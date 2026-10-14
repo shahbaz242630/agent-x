@@ -15,8 +15,9 @@
 //   to server, how the source stands now, and answers it brought up to that.
 //   Admins.
 // - `POST /v1/funding-sources/:id/suspend` (D2-4b): the brake, at once and
-//   with no step-up: 200 with the source, SUSPENDED; one suspended or ended
-//   already is answered as it is. Admins and finance approvers.
+//   with no step-up, with `pendingRequests`, `cancel` or `pause`, required
+//   (Phase 3 decision 7): 200 with the source, SUSPENDED; one suspended or
+//   ended already is answered as it is. Admins and finance approvers.
 // - `POST /v1/funding-sources/:id/reactivate`, then `…/reactivate/confirm`
 //   with the step-up's ID once signed in again (a passkey) (D2-4b): 202 with
 //   the step-up, then 200 with the source, ACTIVE. 409 SOURCE_NOT_SUSPENDED
@@ -64,6 +65,7 @@ import {
   STEP_UP_CONFIRM,
   stepUpAsked,
 } from './route-schemas.ts';
+import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
 
 /** Every member may see the organisation's sources. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -213,9 +215,9 @@ const REFRESH_SCHEMA = {
 const SOURCE_CHANGED = SOURCE.describe('The source, as the change left it.');
 
 const SUSPEND_SCHEMA = {
-  summary: 'Suspend a bank account: the brake, at once and with no step-up',
+  summary: 'Suspend a bank account: the brake, at once and with no step-up, its pending requests cancelled or paused',
   params: SOURCE_ID,
-  body: NOTHING,
+  body: SUSPEND_BODY,
   response: { 200: SOURCE_CHANGED },
 };
 
@@ -344,7 +346,7 @@ export function registerFundingSources(
     '/v1/funding-sources/:id/suspend',
     {
       schema: SUSPEND_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: SUSPEND_BODY_LIMIT,
       config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
     },
     async (request, reply) => {
@@ -353,6 +355,7 @@ export function registerFundingSources(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.body.pendingRequests,
         request.id,
       );
       return answerChange(written, request, reply);

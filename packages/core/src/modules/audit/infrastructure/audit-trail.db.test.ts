@@ -22,6 +22,7 @@ import {
 } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { canonicalDetails } from '../../../shared-kernel/index.ts';
@@ -33,6 +34,7 @@ import {
   TooManyEventsAboutObject,
   TooManyEventsToRead,
 } from './audit-trail.ts';
+import { newestDetail } from './newest-detail.ts';
 import type { AuditTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -1321,6 +1323,42 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
       events: [{ seq: 1n }, { seq: 2n }],
     });
     await expect(history(org, ['membership'], 1)).rejects.toThrow(TooManyEventsToRead);
+  });
+
+  it('reads the newest alone when asked, in chain order, never throwing past its limit (C2a)', async () => {
+    await record(org, about('membership', 1), about('membership', 2), about('probe', 3), about('membership', 4));
+    const newest = (limit: number) =>
+      withTenant(app, org, (tx) =>
+        trail.recordedEvents(tx, org, { subjectTypes: ['membership'], limit, newest: true }),
+      );
+
+    expect(await newest(1)).toMatchObject({ kind: 'recorded', events: [{ seq: 4n }] });
+    expect(await newest(2)).toMatchObject({ kind: 'recorded', events: [{ seq: 2n }, { seq: 4n }] });
+    expect(await newest(5)).toMatchObject({ kind: 'recorded', events: [{ seq: 1n }, { seq: 2n }, { seq: 4n }] });
+    await tamper(`update audit.events set details = '{"step":9}' where org_id = $1 and seq = 4`);
+    expect(await newest(1)).toEqual({ kind: 'broken', seq: 4n });
+  });
+
+  it('gives an object’s newest detail of one action to a query, unverified, null for none (newestDetail, C2a)', async () => {
+    await record(
+      org,
+      { ...about('supplier', 1), action: 'supplier.suspend', details: { pendingRequests: 'pause' } },
+      { ...about('supplier', 2), action: 'supplier.suspend', details: { pendingRequests: 'cancel' } },
+      { ...about('supplier', 3), action: 'supplier.reactivate', details: { pendingRequests: 'pause' } },
+    );
+    const detail = (orgId: string, action: string) =>
+      withTenant(app, orgId, (tx) =>
+        sql<{ found: string | null }>`select ${newestDetail({
+          type: 'supplier',
+          idColumn: 'o.id',
+          orgColumn: 'o.org_id',
+          action,
+          key: 'pendingRequests',
+        })} as found from (values (${orgId}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx),
+      );
+
+    expect((await detail(org, 'supplier.suspend')).rows).toEqual([{ found: 'cancel' }]);
+    expect((await detail(org, 'supplier.unknown')).rows).toEqual([{ found: null }]);
   });
 
   it('is broken at an event edited past the app', async () => {

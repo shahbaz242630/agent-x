@@ -404,7 +404,7 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
     const { org, alice, bob, supplierId } = await established();
     await verified(bob, supplierId);
     const admin = await signedIn(alice);
-    await changes.suspend(admin, keyed(admin, SUSPEND_OPERATION), supplierId, CORRELATION);
+    await changes.suspend(admin, keyed(admin, SUSPEND_OPERATION), supplierId, 'pause', CORRELATION);
 
     expect(await changed(alice, supplierId, NEW_PHONE)).toMatchObject({ supplier: { status: 'SUSPENDED' } });
     const asked = await changes.reactivate(admin, keyed(admin, REACTIVATE_OPERATION), supplierId, CORRELATION);

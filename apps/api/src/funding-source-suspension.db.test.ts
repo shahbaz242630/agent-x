@@ -17,6 +17,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import {
   createDatabaseRecords,
   createFakeRail,
@@ -139,8 +140,8 @@ async function linked(admin: SessionMember, accountId = ACCOUNT): Promise<Source
   return confirmed.source;
 }
 
-const suspend = (who: SessionMember, sourceId: string, key?: string) =>
-  changes.suspend(who, keyed(who, SUSPEND_OPERATION, key), sourceId, CORRELATION);
+const suspend = (who: SessionMember, sourceId: string, key?: string, choice: PendingChoice = 'cancel') =>
+  changes.suspend(who, keyed(who, SUSPEND_OPERATION, key), sourceId, choice, CORRELATION);
 const reactivate = (who: SessionMember, sourceId: string) =>
   changes.reactivate(who, keyed(who, REACTIVATE_OPERATION), sourceId, CORRELATION);
 const confirm = (who: SessionMember, sourceId: string, challengeId: string) =>
@@ -199,22 +200,32 @@ beforeEach(() => {
 });
 
 describe(`suspending a source: the brake, with no step-up (D2-4b, Postgres ${server.version})`, () => {
-  it.each(['admin', 'approver'] as const)('is one write by an %s: SUSPENDED, funding nothing', async (role) => {
-    const org = await organization();
-    const admin = await member(org, 'admin');
-    const source = await linked(admin);
-    const who = role === 'admin' ? admin : await member(org, role);
+  it.each([
+    ['admin', 'cancel'],
+    ['approver', 'pause'],
+  ] as const)(
+    'is one write by an %s: SUSPENDED, funding nothing, with their choice for its requests: %s',
+    async (role, choice) => {
+      const org = await organization();
+      const admin = await member(org, 'admin');
+      const source = await linked(admin);
+      const who = role === 'admin' ? admin : await member(org, role);
 
-    const suspended = changedOf(await suspend(who, source.id));
+      const suspended = changedOf(await suspend(who, source.id, undefined, choice));
 
-    expect(suspended).toMatchObject({ id: source.id, status: 'SUSPENDED', availability: 'ACTIVE' });
-    expect(mayFund(suspended, clock.now())).toBe(false);
-    expect((await eventsAbout(org, source.id)).at(-1)).toMatchObject({
-      action: 'funding_source.suspended',
-      actor_type: 'user',
-      actor_id: who.userId,
-    });
-  });
+      expect(suspended).toMatchObject({ id: source.id, status: 'SUSPENDED', availability: 'ACTIVE' });
+      expect(mayFund(suspended, clock.now())).toBe(false);
+      expect((await eventsAbout(org, source.id)).at(-1)).toMatchObject({
+        action: 'funding_source.suspended',
+        actor_type: 'user',
+        actor_id: who.userId,
+      });
+      expect(JSON.parse(String((await eventsAbout(org, source.id)).at(-1)?.details))).toMatchObject({
+        pendingRequests: choice,
+        pendingStatementVersion: 1,
+      });
+    },
+  );
 
   it('pressed twice, or on an ended source, is answered as it is, recording nothing more', async () => {
     const org = await organization();

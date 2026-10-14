@@ -16,6 +16,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import {
   addVersion,
   type SupplierDetails,
@@ -189,8 +190,8 @@ const changedDetails = (org: string, id: string, enteredBy: string) =>
     return versionId;
   });
 
-const suspend = (who: SessionMember, id: string, key?: string) =>
-  changes.suspend(who, keyed(who, SUSPEND_OPERATION, key), id, CORRELATION);
+const suspend = (who: SessionMember, id: string, key?: string, choice: PendingChoice = 'cancel') =>
+  changes.suspend(who, keyed(who, SUSPEND_OPERATION, key), id, choice, CORRELATION);
 const reactivate = (who: SessionMember, id: string) =>
   changes.reactivate(who, keyed(who, REACTIVATE_OPERATION), id, CORRELATION);
 const confirm = (who: SessionMember, id: string, challengeId: string) =>
@@ -266,7 +267,7 @@ describe(`suspending a supplier: the brake, with no step-up (E1-2, Postgres ${se
     await verified(org, id, admin.membershipId);
     const who = role === 'admin' ? admin : await member(org, role);
 
-    const suspended = changedOf(await suspend(who, id));
+    const suspended = changedOf(await suspend(who, id, undefined, 'pause'));
 
     expect(suspended.supplier).toMatchObject({ id, status: 'SUSPENDED', verifiedBy: admin.membershipId });
     expect(await registry.usableByAgent(org, { after: null, limit: 50 }, CORRELATION)).toMatchObject({
@@ -276,6 +277,10 @@ describe(`suspending a supplier: the brake, with no step-up (E1-2, Postgres ${se
       action: 'supplier.suspend',
       actor_type: 'user',
       actor_id: who.userId,
+    });
+    expect(JSON.parse(String((await eventsAbout(org, id)).at(-1)?.details))).toMatchObject({
+      pendingRequests: 'pause',
+      pendingStatementVersion: 1,
     });
     expect(await noticesOf(org)).toEqual([
       { kind: 'supplier_suspended', to_contacts: false, about_id: id },

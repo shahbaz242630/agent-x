@@ -11,16 +11,28 @@
 // that only looks stopped (changed past the app) raises the alarm through its
 // read and voids nothing; a run's share, the rest the next; and a holder of
 // the request reaching for the audit head (forced) is waited for.
+//
+// Decision 7 (C2a): a suspension voids only when chosen to cancel (one
+// recorded before the choice existed cancels); one chosen to pause, of the
+// agent, mandate, source or supplier, voids nothing, and its requests stand
+// again on resume; the newest suspension's choice is the one that counts; the
+// bank's own suspension of the source voids nothing; a paused request isn't
+// judged again each run.
 import { AGENTS } from '@agentx/core/modules/agents';
+import { SOURCES } from '@agentx/core/modules/funding-sources';
+import { MANDATES } from '@agentx/core/modules/mandates';
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   type AuthorityNow,
   cancelRequest,
   checkHoldings,
+  type Pausable,
+  type PendingChoice,
   SPEND_REQUESTS,
   voidRequest,
 } from '@agentx/core/modules/spend-requests';
+import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -36,10 +48,11 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { AED, keys, type World } from './mandate-world.helper.test.ts';
+import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createRequestVoids, type RequestVoids } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
+import { choiceDetails, SUSPENDS } from './suspensions.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -63,20 +76,50 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { quiet, ready, ask, statusOf, holdingsOf, spentOf, mandateIdOf, STOPS } = shared;
+const { quiet, ready, ask, statusOf, holdingsOf, spentOf, mandateIdOf, signed, STOPS } = shared;
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
+/** The brakes that void: all but the bank's own suspension, which pauses (decision 7). */
+type Voiding = Exclude<keyof typeof STOPS, 'the source suspended by the partner'>;
+
 /** The cause each brake leaves its requests voided with. */
-const CAUSES: Readonly<Record<keyof typeof STOPS, string>> = {
+const CAUSES: Readonly<Record<Voiding, string>> = {
   'the mandate superseded': 'MANDATE_NOT_IN_FORCE',
   'the mandate suspended': 'MANDATE_NOT_IN_FORCE',
   'the supplier’s details changed': 'SUPPLIER_CHANGED',
   'the supplier suspended': 'SUPPLIER_NOT_VERIFIED',
-  'the source suspended by the partner': 'SOURCE_NOT_USABLE',
   'the source suspended by the organisation': 'SOURCE_NOT_USABLE',
   'the agent suspended': 'AGENT_SUSPENDED',
 };
+
+/** The world's own one: its agent, the mandate named, its source, its first supplier. */
+const idOf = (w: World, mandateId: string, which: Pausable): string =>
+  ({ agent: w.agent, mandate: mandateId, source: w.source, supplier: w.suppliers[0] ?? '' })[which];
+
+/** Suspends it with the choice, as its use case records one (suspensions.ts), or lifts it; past the use case. */
+const moved = (w: World, mandateId: string, which: Pausable, choice: PendingChoice | 'resume') =>
+  signed(w, async (tx, states): Promise<unknown> => {
+    const key = { orgId: w.org, id: idOf(w, mandateId, which) };
+    const suspend = choice !== 'resume';
+    const change = {
+      actor: OPERATOR,
+      action: suspend ? SUSPENDS[which].action : `${SUSPENDS[which].type}.resumed`,
+      details: suspend ? choiceDetails(choice) : {},
+    };
+    switch (which) {
+      case 'agent':
+        return states.changeStatus(tx, AGENTS, key, suspend ? 'suspend' : 'reactivate', change);
+      case 'mandate':
+        return states.changeStatus(tx, MANDATES, key, suspend ? 'suspend' : 'resume', change);
+      case 'source':
+        return states.changeStatus(tx, SOURCES, key, suspend ? 'suspend' : 'reactivate', change);
+      case 'supplier':
+        return states.changeStatus(tx, SUPPLIERS, key, suspend ? 'suspend' : 'reactivate_verified', change);
+    }
+  });
+
+const PAUSABLE: readonly Pausable[] = ['agent', 'mandate', 'source', 'supplier'];
 
 /** The brakes on the first supplier alone, which leave a request to the other standing. */
 const ON_THE_FIRST_SUPPLIER: readonly (keyof typeof STOPS)[] = [
@@ -121,7 +164,7 @@ beforeEach(() => {
 });
 
 describe('pending spend requests voided once their authority no longer stands (C1)', () => {
-  it.each(Object.keys(STOPS) as (keyof typeof STOPS)[])(
+  it.each(Object.keys(CAUSES) as Voiding[])(
     'voids the waiting and the approved once %s: DENIED as the API’s with its cause, their holdings released',
     async (what) => {
       const { w, acting } = await ready();
@@ -160,6 +203,103 @@ describe('pending spend requests voided once their authority no longer stands (C
       expect(checked).toMatchObject({ mismatched: 0, tampered: 0 });
     },
   );
+
+  it.each(PAUSABLE)(
+    'voids nothing once the %s is suspended with its requests paused, and they stand again on resume (decision 7)',
+    async (which) => {
+      const { w, acting } = await ready();
+      const approved = await ask(acting, w, { amount: AED(50_000n), orderReference: 'INV-A' });
+      const waiting = await ask(acting, w, { orderReference: 'INV-W' });
+      const mandateId = await mandateIdOf(w);
+      const held = await spentOf(w, acting);
+      await moved(w, mandateId, which, 'pause');
+
+      await voidsOf(only(w)).run();
+
+      expect([await statusOf(w, approved.id), await statusOf(w, waiting.id)]).toEqual([
+        'APPROVED',
+        'APPROVAL_REQUIRED',
+      ]);
+      expect(await holdingsOf(w, waiting.id)).toMatchObject({ released: false });
+      expect(await spentOf(w, acting)).toBe(held);
+      // Left out by the job's own query: not judged, and found standing, every run.
+      expect(lines('request_void.voided')).toEqual([]);
+      expect(lines('request_void.failed')).toEqual([]);
+
+      await moved(w, mandateId, which, 'resume');
+      await voidsOf(only(w)).run();
+      expect([await statusOf(w, approved.id), await statusOf(w, waiting.id)]).toEqual([
+        'APPROVED',
+        'APPROVAL_REQUIRED',
+      ]);
+    },
+  );
+
+  it.each(PAUSABLE)(
+    'voids its requests once the %s is suspended with them cancelled, the choice kept on the suspend (decision 7)',
+    async (which) => {
+      const { w, acting } = await ready();
+      const waiting = await ask(acting, w);
+      const mandateId = await mandateIdOf(w);
+      await moved(w, mandateId, which, 'cancel');
+
+      await voidsOf(only(w)).run();
+
+      expect(await statusOf(w, waiting.id)).toBe('DENIED');
+      const suspends = await shared.eventsAbout(w.org, idOf(w, mandateId, which), SUSPENDS[which].type);
+      expect(suspends.at(-1)).toMatchObject({
+        action: SUSPENDS[which].action,
+        details: { pendingRequests: 'cancel', pendingStatementVersion: 1 },
+      });
+    },
+  );
+
+  it('goes by the newest suspension’s choice: paused, resumed, then cancelled voids; a later pause holds', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const mandateId = await mandateIdOf(w);
+    await moved(w, mandateId, 'agent', 'pause');
+    await voidsOf(only(w)).run();
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+
+    await moved(w, mandateId, 'agent', 'resume');
+    await moved(w, mandateId, 'agent', 'cancel');
+    await voidsOf(only(w)).run();
+    expect(await statusOf(w, waiting.id)).toBe('DENIED');
+
+    await moved(w, mandateId, 'agent', 'resume');
+    const another = await ask(acting, w, { orderReference: 'INV-2' });
+    await moved(w, mandateId, 'agent', 'pause');
+    await voidsOf(only(w)).run();
+    expect(await statusOf(w, another.id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('voids nothing once the bank suspends the source itself: it pauses, as nobody on the team chose it (decision 7)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    await STOPS['the source suspended by the partner'](w);
+
+    await voidsOf(only(w)).run();
+
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    expect(lines('request_void.voided')).toEqual([]);
+  });
+
+  it('still voids a paused one once something else stops it: the mandate superseded under a paused agent', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const mandateId = await mandateIdOf(w);
+    await moved(w, mandateId, 'agent', 'pause');
+    await STOPS['the mandate superseded'](w, mandateId);
+
+    await voidsOf(only(w)).run();
+
+    const events = await shared.eventsAbout(w.org, waiting.id, SPEND_REQUESTS.subject);
+    expect(events.at(-1)).toMatchObject({
+      action: 'spend_request.voided',
+      details: { causes: 'MANDATE_NOT_IN_FORCE' },
+    });
+  });
 
   it('voids one whose source’s bank consent has passed: SOURCE_NOT_USABLE', async () => {
     const { w, acting } = await ready();
@@ -209,6 +349,27 @@ describe('pending spend requests voided once their authority no longer stands (C
 
     await voidsOf(only(w)).run();
 
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
+    expect(lines('request_void.voided')).toEqual([]);
+    expect(lines('request_void.failed')).toEqual([expect.objectContaining({ requestId: waiting.id })]);
+  });
+
+  it('voids nothing on a pause edited into a cancel past the app: the suspension’s read raises the alarm (FX-TAMPER, decision 7)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    await moved(w, await mandateIdOf(w), 'source', 'pause');
+    // A later signed change of the source, so its state stands on that one, whole, and the suspend lies behind it.
+    await shared.partnerSays(w, { availability: 'SUSPENDED' });
+    await database.as('admin').query(
+      `update audit.events set details = replace(details, '"pause"', '"cancel"')
+         where org_id = $1 and action = 'funding_source.suspended'`,
+      [w.org],
+    );
+
+    await voidsOf(only(w)).run();
+
+    // The query's unverified filter took it for a cancel; the verified read believed none of it.
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
     expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
     expect(lines('request_void.voided')).toEqual([]);
@@ -314,8 +475,9 @@ describe('pending spend requests voided once their authority no longer stands (C
       return {
         agentStatus: 'ACTIVE',
         mandate: { status: 'ACTIVE', currentVersionId: row.mandate_version_id },
-        sourceMayFund: true,
+        source: { status: 'ACTIVE', consentPast: false },
         supplier: { status: 'VERIFIED', currentVersionId: row.supplier_version_id ?? '' },
+        paused: new Set(),
       } satisfies AuthorityNow;
     });
     const voiding = (id: string, under = named) =>

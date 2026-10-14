@@ -2,8 +2,11 @@
 // mandate for one of the organisation's agents, and later versions of it;
 // every member reads them. A draft grants nothing until an admin accepts it
 // with a passkey (B3). An admin suspends, resumes or revokes one the same way,
-// asking then confirming with a passkey (B4). Amounts are whole minor units (fils), as integers
-// (ADR-006 §1), checked at the edge as safe integers and kept as bigints.
+// asking then confirming with a passkey (B4); a suspend names what happens to
+// the mandate's pending requests, `pendingRequests`, `cancel` or `pause`, in
+// both its ask and its confirm (Phase 3 decision 7). Amounts are whole minor
+// units (fils), as integers (ADR-006 §1), checked at the edge as safe
+// integers and kept as bigints.
 import {
   CONSENT_LIMITS,
   DEFAULT_CONSENT_LIMITS,
@@ -17,6 +20,7 @@ import {
   PURPOSE_MOST,
   SPLIT_WINDOW_HOURS,
 } from '@agentx/core/modules/mandates';
+import { isPendingChoice } from '@agentx/core/modules/spend-requests';
 import { moneyFromJson, timeZoneOf } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -39,7 +43,14 @@ import {
   ACCEPTING_ROLES,
   type MandateAcceptance,
 } from './mandate-acceptance.ts';
-import { MANDATE_MOVES, type MandateMove, type MandateMoves, MOVE_OPERATIONS, MOVING_ROLES } from './mandate-moves.ts';
+import {
+  MANDATE_MOVES,
+  type MandateMove,
+  type MandateMoves,
+  MOVE_OPERATIONS,
+  type MoveChosen,
+  MOVING_ROLES,
+} from './mandate-moves.ts';
 import type { MandateView, VersionShown } from './mandate-reads.ts';
 import {
   AMOUNT,
@@ -49,11 +60,11 @@ import {
   NEXT,
   UNCHECKED,
   NOTHING,
-  NOTHING_BODY_LIMIT,
   pageQuery,
   STEP_UP_CONFIRM,
   stepUpAsked,
 } from './route-schemas.ts';
+import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
 
 /** Every member may see the organisation's mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -291,19 +302,33 @@ const MOVE_WORDS = {
   },
 } as const satisfies Record<MandateMove, unknown>;
 
+/** A suspend's confirm: the step-up, and the choice it was asked with. */
+const SUSPEND_CONFIRM = STEP_UP_CONFIRM.extend(SUSPEND_BODY.shape).describe(
+  'The step-up signed in again for, and the choice it was asked with.',
+);
+
+/** The move as its body names it: a suspend with its choice, which its schema requires (decision 7). */
+const chosenFrom = (move: MandateMove, body: object | null | undefined): MoveChosen => {
+  if (move !== 'suspend') return { move };
+  const choice = body !== null && body !== undefined && 'pendingRequests' in body ? body.pendingRequests : undefined;
+  if (!isPendingChoice(choice)) throw new Error('A suspend’s schema requires its choice');
+  return { move, pendingRequests: choice };
+};
+
 const moveSchemas = (move: MandateMove) => {
   const words = MOVE_WORDS[move];
+  const suspend = move === 'suspend';
   return {
     ask: {
       summary: words.ask,
       params: MANDATE_ID,
-      body: NOTHING,
+      body: suspend ? SUSPEND_BODY : NOTHING,
       response: { 202: stepUpAsked(words.asked[0], words.asked[1]) },
     },
     confirm: {
       summary: words.confirm,
       params: MANDATE_ID,
-      body: STEP_UP_CONFIRM,
+      body: suspend ? SUSPEND_CONFIRM : STEP_UP_CONFIRM,
       response: { 200: MANDATE_DETAILS.describe(words.moved) },
     },
   };
@@ -484,7 +509,7 @@ export function registerMandates(
       `/v1/mandates/:id/${move}`,
       {
         schema: schemas.ask,
-        bodyLimit: NOTHING_BODY_LIMIT,
+        bodyLimit: SUSPEND_BODY_LIMIT,
         config: { access: [...MOVING_ROLES], operation: MOVE_OPERATIONS[move].ask },
       },
       async (request, reply) => {
@@ -493,7 +518,7 @@ export function registerMandates(
           member,
           idempotentRequest(request, member.orgId),
           request.params.id,
-          move,
+          chosenFrom(move, request.body),
           request.id,
         );
         return answerAsked(asked, request, reply);
@@ -513,7 +538,7 @@ export function registerMandates(
           member,
           idempotentRequest(request, member.orgId),
           request.params.id,
-          move,
+          chosenFrom(move, request.body),
           request.body.stepUpChallengeId,
           request.id,
         );

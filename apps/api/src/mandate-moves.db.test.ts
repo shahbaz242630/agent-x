@@ -8,6 +8,7 @@
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { MANDATES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, type IdempotentRequest } from '@agentx/platform/db';
 import {
   confirmedWhileDemoted,
@@ -27,6 +28,7 @@ import {
   type MandateMoved,
   type MandateMoves,
   MOVE_OPERATIONS,
+  type MoveChosen,
 } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
@@ -58,11 +60,29 @@ const { member, world, keyed, eventsAbout, noticesOf, stepUp, acceptedPastTheUse
 /** A mandate in force for the world's agent, ending at `endsAt` if given. */
 const active = (w: World, endsAt: Date | null = null) => shared.inForce(registry, w, { endsAt });
 
-const ask = (who: Member, id: string, move: MandateMove) =>
-  moves.ask(who, keyed(who, MOVE_OPERATIONS[move].ask), id, move, CORRELATION);
+/** The move, a suspend with `choice` (cancel unless named). */
+const chosen = (move: MandateMove, choice: PendingChoice = 'cancel'): MoveChosen =>
+  move === 'suspend' ? { move, pendingRequests: choice } : { move };
 
-const confirm = (who: Member, id: string, move: MandateMove, challengeId: string, key?: IdempotentRequest) =>
-  moves.confirm(who, key ?? keyed(who, MOVE_OPERATIONS[move].confirm), id, move, challengeId, CORRELATION);
+const ask = (who: Member, id: string, move: MandateMove, choice?: PendingChoice) =>
+  moves.ask(who, keyed(who, MOVE_OPERATIONS[move].ask), id, chosen(move, choice), CORRELATION);
+
+const confirm = (
+  who: Member,
+  id: string,
+  move: MandateMove,
+  challengeId: string,
+  key?: IdempotentRequest,
+  choice?: PendingChoice,
+) =>
+  moves.confirm(
+    who,
+    key ?? keyed(who, MOVE_OPERATIONS[move].confirm),
+    id,
+    chosen(move, choice),
+    challengeId,
+    CORRELATION,
+  );
 
 const movedOf = (write: MandateMoved) => {
   if (write.outcome !== 'moved') throw new Error(`not moved: ${JSON.stringify(write)}`);
@@ -119,6 +139,9 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
       ['mandate.revoked', 'user'],
     ]);
     for (const { details } of events) expect(details).toMatchObject({ methods: PASSKEY.join(' ') });
+    // The suspend keeps the admin's choice for the mandate's pending requests (decision 7), the others none.
+    expect(events.map(({ details }) => details.pendingRequests)).toEqual(['cancel', undefined, undefined]);
+    expect(events[0]?.details).toMatchObject({ pendingStatementVersion: 1 });
     expect(await noticesOf(w.org)).toEqual(
       ['mandate_suspended', 'mandate_resumed', 'mandate_revoked'].map((kind) => ({
         kind,
@@ -203,6 +226,33 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     await stepUp(w.admin, challengeId);
 
     expect(await confirm(w.admin, id, 'revoke', challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+  });
+
+  it('refuses a step-up asked with another choice for the pending requests: STEP_UP_FAILED, nothing moved (decision 7)', async () => {
+    const w = await world();
+    const id = await active(w);
+    const challengeId = askedFor(await ask(w.admin, id, 'suspend', 'pause'));
+    await stepUp(w.admin, challengeId);
+
+    expect(await confirm(w.admin, id, 'suspend', challengeId, undefined, 'cancel')).toEqual(
+      refused(403, 'STEP_UP_FAILED'),
+    );
+    expect((await eventsAbout(w.org, id)).at(-1)?.action).toBe('mandate.activated');
+  });
+
+  it('suspends with the pending requests paused, as asked and confirmed: the choice on the event (decision 7)', async () => {
+    const w = await world();
+    const id = await active(w);
+    const challengeId = askedFor(await ask(w.admin, id, 'suspend', 'pause'));
+    await stepUp(w.admin, challengeId);
+
+    expect(movedOf(await confirm(w.admin, id, 'suspend', challengeId, undefined, 'pause')).mandate.status).toBe(
+      'SUSPENDED',
+    );
+    expect((await eventsAbout(w.org, id)).at(-1)).toMatchObject({
+      action: 'mandate.suspended',
+      details: { pendingRequests: 'pause', pendingStatementVersion: 1 },
+    });
   });
 
   it('refuses a step-up asked before the mandate changed: STEP_UP_FAILED, for the mandate as it stood', async () => {

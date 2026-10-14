@@ -141,7 +141,7 @@ const events = (org: string, sourceId: string) =>
   withTenant(app, org, (tx) =>
     tx
       .selectFrom('audit.events')
-      .select(['action', 'actor_type', 'actor_id'])
+      .select(['action', 'actor_type', 'actor_id', 'details'])
       .where('subject_type', '=', 'funding_source')
       .where('subject_id', '=', sourceId)
       .orderBy('seq')
@@ -195,8 +195,8 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     expect(back).toMatchObject({ status: 'ACTIVE', availability: 'ACTIVE', consentStatus: 'Authorized' });
     expect(await events(org, source.id)).toEqual([
       expect.objectContaining({ action: 'funding_source.linked' }),
-      { action: 'funding_source.partner_changed', actor_type: 'user', actor_id: admin.userId },
-      { action: 'funding_source.partner_changed', actor_type: 'user', actor_id: admin.userId },
+      expect.objectContaining({ action: 'funding_source.partner_changed', actor_type: 'user', actor_id: admin.userId }),
+      expect.objectContaining({ action: 'funding_source.partner_changed', actor_type: 'user', actor_id: admin.userId }),
     ]);
   });
 
@@ -329,7 +329,13 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     expect(answered).toMatchObject({ status: 'SUSPENDED', controls: source.controls });
     const recorded = await events(org, source.id);
     expect(recorded).toHaveLength(2);
+    // Nobody on the team chose it, and the bank puts it right: its requests paused (decision 7).
     expect(recorded.at(-1)).toMatchObject({ action: 'funding_source.suspended', actor_id: 'api' });
+    expect(JSON.parse(String(recorded.at(-1)?.details))).toMatchObject({
+      reason: 'currency_mismatch',
+      pendingRequests: 'pause',
+      pendingStatementVersion: 1,
+    });
     expect(capture.lines().filter((line) => line.event === 'funding_sources.currency_mismatch')).toEqual([
       expect.objectContaining({ level: 'error', orgId: org, sourceId: source.id }),
     ]);

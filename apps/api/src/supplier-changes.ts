@@ -6,8 +6,11 @@
 //   the instant brakes are never behind step-up), for an admin or a finance
 //   approver. The key claimed first; the member read again; the supplier read
 //   for change; then UNVERIFIED or VERIFIED > SUSPENDED, recorded as the
-//   member's. One suspended already is answered as it is: a brake pressed
-//   twice is not an error. A suspended supplier is shown to no agent.
+//   member's, with what the member chose for its pending requests, cancel or
+//   pause (Phase 3 decision 7, suspensions.ts): the request-voids job voids
+//   them on cancel; Phase 3 C3 voids them in the same transaction. One
+//   suspended already is answered as it is: a brake pressed twice is not an
+//   error. A suspended supplier is shown to no agent.
 // - `reactivate` (`suppliers.reactivate`): gives the supplier its place back,
 //   so an admin's, with a passkey step-up (partner, S69; SEC-HA-12). The ask:
 //   the key claimed first; the admin read again; the supplier, SUSPENDED
@@ -28,6 +31,7 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { reactivateSupplier, suspendSupplier } from '@agentx/core/modules/suppliers';
 import type { Outbox } from '@agentx/core/modules/notifications';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -43,6 +47,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
+import { choiceDetails } from './suspensions.ts';
 import { createStepUps } from './use-case-work.ts';
 
 /** The brake on a supplier. */
@@ -62,6 +67,7 @@ export interface SupplierChanges {
     member: SupplierMember,
     idempotent: IdempotentRequest,
     supplierId: string,
+    pendingRequests: PendingChoice,
     correlationId: string,
   ): Promise<SupplierChangeWrite>;
   reactivate(
@@ -114,14 +120,17 @@ export function createSupplierChanges({
   };
 
   return {
-    async suspend(member, idempotent, supplierId, correlationId) {
+    async suspend(member, idempotent, supplierId, pendingRequests, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: supplierId };
         const found = await work.supplierIn(tx, states, key, 'change');
         // Pressed twice: stopped already, and answered as it is.
         if (found.supplier.status !== 'SUSPENDED') {
-          await suspendSupplier(tx, states, key, found, { actor: { type: 'user', id: member.userId } });
+          await suspendSupplier(tx, states, key, found, {
+            actor: { type: 'user', id: member.userId },
+            details: choiceDetails(pendingRequests),
+          });
           await outbox.add(tx, toldEveryone(member.orgId, found.supplier.id, 'supplier_suspended'));
         }
         return { status: 200, resourceId: found.supplier.id };

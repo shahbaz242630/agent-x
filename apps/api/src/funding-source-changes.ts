@@ -18,9 +18,12 @@
 //   claimed first; the member read again; the source read for change; then
 //   ACTIVE > SUSPENDED, recorded as the member's. A source suspended or
 //   ENDED already is left as it is, and answered: a brake pressed twice is
-//   not an error. A suspended source funds nothing (`mayFund`). Phase 3 adds
-//   the cascade in the same transaction: its pending requests denied, their
-//   approvals cancelled (PRD §4.2).
+//   not an error. A suspended source funds nothing (`mayFund`). The member
+//   chooses what happens to its pending requests, cancel or pause (Phase 3
+//   decision 7, suspensions.ts), kept on the event: the request-voids job
+//   voids them on cancel; Phase 3 C3 voids them in the same transaction.
+//   Agent X's own suspension for limits in another currency pauses them:
+//   nobody on the team chose it, and the bank puts it right.
 // - `reactivate` (`funding-sources.reactivate`, D2-4b): gives the source its
 //   authority back, so an admin's, with step-up (a passkey, ADR-003 §8,
 //   SEC-HA-12). The ask: the key claimed first; the admin read again; the
@@ -42,6 +45,7 @@ import {
 } from '@agentx/core/modules/funding-sources';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { type FinancialRailAdapter, limitsInAccountCurrency, type SourceLookup } from '@agentx/core/modules/providers';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -57,6 +61,7 @@ import {
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
 import type { Refused } from './refused.ts';
+import { choiceDetails, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** Asking the partner how a source stands now. */
@@ -95,6 +100,7 @@ export interface FundingSourceChanges {
     member: FundingSourceMember,
     idempotent: IdempotentRequest,
     sourceId: string,
+    pendingRequests: PendingChoice,
     correlationId: string,
   ): Promise<SourceChangeWrite>;
   reactivate(
@@ -205,8 +211,8 @@ export function createFundingSourceChanges({
             movedAsRead(
               await states.changeStatus(tx, SOURCES, key, 'suspend', {
                 actor: { type: 'system', id: 'api' },
-                action: 'funding_source.suspended',
-                details: { reason: 'currency_mismatch' },
+                action: SUSPENDS.source.action,
+                details: { reason: 'currency_mismatch', ...choiceDetails('pause') },
               }),
               "a source read as ACTIVE didn't suspend",
             );
@@ -221,7 +227,7 @@ export function createFundingSourceChanges({
       return answer(member.orgId, correlationId, done);
     },
 
-    async suspend(member, idempotent, sourceId, correlationId) {
+    async suspend(member, idempotent, sourceId, pendingRequests, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
@@ -231,8 +237,8 @@ export function createFundingSourceChanges({
           movedAsRead(
             await states.changeStatus(tx, SOURCES, key, 'suspend', {
               actor: { type: 'user', id: member.userId },
-              action: 'funding_source.suspended',
-              details: {},
+              action: SUSPENDS.source.action,
+              details: choiceDetails(pendingRequests),
             }),
             "a source read as ACTIVE didn't suspend",
           );

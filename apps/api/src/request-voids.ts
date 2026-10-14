@@ -3,7 +3,8 @@
 // timer of its own, denying each request waiting, approved or ready whose
 // agent is suspended, whose mandate is no longer in force or superseded,
 // whose source can't fund, or whose supplier is no longer verified or has
-// new details (voidCauses), recorded as the API's with its causes, its
+// new details (voidCauses), a suspension only when it was chosen to cancel
+// (decision 7: one that pauses, or the bank's own, voids nothing), recorded as the API's with its causes, its
 // reservation and order claim released in the same transaction. The brakes
 // void their own requests as they stop (C2); this finds the rest, and any a
 // brake left past its batch.
@@ -15,19 +16,28 @@
 // the rest; then each in a transaction of its own, in ADR-006's lock order:
 // its agent, mandate, source and supplier read through their signed states
 // (levels 3–6, share), then the request itself (`voidRequest`: 8, 11, 12),
-// judged by what those say. A row that only looks stopped is left standing.
+// judged by what those say, and by the suspension in force of each one
+// suspended (pausedOf). A row that only looks stopped is left standing.
+//
+// The candidates leave out a subject suspended with its requests paused, by
+// its newest suspend event read in the query, unverified: a filter alone, so
+// paused requests aren't judged again every run. An event tampered with to
+// read as a pause hides its requests until the chain's check finds it, as a
+// row tampered back to ACTIVE does; nothing can be approved or handed off
+// under a suspension meanwhile.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next.
 import { agentOf, type AgentsTables } from '@agentx/core/modules/agents';
 import {
   type AuditTables,
+  newestDetail,
   type SignedStates,
   type SignedStatesServices,
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type FundingSourcesTables, mayFund, sourceOf } from '@agentx/core/modules/funding-sources';
+import { type FundingSourcesTables, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
 import {
@@ -44,6 +54,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
+import { pausedOf, SUSPENDS } from './suspensions.ts';
 
 /** How often pending requests are looked over, once the last run has ended: a request a brake left is voided within this. */
 export const REQUEST_VOIDS_EVERY_MS = 5 * 60_000;
@@ -60,6 +71,10 @@ type VoidTables = SpendRequestsTables &
   FundingSourcesTables &
   SuppliersTables;
 type VoidTx = DatabaseTransaction<VoidTables>;
+
+/** The newest suspend's choice for the object a candidate's column `idColumn` names, unverified: null for none. */
+const choiceOf = (which: keyof typeof SUSPENDS, idColumn: string) =>
+  newestDetail({ ...SUSPENDS[which], idColumn, orgColumn: 'r.org_id', key: 'pendingRequests' });
 
 /**
  * The IDs of the organisation's pending requests whose rows look stopped, in
@@ -94,18 +109,33 @@ async function stoppedByTheirRows(
     .where('r.org_id', '=', orgId)
     .where('r.status', 'in', PENDING_STATUSES)
     .where((where) => (after === undefined ? where.lit(true) : where('r.id', '>', after)))
-    .where((where) =>
-      where.or([
-        where('a.status', '<>', 'ACTIVE'),
-        where('m.status', '<>', 'ACTIVE'),
+    .where((where) => {
+      /** Not `standing`, unless SUSPENDED by a suspension whose newest event, unverified, paused its requests. */
+      const looksStopped = (
+        status: 'a.status' | 'm.status' | 's.status' | 'p.status',
+        standing: string,
+        which: keyof typeof SUSPENDS,
+        idColumn: string,
+      ) =>
+        where.and([
+          where(status, '<>', standing),
+          where.not(
+            where.and([
+              where(status, '=', 'SUSPENDED'),
+              where(where.fn.coalesce(choiceOf(which, idColumn), where.val('cancel')), '=', 'pause'),
+            ]),
+          ),
+        ]);
+      return where.or([
+        looksStopped('a.status', 'ACTIVE', 'agent', 'a.id'),
+        looksStopped('m.status', 'ACTIVE', 'mandate', 'm.id'),
         where('m.current_version_id', 'is distinct from', where.ref('r.mandate_version_id')),
-        where('s.status', '<>', 'ACTIVE'),
-        where('s.availability', '<>', 'ACTIVE'),
+        looksStopped('s.status', 'ACTIVE', 'source', 's.id'),
         where('s.consent_expires_at', '<=', now),
-        where('p.status', '<>', 'VERIFIED'),
+        looksStopped('p.status', 'VERIFIED', 'supplier', 'p.id'),
         where('p.current_version_id', 'is distinct from', where.ref('r.supplier_version_id')),
-      ]),
-    )
+      ]);
+    })
     .orderBy('r.id')
     .limit(most)
     .execute();
@@ -185,11 +215,25 @@ export function createRequestVoids({
     ) {
       throw new Error(`What a pending request names can't be believed: ${key.id}`);
     }
+    const suspended = (
+      [
+        ['agent', agent.agent],
+        ['mandate', mandate.mandate],
+        ['source', source.source],
+        ['supplier', supplier.supplier],
+      ] as const
+    ).filter(([, { status }]) => status === 'SUSPENDED');
     const authority: AuthorityNow = {
       agentStatus: agent.agent.status,
       mandate: mandate.mandate,
-      sourceMayFund: mayFund(source.source, now),
+      source: { status: source.source.status, consentPast: source.source.consentExpiresAt <= now },
       supplier: supplier.supplier,
+      paused: await pausedOf(
+        tx,
+        states,
+        orgId,
+        suspended.map(([which, { id }]) => [which, id] as const),
+      ),
     };
     return voidRequest(tx, states, keys, key, { named, authority }, now);
   };

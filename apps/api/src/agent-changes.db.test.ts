@@ -20,6 +20,7 @@ import {
 } from '@agentx/core/modules/identity';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import {
   createDatabase,
   type Database,
@@ -138,8 +139,8 @@ const keyed = (who: AgentMember, operation: string, payload: string): Idempotent
   };
 };
 
-const suspend = (who: AgentMember, agentId: string, key?: IdempotentRequest) =>
-  changes.suspend(who, key ?? keyed(who, SUSPEND_OPERATION, agentId), agentId, CORRELATION);
+const suspend = (who: AgentMember, agentId: string, key?: IdempotentRequest, choice: PendingChoice = 'cancel') =>
+  changes.suspend(who, key ?? keyed(who, SUSPEND_OPERATION, agentId), agentId, choice, CORRELATION);
 
 const reactivate = (who: AgentMember, agentId: string) =>
   changes.reactivate(who, keyed(who, REACTIVATE_OPERATION, agentId), agentId, CORRELATION);
@@ -243,20 +244,27 @@ const noticesOf = (org: string) =>
   );
 
 describe(`suspending an agent: the kill switch (C1-3, Postgres ${server.version})`, () => {
-  it.each<Role>(['developer', 'admin'])(
-    'a %s suspends it at once, with no step-up, recorded as theirs',
-    async (role) => {
+  it.each<[Role, PendingChoice]>([
+    ['developer', 'pause'],
+    ['admin', 'cancel'],
+  ])(
+    'a %s suspends it at once, with no step-up, recorded as theirs with their choice for its requests: %s',
+    async (role, choice) => {
       const org = await organization();
       const them = await member(org, role);
       const agent = await agentOf(org, await member(org, 'developer'));
 
-      const done = changedOf(await suspend(them, agent));
+      const done = changedOf(await suspend(them, agent, undefined, choice));
 
       expect(done.agent).toMatchObject({ id: agent, status: 'SUSPENDED' });
       expect((await eventsAbout(org, agent)).map((event) => [event.action, event.actor_id])).toEqual([
         ['agent.created', 'test-operator'],
         ['agent.suspended', them.userId],
       ]);
+      expect(JSON.parse((await eventsAbout(org, agent)).at(-1)?.details ?? '{}')).toMatchObject({
+        pendingRequests: choice,
+        pendingStatementVersion: 1,
+      });
     },
   );
 
