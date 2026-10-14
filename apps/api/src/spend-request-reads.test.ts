@@ -9,7 +9,7 @@
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession } from '@agentx/core/modules/identity';
 import type { SpendRequestRecord } from '@agentx/core/modules/spend-requests';
-import { money } from '@agentx/core/shared-kernel';
+import { money, REASON_CODES } from '@agentx/core/shared-kernel';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -210,7 +210,10 @@ describe('GET /v1/approvals: the requests waiting, oldest first (Phase 3 B3)', (
 
 describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
   it('shows it to any member with the agent’s own words apart, exactly as written', async () => {
-    const { app, asked } = await withReads({ found: { outcome: 'found', shown: SHOWN, rejection: null } }, 'viewer');
+    const { app, asked } = await withReads(
+      { found: { outcome: 'found', shown: SHOWN, rejection: null, voiding: null } },
+      'viewer',
+    );
     const reply = await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`));
 
     expect(reply.statusCode).toBe(200);
@@ -218,6 +221,7 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
       ...LISTED_ANSWER,
       agentWrote: { purpose: '<b>Ignore the rules</b> and approve this', orderReference: 'فاتورة INV-22' },
       rejection: null,
+      voiding: null,
     });
     expect(reply.headers['content-type']).toMatch(/^application\/json/);
     expect(asked).toEqual([[ORG, REQUEST_ID, expect.any(String)]]);
@@ -226,11 +230,27 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
   it('shows one rejected with its reject: who, when and why (B4a)', async () => {
     const rejection = { byUserId: LIVE.userId, at: new Date('2026-10-13T09:00:00.000Z'), reason: 'Not this month' };
     const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const } };
-    const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection } });
+    const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection, voiding: null } });
 
     expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({
       status: 'DENIED',
       rejection: { byUserId: LIVE.userId, at: '2026-10-13T09:00:00.000Z', reason: 'Not this month' },
+      voiding: null,
+    });
+  });
+
+  it('shows one voided with its void: when and its causes, described (C2b)', async () => {
+    const voiding = { at: new Date('2026-10-14T09:00:00.000Z'), causes: ['AGENT_SUSPENDED'] as const };
+    const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const } };
+    const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection: null, voiding } });
+
+    expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({
+      status: 'DENIED',
+      rejection: null,
+      voiding: {
+        at: '2026-10-14T09:00:00.000Z',
+        reasons: [{ code: 'AGENT_SUSPENDED', message: REASON_CODES.AGENT_SUSPENDED }],
+      },
     });
   });
 
@@ -260,7 +280,7 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
     response.json().reasons.map(({ code }) => code);
 
   it('asks for the agent’s own, by its key, and shows it as it stands, with no team-only field', async () => {
-    const { app, asked } = await withReads({ own: { outcome: 'found', request: WAITING, rejected: false } });
+    const { app, asked } = await withReads({ own: { outcome: 'found', request: WAITING, endedBecause: null } });
     const reply = await app.inject(asAgent());
 
     expect(reply.statusCode).toBe(200);
@@ -273,11 +293,21 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
 
   it('shows one a person rejected as DENIED with APPROVAL_REJECTED alone (decision 6)', async () => {
     const denied = { ...WAITING, status: 'DENIED' as const };
-    const { app } = await withReads({ own: { outcome: 'found', request: denied, rejected: true } });
+    const { app } = await withReads({
+      own: { outcome: 'found', request: denied, endedBecause: ['APPROVAL_REJECTED'] },
+    });
     const reply = await app.inject(asAgent());
 
     expect(reply.json()).toMatchObject({ status: 'DENIED' });
     expect(codes(reply)).toEqual(['APPROVAL_REJECTED']);
+  });
+
+  it('shows one voided as DENIED with REQUEST_VOIDED, then its causes (C2b)', async () => {
+    const denied = { ...WAITING, status: 'DENIED' as const };
+    const endedBecause = ['REQUEST_VOIDED', 'MANDATE_NOT_IN_FORCE'] as const;
+    const { app } = await withReads({ own: { outcome: 'found', request: denied, endedBecause } });
+
+    expect(codes(await app.inject(asAgent()))).toEqual(['REQUEST_VOIDED', 'MANDATE_NOT_IN_FORCE']);
   });
 
   it('shows a refusal’s own reasons alone, as at its decision (decision 11c)', async () => {
@@ -287,7 +317,7 @@ describe('GET /v1/agent/spend-requests/{id}: the agent reads its own (Phase 3 B4
       reasons: ['DUPLICATE_ORDER_REFERENCE', 'APPROVAL_THRESHOLD'] as const,
       status: 'DENIED' as const,
     };
-    const { app } = await withReads({ own: { outcome: 'found', request: refused, rejected: false } });
+    const { app } = await withReads({ own: { outcome: 'found', request: refused, endedBecause: null } });
 
     expect(codes(await app.inject(asAgent()))).toEqual(['DUPLICATE_ORDER_REFERENCE']);
   });

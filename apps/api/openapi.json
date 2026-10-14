@@ -67,7 +67,7 @@
                   {
                     "type": "string",
                     "const": "AGENT_SUSPENDED",
-                    "description": "The agent is suspended, so it can't request payments until an admin lifts its suspension. Nothing was reserved."
+                    "description": "The agent is suspended, so it can't request payments until an admin lifts its suspension. Nothing is held for the request."
                   },
                   {
                     "type": "string",
@@ -247,7 +247,7 @@
                   {
                     "type": "string",
                     "const": "MANDATE_NOT_IN_FORCE",
-                    "description": "The agent has no mandate in force: none was accepted yet, or it is suspended, revoked or expired, or its end date has passed. So the request is refused. Nothing was reserved."
+                    "description": "The agent has no mandate in force for this request: none was accepted yet, it is suspended, revoked or expired, its end date has passed, or a newer version replaced the one it was decided under. So the request is refused. Nothing is held for the request."
                   },
                   {
                     "type": "string",
@@ -441,6 +441,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "REQUEST_VOIDED",
+                    "description": "Something this request was decided under stopped before it was paid (the reasons after this one say what), so it will not be paid. Its reservation was released; ask again once that is in force again."
+                  },
+                  {
+                    "type": "string",
                     "const": "RESET_ASKS_SPENT",
                     "description": "The organisation's admins have asked for as many resets as they may in 24 hours, so this one wasn't asked for. Try again tomorrow; if no one at the organisation asked for them, tell its admins at once."
                   },
@@ -492,7 +497,7 @@
                   {
                     "type": "string",
                     "const": "SOURCE_NOT_USABLE",
-                    "description": "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate can draw on it. Nothing was changed."
+                    "description": "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it."
                   },
                   {
                     "type": "string",
@@ -557,7 +562,7 @@
                   {
                     "type": "string",
                     "const": "SUPPLIER_NOT_VERIFIED",
-                    "description": "The supplier is not one of the organisation's verified suppliers: it is unknown, not yet verified, or suspended. So the request is refused. Nothing was reserved."
+                    "description": "The supplier is not one of the organisation's verified suppliers: it is unknown, not yet verified, or suspended. So the request is refused. Nothing is held for the request."
                   },
                   {
                     "type": "string",
@@ -2075,6 +2080,47 @@
                 "type": "null"
               }
             ]
+          },
+          "voiding": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "reasons": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "at",
+                  "reasons"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2092,7 +2138,8 @@
           "changedAt",
           "expiresAt",
           "agentWrote",
-          "rejection"
+          "rejection",
+          "voiding"
         ],
         "additionalProperties": false,
         "description": "A spend request in full, as the team sees it."

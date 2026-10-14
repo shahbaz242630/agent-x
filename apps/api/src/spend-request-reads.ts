@@ -15,25 +15,28 @@
 // later); one request is read in one transaction, its agent and supplier
 // first, found by their IDs alone (requestInOrder). A rejected one in full
 // carries its reject, from the signed event: who, when and why (B4a,
-// decision 6).
+// decision 6); a voided one its void: when, and the causes (C2b).
 //
 // The agent reads its own requests (B4c, partner S106), one by its ID: its
 // own alone (another agent's is NOT_FOUND, as none), as it stands now, so it
-// learns that one waiting was approved, rejected, cancelled or expired. Who
-// rejected it and why are the team's alone: the agent learns only that a
-// person rejected it.
+// learns that one waiting was approved, rejected, cancelled, expired or
+// voided. Who rejected it and why are the team's alone: the agent learns only
+// that a person rejected it (APPROVAL_REJECTED). A void it learns with its
+// causes (REQUEST_VOIDED, then each cause), so it knows what to wait for
+// before asking again.
 import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
 import type { PageAsked, SignedStates } from '@agentx/core/modules/audit';
 import {
-  rejectionOf,
+  denialOf,
   type RejectionShown,
   requestOf,
   requestsPage,
   type SpendRequestRecord,
   type SpendRequestsTables,
+  type VoidingShown,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf, suppliersNamed, type SuppliersTables, versionOf } from '@agentx/core/modules/suppliers';
-import type { IdGenerator } from '@agentx/core/shared-kernel';
+import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -62,17 +65,28 @@ export type RequestsListed =
     }
   | Refused;
 
-export type RequestFound =
-  { readonly outcome: 'found'; readonly shown: RequestShown; readonly rejection: RejectionShown | null } | Refused;
+/** Why a DENIED request ended after its decision: a person's reject or a void; both null otherwise. */
+interface Denial {
+  readonly rejection: RejectionShown | null;
+  readonly voiding: VoidingShown | null;
+}
+
+export type RequestFound = ({ readonly outcome: 'found'; readonly shown: RequestShown } & Denial) | Refused;
 
 export type OwnRequestFound =
-  { readonly outcome: 'found'; readonly request: SpendRequestRecord; readonly rejected: boolean } | Refused;
+  | {
+      readonly outcome: 'found';
+      readonly request: SpendRequestRecord;
+      /** The reasons that replace its decision's once a person or a brake ended it; null while they still explain it. */
+      readonly endedBecause: readonly ReasonCode[] | null;
+    }
+  | Refused;
 
 export interface SpendRequestReads {
   /** Every request, newest first; or those waiting for approval, oldest first. */
   list(orgId: string, page: PageAsked, which: 'all' | 'waiting', correlationId: string): Promise<RequestsListed>;
   show(orgId: string, requestId: string, correlationId: string): Promise<RequestFound>;
-  /** One of the agent's own requests, as it stands, and whether a person rejected it. */
+  /** One of the agent's own requests, as it stands, and why it ended if a person or a brake ended it. */
   ofAgent(orgId: string, agentId: string, requestId: string, correlationId: string): Promise<OwnRequestFound>;
 }
 
@@ -129,16 +143,26 @@ export async function requestInOrder(
 }
 
 /**
- * The reject of a request read as DENIED, from its signed event, in the
- * caller's transaction; null for any other status (only a waiting request is
- * rejected), or a DENIED one no person rejected.
+ * The reject or void of a request read as DENIED, from its signed event, in
+ * the caller's transaction; both null for any other status, or one its
+ * decision denied.
  */
-async function rejectionIn(tx: ReadTx, states: SignedStates, orgId: string, request: SpendRequestRecord) {
-  if (request.status !== 'DENIED') return null;
-  const rejected = await rejectionOf(tx, states, { orgId, id: request.id });
-  if (rejected.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
-  return rejected.outcome === 'rejected' ? rejected.rejection : null;
+async function denialIn(tx: ReadTx, states: SignedStates, orgId: string, request: SpendRequestRecord): Promise<Denial> {
+  const none = { rejection: null, voiding: null };
+  if (request.status !== 'DENIED') return none;
+  const denial = await denialOf(tx, states, { orgId, id: request.id });
+  if (denial.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+  if (denial.outcome === 'rejected') return { ...none, rejection: denial.rejection };
+  if (denial.outcome === 'voided') return { ...none, voiding: denial.voiding };
+  return none;
 }
+
+/** What the agent is told of a denial: a reject alone, never why; a void with its causes. */
+const toldToAgent = ({ rejection, voiding }: Denial): readonly ReasonCode[] | null => {
+  if (rejection !== null) return ['APPROVAL_REJECTED'];
+  if (voiding !== null) return ['REQUEST_VOIDED', ...voiding.causes];
+  return null;
+};
 
 /** The entry a verified list's own rows point to; one missing is a bug. */
 function pointedTo<T>(named: ReadonlyMap<string, T>, id: string): T {
@@ -201,7 +225,7 @@ export function createSpendRequestReads({
         const read = await requestInOrder(tx, states, orgId, requestId);
         if (read.outcome === 'none') throw new RequestReadRefused(404, 'NOT_FOUND');
         if (read.outcome === 'unbelieved') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
-        return { ...read, rejection: await rejectionIn(tx, states, orgId, read.shown.request) };
+        return { ...read, ...(await denialIn(tx, states, orgId, read.shown.request)) };
       }),
 
     ofAgent: (orgId, agentId, requestId, correlationId) =>
@@ -212,8 +236,8 @@ export function createSpendRequestReads({
         if (read.outcome === 'missing' || read.request.agentId !== agentId) {
           throw new RequestReadRefused(404, 'NOT_FOUND');
         }
-        const rejection = await rejectionIn(tx, states, orgId, read.request);
-        return { outcome: 'found' as const, request: read.request, rejected: rejection !== null };
+        const denial = await denialIn(tx, states, orgId, read.request);
+        return { outcome: 'found' as const, request: read.request, endedBecause: toldToAgent(denial) };
       }),
   };
 }

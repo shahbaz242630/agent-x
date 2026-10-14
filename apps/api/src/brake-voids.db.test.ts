@@ -46,6 +46,7 @@ import { createMandateMoves, type MandateMove, type MandateMoves, MOVE_OPERATION
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { AED, askedFor, draftedOf, keys, type World } from './mandate-world.helper.test.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
+import { createSpendRequestReads } from './spend-request-reads.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 
 const server = inject('postgres');
@@ -387,6 +388,26 @@ describe('a brake queued behind an approval holding the request (forced)', () =>
     expect(await statusOf(w, waiting.id)).toBe('CANCELLED');
     const actions = (await shared.eventsAbout(w.org, waiting.id, SPEND_REQUESTS.subject)).map(({ action }) => action);
     expect(actions).not.toContain('spend_request.voided');
+  });
+});
+
+describe('a voided request as the team and the agent read it (C2b)', () => {
+  it('shows the team when and why, and tells the agent REQUEST_VOIDED with its cause', async () => {
+    const { w, acting } = await ready();
+    const { waiting } = await pendingOf(w, acting);
+    await suspended(w, 'cancel');
+    const reads = createSpendRequestReads({ database: app, keys, ids, logger: logger() });
+
+    expect(await reads.show(w.org, waiting.id, CORRELATION)).toMatchObject({
+      outcome: 'found',
+      shown: { request: { status: 'DENIED' } },
+      rejection: null,
+      voiding: { causes: ['AGENT_SUSPENDED'] },
+    });
+    expect(await reads.ofAgent(w.org, w.agent, waiting.id, CORRELATION)).toMatchObject({
+      outcome: 'found',
+      endedBecause: ['REQUEST_VOIDED', 'AGENT_SUSPENDED'],
+    });
   });
 });
 
