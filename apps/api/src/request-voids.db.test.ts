@@ -21,6 +21,7 @@
 import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
@@ -96,7 +97,9 @@ const CAUSES: Readonly<Record<Voiding, string>> = {
 
 /** The world's own one: its agent, the mandate named, its source, its first supplier. */
 const idOf = (w: World, mandateId: string, which: Pausable): string =>
-  ({ agent: w.agent, mandate: mandateId, source: w.source, supplier: w.suppliers[0] ?? '' })[which];
+  ({ organization: w.org, agent: w.agent, mandate: mandateId, source: w.source, supplier: w.suppliers[0] ?? '' })[
+    which
+  ];
 
 /** Suspends it with the choice, as its use case records one (suspensions.ts), or lifts it; past the use case. */
 const moved = (w: World, mandateId: string, which: Pausable, choice: PendingChoice | 'resume') =>
@@ -109,6 +112,8 @@ const moved = (w: World, mandateId: string, which: Pausable, choice: PendingChoi
       details: suspend ? choiceDetails(choice) : {},
     };
     switch (which) {
+      case 'organization':
+        return states.changeStatus(tx, ORGANIZATIONS, key, suspend ? 'freeze' : 'unfreeze', change);
       case 'agent':
         return states.changeStatus(tx, AGENTS, key, suspend ? 'suspend' : 'reactivate', change);
       case 'mandate':
@@ -120,7 +125,7 @@ const moved = (w: World, mandateId: string, which: Pausable, choice: PendingChoi
     }
   });
 
-const PAUSABLE: readonly Pausable[] = ['agent', 'mandate', 'source', 'supplier'];
+const PAUSABLE: readonly Pausable[] = ['organization', 'agent', 'mandate', 'source', 'supplier'];
 
 /** The brakes on the first supplier alone, which leave a request to the other standing. */
 const ON_THE_FIRST_SUPPLIER: readonly (keyof typeof STOPS)[] = [
@@ -531,6 +536,7 @@ describe('pending spend requests voided once their authority no longer stands (C
         .where('id', '=', waiting.id)
         .executeTakeFirstOrThrow();
       return {
+        organizationStatus: 'ACTIVE',
         agentStatus: 'ACTIVE',
         mandate: { status: 'ACTIVE', currentVersionId: row.mandate_version_id },
         source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },

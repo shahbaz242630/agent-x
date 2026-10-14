@@ -124,7 +124,7 @@ export const REASON_CODES = {
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
   ORG_FROZEN:
-    'The organisation is frozen, so no new request is accepted. This refusal is temporary: the same idempotency key can be used again once the freeze is lifted.',
+    'The organisation is frozen: while it is, no request is decided or approved, and a freeze chosen to cancel ends those pending. A refusal is temporary: the same idempotency key can be used again once the freeze is lifted.',
   ORIGIN_REFUSED:
     "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused.",
   OWN_MEMBERSHIP:

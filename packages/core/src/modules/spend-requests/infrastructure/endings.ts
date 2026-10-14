@@ -252,11 +252,13 @@ export async function voidRequest(
 const MOST_VOIDED_BY_A_BRAKE = 20;
 
 /**
- * What a brake stops: an agent (its suspend), a mandate (its suspend, revoke,
- * expiry or supersede), a funding source (its suspend) or a supplier (its
- * suspend, or its new details or payee made current; C3).
+ * What a brake stops: the organisation (its freeze; D1), an agent (its
+ * suspend), a mandate (its suspend, revoke, expiry or supersede), a funding
+ * source (its suspend) or a supplier (its suspend, or its new details or
+ * payee made current; C3).
  */
 type Braked =
+  | { readonly organizationId: string }
   | { readonly agentId: string }
   | { readonly mandateId: string }
   | { readonly fundingSourceId: string }
@@ -264,6 +266,7 @@ type Braked =
 
 /** The request's column naming what a brake stops, and its ID. */
 function brakedColumn(braked: Braked) {
+  if ('organizationId' in braked) return { column: 'org_id', id: braked.organizationId } as const;
   if ('agentId' in braked) return { column: 'agent_id', id: braked.agentId } as const;
   if ('mandateId' in braked) return { column: 'mandate_id', id: braked.mandateId } as const;
   if ('fundingSourceId' in braked) return { column: 'funding_source_id', id: braked.fundingSourceId } as const;

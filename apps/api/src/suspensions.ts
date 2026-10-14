@@ -44,6 +44,7 @@ import type {
 } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { type Pausable, PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { SignedStateTable } from '@agentx/platform/db';
@@ -167,8 +168,9 @@ export const choiceIn = (details: AuditDetails | undefined): PendingChoice =>
 export const choiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: STATEMENT_VERSION }) as const;
 
-/** Each suspend's object type and action in the log. */
+/** Each suspend's object type and action in the log: an organisation's freeze too (decision 10, D1). */
 export const SUSPENDS = {
+  organization: { type: ORGANIZATIONS.subject, action: 'organization.freeze' },
   agent: { type: AGENTS.subject, action: 'agent.suspended' },
   mandate: { type: MANDATES.subject, action: 'mandate.suspended' },
   source: { type: SOURCES.subject, action: 'funding_source.suspended' },
@@ -191,6 +193,7 @@ const suspends = (which: Pausable): PauseEvents => ({ type: SUSPENDS[which].type
  * registration's cancel over its pause (C3c).
  */
 export const PAUSE_EVENTS: Readonly<Record<Pausable, Readonly<Record<string, PauseEvents>>>> = {
+  organization: { FROZEN: suspends('organization') },
   agent: { SUSPENDED: suspends('agent') },
   mandate: { SUSPENDED: suspends('mandate') },
   source: { SUSPENDED: suspends('source') },
