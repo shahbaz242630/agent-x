@@ -5,6 +5,8 @@
 // in memory. Only the confirmation makes the change current, starts its
 // cooling-off and tells everyone. The routes' answers are suppliers.test.ts;
 // who the sender tells, sender.db.test.ts.
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createHash } from 'node:crypto';
 
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
@@ -63,7 +65,9 @@ type Tables = IdentityTables &
   OrganizationsTables &
   DirectoryTables &
   AuditTables &
-  NotificationsTables;
+  NotificationsTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

@@ -3,6 +3,8 @@
 // app role, with the fake partner over its own records in the same database,
 // as staging runs it. The routes' answers are funding-sources.test.ts; the
 // tables themselves are the funding-sources module's own tests.
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { addLink, type FundingSourcesTables, MOST_LINKS_STARTED_A_DAY } from '@agentx/core/modules/funding-sources';
@@ -53,7 +55,9 @@ type Tables = IdentityTables &
   FakePartnerTables &
   OrganizationsTables &
   DirectoryTables &
-  AuditTables;
+  AuditTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

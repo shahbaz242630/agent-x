@@ -3,6 +3,7 @@
 // passkey step-up, through the use case the routes call, on the real migrated
 // schema, as the app role, each source linked as D2-3 links it through the
 // fake partner. The routes' answers are funding-sources.test.ts.
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createHash } from 'node:crypto';
 
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
@@ -17,7 +18,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import type { PendingChoice } from '@agentx/core/modules/spend-requests';
+import type { PendingChoice, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   createDatabaseRecords,
   createFakeRail,
@@ -57,7 +58,9 @@ type Tables = IdentityTables &
   FakePartnerTables &
   OrganizationsTables &
   DirectoryTables &
-  AuditTables;
+  AuditTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -194,7 +197,7 @@ afterAll(async () => {
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   rail = createFakeRail({ clock, ids, records: createDatabaseRecords(app) });
-  const services = { database: app, keys, ids, logger: testLogger() };
+  const services = { database: app, keys, ids, clock, logger: testLogger() };
   links = createFundingSourceLinks({ ...services, clock, rail, partner: 'fake' });
   changes = createFundingSourceChanges({ ...services, rail, challenges: challenges() });
 });

@@ -3,6 +3,7 @@
 // step-up, through the use case the routes call, on the real migrated schema,
 // as the app role. A supplier comes back VERIFIED only if nothing changed
 // while it was suspended. The routes' answers are suppliers.test.ts.
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createHash } from 'node:crypto';
 
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
@@ -16,7 +17,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import type { PendingChoice } from '@agentx/core/modules/spend-requests';
+import type { PendingChoice, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   addVersion,
   type SupplierDetails,
@@ -54,7 +55,9 @@ type Tables = IdentityTables &
   OrganizationsTables &
   DirectoryTables &
   AuditTables &
-  NotificationsTables;
+  NotificationsTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -242,7 +245,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
-  const services = { database: app, keys, ids, logger: testLogger() };
+  const services = { database: app, keys, ids, clock, logger: testLogger() };
   registry = createSupplierRegistry({ ...services, clock });
   changes = createSupplierChanges({ ...services, challenges: challenges(), outbox: createOutbox({ ids, clock }) });
 });

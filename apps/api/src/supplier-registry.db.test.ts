@@ -3,6 +3,8 @@
 // through the use case the routes call, on the real migrated schema, as the
 // app role. The routes' answers are suppliers.test.ts; the brake is
 // supplier-changes.db.test.ts.
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { type AuditTables, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
@@ -52,7 +54,9 @@ type Tables = IdentityTables &
   OrganizationsTables &
   DirectoryTables &
   AuditTables &
-  NotificationsTables;
+  NotificationsTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

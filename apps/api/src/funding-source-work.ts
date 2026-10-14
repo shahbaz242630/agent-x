@@ -4,7 +4,9 @@
 // silence.
 import { type FundingSourcesTables, sourceOf, type SourceRecord } from '@agentx/core/modules/funding-sources';
 import type { SignedStates } from '@agentx/core/modules/audit';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { RailUnavailable } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -13,7 +15,8 @@ import { refused } from './refused.ts';
 import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 /** The tables the funding-source use cases work on. */
-export type FundingSourceTables = UseCaseTables & FundingSourcesTables;
+/** The sources' tables, with the requests and holdings a suspend's cascade ends (C3). */
+export type FundingSourceTables = UseCaseTables & FundingSourcesTables & SpendRequestsTables & LimitReservationsTables;
 export type FundingSourceTx = DatabaseTransaction<FundingSourceTables>;
 
 /** Who is acting: a signed-in member, in the organisation the access hook verified. */

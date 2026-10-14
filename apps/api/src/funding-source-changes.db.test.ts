@@ -4,6 +4,8 @@
 // fake partner over its own records in the same database, as staging runs
 // it. Each source is linked as D2-3 links it: started, approved at the fake
 // bank, confirmed. The routes' answers are funding-sources.test.ts.
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type FundingSourcesTables, SOURCES, type SourceRecord } from '@agentx/core/modules/funding-sources';
@@ -56,7 +58,9 @@ type Tables = IdentityTables &
   FakePartnerTables &
   OrganizationsTables &
   DirectoryTables &
-  AuditTables;
+  AuditTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -153,6 +157,7 @@ const changesWith = (partner: FinancialRailAdapter | undefined) =>
     database: app,
     keys,
     ids,
+    clock,
     rail: partner,
     challenges: createStepUpChallenges({ ids, clock }),
     logger: testLogger(),
@@ -291,6 +296,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       database: app,
       keys,
       ids,
+      clock,
       rail: mixedUp,
       challenges: createStepUpChallenges({ ids, clock }),
       logger: testLogger(capture),
@@ -318,6 +324,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       database: app,
       keys,
       ids,
+      clock,
       rail,
       challenges: createStepUpChallenges({ ids, clock }),
       logger: testLogger(capture),

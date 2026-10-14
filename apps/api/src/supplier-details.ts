@@ -16,7 +16,10 @@
 //   consumed with a passkey (SEC-HA-12), then the new version made current,
 //   entered by this admin, the supplier UNVERIFIED (the suppliers module's
 //   changeDetails), and `supplier_details_changed` written for every active
-//   member and the counting contacts, in the same transaction.
+//   member and the counting contacts, in the same transaction. Its pending
+//   requests are DENIED first (voidPendingOf, Phase 3 C3; decision 7: new
+//   details always cancel), a suspended supplier's paused ones too; the
+//   request-voids job takes any past the batch.
 //
 // Every version is kept for good, so the organisation may enter at most 200
 // changes of its suppliers a day: payee registrations (100 a day of their
@@ -25,10 +28,12 @@
 //
 // Lock order (ADR-006 §6): the idempotency key, the supplier lock, the
 // member's membership (2a), the supplier (6), its version, the step-up
-// challenge, the chain head with the first event recorded, then the notices.
+// challenge, the pending requests (8) and their holdings (11), the chain head
+// with the first event recorded, then the notices.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import type { Outbox } from '@agentx/core/modules/notifications';
+import { voidPendingOf } from '@agentx/core/modules/spend-requests';
 import {
   changeDetails,
   nextVersionNumber,
@@ -180,6 +185,8 @@ export function createSupplierDetailsChanges({
           { action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) },
           { passkeyRequired: true },
         );
+        const braked = { supplierId: found.supplier.id };
+        await voidPendingOf(tx, states, keys, orgId, braked, 'SUPPLIER_CHANGED', clock.now());
         await changeDetails(tx, states, keys, { orgId, id: found.supplier.id }, found, {
           orgId,
           id: ids.next(),

@@ -20,8 +20,11 @@
 //   ENDED already is left as it is, and answered: a brake pressed twice is
 //   not an error. A suspended source funds nothing (`mayFund`). The member
 //   chooses what happens to its pending requests, cancel or pause (Phase 3
-//   decision 7, suspensions.ts), kept on the event: the request-voids job
-//   voids them on cancel; Phase 3 C3 voids them in the same transaction.
+//   decision 7, suspensions.ts), kept on the event. On cancel they are
+//   DENIED in the same transaction, before its move (voidPendingOf, Phase 3
+//   C3), pressed again too, so a pause made a cancel voids them; the
+//   request-voids job takes any past the batch, and a source's the partner
+//   ends (a refresh can't know before its move that it will end it).
 //   Agent X's own suspension for limits in another currency pauses them:
 //   nobody on the team chose it, and the bank puts it right.
 // - `reactivate` (`funding-sources.reactivate`, D2-4b): gives the source its
@@ -35,7 +38,8 @@
 //   event. The partner's own word still decides whether it may fund.
 //
 // Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
-// the source (5), the step-up challenge, the chain head last.
+// the source (5), a suspend's pending requests (8) and their holdings (11),
+// the step-up challenge, the chain head last.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import {
   endUnknownToPartner,
@@ -45,8 +49,8 @@ import {
 } from '@agentx/core/modules/funding-sources';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { type FinancialRailAdapter, limitsInAccountCurrency, type SourceLookup } from '@agentx/core/modules/providers';
-import type { PendingChoice } from '@agentx/core/modules/spend-requests';
-import type { IdGenerator } from '@agentx/core/shared-kernel';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
+import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -131,6 +135,7 @@ export function createFundingSourceChanges({
   database,
   keys,
   ids,
+  clock,
   rail,
   challenges,
   logger,
@@ -138,6 +143,7 @@ export function createFundingSourceChanges({
   readonly database: Database<FundingSourceTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
+  readonly clock: Clock;
   /** The partner, or undefined where none is set up (config.partner): then a refresh answers PARTNER_UNAVAILABLE. */
   readonly rail: FinancialRailAdapter | undefined;
   readonly challenges: StepUpChallenges;
@@ -232,6 +238,10 @@ export function createFundingSourceChanges({
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
         const { source, state } = await work.sourceIn(tx, states, key, 'change');
+        if (pendingRequests === 'cancel') {
+          const braked = { fundingSourceId: source.id };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
+        }
         // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).
         if (source.status === 'SUSPENDED') {
           const again = await chosenAgain(

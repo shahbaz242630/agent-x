@@ -7,10 +7,12 @@
 //   approver. The key claimed first; the member read again; the supplier read
 //   for change; then UNVERIFIED or VERIFIED > SUSPENDED, recorded as the
 //   member's, with what the member chose for its pending requests, cancel or
-//   pause (Phase 3 decision 7, suspensions.ts): the request-voids job voids
-//   them on cancel; Phase 3 C3 voids them in the same transaction. One
-//   suspended already is answered as it is: a brake pressed twice is not an
-//   error. A suspended supplier is shown to no agent.
+//   pause (Phase 3 decision 7, suspensions.ts). On cancel they are DENIED in
+//   the same transaction, before its move (voidPendingOf, Phase 3 C3),
+//   pressed again too, so a pause made a cancel voids them; the
+//   request-voids job takes any past the batch. One suspended already is
+//   answered as it is: a brake pressed twice is not an error. A suspended
+//   supplier is shown to no agent.
 // - `reactivate` (`suppliers.reactivate`): gives the supplier its place back,
 //   so an admin's, with a passkey step-up (partner, S69; SEC-HA-12). The ask:
 //   the key claimed first; the admin read again; the supplier, SUSPENDED
@@ -25,14 +27,15 @@
 // same transaction; a brake pressed twice tells no one twice.
 //
 // Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
-// the supplier (6), its version, the step-up challenge, the chain head, then
-// the notices, new rows that wait on nothing.
+// the supplier (6), its version, a suspend's pending requests (8) and their
+// holdings (11), the step-up challenge, the chain head, then the notices, new
+// rows that wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { reactivateSupplier, SUPPLIERS, suspendSupplier } from '@agentx/core/modules/suppliers';
 import type { Outbox } from '@agentx/core/modules/notifications';
-import type { PendingChoice } from '@agentx/core/modules/spend-requests';
-import type { IdGenerator } from '@agentx/core/shared-kernel';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
+import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -98,6 +101,7 @@ export function createSupplierChanges({
   database,
   keys,
   ids,
+  clock,
   challenges,
   outbox,
   logger,
@@ -105,6 +109,7 @@ export function createSupplierChanges({
   readonly database: Database<SupplierTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
+  readonly clock: Clock;
   readonly challenges: StepUpChallenges;
   readonly outbox: Outbox;
   readonly logger: Logger;
@@ -125,6 +130,10 @@ export function createSupplierChanges({
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: supplierId };
         const found = await work.supplierIn(tx, states, key, 'change');
+        if (pendingRequests === 'cancel') {
+          const braked = { supplierId: found.supplier.id };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
+        }
         // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).
         if (found.supplier.status === 'SUSPENDED') {
           const again = await chosenAgain(

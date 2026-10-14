@@ -251,8 +251,24 @@ export async function voidRequest(
  */
 const MOST_VOIDED_BY_A_BRAKE = 20;
 
-/** What a brake stops: an agent (its suspend) or a mandate (its suspend, revoke, expiry or supersede). */
-type Braked = { readonly agentId: string } | { readonly mandateId: string };
+/**
+ * What a brake stops: an agent (its suspend), a mandate (its suspend, revoke,
+ * expiry or supersede), a funding source (its suspend) or a supplier (its
+ * suspend, unverify, or new details or payee; C3).
+ */
+type Braked =
+  | { readonly agentId: string }
+  | { readonly mandateId: string }
+  | { readonly fundingSourceId: string }
+  | { readonly supplierId: string };
+
+/** The request's column naming what a brake stops, and its ID. */
+function brakedColumn(braked: Braked) {
+  if ('agentId' in braked) return { column: 'agent_id', id: braked.agentId } as const;
+  if ('mandateId' in braked) return { column: 'mandate_id', id: braked.mandateId } as const;
+  if ('fundingSourceId' in braked) return { column: 'funding_source_id', id: braked.fundingSourceId } as const;
+  return { column: 'supplier_id', id: braked.supplierId } as const;
+}
 
 /**
  * A brake's own cascade (PRD §4.2; ADR-006 §6 "Cascades"; Phase 3 C2): the
@@ -276,15 +292,14 @@ export async function voidPendingOf(
   now: Date,
   most = MOST_VOIDED_BY_A_BRAKE,
 ): Promise<number> {
+  const { column, id: brakedId } = brakedColumn(braked);
   const rows = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the batch's IDs, locked; each verified below before it moves
     .selectFrom(SPEND_REQUESTS.table)
     .select('id')
     .where('org_id', '=', orgId)
     .where('status', 'in', PENDING_STATUSES)
-    .where((where) =>
-      'agentId' in braked ? where('agent_id', '=', braked.agentId) : where('mandate_id', '=', braked.mandateId),
-    )
+    .where(column, '=', brakedId)
     .orderBy('id')
     .limit(most)
     .forNoKeyUpdate()
