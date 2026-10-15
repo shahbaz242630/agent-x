@@ -1026,9 +1026,12 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
     const left = many.at(-1);
     expect(left === undefined ? undefined : await statusOf(w, left.id)).toBe('APPROVED');
 
-    // A pause over the cancel's unverify voids the one left first (as C3e's suspend).
+    // A pause over the cancel's unverify voids the one left first (as C3e's suspend), with the stop's cause.
+    const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
     await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co');
 
+    const changed = await firstSeqAfter(w, 'supplier', supplierOfWorld(w), before);
+    await voidedBefore(w, left === undefined ? [] : [left], 'SUPPLIER_NOT_VERIFIED', changed);
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 

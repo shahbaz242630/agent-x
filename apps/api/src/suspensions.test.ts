@@ -59,7 +59,10 @@ describe('pausedFromOf', () => {
   });
 
   it.each([
-    ['a new payee made current', move('supplier.payee_change_confirmed', { pendingRequests: 'pause' })],
+    [
+      'a new payee made current, though its details read as a pause',
+      move('supplier.payee_change_confirmed', { pendingRequests: 'pause', versionId: 'v2', followsVersionId: 'v1' }),
+    ],
     ['a change chosen to cancel', move('supplier.details_changed', { pendingRequests: 'cancel', versionId: 'v2' })],
     ['a change naming no choice (from before it)', move('supplier.details_changed', { versionId: 'v2' })],
     ['a change to another version', paused('v9', 'v1')],
