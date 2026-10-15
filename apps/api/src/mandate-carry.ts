@@ -366,7 +366,7 @@ async function splitTotalsOutside(
 }
 
 /** The same payee: the same supplier, or the same payee key where it has one (as order-claims' onTheOrdersPayee). */
-const samePayee = (supplier: SupplierRecord, other: SupplierRecord): boolean =>
+export const samePayee = (supplier: SupplierRecord, other: SupplierRecord): boolean =>
   other.id === supplier.id || (supplier.payeeKey !== null && other.payeeKey === supplier.payeeKey);
 
 /**
