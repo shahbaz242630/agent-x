@@ -1243,6 +1243,19 @@ describe("the organisation's monthly cap, chosen by its admin (E2, decision 15)"
     });
   });
 
+  it('simulates proposed organisation rules as chosen, the rules in force as they are: not chosen, denied', async () => {
+    const { w, mandateId } = await ready({ capChosen: false });
+    const id = mandateId ?? '';
+
+    expect(simulatedOf(await simulated(w, id)).made).toMatchObject({
+      decision: 'DENY',
+      reasons: ['ORG_MONTHLY_CAP_NOT_SET'],
+      monthlyCapFrom: 'not-set',
+    });
+    const none = simulatedOf(await simulated(w, id, {}, { organizationPolicy: proposed({}) }));
+    expect(none.made).toMatchObject({ decision: 'ALLOW', reasons: [], monthlyCapFrom: 'none' });
+  });
+
   it('reads a version with no cap and no choice on its event (made before E2) as not chosen: never the old default', async () => {
     const { w, acting } = await ready();
     await uncapped(w, {});

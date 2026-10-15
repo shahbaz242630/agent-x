@@ -143,7 +143,7 @@ export function decide(input: DecisionInput): DecisionMade {
       input.request.amount,
       input.monthSpent,
       input.splitOpen,
-      ...(monthly.cap === null ? [] : [monthly.cap]),
+      // The monthly cap among them: it is always a policy's (E2).
       ...policies.flatMap(amountsOf),
     ];
     if (weighed.every(({ currency }) => currency === mandate.perOrderLimit.currency)) {

@@ -30,7 +30,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { ABOVE_THE_CAP, DRAFT_ABOVE_THE_CAP } from './mandate-reads.ts';
+import { ABOVE_THE_CAP, capChoiceOf, DRAFT_ABOVE_THE_CAP, policyRulesIn } from './mandate-reads.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
   AED,
@@ -605,6 +605,18 @@ describe('the organisation’s monthly cap choice (E2, decision 15)', () => {
     });
     const view = await registry.show(w.org, id, CORRELATION);
     expect(view).toMatchObject({ agentMonthlyCap: { cap: null, from: 'not-set' } });
+  });
+
+  it('refuses a choice whose history can’t be believed: INTEGRITY_FAILED, never read as none', async () => {
+    const w = await world();
+    changedOf(await changed(w, ORGANIZATION, rules(0n, { monthlyCap: null })));
+
+    const read = withSignedStates(app, w.org, shared.quiet(), async (tx, states) => {
+      const current = (await policyRulesIn(tx, states, w.org, w.org))?.current ?? null;
+      const historyOf: typeof states.historyOf = () => Promise.resolve({ outcome: 'tampered', sign: 'log' });
+      return capChoiceOf(tx, { ...states, historyOf }, w.org, current);
+    });
+    await expect(read).rejects.toMatchObject({ status: 503, code: 'INTEGRITY_FAILED' });
   });
 
   it.each<[string, PolicyTarget | 'mandate', PolicyRules, 'amount' | 'none' | null]>([
