@@ -59,7 +59,9 @@ const WAITING: SpendRequestRecord = {
 
 const SHOWN: RequestShown = {
   request: WAITING,
-  changedAt: new Date('2026-10-13T10:00:00.000Z'),
+  // Signed again after its decision (a carry, E4): it still expires 72 hours from the decision.
+  changedAt: new Date('2026-10-14T09:00:00.000Z'),
+  expiresAt: new Date('2026-10-16T10:00:00.000Z'),
   agentName: 'Purchasing agent',
   supplierName: 'Gulf Office Supplies LLC',
 };
@@ -77,7 +79,7 @@ const LISTED_ANSWER = {
   fundingSourceId: SOURCE_ID,
   mandateId: MANDATE_ID,
   bankReference: 'INV-22',
-  changedAt: '2026-10-13T10:00:00.000Z',
+  changedAt: '2026-10-14T09:00:00.000Z',
   expiresAt: '2026-10-16T10:00:00.000Z',
 };
 
@@ -159,6 +161,7 @@ describe('GET /v1/spend-requests: every request, newest first (Phase 3 B3)', () 
     const approved: RequestShown = {
       ...SHOWN,
       request: { ...WAITING, decision: 'ALLOW', reasons: [], status: 'APPROVED' },
+      expiresAt: null,
     };
     const { app, asked } = await withReads({
       listed: { outcome: 'listed', requests: [approved], next: null, unchecked: [] },
@@ -229,7 +232,7 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
 
   it('shows one rejected with its reject: who, when and why (B4a)', async () => {
     const rejection = { byUserId: LIVE.userId, at: new Date('2026-10-13T09:00:00.000Z'), reason: 'Not this month' };
-    const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const } };
+    const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const }, expiresAt: null };
     const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection, voiding: null } });
 
     expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({
@@ -241,7 +244,7 @@ describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
 
   it('shows one voided with its void: when and its causes, described (C2b)', async () => {
     const voiding = { at: new Date('2026-10-14T09:00:00.000Z'), causes: ['AGENT_SUSPENDED'] as const };
-    const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const } };
+    const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const }, expiresAt: null };
     const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection: null, voiding } });
 
     expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({

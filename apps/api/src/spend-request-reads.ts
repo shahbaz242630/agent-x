@@ -27,6 +27,9 @@
 import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
 import type { PageAsked, SignedStates } from '@agentx/core/modules/audit';
 import {
+  type Decided,
+  decisionOf,
+  decisionsOf,
   denialOf,
   type RejectionShown,
   requestOf,
@@ -34,6 +37,7 @@ import {
   type SpendRequestRecord,
   type SpendRequestsTables,
   type VoidingShown,
+  WAITS_FOR_APPROVAL_MS,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf, suppliersNamed, type SuppliersTables, versionOf } from '@agentx/core/modules/suppliers';
 import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
@@ -50,11 +54,23 @@ type ReadTx = DatabaseTransaction<RequestReadTables>;
 /** A request as people see it: its signed state, when that was signed, and who it names, by name. */
 export interface RequestShown {
   readonly request: SpendRequestRecord;
-  /** When its latest move was signed: a waiting request's decision, which its 72 hours run from (D7). */
+  /** When its latest move was signed. */
   readonly changedAt: Date;
+  /** When a waiting one expires: 72 hours from its decision's sealed time (D7), never a later event's (E4b); else null. */
+  readonly expiresAt: Date | null;
   readonly agentName: string;
   readonly supplierName: string;
 }
+
+/**
+ * When a request expires, from its decision (`decisionsOf`): null for one not
+ * waiting; undefined for one waiting with no decision to believe, which is
+ * then not shown.
+ */
+const expiresAtOf = (request: SpendRequestRecord, decided: Decided | null | undefined): Date | null | undefined => {
+  if (request.status !== 'APPROVAL_REQUIRED') return null;
+  return decided ? new Date(decided.decidedAt.getTime() + WAITS_FOR_APPROVAL_MS) : undefined;
+};
 
 export type RequestsListed =
   | {
@@ -129,6 +145,9 @@ export async function requestInOrder(
   if (request.agentId !== agent.agent.id || request.supplierId !== supplier.supplier.id) {
     return { outcome: 'unbelieved' };
   }
+  const waiting = request.status === 'APPROVAL_REQUIRED';
+  const expiresAt = expiresAtOf(request, waiting ? await decisionOf(tx, states, { orgId, id: request.id }) : null);
+  if (expiresAt === undefined) return { outcome: 'unbelieved' };
   // One named agent asked, one shown (agentsShown throws for a missing row).
   const [shown] = (await agentsShown(tx, orgId, [agent.agent])) as [AgentShown];
   return {
@@ -136,6 +155,7 @@ export async function requestInOrder(
     shown: {
       request,
       changedAt: read.state.recordedAt,
+      expiresAt,
       agentName: shown.name,
       supplierName: version.version.displayName,
     },
@@ -186,9 +206,20 @@ export function createSpendRequestReads({
 
   return {
     async list(orgId, page, which, correlationId) {
-      const listed = await work.inOrganisation(orgId, correlationId, (tx, states) =>
-        requestsPage(tx, states, orgId, page, which),
-      );
+      const read = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
+        const found = await requestsPage(tx, states, orgId, page, which);
+        if (found.outcome === 'tampered') return { listed: found, decisions: new Map<string, Decided>() };
+        // The waiting ones' decisions, in one statement, for when each expires.
+        const waiting = found.items.filter(({ request }) => request.status === 'APPROVAL_REQUIRED');
+        const decisions = await decisionsOf(
+          tx,
+          states,
+          orgId,
+          waiting.map(({ request }) => request.id),
+        );
+        return { listed: found, decisions };
+      });
+      const { listed, decisions } = read;
       if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
       const named = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
         const agents = await agentsNamed(tx, states, orgId, [
@@ -203,8 +234,13 @@ export function createSpendRequestReads({
       });
       if (named.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
       const { agents, suppliers } = named;
-      const stuck = ({ request }: { readonly request: SpendRequestRecord }) =>
-        agents.stuck.has(request.agentId) || suppliers.stuck.has(request.supplierId);
+      const expiresAt = ({ request }: { readonly request: SpendRequestRecord }) =>
+        expiresAtOf(request, decisions.get(request.id.toLowerCase()));
+      // A waiting one with no decision to believe is left out and named, as one that can't be checked (A1b).
+      const stuck = (item: { readonly request: SpendRequestRecord }) =>
+        agents.stuck.has(item.request.agentId) ||
+        suppliers.stuck.has(item.request.supplierId) ||
+        expiresAt(item) === undefined;
       return {
         outcome: 'listed',
         requests: listed.items
@@ -212,6 +248,7 @@ export function createSpendRequestReads({
           .map(({ request, changedAt }) => ({
             request,
             changedAt,
+            expiresAt: expiresAt({ request }) ?? null,
             agentName: pointedTo(agents.agents, request.agentId).name,
             supplierName: pointedTo(suppliers.suppliers, request.supplierId).displayName,
           })),

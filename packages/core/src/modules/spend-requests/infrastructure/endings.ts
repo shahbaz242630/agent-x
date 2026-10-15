@@ -129,9 +129,11 @@ export async function expireRequest(
   if (read.outcome !== 'found') return read;
   if (read.request.status !== 'APPROVAL_REQUIRED') return { outcome: 'not_open', request: read.request };
   // Its 72 hours run from its decision as the chain sealed it, not its latest event: a carry (E4) moves no clock.
-  // None only for a history that can't be believed: its alarm is raised and the organisation held.
+  // Every request held waiting was decided so (signRequest): none is a history that can't be believed (its alarm
+  // raised) or a bug, so it throws rather than wait for good, and the job's error line alerts.
   const decision = await decisionOf(tx, states, key);
-  if (decision === null || !waitedOut(decision.decidedAt, now)) return { outcome: 'not_due' };
+  if (decision === null) throw new Error(`A spend request waiting for approval has no decision to read: ${key.id}`);
+  if (!waitedOut(decision.decidedAt, now)) return { outcome: 'not_due' };
   const decided = decision.decidedAt;
   await endHolding(tx, states, keys, key, 'expire', now, {
     actor: ACTOR,

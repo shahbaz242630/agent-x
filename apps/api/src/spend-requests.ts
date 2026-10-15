@@ -64,7 +64,6 @@ import {
   SPEND_REQUEST,
   SpendAskRefused,
   type SpendRequestRecord,
-  WAITS_FOR_APPROVAL_MS,
 } from '@agentx/core/modules/spend-requests';
 import { moneyFromJson } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
@@ -336,7 +335,7 @@ const REJECT_CONFIRM_SCHEMA = {
 };
 
 /** A request as a list shows it to the team. */
-const listed = ({ request, changedAt, agentName, supplierName }: RequestShown) => ({
+const listed = ({ request, changedAt, expiresAt, agentName, supplierName }: RequestShown) => ({
   id: request.id,
   status: request.status,
   decision: request.decision,
@@ -349,9 +348,7 @@ const listed = ({ request, changedAt, agentName, supplierName }: RequestShown) =
   mandateId: request.mandateId,
   bankReference: bankReferenceOf(request.orderReference, request.id),
   changedAt: changedAt.toISOString(),
-  // Its decision is its latest move while it waits, so its 72 hours run from changedAt (D7).
-  expiresAt:
-    request.status === 'APPROVAL_REQUIRED' ? new Date(changedAt.getTime() + WAITS_FOR_APPROVAL_MS).toISOString() : null,
+  expiresAt: expiresAt?.toISOString() ?? null,
 });
 
 /** The request as answered: to its agent, a refusal's own reasons alone (reasonsShownToAgent); to a person, all. */

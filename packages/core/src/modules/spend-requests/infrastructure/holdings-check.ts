@@ -102,12 +102,13 @@ export interface Decided {
 }
 
 /**
- * Each request's decision (Decided), by the request's ID, in one statement.
- * A history that can't be believed has raised the alarm and holds the
- * organisation already: none is then answered.
+ * Each request's decision (Decided), by the request's ID in lower case, in
+ * one statement (the holdings check; the team's list, for when a waiting one
+ * expires). A history that can't be believed has raised the alarm and holds
+ * the organisation already: none is then answered.
  */
-async function decisionsOf(
-  tx: HoldingsTransaction,
+export async function decisionsOf(
+  tx: Transaction<AuditTables>,
   states: SignedStates,
   orgId: string,
   ids: readonly string[],
@@ -140,7 +141,7 @@ async function decisionsOf(
  * alarm raised).
  */
 export async function decisionOf(
-  tx: HoldingsTransaction,
+  tx: Transaction<AuditTables>,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
 ): Promise<Decided | null> {
