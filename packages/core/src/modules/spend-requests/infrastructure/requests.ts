@@ -37,11 +37,11 @@ export const SPEND_REQUESTS = {
   ],
   rules: SPEND_REQUEST,
   // Everything but the status, fixed when the request is made: 0039's `fixed_at_creation` refuses any change after.
+  // The mandate version alone may move, to its mandate's waiting version while pending (0047's `carried_version`, E4).
   fixedAtCreation: [
     'agent_id',
     'agent_key_id',
     'mandate_id',
-    'mandate_version_id',
     'organization_policy_version_id',
     'mandate_policy_version_id',
     'supplier_id',

@@ -145,6 +145,32 @@ const statusOf = (org: Org, id: string) =>
 /** An approved request, ready to claim its order. */
 const approved = (org: Org, overrides: Partial<RequestRow> = {}) => moved(org, requestRow(org, overrides), 'APPROVED');
 
+/** A second version of the organisation's mandate, on its source or the one given, made the one waiting, past the app. */
+const anotherDraft = async (org: Org, source = org.source): Promise<string> => {
+  const version = randomUUID();
+  await database.as('admin').query(
+    `with draft as (
+       insert into mandates.versions (org_id, id, mandate_id, version, purpose, currency, per_order_limit_minor,
+         monthly_limit_minor, approval_threshold_minor, supplier_ids, funding_source_id, split_check, consent_limits,
+         terms_hash, drafted_by, drafted_at)
+       values ($1, $3, $2, 2, 'Office supplies', 'AED', 400000, 2000000, 100000, $4, $5, 'on', 'strict', $6, $7, $8)
+       returning org_id, mandate_id, id)
+     update mandates.mandates m set pending_version_id = draft.id
+     from draft where m.org_id = draft.org_id and m.id = draft.mandate_id`,
+    [org.id, org.mandate, version, org.supplier.id, source, 'c'.repeat(64), org.agent.id, AT],
+  );
+  return version;
+};
+
+const versionOf = (org: Org, id: string) =>
+  inOrg(org, (tx) =>
+    tx
+      .selectFrom('spend_requests.requests')
+      .select(['status', 'mandate_version_id'])
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow(),
+  );
+
 /** A claim on a request's order, with any column given otherwise. */
 const claimRow = (org: Org, request: string, overrides: Partial<ClaimRow> = {}): ClaimRow => ({
   org_id: org.id,
@@ -291,7 +317,7 @@ describe('a spend request', () => {
       { decision: 'DENY' },
       { reason_codes: 'APPROVAL_THRESHOLD' },
       { supplier_id: randomUUID() },
-      { mandate_version_id: null, mandate_id: null },
+      { mandate_id: randomUUID() },
       { order_reference: 'PO-2026/0043' },
       { idempotency_key: 'another' },
     ]) {
@@ -299,6 +325,42 @@ describe('a spend request', () => {
     }
     // Written again unchanged, as the audit module's record does, it is no change.
     await change(org, id, { amount_minor: 25_000n, decision: 'ALLOW' });
+  });
+
+  it('moves its mandate version only while pending, its status unchanged, to its mandate’s waiting version (carried_version, 0047)', async () => {
+    const org = await organisation();
+    const waiting = await anotherDraft(org);
+    for (const status of ['APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY']) {
+      const row = requestRow(org, decided(status === 'APPROVAL_REQUIRED' ? 'REQUIRE_APPROVAL' : 'ALLOW'));
+      const id = await moved(org, row, ...(status === 'INSTRUCTION_READY' ? ['APPROVED', status] : [status]));
+      await change(org, id, { mandate_version_id: waiting });
+      expect(await versionOf(org, id)).toEqual({ status, mandate_version_id: waiting });
+    }
+
+    const pending = await approved(org);
+    // Not to a version its mandate isn't waiting on, nor in the same change as a move of its status.
+    await expect(change(org, pending, { mandate_version_id: randomUUID() })).rejects.toEqual(
+      refusedBy('carried_version'),
+    );
+    await expect(change(org, pending, { mandate_version_id: waiting, status: 'DENIED' })).rejects.toEqual(
+      refusedBy('carried_version'),
+    );
+    // Not once it has ended, nor while still VALIDATING.
+    const denied = await moved(org, requestRow(org, decided('DENY', 'POLICY_ORDER_CAP')), 'DENIED');
+    const validating = await moved(org, requestRow(org));
+    for (const id of [denied, validating]) {
+      await expect(change(org, id, { mandate_version_id: waiting })).rejects.toEqual(refusedBy('carried_version'));
+    }
+  });
+
+  it('is never carried to a waiting version on another source (from_its_mandates_source)', async () => {
+    const org = await organisation();
+    const waiting = await anotherDraft(org, await seed().source(org.id));
+    const id = await approved(org);
+
+    await expect(change(org, id, { mandate_version_id: waiting })).rejects.toEqual(
+      refusedBy('from_its_mandates_source'),
+    );
   });
 
   it('gives reasons for every decision but ALLOW, and none for ALLOW (reasons_with_the_decision)', async () => {

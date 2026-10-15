@@ -249,7 +249,6 @@ describe('the authority-table registry takes the modules’ own descriptions', (
           'agent_id',
           'agent_key_id',
           'mandate_id',
-          'mandate_version_id',
           'organization_policy_version_id',
           'mandate_policy_version_id',
           'supplier_id',
