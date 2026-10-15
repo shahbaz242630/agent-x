@@ -67,8 +67,8 @@ const { quiet, member, world, termsOf, keyed, partnerSays, acceptedPastTheUseCas
 /** A draft within the source's consent, for the world's agent unless another is named. */
 const draftOf = (w: World, overrides: Partial<MandateDraft['terms']> = {}, agentId = w.agent): MandateDraft => ({
   agentId,
-  timeZone: null,
-  splitWindowHours: null,
+  timeZone: 'Asia/Dubai',
+  splitWindowHours: 24,
   terms: termsOf(w, overrides),
 });
 
@@ -118,6 +118,24 @@ describe('drafting a mandate (B2)', () => {
     const drafted = draftedOf(await draft(w.admin, { ...draftOf(w), timeZone: 'Europe/London', splitWindowHours: 48 }));
 
     expect(drafted.mandate).toMatchObject({ timeZone: 'Europe/London', splitWindowHours: 48 });
+  });
+
+  it('refuses another zone than the one an agent already weighed keeps its months in: AGENT_ZONE_KEPT (decision 15)', async () => {
+    const w = await world();
+    // As the agent's first decision keeps it (lockAgentMonth).
+    await withTenant(app, w.org, (tx) =>
+      tx
+        .insertInto('limit_reservations.agent_zones')
+        .values({ org_id: w.org, agent_id: w.agent, time_zone: 'Asia/Dubai', created_at: clock.now() })
+        .execute(),
+    );
+
+    expect(await draft(w.admin, { ...draftOf(w), timeZone: 'Europe/London' })).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'AGENT_ZONE_KEPT',
+    });
+    expect(draftedOf(await draft(w.admin, draftOf(w))).mandate).toMatchObject({ timeZone: 'Asia/Dubai' });
   });
 
   it('answers a retry from the mandate, drafting nothing twice', async () => {

@@ -283,7 +283,7 @@ export function mandateWorld({
       await registry.draft(
         w.admin,
         keyed(w.admin, DRAFT_OPERATION),
-        { agentId: w.agent, timeZone: null, splitWindowHours: null, terms: termsOf(w, overrides) },
+        { agentId: w.agent, timeZone: 'Asia/Dubai', splitWindowHours: 24, terms: termsOf(w, overrides) },
         'test-correlation',
       ),
     );

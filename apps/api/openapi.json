@@ -71,6 +71,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "AGENT_ZONE_KEPT",
+                    "description": "The agent’s months are already counted in another time zone, from its first request on, and a new mandate can’t move them. Draft it in the time zone its mandate shows. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGGREGATE_THRESHOLD",
                     "description": "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it."
                   },
@@ -12636,13 +12641,18 @@
                 },
                 "required": [
                   "agentId",
+                  "timeZone",
+                  "splitWindowHours",
                   "purpose",
                   "currency",
                   "perOrderLimitMinor",
                   "monthlyLimitMinor",
                   "approvalThresholdMinor",
                   "supplierIds",
-                  "fundingSourceId"
+                  "fundingSourceId",
+                  "splitCheck",
+                  "consentLimits",
+                  "endsAt"
                 ],
                 "additionalProperties": false
               }
@@ -12997,7 +13007,10 @@
                   "monthlyLimitMinor",
                   "approvalThresholdMinor",
                   "supplierIds",
-                  "fundingSourceId"
+                  "fundingSourceId",
+                  "splitCheck",
+                  "consentLimits",
+                  "endsAt"
                 ],
                 "additionalProperties": false
               }

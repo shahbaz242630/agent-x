@@ -6,7 +6,6 @@
 export {
   CONSENT_LIMITS,
   type ConsentLimits,
-  DEFAULT_CONSENT_LIMITS,
   DEFAULT_SPLIT_WINDOW_HOURS,
   isEnded,
   MANDATE,

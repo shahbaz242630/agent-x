@@ -201,7 +201,13 @@ const TERMS = {
   approvalThresholdMinor: 100_000,
   supplierIds: [SUPPLIERS[1], SUPPLIERS[0]],
   fundingSourceId: SOURCE_ID,
+  splitCheck: true,
+  consentLimits: 'strict',
+  endsAt: null,
 };
+
+/** A draft's own settings, each chosen (decision 15). */
+const SETTINGS = { timeZone: 'Asia/Dubai', splitWindowHours: 24 };
 
 const DRAFTED: MandateWrite = { outcome: 'drafted', ...VIEW };
 
@@ -209,15 +215,15 @@ const DRAFTED: MandateWrite = { outcome: 'drafted', ...VIEW };
 const STUCK = '0199a0f0-0000-7000-8000-0000000001b1';
 
 describe('POST /v1/mandates drafts a mandate (B2)', () => {
-  it('answers 201 with the mandate, its terms read with the defaults: strict, split check on, no end, zone and window unset', async () => {
+  it('answers 201 with the mandate, its terms and settings as chosen, no end', async () => {
     const { app, calls } = await withMandates({ write: DRAFTED });
-    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...TERMS }));
+    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...SETTINGS, ...TERMS }));
 
     expect(reply.statusCode).toBe(201);
     expect(reply.json()).toEqual(DETAILS_ANSWERED);
     expect(calls).toHaveLength(1);
     const draft = calls[0]?.subject as MandateDraft;
-    expect(draft).toMatchObject({ agentId: AGENT_ID, timeZone: null, splitWindowHours: null });
+    expect(draft).toMatchObject({ agentId: AGENT_ID, timeZone: 'Asia/Dubai', splitWindowHours: 24 });
     expect(draft.terms).toMatchObject({
       purpose: 'Office supplies',
       perOrderLimit: AED(500_000n),
@@ -256,9 +262,15 @@ describe('POST /v1/mandates drafts a mandate (B2)', () => {
     ['an amount that is a fraction', { perOrderLimitMinor: 1.5 }],
     ['limits that don’t nest', { approvalThresholdMinor: 600_000 }],
     ['an end in the past', { endsAt: '2020-01-01T00:00:00.000Z' }],
+    // Decision 15: no hidden default, so each setting left out is refused.
+    ['no time zone', { timeZone: undefined }],
+    ['no split window', { splitWindowHours: undefined }],
+    ['no split check', { splitCheck: undefined }],
+    ['no consent limits', { consentLimits: undefined }],
+    ['no end, not even null', { endsAt: undefined }],
   ])('refuses %s at the edge, the registry never asked', async (_what, change) => {
     const { app, calls } = await withMandates({ write: DRAFTED });
-    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...TERMS, ...change }));
+    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...SETTINGS, ...TERMS, ...change }));
 
     expect(reply.statusCode).toBe(400);
     expect(calls).toEqual([]);
@@ -270,7 +282,7 @@ describe('POST /v1/mandates drafts a mandate (B2)', () => {
     [{ outcome: 'busy' } as const, 409, 'IDEMPOTENCY_KEY_BUSY'],
   ])('answers the registry’s %o as %i %s', async (write, status, code) => {
     const { app } = await withMandates({ write });
-    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...TERMS }));
+    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...SETTINGS, ...TERMS }));
 
     expect(reply.statusCode).toBe(status);
     expect(reply.json()).toMatchObject({ error: { code } });
@@ -297,6 +309,18 @@ describe('POST /v1/mandates/:id/supersede drafts a later version (B2)', () => {
       keyed: { operation: 'mandates.redraft' },
       subject: { mandateId: MANDATE_ID, terms: { purpose: 'Office supplies' } },
     });
+  });
+
+  it.each([
+    ['no split check', { splitCheck: undefined }],
+    ['no consent limits', { consentLimits: undefined }],
+    ['no end, not even null', { endsAt: undefined }],
+  ])('refuses %s at the edge, the registry never asked (decision 15)', async (_what, change) => {
+    const { app, calls } = await withMandates({ write: DRAFTED });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/supersede`, { ...TERMS, ...change }));
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
   });
 
   it('refuses an agent named in it: the agent, zone and window stay as they are', async () => {
