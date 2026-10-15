@@ -736,6 +736,55 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     expect(await chosen(w)).toEqual([]);
   });
 
+  /** A world whose agent has `count` requests to the first supplier, which a payee check then unverifies to cancel. */
+  const unverifiedToCancel = async (count: number) => {
+    const { w, acting } = await ready();
+    const many = [];
+    for (let each = 0; each < count; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    expect((await (await payeeRegistering(w, ['cancel']))()).outcome).toBe('checked');
+    return { w, many };
+  };
+
+  it('a suspend to pause over a supplier unverified to cancel: those its check left for the job are voided first (C3c’s suspend over a cancel)', async () => {
+    const { w, many } = await unverifiedToCancel(21);
+    const left = many.at(-1);
+    expect(left === undefined ? undefined : await statusOf(w, left.id)).toBe('APPROVED');
+    const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
+
+    expect(await supplierSuspended(w, 'pause')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
+
+    const suspended = await firstSeqAfter(w, 'supplier', supplierOfWorld(w), before);
+    await voidedBefore(w, left === undefined ? [] : [left], 'SUPPLIER_NOT_VERIFIED', suspended);
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
+  it('a suspend to pause over a supplier unverified to cancel, more left than one brake voids: PENDING_REQUESTS_TOO_MANY; to cancel, the brake holds at once', async () => {
+    // 41: the check's batch of 20 voids, and 21 are left, past the suspend's own.
+    const { w, many } = await unverifiedToCancel(41);
+
+    expect(await supplierSuspended(w, 'pause')).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'PENDING_REQUESTS_TOO_MANY',
+    });
+    expect(await statusOf(w, many.at(-1)?.id ?? '')).toBe('APPROVED');
+    // The brake itself is never refused: chosen to cancel, it holds, the job ending those past its batch.
+    expect(await supplierSuspended(w, 'cancel')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
+    await job(w).run();
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 60_000);
+
+  it('a suspend to pause over a supplier unverified with its requests paused: nothing voided, they stay held', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    expect((await (await payeeRegistering(w, ['pause']))()).outcome).toBe('checked');
+
+    expect(await supplierSuspended(w, 'pause')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
   it('pause: they stand through the job while it is unverified; withdrawn and verified again, they stand', async () => {
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);

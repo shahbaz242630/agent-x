@@ -341,7 +341,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     expect(JSON.parse(String(recorded.at(-1)?.details))).toMatchObject({
       reason: 'currency_mismatch',
       pendingRequests: 'pause',
-      pendingStatementVersion: 1,
+      pendingStatementVersion: 2,
     });
     expect(capture.lines().filter((line) => line.event === 'funding_sources.currency_mismatch')).toEqual([
       expect.objectContaining({ level: 'error', orgId: org, sourceId: source.id }),
