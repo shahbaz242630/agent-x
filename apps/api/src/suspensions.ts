@@ -144,6 +144,34 @@ export const FREEZE_BODY = z
 export const freezeChoiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: FREEZE_STATEMENT_VERSION }) as const;
 
+/**
+ * The words an unfreeze is confirmed with (decision 14, D2), by version, as
+ * REACTIVATE_STATEMENTS: a fresh start cancels, an un-pause keeps them.
+ */
+const UNFREEZE_STATEMENTS = {
+  cancel:
+    'A fresh start: every spend request of the organisation waiting for approval, approved or ready is cancelled ' +
+    'now and the money held for it freed. This can’t be undone: the agents ask again.',
+  pause:
+    'Un-pause: the held spend requests stand again at once, unless something else still stops them. Requests ' +
+    'waiting for approval still expire after 72 hours. Not offered when its freeze cancelled them.',
+} as const satisfies Record<PendingChoice, string>;
+
+/** The version of UNFREEZE_STATEMENTS each event names: raised with any change to their words. */
+const UNFREEZE_STATEMENT_VERSION = 1;
+
+/** An unfreeze's choice, as its bodies name it (decision 14). */
+export const UNFREEZE_PENDING_REQUESTS = z
+  .enum(PENDING_CHOICES)
+  .describe(
+    'What happens to the organisation’s held spend requests, confirmed by the admin unfreezing; there is no ' +
+      `default. \`cancel\`: ${UNFREEZE_STATEMENTS.cancel} \`pause\`: ${UNFREEZE_STATEMENTS.pause}`,
+  );
+
+/** The choice as an unfreeze's event keeps it, with the statement confirmed. */
+export const unfreezeChoiceDetails = (choice: PendingChoice) =>
+  ({ pendingRequests: choice, pendingStatementVersion: UNFREEZE_STATEMENT_VERSION }) as const;
+
 /** The most a body holding a choice alone may be (a suspend's, a payee start's), with room to spare. */
 export const CHOICE_BODY_LIMIT = 64;
 

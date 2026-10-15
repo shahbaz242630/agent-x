@@ -5089,7 +5089,8 @@
           }
         ],
         "x-access": [
-          "admin"
+          "admin",
+          "approver"
         ],
         "x-body-limit": 96,
         "responses": {
@@ -5149,10 +5150,18 @@
                   "reason": {
                     "type": "string",
                     "maxLength": 1600
+                  },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
                 },
                 "required": [
-                  "reason"
+                  "reason",
+                  "pendingRequests"
                 ],
                 "additionalProperties": false
               }
@@ -5235,6 +5244,13 @@
                     "type": "string",
                     "maxLength": 1600
                   },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
+                  },
                   "stepUpChallengeId": {
                     "type": "string",
                     "format": "uuid",
@@ -5243,6 +5259,7 @@
                 },
                 "required": [
                   "reason",
+                  "pendingRequests",
                   "stepUpChallengeId"
                 ],
                 "additionalProperties": false
