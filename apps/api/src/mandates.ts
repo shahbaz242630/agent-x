@@ -6,10 +6,12 @@
 // the mandate's pending requests, `pendingRequests`, `cancel` or `pause`, in
 // both its ask and its confirm (Phase 3 decision 7). Amounts are whole minor
 // units (fils), as integers (ADR-006 §1), checked at the edge as safe
-// integers and kept as bigints.
+// integers and kept as bigints. Every setting is the admin's to choose, none
+// left to a hidden default (Phase 3 decision 15, Rule Book §1.9): the split
+// check, the consent limits, the time zone and the split window; the
+// acceptance's passkey confirms them with the terms.
 import {
   CONSENT_LIMITS,
-  DEFAULT_CONSENT_LIMITS,
   MANDATE,
   type MandateRecord,
   type MandateTerms,
@@ -94,13 +96,16 @@ const TERM_FIELDS = {
   fundingSourceId: z.uuid().describe('The funding source it draws on: one of the organisation’s, able to fund now.'),
   splitCheck: z
     .boolean()
-    .optional()
-    .describe('Whether a split order counts toward the approval threshold (ADR-014 §5): on unless switched off.'),
+    .describe(
+      'Whether orders split to slip under the approval threshold count together (ADR-014 §5), chosen with no ' +
+        'default. true: orders to one supplier within the split window that together pass the threshold go to a ' +
+        'person. false: each order is weighed alone, so splitting one order into smaller ones avoids approval.',
+    ),
   consentLimits: z
     .enum(CONSENT_LIMITS)
-    .optional()
     .describe(
-      'Above the bank consent’s limits: strict (the default) refuses the mandate; flexible keeps it, with a warning that the bank may refuse a payment.',
+      'Above the bank consent’s limits, chosen with no default. strict: a mandate past them is refused. ' +
+        'flexible: it is kept, with a warning that the bank may refuse a payment past its consent.',
     ),
   endsAt: z.iso.datetime().nullish().describe('When it ends, in the future; none: until revoked.'),
 };
@@ -117,8 +122,8 @@ const termsOf = (body: TermFields, now: Date): MandateTerms =>
       approvalThreshold: moneyFromJson(body.approvalThresholdMinor, body.currency),
       supplierIds: body.supplierIds,
       fundingSourceId: body.fundingSourceId,
-      splitCheck: body.splitCheck ?? true,
-      consentLimits: body.consentLimits ?? DEFAULT_CONSENT_LIMITS,
+      splitCheck: body.splitCheck,
+      consentLimits: body.consentLimits,
       endsAt: body.endsAt ? new Date(body.endsAt) : null,
     },
     now,
@@ -221,18 +226,23 @@ const DRAFT_SCHEMA = {
       timeZone: z
         .string()
         .max(64)
-        .optional()
-        .describe('The IANA time zone its months are counted in (Asia/Dubai unless given): fixed for good.'),
+        .describe(
+          'The IANA time zone its months are counted in, chosen with no default (Asia/Dubai in the UAE): the ' +
+            'monthly limit starts again at midnight on the 1st there. Fixed for good.',
+        ),
       splitWindowHours: z
         .int()
         .min(SPLIT_WINDOW_HOURS.least)
         .max(SPLIT_WINDOW_HOURS.most)
-        .optional()
-        .describe('The split check’s rolling window in hours (24 unless given): fixed for good.'),
+        .describe(
+          `The split check’s rolling window in hours, ${String(SPLIT_WINDOW_HOURS.least)} to ` +
+            `${String(SPLIT_WINDOW_HOURS.most)}, chosen with no default: orders to one supplier within it count ` +
+            'together. Longer catches more splitting and sends more to a person. Fixed for good.',
+        ),
       ...TERM_FIELDS,
     })
     .superRefine((body, context) => {
-      if (body.timeZone !== undefined && timeZoneOf(body.timeZone) === undefined) {
+      if (timeZoneOf(body.timeZone) === undefined) {
         context.addIssue({ code: 'custom', message: 'the time zone is not one the IANA database names' });
       }
       termsChecked(body, context);
@@ -433,8 +443,9 @@ export function registerMandates(
       const { body } = request;
       const draft = {
         agentId: body.agentId,
-        timeZone: body.timeZone === undefined ? null : (timeZoneOf(body.timeZone) ?? null),
-        splitWindowHours: body.splitWindowHours ?? null,
+        // The schema refused a zone the database doesn't name.
+        timeZone: timeZoneOf(body.timeZone) ?? body.timeZone,
+        splitWindowHours: body.splitWindowHours,
         terms: termsKept(body),
       };
       const written = await need(registry).draft(member, idempotentRequest(request, member.orgId), draft, request.id);

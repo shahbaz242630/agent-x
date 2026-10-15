@@ -67,8 +67,8 @@ const { quiet, member, world, termsOf, keyed, partnerSays, acceptedPastTheUseCas
 /** A draft within the source's consent, for the world's agent unless another is named. */
 const draftOf = (w: World, overrides: Partial<MandateDraft['terms']> = {}, agentId = w.agent): MandateDraft => ({
   agentId,
-  timeZone: null,
-  splitWindowHours: null,
+  timeZone: 'Asia/Dubai',
+  splitWindowHours: 24,
   terms: termsOf(w, overrides),
 });
 

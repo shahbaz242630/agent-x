@@ -12636,13 +12636,17 @@
                 },
                 "required": [
                   "agentId",
+                  "timeZone",
+                  "splitWindowHours",
                   "purpose",
                   "currency",
                   "perOrderLimitMinor",
                   "monthlyLimitMinor",
                   "approvalThresholdMinor",
                   "supplierIds",
-                  "fundingSourceId"
+                  "fundingSourceId",
+                  "splitCheck",
+                  "consentLimits"
                 ],
                 "additionalProperties": false
               }
@@ -12997,7 +13001,9 @@
                   "monthlyLimitMinor",
                   "approvalThresholdMinor",
                   "supplierIds",
-                  "fundingSourceId"
+                  "fundingSourceId",
+                  "splitCheck",
+                  "consentLimits"
                 ],
                 "additionalProperties": false
               }

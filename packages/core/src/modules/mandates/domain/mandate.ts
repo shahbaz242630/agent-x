@@ -36,7 +36,7 @@ export const OPEN_STATES = ['PENDING_ACCEPTANCE', 'ACTIVE', 'SUSPENDED'] as cons
 /** Revoked or expired: ended for good, it takes no new version. */
 export const isEnded = (status: MandateStatus): boolean => !(OPEN_STATES as readonly MandateStatus[]).includes(status);
 
-/** The split check's rolling window unless its owner sets another (ADR-006 §9): a day, so midnight can't be gamed. */
+/** A day's split window (ADR-006 §9), so midnight can't be gamed: the console's suggestion; the admin always chooses (Phase 3 decision 15). */
 export const DEFAULT_SPLIT_WINDOW_HOURS = 24;
 
 /** How long a split window may be: from an hour to 31 days (`windowStart`'s own bounds, A1). */
@@ -45,7 +45,6 @@ export const SPLIT_WINDOW_HOURS = { least: 1, most: 744 } as const;
 /** The most suppliers one version's allow-list may name (B2). */
 export const MOST_ALLOWED_SUPPLIERS = 100;
 
-/** Whether a limit above the bank consent's is refused or allowed with a warning (partner, S86); strict unless chosen (S87). */
+/** Whether a limit above the bank consent's is refused or allowed with a warning (partner, S86); always chosen, no default (Phase 3 decision 15). */
 export const CONSENT_LIMITS = ['strict', 'flexible'] as const;
 export type ConsentLimits = (typeof CONSENT_LIMITS)[number];
-export const DEFAULT_CONSENT_LIMITS: ConsentLimits = 'strict';

@@ -25,7 +25,6 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { mayFund } from '@agentx/core/modules/funding-sources';
 import {
   consentCheck,
-  DEFAULT_SPLIT_WINDOW_HOURS,
   draftMandate,
   draftsSince,
   draftVersion,
@@ -38,7 +37,7 @@ import {
   openMandateOfAgent,
 } from '@agentx/core/modules/mandates';
 import { suppliersFound } from '@agentx/core/modules/suppliers';
-import { type Clock, DAY_MS, DEFAULT_TIME_ZONE, type IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -63,11 +62,11 @@ export const REDRAFT_OPERATION = 'mandates.redraft';
 /** Who may draft: the admins, as accept (partner, S86). */
 export const DRAFTING_ROLES = ['admin'] as const;
 
-/** A new mandate as a body gives it: its agent, the zone its months are counted in and its split window, if not the defaults, and its first terms. */
+/** A new mandate as a body gives it: its agent, the zone its months are counted in and its split window, each the admin's choice (decision 15), and its first terms. */
 export interface MandateDraft {
   readonly agentId: string;
-  readonly timeZone: string | null;
-  readonly splitWindowHours: number | null;
+  readonly timeZone: string;
+  readonly splitWindowHours: number;
   readonly terms: MandateTerms;
 }
 
@@ -182,8 +181,8 @@ export function createMandateRegistry({
           id,
           versionId: ids.next(),
           agentId: agent.agent.id,
-          timeZone: timeZone ?? DEFAULT_TIME_ZONE,
-          splitWindowHours: splitWindowHours ?? DEFAULT_SPLIT_WINDOW_HOURS,
+          timeZone,
+          splitWindowHours,
           terms,
           draftedBy: admin.id,
           draftedAt: now,
