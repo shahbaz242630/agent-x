@@ -13,14 +13,17 @@
 // - Per-order cap, approval threshold, supplier list: each policy narrows on
 //   its own, so the tightest of the three always applies.
 // - The monthly cap per agent (decision 5): the mandate's policy's if it sets
-//   one, higher or lower, else the organisation's, else AED 20,000. Over it is
-//   DENY; the mandate's own monthly limit still binds above it.
+//   one, higher or lower, else the organisation's. Over it is DENY; the
+//   mandate's own monthly limit still binds above it. No hidden default
+//   (Phase 3 decision 15, E2): until an admin has chosen the organisation's,
+//   an amount or none, every request is DENY (ORG_MONTHLY_CAP_NOT_SET); with
+//   none chosen, only a mandate's policy and its own monthly limit cap it.
 // - The month's total is the agent's under every mandate (decision 4), every
 //   reservation but a released one (ADR-006 §8).
 //
 // Free text (the purpose, the order reference's wording) is never weighed:
 // the duplicate check comes in as the caller's finding (SEC-AG-14).
-import { type Money, money, plus, type ReasonCode, withinLimit } from '../../../shared-kernel/index.ts';
+import { type Money, plus, type ReasonCode, withinLimit } from '../../../shared-kernel/index.ts';
 
 export const DECISIONS = ['DENY', 'REQUIRE_NEW_MANDATE', 'REQUIRE_APPROVAL', 'ALLOW'] as const;
 /** Strictest first: a decision's place in DECISIONS is its precedence. */
@@ -28,9 +31,6 @@ export type Decision = (typeof DECISIONS)[number];
 
 /** What a policy's per-order cap does to an order over it: refuse it, or send it for approval. */
 export type OverCap = 'DENY' | 'REQUIRE_APPROVAL';
-
-/** Every agent's monthly cap when the organisation has set none (partner, S91): AED 20,000. Another currency has no default. */
-export const DEFAULT_MONTHLY_CAP: Money = money(2_000_000n, 'AED');
 
 /** The request as the agent made it, its amounts already Money (A1). */
 export interface SpendAsked {
@@ -78,6 +78,8 @@ export interface DecisionInput {
   /** Whether the source may fund now: ACTIVE both here and at the partner, before its consent's expiry. */
   readonly sourceMayFund: boolean;
   readonly organizationPolicy: PolicyRules | null;
+  /** Whether an admin has chosen the organisation's monthly cap, an amount or none (E2): never, every request is DENY. */
+  readonly organizationCapChosen: boolean;
   readonly mandatePolicy: PolicyRules | null;
   /** What the agent holds or spent this month (the mandate's zone's), every reservation but a released one. */
   readonly monthSpent: Money;
@@ -89,8 +91,9 @@ export interface DecisionInput {
   readonly possibleDuplicate: boolean;
 }
 
-/** Where the monthly cap per agent came from. */
-export type MonthlyCapFrom = 'mandate-policy' | 'organization-policy' | 'default';
+/** Where the monthly cap per agent came from: `none` chosen, or `not-set` (no cap, every request DENY). */
+export const MONTHLY_CAP_FROM = ['mandate-policy', 'organization-policy', 'none', 'not-set'] as const;
+export type MonthlyCapFrom = (typeof MONTHLY_CAP_FROM)[number];
 
 export interface DecisionMade {
   readonly decision: Decision;
@@ -118,7 +121,7 @@ const DECIDES: Readonly<Partial<Record<ReasonCode, Decision>>> = {
 export function decide(input: DecisionInput): DecisionMade {
   const { mandate, organizationPolicy, mandatePolicy } = input;
   const policies = [organizationPolicy, mandatePolicy].filter((p) => p !== null);
-  const monthly = monthlyCapOf(organizationPolicy, mandatePolicy);
+  const monthly = monthlyCapOf(organizationPolicy, mandatePolicy, input.organizationCapChosen);
   const failed: { code: ReasonCode; decision: Decision }[] = [];
   const fail = (code: ReasonCode, decision: Decision = DECIDES[code] ?? 'DENY'): void => {
     failed.push({ code, decision });
@@ -140,7 +143,7 @@ export function decide(input: DecisionInput): DecisionMade {
       input.request.amount,
       input.monthSpent,
       input.splitOpen,
-      monthly.cap,
+      // The monthly cap among them: it is always a policy's (E2).
       ...policies.flatMap(amountsOf),
     ];
     if (weighed.every(({ currency }) => currency === mandate.perOrderLimit.currency)) {
@@ -187,21 +190,26 @@ const amountsOf = (p: PolicyRules): Money[] =>
   [p.perOrderCap?.cap ?? null, p.monthlyCap, p.approvalThreshold].filter((m) => m !== null);
 
 /**
- * The monthly cap per agent: the mandate's policy's, else the organisation's,
- * else the default (decision 5). Also what a mandate shows its agent held to
- * (C3c, partner S92: never quiet).
+ * The monthly cap per agent: none until the admin has chosen the
+ * organisation's (E2: nothing is spent then), else the mandate's policy's,
+ * else the organisation's, else none, as chosen (decision 5). Also what a
+ * mandate shows its agent held to (C3c, partner S92: never quiet).
  */
 export function monthlyCapOf(
   organizationPolicy: Pick<PolicyRules, 'monthlyCap'> | null,
   mandatePolicy: Pick<PolicyRules, 'monthlyCap'> | null,
-): { readonly cap: Money; readonly from: MonthlyCapFrom } {
+  organizationCapChosen: boolean,
+): { readonly cap: Money | null; readonly from: MonthlyCapFrom } {
+  if (!organizationCapChosen) return { cap: null, from: 'not-set' };
   if (mandatePolicy?.monthlyCap) return { cap: mandatePolicy.monthlyCap, from: 'mandate-policy' };
   if (organizationPolicy?.monthlyCap) return { cap: organizationPolicy.monthlyCap, from: 'organization-policy' };
-  return { cap: DEFAULT_MONTHLY_CAP, from: 'default' };
+  return { cap: null, from: 'none' };
 }
 
-/** The agent, supplier, source and order, whatever the mandate. */
+/** The organisation's setup, the agent, supplier, source and order, whatever the mandate. */
 function statusChecks(input: DecisionInput, fail: Fail): void {
+  // A setup gate: even a mandate's policy setting a cap doesn't stand in for the admin's choice.
+  if (!input.organizationCapChosen) fail('ORG_MONTHLY_CAP_NOT_SET');
   if (input.agent.status !== 'ACTIVE') fail('AGENT_SUSPENDED');
   if (input.supplierStatus !== 'VERIFIED') fail('SUPPLIER_NOT_VERIFIED');
   if (!input.sourceMayFund) fail('SOURCE_NOT_USABLE');
@@ -223,7 +231,7 @@ function amountChecks(
   input: DecisionInput,
   mandate: MandateInForce,
   policies: readonly PolicyRules[],
-  monthlyCap: Money,
+  monthlyCap: Money | null,
   fail: Fail,
 ): void {
   const { amount } = input.request;
@@ -234,7 +242,7 @@ function amountChecks(
   for (const { perOrderCap } of policies) {
     if (perOrderCap !== null && over(amount, perOrderCap.cap)) fail('POLICY_ORDER_CAP', perOrderCap.over);
   }
-  if (over(monthTotal, monthlyCap)) fail('POLICY_MONTHLY_CAP');
+  if (monthlyCap !== null && over(monthTotal, monthlyCap)) fail('POLICY_MONTHLY_CAP');
 
   // Over any of the three thresholds is over the lowest.
   const thresholds = [mandate.approvalThreshold, ...policies.flatMap((p) => p.approvalThreshold ?? [])];
@@ -288,10 +296,12 @@ export function decisionInputText(input: DecisionInput): string {
     amount(input.monthSpent),
     amount(input.splitOpen),
     input.duplicateOrder,
-    // So a change of the default changes the text too.
-    amount(DEFAULT_MONTHLY_CAP),
-    // Last, from G5 (decision 11a): a decision sealed before it has no `possibleDuplicate` fact, and its text ends above.
+    // The old default monthly cap's place: AED 20,000 in a decision sealed before E2 (its `defaultMonthlyCap` fact), none since.
+    null,
+    // From G5 (decision 11a): a decision sealed before it has no `possibleDuplicate` fact, and its text ends above.
     input.possibleDuplicate,
+    // Last, from E2: a decision sealed before it has no `organizationCapChosen` fact, and its text ends above.
+    input.organizationCapChosen,
   ]);
 }
 
@@ -313,7 +323,8 @@ export function decisionFacts(input: DecisionInput): Readonly<Record<string, str
     splitOpen: `${String(input.splitOpen.minor)} ${input.splitOpen.currency}`,
     duplicateOrder: input.duplicateOrder,
     possibleDuplicate: input.possibleDuplicate,
-    // The default as it was then, so a later change of it leaves this decision whole.
-    defaultMonthlyCap: `${String(DEFAULT_MONTHLY_CAP.minor)} ${DEFAULT_MONTHLY_CAP.currency}`,
+    // None since E2 (decision 15): a decision sealed before it keeps the AED 20,000 default it weighed.
+    defaultMonthlyCap: null,
+    organizationCapChosen: input.organizationCapChosen,
   };
 }

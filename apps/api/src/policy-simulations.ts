@@ -77,7 +77,8 @@ const proposedRules = (rules: Rules) => ({ ...rules, versionId: PROPOSED });
 /**
  * The policies to weigh: those in force, each replaced by its proposed rules.
  * A proposed mandate policy needs the mandate asked about in force, and must
- * be one its change could make.
+ * be one its change could make. Proposed organisation rules are weighed as
+ * chosen (E2): their monthly cap, or none.
  */
 const policiesFor =
   (mandateId: string, whatIf: WhatIf) =>
@@ -92,6 +93,7 @@ const policiesFor =
     return {
       organizationPolicy:
         organizationPolicy === undefined ? inForce.organizationPolicy : proposedRules(organizationPolicy),
+      organizationCapChosen: organizationPolicy !== undefined || inForce.organizationCapChosen,
       mandatePolicy: mandatePolicy === undefined ? inForce.mandatePolicy : proposedRules(mandatePolicy),
     };
   };

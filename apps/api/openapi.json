@@ -326,6 +326,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "ORG_MONTHLY_CAP_NOT_SET",
+                    "description": "The organisation's admin hasn't yet set its monthly cap per agent (an amount, or none beyond each mandate's own monthly limit), so no agent may spend. An admin sets it in the organisation's policy; until then every request is refused. Nothing was reserved."
+                  },
+                  {
+                    "type": "string",
                     "const": "ORG_NOT_FROZEN",
                     "description": "The organisation is not frozen, so there is nothing to unfreeze. Nothing was changed."
                   },
@@ -397,7 +402,7 @@
                   {
                     "type": "string",
                     "const": "POLICY_MONTHLY_CAP",
-                    "description": "With what the agent has already spent or holds this month, this request is above the agent's monthly cap set by the organisation's policies (AED 20,000 unless the organisation set another), so it is refused. Nothing was reserved."
+                    "description": "With what the agent has already spent or holds this month, this request is above the agent's monthly cap set by the organisation's policies, so it is refused. Nothing was reserved."
                   },
                   {
                     "type": "string",
@@ -1167,17 +1172,24 @@
             "type": "object",
             "properties": {
               "capMinor": {
-                "type": "number"
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "currency": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "from": {
                 "type": "string",
                 "enum": [
                   "mandate-policy",
                   "organization-policy",
-                  "default"
+                  "none",
+                  "not-set"
                 ]
               }
             },
@@ -1330,7 +1342,8 @@
             "enum": [
               "mandate-policy",
               "organization-policy",
-              "default"
+              "none",
+              "not-set"
             ]
           },
           "month": {
@@ -1492,7 +1505,21 @@
               }
             ]
           },
-          "defaultMonthlyCapMinor": {
+          "monthlyCapChoice": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "amount",
+                  "none"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "suggestedMonthlyCapMinor": {
             "type": "number"
           }
         },
@@ -1501,7 +1528,8 @@
           "id",
           "mandateId",
           "current",
-          "defaultMonthlyCapMinor"
+          "monthlyCapChoice",
+          "suggestedMonthlyCapMinor"
         ],
         "additionalProperties": false,
         "description": "A policy and the rules in force."
@@ -1590,7 +1618,19 @@
             "type": "number"
           },
           "monthlyCapMinor": {
-            "type": "number"
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "monthlyCapFrom": {
+            "type": "string",
+            "enum": [
+              "mandate-policy",
+              "organization-policy",
+              "none",
+              "not-set"
+            ]
           },
           "supplierIds": {
             "type": "array",
@@ -1631,6 +1671,7 @@
           "perOrderLimitMinor",
           "monthlyLimitMinor",
           "monthlyCapMinor",
+          "monthlyCapFrom",
           "supplierIds",
           "fundingSourceId",
           "timeZone",
@@ -14420,10 +14461,18 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "monthlyCapChoice": {
+                    "type": "string",
+                    "enum": [
+                      "amount",
+                      "none"
+                    ]
                   }
                 },
                 "required": [
-                  "currency"
+                  "currency",
+                  "monthlyCapChoice"
                 ],
                 "additionalProperties": false
               }
@@ -14562,6 +14611,13 @@
                       }
                     ]
                   },
+                  "monthlyCapChoice": {
+                    "type": "string",
+                    "enum": [
+                      "amount",
+                      "none"
+                    ]
+                  },
                   "stepUpChallengeId": {
                     "type": "string",
                     "format": "uuid",
@@ -14570,6 +14626,7 @@
                 },
                 "required": [
                   "currency",
+                  "monthlyCapChoice",
                   "stepUpChallengeId"
                 ],
                 "additionalProperties": false

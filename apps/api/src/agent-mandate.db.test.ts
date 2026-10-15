@@ -72,8 +72,9 @@ describe('an agent’s own mandate and sources (B5, SEC-AG-05)', () => {
       outcome: 'found',
       mandate: { id, status: 'ACTIVE', agentId: w.agent },
       version: { version: 1, fundingSourceId: w.source, supplierIds: [...w.suppliers].sort() },
-      // C3c: no policy set, the default cap.
+      // C3c: the organisation's cap, as the world chose it (E2).
       monthlyCap: AED(2_000_000n),
+      monthlyCapFrom: 'organization-policy',
     });
     expect(await sourceIds(w)).toEqual([w.source]);
     // Paged after the filter: past the one source, nothing.

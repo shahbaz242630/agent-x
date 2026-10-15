@@ -19,6 +19,7 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { mayFund, type SourceRecord } from '@agentx/core/modules/funding-sources';
 import { type MandateRecord, type MandateVersionRecord, openMandateOfAgent } from '@agentx/core/modules/mandates';
+import type { MonthlyCapFrom } from '@agentx/core/modules/policies';
 import type { Clock, IdGenerator, Money } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -41,7 +42,9 @@ export type AgentMandateShown =
       readonly outcome: 'found';
       readonly mandate: MandateRecord & { readonly status: 'ACTIVE' | 'SUSPENDED' };
       readonly version: MandateVersionRecord;
-      readonly monthlyCap: Money;
+      /** The organisation's policies' monthly cap, or none (E2: none chosen, or not yet, `from` says which). */
+      readonly monthlyCap: Money | null;
+      readonly monthlyCapFrom: MonthlyCapFrom;
     }
   | Refused;
 
@@ -87,8 +90,8 @@ export function createAgentMandates({
       work.answered(orgId, correlationId, async (tx, states) => {
         const found = await inForceIn(tx, states, orgId, agentId, clock.now());
         if (found === undefined) throw new MandateRefused(404, 'NOT_FOUND');
-        const { cap } = await agentCapOf(tx, states, orgId, found.mandate.id);
-        return { outcome: 'found' as const, ...found, monthlyCap: cap };
+        const { cap, from } = await agentCapOf(tx, states, orgId, found.mandate.id);
+        return { outcome: 'found' as const, ...found, monthlyCap: cap, monthlyCapFrom: from };
       }),
 
     sources: (orgId, agentId, after, correlationId) =>

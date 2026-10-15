@@ -9,7 +9,7 @@ export {
   type DecisionMade,
   DECISIONS,
   decide,
-  DEFAULT_MONTHLY_CAP,
+  MONTHLY_CAP_FROM,
   type MandateInForce,
   monthlyCapOf,
   type MonthlyCapFrom,

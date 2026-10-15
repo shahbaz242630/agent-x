@@ -18,6 +18,7 @@ import {
   type MandateVersionRecord,
   mandateOf,
   mandateVersionOf,
+  POLICY_VERSIONS,
   policyOf,
   type PolicyVersionRecord,
   policyVersionOf,
@@ -29,6 +30,7 @@ import { monthlyCapOf, type MonthlyCapFrom } from '@agentx/core/modules/policies
 import { compare, type Money, money } from '@agentx/core/shared-kernel';
 import type { DatabaseTransaction } from '@agentx/platform/db';
 
+import { capChoiceIn, type MonthlyCapChoice } from './monthly-cap-choice.ts';
 import { UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 /** The mandates' tables, with the requests and holdings a brake's cascade ends (C2b). */
@@ -52,9 +54,9 @@ export interface VersionShown {
   readonly capWarnings: readonly string[];
 }
 
-/** The monthly cap the policies hold the mandate's agent to (decision 5), and where it comes from. */
+/** The monthly cap the policies hold the mandate's agent to (decision 5), and where it comes from: none chosen, or not yet (E2). */
 interface AgentMonthlyCap {
-  readonly cap: Money;
+  readonly cap: Money | null;
   readonly from: MonthlyCapFrom;
 }
 
@@ -150,7 +152,9 @@ const heldBelow = (
     : {
         ...shown,
         capWarnings:
-          cap.currency === shown.version.monthlyLimit.currency && compare(shown.version.monthlyLimit, cap) > 0
+          cap !== null &&
+          cap.currency === shown.version.monthlyLimit.currency &&
+          compare(shown.version.monthlyLimit, cap) > 0
             ? [warning]
             : [],
       };
@@ -173,15 +177,45 @@ export async function policyRulesIn(
   return { ...read, current: current.version satisfies PolicyVersionRecord };
 }
 
+/** The action whose event keeps a policy version's choices (`setPolicy`'s). */
+const VERSION_MADE = 'policy_version.made';
+
 /**
- * The monthly cap the policies hold the mandate's agent to: the mandate's
- * policy's, else the organisation's, else the default. The organisation's is
- * read only when the mandate's own sets none, as it can't change the cap then.
+ * The organisation's monthly cap as an admin chose it (E2), from its policy
+ * version in force (null: never set): an amount set is `amount`; none is
+ * `none` only when the version's event says so (a version made before E2 with
+ * none meant the old default: null, not chosen). The event is read, believed
+ * only whole, only for a version with no cap.
+ */
+export async function capChoiceOf(
+  tx: MandateTx,
+  states: SignedStates,
+  orgId: string,
+  current: PolicyVersionRecord | null,
+): Promise<MonthlyCapChoice | null> {
+  if (current === null) return null;
+  if (current.monthlyCap !== null) return 'amount';
+  const history = await states.historyOf(tx, orgId, {
+    subjectTypes: [POLICY_VERSIONS.subject],
+    subjectId: current.id,
+    actions: [VERSION_MADE],
+    limit: 1,
+    newest: true,
+  });
+  if (history.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  return capChoiceIn(history.events.at(-1)?.event.details) === 'none' ? 'none' : null;
+}
+
+/**
+ * The monthly cap the policies hold the mandate's agent to: none until an
+ * admin chose the organisation's, else the mandate's policy's, else the
+ * organisation's, else none (monthlyCapOf). The organisation's policy is read
+ * always: its choice gates every cap.
  */
 export async function agentCapOf(tx: MandateTx, states: SignedStates, orgId: string, mandateId: string) {
   const own = (await policyRulesIn(tx, states, orgId, mandateId))?.current ?? null;
-  const organization = own?.monthlyCap ? null : ((await policyRulesIn(tx, states, orgId, orgId))?.current ?? null);
-  return monthlyCapOf(organization, own);
+  const organization = (await policyRulesIn(tx, states, orgId, orgId))?.current ?? null;
+  return monthlyCapOf(organization, own, (await capChoiceOf(tx, states, orgId, organization)) !== null);
 }
 
 /** The mandate as it now stands, with its version in force, its waiting draft, and its agent's monthly cap. */

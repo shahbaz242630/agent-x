@@ -83,6 +83,7 @@ const FOUND: AgentMandateShown = {
   },
   // C3c: the organisation's policies hold it below the mandate's monthly limit.
   monthlyCap: money(1_500_000n, 'AED'),
+  monthlyCapFrom: 'organization-policy',
 };
 
 const SOURCE: SourceRecord = {
@@ -166,6 +167,7 @@ describe('GET /v1/agent/mandate: the mandate an agent acts under (B5, SEC-AG-05)
       perOrderLimitMinor: 500_000,
       monthlyLimitMinor: 2_000_000,
       monthlyCapMinor: 1_500_000,
+      monthlyCapFrom: 'organization-policy',
       supplierIds: SUPPLIERS,
       fundingSourceId: SOURCE_ID,
       timeZone: 'Asia/Dubai',
@@ -175,6 +177,13 @@ describe('GET /v1/agent/mandate: the mandate an agent acts under (B5, SEC-AG-05)
       expect(response.body).not.toContain(withheld);
     }
     expect(asked).toEqual([{ kind: 'inForce', orgId: ORG, agentId: AGENT_ID }]);
+  });
+
+  it('answers no cap where the organisation’s admin hasn’t chosen one yet (E2)', async () => {
+    const { app } = await withMandates({ shown: { ...FOUND, monthlyCap: null, monthlyCapFrom: 'not-set' } });
+    const response = await app.inject(asAgent('/v1/agent/mandate'));
+
+    expect(response.json()).toMatchObject({ monthlyCapMinor: null, monthlyCapFrom: 'not-set' });
   });
 
   it.each([

@@ -7,9 +7,11 @@
 // a mandate's policy never wider than its mandate); a step-up that isn't a
 // passkey, was asked for other rules or for the policy as it stood before; a
 // policy deleted past the app; and the lock order against the admin's demotion.
+// The organisation's monthly cap choice (E2): kept on the version's event, and
+// a version from before it with no cap read as not chosen.
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { withSignedStates } from '@agentx/core/modules/audit';
-import { policyOf, type PolicyRules, policyVersionOf, POLICIES } from '@agentx/core/modules/mandates';
+import { policyOf, type PolicyRules, policyVersionOf, POLICIES, setPolicy } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
@@ -28,7 +30,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { ABOVE_THE_CAP, DRAFT_ABOVE_THE_CAP } from './mandate-reads.ts';
+import { ABOVE_THE_CAP, capChoiceOf, DRAFT_ABOVE_THE_CAP, policyRulesIn } from './mandate-reads.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
   AED,
@@ -71,7 +73,14 @@ let registry: MandateRegistry;
 let changes: PolicyChanges;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'policy-changes' });
-const { member, world, keyed, noticesOf, stepUp } = shared;
+const { member, keyed, noticesOf, stepUp } = shared;
+
+/** A world whose organisation's policy was never set (its monthly cap not chosen, E2): its first change makes it. */
+const world = () => shared.world({ capChosen: false });
+
+/** The choice the organisation's rules say (E2): an amount with a monthly cap, none without; a mandate's names none. */
+const choiceOf = (target: PolicyTarget, rules: PolicyRules) =>
+  target.scope === 'mandate' ? null : rules.monthlyCap === null ? 'none' : 'amount';
 
 /** Rules that set only a monthly cap of `minor` fils, unless `more` says otherwise. */
 const rules = (minor: bigint, more: Partial<PolicyRules> = {}): PolicyRules => ({
@@ -84,14 +93,20 @@ const rules = (minor: bigint, more: Partial<PolicyRules> = {}): PolicyRules => (
 });
 
 const ask = (who: Member, target: PolicyTarget, asked: PolicyRules) =>
-  changes.ask(who, keyed(who, POLICY_OPERATIONS[target.scope].ask), target, asked, CORRELATION);
+  changes.ask(
+    who,
+    keyed(who, POLICY_OPERATIONS[target.scope].ask),
+    target,
+    { rules: asked, capChoice: choiceOf(target, asked) },
+    CORRELATION,
+  );
 
 const confirm = (who: Member, target: PolicyTarget, asked: PolicyRules, challengeId: string, key?: IdempotentRequest) =>
   changes.confirm(
     who,
     key ?? keyed(who, POLICY_OPERATIONS[target.scope].confirm),
     target,
-    asked,
+    { rules: asked, capChoice: choiceOf(target, asked) },
     challengeId,
     CORRELATION,
   );
@@ -221,6 +236,7 @@ describe('the organisation’s policy (C3, decision 5)', () => {
       id: w.org,
       mandateId: null,
       current: null,
+      monthlyCapChoice: null,
     });
 
     const first = changedOf(await changed(w, ORGANIZATION, rules(1_000_000n)));
@@ -475,8 +491,8 @@ describe('a mandate’s policy (C3, SEC-LIM-11)', () => {
 });
 
 describe('a mandate shows the cap its agent is held to (C3c, partner S92: never quiet)', () => {
-  /** AED 30,000 a month, above the default; AED 10,000 an order: flexible, so a sandbox consent below them only warns. */
-  const ABOVE_DEFAULT = {
+  /** AED 30,000 a month, above the AED 20,000 the console suggests; AED 10,000 an order: flexible, so a sandbox consent below them only warns. */
+  const ABOVE_SUGGESTED = {
     perOrderLimit: AED(1_000_000n),
     approvalThreshold: AED(500_000n),
     monthlyLimit: AED(3_000_000n),
@@ -491,14 +507,14 @@ describe('a mandate shows the cap its agent is held to (C3c, partner S92: never 
 
   it('warns while the policies hold the agent below the mandate’s monthly limit, until its own policy raises the cap', async () => {
     const w = await world();
-    const id = await shared.inForce(registry, w, ABOVE_DEFAULT);
+    const id = await shared.inForce(registry, w, ABOVE_SUGGESTED);
     const shown = async () => {
       const { agentMonthlyCap, current } = await shownOf(w, id);
       return { from: agentMonthlyCap.from, cap: agentMonthlyCap.cap, warnings: current?.capWarnings };
     };
 
-    // None set: the default, AED 20,000, below the mandate's AED 30,000.
-    expect(await shown()).toEqual({ from: 'default', cap: AED(2_000_000n), warnings: [ABOVE_THE_CAP] });
+    // None chosen yet (E2): no cap to warn of, every request refused until one is.
+    expect(await shown()).toEqual({ from: 'not-set', cap: null, warnings: [] });
     changedOf(await changed(w, ORGANIZATION, rules(3_000_000n)));
     expect(await shown()).toEqual({ from: 'organization-policy', cap: AED(3_000_000n), warnings: [] });
     // A mandate policy setting no monthly cap of its own: the organisation's still holds.
@@ -512,15 +528,16 @@ describe('a mandate shows the cap its agent is held to (C3c, partner S92: never 
   });
 
   it('warns of a draft above the cap in its own words: the cap is raised once it is accepted', async () => {
-    const w = await world();
-    const { id } = await shared.drafted(registry, w, ABOVE_DEFAULT);
+    // The organisation's cap chosen, AED 20,000.
+    const w = await shared.world();
+    const { id } = await shared.drafted(registry, w, ABOVE_SUGGESTED);
 
     expect((await shownOf(w, id)).pending?.capWarnings).toEqual([DRAFT_ABOVE_THE_CAP]);
   });
 
-  it('a tampered organisation policy: INTEGRITY_FAILED, never the default shown in its place (FX-TAMPER)', async () => {
+  it('a tampered organisation policy: INTEGRITY_FAILED, never read as none set (FX-TAMPER)', async () => {
     const w = await world();
-    const id = await shared.inForce(registry, w, ABOVE_DEFAULT);
+    const id = await shared.inForce(registry, w, ABOVE_SUGGESTED);
     changedOf(await changed(w, ORGANIZATION, rules(3_000_000n)));
     const owner = await tamperAsOwner(database, POLICIES, w.org);
     try {
@@ -533,6 +550,94 @@ describe('a mandate shows the cap its agent is held to (C3c, partner S92: never 
     }
 
     expect(await registry.show(w.org, id, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+  });
+});
+
+describe('the organisation’s monthly cap choice (E2, decision 15)', () => {
+  /** The events of the policy's versions, oldest first, their details read. */
+  const versionsMade = async (org: string) =>
+    (await policyEvents(org))
+      .filter(({ action }) => action === 'policy_version.made')
+      .map(({ details }) => JSON.parse(details) as Record<string, unknown>);
+
+  it('keeps each choice on its version’s event with the words confirmed, and shows it', async () => {
+    const w = await world();
+    const none = changedOf(await changed(w, ORGANIZATION, rules(0n, { monthlyCap: null })));
+    expect(none).toMatchObject({ monthlyCapChoice: 'none', current: { monthlyCap: null } });
+    changedOf(await changed(w, ORGANIZATION, rules(1_000n)));
+
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toMatchObject({ monthlyCapChoice: 'amount' });
+    expect(await versionsMade(w.org)).toEqual([
+      expect.objectContaining({ monthlyCapChoice: 'none', monthlyCapStatementVersion: 1, methods: PASSKEY.join(' ') }),
+      expect.objectContaining({ monthlyCapChoice: 'amount', monthlyCapStatementVersion: 1 }),
+    ]);
+  });
+
+  it('keeps none on a mandate’s policy, which shows none', async () => {
+    const w = await world();
+    const target: PolicyTarget = { scope: 'mandate', mandateId: await shared.inForce(registry, w) };
+    expect(changedOf(await changed(w, target, rules(1_000n))).monthlyCapChoice).toBeNull();
+
+    expect((await versionsMade(w.org)).at(-1)).not.toHaveProperty('monthlyCapChoice');
+  });
+
+  it('reads a version with no cap and no choice on its event (made before E2) as not chosen', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w);
+    await withSignedStates(app, w.org, shared.quiet(), (tx, states) =>
+      setPolicy(tx, states, {
+        orgId: w.org,
+        existing: null,
+        scope: 'organization',
+        mandateId: null,
+        versionId: ids.next(),
+        rules: rules(0n, { monthlyCap: null }),
+        madeBy: w.admin.membershipId,
+        madeAt: clock.now(),
+        actor: { type: 'user', id: w.admin.userId },
+        details: {},
+      }),
+    );
+
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toMatchObject({
+      current: { version: 1 },
+      monthlyCapChoice: null,
+    });
+    const view = await registry.show(w.org, id, CORRELATION);
+    expect(view).toMatchObject({ agentMonthlyCap: { cap: null, from: 'not-set' } });
+  });
+
+  it('refuses a choice whose history can’t be believed: INTEGRITY_FAILED, never read as none', async () => {
+    const w = await world();
+    changedOf(await changed(w, ORGANIZATION, rules(0n, { monthlyCap: null })));
+
+    const read = withSignedStates(app, w.org, shared.quiet(), async (tx, states) => {
+      const current = (await policyRulesIn(tx, states, w.org, w.org))?.current ?? null;
+      const historyOf: typeof states.historyOf = () => Promise.resolve({ outcome: 'tampered', sign: 'log' });
+      return capChoiceOf(tx, { ...states, historyOf }, w.org, current);
+    });
+    await expect(read).rejects.toMatchObject({ status: 503, code: 'INTEGRITY_FAILED' });
+  });
+
+  it.each<[string, PolicyTarget | 'mandate', PolicyRules, 'amount' | 'none' | null]>([
+    ['none with a monthly cap', ORGANIZATION, rules(1_000n), 'none'],
+    ['an amount with none', ORGANIZATION, rules(0n, { monthlyCap: null }), 'amount'],
+    ['no choice for the organisation’s', ORGANIZATION, rules(1_000n), null],
+    ['a choice for a mandate’s', 'mandate', rules(1_000n), 'amount'],
+  ])('refuses %s, asked past the routes: nothing asked', async (_what, which, asked, capChoice) => {
+    const w = await world();
+    const target: PolicyTarget =
+      which === 'mandate' ? { scope: 'mandate', mandateId: await shared.inForce(registry, w) } : which;
+
+    await expect(
+      changes.ask(
+        w.admin,
+        keyed(w.admin, POLICY_OPERATIONS[target.scope].ask),
+        target,
+        { rules: asked, capChoice },
+        CORRELATION,
+      ),
+    ).rejects.toThrow(RangeError);
   });
 });
 

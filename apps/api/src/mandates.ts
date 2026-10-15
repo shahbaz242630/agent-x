@@ -54,6 +54,7 @@ import {
   MOVING_ROLES,
 } from './mandate-moves.ts';
 import type { MandateView, VersionShown } from './mandate-reads.ts';
+import { MONTHLY_CAP_FROM_FIELD } from './monthly-cap-choice.ts';
 import {
   AMOUNT,
   CHALLENGE_BODY_LIMIT,
@@ -206,11 +207,9 @@ const MANDATE_DETAILS = z
     pending: VERSION.nullable().describe('A draft waiting for acceptance, or null.'),
     agentMonthlyCap: z
       .object({
-        capMinor: z.number().describe('Whole minor units.'),
-        currency: z.string(),
-        from: z
-          .enum(['mandate-policy', 'organization-policy', 'default'])
-          .describe('The mandate’s own policy, the organisation’s, or the default (AED 20,000).'),
+        capMinor: z.number().nullable().describe('Whole minor units, or null: no cap (see from).'),
+        currency: z.string().nullable(),
+        from: MONTHLY_CAP_FROM_FIELD,
       })
       .describe(
         'The monthly cap the organisation’s policies hold the agent to: below the mandate’s own monthly limit, it is the one that applies.',
@@ -402,16 +401,16 @@ const versionOf = ({ version: v, consentWarnings, capWarnings }: VersionShown) =
   capWarnings: [...capWarnings],
 });
 
-const detailsOf = ({ mandate, current, pending, agentMonthlyCap }: MandateView) => ({
+const detailsOf = ({ mandate, current, pending, agentMonthlyCap: { cap, from } }: MandateView) => ({
   ...mandateBody(mandate),
   acceptedBy: mandate.acceptedBy,
   acceptedAt: mandate.acceptedAt?.toISOString() ?? null,
   current: current === null ? null : versionOf(current),
   pending: pending === null ? null : versionOf(pending),
   agentMonthlyCap: {
-    capMinor: Number(agentMonthlyCap.cap.minor),
-    currency: agentMonthlyCap.cap.currency,
-    from: agentMonthlyCap.from,
+    capMinor: cap === null ? null : Number(cap.minor),
+    currency: cap === null ? null : cap.currency,
+    from,
   },
 });
 

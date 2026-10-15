@@ -34,6 +34,7 @@ import { agentOf, need } from './access.ts';
 import type { AgentMandates } from './agent-mandate.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import { MONTHLY_CAP_FROM_FIELD } from './monthly-cap-choice.ts';
 import { NEXT, pageQuery } from './route-schemas.ts';
 
 const SELF_SCHEMA = {
@@ -71,9 +72,11 @@ const MANDATE_SCHEMA = {
           .describe('The most you may spend in a month, in whole minor units, every mandate of yours counted.'),
         monthlyCapMinor: z
           .number()
+          .nullable()
           .describe(
-            'The most the organisation’s policies let you spend in a month, in whole minor units: the lower of this and monthlyLimitMinor applies.',
+            'The most the organisation’s policies let you spend in a month, in whole minor units: the lower of this and monthlyLimitMinor applies. Null: no cap, as monthlyCapFrom says.',
           ),
+        monthlyCapFrom: MONTHLY_CAP_FROM_FIELD,
         supplierIds: z.array(z.uuid()).describe('The suppliers you may pay, by ID, in order of ID.'),
         fundingSourceId: z.uuid().describe('The bank account you pay from, by ID.'),
         timeZone: z.string().describe('The IANA time zone your months are counted in.'),
@@ -126,7 +129,7 @@ export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates
       const { orgId, agentId } = agentOf(request);
       const found = await need(mandates).inForce(orgId, agentId, request.id);
       if (found.outcome === 'refused') return sendErrorBody(reply, found.status, found.code, request.id);
-      const { mandate, version: v, monthlyCap } = found;
+      const { mandate, version: v, monthlyCap, monthlyCapFrom } = found;
       // Field by field: nothing else of the mandate can reach an agent.
       return {
         mandateId: mandate.id,
@@ -137,7 +140,8 @@ export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates
         currency: v.perOrderLimit.currency,
         perOrderLimitMinor: Number(v.perOrderLimit.minor),
         monthlyLimitMinor: Number(v.monthlyLimit.minor),
-        monthlyCapMinor: Number(monthlyCap.minor),
+        monthlyCapMinor: monthlyCap === null ? null : Number(monthlyCap.minor),
+        monthlyCapFrom,
         supplierIds: [...v.supplierIds],
         fundingSourceId: v.fundingSourceId,
         timeZone: mandate.timeZone,

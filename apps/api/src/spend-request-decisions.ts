@@ -83,6 +83,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import {
+  capChoiceOf,
   MandateRefused,
   type MandateTables,
   policyRulesIn,
@@ -202,7 +203,7 @@ async function actingIn(tx: DecisionTx, states: SignedStates, acting: AgentActin
 /**
  * Level 4: the agent's open mandate with its version in force (a draft grants
  * nothing) and the zone its months start in, then the mandate's policy and the
- * organisation's.
+ * organisation's, with whether an admin chose its monthly cap (E2).
  */
 async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, agentId: string) {
   const open = await openMandateOfAgent(tx, states, orgId, agentId);
@@ -213,8 +214,9 @@ async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, 
     mandate = { ...version, ...open.mandate, versionId: version.id };
   }
   const mandatePolicy = mandate === null ? null : rulesOf(await policyRulesIn(tx, states, orgId, mandate.id));
-  const organizationPolicy = rulesOf(await policyRulesIn(tx, states, orgId, orgId));
-  return { mandate, mandatePolicy, organizationPolicy };
+  const organization = await policyRulesIn(tx, states, orgId, orgId);
+  const organizationCapChosen = (await capChoiceOf(tx, states, orgId, organization?.current ?? null)) !== null;
+  return { mandate, mandatePolicy, organizationPolicy: rulesOf(organization), organizationCapChosen };
 }
 
 /**
@@ -251,6 +253,7 @@ async function payingIn(
 /** The policies in force for the agent's mandate, as the engine weighs them. */
 export interface PoliciesWeighed {
   readonly organizationPolicy: PolicyRules | null;
+  readonly organizationCapChosen: boolean;
   readonly mandatePolicy: PolicyRules | null;
 }
 
@@ -286,7 +289,7 @@ export async function weigh(
   },
 ) {
   const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
-  const { mandatePolicy, organizationPolicy } = rules(inForce, mandate);
+  const { mandatePolicy, organizationPolicy, organizationCapChosen } = rules(inForce, mandate);
   const { source, supplier, order, claims } = await payingIn(
     tx,
     states,
@@ -318,6 +321,7 @@ export async function weigh(
     supplierStatus: supplier?.status ?? null,
     sourceMayFund: source.outcome === 'found' && mayFund(source.source, now),
     organizationPolicy,
+    organizationCapChosen,
     mandatePolicy,
     monthSpent: money(spent, currency),
     splitOpen: money(split, currency),

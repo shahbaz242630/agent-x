@@ -3,7 +3,8 @@
 // REQUIRE_NEW_MANDATE, never approval; precedence), SEC-LIM-11 (a narrower
 // policy decides exactly as it states), SEC-AG-14 (free text never weighs),
 // and partner decision 5 (the strictest rule wins, except the monthly cap per
-// agent: the mandate's policy's, else the organisation's, else AED 20,000).
+// agent: the mandate's policy's, else the organisation's), with Phase 3
+// decision 15 (E2): no default, nothing spent until an admin chooses it.
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
@@ -15,7 +16,6 @@ import {
   type DecisionInput,
   decisionFacts,
   decisionInputText,
-  DEFAULT_MONTHLY_CAP,
   type MandateInForce,
   type PolicyRules,
   type SpendAsked,
@@ -64,6 +64,7 @@ function input(dirhams: number, changes: Partial<DecisionInput> = {}): DecisionI
     supplierStatus: 'VERIFIED',
     sourceMayFund: true,
     organizationPolicy: null,
+    organizationCapChosen: true,
     mandatePolicy: null,
     monthSpent: aed(0),
     splitOpen: aed(0),
@@ -92,7 +93,7 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
       decision: 'ALLOW',
       reasons: [],
       versions: { mandate: MANDATE.versionId, organizationPolicy: null, mandatePolicy: null },
-      monthlyCapFrom: 'default',
+      monthlyCapFrom: 'none',
     });
   });
 
@@ -174,7 +175,7 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
     }
   });
 
-  it('has a default monthly cap in AED alone: a mandate in another currency needs its own', () => {
+  it("weighs a mandate in another currency only against caps in its own (E2: no default's currency)", () => {
     const usd = (minor: bigint) => money(minor, 'USD');
     const limits = { perOrderLimit: usd(1_000n), monthlyLimit: usd(1_000n), approvalThreshold: usd(1_000n) };
     const inUsd = {
@@ -183,8 +184,10 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
       monthSpent: usd(0n),
       splitOpen: usd(0n),
     };
-    expect(decide(inUsd).reasons).toEqual(['CURRENCY_NOT_ALLOWED']);
+    expect(decide(inUsd).decision).toBe('ALLOW');
     expect(decide({ ...inUsd, organizationPolicy: orgPolicy({ monthlyCap: usd(500n) }) }).decision).toBe('ALLOW');
+    const inAed = orgPolicy({ monthlyCap: aed(500) });
+    expect(decide({ ...inUsd, organizationPolicy: inAed }).reasons).toEqual(['CURRENCY_NOT_ALLOWED']);
   });
 
   it('reads the IDs a request names in any case', () => {
@@ -198,7 +201,8 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
       decision: 'DENY',
       reasons: ['SUPPLIER_NOT_VERIFIED', 'MANDATE_NOT_IN_FORCE'],
     });
-    expect(decide(input(30_000, { duplicateOrder: true }))).toMatchObject({
+    const capped = { organizationPolicy: orgPolicy({ monthlyCap: aed(20_000) }) };
+    expect(decide(input(30_000, { ...capped, duplicateOrder: true }))).toMatchObject({
       decision: 'DENY',
       reasons: ['DUPLICATE_ORDER_REFERENCE', 'MANDATE_ORDER_LIMIT', 'POLICY_MONTHLY_CAP', 'APPROVAL_THRESHOLD'],
     });
@@ -304,11 +308,29 @@ describe('decide: a narrower policy (SEC-LIM-11, decision 5)', () => {
 });
 
 describe('decide: the monthly cap per agent (decision 5)', () => {
-  it('is AED 20,000 when no policy sets one', () => {
-    expect(DEFAULT_MONTHLY_CAP).toEqual(aed(20_000));
-    const spent = { monthSpent: aed(15_000), organizationPolicy: NO_RULES };
-    expect(decide(input(5_000, spent))).toMatchObject({ decision: 'ALLOW', monthlyCapFrom: 'default' });
-    expect(decide(input(5_000.01, spent))).toMatchObject({ decision: 'DENY', reasons: ['POLICY_MONTHLY_CAP'] });
+  it("denies every request until an admin chose the organisation's, even under a mandate's policy's cap (E2)", () => {
+    const unchosen = { organizationPolicy: NO_RULES, organizationCapChosen: false };
+    expect(decide(input(1, unchosen))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['ORG_MONTHLY_CAP_NOT_SET'],
+      monthlyCapFrom: 'not-set',
+    });
+    expect(decide(input(1, { ...unchosen, organizationPolicy: null })).reasons).toEqual(['ORG_MONTHLY_CAP_NOT_SET']);
+    const capped = { ...unchosen, mandatePolicy: mandatePolicy({ monthlyCap: aed(30_000) }) };
+    expect(decide(input(1, capped))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['ORG_MONTHLY_CAP_NOT_SET'],
+      monthlyCapFrom: 'not-set',
+    });
+  });
+
+  it("holds the agent to the mandate's own monthly limit alone with none chosen, no default (E2)", () => {
+    const none = { organizationPolicy: NO_RULES, monthSpent: aed(45_000) };
+    expect(decide(input(5_000, none))).toMatchObject({ decision: 'ALLOW', reasons: [], monthlyCapFrom: 'none' });
+    expect(decide(input(5_000.01, none))).toMatchObject({
+      decision: 'REQUIRE_NEW_MANDATE',
+      reasons: ['MANDATE_MONTHLY_LIMIT'],
+    });
   });
 
   it("is the organisation's when it sets one, higher or lower", () => {
@@ -358,6 +380,7 @@ describe('decisionInputText', () => {
       { ...base, splitOpen: aed(1) },
       { ...base, duplicateOrder: true },
       { ...base, possibleDuplicate: true },
+      { ...base, organizationCapChosen: false },
       { ...base, organizationPolicy: orgPolicy({ perOrderCap: { cap: aed(4_000), over: 'REQUIRE_APPROVAL' } }) },
       { ...base, mandatePolicy: NO_RULES },
       { ...base, mandate: { ...MANDATE, endsAt: NOW } },
@@ -379,10 +402,11 @@ describe('decisionInputText', () => {
       splitOpen: '0 AED',
       duplicateOrder: false,
       possibleDuplicate: false,
-      defaultMonthlyCap: '2000000 AED',
+      defaultMonthlyCap: null,
+      organizationCapChosen: true,
     });
     // A fact added to the text must be added here too, or kept in a versioned record: this counts them.
-    expect(JSON.parse(decisionInputText(base))).toHaveLength(13);
+    expect(JSON.parse(decisionInputText(base))).toHaveLength(14);
     for (const changed of [
       { ...base, now: new Date(NOW.getTime() + 1) },
       { ...base, agent: { ...base.agent, status: 'SUSPENDED' } },
@@ -393,9 +417,19 @@ describe('decisionInputText', () => {
       { ...base, splitOpen: aed(1) },
       { ...base, duplicateOrder: true },
       { ...base, possibleDuplicate: true },
+      { ...base, organizationCapChosen: false },
     ]) {
       expect(decisionFacts(changed)).not.toEqual(decisionFacts(base));
     }
+  });
+
+  it("keeps the old default's place empty, and the admin's choice last (E2)", () => {
+    const textOf = (given: DecisionInput) => JSON.parse(decisionInputText(given)) as unknown[];
+    const text = textOf(input(5_000));
+    expect(text[11]).toBeNull();
+    expect(text.at(-2)).toBe(false);
+    expect(text.at(-1)).toBe(true);
+    expect(textOf(input(5_000, { organizationCapChosen: false })).at(-1)).toBe(false);
   });
 
   it('reads IDs in any case, and keeps amounts as exact text', () => {
@@ -435,6 +469,7 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
     supplierStatus: fc.constantFrom('VERIFIED', 'UNVERIFIED', null),
     sourceMayFund: fc.boolean(),
     organizationPolicy: maybe(rules),
+    organizationCapChosen: fc.boolean(),
     mandatePolicy: maybe(rules),
     monthSpent: minor,
     splitOpen: minor,
@@ -460,6 +495,7 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
       supplierStatus: g.supplierStatus,
       sourceMayFund: g.sourceMayFund,
       organizationPolicy: g.organizationPolicy,
+      organizationCapChosen: g.organizationCapChosen,
       mandatePolicy: g.mandatePolicy,
       monthSpent: money(g.monthSpent, 'AED'),
       splitOpen: money(g.splitOpen, 'AED'),
@@ -514,6 +550,17 @@ describe('decide: properties', () => {
         if (decision === 'ALLOW') expect(request.amount.minor).toBeLessThanOrEqual(mandate.approvalThreshold.minor);
         // A possible duplicate is never allowed without a person (decision 11a).
         if (decision === 'ALLOW') expect(given.possibleDuplicate).toBe(false);
+      }),
+    );
+  });
+
+  it("denies whatever else is weighed until the organisation's monthly cap is chosen (E2)", () => {
+    fc.assert(
+      fc.property(anyInput, (given) => {
+        const made = decide({ ...given, organizationCapChosen: false });
+        expect(made.decision).toBe('DENY');
+        expect(made.reasons).toContain('ORG_MONTHLY_CAP_NOT_SET');
+        expect(made.monthlyCapFrom).toBe('not-set');
       }),
     );
   });
