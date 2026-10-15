@@ -101,24 +101,46 @@ export async function claimsOn(
   return { duplicate: found.duplicate === true, possible: found.possible === true };
 }
 
+/** What claimsOnEach answers of one order: claimsOn's two looks, and its canonical form and bank key. */
+export interface OrderClaimsSeen {
+  readonly duplicate: boolean;
+  readonly possible: boolean;
+  /** Its canonical form, as 0039 makes a request's `order_key`. */
+  readonly key: string;
+  /** Its reference as the bank would carry it (bankKeyOf): null for one never a lookalike. */
+  readonly bankKey: string | null;
+}
+
 /**
  * claimsOn for several orders at once, in one statement, each with its own
- * request left out (a carry to a new mandate version weighs its pending
- * requests again, Phase 3 E4c): the same two looks, clause for clause, made
- * for each order of a list, at least one. Answered in the orders' order.
+ * request left out, and the claims of `alsoExcept` left out of both looks (a
+ * carry to a new mandate version weighs its pending requests again apart from
+ * one another, Phase 3 E4c): the same two looks, clause for clause, made for
+ * each order of a list, at least one. Answered in the orders' order, each
+ * with its canonical form and bank key, for the caller to compare its own.
  */
 export async function claimsOnEach(
   tx: ClaimsTransaction,
   orders: readonly (OrderOf & { readonly except: string })[],
-): Promise<readonly { readonly duplicate: boolean; readonly possible: boolean }[]> {
-  const { rows } = await sql<{ at: number; duplicate: boolean; possible: boolean }>`
-    select asked.at,
+  alsoExcept: readonly string[] = [],
+): Promise<readonly OrderClaimsSeen[]> {
+  const notCounted = (claim: string) =>
+    alsoExcept.length === 0 ? sql`true` : sql`${sql.ref(claim)} <> all(${[...alsoExcept]}::uuid[])`;
+  const { rows } = await sql<{
+    at: number;
+    duplicate: boolean;
+    possible: boolean;
+    key: string;
+    bank_key: string | null;
+  }>`
+    select asked.at, ${orderKeyOf(sql.ref('asked.reference'))} as key, asked.bank_key,
       exists (
         select 1 from spend_requests.order_claims as claim
         where claim.released_at is null
           and claim.order_reference = ${orderKeyOf(sql.ref('asked.reference'))}
           and (claim.supplier_id = asked.supplier_id or (asked.payee_key is not null and claim.payee_key = asked.payee_key))
           and claim.request_id <> asked.except_id
+          and ${notCounted('claim.request_id')}
       ) as duplicate,
       asked.bank_key is not null and exists (
         select 1 from spend_requests.order_claims as claim
@@ -126,6 +148,7 @@ export async function claimsOnEach(
           and claim.bank_key = asked.bank_key
           and claim.order_reference <> ${orderKeyOf(sql.ref('asked.reference'))}
           and (claim.supplier_id = asked.supplier_id or (asked.payee_key is not null and claim.payee_key = asked.payee_key))
+          and ${notCounted('claim.request_id')}
       ) as possible
     from rows from (
       pg_catalog.unnest(${orders.map((_, at) => at)}::int[]),
@@ -136,7 +159,7 @@ export async function claimsOnEach(
       pg_catalog.unnest(${orders.map((order) => order.except)}::uuid[])
     ) as asked (at, supplier_id, payee_key, reference, bank_key, except_id)
     order by asked.at`.execute(tx);
-  return rows.map(({ duplicate, possible }) => ({ duplicate, possible }));
+  return rows.map(({ duplicate, possible, key, bank_key: bankKey }) => ({ duplicate, possible, key, bankKey }));
 }
 
 /**

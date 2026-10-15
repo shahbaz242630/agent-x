@@ -530,11 +530,7 @@ export function registerMandates(
         request.id,
       );
       if (asked.outcome !== 'asked') return answerAsked(asked, request, reply);
-      const carry = asked.carry?.map(({ id, carried, reasons }) => ({
-        id,
-        outcome: carried ? ('carry' as const) : ('cancel' as const),
-        reasons: reasonsOf(reasons),
-      }));
+      const carry = asked.carry?.map(({ id, outcome, reasons }) => ({ id, outcome, reasons: reasonsOf(reasons) }));
       return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId, carry: carry ?? null });
     },
   );

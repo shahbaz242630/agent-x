@@ -68,8 +68,9 @@ import {
   carryPlan,
   type CarryPlanned,
   planHashOf,
-  SUPERSEDE_STATEMENT_VERSION,
   type SupersedeChoice,
+  supersedeChoiceDetails,
+  supersedeHashParts,
 } from './mandate-carry.ts';
 import type { Refused } from './refused.ts';
 import type { DecisionTables } from './spend-request-decisions.ts';
@@ -145,8 +146,7 @@ const acceptanceHash = (
     mandateEvent.toLowerCase(),
     draft.id,
     draft.termsHash,
-    choice ?? 'none',
-    String(SUPERSEDE_STATEMENT_VERSION),
+    ...supersedeHashParts(choice),
     plan === null ? 'none' : planHashOf(plan),
   ]);
 
@@ -281,6 +281,16 @@ export function createMandateAcceptance({
         });
       });
       if (isUnwritten(done)) return done;
+      // A replayed ask answers from its key's record, which keeps no plan: it is worked out again, as it now
+      // stands, so the admin always sees one (decision 17.4). Changed since the step-up bound it, the confirm refuses.
+      if (done.outcome === 'replayed' && pendingRequests === 'carry') {
+        const again = await work.answered(member.orgId, correlationId, async (tx, states) => {
+          const read = await acceptable(tx, states, member.orgId, mandateId, versionId, 'share');
+          return { plan: (await settling(tx, states, member.orgId, read, pendingRequests, false)).plan };
+        });
+        if ('outcome' in again) return again;
+        carry = again.plan;
+      }
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, carry };
     },
 
@@ -323,13 +333,10 @@ export function createMandateAcceptance({
           actor,
           details: {
             ...evidence,
-            ...(settled.choice !== null && {
-              pendingRequests: settled.choice,
-              pendingStatementVersion: SUPERSEDE_STATEMENT_VERSION,
-            }),
+            ...supersedeChoiceDetails(settled.choice),
             ...(settled.plan !== null && {
-              carried: settled.plan.filter(({ carried }) => carried).length,
-              cancelled: settled.plan.filter(({ carried }) => !carried).length,
+              carried: settled.plan.filter(({ outcome }) => outcome === 'carry').length,
+              cancelled: settled.plan.filter(({ outcome }) => outcome === 'cancel').length,
             }),
           },
         });

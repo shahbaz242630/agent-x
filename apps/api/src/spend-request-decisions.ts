@@ -203,22 +203,22 @@ async function actingIn(tx: DecisionTx, states: SignedStates, acting: AgentActin
 /**
  * Level 4: the agent's open mandate with its version in force (a draft grants
  * nothing) and the zone its months start in, then the mandate's policy and the
- * organisation's, with whether an admin chose its monthly cap (E2). Or
- * `underDraft`: the draft being accepted in its place, which a carry weighs
- * its pending requests under (E4c).
+ * organisation's, with whether an admin chose its monthly cap (E2). Or the
+ * `draft` being accepted in its place, which a carry weighs its pending
+ * requests under (E4c).
  */
 export async function authorityIn(
   tx: DecisionTx,
   states: SignedStates,
   orgId: string,
   agentId: string,
-  underDraft = false,
+  version: 'inForce' | 'draft' = 'inForce',
 ) {
   const open = await openMandateOfAgent(tx, states, orgId, agentId);
   believed(open);
   let mandate: MandateWeighed | null = null;
   const found = open.outcome === 'found' ? open.mandate : null;
-  const versionId = underDraft ? (found?.pendingVersionId ?? null) : (found?.currentVersionId ?? null);
+  const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
   if (found !== null && versionId !== null) {
     const version = await versionIn(tx, states, orgId, found.id, versionId);
     mandate = { ...version, ...found, versionId: version.id };

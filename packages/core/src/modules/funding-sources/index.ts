@@ -20,6 +20,7 @@ export {
   MOST_SOURCES_A_PAGE,
   NotThisSource,
   SOURCES,
+  type SourceCheck,
   sourceOf,
   sourcesPage,
   updateFromPartner,

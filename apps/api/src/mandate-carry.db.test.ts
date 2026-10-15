@@ -205,8 +205,8 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     const { plan, versionId } = await carried(w, mandateId);
 
     expect(plan).toEqual([
-      { id: waiting.id, carried: true, reasons: ['APPROVAL_THRESHOLD'] },
-      { id: approved.id, carried: true, reasons: [] },
+      { id: waiting.id, outcome: 'carry', reasons: ['APPROVAL_THRESHOLD'] },
+      { id: approved.id, outcome: 'carry', reasons: [] },
     ]);
     for (const [request, status] of [
       [waiting, 'APPROVAL_REQUIRED'],
@@ -276,7 +276,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
   it('cancels one the new terms refuse, with their reasons, its holdings freed; carries the rest', async () => {
     const { w, acting, mandateId } = await ready();
     const over = await ask(acting, w);
-    const within = await ask(acting, w, { amount: AED(50_000n) });
+    const underLimit = await ask(acting, w, { amount: AED(50_000n) });
 
     const { plan } = await carried(w, mandateId, {
       perOrderLimit: AED(150_000n),
@@ -284,8 +284,8 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     });
 
     expect(plan).toEqual([
-      { id: over.id, carried: false, reasons: ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'] },
-      { id: within.id, carried: true, reasons: [] },
+      { id: over.id, outcome: 'cancel', reasons: ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'] },
+      { id: underLimit.id, outcome: 'carry', reasons: [] },
     ]);
     expect(await statusOf(w, over.id)).toBe('DENIED');
     expect(await holdingsOf(w, over.id)).toEqual({ reservation: 'RELEASED', released: true });
@@ -294,7 +294,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
       action: 'spend_request.voided',
       details: { causes: 'MANDATE_ORDER_LIMIT,APPROVAL_THRESHOLD' },
     });
-    expect(await statusOf(w, within.id)).toBe('APPROVED');
+    expect(await statusOf(w, underLimit.id)).toBe('APPROVED');
   });
 
   it('keeps one a person approved where the new terms would ask an approval; cancels one approved without a person (17.1)', async () => {
@@ -308,8 +308,8 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     const { plan } = await carried(w, mandateId, { approvalThreshold: AED(30_000n) });
 
     expect(plan).toEqual([
-      { id: byAPerson.id, carried: true, reasons: ['APPROVAL_THRESHOLD'] },
-      { id: unasked.id, carried: false, reasons: ['APPROVAL_THRESHOLD'] },
+      { id: byAPerson.id, outcome: 'carry', reasons: ['APPROVAL_THRESHOLD'] },
+      { id: unasked.id, outcome: 'cancel', reasons: ['APPROVAL_THRESHOLD'] },
     ]);
     expect(await statusOf(w, byAPerson.id)).toBe('APPROVED');
     expect(await statusOf(w, unasked.id)).toBe('DENIED');
@@ -317,8 +317,11 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
 
   it('lets the oldest stand when a lowered monthly limit can’t hold them all', async () => {
     const { w, acting, mandateId } = await ready();
+    // A minute apart, so the carry's order is when each was made.
     const first = await ask(acting, w, { amount: AED(50_000n) });
+    clock.advanceBy(60_000);
     const second = await ask(acting, w, { amount: AED(50_000n) });
+    clock.advanceBy(60_000);
     const third = await ask(acting, w, { amount: AED(50_000n) });
 
     const { plan } = await carried(w, mandateId, {
@@ -327,10 +330,10 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
       approvalThreshold: AED(100_000n),
     });
 
-    expect(plan?.map(({ id, carried: stands }) => [id, stands])).toEqual([
-      [first.id, true],
-      [second.id, true],
-      [third.id, false],
+    expect(plan?.map(({ id, outcome }) => [id, outcome])).toEqual([
+      [first.id, 'carry'],
+      [second.id, 'carry'],
+      [third.id, 'cancel'],
     ]);
     expect(plan?.[2]?.reasons).toContain('MANDATE_MONTHLY_LIMIT');
     expect(await statusOf(w, third.id)).toBe('DENIED');
@@ -347,10 +350,39 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
 
     // Each AED 600 alone is within the AED 1,000 threshold; with the first, the second to its supplier isn't.
     expect(plan).toEqual([
-      { id: first.id, carried: true, reasons: [] },
-      { id: alone.id, carried: true, reasons: [] },
-      { id: second.id, carried: false, reasons: ['AGGREGATE_THRESHOLD'] },
+      { id: first.id, outcome: 'carry', reasons: [] },
+      { id: alone.id, outcome: 'carry', reasons: [] },
+      { id: second.id, outcome: 'cancel', reasons: ['AGGREGATE_THRESHOLD'] },
     ]);
+  });
+
+  it('lets an older order stand over a younger lookalike to its payee, which the same plan may cancel', async () => {
+    const { w, acting, mandateId } = await ready();
+    // The older one approved outright; the younger, a lookalike the bank would carry the same way, sent for approval.
+    const older = await ask(acting, w, { amount: AED(50_000n), orderReference: 'PO-2026/0042' });
+    clock.advanceBy(60_000);
+    const younger = await ask(acting, w, { amount: AED(50_000n), orderReference: 'PO_2026/0042' });
+    expect([older.status, younger.status]).toEqual(['APPROVED', 'APPROVAL_REQUIRED']);
+    expect(younger.reasons).toContain('POSSIBLE_DUPLICATE_ORDER');
+
+    const { plan } = await carried(w, mandateId);
+
+    // The older is weighed before the younger, whose claim is the plan's own: it stays approved without a person.
+    expect(plan?.[0]).toEqual({ id: older.id, outcome: 'carry', reasons: [] });
+    expect(plan?.[1]).toMatchObject({ id: younger.id, outcome: 'carry' });
+    expect(plan?.[1]?.reasons).toContain('POSSIBLE_DUPLICATE_ORDER');
+  });
+
+  it('answers a replayed ask with the plan worked out again, the same as the first (17.4)', async () => {
+    const { w, acting, mandateId } = await ready();
+    const waiting = await ask(acting, w);
+    const { versionId } = await asking(w, mandateId, {}, 'cancel');
+    const key = keyed(w.admin, ACCEPT_OPERATION, 'e4c-replayed');
+    const first = await acceptance().accept(w.admin, key, mandateId, versionId, 'carry', CORRELATION);
+    const replayed = await acceptance().accept(w.admin, key, mandateId, versionId, 'carry', CORRELATION);
+
+    expect(replayed).toEqual(first);
+    expect(replayed).toMatchObject({ carry: [{ id: waiting.id, outcome: 'carry' }] });
   });
 
   it('refuses a carry whose request’s holdings were changed past the app, nothing moved (INTEGRITY_FAILED)', async () => {

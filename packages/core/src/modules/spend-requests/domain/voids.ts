@@ -33,6 +33,10 @@ export const PENDING_STATUSES = [
   'INSTRUCTION_READY',
 ] as const satisfies readonly SpendRequestStatus[];
 
+/** Whether a request is pending: holding capacity before hand-off. */
+export const isPending = (status: SpendRequestStatus): boolean =>
+  (PENDING_STATUSES as readonly string[]).includes(status);
+
 /** What a suspension does to the pending requests of what it suspends, as the suspender chose (decision 7). */
 export const PENDING_CHOICES = ['cancel', 'pause'] as const;
 export type PendingChoice = (typeof PENDING_CHOICES)[number];

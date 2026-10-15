@@ -36,13 +36,16 @@
 // locks, held here (as an approval's), and a cancel locks its own as a
 // brake's void does. The ask reads it all FOR SHARE and locks no month.
 import { type AuditActor, type AuditDetails, type SignedStates } from '@agentx/core/modules/audit';
-import { sourceOf } from '@agentx/core/modules/funding-sources';
+import { type SourceCheck, sourceOf } from '@agentx/core/modules/funding-sources';
 import { changeHashOf } from '@agentx/core/modules/identity';
 import { lockAgentPeriod, monthsSpent, splitHeld } from '@agentx/core/modules/limit-reservations';
 import { type Decision, decide } from '@agentx/core/modules/policies';
 import {
   claimsOnEach,
   decisionsOf,
+  type HeldSealed,
+  isPending,
+  type OrderClaimsSeen,
   PENDING_STATUSES,
   requestOf,
   requestsOf,
@@ -58,7 +61,13 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import { z } from 'zod';
 
 import { MandateRefused } from './mandate-reads.ts';
-import { authorityIn, type DecisionTables, inputOf } from './spend-request-decisions.ts';
+import {
+  authorityIn,
+  type DecisionTables,
+  inputOf,
+  type MandateWeighed,
+  type PoliciesWeighed,
+} from './spend-request-decisions.ts';
 
 type CarryTx = DatabaseTransaction<DecisionTables>;
 
@@ -82,7 +91,17 @@ const SUPERSEDE_STATEMENTS = {
 } as const satisfies Record<SupersedeChoice, string>;
 
 /** The version of SUPERSEDE_STATEMENTS each acceptance names: raised with any change to their words. */
-export const SUPERSEDE_STATEMENT_VERSION = 1;
+const SUPERSEDE_STATEMENT_VERSION = 1;
+
+/** The choice as an acceptance's event keeps it, with its words' version (none for a first version). */
+export const supersedeChoiceDetails = (choice: SupersedeChoice | null) =>
+  choice === null ? {} : { pendingRequests: choice, pendingStatementVersion: SUPERSEDE_STATEMENT_VERSION };
+
+/** The choice as the acceptance's step-up binds it, with its words' version. */
+export const supersedeHashParts = (choice: SupersedeChoice | null): readonly string[] => [
+  choice ?? 'none',
+  String(SUPERSEDE_STATEMENT_VERSION),
+];
 
 /** An acceptance's choice, as its bodies name it (decision 15): only when a version is in force. */
 export const SUPERSEDE_PENDING_REQUESTS = z
@@ -99,7 +118,7 @@ export const MOST_CARRIED = 20;
 /** One pending request as the carry settles it: carried to the draft, or cancelled with the new terms' reasons. */
 export interface CarryPlanned {
   readonly id: string;
-  readonly carried: boolean;
+  readonly outcome: 'carry' | 'cancel';
   /** The engine's reasons under the new terms: why it is cancelled, or why a carried one would need approval. */
   readonly reasons: readonly ReasonCode[];
 }
@@ -123,35 +142,35 @@ export function carries(status: SpendRequestStatus, decidedAs: Decision, now: De
 
 /** The plan as the step-up binds it: every request with its outcome and reasons, in order. */
 export const planHashOf = (plan: readonly CarryPlanned[]): string =>
-  changeHashOf(
-    plan.map(({ id, carried, reasons }) => `${id}:${carried ? 'carry' : 'cancel'}:${reasons.join(',')}`),
-  ).toString('hex');
+  changeHashOf(plan.map(({ id, outcome, reasons }) => `${id}:${outcome}:${reasons.join(',')}`)).toString('hex');
+
+/** Whose pending requests a carry weighs, and how: the confirm's locks (`decides`), or the ask's reads. */
+interface CarryScope {
+  readonly orgId: string;
+  readonly agentId: string;
+  readonly mandateId: string;
+  readonly now: Date;
+  readonly decides: boolean;
+}
 
 /**
  * The mandate's pending requests weighed again under its draft waiting, in
- * the lock order above: `decides` for the confirm's locks, or the ask's
- * reads. More than MOST_CARRIED pending: PENDING_REQUESTS_TOO_MANY_TO_CARRY.
- * One whose signed state, history or holdings can't be believed, or whose row
- * names other facts than its signed state: INTEGRITY_FAILED.
+ * the lock order above. More than MOST_CARRIED pending:
+ * PENDING_REQUESTS_TOO_MANY_TO_CARRY. One whose signed state, history or
+ * holdings can't be believed, or whose row names other facts than its signed
+ * state: INTEGRITY_FAILED.
  */
 export async function carryPlan(
   tx: CarryTx,
   states: SignedStates,
-  carry: {
-    readonly orgId: string;
-    readonly agentId: string;
-    readonly mandateId: string;
-    readonly now: Date;
-    readonly decides: boolean;
-  },
+  scope: CarryScope,
 ): Promise<readonly CarryPlanned[]> {
-  const { orgId, mandateId } = carry;
   const rows = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs and facts alone, each held to its signed state below
     .selectFrom(SPEND_REQUESTS.table)
     .select(['id', 'supplier_id', 'funding_source_id'])
-    .where('org_id', '=', orgId)
-    .where('mandate_id', '=', mandateId)
+    .where('org_id', '=', scope.orgId)
+    .where('mandate_id', '=', scope.mandateId)
     .where('status', 'in', PENDING_STATUSES)
     .orderBy('created_at')
     .orderBy('id')
@@ -159,9 +178,9 @@ export async function carryPlan(
     .execute();
   if (rows.length > MOST_CARRIED) throw new MandateRefused(409, 'PENDING_REQUESTS_TOO_MANY_TO_CARRY');
   if (rows.length === 0) return [];
-  const authority = await authorityOfCarry(tx, states, carry, rows);
-  const requests = await requestsHeld(tx, states, carry, rows);
-  return weighedInOrder(tx, carry, authority, requests);
+  const authority = await authorityOfCarry(tx, states, scope, rows);
+  const requests = await requestsHeld(tx, states, scope, rows);
+  return weighedInOrder(tx, scope, authority, requests);
 }
 
 /** A pending request as its row names it: what the authority is read by, before its signed state is. */
@@ -171,18 +190,28 @@ interface CarryRow {
   readonly funding_source_id: string;
 }
 
-/** Levels 4–7, each read once for every request: the draft, its policies, the sources, suppliers and months. */
+/** What every request of a carry is weighed under, read once: the draft and its policies, sources, suppliers, months. */
+interface CarryAuthority {
+  readonly mandate: MandateWeighed;
+  readonly policies: PoliciesWeighed;
+  readonly sources: ReadonlyMap<string, SourceCheck>;
+  readonly suppliers: ReadonlyMap<string, SupplierRecord>;
+  /** Each request's capacity as its decision sealed it: its month, and when it was reserved. */
+  readonly held: ReadonlyMap<string, HeldSealed>;
+}
+
+/** Levels 4–7, each read once for every request. */
 async function authorityOfCarry(
   tx: CarryTx,
   states: SignedStates,
-  { orgId, agentId, decides }: { readonly orgId: string; readonly agentId: string; readonly decides: boolean },
+  { orgId, agentId, decides }: CarryScope,
   rows: readonly CarryRow[],
-) {
+): Promise<CarryAuthority> {
   const ids = rows.map(({ id }) => id);
-  // 4: the draft, the mandate's policy and the organisation's, once. The acceptance read the draft waiting.
-  const { mandate, ...policies } = await authorityIn(tx, states, orgId, agentId, true);
+  // 4: the draft, the mandate's policy and the organisation's, once.
+  const { mandate, ...policies } = await authorityIn(tx, states, orgId, agentId, 'draft');
   // 5 and 6: each set in order of ID, so no two carries lock them crosswise. A request's own exist (0039's keys).
-  const sources = new Map<string, Awaited<ReturnType<typeof sourceOf>>>();
+  const sources = new Map<string, SourceCheck>();
   for (const id of distinct(rows.map((row) => row.funding_source_id))) {
     const source = await sourceOf(tx, states, { orgId, id }, 'share');
     if (source.outcome !== 'found') integrityFailed();
@@ -211,7 +240,7 @@ async function authorityOfCarry(
 async function requestsHeld(
   tx: CarryTx,
   states: SignedStates,
-  { orgId, agentId, decides }: { readonly orgId: string; readonly agentId: string; readonly decides: boolean },
+  { orgId, agentId, decides }: CarryScope,
   rows: readonly CarryRow[],
 ): Promise<readonly SpendRequestRecord[]> {
   const ids = rows.map(({ id }) => id);
@@ -239,7 +268,7 @@ async function requestsHeld(
     const request = read.get(row.id);
     const asItsRow =
       request !== undefined &&
-      (PENDING_STATUSES as readonly string[]).includes(request.status) &&
+      isPending(request.status) &&
       request.agentId === agentId &&
       request.supplierId === row.supplier_id &&
       request.fundingSourceId === row.funding_source_id;
@@ -249,37 +278,29 @@ async function requestsHeld(
 
 /**
  * Each request weighed in memory, oldest first, by the engine through the
- * input a decision builds (inputOf), against the totals read once of what
- * holds capacity outside the plan, and the older requests carried before it:
- * in its month (the monthly limits), and to its payee in the split window
- * (the split check). The younger ones, and those cancelled, aren't counted,
- * so the oldest stand when the new limits can't hold them all; and its own
- * amount is the engine's to add, once.
+ * input a decision builds (inputOf), against what holds capacity or claims
+ * an order outside the plan, read once, and the older requests carried before
+ * it: in its month (the monthly limits), to its payee in the split window
+ * (the split check), and to its payee as a lookalike order (a possible
+ * duplicate). The younger ones, and those cancelled, aren't counted, so the
+ * oldest stand when the new terms can't hold them all; and its own amount is
+ * the engine's to add, once.
  */
 async function weighedInOrder(
   tx: CarryTx,
-  { agentId, now }: { readonly agentId: string; readonly now: Date },
-  { mandate, policies, sources, suppliers, held }: Awaited<ReturnType<typeof authorityOfCarry>>,
+  { agentId, now }: CarryScope,
+  { mandate, policies, sources, suppliers, held }: CarryAuthority,
   requests: readonly SpendRequestRecord[],
 ): Promise<readonly CarryPlanned[]> {
   const currency = mandate.perOrderLimit.currency;
   const inPlan = requests.map(({ id }) => id);
   const spentOutside = await monthsSpent(tx, { agentId, months: monthsOf(held), currency, except: inPlan });
   const since = windowStart(now, mandate.splitWindowHours);
-  const splitOutside = new Map<string, bigint>();
-  if (mandate.splitCheck) {
-    for (const [id, supplier] of suppliers) {
-      const split = await splitHeld(tx, {
-        supplierId: id,
-        payeeKey: supplier.payeeKey,
-        since,
-        currency,
-        except: inPlan,
-      });
-      splitOutside.set(id, split);
-    }
-  }
-  const claims = await claimsOnEach(
+  // None read with the split check off: the engine weighs no split then.
+  const splitOutside = mandate.splitCheck
+    ? await splitTotalsOutside(tx, suppliers, { since, currency, except: inPlan })
+    : new Map<string, bigint>();
+  const orders = await claimsOnEach(
     tx,
     requests.map((request) => ({
       supplierId: request.supplierId,
@@ -287,17 +308,14 @@ async function weighedInOrder(
       reference: request.orderReference,
       except: request.id,
     })),
+    inPlan,
   );
-  const carried: SpendRequestRecord[] = [];
+  const carried: { readonly request: SpendRequestRecord; readonly order: OrderClaimsSeen }[] = [];
   return requests.map((request, at) => {
     const { month } = known(held.get(request.id));
     const supplier = known(suppliers.get(request.supplierId));
-    const samePayee = (other: SpendRequestRecord) => {
-      const theirs = known(suppliers.get(other.supplierId));
-      return other.supplierId === supplier.id || (supplier.payeeKey !== null && theirs.payeeKey === supplier.payeeKey);
-    };
-    const inMonth = carried.filter((other) => known(held.get(other.id)).month === month);
-    const inWindow = carried.filter((other) => samePayee(other) && known(held.get(other.id)).reservedAt >= since);
+    const order = known(orders[at]);
+    const toItsPayee = carried.filter((other) => samePayee(supplier, known(suppliers.get(other.request.supplierId))));
     const made = decide(
       inputOf({
         asked: request,
@@ -307,24 +325,57 @@ async function weighedInOrder(
         policies,
         supplier,
         source: known(sources.get(request.fundingSourceId)),
-        spent: money(known(spentOutside.get(month)) + sumOf(inMonth), currency),
-        split: money((splitOutside.get(supplier.id) ?? 0n) + sumOf(inWindow), currency),
-        claims: known(claims[at]),
+        spent: money(
+          known(spentOutside.get(month)) +
+            sumOf(carried.filter((other) => known(held.get(other.request.id)).month === month)),
+          currency,
+        ),
+        split: money(
+          (splitOutside.get(supplier.id) ?? 0n) +
+            sumOf(toItsPayee.filter((other) => known(held.get(other.request.id)).reservedAt >= since)),
+          currency,
+        ),
+        claims: {
+          duplicate: order.duplicate || toItsPayee.some((other) => other.order.key === order.key),
+          possible:
+            order.possible ||
+            toItsPayee.some(
+              (other) =>
+                order.bankKey !== null && other.order.bankKey === order.bankKey && other.order.key !== order.key,
+            ),
+        },
       }),
     );
     const stands = carries(request.status, request.decision, made.decision);
-    if (stands) carried.push(request);
-    return { id: request.id, carried: stands, reasons: made.reasons };
+    if (stands) carried.push({ request, order });
+    return { id: request.id, outcome: stands ? 'carry' : 'cancel', reasons: made.reasons };
   });
 }
 
+/** The split total of each supplier's payee outside the plan, one statement a supplier. */
+async function splitTotalsOutside(
+  tx: CarryTx,
+  suppliers: ReadonlyMap<string, SupplierRecord>,
+  { since, currency, except }: { since: Date; currency: string; except: readonly string[] },
+): Promise<ReadonlyMap<string, bigint>> {
+  const totals = new Map<string, bigint>();
+  for (const [id, { payeeKey }] of suppliers) {
+    totals.set(id, await splitHeld(tx, { supplierId: id, payeeKey, since, currency, except }));
+  }
+  return totals;
+}
+
+/** The same payee: the same supplier, or the same payee key where it has one (as order-claims' onTheOrdersPayee). */
+const samePayee = (supplier: SupplierRecord, other: SupplierRecord): boolean =>
+  other.id === supplier.id || (supplier.payeeKey !== null && other.payeeKey === supplier.payeeKey);
+
 /**
  * Their amounts' total, in minor units. A carried request is in the mandate's
- * currency: in another, the engine denies it (MANDATE_CURRENCY), so it never
- * carries.
+ * currency: in another, the engine denies it (CURRENCY_NOT_ALLOWED), so it
+ * never carries.
  */
-const sumOf = (requests: readonly SpendRequestRecord[]): bigint =>
-  requests.reduce((total, { amount }) => total + amount.minor, 0n);
+const sumOf = (carried: readonly { readonly request: SpendRequestRecord }[]): bigint =>
+  carried.reduce((total, { request }) => total + request.amount.minor, 0n);
 
 /** The months their capacity is held in, each once, in order. */
 const monthsOf = (held: ReadonlyMap<string, { readonly month: string }>): string[] =>
@@ -332,8 +383,9 @@ const monthsOf = (held: ReadonlyMap<string, { readonly month: string }>): string
 
 /**
  * A value every read above answers for what it was asked (each request's
- * decision, supplier and source, each month's total): one missing is a
- * history or a row changed past the app, so the carry is refused.
+ * decision, supplier and source, each month's total, each order's claims):
+ * one missing is a history or a row changed past the app, so the carry is
+ * refused.
  */
 const known = <Value>(value: Value | null | undefined): Value => value ?? integrityFailed();
 
@@ -343,8 +395,9 @@ const distinct = (values: readonly string[]): string[] => [...new Set(values)].s
 /**
  * The plan carried out, in the confirm's transaction after its step-up is
  * consumed and before the draft is accepted: each request carried to the
- * draft (the admin's, with the acceptance's evidence) or cancelled. Holdings that don't match a decision
- * refuse it all (INTEGRITY_FAILED), nothing moved.
+ * draft (the admin's, with the acceptance's evidence) or cancelled. Holdings
+ * of a carried one that don't match its decision refuse it all
+ * (INTEGRITY_FAILED), nothing moved.
  */
 export async function carryOut(
   tx: CarryTx,
@@ -354,15 +407,15 @@ export async function carryOut(
   plan: readonly CarryPlanned[],
   { draftId, actor, details, now }: { draftId: string; actor: AuditActor; details: AuditDetails; now: Date },
 ): Promise<void> {
-  for (const { id, carried, reasons } of plan) {
+  for (const { id, outcome, reasons } of plan) {
     const settled = await settleCarried(
       tx,
       states,
       keys,
       { orgId, id },
-      carried
-        ? { outcome: 'carry', draftId, change: { actor, action: 'spend_request.carried', details } }
-        : { outcome: 'cancel', causes: reasons },
+      outcome === 'carry'
+        ? { outcome, draftId, change: { actor, action: 'spend_request.carried', details } }
+        : { outcome, causes: reasons },
       now,
     );
     if (settled === 'mismatch') integrityFailed();

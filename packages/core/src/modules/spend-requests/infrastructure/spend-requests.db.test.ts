@@ -777,7 +777,10 @@ describe('the duplicate check and claiming an order (D3)', () => {
     const seen = new Set<string>();
     await fc.assert(
       fc.asyncProperty(fc.array(asked, { minLength: 1, maxLength: 6 }), async (orders) => {
-        const each = await inOrg(org, (tx) => claimsOnEach(tx, orders));
+        const each = (await inOrg(org, (tx) => claimsOnEach(tx, orders))).map(({ duplicate, possible }) => ({
+          duplicate,
+          possible,
+        }));
         const alone = [];
         for (const order of orders) alone.push(await inOrg(org, (tx) => claimsOn(tx, order)));
         expect(each).toEqual(alone);
@@ -787,6 +790,36 @@ describe('the duplicate check and claiming an order (D3)', () => {
     );
     // Both looks were met, each way: never a run of answers all alike.
     expect([...seen].sort()).toEqual(['false:false', 'false:true', 'true:false']);
+  });
+
+  it('leaves the claims of the requests named out of both looks, and gives each order its canonical form and bank key (claimsOnEach, E4c)', async () => {
+    const org = await organisation();
+    const first = await approved(org);
+    expect(await claimed(org, first)).toBe('claimed');
+    const order = { supplierId: org.supplier.id, payeeKey: null, except: randomUUID() };
+    const [same, lookalike] = await inOrg(org, (tx) =>
+      claimsOnEach(tx, [
+        { ...order, reference: ' po-2026/0042 ' },
+        { ...order, reference: 'PO_2026/0042' },
+      ]),
+    );
+    expect([same?.duplicate, lookalike?.possible]).toEqual([true, true]);
+    expect([same?.key, lookalike?.bankKey]).toEqual(['po-2026/0042', same?.bankKey]);
+
+    const apart = await inOrg(org, (tx) =>
+      claimsOnEach(
+        tx,
+        [
+          { ...order, reference: 'PO-2026/0042' },
+          { ...order, reference: 'PO_2026/0042' },
+        ],
+        [first],
+      ),
+    );
+    expect(apart.map(({ duplicate, possible }) => [duplicate, possible])).toEqual([
+      [false, false],
+      [false, false],
+    ]);
   });
 
   it('finds an order claimed and open for the supplier, however it is written, and none once released', async () => {

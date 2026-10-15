@@ -369,8 +369,8 @@ describe('POST /v1/mandates/:id/accept asks a passkey step-up to accept the draf
         outcome: 'asked',
         stepUpChallengeId: CHALLENGE,
         carry: [
-          { id: carried, carried: true, reasons: ['APPROVAL_THRESHOLD'] },
-          { id: cancelled, carried: false, reasons: ['MANDATE_ORDER_LIMIT'] },
+          { id: carried, outcome: 'carry', reasons: ['APPROVAL_THRESHOLD'] },
+          { id: cancelled, outcome: 'cancel', reasons: ['MANDATE_ORDER_LIMIT'] },
         ],
       },
     });

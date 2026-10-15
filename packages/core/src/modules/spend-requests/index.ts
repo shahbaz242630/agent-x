@@ -31,7 +31,7 @@ export {
   type Decided,
   MOST_CHECKED_A_PAGE,
 } from './infrastructure/holdings-check.ts';
-export type { HeldAs } from './domain/holdings.ts';
+export type { HeldAs, HeldSealed } from './domain/holdings.ts';
 export { type Approval, approveRequest } from './infrastructure/approvals.ts';
 export {
   type DecidedAgainst,
@@ -71,6 +71,7 @@ export {
 } from './infrastructure/endings.ts';
 export {
   type AuthorityNow,
+  isPending,
   isPendingChoice,
   PAUSED_IN,
   type Pausable,
@@ -82,6 +83,7 @@ export {
   claimOrder,
   claimsOn,
   claimsOnEach,
+  type OrderClaimsSeen,
   type OrderOf,
   type OrderWeighed,
   releaseClaim,
