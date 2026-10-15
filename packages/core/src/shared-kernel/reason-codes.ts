@@ -147,10 +147,16 @@ export const REASON_CODES = {
   PAYEE_ROUTE_NOT_OFFERED:
     "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
+  PENDING_CHOICE_NOT_OFFERED:
+    'This is the mandate’s first version, so no requests are pending under it and there is nothing to cancel or carry over: leave the choice out. Nothing was changed.',
+  PENDING_CHOICE_REQUIRED:
+    'A version is in force, so choose what happens to its pending requests: cancel them, or carry them over to the new version, each checked again under its terms. Nothing was changed.',
   PENDING_REQUESTS_CANCELLED:
     "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed.",
   PENDING_REQUESTS_TOO_MANY:
     'More pending requests are left to cancel than one move cancels at once, so nothing was changed. Wait a few minutes while they are cancelled, then try again; if its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel first.',
+  PENDING_REQUESTS_TOO_MANY_TO_CARRY:
+    'More requests are pending under the version in force than can be checked again at once (20), so nothing was changed. Choose cancel, or approve, reject or cancel some first, then try again.',
   POLICY_CHANGES_SPENT:
     "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
   POLICY_CURRENCY_REFUSED:

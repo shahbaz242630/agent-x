@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { type SeededSupplier as Supplier, seedRows } from '../../../seed-rows.helper.test.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
-import { claimOrder, claimsOn, orderKeyOf, releaseClaim } from './order-claims.ts';
+import { claimOrder, claimsOn, claimsOnEach, orderKeyOf, releaseClaim } from './order-claims.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -744,6 +744,49 @@ describe('the duplicate check and claiming an order (D3)', () => {
       // And always: two runs of spaces apart, each collapsed.
       { numRuns: 60, examples: [['P  o   4']] },
     );
+  });
+
+  it('answers several orders at once exactly as each alone (claimsOnEach, E4c): duplicates and lookalikes, by supplier or payee, its own left out', async () => {
+    const org = await organisation();
+    const other = await supplierOf(org.id, 'payee-9');
+    const first = await approved(org);
+    const second = await approved(org, {
+      supplier_id: other.id,
+      supplier_version_id: other.version,
+      order_reference: 'INV-22',
+    });
+    expect(await claimed(org, first)).toBe('claimed');
+    expect(await claimed(org, second, { supplier: other.id, payeeKey: 'payee-9', reference: 'INV-22' })).toBe(
+      'claimed',
+    );
+    const asked = fc.record({
+      supplierId: fc.constantFrom(org.supplier.id, other.id, randomUUID()),
+      payeeKey: fc.constantFrom(null, 'payee-9', 'payee-1'),
+      reference: fc.constantFrom(
+        'PO-2026/0042',
+        ' po-2026/0042 ',
+        'PO_2026/0042',
+        'INV-22',
+        'INV_22',
+        'inv 22',
+        'PO-1',
+      ),
+      except: fc.constantFrom(first, second, randomUUID()),
+    });
+
+    const seen = new Set<string>();
+    await fc.assert(
+      fc.asyncProperty(fc.array(asked, { minLength: 1, maxLength: 6 }), async (orders) => {
+        const each = await inOrg(org, (tx) => claimsOnEach(tx, orders));
+        const alone = [];
+        for (const order of orders) alone.push(await inOrg(org, (tx) => claimsOn(tx, order)));
+        expect(each).toEqual(alone);
+        for (const { duplicate, possible } of each) seen.add(`${String(duplicate)}:${String(possible)}`);
+      }),
+      { numRuns: 40 },
+    );
+    // Both looks were met, each way: never a run of answers all alike.
+    expect([...seen].sort()).toEqual(['false:false', 'false:true', 'true:false']);
   });
 
   it('finds an order claimed and open for the supplier, however it is written, and none once released', async () => {

@@ -102,6 +102,44 @@ export async function claimsOn(
 }
 
 /**
+ * claimsOn for several orders at once, in one statement, each with its own
+ * request left out (a carry to a new mandate version weighs its pending
+ * requests again, Phase 3 E4c): the same two looks, clause for clause, made
+ * for each order of a list, at least one. Answered in the orders' order.
+ */
+export async function claimsOnEach(
+  tx: ClaimsTransaction,
+  orders: readonly (OrderOf & { readonly except: string })[],
+): Promise<readonly { readonly duplicate: boolean; readonly possible: boolean }[]> {
+  const { rows } = await sql<{ at: number; duplicate: boolean; possible: boolean }>`
+    select asked.at,
+      exists (
+        select 1 from spend_requests.order_claims as claim
+        where claim.released_at is null
+          and claim.order_reference = ${orderKeyOf(sql.ref('asked.reference'))}
+          and (claim.supplier_id = asked.supplier_id or (asked.payee_key is not null and claim.payee_key = asked.payee_key))
+          and claim.request_id <> asked.except_id
+      ) as duplicate,
+      asked.bank_key is not null and exists (
+        select 1 from spend_requests.order_claims as claim
+        where claim.released_at is null
+          and claim.bank_key = asked.bank_key
+          and claim.order_reference <> ${orderKeyOf(sql.ref('asked.reference'))}
+          and (claim.supplier_id = asked.supplier_id or (asked.payee_key is not null and claim.payee_key = asked.payee_key))
+      ) as possible
+    from rows from (
+      pg_catalog.unnest(${orders.map((_, at) => at)}::int[]),
+      pg_catalog.unnest(${orders.map((order) => order.supplierId)}::uuid[]),
+      pg_catalog.unnest(${orders.map((order) => order.payeeKey)}::text[]),
+      pg_catalog.unnest(${orders.map((order) => order.reference)}::text[]),
+      pg_catalog.unnest(${orders.map((order) => bankKeyOf(order.reference))}::text[]),
+      pg_catalog.unnest(${orders.map((order) => order.except)}::uuid[])
+    ) as asked (at, supplier_id, payee_key, reference, bank_key, except_id)
+    order by asked.at`.execute(tx);
+  return rows.map(({ duplicate, possible }) => ({ duplicate, possible }));
+}
+
+/**
  * Claims a request's order, on its own supplier and order: `claimed`, or
  * `taken` when another request's open claim already holds it (left to the
  * caller to start again, the transaction still usable). A supplier or order

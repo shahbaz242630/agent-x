@@ -41,6 +41,7 @@ export {
   MOST_REQUESTS_A_PAGE,
   type NewRequest,
   requestOf,
+  requestsOf,
   requestsPage,
   signRequest,
   type SpendRequestCheck,
@@ -59,6 +60,7 @@ export {
   type RejectionShown,
   rejectRequest,
   requestsWaitingSince,
+  settleCarried,
   type SubjectsNamed,
   type Voided,
   type VoidingShown,
@@ -76,7 +78,14 @@ export {
   PENDING_STATUSES,
   type PendingChoice,
 } from './domain/voids.ts';
-export { claimOrder, claimsOn, type OrderOf, type OrderWeighed, releaseClaim } from './infrastructure/order-claims.ts';
+export {
+  claimOrder,
+  claimsOn,
+  claimsOnEach,
+  type OrderOf,
+  type OrderWeighed,
+  releaseClaim,
+} from './infrastructure/order-claims.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

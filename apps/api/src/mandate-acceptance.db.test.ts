@@ -31,6 +31,7 @@ import {
   type MandateAcceptance,
   type MandateAccepted,
 } from './mandate-acceptance.ts';
+import type { SupersedeChoice } from './mandate-carry.ts';
 import {
   createMandateRegistry,
   type MandateDraft,
@@ -77,22 +78,38 @@ async function redrafted(w: World, mandateId: string, overrides: Partial<Mandate
   return write.pending?.version.id ?? '';
 }
 
-const ask = (who: Member, mandateId: string, versionId: string) =>
-  acceptance.accept(who, keyed(who, ACCEPT_OPERATION), mandateId, versionId, CORRELATION);
+/** The admin's choice for the version in force's pending requests: none for a first version (E4c). */
+type Choice = SupersedeChoice | undefined;
 
-const confirm = (who: Member, mandateId: string, challengeId: string, key?: IdempotentRequest) =>
-  acceptance.acceptConfirm(who, key ?? keyed(who, ACCEPT_CONFIRM_OPERATION), mandateId, challengeId, CORRELATION);
+const ask = (who: Member, mandateId: string, versionId: string, choice?: Choice) =>
+  acceptance.accept(who, keyed(who, ACCEPT_OPERATION), mandateId, versionId, choice, CORRELATION);
+
+const confirm = (who: Member, mandateId: string, challengeId: string, key?: IdempotentRequest, choice?: Choice) =>
+  acceptance.acceptConfirm(
+    who,
+    key ?? keyed(who, ACCEPT_CONFIRM_OPERATION),
+    mandateId,
+    challengeId,
+    choice,
+    CORRELATION,
+  );
 
 const acceptedOf = (write: MandateAccepted) => {
   if (write.outcome !== 'accepted') throw new Error(`not accepted: ${JSON.stringify(write)}`);
   return write;
 };
 
-/** Asks, signs in again with `amr` and confirms: the confirm's answer. */
-async function accepted(w: World, mandateId: string, versionId: string, amr: readonly string[] = PASSKEY) {
-  const challengeId = askedFor(await ask(w.admin, mandateId, versionId));
+/** Asks, signs in again with `amr` and confirms, with the choice for a version in force's requests: the answer. */
+async function accepted(
+  w: World,
+  mandateId: string,
+  versionId: string,
+  amr: readonly string[] = PASSKEY,
+  choice?: Choice,
+) {
+  const challengeId = askedFor(await ask(w.admin, mandateId, versionId, choice));
   await stepUp(w.admin, challengeId, amr);
-  return confirm(w.admin, mandateId, challengeId);
+  return confirm(w.admin, mandateId, challengeId, undefined, choice);
 }
 
 beforeAll(async () => {
@@ -158,14 +175,15 @@ describe('accepting a mandate’s draft (B3)', () => {
     const { id, versionId } = await drafted(w);
     acceptedOf(await accepted(w, id, versionId));
     const second = await redrafted(w, id, { purpose: 'Stationery' });
-    const done = acceptedOf(await accepted(w, id, second));
+    const done = acceptedOf(await accepted(w, id, second, PASSKEY, 'cancel'));
 
     expect(done.mandate).toMatchObject({ status: 'ACTIVE', currentVersionId: second, pendingVersionId: null });
     expect(done.current?.version).toMatchObject({ version: 2, purpose: 'Stationery' });
     const events = await eventsAbout(w.org, id);
+    // The admin's choice for its pending requests is on the signed event, with its words' version (E4c).
     expect(events.at(-1)).toMatchObject({
       action: 'mandate.accepted',
-      details: { versionId: second, replaced: versionId },
+      details: { versionId: second, replaced: versionId, pendingRequests: 'cancel', pendingStatementVersion: 1 },
     });
   });
 
@@ -221,12 +239,50 @@ describe('the step-up bound to the mandate as it stood (B3)', () => {
     const { id, versionId } = await drafted(w);
     acceptedOf(await accepted(w, id, versionId));
     const second = await redrafted(w, id);
-    const challengeId = askedFor(await ask(w.admin, id, second));
+    const challengeId = askedFor(await ask(w.admin, id, second, 'cancel'));
     await stepUp(w.admin, challengeId);
     await movedPastTheUseCase(w, id, 'suspend');
     await movedPastTheUseCase(w, id, 'resume');
 
-    expect(await confirm(w.admin, id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await confirm(w.admin, id, challengeId, undefined, 'cancel')).toEqual(refused(403, 'STEP_UP_FAILED'));
+  });
+
+  it('refuses a step-up asked with another choice for the pending requests (E4c)', async () => {
+    const w = await world();
+    const { id, versionId } = await drafted(w);
+    acceptedOf(await accepted(w, id, versionId));
+    const second = await redrafted(w, id);
+    const challengeId = askedFor(await ask(w.admin, id, second, 'cancel'));
+    await stepUp(w.admin, challengeId);
+
+    expect(await confirm(w.admin, id, challengeId, undefined, 'carry')).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(acceptedOf(await confirm(w.admin, id, challengeId, undefined, 'cancel')).mandate.currentVersionId).toBe(
+      second,
+    );
+  });
+});
+
+describe('the choice for the pending requests (decision 15, E4c)', () => {
+  it('takes none for a first version, and refuses one given: there is nothing to cancel or carry', async () => {
+    const w = await world();
+    const { id, versionId } = await drafted(w);
+
+    for (const choice of ['cancel', 'carry'] as const) {
+      expect(await ask(w.admin, id, versionId, choice)).toEqual(refused(400, 'PENDING_CHOICE_NOT_OFFERED'));
+    }
+    expect(acceptedOf(await accepted(w, id, versionId)).mandate.status).toBe('ACTIVE');
+  });
+
+  it('requires one once a version is in force, at the ask and the confirm', async () => {
+    const w = await world();
+    const { id, versionId } = await drafted(w);
+    acceptedOf(await accepted(w, id, versionId));
+    const second = await redrafted(w, id);
+
+    expect(await ask(w.admin, id, second)).toEqual(refused(400, 'PENDING_CHOICE_REQUIRED'));
+    const challengeId = askedFor(await ask(w.admin, id, second, 'carry'));
+    await stepUp(w.admin, challengeId);
+    expect(await confirm(w.admin, id, challengeId)).toEqual(refused(400, 'PENDING_CHOICE_REQUIRED'));
   });
 });
 

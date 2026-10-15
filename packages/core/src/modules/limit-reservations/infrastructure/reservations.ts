@@ -127,6 +127,37 @@ export async function monthSpent(
 }
 
 /**
+ * monthSpent for several of the agent's months at once, in one statement,
+ * leaving out every request in `except`: a carry to a new mandate version
+ * weighs its requests against all else first (Phase 3 E4c). At least one
+ * month and one request; each month asked is answered, 0 where nothing is
+ * held.
+ */
+export async function monthsSpent(
+  tx: ReservationsTransaction,
+  {
+    agentId,
+    months,
+    currency,
+    except,
+  }: { agentId: string; months: readonly string[]; currency: string; except: readonly string[] },
+): Promise<ReadonlyMap<string, bigint>> {
+  const spent = new Map(months.map((month) => [month, 0n]));
+  const rows = await tx
+    .selectFrom('limit_reservations.reservations')
+    .select(['month', sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('spent')])
+    .where('agent_id', '=', agentId)
+    .where('month', 'in', months)
+    .where('currency', '=', currency)
+    .where('state', '<>', 'RELEASED')
+    .where('request_id', 'not in', except)
+    .groupBy('month')
+    .execute();
+  for (const row of rows) spent.set(row.month, BigInt(row.spent));
+  return spent;
+}
+
+/**
  * The split total in minor units (ADR-006 §9, ADR-014 §3 and §5; D5): what the
  * payee's reservations still hold (every state but RELEASED) that were
  * reserved since `since`, under any agent of the organisation. The payee is
@@ -135,7 +166,8 @@ export async function monthSpent(
  * counts, and so does one the supplier made before it had a key (0041's
  * indexes). A statement of its own after the supplier's lock, which
  * serialises the payee's decisions (§7.2). In `currency` alone, as the
- * threshold is (G4).
+ * threshold is (G4). `except` leaves requests out: a carry weighs its own
+ * apart (Phase 3 E4c).
  */
 export async function splitHeld(
   tx: ReservationsTransaction,
@@ -144,12 +176,14 @@ export async function splitHeld(
     payeeKey,
     since,
     currency,
-  }: { supplierId: string; payeeKey: string | null; since: Date; currency: string },
+    except = [],
+  }: { supplierId: string; payeeKey: string | null; since: Date; currency: string; except?: readonly string[] },
 ): Promise<bigint> {
   const { held } = await tx
     .selectFrom('limit_reservations.reservations')
     .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('held'))
     .where('state', '<>', 'RELEASED')
+    .where((where) => (except.length === 0 ? where.lit(true) : where('request_id', 'not in', except)))
     .where('reserved_at', '>=', since)
     .where('currency', '=', currency)
     .where((where) =>

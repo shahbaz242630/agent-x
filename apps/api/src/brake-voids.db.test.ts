@@ -180,11 +180,18 @@ async function superseding(w: World, mandateId: string): Promise<Press> {
   );
   const versionId = drafted.pending?.version.id ?? '';
   const challengeId = askedFor(
-    await acceptance.accept(w.admin, keyed(w.admin, ACCEPT_OPERATION), mandateId, versionId, CORRELATION),
+    await acceptance.accept(w.admin, keyed(w.admin, ACCEPT_OPERATION), mandateId, versionId, 'cancel', CORRELATION),
   );
   await stepUp(w.admin, challengeId);
   return () =>
-    acceptance.acceptConfirm(w.admin, keyed(w.admin, ACCEPT_CONFIRM_OPERATION), mandateId, challengeId, CORRELATION);
+    acceptance.acceptConfirm(
+      w.admin,
+      keyed(w.admin, ACCEPT_CONFIRM_OPERATION),
+      mandateId,
+      challengeId,
+      'cancel',
+      CORRELATION,
+    );
 }
 
 /** The services the source's and the supplier's use cases are made with. */

@@ -249,6 +249,61 @@ export async function voidRequest(
 }
 
 /**
+ * A pending request of a mandate's version in force, weighed again under the
+ * draft being accepted in its place (Phase 3 E4c; decisions 15 and 17), read
+ * for change in this transaction and its holdings locked by the caller:
+ * - `carry`: it names the draft from now on (`spend_request.carried`, the
+ *   accepting admin's, its status as it was; 0047's `carried_version`), so
+ *   the voids, the job and an approval compare it as any other. The caller
+ *   carries before the draft is accepted, while it is the mandate's waiting.
+ * - `cancel`: DENIED with the new terms' reasons, its holdings released,
+ *   recorded as the API's (`spend_request.voided`, as the brakes' voids).
+ * `mismatch` when its holdings don't match its decision (the alarm raised by
+ * the judging, nothing moved): the caller refuses.
+ */
+export async function settleCarried(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  key: { readonly orgId: string; readonly id: string },
+  settled:
+    | { readonly outcome: 'carry'; readonly draftId: string; readonly change: SignedChange }
+    | { readonly outcome: 'cancel'; readonly causes: readonly ReasonCode[] },
+  now: Date,
+): Promise<'settled' | 'mismatch'> {
+  if (settled.outcome === 'cancel') {
+    await endHolding(tx, states, keys, key, 'deny', now, {
+      actor: ACTOR,
+      action: VOIDED,
+      details: { causes: settled.causes.join(',') },
+    });
+    return 'settled';
+  }
+  if (!(await requestHoldingsWhole(tx, states, keys, key.orgId, key.id))) return 'mismatch';
+  const read = await requestOf(tx, states, key, 'change');
+  // The caller read it pending in this transaction, locked: anything else is a bug.
+  if (read.outcome !== 'found' || !(PENDING_STATUSES as readonly string[]).includes(read.request.status)) {
+    throw new Error(`A spend request read as pending to carry isn't: ${key.id}`);
+  }
+  await states.record(
+    tx,
+    SPEND_REQUESTS,
+    key,
+    read.state,
+    { mandate_version_id: settled.draftId },
+    {
+      ...settled.change,
+      details: {
+        ...settled.change.details,
+        fromVersionId: decidedAgainst(read.state).mandateVersionId,
+        mandateVersionId: settled.draftId,
+      },
+    },
+  );
+  return 'settled';
+}
+
+/**
  * How many pending requests a brake voids in its own transaction: the rest
  * are left to the request-voids job (5 minutes), meanwhile unable to be
  * approved or handed off under the stop. Kept small so the brake is quick:
