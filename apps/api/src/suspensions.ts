@@ -239,8 +239,9 @@ const DETAILS_STATEMENTS = {
     'Once you confirm the new details, its requests are held as they are: none can be approved or paid until a ' +
     'second person verifies the supplier with its new details, when approved ones stand again. Requests waiting ' +
     'for approval can’t be approved under the old details, and still expire after 72 hours. New bank details made ' +
-    'current, or a later change chosen to cancel, cancel them. A supplier already suspended or unverified keeps ' +
-    'the choice it was stopped with.',
+    'current, or a later change chosen to cancel, cancel them, and so does an eleventh change in a row chosen to ' +
+    'pause, for the requests held since before the first. A supplier already suspended or unverified keeps the ' +
+    'choice it was stopped with.',
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of DETAILS_STATEMENTS each event names: raised with any change to their words. */
@@ -263,7 +264,10 @@ export const detailsChoiceDetails = (choice: PendingChoice) =>
 export const DETAILS_CHANGED = 'supplier.details_changed';
 export const VERSION_MOVES = [DETAILS_CHANGED, 'supplier.payee_change_confirmed'] as const;
 
-/** The most details changes back a request is carried through: one decided before them is voided (fail-closed). */
+/**
+ * The most details changes back a request is carried through: one decided
+ * before them is voided (fail-closed), as DETAILS_STATEMENTS' pause says.
+ */
 export const MOST_CARRIED_CHANGES = 10;
 
 /**

@@ -68,7 +68,7 @@ describe('pausedFromOf', () => {
     expect(await carried([paused('v2', 'v1'), stop, paused('v3', 'v2')])).toEqual(['v2']);
   });
 
-  it('carries from none for a supplier whose newest move isn’t a pause', async () => {
+  it('carries from none for a supplier with no version moves', async () => {
     expect(await carried([])).toEqual([]);
   });
 

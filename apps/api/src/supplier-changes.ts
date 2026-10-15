@@ -54,6 +54,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import {
   createSupplierWork,
+  pauseOverACancel,
   type SessionMember,
   type SupplierChangeWrite,
   type SupplierMember,
@@ -163,15 +164,7 @@ export function createSupplierChanges({
         const key = { orgId: member.orgId, id: supplierId };
         const found = await work.supplierIn(tx, states, key, 'change');
         const braked = { supplierId: found.supplier.id };
-        // A pause can't hold what an UNVERIFIED supplier's stop cancels (C3c's suspend over a cancel): those the
-        // job hasn't reached yet are voided first, refused past what one brake voids.
-        const cancelledBefore =
-          pendingRequests === 'pause' &&
-          found.supplier.status === 'UNVERIFIED' &&
-          !(await pausedOf(tx, states, member.orgId, [['supplier', found.supplier.id, 'UNVERIFIED']])).has('supplier');
-        if (cancelledBefore && (await pendingPastABrake(tx, member.orgId, braked))) {
-          throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
-        }
+        const cancelledBefore = await pauseOverACancel(tx, states, member.orgId, found.supplier, pendingRequests);
         if (pendingRequests === 'cancel' || cancelledBefore) {
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
         }

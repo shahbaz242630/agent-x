@@ -1,6 +1,7 @@
 // One detail of an object's newest event of the actions named, and whether an
 // object moved otherwise than one way since another's first event (E3), as a
-// query's expressions, unverified (Phase 3 C2a, C3b): a candidate's filter alone, never a
+// query's expressions, unverified (Phase 3 C2a, C3b): a candidate's filter
+// alone, never a
 // decision. A caller believes what it then acts on only through the
 // verified read (SignedStates.historyOf, `newest`). 0005's
 // `events_by_subject` index finds the object's events newest first. The

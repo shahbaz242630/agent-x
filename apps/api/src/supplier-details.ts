@@ -41,7 +41,7 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import type { Outbox } from '@agentx/core/modules/notifications';
-import { pendingPastABrake, type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import {
   changeDetails,
   nextVersionNumber,
@@ -57,6 +57,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { ADDING_ROLES } from './supplier-registry.ts';
 import {
   createSupplierWork,
+  pauseOverACancel,
   type SessionMember,
   type SupplierChangeWrite,
   SupplierRefused,
@@ -64,7 +65,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
-import { DETAILS_STATEMENT_VERSION, detailsChoiceDetails, pausedOf } from './suspensions.ts';
+import { DETAILS_STATEMENT_VERSION, detailsChoiceDetails } from './suspensions.ts';
 import { createStepUps } from './use-case-work.ts';
 
 /** Asking to change a supplier's details: its operation, which the step-up challenge names as its action too. */
@@ -174,13 +175,7 @@ export function createSupplierDetailsChanges({
     if (fieldsOf(details).every((field, at) => field === currentFields[at])) {
       throw new SupplierRefused(409, 'SUPPLIER_DETAILS_UNCHANGED');
     }
-    const cancelledBefore =
-      pendingRequests === 'pause' &&
-      found.supplier.status === 'UNVERIFIED' &&
-      !(await pausedOf(tx, states, orgId, [['supplier', found.supplier.id, 'UNVERIFIED']])).has('supplier');
-    if (cancelledBefore && (await pendingPastABrake(tx, orgId, { supplierId: found.supplier.id }))) {
-      throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
-    }
+    const cancelledBefore = await pauseOverACancel(tx, states, orgId, found.supplier, pendingRequests);
     return { admin, found, current, cancelledBefore };
   };
 

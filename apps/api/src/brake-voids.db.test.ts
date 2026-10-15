@@ -228,6 +228,33 @@ const supplierSuspended = (w: World, choice: PendingChoice) =>
     CORRELATION,
   );
 
+/** The world's first supplier: the one the supplier brakes stop. */
+const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
+
+/** The request-voids job, over the world's organisation alone. */
+const job = (w: World) =>
+  createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
+
+/** The world's first supplier reactivated by its admin with `choice`, stepped up with a passkey. */
+const reactivated = async (w: World, choice: PendingChoice) => {
+  const changes = createSupplierChanges(services());
+  const asked = await changes.reactivate(
+    w.admin,
+    keyed(w.admin, SUPPLIER_REACTIVATE),
+    supplierOfWorld(w),
+    choice,
+    CORRELATION,
+  );
+  const challengeId = askedFor(asked);
+  await stepUp(w.admin, challengeId);
+  return changes.reactivateConfirm(
+    w.admin,
+    keyed(w.admin, SUPPLIER_REACTIVATE_CONFIRM),
+    supplierOfWorld(w),
+    { stepUpChallengeId: challengeId, pendingRequests: choice },
+    CORRELATION,
+  );
+};
 /** Details for the world's first supplier other than both its own and detailsChanging's. */
 const CHANGED_AGAIN = {
   displayName: 'Gulf Office Supplies Holdings LLC',
@@ -658,10 +685,6 @@ describe('the brakes void their own pending requests in their transaction (C2b)'
 });
 
 describe('a payee registration’s choice for the supplier’s pending requests (decision 8, C3b)', () => {
-  const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
-  const job = (w: World) =>
-    createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
-
   it('cancel: the check voids them, before its first event, and unverifies the supplier', async () => {
     const { w, acting } = await ready();
     const { approved, waiting, elsewhere } = await pendingOf(w, acting);
@@ -906,9 +929,6 @@ describe('a payee registration’s choice for the supplier’s pending requests 
 });
 
 describe('a supplier’s details changed: the admin chooses cancel or pause (decision 15, E3)', () => {
-  const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
-  const job = (w: World) =>
-    createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
   /** The world's first supplier's details changed with `choice` (named `displayName`): its answer. */
   const changedDetails = async (w: World, choice: PendingChoice, displayName?: string) =>
     (await detailsChanging(w, choice, displayName))();
@@ -959,6 +979,21 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
 
     await standing(w, [approved, waiting]);
   });
+
+  it('pause ten times in a row: carried, verified they stand; an eleventh: voided by the job, as its words say', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    for (let each = 1; each <= 10; each += 1) await changedDetails(w, 'pause', `Gulf Office Supplies ${each}`);
+    await shared.verified(w, supplierOfWorld(w));
+    await job(w).run();
+    await standing(w, [approved, waiting]);
+
+    await changedDetails(w, 'pause', 'Gulf Office Supplies 11');
+    await shared.verified(w, supplierOfWorld(w));
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 120_000);
 
   it('pause, then a later change chosen to cancel: voided at once, verified or not', async () => {
     const { w, acting } = await ready();
@@ -1025,26 +1060,7 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
 
     expect(await changedDetails(w, 'pause')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
     await standing(w, [approved, waiting]);
-    const reactivating = createSupplierChanges(services());
-    const challengeId = askedFor(
-      await reactivating.reactivate(
-        w.admin,
-        keyed(w.admin, SUPPLIER_REACTIVATE),
-        supplierOfWorld(w),
-        'pause',
-        CORRELATION,
-      ),
-    );
-    await stepUp(w.admin, challengeId);
-    expect(
-      await reactivating.reactivateConfirm(
-        w.admin,
-        keyed(w.admin, SUPPLIER_REACTIVATE_CONFIRM),
-        supplierOfWorld(w),
-        { stepUpChallengeId: challengeId, pendingRequests: 'pause' },
-        CORRELATION,
-      ),
-    ).toMatchObject({ supplier: { status: 'UNVERIFIED' } });
+    expect(await reactivated(w, 'pause')).toMatchObject({ supplier: { status: 'UNVERIFIED' } });
     await job(w).run();
     await standing(w, [approved, waiting]);
 
@@ -1105,29 +1121,6 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
 });
 
 describe('reactivating a suspended supplier: a fresh start or an un-pause (decision 9, C3d)', () => {
-  const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
-  const job = (w: World) =>
-    createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
-  /** The world's first supplier reactivated by its admin with `choice`, stepped up with a passkey. */
-  const reactivated = async (w: World, choice: PendingChoice) => {
-    const changes = createSupplierChanges(services());
-    const asked = await changes.reactivate(
-      w.admin,
-      keyed(w.admin, SUPPLIER_REACTIVATE),
-      supplierOfWorld(w),
-      choice,
-      CORRELATION,
-    );
-    const challengeId = askedFor(asked);
-    await stepUp(w.admin, challengeId);
-    return changes.reactivateConfirm(
-      w.admin,
-      keyed(w.admin, SUPPLIER_REACTIVATE_CONFIRM),
-      supplierOfWorld(w),
-      { stepUpChallengeId: challengeId, pendingRequests: choice },
-      CORRELATION,
-    );
-  };
   const reactivation = async (w: World) =>
     (await shared.eventsAbout(w.org, supplierOfWorld(w), 'supplier')).findLast(({ action }) =>
       action.startsWith('supplier.reactivate'),
@@ -1268,8 +1261,6 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
 });
 
 describe('freezing the organisation: an admin or approver chooses cancel or pause; unfreezing with a passkey, a reason and a choice (D1, D2)', () => {
-  const job = (w: World) =>
-    createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
   const freezes = async (w: World) =>
     (await shared.eventsAbout(w.org, w.org, 'organization')).filter(({ action }) => action === 'organization.freeze');
   const told = (w: World) =>
