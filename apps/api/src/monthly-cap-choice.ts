@@ -10,6 +10,7 @@
 // none only when its event says so: a version made before E2 with no cap
 // meant the old AED 20,000 default, and reads as not chosen (fail-closed).
 import type { AuditDetails } from '@agentx/core/modules/audit';
+import { MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
 import { z } from 'zod';
 
 export const MONTHLY_CAP_CHOICES = ['amount', 'none'] as const;
@@ -38,6 +39,13 @@ export const MONTHLY_CAP_CHOICE = z
     'The organisation’s monthly cap per agent, confirmed by the admin; there is no default, and no agent may spend ' +
       'until it is chosen. `amount` (with monthlyCapMinor): ' +
       `${MONTHLY_CAP_STATEMENTS.amount} \`none\` (with no monthlyCapMinor): ${MONTHLY_CAP_STATEMENTS.none}`,
+  );
+
+/** Where an agent's monthly cap comes from, as a mandate and the agent's own view show it. */
+export const MONTHLY_CAP_FROM_FIELD = z
+  .enum(MONTHLY_CAP_FROM)
+  .describe(
+    'Where it comes from: the mandate’s own policy, the organisation’s, `none` (the organisation chose no cap: only the mandate’s own monthly limit), or `not-set` (its admin hasn’t chosen yet: every request is refused, ORG_MONTHLY_CAP_NOT_SET).',
   );
 
 /** The choice as the version's event keeps it, with the words confirmed: what the step-up is bound to as well. */

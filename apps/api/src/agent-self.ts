@@ -26,7 +26,6 @@
 import { SCOPES } from '@agentx/core/modules/agents';
 import { MANDATE } from '@agentx/core/modules/mandates';
 import { MOST_SOURCES_A_PAGE } from '@agentx/core/modules/funding-sources';
-import { MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -35,6 +34,7 @@ import { agentOf, need } from './access.ts';
 import type { AgentMandates } from './agent-mandate.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import { MONTHLY_CAP_FROM_FIELD } from './monthly-cap-choice.ts';
 import { NEXT, pageQuery } from './route-schemas.ts';
 
 const SELF_SCHEMA = {
@@ -76,11 +76,7 @@ const MANDATE_SCHEMA = {
           .describe(
             'The most the organisation’s policies let you spend in a month, in whole minor units: the lower of this and monthlyLimitMinor applies. Null: no cap, as monthlyCapFrom says.',
           ),
-        monthlyCapFrom: z
-          .enum(MONTHLY_CAP_FROM)
-          .describe(
-            'Where it comes from: the mandate’s own policy, the organisation’s, `none` (the organisation chose no cap: only the mandate’s own monthly limit), or `not-set` (its admin hasn’t chosen yet: every request is refused, ORG_MONTHLY_CAP_NOT_SET).',
-          ),
+        monthlyCapFrom: MONTHLY_CAP_FROM_FIELD,
         supplierIds: z.array(z.uuid()).describe('The suppliers you may pay, by ID, in order of ID.'),
         fundingSourceId: z.uuid().describe('The bank account you pay from, by ID.'),
         timeZone: z.string().describe('The IANA time zone your months are counted in.'),

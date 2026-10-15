@@ -22,7 +22,6 @@ import {
   PURPOSE_MOST,
   SPLIT_WINDOW_HOURS,
 } from '@agentx/core/modules/mandates';
-import { MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
 import { isPendingChoice } from '@agentx/core/modules/spend-requests';
 import { moneyFromJson, timeZoneOf } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
@@ -55,6 +54,7 @@ import {
   MOVING_ROLES,
 } from './mandate-moves.ts';
 import type { MandateView, VersionShown } from './mandate-reads.ts';
+import { MONTHLY_CAP_FROM_FIELD } from './monthly-cap-choice.ts';
 import {
   AMOUNT,
   CHALLENGE_BODY_LIMIT,
@@ -209,11 +209,7 @@ const MANDATE_DETAILS = z
       .object({
         capMinor: z.number().nullable().describe('Whole minor units, or null: no cap (see from).'),
         currency: z.string().nullable(),
-        from: z
-          .enum(MONTHLY_CAP_FROM)
-          .describe(
-            'Where it comes from: the mandate’s own policy, the organisation’s, `none` (the organisation chose no cap: only the mandate’s own monthly limit), or `not-set` (its admin hasn’t chosen yet: every request is refused, ORG_MONTHLY_CAP_NOT_SET).',
-          ),
+        from: MONTHLY_CAP_FROM_FIELD,
       })
       .describe(
         'The monthly cap the organisation’s policies hold the agent to: below the mandate’s own monthly limit, it is the one that applies.',
@@ -405,16 +401,16 @@ const versionOf = ({ version: v, consentWarnings, capWarnings }: VersionShown) =
   capWarnings: [...capWarnings],
 });
 
-const detailsOf = ({ mandate, current, pending, agentMonthlyCap }: MandateView) => ({
+const detailsOf = ({ mandate, current, pending, agentMonthlyCap: { cap, from } }: MandateView) => ({
   ...mandateBody(mandate),
   acceptedBy: mandate.acceptedBy,
   acceptedAt: mandate.acceptedAt?.toISOString() ?? null,
   current: current === null ? null : versionOf(current),
   pending: pending === null ? null : versionOf(pending),
   agentMonthlyCap: {
-    capMinor: agentMonthlyCap.cap === null ? null : Number(agentMonthlyCap.cap.minor),
-    currency: agentMonthlyCap.cap?.currency ?? null,
-    from: agentMonthlyCap.from,
+    capMinor: cap === null ? null : Number(cap.minor),
+    currency: cap === null ? null : cap.currency,
+    from,
   },
 });
 

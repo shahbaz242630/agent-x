@@ -254,14 +254,13 @@ export function createPolicyChanges({
       target.scope === 'organization'
         ? orgId.toLowerCase()
         : (await mandateIn(tx, states, orgId, target.mandateId, 'share')).mandate.id;
-    const read = await policyRulesIn(tx, states, orgId, id);
+    const current = (await policyRulesIn(tx, states, orgId, id))?.current ?? null;
     return {
       scope: target.scope,
       id,
       mandateId: target.scope === 'mandate' ? id : null,
-      current: read?.current ?? null,
-      monthlyCapChoice:
-        target.scope === 'organization' ? await capChoiceOf(tx, states, orgId, read?.current ?? null) : null,
+      current,
+      monthlyCapChoice: target.scope === 'organization' ? await capChoiceOf(tx, states, orgId, current) : null,
     };
   };
 
