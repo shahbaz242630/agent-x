@@ -1097,7 +1097,7 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     expect(await frozen(w, 'pause')).toMatchObject({ outcome: 'changed', organization: { status: 'FROZEN' } });
     await job(w).run();
     for (const request of [approved, waiting, elsewhere]) expect(await statusOf(w, request.id)).toBe(request.status);
-    expect(await freezes(w)).toMatchObject([{ details: { pendingRequests: 'pause', pendingStatementVersion: 1 } }]);
+    expect(await freezes(w)).toMatchObject([{ details: { pendingRequests: 'pause', pendingStatementVersion: 2 } }]);
 
     expect(await unfrozen(w, 'All clear', 'pause')).toMatchObject({ organization: { status: 'ACTIVE' } });
     await job(w).run();
@@ -1123,6 +1123,8 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     expect(await frozen(w, 'pause')).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_CANCELLED' });
     expect(await frozen(w, 'cancel')).toMatchObject({ outcome: 'changed' });
     expect(await told(w)).toEqual([{ kind: 'organization_frozen' }]);
+    // The newest freeze cancels, so an un-pause is refused too (decision 14).
+    expect(await unfreezeAsked(w, 'All clear', 'pause')).toMatchObject({ code: 'PENDING_REQUESTS_CANCELLED' });
   });
 
   it('an approver may freeze it (decision 12), but only an admin unfreezes it: FORBIDDEN, still frozen', async () => {

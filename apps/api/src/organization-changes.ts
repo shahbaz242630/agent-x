@@ -3,11 +3,12 @@
 // the other brakes are (agent-changes.ts, supplier-changes.ts).
 //
 // - `freeze` (`organization.freeze`): an instant brake, one click and no
-//   step-up, for any admin or approver (decision 12, partner S112), confirmed (decision 11: the console's
-//   are-you-sure, so a mis-click blocks nothing) and with the admin's choice
-//   for the organisation's pending spend requests, cancel or pause (decision
-//   10, suspensions.ts). The key claimed first; the organisation read for
-//   change; the admin read again; on cancel, the pending requests DENIED
+//   step-up, for any admin or approver (decision 12, partner S112),
+//   confirmed (decision 11: the console's are-you-sure, so a mis-click blocks
+//   nothing) and with the member's choice for the organisation's pending
+//   spend requests, cancel or pause (decision 10, suspensions.ts). The key
+//   claimed first; the organisation read for change; the member read again;
+//   on cancel, the pending requests DENIED
 //   before its move (voidPendingOf, the request-voids job taking any past
 //   the batch), pressed again too; then ACTIVE > FROZEN with the choice on
 //   its event. One frozen already is answered as it is, unless the choice

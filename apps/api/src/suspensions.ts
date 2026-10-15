@@ -57,12 +57,16 @@ const STATEMENTS = {
     'This can’t be undone: the agent asks again once it is resumed.',
   pause:
     'Its requests are held as they are: none can be approved or paid while it is suspended, and they stand again ' +
-    'once it is resumed. Requests waiting for approval still expire after 72 hours. Requests an earlier stop has ' +
-    'already cancelled (a supplier unverified with them cancelled) stay cancelled.',
+    'once it is resumed, unless the admin reactivating a supplier chooses a fresh start. Requests waiting for ' +
+    'approval still expire after 72 hours. Requests an earlier stop has already cancelled (a supplier unverified ' +
+    'with them cancelled) stay cancelled.',
 } as const satisfies Record<PendingChoice, string>;
 
-/** The version of STATEMENTS each event names: raised with any change to their words (2: an earlier stop's cancel, S113). */
-const STATEMENT_VERSION = 2;
+/**
+ * The version of STATEMENTS each event names: raised with any change to their
+ * words (2: an earlier stop's cancel; 3: a supplier's fresh start; S113).
+ */
+const STATEMENT_VERSION = 3;
 
 /** A suspend's choice, as its body names it. */
 const PENDING_REQUESTS = z
@@ -119,26 +123,27 @@ const FREEZE_STATEMENTS = {
     'held for it freed. This can’t be undone: the agents ask again once it is unfrozen.',
   pause:
     'Its spend requests are held as they are: none can be approved or paid while it is frozen, and they stand again ' +
-    'once it is unfrozen. Requests waiting for approval still expire after 72 hours.',
+    'once it is unfrozen, unless the admin unfreezing it chooses a fresh start. Requests waiting for approval still ' +
+    'expire after 72 hours.',
 } as const satisfies Record<PendingChoice, string>;
 
-/** The version of FREEZE_STATEMENTS each event names: raised with any change to their words. */
-const FREEZE_STATEMENT_VERSION = 1;
+/** The version of FREEZE_STATEMENTS each event names: raised with any change to their words (2: a fresh start, D2). */
+const FREEZE_STATEMENT_VERSION = 2;
 
-/** A freeze's body: the admin's choice, and their confirmation (decision 11: the console's are-you-sure). */
+/** A freeze's body: the member's choice, and their confirmation (decision 11: the console's are-you-sure). */
 export const FREEZE_BODY = z
   .strictObject({
     pendingRequests: z
       .enum(PENDING_CHOICES)
       .describe(
-        'What happens to the organisation’s pending spend requests, chosen by the admin freezing; there is no ' +
-          `default. \`cancel\`: ${FREEZE_STATEMENTS.cancel} \`pause\`: ${FREEZE_STATEMENTS.pause}`,
+        'What happens to the organisation’s pending spend requests, chosen by the admin or approver freezing; there ' +
+          `is no default. \`cancel\`: ${FREEZE_STATEMENTS.cancel} \`pause\`: ${FREEZE_STATEMENTS.pause}`,
       ),
     confirmed: z
       .literal(true)
-      .describe('The admin confirmed the freeze, shown what it does: no request is decided or approved while frozen.'),
+      .describe('They confirmed the freeze, shown what it does: no request is decided or approved while frozen.'),
   })
-  .describe('The freezing admin’s choice and confirmation.');
+  .describe('The freezing admin’s or approver’s choice and confirmation.');
 
 /** The choice as a freeze's event keeps it, with the statement confirmed. */
 export const freezeChoiceDetails = (choice: PendingChoice) =>

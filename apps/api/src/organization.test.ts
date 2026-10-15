@@ -1,4 +1,4 @@
-// Phase 3 D1: the organisation's freeze routes, answering an admin with each
+// Phase 3 D1, D2: the organisation's freeze routes, answering an admin with each
 // outcome of the use case, and refusing a body that doesn't choose, confirm
 // or give a reason before it runs (D1, D2). Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use case does in the database is
