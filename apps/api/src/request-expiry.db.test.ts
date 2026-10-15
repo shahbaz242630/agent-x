@@ -193,6 +193,40 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
   });
 
+  it('runs its 72 hours from its decision, not a later event of its own: due by its decision, not by the later one (E4b)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    // Sealed times are the database's own, so the later event comes a moment later, not hours.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const later = await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const read = await requestOf(tx, states, { orgId: w.org, id: waiting.id }, 'change');
+      if (read.outcome !== 'found') throw new Error('the waiting request is not found');
+      // A signed change that moves nothing, as E4's carry is a later event on a request still waiting.
+      await states.record(
+        tx,
+        SPEND_REQUESTS,
+        { orgId: w.org, id: waiting.id },
+        read.state,
+        {},
+        {
+          actor: { type: 'system', id: 'api' },
+          action: 'spend_request.signed_again',
+          details: {},
+        },
+      );
+      const after = await requestOf(tx, states, { orgId: w.org, id: waiting.id });
+      if (after.outcome !== 'found') throw new Error('the waiting request is not found');
+      return after.state.recordedAt.getTime();
+    });
+    // 72 hours past its decision, not yet past the later event's.
+    clock.advanceBy(later + SEVENTY_TWO_HOURS - 1 - clock.now().getTime());
+
+    await expiryOf(only(w)).run();
+
+    expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
+    expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'RELEASED', released: true });
+  });
+
   it('refuses a request tampered with past the app, and pages past it when it fills a page, expiring the one after (FX-TAMPER)', async () => {
     const { w, acting } = await ready();
     const bad = await ask(acting, w);

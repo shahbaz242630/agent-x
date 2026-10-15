@@ -26,7 +26,7 @@ export {
   checkHoldings,
   holdingsRecordChecks,
   type HoldingsChecked,
-  heldAsDecidedOf,
+  decisionOf,
   MOST_CHECKED_A_PAGE,
 } from './infrastructure/holdings-check.ts';
 export type { HeldAs } from './domain/holdings.ts';
