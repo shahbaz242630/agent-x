@@ -74,8 +74,8 @@ const VIEW: MandateView = {
     consentWarnings: ['the per-order limit is above the bank consent’s per payment'],
     capWarnings: [],
   },
-  // C3c: the default cap, equal to the version's monthly limit, so no warning.
-  agentMonthlyCap: { cap: AED(2_000_000n), from: 'default' },
+  // C3c: the organisation's cap, equal to the version's monthly limit, so no warning.
+  agentMonthlyCap: { cap: AED(2_000_000n), from: 'organization-policy' },
 };
 
 /** The mandate as the routes answer it. */
@@ -109,7 +109,7 @@ const DETAILS_ANSWERED = {
   acceptedAt: null,
   current: null,
   pending: VERSION_ANSWERED,
-  agentMonthlyCap: { capMinor: 2_000_000, currency: 'AED', from: 'default' },
+  agentMonthlyCap: { capMinor: 2_000_000, currency: 'AED', from: 'organization-policy' },
 };
 
 afterEach(closeServers);
@@ -638,6 +638,14 @@ describe('reading mandates (B2)', () => {
       pending: { capWarnings: [ABOVE_THE_CAP] },
       agentMonthlyCap: { capMinor: 800_000, currency: 'AED', from: 'organization-policy' },
     });
+  });
+
+  it.each(['none', 'not-set'] as const)('shows no cap where the organisation chose %s (E2)', async (from) => {
+    const uncapped: MandateView = { ...VIEW, agentMonthlyCap: { cap: null, from } };
+    const { app } = await withMandates({ found: { outcome: 'found', ...uncapped } }, 'viewer');
+    const reply = await app.inject(get(`/v1/mandates/${MANDATE_ID}`));
+
+    expect(reply.json()).toMatchObject({ agentMonthlyCap: { capMinor: null, currency: null, from } });
   });
 
   it('answers one not found', async () => {

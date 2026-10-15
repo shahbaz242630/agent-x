@@ -22,7 +22,7 @@
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { MANDATE_VERSIONS, MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
+import { MANDATE_VERSIONS, MANDATES, policyOf, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
@@ -54,6 +54,7 @@ import {
   refused,
   type World,
 } from './mandate-world.helper.test.ts';
+import { capChoiceDetails } from './monthly-cap-choice.ts';
 import {
   type AgentActing,
   createSpendRequestDecisions,
@@ -86,13 +87,15 @@ const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout, verified } = s
  * A world whose agent has a key and a mandate in force (unless `mandate` is
  * false), both suppliers verified: the mandate's terms the world's own
  * (AED 50,000 an order, 100,000 a month, approval above 25,000) changed by
- * `terms`, so the default cap (AED 20,000 a month) binds first.
+ * `terms`, so the organisation's cap (AED 20,000 a month, the world's) binds first;
+ * none chosen at all with `capChosen` false (E2).
  */
 async function ready({
   terms = {},
   mandate = true,
-}: { terms?: Parameters<typeof shared.termsOf>[1]; mandate?: boolean } = {}) {
-  const w = await world();
+  capChosen = true,
+}: { terms?: Parameters<typeof shared.termsOf>[1]; mandate?: boolean; capChosen?: boolean } = {}) {
+  const w = await world({ capChosen });
   for (const supplier of w.suppliers) await verified(w, supplier);
   const mandateId = mandate ? await shared.inForce(registry, w, terms) : null;
   return { w, mandateId, acting: await agentKey(w) };
@@ -163,10 +166,12 @@ const capped = (w: World, scope: 'organization' | 'mandate', mandateId: string |
     approvalThreshold: null,
     supplierIds: null,
   };
-  return withSignedStates(app, w.org, quiet(), (tx, states) =>
-    setPolicy(tx, states, {
+  return withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    // The organisation's is set already, as the world chose its cap (E2).
+    const read = await policyOf(tx, states, { orgId: w.org, id: mandateId ?? w.org }, 'change');
+    return setPolicy(tx, states, {
       orgId: w.org,
-      existing: null,
+      existing: read.outcome === 'found' ? read : null,
       scope,
       mandateId,
       versionId: ids.next(),
@@ -174,9 +179,9 @@ const capped = (w: World, scope: 'organization' | 'mandate', mandateId: string |
       madeBy: w.admin.membershipId,
       madeAt: clock.now(),
       actor: OPERATOR,
-      details: {},
-    }),
-  );
+      details: scope === 'organization' ? capChoiceDetails('amount') : {},
+    });
+  });
 };
 
 /**
@@ -274,7 +279,8 @@ describe('deciding a spend request and reserving it (D4)', () => {
       agent_key_id: acting.keyId,
       mandate_version_id: expect.any(String) as unknown,
       supplier_version_id: expect.any(String) as unknown,
-      organization_policy_version_id: null,
+      // The world's, its cap chosen (E2).
+      organization_policy_version_id: expect.any(String) as unknown,
       mandate_policy_version_id: null,
       input_hash: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
       input_hash_key_version: 1,
@@ -309,7 +315,8 @@ describe('deciding a spend request and reserving it (D4)', () => {
           monthSpent: '0 AED',
           splitOpen: '0 AED',
           duplicateOrder: false,
-          defaultMonthlyCap: '2000000 AED',
+          defaultMonthlyCap: null,
+          organizationCapChosen: true,
         }) as unknown,
       }),
     ]);
@@ -490,7 +497,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
       await ask(acting, asking(w, { amount: AED(1_500_000n), supplierId: other, orderReference: 'INV-2' })),
     );
 
-    // AED 15,000 held under the revoked mandate and 15,000 asked: past the default AED 20,000 cap.
+    // AED 15,000 held under the revoked mandate and 15,000 asked: past the organisation's AED 20,000 cap.
     expect(over).toMatchObject({ mandateId: next, decision: 'DENY', reasons: ['POLICY_MONTHLY_CAP'] });
     // Exactly at the cap passes.
     const rest = asking(w, { amount: AED(500_000n), supplierId: other, orderReference: 'INV-3' });
@@ -744,7 +751,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
       await ask(acting, asking(w, { amount: AED(1_500_000n), supplierId: other, orderReference: 'INV-2' })),
     );
 
-    // AED 15,000 held under the version superseded and 15,000 asked: past the default AED 20,000 cap.
+    // AED 15,000 held under the version superseded and 15,000 asked: past the organisation's AED 20,000 cap.
     expect(over).toMatchObject({ mandateId, decision: 'DENY', reasons: ['POLICY_MONTHLY_CAP'] });
     const versions = [first.id, over.id].map(async (id) => (await heldBy(w.org, id)).row?.mandate_version_id);
     const [before, after] = await Promise.all(versions);
@@ -916,7 +923,7 @@ const payeeKeyOf = (w: World, id: string, payeeKey: string | null) =>
     );
   });
 
-/** Approval above AED 15,000, so two orders within the default cap (AED 20,000 a month) can cross it together. */
+/** Approval above AED 15,000, so two orders within the organisation's cap (AED 20,000 a month) can cross it together. */
 const SPLIT_TERMS = { approvalThreshold: AED(1_500_000n) };
 const SPLIT = { decision: 'REQUIRE_APPROVAL', reasons: ['AGGREGATE_THRESHOLD'], status: 'APPROVAL_REQUIRED' };
 
@@ -1079,7 +1086,7 @@ describe('the simulator (C4, decision 9)', () => {
       monthSpent: AED(0n),
       proposed: { organizationPolicy: false, mandatePolicy: false },
     });
-    expect(first.made).toMatchObject({ decision: 'ALLOW', reasons: [], monthlyCapFrom: 'default' });
+    expect(first.made).toMatchObject({ decision: 'ALLOW', reasons: [], monthlyCapFrom: 'organization-policy' });
     const approval = simulatedOf(await simulated(w, id, { amount: AED(1_600_000n) }));
     expect(approval.made).toMatchObject({ decision: 'REQUIRE_APPROVAL', reasons: ['APPROVAL_THRESHOLD'] });
     await simulated(w, id, {}, { organizationPolicy: proposed({ monthlyCap: 1n }) });
@@ -1092,7 +1099,7 @@ describe('the simulator (C4, decision 9)', () => {
     expect(
       decidedOf(await ask(acting, asking(w, { amount: AED(600_000n), supplierId: other, orderReference: 'INV-2' }))),
     ).toMatchObject({ decision: 'ALLOW' });
-    // AED 16,000 held: AED 16,000 more is past the default cap (AED 20,000), as a request would find it.
+    // AED 16,000 held: AED 16,000 more is past the organisation's cap (AED 20,000), as a request would find it.
     const held = simulatedOf(await simulated(w, id, { amount: AED(1_600_000n), orderReference: 'INV-3' }));
     expect(held).toMatchObject({ monthSpent: AED(1_600_000n), month: '2026-10' });
     expect(held.made).toMatchObject({ decision: 'DENY' });
@@ -1201,6 +1208,65 @@ describe('the simulator (C4, decision 9)', () => {
       }),
     );
     expect(await simulated(w, mandateId ?? '')).toEqual(refused(409, 'ORG_FROZEN'));
+  });
+});
+
+describe("the organisation's monthly cap, chosen by its admin (E2, decision 15)", () => {
+  /** The organisation's policy made one with no cap, its event's choice `details`: none chosen, or none recorded (before E2). */
+  const uncapped = (w: World, details: Readonly<Record<string, string | number>>) =>
+    withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'change');
+      return setPolicy(tx, states, {
+        orgId: w.org,
+        existing: read.outcome === 'found' ? read : null,
+        scope: 'organization',
+        mandateId: null,
+        versionId: ids.next(),
+        rules: { currency: 'AED', perOrderCap: null, monthlyCap: null, approvalThreshold: null, supplierIds: null },
+        madeBy: w.admin.membershipId,
+        madeAt: clock.now(),
+        actor: OPERATOR,
+        details,
+      });
+    });
+
+  it("denies every request until an admin chose it, even under a mandate policy's cap, holding nothing", async () => {
+    const { w, mandateId, acting } = await ready({ capChosen: false });
+
+    const first = decidedOf(await ask(acting, asking(w)));
+    expect(first).toMatchObject({ decision: 'DENY', reasons: ['ORG_MONTHLY_CAP_NOT_SET'], status: 'DENIED' });
+    expect((await heldBy(w.org, first.id)).reservation).toBeUndefined();
+    await capped(w, 'mandate', mandateId, 2_000_000n);
+    expect(decidedOf(await ask(acting, asking(w, { orderReference: 'INV-2' })))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['ORG_MONTHLY_CAP_NOT_SET'],
+    });
+  });
+
+  it('reads a version with no cap and no choice on its event (made before E2) as not chosen: never the old default', async () => {
+    const { w, acting } = await ready();
+    await uncapped(w, {});
+
+    expect(decidedOf(await ask(acting, asking(w)))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['ORG_MONTHLY_CAP_NOT_SET'],
+    });
+  });
+
+  it("holds the agent to its mandate's own monthly limit alone with none chosen: past AED 20,000, sealed as chosen", async () => {
+    const { w, acting } = await ready();
+    await uncapped(w, capChoiceDetails('none'));
+
+    // AED 25,000 to each supplier (one supplier's would be a split): AED 50,000 in the month, within the mandate's 100,000.
+    for (const [n, supplierId] of w.suppliers.entries()) {
+      const order = { amount: AED(2_500_000n), supplierId, orderReference: `INV-${String(n)}` };
+      expect(decidedOf(await ask(acting, asking(w, order)))).toMatchObject({ decision: 'ALLOW', reasons: [] });
+    }
+    const [, request] = await withTenant(app, w.org, (tx) =>
+      tx.selectFrom('spend_requests.requests').select('id').orderBy('created_at').orderBy('id').execute(),
+    );
+    const decided = (await eventsAbout(w.org, request?.id ?? '', 'spend_request')).at(-1);
+    expect(decided?.details).toMatchObject({ organizationCapChosen: true, defaultMonthlyCap: null });
   });
 });
 

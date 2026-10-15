@@ -20,6 +20,10 @@
 //   version in force or else the draft waiting (POLICY_WIDER_THAN_MANDATE).
 //   The organisation's is weighed against each mandate by the engine (C2),
 //   which takes the strictest.
+// - The organisation's monthly cap per agent (decision 15, E2): its admin
+//   chooses an amount or none with every change of it, bound into the
+//   step-up and kept on the version's event (monthly-cap-choice.ts). A
+//   mandate's policy names no choice.
 // - `show`, every member: the policy as it stands, or none set.
 //
 // Lock order (ADR-006 §6): the idempotency key, the policies' lock (confirm),
@@ -55,10 +59,12 @@ import {
   type MandateTables,
   type MandateTx,
   mandateIn,
+  capChoiceOf,
   policyRulesIn,
   toldAdminsAndApprovers,
   versionIn,
 } from './mandate-reads.ts';
+import { capChoiceDetails, type MonthlyCapChoice } from './monthly-cap-choice.ts';
 import type { Refused } from './refused.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
@@ -82,6 +88,14 @@ export interface PolicyView {
   readonly id: string;
   readonly mandateId: string | null;
   readonly current: PolicyVersionRecord | null;
+  /** The organisation's monthly cap as its admin chose it (E2), or null: not chosen, or a mandate's policy. */
+  readonly monthlyCapChoice: MonthlyCapChoice | null;
+}
+
+/** A change's rules, with the organisation's monthly cap choice (E2): null, and only null, for a mandate's policy. */
+interface PolicyAsked {
+  readonly rules: PolicyRules;
+  readonly capChoice: MonthlyCapChoice | null;
 }
 
 export type PolicyChangeAsked =
@@ -101,14 +115,14 @@ export interface PolicyChanges {
     member: SessionMember,
     idempotent: IdempotentRequest,
     target: PolicyTarget,
-    rules: PolicyRules,
+    asked: PolicyAsked,
     correlationId: string,
   ): Promise<PolicyChangeAsked>;
   confirm(
     member: SessionMember,
     idempotent: IdempotentRequest,
     target: PolicyTarget,
-    rules: PolicyRules,
+    asked: PolicyAsked,
     stepUpChallengeId: string,
     correlationId: string,
   ): Promise<PolicyChanged>;
@@ -124,16 +138,17 @@ const NOTICE = { organization: 'organization_policy_changed', mandate: 'mandate_
 
 /**
  * The change's SHA-256: the operation, the organisation, the policy, its
- * latest signed event (empty for one never set) and the rules' hash, IDs in
- * lower case: any change to the policy since the ask, or other rules, make the
- * step-up another change's.
+ * latest signed event (empty for one never set), the rules' hash and, for the
+ * organisation's, the monthly cap choice with its words' version, IDs in
+ * lower case: any change to the policy since the ask, other rules or another
+ * choice, make the step-up another change's.
  */
 const changeHash = (
   scope: PolicyScope,
   orgId: string,
   policyId: string,
   existing: { readonly state: { readonly eventId: string } } | null,
-  rules: PolicyRules,
+  { rules, capChoice }: PolicyAsked,
 ) =>
   changeHashOf([
     POLICY_OPERATIONS[scope].ask,
@@ -141,7 +156,19 @@ const changeHash = (
     policyId.toLowerCase(),
     existing?.state.eventId.toLowerCase() ?? '',
     rulesHash(rules),
+    ...(capChoice === null ? [] : Object.values(capChoiceDetails(capChoice)).map(String)),
   ]);
+
+/**
+ * The rules checked again (policyRules), with a choice only for the
+ * organisation's, saying what its rules do: an amount with a cap, none
+ * without. The routes have checked it; this keeps another caller to it.
+ */
+function askedOf(target: PolicyTarget, { rules, capChoice }: PolicyAsked): PolicyAsked {
+  const expected = target.scope === 'mandate' ? null : rules.monthlyCap === null ? 'none' : 'amount';
+  if (capChoice !== expected) throw new RangeError('The monthly cap choice must match the policy’s rules');
+  return { rules: policyRules(rules), capChoice };
+}
 
 export function createPolicyChanges({
   database,
@@ -233,26 +260,29 @@ export function createPolicyChanges({
       id,
       mandateId: target.scope === 'mandate' ? id : null,
       current: read?.current ?? null,
+      monthlyCapChoice:
+        target.scope === 'organization' ? await capChoiceOf(tx, states, orgId, read?.current ?? null) : null,
     };
   };
 
   return {
-    async ask(member, idempotent, target, asked, correlationId) {
+    async ask(member, idempotent, target, sent, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        const rules = policyRules(asked);
-        const { id, existing } = await changeable(tx, states, member, target, rules, 'share');
+        const asked = askedOf(target, sent);
+        const { id, existing } = await changeable(tx, states, member, target, asked.rules, 'share');
         return stepUps.ask(tx, member, {
           action: POLICY_OPERATIONS[target.scope].ask,
-          changeHash: changeHash(target.scope, member.orgId, id, existing, rules),
+          changeHash: changeHash(target.scope, member.orgId, id, existing, asked),
         });
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
-    async confirm(member, idempotent, target, asked, stepUpChallengeId, correlationId) {
+    async confirm(member, idempotent, target, sent, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        const rules = policyRules(asked);
+        const asked = askedOf(target, sent);
+        const { rules, capChoice } = asked;
         await onePolicyChangeAtATime(tx, member.orgId);
         const held = await challenges.hold(tx, member.sessionId);
         const { admin, id, mandateId, existing } = await changeable(tx, states, member, target, rules, 'change');
@@ -263,7 +293,7 @@ export function createPolicyChanges({
           stepUpChallengeId,
           {
             action: POLICY_OPERATIONS[target.scope].ask,
-            changeHash: changeHash(target.scope, member.orgId, id, existing, rules),
+            changeHash: changeHash(target.scope, member.orgId, id, existing, asked),
           },
           { passkeyRequired: true },
         );
@@ -277,7 +307,7 @@ export function createPolicyChanges({
           madeBy: admin.id,
           madeAt: clock.now(),
           actor: { type: 'user', id: member.userId },
-          details: stepUpDetails(consumed),
+          details: { ...stepUpDetails(consumed), ...(capChoice === null ? {} : capChoiceDetails(capChoice)) },
         });
         await outbox.add(tx, toldAdminsAndApprovers(member.orgId, NOTICE[target.scope], id));
         return { status: 200, resourceId: id };

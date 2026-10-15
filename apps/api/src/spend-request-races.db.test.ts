@@ -82,7 +82,7 @@ let approvals: SpendRequestApprovals;
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'spend-request-races' });
 const { world, quiet, keyed, agentKey } = shared;
 
-/** Approval above AED 15,000 and the default cap (AED 20,000 a month), so splits and the month both bind. */
+/** Approval above AED 15,000 and the organisation's cap (AED 20,000 a month, the world's), so splits and the month both bind. */
 const TERMS = { approvalThreshold: AED(1_500_000n) };
 
 /** A world whose agent has a key and a mandate in force on TERMS, both suppliers verified. */
@@ -376,7 +376,7 @@ describe('approvals racing a revoke and the agent’s requests (Phase 3 B4b, SEC
   it('no deadlock; an approval committed before the revoke approved, one after it REQUEST_CHANGED', async () => {
     const w = await world();
     for (const id of w.suppliers) await shared.verified(w, id);
-    // Approval above AED 1,000: five requests of AED 2,000 wait, within the default cap together.
+    // Approval above AED 1,000: five requests of AED 2,000 wait, within the organisation's cap together.
     const mandateId = await shared.inForce(registry, w, { approvalThreshold: AED(100_000n) });
     const acting = await agentKey(w);
     const confirms: (() => Promise<Approved>)[] = [];
@@ -466,7 +466,7 @@ describe('the model: random batches all at once (SEC-LIM-01, SEC-LIM-04, SEC-DP-
         );
         const sum = (requests: typeof decided) => requests.reduce((total, request) => total + request.amount.minor, 0n);
 
-        // The default cap, AED 20,000 a month, per agent (decision 5).
+        // The organisation's cap, AED 20,000 a month, per agent (decision 5), as the world chose it.
         for (const agent of agents) {
           expect(sum(holding.filter((request) => request.agentId === agent.agentId))).toBeLessThanOrEqual(2_000_000n);
         }

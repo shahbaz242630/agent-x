@@ -127,6 +127,8 @@ export const REASON_CODES = {
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
   ORG_FROZEN:
     'The organisation is frozen: while it is, no request is decided or approved, and a freeze chosen to cancel ends those pending. A refusal is temporary: the same idempotency key can be used again once the freeze is lifted.',
+  ORG_MONTHLY_CAP_NOT_SET:
+    "The organisation's admin hasn't yet set its monthly cap per agent (an amount, or none beyond each mandate's own monthly limit), so no agent may spend. An admin sets it in the organisation's policy; until then every request is refused. Nothing was reserved.",
   ORG_NOT_FROZEN: 'The organisation is not frozen, so there is nothing to unfreeze. Nothing was changed.',
   ORIGIN_REFUSED:
     "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused.",
@@ -154,7 +156,7 @@ export const REASON_CODES = {
   POLICY_CURRENCY_REFUSED:
     "The policy's currency isn't one Agent X takes here (AED in the Pilot), or a mandate's policy isn't in its mandate's currency. Nothing was changed.",
   POLICY_MONTHLY_CAP:
-    "With what the agent has already spent or holds this month, this request is above the agent's monthly cap set by the organisation's policies (AED 20,000 unless the organisation set another), so it is refused. Nothing was reserved.",
+    "With what the agent has already spent or holds this month, this request is above the agent's monthly cap set by the organisation's policies, so it is refused. Nothing was reserved.",
   POLICY_ORDER_CAP:
     "The amount is above a per-order cap the organisation's policies set, so it is refused or sent for approval, as that policy says.",
   POLICY_SUPPLIER_NOT_ALLOWED:

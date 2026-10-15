@@ -26,6 +26,7 @@
 import { SCOPES } from '@agentx/core/modules/agents';
 import { MANDATE } from '@agentx/core/modules/mandates';
 import { MOST_SOURCES_A_PAGE } from '@agentx/core/modules/funding-sources';
+import { MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -71,8 +72,14 @@ const MANDATE_SCHEMA = {
           .describe('The most you may spend in a month, in whole minor units, every mandate of yours counted.'),
         monthlyCapMinor: z
           .number()
+          .nullable()
           .describe(
-            'The most the organisation’s policies let you spend in a month, in whole minor units: the lower of this and monthlyLimitMinor applies.',
+            'The most the organisation’s policies let you spend in a month, in whole minor units: the lower of this and monthlyLimitMinor applies. Null: no cap, as monthlyCapFrom says.',
+          ),
+        monthlyCapFrom: z
+          .enum(MONTHLY_CAP_FROM)
+          .describe(
+            'Where it comes from: the mandate’s own policy, the organisation’s, `none` (the organisation chose no cap: only the mandate’s own monthly limit), or `not-set` (its admin hasn’t chosen yet: every request is refused, ORG_MONTHLY_CAP_NOT_SET).',
           ),
         supplierIds: z.array(z.uuid()).describe('The suppliers you may pay, by ID, in order of ID.'),
         fundingSourceId: z.uuid().describe('The bank account you pay from, by ID.'),
@@ -126,7 +133,7 @@ export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates
       const { orgId, agentId } = agentOf(request);
       const found = await need(mandates).inForce(orgId, agentId, request.id);
       if (found.outcome === 'refused') return sendErrorBody(reply, found.status, found.code, request.id);
-      const { mandate, version: v, monthlyCap } = found;
+      const { mandate, version: v, monthlyCap, monthlyCapFrom } = found;
       // Field by field: nothing else of the mandate can reach an agent.
       return {
         mandateId: mandate.id,
@@ -137,7 +144,8 @@ export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates
         currency: v.perOrderLimit.currency,
         perOrderLimitMinor: Number(v.perOrderLimit.minor),
         monthlyLimitMinor: Number(v.monthlyLimit.minor),
-        monthlyCapMinor: Number(monthlyCap.minor),
+        monthlyCapMinor: monthlyCap === null ? null : Number(monthlyCap.minor),
+        monthlyCapFrom,
         supplierIds: [...v.supplierIds],
         fundingSourceId: v.fundingSourceId,
         timeZone: mandate.timeZone,

@@ -9,7 +9,11 @@
 // for admins, approvers and developers, answers what a request by the
 // mandate's agent would get now, with the rules in force or proposed ones in
 // their place, writing nothing (policy-simulations.ts).
-import { DECISIONS, DEFAULT_MONTHLY_CAP } from '@agentx/core/modules/policies';
+//
+// The organisation's change names its monthly cap choice (decision 15, E2):
+// `amount` with a monthly cap, `none` without; no agent spends until one is
+// chosen (monthly-cap-choice.ts).
+import { DECISIONS, MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
 import { orderReferenceOf, SpendAskRefused } from '@agentx/core/modules/spend-requests';
 import {
   MOST_ALLOWED_SUPPLIERS,
@@ -28,6 +32,12 @@ import { z } from 'zod';
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import {
+  MONTHLY_CAP_CHOICE,
+  MONTHLY_CAP_CHOICES,
+  type MonthlyCapChoice,
+  SUGGESTED_MONTHLY_CAP_MINOR,
+} from './monthly-cap-choice.ts';
 import {
   CHANGING_ROLES,
   POLICY_OPERATIONS,
@@ -63,7 +73,7 @@ const RULE_FIELDS = {
     .nullish()
     .describe('A per-order cap, or none.'),
   monthlyCapMinor: AMOUNT.nullish().describe(
-    'The most each agent may spend in its month (every mandate of its counted): above it, DENY. None: the organisation’s policy’s, else AED 20,000; a mandate’s own replaces the organisation’s for its agent, higher or lower.',
+    'The most each agent may spend in its month (every mandate of its counted): above it, DENY. A mandate’s own replaces the organisation’s for its agent, higher or lower; none in a mandate’s: the organisation’s. The organisation’s is given with monthlyCapChoice `amount`, left out with `none`.',
   ),
   approvalThresholdMinor: AMOUNT.nullish().describe(
     'Above it, a person must approve the request: the lowest of the mandate’s and its policies’ applies.',
@@ -106,6 +116,24 @@ const rulesOf = (body: RuleFields): PolicyRules => {
 /** Each problem that keeps the body's rules from being a policy's, as a refinement. */
 const rulesChecked = (body: RuleFields, context: z.RefinementCtx): void => {
   issuesOf(() => rulesOf(body), PolicyRulesRefused, context);
+};
+
+/** A change's body: the organisation's names its monthly cap choice (E2). */
+type ChangeBody = RuleFields & { readonly monthlyCapChoice?: MonthlyCapChoice | undefined };
+
+/** The organisation's rules with its choice, which must say what they do: an amount with a monthly cap, none without. */
+const ORGANIZATION_FIELDS = { ...RULE_FIELDS, monthlyCapChoice: MONTHLY_CAP_CHOICE };
+
+const choiceChecked = (body: ChangeBody, context: z.RefinementCtx): void => {
+  rulesChecked(body, context);
+  const capped = body.monthlyCapMinor !== null && body.monthlyCapMinor !== undefined;
+  if ((body.monthlyCapChoice === 'amount') !== capped) {
+    context.addIssue({
+      code: 'custom',
+      path: ['monthlyCapChoice'],
+      message: '`amount` must come with monthlyCapMinor, and `none` without it',
+    });
+  }
 };
 
 /** Proposed rules for a policy: weighed in place of those in force, never kept. */
@@ -159,8 +187,10 @@ const SIMULATE_SCHEMA = {
           .object({ organizationPolicy: z.boolean(), mandatePolicy: z.boolean() })
           .describe('Which policies were weighed as proposed, in place of those in force.'),
         monthlyCapFrom: z
-          .enum(['mandate-policy', 'organization-policy', 'default'])
-          .describe('Where the agent’s monthly cap came from.'),
+          .enum(MONTHLY_CAP_FROM)
+          .describe(
+            'Where the agent’s monthly cap came from: `none`, the organisation chose none; `not-set`, its admin hasn’t chosen yet, so every request is denied (ORG_MONTHLY_CAP_NOT_SET).',
+          ),
         month: z.string().nullable().describe('The agent’s month (YYYY-MM) in its zone, or null without a mandate.'),
         monthSpentMinor: z
           .number()
@@ -215,9 +245,17 @@ const POLICY = z
     id: z.uuid().describe('The policy: the organisation’s ID for its own, the mandate’s for a mandate’s.'),
     mandateId: z.uuid().nullable().describe('The mandate, for a mandate’s policy.'),
     current: POLICY_VERSION.nullable().describe('The rules in force, or null: none was ever set.'),
-    defaultMonthlyCapMinor: z
+    monthlyCapChoice: z
+      .enum(MONTHLY_CAP_CHOICES)
+      .nullable()
+      .describe(
+        'The organisation’s monthly cap per agent as its admin chose it: `amount` (current.monthlyCapMinor) or `none`; null: not chosen yet, so no agent may spend (ORG_MONTHLY_CAP_NOT_SET). Always null for a mandate’s policy.',
+      ),
+    suggestedMonthlyCapMinor: z
       .number()
-      .describe('Each agent’s monthly cap when no policy sets one (AED 20,000), in whole minor units.'),
+      .describe(
+        'The amount the console suggests for the organisation’s monthly cap (AED 20,000), in whole minor units: never applied until an admin chooses it.',
+      ),
   })
   .register(API_SCHEMAS, { id: 'Policy', description: 'A policy and the rules in force.' });
 
@@ -246,24 +284,45 @@ const KINDS = {
 
 type Kind = keyof typeof KINDS;
 
+const ASK_WORDS = 'Every rule of the new version.';
+const CONFIRM_WORDS = 'The same rules as the ask, with the step-up it answered, signed in again for.';
+
+/** Each kind's ask and confirm bodies: only the organisation's names its monthly cap choice. */
+const BODIES = {
+  organization: {
+    ask: z.strictObject(ORGANIZATION_FIELDS).superRefine(choiceChecked).describe(ASK_WORDS),
+    confirm: z
+      .strictObject({ ...ORGANIZATION_FIELDS, stepUpChallengeId: STEP_UP_SIGNED_IN })
+      .superRefine(choiceChecked)
+      .describe(CONFIRM_WORDS),
+  },
+  mandate: {
+    ask: z.strictObject(RULE_FIELDS).superRefine(rulesChecked).describe(ASK_WORDS),
+    confirm: z
+      .strictObject({ ...RULE_FIELDS, stepUpChallengeId: STEP_UP_SIGNED_IN })
+      .superRefine(rulesChecked)
+      .describe(CONFIRM_WORDS),
+  },
+};
+
 const schemasOf = (kind: Kind) => {
   const words = KINDS[kind];
   const params = words.params === undefined ? {} : { params: words.params };
+  // Either kind's, as the handlers read them alike.
+  const ask: z.ZodType<ChangeBody> = BODIES[kind].ask;
+  const confirm: z.ZodType<ChangeBody & { readonly stepUpChallengeId: string }> = BODIES[kind].confirm;
   return {
     show: { summary: words.show, ...params, response: { 200: POLICY } },
     ask: {
       summary: words.ask,
       ...params,
-      body: z.strictObject(RULE_FIELDS).superRefine(rulesChecked).describe('Every rule of the new version.'),
+      body: ask,
       response: { 202: stepUpAsked(words.asked[0], words.asked[1]) },
     },
     confirm: {
       summary: words.confirm,
       ...params,
-      body: z
-        .strictObject({ ...RULE_FIELDS, stepUpChallengeId: STEP_UP_SIGNED_IN })
-        .superRefine(rulesChecked)
-        .describe('The same rules as the ask, with the step-up it answered, signed in again for.'),
+      body: confirm,
       response: { 200: POLICY.describe('The policy with the new rules in force.') },
     },
   };
@@ -282,13 +341,17 @@ const versionOf = (v: PolicyVersionRecord) => ({
   madeAt: v.madeAt.toISOString(),
 });
 
-const policyBody = ({ scope, id, mandateId, current }: PolicyView) => ({
+const policyBody = ({ scope, id, mandateId, current, monthlyCapChoice }: PolicyView) => ({
   scope,
   id,
   mandateId,
   current: current === null ? null : versionOf(current),
-  defaultMonthlyCapMinor: Number(DEFAULT_MONTHLY_CAP.minor),
+  monthlyCapChoice,
+  suggestedMonthlyCapMinor: SUGGESTED_MONTHLY_CAP_MINOR,
 });
+
+/** The body's rules, with its choice: none sent (a mandate's) is null. */
+const askedOf = (body: ChangeBody) => ({ rules: rulesOf(body), capChoice: body.monthlyCapChoice ?? null });
 
 const targetOf = (kind: Kind, request: FastifyRequest): PolicyTarget => {
   if (kind === 'organization') return { scope: 'organization' };
@@ -358,7 +421,7 @@ export function registerPolicies(
           member,
           idempotentRequest(request, member.orgId),
           targetOf(kind, request),
-          rulesOf(request.body),
+          askedOf(request.body),
           request.id,
         );
         return answerAsked(asked, request, reply);
@@ -378,7 +441,7 @@ export function registerPolicies(
           member,
           idempotentRequest(request, member.orgId),
           targetOf(kind, request),
-          rulesOf(request.body),
+          askedOf(request.body),
           request.body.stepUpChallengeId,
           request.id,
         );

@@ -26,7 +26,7 @@
 import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
-import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
+import { MANDATES, policyOf, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
@@ -60,6 +60,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, askedFor, keys, type Member, OPERATOR, refused, type World } from './mandate-world.helper.test.ts';
+import { capChoiceDetails } from './monthly-cap-choice.ts';
 import {
   APPROVE_CONFIRM_OPERATION,
   APPROVE_OPERATION,
@@ -128,7 +129,11 @@ const freeze = (w: World) =>
     }),
   );
 
-/** A first policy, the organisation's or the mandate's, set past the use case: a monthly cap of `cap` minor units. */
+/**
+ * A policy's new version, the organisation's (set already, as the world chose
+ * its cap, E2) or the mandate's, set past the use case: a monthly cap of `cap`
+ * minor units.
+ */
 const policySet = (w: World, mandateId: string | null, cap: bigint) => {
   const rules: PolicyRules = {
     currency: 'AED',
@@ -137,10 +142,11 @@ const policySet = (w: World, mandateId: string | null, cap: bigint) => {
     approvalThreshold: null,
     supplierIds: null,
   };
-  return signed(w, (tx, states) =>
-    setPolicy(tx, states, {
+  return signed(w, async (tx, states) => {
+    const read = await policyOf(tx, states, { orgId: w.org, id: mandateId ?? w.org }, 'change');
+    return setPolicy(tx, states, {
       orgId: w.org,
-      existing: null,
+      existing: read.outcome === 'found' ? read : null,
       scope: mandateId === null ? 'organization' : 'mandate',
       mandateId,
       versionId: ids.next(),
@@ -148,9 +154,9 @@ const policySet = (w: World, mandateId: string | null, cap: bigint) => {
       madeBy: w.admin.membershipId,
       madeAt: clock.now(),
       actor: OPERATOR,
-      details: {},
-    }),
-  );
+      details: mandateId === null ? capChoiceDetails('amount') : {},
+    });
+  });
 };
 
 /** Each change since a request was decided that makes it another's to approve (SEC-LIM-10). */
@@ -240,8 +246,8 @@ describe('approving a spend request waiting for approval (B4b)', () => {
         stepUpChallengeId: challengeId,
         signedInAt: clock.now().toISOString(),
         methods: 'pwd user mfa',
-        // The policies it was weighed under: none set in this world.
-        organizationPolicyVersionId: null,
+        // The policies it was weighed under: the organisation's, its cap chosen (E2), and no mandate's.
+        organizationPolicyVersionId: expect.any(String) as unknown,
         mandatePolicyVersionId: null,
       },
     });
@@ -272,7 +278,7 @@ describe('approving a spend request waiting for approval (B4b)', () => {
 
   it('counts the request once: one over half the monthly cap is approved (its own reservation and claim left out)', async () => {
     const { w, acting } = await ready();
-    // AED 12,000 of the default AED 20,000 cap: counted twice it would be past it.
+    // AED 12,000 of the organisation's AED 20,000 cap: counted twice it would be past it.
     const waiting = await ask(acting, w, { amount: AED(1_200_000n) });
     expect(waiting.status).toBe('APPROVAL_REQUIRED');
 

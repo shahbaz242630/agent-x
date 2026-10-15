@@ -2,7 +2,9 @@
 // review): an organisation with an admin, an active agent, a funding source
 // linked through the fake partner and two signed suppliers, the people and
 // keys the use cases take, a mandate drafted and accepted, the step-up's
-// sign-in, and the reads the tests make of them. A helper,
+// sign-in, and the reads the tests make of them. Its organisation's monthly
+// cap is chosen, AED 20,000 (E2: no agent spends until it is), unless a test
+// asks for none chosen. A helper,
 // not a test: Vitest leaves `*.helper.test.ts` out (vitest.config.ts), and
 // the name keeps it with the tests, which alone may import @agentx/testing.
 import { createHash, randomBytes } from 'node:crypto';
@@ -27,7 +29,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { acceptDraft, mandateOf, MANDATES, type MandatesTables } from '@agentx/core/modules/mandates';
+import { acceptDraft, mandateOf, MANDATES, type MandatesTables, setPolicy } from '@agentx/core/modules/mandates';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
@@ -39,6 +41,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { type FixedClock, SequentialIds, testLogger } from '@agentx/testing';
 
 import { DRAFT_OPERATION, type MandateDraft, type MandateRegistry, type MandateWrite } from './mandate-registry.ts';
+import { capChoiceDetails, SUGGESTED_MONTHLY_CAP_MINOR } from './monthly-cap-choice.ts';
 import type { SessionMember } from './use-case-work.ts';
 
 export type MandateWorldTables = IdentityTables &
@@ -141,14 +144,41 @@ export function mandateWorld({
     return { orgId: org, userId, sessionId, membershipId };
   }
 
-  /** An organisation with an admin, an active agent, a source linked through the fake partner, and two suppliers. */
-  async function world(): Promise<World> {
+  /**
+   * An organisation with an admin, an active agent, a source linked through
+   * the fake partner, and two suppliers; its monthly cap chosen, AED 20,000,
+   * as its admin's policy change records it (E2), unless `capChosen` is false:
+   * no organisation policy at all.
+   */
+  async function world({ capChosen = true }: { readonly capChosen?: boolean } = {}): Promise<World> {
     const now = clock().now();
     const org = ids.next();
     await withSignedStates(app(), org, quiet(), (tx, states) =>
       createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
     );
     const admin = await member(org, 'admin');
+    if (capChosen) {
+      await withSignedStates(app(), org, quiet(), (tx, states) =>
+        setPolicy(tx, states, {
+          orgId: org,
+          existing: null,
+          scope: 'organization',
+          mandateId: null,
+          versionId: ids.next(),
+          rules: {
+            currency: 'AED',
+            perOrderCap: null,
+            monthlyCap: AED(BigInt(SUGGESTED_MONTHLY_CAP_MINOR)),
+            approvalThreshold: null,
+            supplierIds: null,
+          },
+          madeBy: admin.membershipId,
+          madeAt: now,
+          actor: { type: 'user', id: admin.userId },
+          details: capChoiceDetails('amount'),
+        }),
+      );
+    }
     const agent = ids.next();
     await withSignedStates(app(), org, quiet(), (tx, states) =>
       addAgent(tx, states, {

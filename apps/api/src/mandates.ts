@@ -22,6 +22,7 @@ import {
   PURPOSE_MOST,
   SPLIT_WINDOW_HOURS,
 } from '@agentx/core/modules/mandates';
+import { MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
 import { isPendingChoice } from '@agentx/core/modules/spend-requests';
 import { moneyFromJson, timeZoneOf } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
@@ -206,11 +207,13 @@ const MANDATE_DETAILS = z
     pending: VERSION.nullable().describe('A draft waiting for acceptance, or null.'),
     agentMonthlyCap: z
       .object({
-        capMinor: z.number().describe('Whole minor units.'),
-        currency: z.string(),
+        capMinor: z.number().nullable().describe('Whole minor units, or null: no cap (see from).'),
+        currency: z.string().nullable(),
         from: z
-          .enum(['mandate-policy', 'organization-policy', 'default'])
-          .describe('The mandate’s own policy, the organisation’s, or the default (AED 20,000).'),
+          .enum(MONTHLY_CAP_FROM)
+          .describe(
+            'Where it comes from: the mandate’s own policy, the organisation’s, `none` (the organisation chose no cap: only the mandate’s own monthly limit), or `not-set` (its admin hasn’t chosen yet: every request is refused, ORG_MONTHLY_CAP_NOT_SET).',
+          ),
       })
       .describe(
         'The monthly cap the organisation’s policies hold the agent to: below the mandate’s own monthly limit, it is the one that applies.',
@@ -409,8 +412,8 @@ const detailsOf = ({ mandate, current, pending, agentMonthlyCap }: MandateView) 
   current: current === null ? null : versionOf(current),
   pending: pending === null ? null : versionOf(pending),
   agentMonthlyCap: {
-    capMinor: Number(agentMonthlyCap.cap.minor),
-    currency: agentMonthlyCap.cap.currency,
+    capMinor: agentMonthlyCap.cap === null ? null : Number(agentMonthlyCap.cap.minor),
+    currency: agentMonthlyCap.cap?.currency ?? null,
     from: agentMonthlyCap.from,
   },
 });
