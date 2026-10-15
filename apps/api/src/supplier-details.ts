@@ -57,7 +57,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { ADDING_ROLES } from './supplier-registry.ts';
 import {
   createSupplierWork,
-  pauseOverACancel,
+  cancelledByItsStop,
   type SessionMember,
   type SupplierChangeWrite,
   SupplierRefused,
@@ -175,7 +175,8 @@ export function createSupplierDetailsChanges({
     if (fieldsOf(details).every((field, at) => field === currentFields[at])) {
       throw new SupplierRefused(409, 'SUPPLIER_DETAILS_UNCHANGED');
     }
-    const cancelledBefore = await pauseOverACancel(tx, states, orgId, found.supplier, pendingRequests);
+    const cancelledBefore =
+      pendingRequests === 'pause' && (await cancelledByItsStop(tx, states, orgId, found.supplier));
     return { admin, found, current, cancelledBefore };
   };
 

@@ -8,7 +8,7 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
-import { pendingPastABrake, type PendingChoice, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { pendingPastABrake, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   contactsOf,
   type NameCheck,
@@ -97,27 +97,28 @@ export const toldEveryone = (
 };
 
 /**
- * Whether `choice`, a pause, comes over an UNVERIFIED supplier whose stop
- * cancels its requests (C3c's suspend over a cancel; E3's details change):
- * a pause can't hold what that stop cancelled, so those the request-voids
- * job hasn't reached yet must be voided first, by the caller with its own
- * cause; refused (PENDING_REQUESTS_TOO_MANY) past what one brake voids.
+ * Whether the supplier is UNVERIFIED by a stop that cancels its requests,
+ * so a move that would let them stand again must void those the
+ * request-voids job hasn't reached yet first, by the caller with its own
+ * cause; refused (PENDING_REQUESTS_TOO_MANY) past what one brake voids. The
+ * moves: a pause over it (C3c's suspend over a cancel; E3's details change)
+ * and verifying it again (the E3 review: a payee change chosen to cancel,
+ * then withdrawn, comes back VERIFIED on the version its requests were
+ * decided under, so the job would never end those left).
  */
-export async function pauseOverACancel(
+export async function cancelledByItsStop(
   tx: SupplierTx,
   states: SignedStates,
   orgId: string,
   supplier: { readonly id: string; readonly status: string },
-  choice: PendingChoice,
 ): Promise<boolean> {
-  const cancelledBefore =
-    choice === 'pause' &&
+  const cancelled =
     supplier.status === 'UNVERIFIED' &&
     !(await pausedOf(tx, states, orgId, [['supplier', supplier.id, 'UNVERIFIED']])).has('supplier');
-  if (cancelledBefore && (await pendingPastABrake(tx, orgId, { supplierId: supplier.id }))) {
+  if (cancelled && (await pendingPastABrake(tx, orgId, { supplierId: supplier.id }))) {
     throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
   }
-  return cancelledBefore;
+  return cancelled;
 }
 
 /** A supplier read for a decision or a change: its record, and the state a change records from. */

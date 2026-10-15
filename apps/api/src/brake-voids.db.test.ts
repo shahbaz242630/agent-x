@@ -29,7 +29,7 @@
 // once the supplier is verified again (a waiting one not approved under the
 // old details, decision 16), until a new payee or a change chosen to cancel.
 import { withSignedStates } from '@agentx/core/modules/audit';
-import { createStepUpChallenges } from '@agentx/core/modules/identity';
+import { createSessions, createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   createFakeRail,
@@ -46,7 +46,7 @@ import {
   SPEND_REQUESTS,
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
-import { supplierOf } from '@agentx/core/modules/suppliers';
+import { PAYEE_COOLING_OFF_MS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -71,7 +71,7 @@ import { ACCEPT_CONFIRM_OPERATION, ACCEPT_OPERATION, createMandateAcceptance } f
 import { createMandateExpiry } from './mandate-expiry.ts';
 import { createMandateMoves, type MandateMove, type MandateMoves, MOVE_OPERATIONS } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
-import { AED, askedFor, draftedOf, keys, type World } from './mandate-world.helper.test.ts';
+import { AED, askedFor, draftedOf, keys, PASSKEY, type World } from './mandate-world.helper.test.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createRequestVoids } from './request-voids.ts';
@@ -84,6 +84,7 @@ import {
   SUSPEND_OPERATION as SUPPLIER_SUSPEND,
 } from './supplier-changes.ts';
 import { createSupplierDetailsChanges, DETAILS_CONFIRM_OPERATION, DETAILS_OPERATION } from './supplier-details.ts';
+import { createSupplierVerifications, VERIFY_CONFIRM_OPERATION, VERIFY_OPERATION } from './supplier-verifications.ts';
 import {
   createSupplierPayeeChanges,
   PAYEE_APPROVE_CONFIRM_OPERATION,
@@ -305,13 +306,15 @@ let payeeRail: ReturnType<typeof createFakeRail>;
  * A new payee registered for the supplier (the world's first unless named)
  * through the fake partner's form, the admin choosing each of `choices` in
  * turn on a start (a second start carries on with the one open), its form
- * filled in and then checked: the change left waiting. The check, to call.
+ * filled in (with `name`) and then checked: the change left waiting. The
+ * check, to call.
  */
 async function payeeRegistering(
   w: World,
   choices: readonly PendingChoice[],
   supplierId = w.suppliers[0] ?? '',
   rail: FinancialRailAdapter = payeeRail,
+  name = 'Gulf Office Supplies LLC',
 ): Promise<Press> {
   const payees = createSupplierPayees({ ...services(), rail, partner: 'fake' });
   let started: Awaited<ReturnType<typeof payees.start>> | undefined;
@@ -320,7 +323,7 @@ async function payeeRegistering(
   }
   if (started?.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   const iban = SANDBOX_ACCOUNTS[0]?.AccountIdentifiers.find((each) => each.SchemeName === 'IBAN')?.Identification;
-  await payeeRail.bank.fillForm(w.org, started.form?.url ?? '', { name: 'Gulf Office Supplies LLC', iban: iban ?? '' });
+  await payeeRail.bank.fillForm(w.org, started.form?.url ?? '', { name, iban: iban ?? '' });
   const { id } = started.registration;
   return () => payees.check(w.admin, keyed(w.admin, PAYEE_CHECK_OPERATION), supplierId, id, CORRELATION);
 }
@@ -821,6 +824,92 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     await job(w).run();
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   }, 60_000);
+
+  /**
+   * The world's first supplier verified again through its use case, by its
+   * admin signed in afresh with a passkey (the clock moved past their
+   * session): the confirm's answer.
+   */
+  const verifiedAgain = async (world: World) => {
+    const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const { sessionId } = await sessions.open(app, world.admin.userId, {
+      idpSessionId: 'V1_2',
+      authTime: clock.now(),
+      amr: [...PASSKEY],
+    });
+    const w = { ...world, admin: { ...world.admin, sessionId } };
+    const verifications = createSupplierVerifications(services());
+    const challengeId = askedFor(
+      await verifications.verify(
+        w.admin,
+        keyed(w.admin, VERIFY_OPERATION),
+        supplierOfWorld(w),
+        { note: null },
+        CORRELATION,
+      ),
+    );
+    await stepUp(w.admin, challengeId);
+    return verifications.verifyConfirm(
+      w.admin,
+      keyed(w.admin, VERIFY_CONFIRM_OPERATION),
+      supplierOfWorld(w),
+      { stepUpChallengeId: challengeId, note: null },
+      CORRELATION,
+    );
+  };
+
+  /**
+   * A world whose first supplier is paid to a payee of its own, verified (as
+   * every verified supplier is outside these tests), with `count` requests;
+   * then new bank details chosen with `choice`, checked (a cancel voids 20,
+   * leaving the rest for the job) and withdrawn, past the payee's cooling-off.
+   */
+  const payeeWithdrawnAfter = async (count: number, choice: PendingChoice) => {
+    const { w, acting } = await ready();
+    const holder = SANDBOX_ACCOUNTS[0]?.AccountHolderName ?? '';
+    const registered = await payeeRegistering(w, ['pause'], supplierOfWorld(w), payeeRail, holder);
+    expect((await registered()).outcome).toBe('checked');
+    expect((await (await payeeConfirming(w))()).outcome).toBe('changed');
+    await shared.verified(w, supplierOfWorld(w));
+    const many = [];
+    for (let each = 0; each < count; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    expect((await (await payeeRegistering(w, [choice]))()).outcome).toBe('checked');
+    expect((await payeeWithdrawn(w)).outcome).toBe('changed');
+    clock.advanceBy(PAYEE_COOLING_OFF_MS + 60_000);
+    return { w, many };
+  };
+
+  it('verified again before the job, after a cancel withdrawn: those its check left are voided first (E3 review)', async () => {
+    const { w, many } = await payeeWithdrawnAfter(21, 'cancel');
+    const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
+
+    expect(await verifiedAgain(w)).toMatchObject({ supplier: { status: 'VERIFIED' } });
+
+    const verified = await firstSeqAfter(w, 'supplier', supplierOfWorld(w), before);
+    const left = many.at(-1);
+    await voidedBefore(w, left === undefined ? [] : [left], 'SUPPLIER_NOT_VERIFIED', verified);
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
+  it('verified again after a cancel withdrawn, more left than one brake voids: PENDING_REQUESTS_TOO_MANY; once the job ends them, it goes through', async () => {
+    // 41: the check's batch of 20 voids, and 21 are left, past the verification's own.
+    const { w, many } = await payeeWithdrawnAfter(41, 'cancel');
+
+    await expect(verifiedAgain(w)).rejects.toThrow('PENDING_REQUESTS_TOO_MANY');
+    expect(await statusOf(w, many.at(-1)?.id ?? '')).toBe('APPROVED');
+    await job(w).run();
+    expect(await verifiedAgain(w)).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 60_000);
+
+  it('verified again after a pause withdrawn: nothing voided, they stand', async () => {
+    const { w, many } = await payeeWithdrawnAfter(2, 'pause');
+
+    expect(await verifiedAgain(w)).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    await job(w).run();
+
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('APPROVED');
+  });
 
   it('a suspend to pause over a supplier unverified with its requests paused: nothing voided, they stay held', async () => {
     const { w, acting } = await ready();

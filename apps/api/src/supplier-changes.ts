@@ -54,7 +54,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import {
   createSupplierWork,
-  pauseOverACancel,
+  cancelledByItsStop,
   type SessionMember,
   type SupplierChangeWrite,
   type SupplierMember,
@@ -164,7 +164,8 @@ export function createSupplierChanges({
         const key = { orgId: member.orgId, id: supplierId };
         const found = await work.supplierIn(tx, states, key, 'change');
         const braked = { supplierId: found.supplier.id };
-        const cancelledBefore = await pauseOverACancel(tx, states, member.orgId, found.supplier, pendingRequests);
+        const cancelledBefore =
+          pendingRequests === 'pause' && (await cancelledByItsStop(tx, states, member.orgId, found.supplier));
         if (pendingRequests === 'cancel' || cancelledBefore) {
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
         }
