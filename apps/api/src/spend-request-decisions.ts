@@ -203,15 +203,25 @@ async function actingIn(tx: DecisionTx, states: SignedStates, acting: AgentActin
 /**
  * Level 4: the agent's open mandate with its version in force (a draft grants
  * nothing) and the zone its months start in, then the mandate's policy and the
- * organisation's, with whether an admin chose its monthly cap (E2).
+ * organisation's, with whether an admin chose its monthly cap (E2). Or the
+ * `draft` being accepted in its place, which a carry weighs its pending
+ * requests under (E4c).
  */
-async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, agentId: string) {
+export async function authorityIn(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  agentId: string,
+  version: 'inForce' | 'draft' = 'inForce',
+) {
   const open = await openMandateOfAgent(tx, states, orgId, agentId);
   believed(open);
   let mandate: MandateWeighed | null = null;
-  if (open.outcome === 'found' && open.mandate.currentVersionId !== null) {
-    const version = await versionIn(tx, states, orgId, open.mandate.id, open.mandate.currentVersionId);
-    mandate = { ...version, ...open.mandate, versionId: version.id };
+  const found = open.outcome === 'found' ? open.mandate : null;
+  const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
+  if (found !== null && versionId !== null) {
+    const version = await versionIn(tx, states, orgId, found.id, versionId);
+    mandate = { ...version, ...found, versionId: version.id };
   }
   const mandatePolicy = mandate === null ? null : rulesOf(await policyRulesIn(tx, states, orgId, mandate.id));
   const organization = await policyRulesIn(tx, states, orgId, orgId);
@@ -313,22 +323,63 @@ export async function weigh(
           currency,
         })
       : 0n;
-  const input: DecisionInput = {
+  const input = inputOf({
+    asked,
+    now,
+    agent,
+    mandate,
+    policies: { mandatePolicy, organizationPolicy, organizationCapChosen },
+    supplier,
+    source,
+    spent: money(spent, currency),
+    split: money(split, currency),
+    claims,
+  });
+  return { input, mandate, supplier, order, month };
+}
+
+/**
+ * What the engine weighs, from what was read for it: one builder for a
+ * decision (weigh) and a carry's batch (E4c), so the two never weigh apart.
+ */
+export function inputOf({
+  asked,
+  now,
+  agent,
+  mandate,
+  policies,
+  supplier,
+  source,
+  spent,
+  split,
+  claims,
+}: {
+  readonly asked: SpendWeighed;
+  readonly now: Date;
+  readonly agent: { readonly id: string; readonly status: string };
+  readonly mandate: MandateWeighed | null;
+  readonly policies: PoliciesWeighed;
+  readonly supplier: { readonly status: string } | null;
+  readonly source: Awaited<ReturnType<typeof sourceOf>>;
+  readonly spent: Money;
+  readonly split: Money;
+  readonly claims: { readonly duplicate: boolean; readonly possible: boolean };
+}): DecisionInput {
+  return {
     request: { amount: asked.amount, supplierId: asked.supplierId, fundingSourceId: asked.fundingSourceId },
     now,
     agent: { id: agent.id, status: agent.status },
     mandate,
     supplierStatus: supplier?.status ?? null,
     sourceMayFund: source.outcome === 'found' && mayFund(source.source, now),
-    organizationPolicy,
-    organizationCapChosen,
-    mandatePolicy,
-    monthSpent: money(spent, currency),
-    splitOpen: money(split, currency),
+    organizationPolicy: policies.organizationPolicy,
+    organizationCapChosen: policies.organizationCapChosen,
+    mandatePolicy: policies.mandatePolicy,
+    monthSpent: spent,
+    splitOpen: split,
     duplicateOrder: claims.duplicate,
     possibleDuplicate: claims.possible,
   };
-  return { input, mandate, supplier, order, month };
 }
 
 export function createSpendRequestDecisions({

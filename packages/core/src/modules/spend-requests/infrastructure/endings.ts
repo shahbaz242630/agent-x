@@ -43,7 +43,7 @@ import {
 } from '../../limit-reservations/index.ts';
 import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
-import { type AuthorityNow, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
+import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
 import { decisionOf, requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
@@ -226,7 +226,7 @@ export async function voidRequest(
   const read = await requestOf(tx, states, key, 'change');
   if (read.outcome !== 'found') return read;
   const { request } = read;
-  if (!(PENDING_STATUSES as readonly string[]).includes(request.status)) return { outcome: 'not_open', request };
+  if (!isPending(request.status)) return { outcome: 'not_open', request };
   // The caller read them by the request's row, which its verified state has just vouched for, and a request's
   // agent, mandate, source and supplier never change: another's is a bug.
   if (
@@ -240,12 +240,76 @@ export async function voidRequest(
   const against = decidedAgainst(read.state);
   const causes = voidCauses({ mandateId: request.mandateId, ...against }, authority);
   if (causes.length === 0) return { outcome: 'standing' };
-  await endHolding(tx, states, keys, key, 'deny', now, {
+  await voidedWith(tx, states, keys, key, causes, now);
+  return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
+}
+
+/** DENIED as the API's void with its causes (`spend_request.voided`), its holdings released. */
+const voidedWith = (
+  tx: EndingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  key: { readonly orgId: string; readonly id: string },
+  causes: readonly ReasonCode[],
+  now: Date,
+) =>
+  endHolding(tx, states, keys, key, 'deny', now, {
     actor: ACTOR,
     action: VOIDED,
     details: { causes: causes.join(',') },
   });
-  return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
+
+/**
+ * A pending request of a mandate's version in force, weighed again under the
+ * draft being accepted in its place (Phase 3 E4c; decisions 15 and 17), read
+ * for change in this transaction and its holdings locked by the caller:
+ * - `carry`: it names the draft from now on (`spend_request.carried`, the
+ *   accepting admin's, its status as it was; 0047's `carried_version`), so
+ *   the voids, the job and an approval compare it as any other. The caller
+ *   carries before the draft is accepted, while it is the mandate's waiting.
+ * - `cancel`: DENIED with the new terms' reasons, its holdings released,
+ *   recorded as the API's (`spend_request.voided`, as the brakes' voids).
+ * `mismatch` when a carried one's holdings don't match its decision (the
+ * alarm raised by the judging, nothing moved): the caller refuses. A cancel
+ * goes ahead as a brake's void does, its holdings judged and any mismatch
+ * alarmed, then released.
+ */
+export async function settleCarried(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  key: { readonly orgId: string; readonly id: string },
+  settled:
+    | { readonly outcome: 'carry'; readonly draftId: string; readonly change: SignedChange }
+    | { readonly outcome: 'cancel'; readonly causes: readonly ReasonCode[] },
+  now: Date,
+): Promise<'settled' | 'mismatch'> {
+  if (settled.outcome === 'cancel') {
+    await voidedWith(tx, states, keys, key, settled.causes, now);
+    return 'settled';
+  }
+  if (!(await requestHoldingsWhole(tx, states, keys, key.orgId, key.id))) return 'mismatch';
+  const read = await requestOf(tx, states, key, 'change');
+  // The caller read it pending in this transaction, locked: anything else is a bug.
+  if (read.outcome !== 'found' || !isPending(read.request.status)) {
+    throw new Error(`A spend request read as pending to carry isn't: ${key.id}`);
+  }
+  await states.record(
+    tx,
+    SPEND_REQUESTS,
+    key,
+    read.state,
+    { mandate_version_id: settled.draftId },
+    {
+      ...settled.change,
+      details: {
+        ...settled.change.details,
+        fromVersionId: decidedAgainst(read.state).mandateVersionId,
+        mandateVersionId: settled.draftId,
+      },
+    },
+  );
+  return 'settled';
 }
 
 /**
@@ -320,13 +384,7 @@ export async function voidPendingOf(
   if (pending.length === 0) return 0;
   await lockReservationsOf(tx, pending);
   await lockClaimsOf(tx, pending);
-  for (const id of pending) {
-    await endHolding(tx, states, keys, { orgId, id }, 'deny', now, {
-      actor: ACTOR,
-      action: VOIDED,
-      details: { causes: cause },
-    });
-  }
+  for (const id of pending) await voidedWith(tx, states, keys, { orgId, id }, [cause], now);
   return pending.length;
 }
 

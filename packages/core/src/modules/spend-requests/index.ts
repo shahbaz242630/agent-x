@@ -31,7 +31,7 @@ export {
   type Decided,
   MOST_CHECKED_A_PAGE,
 } from './infrastructure/holdings-check.ts';
-export type { HeldAs } from './domain/holdings.ts';
+export type { HeldAs, HeldSealed } from './domain/holdings.ts';
 export { type Approval, approveRequest } from './infrastructure/approvals.ts';
 export {
   type DecidedAgainst,
@@ -41,6 +41,7 @@ export {
   MOST_REQUESTS_A_PAGE,
   type NewRequest,
   requestOf,
+  requestsOf,
   requestsPage,
   signRequest,
   type SpendRequestCheck,
@@ -59,6 +60,7 @@ export {
   type RejectionShown,
   rejectRequest,
   requestsWaitingSince,
+  settleCarried,
   type SubjectsNamed,
   type Voided,
   type VoidingShown,
@@ -69,6 +71,7 @@ export {
 } from './infrastructure/endings.ts';
 export {
   type AuthorityNow,
+  isPending,
   isPendingChoice,
   PAUSED_IN,
   type Pausable,
@@ -76,7 +79,15 @@ export {
   PENDING_STATUSES,
   type PendingChoice,
 } from './domain/voids.ts';
-export { claimOrder, claimsOn, type OrderOf, type OrderWeighed, releaseClaim } from './infrastructure/order-claims.ts';
+export {
+  claimOrder,
+  claimsOn,
+  claimsOnEach,
+  type OrderClaimsSeen,
+  type OrderOf,
+  type OrderWeighed,
+  releaseClaim,
+} from './infrastructure/order-claims.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

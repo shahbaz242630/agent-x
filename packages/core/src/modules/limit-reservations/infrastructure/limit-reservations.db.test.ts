@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { seedRows } from '../../../seed-rows.helper.test.ts';
 import { RESERVATION } from '../domain/reservation.ts';
-import { monthSpent, splitHeld } from './reservations.ts';
+import { monthSpent, monthsSpent, splitHeld } from './reservations.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -470,6 +470,32 @@ describe('the totals in one currency (G4)', () => {
       await splitOf(org, org.supplier, null, AT, 'AED'),
       await splitOf(org, org.supplier, null, AT, 'USD'),
     ]).toEqual([25_000n, 25_000n]);
+  });
+});
+
+describe('several months’ totals at once (`monthsSpent`, E4c)', () => {
+  it('answers each month asked as monthSpent would, leaving out every request named, 0 where nothing is held', async () => {
+    const org = await organisation();
+    await period(org);
+    await period(org, '2026-11');
+    const left = await requestOf(org);
+    await add(org, reservationRow(org, left));
+    await reserve(org);
+    await reserve(org, { month: '2026-11', reserved_at: new Date('2026-11-10T08:00:00Z') });
+
+    const totals = await inOrg(org, (tx) =>
+      monthsSpent(tx, { agentId: org.agent, months: [MONTH, '2026-11', '2026-12'], currency: 'AED', except: [left] }),
+    );
+
+    expect([...totals]).toEqual([
+      [MONTH, 25_000n],
+      ['2026-11', 25_000n],
+      ['2026-12', 0n],
+    ]);
+    const alone = await inOrg(org, (tx) =>
+      monthSpent(tx, { agentId: org.agent, month: MONTH, currency: 'AED', except: left }),
+    );
+    expect(alone).toBe(totals.get(MONTH));
   });
 });
 

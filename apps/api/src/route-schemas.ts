@@ -58,6 +58,10 @@ export const STEP_UP_SIGNED_IN = z.uuid().describe('The step-up the ask answered
 export const stepUpAsked = (id: string, description: string) =>
   z.object({ stepUpChallengeId: STEP_UP_TO_SIGN_IN }).register(API_SCHEMAS, { id, description });
 
+/** A change's ask that answers more than the step-up (an acceptance's carry plan, E4c). */
+export const stepUpAskedWith = <Shape extends z.ZodRawShape>(id: string, description: string, shape: Shape) =>
+  z.object({ stepUpChallengeId: STEP_UP_TO_SIGN_IN, ...shape }).register(API_SCHEMAS, { id, description });
+
 /** A confirm's body: the step-up its ask answered with, signed in again for. */
 export const STEP_UP_CONFIRM = z
   .strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN })

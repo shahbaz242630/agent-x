@@ -381,6 +381,16 @@
                   },
                   {
                     "type": "string",
+                    "const": "PENDING_CHOICE_NOT_OFFERED",
+                    "description": "This is the mandate’s first version, so no requests are pending under it and there is nothing to cancel or carry over: leave the choice out. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "PENDING_CHOICE_REQUIRED",
+                    "description": "A version is in force, so choose what happens to its pending requests: cancel them, or carry them over to the new version, each checked again under its terms. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "PENDING_REQUESTS_CANCELLED",
                     "description": "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed."
                   },
@@ -388,6 +398,11 @@
                     "type": "string",
                     "const": "PENDING_REQUESTS_TOO_MANY",
                     "description": "More pending requests are left to cancel than one move cancels at once, so nothing was changed. Wait a few minutes while they are cancelled, then try again; if its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel first."
+                  },
+                  {
+                    "type": "string",
+                    "const": "PENDING_REQUESTS_TOO_MANY_TO_CARRY",
+                    "description": "More requests are pending under the version in force than can be checked again at once (20), so nothing was changed. Choose cancel, or approve, reject or cancel some first, then try again."
                   },
                   {
                     "type": "string",
@@ -1223,13 +1238,67 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "carry": {
+            "anyOf": [
+              {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "carry",
+                        "cancel"
+                      ]
+                    },
+                    "reasons": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "outcome",
+                    "reasons"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
-          "stepUpChallengeId"
+          "stepUpChallengeId",
+          "carry"
         ],
         "additionalProperties": false,
-        "description": "Accepting a mandate’s draft, waiting for the admin to sign in again."
+        "description": "Accepting a mandate’s draft, waiting for the admin to sign in again; for a carry, what it will do."
       },
       "PolicySimulation": {
         "type": "object",
@@ -13160,6 +13229,13 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "carry"
+                    ]
                   }
                 },
                 "required": [
@@ -13206,7 +13282,7 @@
         "x-access": [
           "admin"
         ],
-        "x-body-limit": 128,
+        "x-body-limit": 192,
         "responses": {
           "202": {
             "description": "Default Response",
@@ -13256,6 +13332,13 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "carry"
+                    ]
                   }
                 },
                 "required": [

@@ -136,12 +136,12 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
   const calls: Call[] = [];
   const written = () => Promise.resolve(answers.write ?? { outcome: 'busy' as const });
   const acceptance: MandateAcceptance = {
-    accept: (member, keyed, mandateId, versionId) => {
-      calls.push({ kind: 'accept', member, keyed, subject: { mandateId, versionId } });
+    accept: (member, keyed, mandateId, versionId, pendingRequests) => {
+      calls.push({ kind: 'accept', member, keyed, subject: { mandateId, versionId, pendingRequests } });
       return Promise.resolve(answers.asked ?? { outcome: 'busy' as const });
     },
-    acceptConfirm: (member, keyed, mandateId, stepUpChallengeId) => {
-      calls.push({ kind: 'acceptConfirm', member, keyed, subject: { mandateId, stepUpChallengeId } });
+    acceptConfirm: (member, keyed, mandateId, stepUpChallengeId, pendingRequests) => {
+      calls.push({ kind: 'acceptConfirm', member, keyed, subject: { mandateId, stepUpChallengeId, pendingRequests } });
       return Promise.resolve(answers.accepted ?? { outcome: 'busy' as const });
     },
   };
@@ -344,25 +344,64 @@ const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c6';
 
 describe('POST /v1/mandates/:id/accept asks a passkey step-up to accept the draft (B3)', () => {
   it('answers 202 with the step-up, passing the member in their session, the key and the draft named', async () => {
-    const { app, calls } = await withMandates({ asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+    const { app, calls } = await withMandates({
+      asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE, carry: null },
+    });
     const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept`, { versionId: VERSION_ID }));
 
     expect(reply.statusCode).toBe(202);
-    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE, carry: null });
     expect(calls).toEqual([
       {
         kind: 'accept',
         member: { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId },
         keyed: expect.objectContaining({ operation: 'mandates.accept', key: 'k-1' }) as unknown,
-        subject: { mandateId: MANDATE_ID, versionId: VERSION_ID },
+        subject: { mandateId: MANDATE_ID, versionId: VERSION_ID, pendingRequests: undefined },
       },
     ]);
+  });
+
+  it('passes the choice for the pending requests on, and answers a carry’s plan with each outcome’s reasons (E4c)', async () => {
+    const carried = '0199a0f0-0000-7000-8000-0000000000a1';
+    const cancelled = '0199a0f0-0000-7000-8000-0000000000a2';
+    const { app, calls } = await withMandates({
+      asked: {
+        outcome: 'asked',
+        stepUpChallengeId: CHALLENGE,
+        carry: [
+          { id: carried, outcome: 'carry', reasons: ['APPROVAL_THRESHOLD'] },
+          { id: cancelled, outcome: 'cancel', reasons: ['MANDATE_ORDER_LIMIT'] },
+        ],
+      },
+    });
+    const reply = await app.inject(
+      post(`/v1/mandates/${MANDATE_ID}/accept`, { versionId: VERSION_ID, pendingRequests: 'carry' }),
+    );
+
+    expect(reply.statusCode).toBe(202);
+    expect(reply.json()).toEqual({
+      stepUpChallengeId: CHALLENGE,
+      carry: [
+        {
+          id: carried,
+          outcome: 'carry',
+          reasons: [{ code: 'APPROVAL_THRESHOLD', message: expect.any(String) as string }],
+        },
+        {
+          id: cancelled,
+          outcome: 'cancel',
+          reasons: [{ code: 'MANDATE_ORDER_LIMIT', message: expect.any(String) as string }],
+        },
+      ],
+    });
+    expect(calls[0]?.subject).toEqual({ mandateId: MANDATE_ID, versionId: VERSION_ID, pendingRequests: 'carry' });
   });
 
   it.each([
     ['no version', {}],
     ['a version not named by its ID', { versionId: 'v1' }],
     ['anything more', { versionId: VERSION_ID, terms: {} }],
+    ['a choice not offered', { versionId: VERSION_ID, pendingRequests: 'pause' }],
   ])('refuses a body with %s at the edge', async (_what, body) => {
     const { app, calls } = await withMandates({});
     const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept`, body));
@@ -425,6 +464,18 @@ describe('POST /v1/mandates/:id/accept/confirm accepts the draft (B3)', () => {
       keyed: { operation: 'mandates.accept.confirm' },
       subject: { mandateId: MANDATE_ID, stepUpChallengeId: CHALLENGE },
     });
+  });
+
+  it('passes the choice it was asked with on, and refuses one not offered at the edge (E4c)', async () => {
+    const { app, calls } = await withMandates({ accepted: { outcome: 'accepted', ...ACCEPTED } });
+    const confirmed = (pendingRequests: string) =>
+      app.inject(post(`/v1/mandates/${MANDATE_ID}/accept/confirm`, { stepUpChallengeId: CHALLENGE, pendingRequests }));
+
+    expect((await confirmed('carry')).statusCode).toBe(200);
+    expect((await confirmed('pause')).statusCode).toBe(400);
+    expect(calls.map(({ subject }) => subject)).toEqual([
+      { mandateId: MANDATE_ID, stepUpChallengeId: CHALLENGE, pendingRequests: 'carry' },
+    ]);
   });
 
   it('refuses a confirm with no step-up named', async () => {

@@ -45,6 +45,7 @@ import {
   ACCEPTING_ROLES,
   type MandateAcceptance,
 } from './mandate-acceptance.ts';
+import { MOST_CARRIED, SUPERSEDE_PENDING_REQUESTS } from './mandate-carry.ts';
 import {
   MANDATE_MOVES,
   type MandateMove,
@@ -64,8 +65,11 @@ import {
   UNCHECKED,
   NOTHING,
   pageQuery,
+  REASONS,
+  reasonsOf,
   STEP_UP_CONFIRM,
   stepUpAsked,
+  stepUpAskedWith,
 } from './route-schemas.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 
@@ -268,24 +272,56 @@ const REDRAFT_SCHEMA = {
   },
 };
 
-/** The most an accept's body may be: a version's ID, with room to spare. */
-const ACCEPT_BODY_LIMIT = 128;
+/** The most an accept's body may be: a version's ID and the choice, with room to spare. */
+const ACCEPT_BODY_LIMIT = 192;
+
+/** The choice for a version in force's pending requests, in both bodies; none for a first version (decision 15). */
+const PENDING_CHOICE = { pendingRequests: SUPERSEDE_PENDING_REQUESTS.optional() };
+
+/** A carry's plan as the ask answers it (decision 17): what it will do to each pending request. */
+const CARRY_PLAN = z
+  .array(
+    z.object({
+      id: z.uuid().describe('The pending spend request.'),
+      outcome: z
+        .enum(['carry', 'cancel'])
+        .describe('`carry`: it stands under the new version as it is. `cancel`: it is cancelled, its money freed.'),
+      reasons: REASONS.describe(
+        'What the new terms say of it: why it is cancelled, or why a carried one would now need an approval.',
+      ),
+    }),
+  )
+  .max(MOST_CARRIED)
+  .nullable()
+  .describe(
+    'For `carry`: each pending request, oldest first, and what accepting will do to it. Confirming applies exactly ' +
+      'this; if anything changes first, the confirm is refused and you ask again. Null otherwise.',
+  );
 
 const ACCEPT_SCHEMA = {
   summary: 'Ask to accept the draft waiting, signing in again with a passkey',
   params: MANDATE_ID,
   body: z
-    .strictObject({ versionId: z.uuid().describe('The draft waiting, as you read it: its terms are what you accept.') })
-    .describe('The draft to accept.'),
+    .strictObject({
+      versionId: z.uuid().describe('The draft waiting, as you read it: its terms are what you accept.'),
+      ...PENDING_CHOICE,
+    })
+    .describe('The draft to accept, and what happens to the pending requests of the version in force.'),
   response: {
-    202: stepUpAsked('MandateAcceptanceAsked', 'Accepting a mandate’s draft, waiting for the admin to sign in again.'),
+    202: stepUpAskedWith(
+      'MandateAcceptanceAsked',
+      'Accepting a mandate’s draft, waiting for the admin to sign in again; for a carry, what it will do.',
+      { carry: CARRY_PLAN },
+    ),
   },
 };
 
 const ACCEPT_CONFIRM_SCHEMA = {
   summary: 'Accept the draft, once signed in again for it with a passkey',
   params: MANDATE_ID,
-  body: STEP_UP_CONFIRM,
+  body: STEP_UP_CONFIRM.extend(PENDING_CHOICE).describe(
+    'The step-up signed in again for, and the choice it was asked with.',
+  ),
   response: {
     200: MANDATE_DETAILS.describe(
       'The mandate with the draft in force (ACTIVE, if it was its first), the version it replaced superseded.',
@@ -490,9 +526,12 @@ export function registerMandates(
         idempotentRequest(request, member.orgId),
         request.params.id,
         request.body.versionId,
+        request.body.pendingRequests,
         request.id,
       );
-      return answerAsked(asked, request, reply);
+      if (asked.outcome !== 'asked') return answerAsked(asked, request, reply);
+      const carry = asked.carry?.map(({ id, outcome, reasons }) => ({ id, outcome, reasons: reasonsOf(reasons) }));
+      return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId, carry: carry ?? null });
     },
   );
 
@@ -510,6 +549,7 @@ export function registerMandates(
         idempotentRequest(request, member.orgId),
         request.params.id,
         request.body.stepUpChallengeId,
+        request.body.pendingRequests,
         request.id,
       );
       if (isUnwritten(accepted)) return answerRefusal(accepted, request, reply);

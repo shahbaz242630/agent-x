@@ -10,6 +10,7 @@ export {
   lockAgentPeriod,
   lockReservationsOf,
   monthSpent,
+  monthsSpent,
   type NewReservation,
   releaseReservationsOf,
   reservationsFor,
