@@ -21,11 +21,18 @@
 // two-person rule (E3-1) against everyone who entered its details since it
 // was last verified (versionsToVerify), each in turn: one refusal refuses.
 //
+// Verified again, its pending requests stand again, so those its stop
+// cancelled and the request-voids job hasn't reached yet are DENIED first
+// (cancelledByItsStop; the E3 review: a payee change chosen to cancel, then
+// withdrawn), refused at the ask and the confirm (PENDING_REQUESTS_TOO_MANY)
+// past what one brake voids: wait for the job, then verify.
+//
 // Lock order (ADR-006 §6): the idempotency key, the memberships (2a: the
 // verifier's, then every member's for the rule, all `share`), the supplier
 // (6), its versions and the registration of its payee (never locked for
-// change, so waiting on nothing), the step-up challenge, the chain head with
-// the first event recorded, then the notices, new rows that wait on nothing.
+// change, so waiting on nothing), the step-up challenge, the pending requests
+// (8) and their holdings (11), the chain head with the first event recorded,
+// then the notices, new rows that wait on nothing.
 import { type SignedStates, TooManyEventsToRead } from '@agentx/core/modules/audit';
 import {
   changeHashOf,
@@ -37,6 +44,7 @@ import {
   verifierVerdict,
 } from '@agentx/core/modules/identity';
 import type { Outbox } from '@agentx/core/modules/notifications';
+import { voidPendingOf } from '@agentx/core/modules/spend-requests';
 import { verificationProblem, verifySupplier, versionsToVerify } from '@agentx/core/modules/suppliers';
 import type { Clock, IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
@@ -44,6 +52,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import {
+  cancelledByItsStop,
   createSupplierWork,
   type SessionMember,
   type SupplierChangeWrite,
@@ -175,7 +184,8 @@ export function createSupplierVerifications({
       [...enterers].map((enteredById) => verifierVerdict(facts, { enteredById, verifierId: verifier.id }, now)),
     );
     if (verdict.outcome === 'refused') throw new SupplierRefused(403, REFUSALS[verdict.reason]);
-    return { verifier, found, current, nameCheck, path: verdict.outcome };
+    const leftByItsStop = await cancelledByItsStop(tx, states, orgId, found.supplier);
+    return { verifier, found, current, nameCheck, path: verdict.outcome, leftByItsStop };
   };
 
   /** The write, a history past its cap answered as a refusal like any other. */
@@ -204,7 +214,7 @@ export function createSupplierVerifications({
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         const { orgId } = member;
-        const { verifier, found, current, nameCheck, path } = await verifiable(
+        const { verifier, found, current, nameCheck, path, leftByItsStop } = await verifiable(
           tx,
           states,
           member,
@@ -222,6 +232,17 @@ export function createSupplierVerifications({
           // A change that makes a supplier payable: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },
         );
+        if (leftByItsStop) {
+          await voidPendingOf(
+            tx,
+            states,
+            keys,
+            orgId,
+            { supplierId: found.supplier.id },
+            'SUPPLIER_NOT_VERIFIED',
+            clock.now(),
+          );
+        }
         await verifySupplier(tx, states, { orgId, id: found.supplier.id }, found, {
           verifiedBy: verifier.id,
           actor: { type: 'user', id: member.userId },
