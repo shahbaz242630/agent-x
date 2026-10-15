@@ -23,7 +23,11 @@
 // first event; pause holds them while it is unverified, through the
 // request-voids job, until the change is confirmed (voided) or withdrawn and
 // the supplier verified again (they stand); a start carrying on with one open
-// and choosing otherwise is the choice that holds.
+// and choosing otherwise is the choice that holds. Decision 15 (E3): a
+// details change's choice the same way: cancel voids them at once whatever
+// the supplier's status; pause carries them to the new details, standing
+// once the supplier is verified again (a waiting one not approved under the
+// old details, decision 16), until a new payee or a change chosen to cancel.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -71,6 +75,7 @@ import { AED, askedFor, draftedOf, keys, type World } from './mandate-world.help
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createRequestVoids } from './request-voids.ts';
+import { APPROVE_OPERATION, createSpendRequestApprovals } from './spend-request-approvals.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 import {
   createSupplierChanges,
@@ -223,17 +228,37 @@ const supplierSuspended = (w: World, choice: PendingChoice) =>
     CORRELATION,
   );
 
-/** New details for the world's first supplier asked, stepped up with a passkey: their confirm, to call. */
-async function detailsChanging(w: World): Promise<Press> {
+/** Details for the world's first supplier other than both its own and detailsChanging's. */
+const CHANGED_AGAIN = {
+  displayName: 'Gulf Office Supplies Holdings LLC',
+  contacts: { phone: '+971501234567', email: null, tradeLicence: null },
+  source: { kind: 'registry', ref: 'DED-123456' },
+} as const;
+
+/**
+ * New details for the world's first supplier (named `displayName`) asked with
+ * `choice`, stepped up with a passkey: their confirm, to call.
+ */
+async function detailsChanging(
+  w: World,
+  pendingRequests: PendingChoice = 'cancel',
+  displayName = 'Gulf Office Supplies Trading LLC',
+): Promise<Press> {
   const changes = createSupplierDetailsChanges(services());
   const supplierId = w.suppliers[0] ?? '';
   const details = {
-    displayName: 'Gulf Office Supplies Trading LLC',
+    displayName,
     contacts: { phone: '+971501234567', email: null, tradeLicence: null },
     source: { kind: 'registry', ref: 'DED-123456' },
   } as const;
   const challengeId = askedFor(
-    await changes.change(w.admin, keyed(w.admin, DETAILS_OPERATION), supplierId, details, CORRELATION),
+    await changes.change(
+      w.admin,
+      keyed(w.admin, DETAILS_OPERATION),
+      supplierId,
+      { details, pendingRequests },
+      CORRELATION,
+    ),
   );
   await stepUp(w.admin, challengeId);
   return () =>
@@ -241,7 +266,7 @@ async function detailsChanging(w: World): Promise<Press> {
       w.admin,
       keyed(w.admin, DETAILS_CONFIRM_OPERATION),
       supplierId,
-      { details, stepUpChallengeId: challengeId },
+      { details, pendingRequests, stepUpChallengeId: challengeId },
       CORRELATION,
     );
 }
@@ -377,7 +402,7 @@ const BRAKES = {
     cause: 'SUPPLIER_CHANGED',
     subject: 'supplier',
     spares: true,
-    ready: detailsChanging,
+    ready: (w: World) => detailsChanging(w),
   },
   'the paused supplier’s new payee confirmed': {
     cause: 'SUPPLIER_CHANGED',
@@ -579,7 +604,7 @@ describe('the brakes void their own pending requests in their transaction (C2b)'
     await voidedBefore(w, [approved, waiting], 'SOURCE_NOT_USABLE', await newestSeq(w, 'funding_source', w.source));
   });
 
-  it('voids a paused supplier’s requests once its details change (decision 7: new details always cancel)', async () => {
+  it('voids a paused supplier’s requests once its details change, chosen to cancel (decision 15: whatever its status)', async () => {
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
     await supplierSuspended(w, 'pause');
@@ -880,6 +905,205 @@ describe('a payee registration’s choice for the supplier’s pending requests 
   });
 });
 
+describe('a supplier’s details changed: the admin chooses cancel or pause (decision 15, E3)', () => {
+  const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
+  const job = (w: World) =>
+    createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
+  /** The world's first supplier's details changed with `choice` (named `displayName`): its answer. */
+  const changedDetails = async (w: World, choice: PendingChoice, displayName?: string) =>
+    (await detailsChanging(w, choice, displayName))();
+  const standing = async (w: World, requests: readonly { readonly id: string; readonly status: string }[]) => {
+    for (const request of requests) expect(await statusOf(w, request.id)).toBe(request.status);
+  };
+  const supplierEvents = (w: World) => shared.eventsAbout(w.org, supplierOfWorld(w), 'supplier');
+  /** The world's first supplier as its signed state now says. */
+  const supplierNow = async (w: World) => {
+    const read = await signed(w, (tx, states) =>
+      supplierOf(tx, states, { orgId: w.org, id: supplierOfWorld(w) }, 'share'),
+    );
+    if (read.outcome !== 'found') throw new Error('the supplier isn’t found');
+    return read.supplier;
+  };
+
+  it('pause: nothing voided; held through the job while unverified; verified with its new details, they stand', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting, elsewhere } = await pendingOf(w, acting);
+    const before = await supplierNow(w);
+
+    expect(await changedDetails(w, 'pause')).toMatchObject({ supplier: { status: 'UNVERIFIED' } });
+    await job(w).run();
+    await standing(w, [approved, waiting, elsewhere]);
+
+    const events = await supplierEvents(w);
+    expect(events.findLast(({ action }) => action === 'supplier.unverify')).toMatchObject({
+      details: { pendingRequests: 'pause', pendingStatementVersion: 1 },
+    });
+    expect(events.findLast(({ action }) => action === 'supplier.details_changed')).toMatchObject({
+      details: { pendingRequests: 'pause', pendingStatementVersion: 1, followsVersionId: before.currentVersionId },
+    });
+
+    await shared.verified(w, supplierOfWorld(w));
+    await job(w).run();
+    await standing(w, [approved, waiting, elsewhere]);
+    expect(lines('request_void.failed')).toEqual([]);
+  });
+
+  it('pause twice, then verified: carried through both changes, they stand', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+
+    await changedDetails(w, 'pause');
+    await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co');
+    await shared.verified(w, supplierOfWorld(w));
+    await job(w).run();
+
+    await standing(w, [approved, waiting]);
+  });
+
+  it('pause, then a later change chosen to cancel: voided at once, verified or not', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await changedDetails(w, 'pause');
+    const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
+
+    await changedDetails(w, 'cancel', 'Gulf Office Supplies Trading Co');
+
+    const changed = await firstSeqAfter(w, 'supplier', supplierOfWorld(w), before);
+    await voidedBefore(w, [approved, waiting], 'SUPPLIER_CHANGED', changed);
+  });
+
+  it('pause, then a new payee made current: voided, as a new payee always is', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await changedDetails(w, 'pause');
+    await shared.verified(w, supplierOfWorld(w));
+
+    expect((await (await payeeChanging(w))()).outcome).toBe('changed');
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
+  it('cancel: the job voids those past the change’s batch, its chain broken, through a later pause too', async () => {
+    const { w, acting } = await ready();
+    const many = [];
+    for (let each = 0; each < 21; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    await changedDetails(w, 'cancel');
+    const left = many.at(-1);
+    expect(left === undefined ? undefined : await statusOf(w, left.id)).toBe('APPROVED');
+
+    // A pause over the cancel's unverify voids the one left first (as C3e's suspend).
+    await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co');
+
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
+  it('cancel, more left than one brake voids: a pause refused PENDING_REQUESTS_TOO_MANY; the job ends them', async () => {
+    const { w, acting } = await ready();
+    const many = [];
+    for (let each = 0; each < 41; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    await changedDetails(w, 'cancel');
+
+    expect(
+      await createSupplierDetailsChanges(services()).change(
+        w.admin,
+        keyed(w.admin, DETAILS_OPERATION),
+        supplierOfWorld(w),
+        { details: CHANGED_AGAIN, pendingRequests: 'pause' },
+        CORRELATION,
+      ),
+    ).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' });
+    await shared.verified(w, supplierOfWorld(w));
+    await job(w).run();
+
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 60_000);
+
+  it('pause over a supplier suspended to pause: its suspension’s choice holds; un-paused and verified, they stand', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await supplierSuspended(w, 'pause');
+
+    expect(await changedDetails(w, 'pause')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
+    await standing(w, [approved, waiting]);
+    const reactivating = createSupplierChanges(services());
+    const challengeId = askedFor(
+      await reactivating.reactivate(
+        w.admin,
+        keyed(w.admin, SUPPLIER_REACTIVATE),
+        supplierOfWorld(w),
+        'pause',
+        CORRELATION,
+      ),
+    );
+    await stepUp(w.admin, challengeId);
+    expect(
+      await reactivating.reactivateConfirm(
+        w.admin,
+        keyed(w.admin, SUPPLIER_REACTIVATE_CONFIRM),
+        supplierOfWorld(w),
+        { stepUpChallengeId: challengeId, pendingRequests: 'pause' },
+        CORRELATION,
+      ),
+    ).toMatchObject({ supplier: { status: 'UNVERIFIED' } });
+    await job(w).run();
+    await standing(w, [approved, waiting]);
+
+    await shared.verified(w, supplierOfWorld(w));
+    await job(w).run();
+    await standing(w, [approved, waiting]);
+  });
+
+  it('refuses a confirm with another choice than the step-up was asked for: STEP_UP_FAILED, nothing changed', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    const changes = createSupplierDetailsChanges(services());
+    const challengeId = askedFor(
+      await changes.change(
+        w.admin,
+        keyed(w.admin, DETAILS_OPERATION),
+        supplierOfWorld(w),
+        { details: CHANGED_AGAIN, pendingRequests: 'pause' },
+        CORRELATION,
+      ),
+    );
+    await stepUp(w.admin, challengeId);
+
+    expect(
+      await changes.changeConfirm(
+        w.admin,
+        keyed(w.admin, DETAILS_CONFIRM_OPERATION),
+        supplierOfWorld(w),
+        { details: CHANGED_AGAIN, pendingRequests: 'cancel', stepUpChallengeId: challengeId },
+        CORRELATION,
+      ),
+    ).toMatchObject({ outcome: 'refused', code: 'STEP_UP_FAILED' });
+    await standing(w, [approved, waiting]);
+    expect((await supplierNow(w)).status).toBe('VERIFIED');
+  });
+
+  it('a waiting request carried to the new details isn’t approved under the old ones: REQUEST_CHANGED (decision 16, E5)', async () => {
+    const { w, acting } = await ready();
+    const { waiting } = await pendingOf(w, acting);
+    await changedDetails(w, 'pause');
+    await shared.verified(w, supplierOfWorld(w));
+    const approvals = createSpendRequestApprovals({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: createStepUpChallenges({ ids, clock }),
+      logger: logger(),
+    });
+
+    expect(await approvals.ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'REQUEST_CHANGED',
+    });
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+  });
+});
+
 describe('reactivating a suspended supplier: a fresh start or an un-pause (decision 9, C3d)', () => {
   const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
   const job = (w: World) =>
@@ -922,7 +1146,7 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
     expect(await statusOf(w, elsewhere.id)).toBe('APPROVED');
     expect(await reactivation(w)).toMatchObject({
       action: 'supplier.reactivate_verified',
-      details: { pendingRequests: 'cancel', pendingStatementVersion: 1 },
+      details: { pendingRequests: 'cancel', pendingStatementVersion: 2 },
     });
   });
 

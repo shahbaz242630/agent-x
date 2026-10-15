@@ -25,7 +25,10 @@
 // The candidates leave out a subject stopped with its requests paused, by
 // its newest suspend event (a supplier UNVERIFIED: its newest unverifying
 // move, PAUSE_EVENTS) read in the query, unverified: a filter alone, so
-// paused requests aren't judged again every run. An event tampered with to
+// paused requests aren't judged again every run; likewise a supplier's new
+// version, while every version move since the request (at most
+// MOST_CARRIED_CHANGES) is a details change chosen to pause (E3), judged
+// then by the moves its signed events link (pausedFromOf). An event tampered with to
 // read as a pause hides its requests until the chain's check finds it, as a
 // row tampered back to ACTIVE does; nothing can be approved or handed off
 // under a suspension meanwhile.
@@ -35,6 +38,7 @@
 import { agentOf, type AgentsTables } from '@agentx/core/modules/agents';
 import {
   type AuditTables,
+  movedOtherwiseSince,
   newestDetail,
   type SignedStates,
   type SignedStatesServices,
@@ -49,18 +53,26 @@ import {
   type AuthorityNow,
   type Pausable,
   PENDING_STATUSES,
+  SPEND_REQUESTS,
   type SpendRequestsTables,
   type Voided,
   voidRequest,
 } from '@agentx/core/modules/spend-requests';
-import { supplierOf, type SuppliersTables } from '@agentx/core/modules/suppliers';
+import { SUPPLIERS, supplierOf, type SuppliersTables } from '@agentx/core/modules/suppliers';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
-import { PAUSE_EVENTS, pausedOf } from './suspensions.ts';
+import {
+  DETAILS_CHANGED,
+  MOST_CARRIED_CHANGES,
+  PAUSE_EVENTS,
+  pausedFromOf,
+  pausedOf,
+  VERSION_MOVES,
+} from './suspensions.ts';
 
 /** How often pending requests are looked over, once the last run has ended: a request a brake left is voided within this. */
 export const REQUEST_VOIDS_EVERY_MS = 5 * 60_000;
@@ -151,7 +163,19 @@ async function stoppedByTheirRows(
         // The bank's availability needs no filter: its end (UNAVAILABLE) ends the source too (updateFromPartner).
         where('s.consent_expires_at', '<=', now),
         looksStopped('p.status', 'VERIFIED', 'supplier', 'p.id'),
-        where('p.current_version_id', 'is distinct from', where.ref('r.supplier_version_id')),
+        // New details carry its requests only through changes chosen to pause (pausedFromOf, E3).
+        where.and([
+          where('p.current_version_id', 'is distinct from', where.ref('r.supplier_version_id')),
+          movedOtherwiseSince({
+            type: SUPPLIERS.subject,
+            idColumn: 'p.id',
+            orgColumn: 'r.org_id',
+            actions: VERSION_MOVES,
+            since: { type: SPEND_REQUESTS.subject, idColumn: 'r.id' },
+            only: { action: DETAILS_CHANGED, key: 'pendingRequests', value: 'pause' },
+            most: MOST_CARRIED_CHANGES,
+          }),
+        ]),
       ]);
     })
     .orderBy('r.id')
@@ -254,7 +278,7 @@ export function createRequestVoids({
         availability: source.source.availability,
         consentPast: source.source.consentExpiresAt <= now,
       },
-      supplier: supplier.supplier,
+      supplier: { ...supplier.supplier, pausedFrom: await pausedFromOf(tx, states, orgId, supplier.supplier) },
       paused: await pausedOf(
         tx,
         states,

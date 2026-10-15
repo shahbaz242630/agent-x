@@ -3,7 +3,8 @@
 // engine's order; several at once all kept; a supplier not found unverified,
 // with no version to compare; a suspension that pauses voids nothing, and
 // pauses only a suspension; the bank's own suspension never voids, consent
-// it ended always does.
+// it ended always does; new details a pause carries it through void nothing
+// for themselves (E3).
 import { describe, expect, it } from 'vitest';
 
 import { type AuthorityNow, type DecidedUnder, type Pausable, voidCauses } from './voids.ts';
@@ -15,7 +16,7 @@ const STANDING: AuthorityNow = {
   agentStatus: 'ACTIVE',
   mandate: { status: 'ACTIVE', currentVersionId: 'mv1' },
   source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },
-  supplier: { status: 'VERIFIED', currentVersionId: 'sv1' },
+  supplier: { status: 'VERIFIED', currentVersionId: 'sv1', pausedFrom: [] },
   paused: new Set(),
 };
 
@@ -53,15 +54,19 @@ describe('voidCauses', () => {
       { source: { status: 'ACTIVE', availability: 'UNAVAILABLE', consentPast: false } },
       'SOURCE_NOT_USABLE',
     ],
-    ['the supplier suspended', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1' } }, 'SUPPLIER_NOT_VERIFIED'],
+    [
+      'the supplier suspended',
+      { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } },
+      'SUPPLIER_NOT_VERIFIED',
+    ],
     [
       'the supplier unverified',
-      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1' } },
+      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1', pausedFrom: [] } },
       'SUPPLIER_NOT_VERIFIED',
     ],
     [
       'the supplier’s details changed',
-      { supplier: { status: 'VERIFIED', currentVersionId: 'sv2' } },
+      { supplier: { status: 'VERIFIED', currentVersionId: 'sv2', pausedFrom: [] } },
       'SUPPLIER_CHANGED',
     ],
     ['the supplier not found', { supplier: null }, 'SUPPLIER_NOT_VERIFIED'],
@@ -80,7 +85,7 @@ describe('voidCauses', () => {
         agentStatus: 'SUSPENDED',
         mandate: null,
         source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false },
-        supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2' },
+        supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2', pausedFrom: [] },
         paused: new Set(),
       }),
     ).toEqual([
@@ -107,9 +112,13 @@ describe('voidCauses', () => {
     ['the agent', 'agent', { agentStatus: 'SUSPENDED' }],
     ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }],
     ['the source', 'source', { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } }],
-    ['the supplier', 'supplier', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1' } }],
+    ['the supplier', 'supplier', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } }],
     // Decision 8: a payee registration's unverify, its requests paused by the registering admin.
-    ['the supplier unverified', 'supplier', { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1' } }],
+    [
+      'the supplier unverified',
+      'supplier',
+      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1', pausedFrom: [] } },
+    ],
   ] as const)(
     'finds none for %s suspended with its requests paused, and only its own pause counts',
     (_what, which, change: Partial<AuthorityNow>) => {
@@ -139,12 +148,12 @@ describe('voidCauses', () => {
     ],
     [
       'the supplier’s details changed while paused',
-      { supplier: { status: 'SUSPENDED', currentVersionId: 'sv2' } },
+      { supplier: { status: 'SUSPENDED', currentVersionId: 'sv2', pausedFrom: [] } },
       'SUPPLIER_CHANGED',
     ],
     [
       'the supplier’s new payee made current while paused unverified',
-      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2' } },
+      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2', pausedFrom: [] } },
       'SUPPLIER_CHANGED',
     ],
   ] as const)(
@@ -153,4 +162,31 @@ describe('voidCauses', () => {
       expect(voidCauses(DECIDED, { ...STANDING, ...change, paused: EVERY_PAUSED })).toEqual([cause]);
     },
   );
+
+  describe('a supplier’s new details chosen to pause (E3)', () => {
+    const carried = (status: string, pausedFrom: readonly string[]) => ({
+      ...STANDING,
+      supplier: { status, currentVersionId: 'sv3', pausedFrom },
+    });
+
+    it('finds none once it is verified again, its version carried through every change', () => {
+      expect(voidCauses(DECIDED, carried('VERIFIED', ['sv2', 'sv1']))).toEqual([]);
+    });
+
+    it('finds its changed details for a version the current one doesn’t carry from', () => {
+      expect(voidCauses(DECIDED, carried('VERIFIED', ['sv2']))).toEqual(['SUPPLIER_CHANGED']);
+      expect(voidCauses(DECIDED, carried('VERIFIED', []))).toEqual(['SUPPLIER_CHANGED']);
+    });
+
+    it('still judges its status: unverified, only its own pause holds it', () => {
+      expect(voidCauses(DECIDED, carried('UNVERIFIED', ['sv1']))).toEqual(['SUPPLIER_NOT_VERIFIED']);
+      expect(voidCauses(DECIDED, { ...carried('UNVERIFIED', ['sv1']), paused: new Set(['supplier']) })).toEqual([]);
+    });
+
+    it('carries none decided under no supplier version', () => {
+      expect(voidCauses({ ...DECIDED, supplierVersionId: null }, carried('VERIFIED', ['sv1']))).toEqual([
+        'SUPPLIER_CHANGED',
+      ]);
+    });
+  });
 });

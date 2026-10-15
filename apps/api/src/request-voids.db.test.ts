@@ -540,7 +540,7 @@ describe('pending spend requests voided once their authority no longer stands (C
         agentStatus: 'ACTIVE',
         mandate: { status: 'ACTIVE', currentVersionId: row.mandate_version_id },
         source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },
-        supplier: { status: 'VERIFIED', currentVersionId: row.supplier_version_id ?? '' },
+        supplier: { status: 'VERIFIED', currentVersionId: row.supplier_version_id ?? '', pausedFrom: [] },
         paused: new Set(),
       } satisfies AuthorityNow;
     });

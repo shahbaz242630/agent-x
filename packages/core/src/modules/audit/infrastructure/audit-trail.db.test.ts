@@ -34,7 +34,7 @@ import {
   TooManyEventsAboutObject,
   TooManyEventsToRead,
 } from './audit-trail.ts';
-import { newestDetail } from './newest-detail.ts';
+import { movedOtherwiseSince, newestDetail } from './newest-detail.ts';
 import type { AuditTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -1361,6 +1361,60 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
     expect((await detail(org, 'supplier.unknown')).rows).toEqual([{ found: null }]);
     // The newest of several actions (C3b): the reactivate, after the suspends.
     expect((await detail(org, 'supplier.suspend', 'supplier.reactivate')).rows).toEqual([{ found: 'pause' }]);
+  });
+
+  it('tells a query whether an object moved otherwise than one way since another’s first event, unverified (movedOtherwiseSince, E3)', async () => {
+    const PAUSE = { pendingRequests: 'pause' };
+    const moved = (most = 5) =>
+      withTenant(app, org, async (tx) => {
+        const { rows } = await sql<{ moved: boolean }>`select ${movedOtherwiseSince({
+          type: 'supplier',
+          idColumn: 'o.id',
+          orgColumn: 'o.org_id',
+          actions: ['supplier.details_changed', 'supplier.payee_change_confirmed'],
+          since: { type: 'spend_request', idColumn: 'o.id' },
+          only: { action: 'supplier.details_changed', key: 'pendingRequests', value: 'pause' },
+          most,
+        })} as moved from (values (${org}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx);
+        return rows[0]?.moved;
+      });
+
+    // A cancel before the request counts for nothing.
+    await record(
+      org,
+      { ...about('supplier', 1), action: 'supplier.details_changed', details: { pendingRequests: 'cancel' } },
+      { ...about('spend_request', 2), action: 'spend_request.decided' },
+    );
+    expect(await moved()).toBe(false);
+    await record(org, { ...about('supplier', 3), action: 'supplier.details_changed', details: PAUSE });
+    expect(await moved()).toBe(false);
+    expect(await moved(0)).toBe(true);
+    // Another action of the object's is no move.
+    await record(org, { ...about('supplier', 4), action: 'supplier.unverify', details: {} });
+    expect(await moved()).toBe(false);
+    // A new payee is never the one way, whatever its details say.
+    await record(org, { ...about('supplier', 5), action: 'supplier.payee_change_confirmed', details: PAUSE });
+    expect(await moved()).toBe(true);
+  });
+
+  it('tells a query a details change naming no choice moved otherwise (movedOtherwiseSince, E3)', async () => {
+    await record(
+      org,
+      { ...about('spend_request', 1), action: 'spend_request.decided' },
+      { ...about('supplier', 2), action: 'supplier.details_changed', details: { step: 2 } },
+    );
+    const { rows } = await withTenant(app, org, (tx) =>
+      sql<{ moved: boolean }>`select ${movedOtherwiseSince({
+        type: 'supplier',
+        idColumn: 'o.id',
+        orgColumn: 'o.org_id',
+        actions: ['supplier.details_changed'],
+        since: { type: 'spend_request', idColumn: 'o.id' },
+        only: { action: 'supplier.details_changed', key: 'pendingRequests', value: 'pause' },
+        most: 5,
+      })} as moved from (values (${org}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx),
+    );
+    expect(rows).toEqual([{ moved: true }]);
   });
 
   it('is broken at an event edited past the app', async () => {

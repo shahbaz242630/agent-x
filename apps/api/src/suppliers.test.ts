@@ -932,20 +932,21 @@ describe('POST /v1/suppliers/:id/payee-change/approve, then /confirm, and /withd
   });
 });
 
-describe('POST /v1/suppliers/:id/details, then /confirm (E3-2b)', () => {
-  const NEW_DETAILS = {
+describe('POST /v1/suppliers/:id/details, then /confirm (E3-2b; the choice, Phase 3 E3)', () => {
+  const NO_CHOICE = {
     displayName: 'Gulf Office Supplies LLC',
     phone: '+971509876543',
     email: 'Accounts@GulfOffice.example',
     source: { kind: 'registry', ref: 'DED-CN-1234567' },
   };
+  const NEW_DETAILS = { ...NO_CHOICE, pendingRequests: 'pause' };
   const KEPT = {
     displayName: 'Gulf Office Supplies LLC',
     contacts: { phone: '+971509876543', email: 'accounts@gulfoffice.example', tradeLicence: null },
     source: { kind: 'registry', ref: 'DED-CN-1234567' },
   };
 
-  it('answers the ask 202 with the step-up, passing the details as a version keeps them', async () => {
+  it('answers the ask 202 with the step-up, passing the details as a version keeps them and the choice', async () => {
     const asked: Asked[] = [];
     const app = await withSuppliers({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, asked);
 
@@ -959,12 +960,12 @@ describe('POST /v1/suppliers/:id/details, then /confirm (E3-2b)', () => {
         member: { ...MEMBER, sessionId: LIVE.sessionId },
         keyed: { operation: 'suppliers.details' },
         supplierId: SUPPLIER_ID,
-        change: KEPT,
+        change: { details: KEPT, pendingRequests: 'pause' },
       },
     ]);
   });
 
-  it('answers the confirm 200 with the supplier, passing the step-up and the same details', async () => {
+  it('answers the confirm 200 with the supplier, passing the step-up and the same details and choice', async () => {
     const asked: Asked[] = [];
     const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW } }, asked);
 
@@ -977,7 +978,7 @@ describe('POST /v1/suppliers/:id/details, then /confirm (E3-2b)', () => {
       {
         kind: 'detailsConfirm',
         keyed: { operation: 'suppliers.details.confirm' },
-        change: { stepUpChallengeId: CHALLENGE, details: KEPT },
+        change: { stepUpChallengeId: CHALLENGE, details: KEPT, pendingRequests: 'pause' },
       },
     ]);
   });
@@ -991,7 +992,7 @@ describe('POST /v1/suppliers/:id/details, then /confirm (E3-2b)', () => {
     expect(response.json()).toMatchObject({ error: { code: 'SUPPLIER_DETAILS_UNCHANGED' } });
   });
 
-  it('refuses details a version can’t hold, a payee, or a confirm without its step-up, before the use case runs', async () => {
+  it('refuses details a version can’t hold, a payee, no choice or one not offered, or a confirm without its step-up, before the use case runs', async () => {
     const asked: Asked[] = [];
     const app = await withSuppliers({}, asked);
 
@@ -1000,10 +1001,14 @@ describe('POST /v1/suppliers/:id/details, then /confirm (E3-2b)', () => {
       { ...NEW_DETAILS, phone: '0501234567' },
       { ...NEW_DETAILS, displayName: '' },
       { ...NEW_DETAILS, iban: 'AE070331234567890123456' },
+      NO_CHOICE,
+      { ...NO_CHOICE, pendingRequests: 'keep' },
     ]) {
       expect((await app.inject(post(`/${SUPPLIER_ID}/details`, body))).statusCode).toBe(400);
     }
-    expect((await app.inject(post(`/${SUPPLIER_ID}/details/confirm`, NEW_DETAILS))).statusCode).toBe(400);
+    for (const body of [NEW_DETAILS, { ...NO_CHOICE, stepUpChallengeId: CHALLENGE }]) {
+      expect((await app.inject(post(`/${SUPPLIER_ID}/details/confirm`, body))).statusCode).toBe(400);
+    }
     expect(asked).toEqual([]);
   });
 });
