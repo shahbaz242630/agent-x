@@ -146,7 +146,7 @@ export const REASON_CODES = {
   PENDING_REQUESTS_CANCELLED:
     "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed.",
   PENDING_REQUESTS_TOO_MANY:
-    'More pending requests are left to cancel than one move cancels at once, so nothing was changed. If its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel; wait a few minutes while they are cancelled, then try again.',
+    'More pending requests are left to cancel than one move cancels at once, so nothing was changed. Wait a few minutes while they are cancelled, then try again; if its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel first.',
   POLICY_CHANGES_SPENT:
     "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
   POLICY_CURRENCY_REFUSED:
