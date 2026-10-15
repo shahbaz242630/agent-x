@@ -16,10 +16,18 @@
 //   consumed with a passkey (SEC-HA-12), then the new version made current,
 //   entered by this admin, the supplier UNVERIFIED (the suppliers module's
 //   changeDetails), and `supplier_details_changed` written for every active
-//   member and the counting contacts, in the same transaction. Its pending
-//   requests are DENIED first (voidPendingOf, Phase 3 C3; decision 7: new
-//   details always cancel), a suspended supplier's paused ones too; the
-//   request-voids job takes any past the batch.
+//   member and the counting contacts, in the same transaction.
+//
+// Its pending requests, as the admin chose (decision 15, E3; no default,
+// bound into the step-up and kept on the change's events): `cancel` DENIES
+// them first whatever the supplier's status (voidPendingOf, Phase 3 C3), the
+// request-voids job taking any past the batch; `pause` holds them, carried to
+// the new version (pausedFromOf), so they stand again once a second person
+// verifies the supplier, a waiting one still re-checked by its approver
+// (decision 16, E5). A pause over an UNVERIFIED supplier whose stop cancels
+// voids those the job hasn't reached first, refused at the ask and the
+// confirm (PENDING_REQUESTS_TOO_MANY) past what one brake voids, so it never
+// carries what that stop cancelled (as C3e's suspend).
 //
 // Every version is kept for good, so the organisation may enter at most 200
 // changes of its suppliers a day: payee registrations (100 a day of their
@@ -33,7 +41,7 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import type { Outbox } from '@agentx/core/modules/notifications';
-import { voidPendingOf } from '@agentx/core/modules/spend-requests';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import {
   changeDetails,
   nextVersionNumber,
@@ -49,6 +57,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { ADDING_ROLES } from './supplier-registry.ts';
 import {
   createSupplierWork,
+  pauseOverACancel,
   type SessionMember,
   type SupplierChangeWrite,
   SupplierRefused,
@@ -56,6 +65,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
+import { DETAILS_STATEMENT_VERSION, detailsChoiceDetails } from './suspensions.ts';
 import { createStepUps } from './use-case-work.ts';
 
 /** Asking to change a supplier's details: its operation, which the step-up challenge names as its action too. */
@@ -66,19 +76,25 @@ export const DETAILS_CONFIRM_OPERATION = 'suppliers.details.confirm';
 /** The most changes of its suppliers an organisation may enter in any 24 hours: payee registrations' 100 and as many details changes. */
 export const MOST_CHANGES_A_DAY = 200;
 
+/** The new details, and the admin's choice for the supplier's pending requests (decision 15). */
+interface DetailsChange {
+  readonly details: SupplierDetails;
+  readonly pendingRequests: PendingChoice;
+}
+
 export interface SupplierDetailsChanges {
   change(
     member: SessionMember,
     idempotent: IdempotentRequest,
     supplierId: string,
-    details: SupplierDetails,
+    change: DetailsChange,
     correlationId: string,
   ): Promise<SupplierChangeWrite>;
   changeConfirm(
     member: SessionMember,
     idempotent: IdempotentRequest,
     supplierId: string,
-    confirm: { readonly details: SupplierDetails; readonly stepUpChallengeId: string },
+    confirm: DetailsChange & { readonly stepUpChallengeId: string },
     correlationId: string,
   ): Promise<SupplierChangeWrite>;
 }
@@ -94,13 +110,20 @@ const fieldsOf = ({ displayName, contacts, source }: SupplierDetails): string[] 
 ];
 
 /**
- * The change's SHA-256: the version it follows, its ID in lower case, and
- * every field of the new details. That version is the supplier's own, read
- * from its signed state inside the organisation's walls, so it names the
- * organisation, the supplier and exactly the details confirmed.
+ * The change's SHA-256: the version it follows, its ID in lower case, every
+ * field of the new details, and the choice with the version of its words.
+ * That version is the supplier's own, read from its signed state inside the
+ * organisation's walls, so it names the organisation, the supplier and
+ * exactly the details and choice confirmed.
  */
-const changeHash = (versionId: string, details: SupplierDetails): Buffer =>
-  changeHashOf([DETAILS_OPERATION, versionId.toLowerCase(), ...fieldsOf(details)]);
+const changeHash = (versionId: string, { details, pendingRequests }: DetailsChange): Buffer =>
+  changeHashOf([
+    DETAILS_OPERATION,
+    versionId.toLowerCase(),
+    ...fieldsOf(details),
+    pendingRequests,
+    String(DETAILS_STATEMENT_VERSION),
+  ]);
 
 export function createSupplierDetailsChanges({
   database,
@@ -123,17 +146,19 @@ export function createSupplierDetailsChanges({
   const stepUps = createStepUps({ challenges, Refusal: SupplierRefused });
 
   /**
-   * Whether this admin may change the supplier's details to `details` now,
-   * read in the write's transaction (the supplier `lock`ed as asked), after
-   * the caller took the add lock (oneSupplierAddAtATime) first: the admin,
-   * the supplier and its current version; or a refusal thrown.
+   * Whether this admin may change the supplier's details as `change` asks
+   * now, read in the write's transaction (the supplier `lock`ed as asked),
+   * after the caller took the add lock (oneSupplierAddAtATime) first: the
+   * admin, the supplier and its current version, and whether a pause must
+   * void first what an UNVERIFIED supplier's stop cancelled (refused past
+   * what one brake voids); or a refusal thrown.
    */
   const changeable = async (
     tx: SupplierTx,
     states: SignedStates,
     member: SessionMember,
     supplierId: string,
-    details: SupplierDetails,
+    { details, pendingRequests }: DetailsChange,
     lock: 'share' | 'change',
     correlationId: string,
   ) => {
@@ -150,30 +175,31 @@ export function createSupplierDetailsChanges({
     if (fieldsOf(details).every((field, at) => field === currentFields[at])) {
       throw new SupplierRefused(409, 'SUPPLIER_DETAILS_UNCHANGED');
     }
-    return { admin, found, current };
+    const cancelledBefore = await pauseOverACancel(tx, states, orgId, found.supplier, pendingRequests);
+    return { admin, found, current, cancelledBefore };
   };
 
   return {
-    async change(member, idempotent, supplierId, details, correlationId) {
+    async change(member, idempotent, supplierId, change, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneSupplierAddAtATime(tx, member.orgId);
-        const { current } = await changeable(tx, states, member, supplierId, details, 'share', correlationId);
-        return stepUps.ask(tx, member, { action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) });
+        const { current } = await changeable(tx, states, member, supplierId, change, 'share', correlationId);
+        return stepUps.ask(tx, member, { action: DETAILS_OPERATION, changeHash: changeHash(current.id, change) });
       });
       return work.askedAfter(done);
     },
 
-    async changeConfirm(member, idempotent, supplierId, { details, stepUpChallengeId }, correlationId) {
+    async changeConfirm(member, idempotent, supplierId, { stepUpChallengeId, ...change }, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneSupplierAddAtATime(tx, member.orgId);
         const held = await challenges.hold(tx, member.sessionId);
         const { orgId } = member;
-        const { admin, found, current } = await changeable(
+        const { admin, found, current, cancelledBefore } = await changeable(
           tx,
           states,
           member,
           supplierId,
-          details,
+          change,
           'change',
           correlationId,
         );
@@ -182,21 +208,25 @@ export function createSupplierDetailsChanges({
           member,
           held,
           stepUpChallengeId,
-          { action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) },
+          { action: DETAILS_OPERATION, changeHash: changeHash(current.id, change) },
           { passkeyRequired: true },
         );
         const braked = { supplierId: found.supplier.id };
-        await voidPendingOf(tx, states, keys, orgId, braked, 'SUPPLIER_CHANGED', clock.now());
+        if (change.pendingRequests === 'cancel') {
+          await voidPendingOf(tx, states, keys, orgId, braked, 'SUPPLIER_CHANGED', clock.now());
+        } else if (cancelledBefore) {
+          await voidPendingOf(tx, states, keys, orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
+        }
         await changeDetails(tx, states, keys, { orgId, id: found.supplier.id }, found, {
           orgId,
           id: ids.next(),
           supplierId: found.supplier.id,
           version: await nextVersionNumber(tx, orgId, found.supplier.id),
-          supplier: details,
+          supplier: change.details,
           enteredBy: admin.id,
           enteredAt: clock.now(),
           actor: { type: 'user', id: member.userId },
-          details: stepUpDetails(consumed),
+          details: { ...stepUpDetails(consumed), ...detailsChoiceDetails(change.pendingRequests) },
           follows: current,
         });
         await outbox.add(tx, toldEveryone(orgId, found.supplier.id, 'supplier_details_changed'));

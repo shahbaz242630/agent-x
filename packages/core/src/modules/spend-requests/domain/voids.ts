@@ -16,6 +16,10 @@
 // but for one a payee registration unverified with its requests paused, as the
 // registering admin chose (decision 8): its requests stand again once it is
 // verified again, and a new payee made current voids them (a new version).
+// New details void them too, unless the admin changing them chose to pause
+// (decision 15, E3): a request decided under a version the current one
+// carries from stands once the supplier is verified again; its status is
+// judged as ever meanwhile.
 //
 // Each cause found is kept with the void, in the order the engine checks
 // them; none and the request stands.
@@ -62,7 +66,16 @@ export interface AuthorityNow {
   readonly mandate: { readonly status: string; readonly currentVersionId: string | null } | null;
   /** Its own status, the bank's word on it (its availability), and whether its consent has run out. */
   readonly source: { readonly status: string; readonly availability: string; readonly consentPast: boolean };
-  readonly supplier: { readonly status: string; readonly currentVersionId: string } | null;
+  /**
+   * Its status and current version, and the versions that one carries
+   * requests from: each moved on from by a details change chosen to pause
+   * (decision 15, E3).
+   */
+  readonly supplier: {
+    readonly status: string;
+    readonly currentVersionId: string;
+    readonly pausedFrom: readonly string[];
+  } | null;
   /** Those stopped with their requests paused, as the freeze, suspension (or a supplier's unverify) in force chose. */
   readonly paused: ReadonlySet<Pausable>;
 }
@@ -88,6 +101,9 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly R
   const bankEnded = source.availability !== 'ACTIVE' && source.availability !== 'SUSPENDED';
   if (stopped(source.status, 'ACTIVE', 'source') || bankEnded || source.consentPast) causes.push('SOURCE_NOT_USABLE');
   if (supplier === null || stopped(supplier.status, 'VERIFIED', 'supplier')) causes.push('SUPPLIER_NOT_VERIFIED');
-  if (supplier !== null && supplier.currentVersionId !== decided.supplierVersionId) causes.push('SUPPLIER_CHANGED');
+  if (supplier !== null && supplier.currentVersionId !== decided.supplierVersionId) {
+    const carried = decided.supplierVersionId !== null && supplier.pausedFrom.includes(decided.supplierVersionId);
+    if (!carried) causes.push('SUPPLIER_CHANGED');
+  }
   return causes;
 }

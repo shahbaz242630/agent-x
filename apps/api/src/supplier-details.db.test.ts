@@ -308,14 +308,20 @@ async function changed(
   { confirmDetails = details, amr = PASSKEY }: { confirmDetails?: SupplierDetails; amr?: readonly string[] } = {},
 ) {
   const who = await signedIn(person);
-  const asked = await detailsChanges.change(who, keyed(who, DETAILS_OPERATION), id, details, CORRELATION);
+  const asked = await detailsChanges.change(
+    who,
+    keyed(who, DETAILS_OPERATION),
+    id,
+    { details, pendingRequests: 'cancel' },
+    CORRELATION,
+  );
   if (asked.outcome !== 'asked') return asked;
   await stepUp(who, asked.stepUpChallengeId, amr);
   return detailsChanges.changeConfirm(
     who,
     keyed(who, DETAILS_CONFIRM_OPERATION),
     id,
-    { details: confirmDetails, stepUpChallengeId: asked.stepUpChallengeId },
+    { details: confirmDetails, pendingRequests: 'cancel', stepUpChallengeId: asked.stepUpChallengeId },
     CORRELATION,
   );
 }
@@ -502,7 +508,13 @@ describe(`the confirmation's lock order against the confirmer's demotion (ADR-00
     const { org, alice, supplierId } = await established();
     const admin = await signedIn(alice);
     const challengeId = askedFor(
-      await detailsChanges.change(admin, keyed(admin, DETAILS_OPERATION), supplierId, NEW_PHONE, CORRELATION),
+      await detailsChanges.change(
+        admin,
+        keyed(admin, DETAILS_OPERATION),
+        supplierId,
+        { details: NEW_PHONE, pendingRequests: 'cancel' },
+        CORRELATION,
+      ),
     );
     await stepUp(admin, challengeId);
 
@@ -514,7 +526,7 @@ describe(`the confirmation's lock order against the confirmer's demotion (ADR-00
           admin,
           keyed(admin, DETAILS_CONFIRM_OPERATION),
           supplierId,
-          { details: NEW_PHONE, stepUpChallengeId: challengeId },
+          { details: NEW_PHONE, pendingRequests: 'cancel', stepUpChallengeId: challengeId },
           CORRELATION,
         ),
     );

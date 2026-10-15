@@ -34,6 +34,15 @@
 // reactivation's event, so one coming back UNVERIFIED keeps its requests held
 // until it is verified again. One reactivated before the choice names none
 // and cancels.
+//
+// A supplier's details change (decision 15, E3) asks the admin too, in its
+// own words (DETAILS_STATEMENTS): cancel, whatever the supplier's status, or
+// pause, kept on the change's event (and on the unverify it makes of a
+// verified one, read as a payee registration's is). The requests a pause
+// holds are carried to the new version (pausedFromOf): the change's event
+// names the version it follows, so the walk back from the current version
+// through changes chosen to pause finds the versions they were decided
+// under.
 import { AGENTS } from '@agentx/core/modules/agents';
 import type {
   AuditActor,
@@ -89,13 +98,16 @@ const REACTIVATE_STATEMENTS = {
     'the money held for it freed. This can’t be undone: the agent asks again.',
   pause:
     'Un-pause: its held requests stand again, at once if it comes back verified. If it comes back unverified (never ' +
-    'verified, or new bank details still waiting), they stay held until a second person verifies it again; its new ' +
-    'details made current cancel them. Requests waiting for approval still expire after 72 hours. Not offered when ' +
-    'its suspension cancelled them.',
+    'verified, or new bank details still waiting), they stay held until a second person verifies it again; new bank ' +
+    'details made current, or new details chosen to cancel, cancel them. Requests waiting for approval still expire ' +
+    'after 72 hours. Not offered when its suspension cancelled them.',
 } as const satisfies Record<PendingChoice, string>;
 
-/** The version of REACTIVATE_STATEMENTS each event names: raised with any change to their words. */
-const REACTIVATE_STATEMENT_VERSION = 1;
+/**
+ * The version of REACTIVATE_STATEMENTS each event names: raised with any
+ * change to their words (2: new details may carry them, E3).
+ */
+const REACTIVATE_STATEMENT_VERSION = 2;
 
 /** A supplier's reactivation: the reactivator's choice alone (decision 9). */
 export const REACTIVATE_BODY = z
@@ -211,6 +223,94 @@ const PAYEE_CANCEL = 'supplier.pending_requests_chosen';
 /** The choice as a payee registration's events keep it, with the statement confirmed. */
 export const payeeChoiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: PAYEE_STATEMENT_VERSION }) as const;
+
+/**
+ * The words a supplier's details change is confirmed with (decision 15, E3),
+ * by version, as STATEMENTS: a waiting request carried to the new details
+ * isn't approved under the old ones (decision 16, S115: the approver
+ * re-checks it, E5).
+ */
+const DETAILS_STATEMENTS = {
+  cancel:
+    'Once you confirm the new details, every request to this supplier waiting for approval, approved or ready is ' +
+    'cancelled and the money held for it freed, whatever the supplier’s status. This can’t be undone: the agent ' +
+    'asks again once a second person verifies the supplier.',
+  pause:
+    'Once you confirm the new details, its requests are held as they are: none can be approved or paid until a ' +
+    'second person verifies the supplier with its new details, when approved ones stand again. Requests waiting ' +
+    'for approval can’t be approved under the old details, and still expire after 72 hours. New bank details made ' +
+    'current, or a later change chosen to cancel, cancel them, and so does an eleventh change in a row chosen to ' +
+    'pause, for the requests held since before the first. A supplier already suspended or unverified keeps the ' +
+    'choice it was stopped with.',
+} as const satisfies Record<PendingChoice, string>;
+
+/** The version of DETAILS_STATEMENTS each event names: raised with any change to their words. */
+export const DETAILS_STATEMENT_VERSION = 1;
+
+/** A details change's choice, as its bodies name it (decision 15). */
+export const DETAILS_PENDING_REQUESTS = z
+  .enum(PENDING_CHOICES)
+  .describe(
+    'What happens to the supplier’s pending spend requests once the new details are confirmed, chosen by the ' +
+      `admin changing them; there is no default. \`cancel\`: ${DETAILS_STATEMENTS.cancel} ` +
+      `\`pause\`: ${DETAILS_STATEMENTS.pause}`,
+  );
+
+/** The choice as a details change's events keep it (its `supplier.details_changed`, and an unverify it made). */
+export const detailsChoiceDetails = (choice: PendingChoice) =>
+  ({ pendingRequests: choice, pendingStatementVersion: DETAILS_STATEMENT_VERSION }) as const;
+
+/** A supplier's version moves: a details change (its choice kept, E3) and a new payee made current (always cancels). */
+export const DETAILS_CHANGED = 'supplier.details_changed';
+export const VERSION_MOVES = [DETAILS_CHANGED, 'supplier.payee_change_confirmed'] as const;
+
+/**
+ * The most details changes back a request is carried through: one decided
+ * before them is voided (fail-closed), as DETAILS_STATEMENTS' pause says.
+ */
+export const MOST_CARRIED_CHANGES = 10;
+
+/**
+ * The versions the supplier's current one carries requests from (E3): each
+ * one a details change chosen to pause moved it on from, walking back from
+ * the current version through its newest version moves, each event believed
+ * only whole, until a move that isn't one (a new payee, a cancel, or one
+ * from before the choice, which names no version it follows). A request
+ * decided under one of them isn't void for its new details; its supplier's
+ * status is judged as ever. Throws for a history that can't be believed (its
+ * alarm already raised).
+ */
+export async function pausedFromOf(
+  tx: AuditTransaction,
+  states: SignedStates,
+  orgId: string,
+  supplier: { readonly id: string; readonly currentVersionId: string },
+): Promise<readonly string[]> {
+  const history = await states.historyOf(tx, orgId, {
+    subjectTypes: [SUPPLIERS.subject],
+    subjectId: supplier.id,
+    actions: VERSION_MOVES,
+    limit: MOST_CARRIED_CHANGES,
+    newest: true,
+  });
+  if (history.outcome !== 'read') throw new Error(`A supplier's version history can't be believed: ${supplier.id}`);
+  const carried: string[] = [];
+  let expected = supplier.currentVersionId;
+  for (const { event } of history.events.toReversed()) {
+    const follows = event.details.followsVersionId;
+    if (
+      event.action !== DETAILS_CHANGED ||
+      event.details.versionId !== expected ||
+      choiceIn(event.details) !== 'pause' ||
+      typeof follows !== 'string'
+    ) {
+      break;
+    }
+    carried.push(follows);
+    expected = follows;
+  }
+  return carried;
+}
 
 /** The first PAYEE_STATEMENTS whose cancel said it acts whatever the supplier's status (C3c). */
 const CANCELS_AT_ONCE_FROM = 2;

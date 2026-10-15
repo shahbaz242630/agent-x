@@ -11188,12 +11188,20 @@
                       "ref"
                     ],
                     "additionalProperties": false
+                  },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
                 },
                 "required": [
                   "displayName",
                   "phone",
-                  "source"
+                  "source",
+                  "pendingRequests"
                 ],
                 "additionalProperties": false
               }
@@ -11320,6 +11328,13 @@
                     ],
                     "additionalProperties": false
                   },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
+                  },
                   "stepUpChallengeId": {
                     "type": "string",
                     "format": "uuid",
@@ -11330,6 +11345,7 @@
                   "displayName",
                   "phone",
                   "source",
+                  "pendingRequests",
                   "stepUpChallengeId"
                 ],
                 "additionalProperties": false

@@ -8,7 +8,7 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { pendingPastABrake, type PendingChoice, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   contactsOf,
   type NameCheck,
@@ -27,6 +27,7 @@ import { type Database, type DatabaseTransaction, isUnwritten } from '@agentx/pl
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
+import { pausedOf } from './suspensions.ts';
 import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables, type Written } from './use-case-work.ts';
 
 /**
@@ -94,6 +95,30 @@ export const toldEveryone = (
     { ...about, recipientUserId: null, toContacts: true },
   ];
 };
+
+/**
+ * Whether `choice`, a pause, comes over an UNVERIFIED supplier whose stop
+ * cancels its requests (C3c's suspend over a cancel; E3's details change):
+ * a pause can't hold what that stop cancelled, so those the request-voids
+ * job hasn't reached yet must be voided first, by the caller with its own
+ * cause; refused (PENDING_REQUESTS_TOO_MANY) past what one brake voids.
+ */
+export async function pauseOverACancel(
+  tx: SupplierTx,
+  states: SignedStates,
+  orgId: string,
+  supplier: { readonly id: string; readonly status: string },
+  choice: PendingChoice,
+): Promise<boolean> {
+  const cancelledBefore =
+    choice === 'pause' &&
+    supplier.status === 'UNVERIFIED' &&
+    !(await pausedOf(tx, states, orgId, [['supplier', supplier.id, 'UNVERIFIED']])).has('supplier');
+  if (cancelledBefore && (await pendingPastABrake(tx, orgId, { supplierId: supplier.id }))) {
+    throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
+  }
+  return cancelledBefore;
+}
 
 /** A supplier read for a decision or a change: its record, and the state a change records from. */
 type SupplierFound = Extract<Awaited<ReturnType<typeof supplierOf>>, { outcome: 'found' }>;

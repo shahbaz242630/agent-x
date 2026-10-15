@@ -757,7 +757,9 @@ export async function withdrawPayeeChange(
  * current one and keeping its payee (addVersion), is made current at once.
  * A new phone starts its own `phone_since`, so a call-back to it waits 30
  * days. A suspended supplier stays suspended, and comes back UNVERIFIED
- * (reactivationOf: its verified version is no longer current). Gives the
+ * (reactivationOf: its verified version is no longer current). The change's
+ * event names the version made current and the one it follows, so the
+ * requests a pause carries are found by walking back (E3). Gives the
  * supplier as it now stands.
  */
 export async function changeDetails(
@@ -782,7 +784,11 @@ export async function changeDetails(
     key,
     from.state,
     { current_version_id: version.id },
-    { ...change, action: 'supplier.details_changed', details: { ...change.details, versionId: version.id } },
+    {
+      ...change,
+      action: 'supplier.details_changed',
+      details: { ...change.details, versionId: version.id, followsVersionId: version.follows.id },
+    },
   );
   return (await againForChange(tx, states, key)).supplier;
 }

@@ -100,7 +100,13 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAsked,
 } from './route-schemas.ts';
-import { PAYEE_PENDING_REQUESTS, REACTIVATE_BODY, SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
+import {
+  CHOICE_BODY_LIMIT,
+  DETAILS_PENDING_REQUESTS,
+  PAYEE_PENDING_REQUESTS,
+  REACTIVATE_BODY,
+  SUSPEND_BODY,
+} from './suspensions.ts';
 import {
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
@@ -293,7 +299,13 @@ const SUPPLIER_CHANGED = SUPPLIER_DETAILS.describe('The supplier, as the change 
 const DETAILS_SCHEMA = {
   summary: 'Ask to change a supplier’s details: its name, contacts or source, never its bank details',
   params: SUPPLIER_ID,
-  body: DETAILS_BODY.describe('Its new details, every field: the supplier is UNVERIFIED once they are confirmed.'),
+  body: z
+    .strictObject({ ...DETAIL_FIELDS, pendingRequests: DETAILS_PENDING_REQUESTS })
+    .transform((body, context) => ({ pendingRequests: body.pendingRequests, details: detailsKept(body, context) }))
+    .describe(
+      'Its new details, every field, and the choice for its pending requests: the supplier is UNVERIFIED once ' +
+        'they are confirmed.',
+    ),
   response: {
     202: stepUpAsked(
       'SupplierDetailsChangeAsked',
@@ -308,10 +320,15 @@ const DETAILS_CONFIRM_SCHEMA = {
   body: z
     .strictObject({
       ...DETAIL_FIELDS,
+      pendingRequests: DETAILS_PENDING_REQUESTS,
       stepUpChallengeId: STEP_UP_SIGNED_IN,
     })
-    .transform((body, context) => ({ stepUpChallengeId: body.stepUpChallengeId, details: detailsKept(body, context) }))
-    .describe('The step-up signed in again for, with the same details as the ask.'),
+    .transform((body, context) => ({
+      stepUpChallengeId: body.stepUpChallengeId,
+      pendingRequests: body.pendingRequests,
+      details: detailsKept(body, context),
+    }))
+    .describe('The step-up signed in again for, with the same details and choice as the ask.'),
   response: {
     200: SUPPLIER_CHANGED.describe(
       'The supplier with its new details: UNVERIFIED until a second person verifies it again, and everyone told.',

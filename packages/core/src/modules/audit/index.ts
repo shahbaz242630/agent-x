@@ -55,7 +55,7 @@ export {
   type InvestigationConclusion,
   isIncidentReference,
 } from './domain/integrity-hold.ts';
-export { newestDetail } from './infrastructure/newest-detail.ts';
+export { movedOtherwiseSince, newestDetail } from './infrastructure/newest-detail.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
 export { type PageAsked, type PageShown, type VerifiedPage, verifiedPage } from './infrastructure/verified-page.ts';
 export { holdOrganisation, type SignedStatesServices, withSignedStates } from './infrastructure/with-signed-states.ts';
