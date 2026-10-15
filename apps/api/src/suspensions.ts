@@ -57,11 +57,12 @@ const STATEMENTS = {
     'This can’t be undone: the agent asks again once it is resumed.',
   pause:
     'Its requests are held as they are: none can be approved or paid while it is suspended, and they stand again ' +
-    'once it is resumed. Requests waiting for approval still expire after 72 hours.',
+    'once it is resumed. Requests waiting for approval still expire after 72 hours. Requests an earlier stop has ' +
+    'already cancelled (a supplier unverified with them cancelled) stay cancelled.',
 } as const satisfies Record<PendingChoice, string>;
 
-/** The version of STATEMENTS each event names: raised with any change to their words. */
-const STATEMENT_VERSION = 1;
+/** The version of STATEMENTS each event names: raised with any change to their words (2: an earlier stop's cancel, S113). */
+const STATEMENT_VERSION = 2;
 
 /** A suspend's choice, as its body names it. */
 const PENDING_REQUESTS = z

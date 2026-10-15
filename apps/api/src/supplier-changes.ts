@@ -10,7 +10,10 @@
 //   pause (Phase 3 decision 7, suspensions.ts). On cancel they are DENIED in
 //   the same transaction, before its move (voidPendingOf, Phase 3 C3),
 //   pressed again too, so a pause made a cancel voids them; the
-//   request-voids job takes any past the batch. One suspended already is
+//   request-voids job takes any past the batch. A pause over an UNVERIFIED
+//   supplier whose stop cancels voids those the job hasn't reached first,
+//   refused (PENDING_REQUESTS_TOO_MANY) past the batch, so it never holds
+//   what that stop cancelled (C3c's suspend over a cancel). One suspended already is
 //   answered as it is: a brake pressed twice is not an error. A suspended
 //   supplier is shown to no agent.
 // - `reactivate` (`suppliers.reactivate`): gives the supplier its place back,
@@ -159,8 +162,17 @@ export function createSupplierChanges({
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: supplierId };
         const found = await work.supplierIn(tx, states, key, 'change');
-        if (pendingRequests === 'cancel') {
-          const braked = { supplierId: found.supplier.id };
+        const braked = { supplierId: found.supplier.id };
+        // A pause can't hold what an UNVERIFIED supplier's stop cancels (C3c's suspend over a cancel): those the
+        // job hasn't reached yet are voided first, refused past what one brake voids.
+        const cancelledBefore =
+          pendingRequests === 'pause' &&
+          found.supplier.status === 'UNVERIFIED' &&
+          !(await pausedOf(tx, states, member.orgId, [['supplier', found.supplier.id, 'UNVERIFIED']])).has('supplier');
+        if (cancelledBefore && (await pendingPastABrake(tx, member.orgId, braked))) {
+          throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
+        }
+        if (pendingRequests === 'cancel' || cancelledBefore) {
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
         }
         // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).

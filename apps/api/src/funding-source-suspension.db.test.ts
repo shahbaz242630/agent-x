@@ -225,7 +225,7 @@ describe(`suspending a source: the brake, with no step-up (D2-4b, Postgres ${ser
       });
       expect(JSON.parse(String((await eventsAbout(org, source.id)).at(-1)?.details))).toMatchObject({
         pendingRequests: choice,
-        pendingStatementVersion: 1,
+        pendingStatementVersion: 2,
       });
     },
   );
