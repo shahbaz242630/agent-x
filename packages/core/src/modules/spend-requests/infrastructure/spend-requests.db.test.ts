@@ -145,8 +145,8 @@ const statusOf = (org: Org, id: string) =>
 /** An approved request, ready to claim its order. */
 const approved = (org: Org, overrides: Partial<RequestRow> = {}) => moved(org, requestRow(org, overrides), 'APPROVED');
 
-/** A second version of the organisation's mandate, on its source, made the one waiting for acceptance, past the app. */
-const anotherDraft = async (org: Org): Promise<string> => {
+/** A second version of the organisation's mandate, on its source or the one given, made the one waiting, past the app. */
+const anotherDraft = async (org: Org, source = org.source): Promise<string> => {
   const version = randomUUID();
   await database.as('admin').query(
     `with draft as (
@@ -157,7 +157,7 @@ const anotherDraft = async (org: Org): Promise<string> => {
        returning org_id, mandate_id, id)
      update mandates.mandates m set pending_version_id = draft.id
      from draft where m.org_id = draft.org_id and m.id = draft.mandate_id`,
-    [org.id, org.mandate, version, org.supplier.id, org.source, 'c'.repeat(64), org.agent.id, AT],
+    [org.id, org.mandate, version, org.supplier.id, source, 'c'.repeat(64), org.agent.id, AT],
   );
   return version;
 };
@@ -351,6 +351,16 @@ describe('a spend request', () => {
     for (const id of [denied, validating]) {
       await expect(change(org, id, { mandate_version_id: waiting })).rejects.toEqual(refusedBy('carried_version'));
     }
+  });
+
+  it('is never carried to a waiting version on another source (from_its_mandates_source)', async () => {
+    const org = await organisation();
+    const waiting = await anotherDraft(org, await seed().source(org.id));
+    const id = await approved(org);
+
+    await expect(change(org, id, { mandate_version_id: waiting })).rejects.toEqual(
+      refusedBy('from_its_mandates_source'),
+    );
   });
 
   it('gives reasons for every decision but ALLOW, and none for ALLOW (reasons_with_the_decision)', async () => {
