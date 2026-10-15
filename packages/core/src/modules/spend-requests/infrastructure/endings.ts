@@ -45,7 +45,7 @@ import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../sha
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { type AuthorityNow, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
-import { requestHoldingsWhole } from './holdings-check.ts';
+import { decisionOf, requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -128,9 +128,13 @@ export async function expireRequest(
   const read = await requestOf(tx, states, key, 'change');
   if (read.outcome !== 'found') return read;
   if (read.request.status !== 'APPROVAL_REQUIRED') return { outcome: 'not_open', request: read.request };
-  // Still waiting, its latest signed event is its decision: the chain seals when that was recorded.
-  const decided = read.state.recordedAt;
-  if (!waitedOut(decided, now)) return { outcome: 'not_due' };
+  // Its 72 hours run from its decision as the chain sealed it, not its latest event: a carry (E4) moves no clock.
+  // Every request held waiting was decided so (signRequest): none is a history that can't be believed (its alarm
+  // raised) or a bug, so it throws rather than wait for good, and the job's error line alerts.
+  const decision = await decisionOf(tx, states, key);
+  if (decision === null) throw new Error(`A spend request waiting for approval has no decision to read: ${key.id}`);
+  if (!waitedOut(decision.decidedAt, now)) return { outcome: 'not_due' };
+  const decided = decision.decidedAt;
   await endHolding(tx, states, keys, key, 'expire', now, {
     actor: ACTOR,
     action: 'spend_request.expired',

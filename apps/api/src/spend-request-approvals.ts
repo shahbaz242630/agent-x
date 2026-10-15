@@ -49,7 +49,7 @@ import {
   approveRequest,
   decidedAgainst,
   expireRequest,
-  heldAsDecidedOf,
+  decisionOf,
   holdsCapacity,
   requestOf,
   type SpendRequestRecord,
@@ -168,8 +168,9 @@ export function createSpendRequestApprovals({
     const agent = await agentAlone(tx, states, { orgId, agentId: named.agent_id });
     const key = await agentKeyOf(tx, states, { orgId, id: named.agent_key_id }, 'share');
     if (key.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    // The month its capacity is held in, as its decision sealed it; none for a request that holds none.
-    const held = await heldAsDecidedOf(tx, states, { orgId, id: requestId });
+    // Its decision as sealed: the month its capacity is held in (none for a request that holds none), and its time.
+    const decision = await decisionOf(tx, states, { orgId, id: requestId });
+    const held = decision?.held ?? null;
     const asked = {
       amount: money(BigInt(named.amount_minor), named.currency),
       supplierId: named.supplier_id,
@@ -193,8 +194,9 @@ export function createSpendRequestApprovals({
     if (read.outcome !== 'found') throw new Error(`A spend request found by its row is missing: ${requestId}`);
     const { request } = read;
     if (request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
-    // Still waiting, its latest signed event is its decision, which its 72 hours run from (as expireRequest's).
-    if (waitedOut(read.state.recordedAt, now)) throw new MandateRefused(409, 'REQUEST_EXPIRED');
+    // Its 72 hours run from its decision as sealed, never a later event such as a carry (E4; as expireRequest's).
+    // With no decision it holds nothing sealed, so the check below refuses it.
+    if (decision !== null && waitedOut(decision.decidedAt, now)) throw new MandateRefused(409, 'REQUEST_EXPIRED');
     const against = decidedAgainst(read.state);
     // A waiting request holds capacity, sealed with its decision; and its row names what its signed state does.
     if (

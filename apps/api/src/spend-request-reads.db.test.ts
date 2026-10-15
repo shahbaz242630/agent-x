@@ -6,6 +6,7 @@
 import { agentsNamed } from '@agentx/core/modules/agents';
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { suppliersNamed } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
@@ -33,7 +34,7 @@ let decisions: SpendRequestDecisions;
 let reads: SpendRequestReads;
 let cancels: SpendRequestCancels;
 
-const { ready, ask } = spendWorld({
+const { ready, ask, quiet } = spendWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -167,6 +168,53 @@ describe('the team’s reads of spend requests (Phase 3 B3)', () => {
         },
       ],
     });
+  });
+
+  it('shows a waiting one expiring 72 hours from its decision, not from a later event of its own (E4b)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    // Sealed times are the database's own, so the later event comes a moment later.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const read = await requestOf(tx, states, { orgId: w.org, id: waiting.id }, 'change');
+      if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
+      // A signed change that moves nothing, as E4's carry is a later event on a request still waiting.
+      await states.record(
+        tx,
+        SPEND_REQUESTS,
+        { orgId: w.org, id: waiting.id },
+        read.state,
+        {},
+        {
+          actor: OPERATOR,
+          action: 'spend_request.signed_again',
+          details: {},
+        },
+      );
+    });
+    const times = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select(['action', 'recorded_at'])
+        .where('subject_type', '=', 'spend_request')
+        .where('subject_id', '=', waiting.id)
+        .where('action', 'in', ['spend_request.decided', 'spend_request.signed_again'])
+        .orderBy('seq')
+        .execute(),
+    );
+    const [decidedAt, signedAgainAt] = times.map(({ recorded_at }) => recorded_at);
+    const expected = {
+      request: { id: waiting.id },
+      changedAt: signedAgainAt,
+      expiresAt: new Date((decidedAt?.getTime() ?? 0) + 72 * 3_600_000),
+    };
+
+    expect(signedAgainAt?.getTime()).toBeGreaterThan(decidedAt?.getTime() ?? Infinity);
+    expect(await reads.list(w.org, { after: null, limit: 50 }, 'waiting', CORRELATION)).toMatchObject({
+      outcome: 'listed',
+      requests: [expected],
+    });
+    expect(await reads.show(w.org, waiting.id, CORRELATION)).toMatchObject({ outcome: 'found', shown: expected });
   });
 
   it('leaves a request cancelled out of those waiting, and lists it as cancelled', async () => {

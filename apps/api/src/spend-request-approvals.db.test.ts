@@ -381,6 +381,38 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(await holdingsOf(w, asked.id)).toEqual({ reservation: 'RELEASED', released: true });
   });
 
+  it('runs its 72 hours from its decision, not a later event of its own: past it by its decision, refused (E4b)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    // Sealed times are the database's own, so the later event comes a moment later, not hours.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const later = await signed(w, async (tx, states) => {
+      const read = await requestOf(tx, states, { orgId: w.org, id: waiting.id }, 'change');
+      if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
+      // A signed change that moves nothing, as E4's carry is a later event on a request still waiting.
+      await states.record(
+        tx,
+        SPEND_REQUESTS,
+        { orgId: w.org, id: waiting.id },
+        read.state,
+        {},
+        {
+          actor: OPERATOR,
+          action: 'spend_request.signed_again',
+          details: {},
+        },
+      );
+      const after = await requestOf(tx, states, { orgId: w.org, id: waiting.id });
+      if (after.outcome !== 'found') throw new Error(`not found: ${after.outcome}`);
+      return after.state.recordedAt.getTime();
+    });
+    // 72 hours past its decision, not yet past the later event's.
+    clock.advanceBy(later + 72 * HOUR_MS - 1 - clock.now().getTime());
+
+    expect(await asking(await member(w.org, 'approver'), waiting.id)).toEqual(refused(409, 'REQUEST_EXPIRED'));
+    expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
+  });
+
   it('refuses it while the organisation is frozen: ORG_FROZEN, nothing changed (decision 3)', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);

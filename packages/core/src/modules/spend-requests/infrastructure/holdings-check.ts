@@ -91,17 +91,28 @@ async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[
 }
 
 /**
- * What each request's decision sealed of what it holds (heldOf), by the
- * request's ID, in one statement; null for a request whose decision sealed
- * none. A history that can't be believed has raised the alarm and holds the
- * organisation already: nothing sealed is then compared.
+ * A request's decision as its signed event holds it: what it sealed of what
+ * the request holds (null for none), and when the chain recorded it, which a
+ * waiting request's 72 hours run from (D7). Not its latest event's time: a
+ * carry to a new mandate version (E4) is a later event that moves no clock.
  */
-async function heldAsDecided(
-  tx: HoldingsTransaction,
+export interface Decided {
+  readonly held: HeldSealed | null;
+  readonly decidedAt: Date;
+}
+
+/**
+ * Each request's decision (Decided), by the request's ID in lower case, in
+ * one statement (the holdings check; the team's list, for when a waiting one
+ * expires). A history that can't be believed has raised the alarm and holds
+ * the organisation already: none is then answered.
+ */
+export async function decisionsOf(
+  tx: Transaction<AuditTables>,
   states: SignedStates,
   orgId: string,
   ids: readonly string[],
-): Promise<Map<string, HeldSealed | null>> {
+): Promise<Map<string, Decided>> {
   if (ids.length === 0) return new Map();
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SPEND_REQUESTS.subject],
@@ -110,28 +121,31 @@ async function heldAsDecided(
     limit: MOST_DECIDED_EVENTS * ids.length,
   });
   if (history.outcome !== 'read') return new Map();
-  const decided = history.events.map(({ event }) => [event.subject.id.toLowerCase(), event.details] as const);
+  const decided = history.events.map(
+    ({ event, recordedAt }) =>
+      [event.subject.id.toLowerCase(), { held: heldOf(event.details), decidedAt: recordedAt }] as const,
+  );
   // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
   const counts = new Map<string, number>();
   for (const [id] of decided) counts.set(id, (counts.get(id) ?? 0) + 1);
   if ([...counts.values()].some((count) => count > MOST_DECIDED_EVENTS))
     throw new TooManyEventsToRead(MOST_DECIDED_EVENTS);
   // In chain order, so each request's last decided event is the one left.
-  return new Map(decided.map(([id, details]) => [id, heldOf(details)]));
+  return new Map(decided);
 }
 
 /**
- * What one request's decision sealed of what it holds, read as the holdings
- * check reads it (Phase 3 B4b: the month an approval weighs it in); null for
- * a decision that sealed none, or a history that can't be believed (its
+ * One request's decision, read as the holdings check reads it (Phase 3 B4b:
+ * the month an approval weighs it in; E4b: when its 72 hours run from); null
+ * for a request with no decision, or a history that can't be believed (its
  * alarm raised).
  */
-export async function heldAsDecidedOf(
-  tx: HoldingsTransaction,
+export async function decisionOf(
+  tx: Transaction<AuditTables>,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
-): Promise<HeldSealed | null> {
-  return (await heldAsDecided(tx, states, key.orgId, [key.id])).get(key.id.toLowerCase()) ?? null;
+): Promise<Decided | null> {
+  return (await decisionsOf(tx, states, key.orgId, [key.id])).get(key.id.toLowerCase()) ?? null;
 }
 
 /** Groups rows by their request's ID. */
@@ -203,7 +217,7 @@ async function judged(
   const claimed = byRequest(await claimsFor(tx, found));
   const orderKeys = await orderKeysOf(tx, [...new Set(requests.map(({ orderReference }) => orderReference))]);
   // Only what still holds anything was sealed with what it holds.
-  const sealed = await heldAsDecided(
+  const sealed = await decisionsOf(
     tx,
     states,
     orgId,
@@ -211,7 +225,7 @@ async function judged(
   );
   let mismatched = 0;
   for (const request of requests) {
-    const held = sealed.get(request.id) ?? null;
+    const held = sealed.get(request.id)?.held ?? null;
     const asSealed = (payeeKey: string | null) =>
       held === null || payeeAsSealed(keys, held.payee, { orgId, requestId: request.id, payeeKey });
     // A claim is its request's own when it is on the request's supplier and order, in canonical form, and,
