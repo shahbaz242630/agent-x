@@ -140,6 +140,14 @@ const TABLE_GUARDS: readonly TableGuard[] = [
     body: '8d0507da95a4277aaa641df8d889d72120be2baeefb9be8f5966b40191d94280',
   },
   {
+    // A request's mandate version moves only while pending, its status unchanged, to its mandate's waiting version (0047, E4).
+    table: 'spend_requests.requests',
+    name: 'carried_version',
+    function: 'spend_requests.guard_carried_version',
+    type: 19,
+    body: 'f67ca41da4d11c544c014a10acaef9d58bacce284f29fb8f526c749f65742e70',
+  },
+  {
     // An order claimed for a request holding capacity, with its supplier's payee key; released once, after its request ends.
     table: 'spend_requests.order_claims',
     name: 'claim_guard',
@@ -1025,7 +1033,7 @@ function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
 /**
  * The only triggers our schema has are the status guard 0004 installs, the
  * made-once guard 0032 installs, the fixed-at-creation guard 0035 installs
- * and the table guards 0039 installs, and each must still be that guard: a
+ * and the table guards 0039, 0040 and 0047 install, and each must still be that guard: a
  * planted trigger given its name would otherwise pass on its name alone. A
  * switched-off guard is drift too — Postgres keeps the row and stops running
  * it, which is tampering that leaves no trace in the table.

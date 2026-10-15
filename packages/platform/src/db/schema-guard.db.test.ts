@@ -182,13 +182,24 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
     );
   const aboutThem = async () =>
     (await problems()).filter((each) =>
-      ['decided_move', 'claim_guard', 'period_lock_only', 'reservation_moves', 'held_for_its_request'].some((name) =>
-        each.includes(name),
-      ),
+      [
+        'decided_move',
+        'carried_version',
+        'claim_guard',
+        'period_lock_only',
+        'reservation_moves',
+        'held_for_its_request',
+      ].some((name) => each.includes(name)),
     );
 
   it('are the bodies the migration wrote, pinned, and running with their caller’s rights', async () => {
     expect(await read()).toEqual([
+      {
+        name: 'guard_carried_version',
+        body: 'f67ca41da4d11c544c014a10acaef9d58bacce284f29fb8f526c749f65742e70',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
       {
         name: 'guard_claim',
         body: 'e1e611bdc0fbcd13e60ddaf0163089449a39b28558f2baa13f1bd4439cdaeb52',
@@ -269,6 +280,16 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
       'drop trigger held_for_its_request on limit_reservations.reservations',
       'limit_reservations.reservations carries no held_for_its_request',
     ],
+    [
+      'dropped (0047)',
+      'drop trigger carried_version on spend_requests.requests',
+      'spend_requests.requests carries no carried_version',
+    ],
+    [
+      'switched off (0047)',
+      'alter table spend_requests.requests disable trigger carried_version',
+      "spend_requests.requests's carried_version is switched off",
+    ],
   ])('sees one %s', async (_case, tamper, problem) => {
     // eslint-disable-next-line agentx/no-string-built-sql -- one of the fixed statements above
     await owner.query(tamper);
@@ -278,6 +299,9 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
       await owner.query(`drop trigger if exists decided_move on spend_requests.order_claims;
         drop trigger if exists decided_move on spend_requests.requests;
         drop trigger if exists claim_guard on spend_requests.order_claims;
+        drop trigger if exists carried_version on spend_requests.requests;
+        create trigger carried_version before update on spend_requests.requests for each row
+          execute function spend_requests.guard_carried_version();
         create trigger decided_move before update on spend_requests.requests for each row
           execute function spend_requests.guard_decided_move();
         create trigger claim_guard before insert or update on spend_requests.order_claims for each row
