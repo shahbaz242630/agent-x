@@ -73,6 +73,20 @@ export async function lockAgentPeriod(
 }
 
 /**
+ * The zone the agent's months are kept in, from its first decision on, or
+ * none for an agent never weighed: a later mandate can't move its month edges
+ * (0040), so a draft naming another is refused (Phase 3 decision 15).
+ */
+export async function keptZoneOf(tx: ReservationsTransaction, agentId: string): Promise<string | undefined> {
+  const kept = await tx
+    .selectFrom('limit_reservations.agent_zones')
+    .select('time_zone')
+    .where('agent_id', '=', agentId)
+    .executeTakeFirst();
+  return kept?.time_zone;
+}
+
+/**
  * The agent's month at `at` (`YYYY-MM`), writing and locking nothing: named
  * in its kept zone, or `zoneIfNew` for an agent with none yet, as its first
  * decision would keep it. The simulator's (C4); a decision locks it instead.
@@ -81,12 +95,7 @@ export async function agentMonth(
   tx: ReservationsTransaction,
   { agentId, zoneIfNew, at }: { agentId: string; zoneIfNew: string; at: Date },
 ): Promise<string> {
-  const kept = await tx
-    .selectFrom('limit_reservations.agent_zones')
-    .select('time_zone')
-    .where('agent_id', '=', agentId)
-    .executeTakeFirst();
-  return periodOf(at, kept?.time_zone ?? zoneIfNew).month;
+  return periodOf(at, (await keptZoneOf(tx, agentId)) ?? zoneIfNew).month;
 }
 
 /**

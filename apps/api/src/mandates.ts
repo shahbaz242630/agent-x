@@ -107,7 +107,10 @@ const TERM_FIELDS = {
       'Above the bank consent’s limits, chosen with no default. strict: a mandate past them is refused. ' +
         'flexible: it is kept, with a warning that the bank may refuse a payment past its consent.',
     ),
-  endsAt: z.iso.datetime().nullish().describe('When it ends, in the future; none: until revoked.'),
+  endsAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When it ends, in the future, or null: until revoked. Chosen with no default (decision 15).'),
 };
 
 type TermFields = z.infer<z.ZodObject<typeof TERM_FIELDS>>;
@@ -228,7 +231,8 @@ const DRAFT_SCHEMA = {
         .max(64)
         .describe(
           'The IANA time zone its months are counted in, chosen with no default (Asia/Dubai in the UAE): the ' +
-            'monthly limit starts again at midnight on the 1st there. Fixed for good.',
+            'monthly limit starts again at midnight on the 1st there. Fixed for good: an agent already weighed ' +
+            'keeps the zone of its first request, so another is refused (AGENT_ZONE_KEPT).',
         ),
       splitWindowHours: z
         .int()

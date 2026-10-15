@@ -203,6 +203,7 @@ const TERMS = {
   fundingSourceId: SOURCE_ID,
   splitCheck: true,
   consentLimits: 'strict',
+  endsAt: null,
 };
 
 /** A draft's own settings, each chosen (decision 15). */
@@ -266,6 +267,7 @@ describe('POST /v1/mandates drafts a mandate (B2)', () => {
     ['no split window', { splitWindowHours: undefined }],
     ['no split check', { splitCheck: undefined }],
     ['no consent limits', { consentLimits: undefined }],
+    ['no end, not even null', { endsAt: undefined }],
   ])('refuses %s at the edge, the registry never asked', async (_what, change) => {
     const { app, calls } = await withMandates({ write: DRAFTED });
     const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...SETTINGS, ...TERMS, ...change }));
@@ -307,6 +309,18 @@ describe('POST /v1/mandates/:id/supersede drafts a later version (B2)', () => {
       keyed: { operation: 'mandates.redraft' },
       subject: { mandateId: MANDATE_ID, terms: { purpose: 'Office supplies' } },
     });
+  });
+
+  it.each([
+    ['no split check', { splitCheck: undefined }],
+    ['no consent limits', { consentLimits: undefined }],
+    ['no end, not even null', { endsAt: undefined }],
+  ])('refuses %s at the edge, the registry never asked (decision 15)', async (_what, change) => {
+    const { app, calls } = await withMandates({ write: DRAFTED });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/supersede`, { ...TERMS, ...change }));
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
   });
 
   it('refuses an agent named in it: the agent, zone and window stay as they are', async () => {

@@ -30,6 +30,8 @@ export const REASON_CODES = {
   AGENT_OWNER_UNCHANGED: 'The member already owns the agent, so nothing was changed.',
   AGENT_SUSPENDED:
     "The agent is suspended or revoked, so it can't request payments; a suspended one can again once an admin lifts its suspension. Nothing is held for the request.",
+  AGENT_ZONE_KEPT:
+    'The agent’s months are already counted in another time zone, from its first request on, and a new mandate can’t move them. Draft it in the time zone its mandate shows. Nothing was changed.',
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:

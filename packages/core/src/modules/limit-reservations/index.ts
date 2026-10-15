@@ -5,6 +5,7 @@
 export { RESERVATION, type ReservationState } from './domain/reservation.ts';
 export {
   agentMonth,
+  keptZoneOf,
   lockAgentMonth,
   lockAgentPeriod,
   lockReservationsOf,
