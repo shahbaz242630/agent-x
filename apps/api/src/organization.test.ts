@@ -1,6 +1,6 @@
-// Phase 3 D1: the organisation's freeze routes, answering an admin with each
+// Phase 3 D1, D2: the organisation's freeze routes, answering an admin with each
 // outcome of the use case, and refusing a body that doesn't choose, confirm
-// or give a reason before it runs. Who reaches them is the access hook's
+// or give a reason before it runs (D1, D2). Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use case does in the database is
 // brake-voids.db.test.ts (its freezing describe) and
 // spend-request-approvals.db.test.ts.
@@ -39,11 +39,17 @@ afterEach(closeServers);
 
 type Call =
   | { readonly kind: 'freeze'; readonly keyed: IdempotentRequest; readonly pendingRequests: PendingChoice }
-  | { readonly kind: 'unfreeze'; readonly keyed: IdempotentRequest; readonly reason: string }
+  | {
+      readonly kind: 'unfreeze';
+      readonly keyed: IdempotentRequest;
+      readonly reason: string;
+      readonly pendingRequests: PendingChoice;
+    }
   | {
       readonly kind: 'unfreezeConfirm';
       readonly keyed: IdempotentRequest;
       readonly reason: string;
+      readonly pendingRequests: PendingChoice;
       readonly stepUpChallengeId: string;
     };
 
@@ -55,12 +61,12 @@ async function withChanges(written: OrganizationChangeWrite) {
       asked.push({ kind: 'freeze', member, keyed, pendingRequests });
       return Promise.resolve(written);
     },
-    unfreeze: (member, keyed, reason) => {
-      asked.push({ kind: 'unfreeze', member, keyed, reason });
+    unfreeze: (member, keyed, { reason, pendingRequests }) => {
+      asked.push({ kind: 'unfreeze', member, keyed, reason, pendingRequests });
       return Promise.resolve(written);
     },
-    unfreezeConfirm: (member, keyed, { stepUpChallengeId, reason }) => {
-      asked.push({ kind: 'unfreezeConfirm', member, keyed, reason, stepUpChallengeId });
+    unfreezeConfirm: (member, keyed, { stepUpChallengeId, reason, pendingRequests }) => {
+      asked.push({ kind: 'unfreezeConfirm', member, keyed, reason, pendingRequests, stepUpChallengeId });
       return Promise.resolve(written);
     },
   };
@@ -117,11 +123,13 @@ describe('POST /v1/organization/freeze: the brake, chosen and confirmed (decisio
   });
 });
 
-describe('POST /v1/organization/unfreeze, then /confirm: a passkey and a reason', () => {
-  it('asks with the reason as it is kept: 202 with the step-up', async () => {
+describe('POST /v1/organization/unfreeze, then /confirm: a passkey, a reason and a choice (decision 14)', () => {
+  it('asks with the reason as it is kept and the choice: 202 with the step-up', async () => {
     const { app, asked } = await withChanges({ outcome: 'asked', stepUpChallengeId: CHALLENGE });
 
-    const response = await app.inject(post('/unfreeze', { reason: 'Café checked: all clear' }));
+    const response = await app.inject(
+      post('/unfreeze', { reason: 'Café checked: all clear', pendingRequests: 'pause' }),
+    );
 
     expect(response.statusCode).toBe(202);
     expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
@@ -131,6 +139,7 @@ describe('POST /v1/organization/unfreeze, then /confirm: a passkey and a reason'
         member: MEMBER,
         keyed: { operation: 'organization.unfreeze' },
         reason: 'Café checked: all clear',
+        pendingRequests: 'pause',
       },
     ]);
   });
@@ -138,7 +147,9 @@ describe('POST /v1/organization/unfreeze, then /confirm: a passkey and a reason'
   it('confirms with the step-up and the same reason: 200 with the organisation, ACTIVE', async () => {
     const { app, asked } = await withChanges(ACTIVE);
 
-    const response = await app.inject(post('/unfreeze/confirm', { reason: 'All clear', stepUpChallengeId: CHALLENGE }));
+    const response = await app.inject(
+      post('/unfreeze/confirm', { reason: 'All clear', pendingRequests: 'cancel', stepUpChallengeId: CHALLENGE }),
+    );
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ organization: { id: ORG, status: 'ACTIVE' } });
@@ -147,6 +158,7 @@ describe('POST /v1/organization/unfreeze, then /confirm: a passkey and a reason'
         kind: 'unfreezeConfirm',
         keyed: { operation: 'organization.unfreeze.confirm' },
         reason: 'All clear',
+        pendingRequests: 'cancel',
         stepUpChallengeId: CHALLENGE,
       },
     ]);
@@ -154,13 +166,16 @@ describe('POST /v1/organization/unfreeze, then /confirm: a passkey and a reason'
 
   it.each([
     ['/unfreeze', {}],
-    ['/unfreeze', { reason: '' }],
-    ['/unfreeze', { reason: 'Call 0501234567 for details' }],
-    ['/unfreeze', { reason: 'All clear', more: 1 }],
-    ['/unfreeze/confirm', { reason: 'All clear' }],
-    ['/unfreeze/confirm', { stepUpChallengeId: CHALLENGE }],
+    ['/unfreeze', { reason: '', pendingRequests: 'pause' }],
+    ['/unfreeze', { reason: 'Call 0501234567 for details', pendingRequests: 'pause' }],
+    ['/unfreeze', { reason: 'All clear', pendingRequests: 'pause', more: 1 }],
+    ['/unfreeze', { reason: 'All clear' }],
+    ['/unfreeze', { reason: 'All clear', pendingRequests: 'hold' }],
+    ['/unfreeze/confirm', { reason: 'All clear', pendingRequests: 'pause' }],
+    ['/unfreeze/confirm', { reason: 'All clear', stepUpChallengeId: CHALLENGE }],
+    ['/unfreeze/confirm', { pendingRequests: 'pause', stepUpChallengeId: CHALLENGE }],
   ])(
-    'refuses %s with %j (no reason, one that can’t be kept, no step-up) before the use case runs',
+    'refuses %s with %j (no reason, one that can’t be kept, no choice, no step-up) before the use case runs',
     async (path, body) => {
       const { app, asked } = await withChanges(ACTIVE);
 
@@ -171,12 +186,15 @@ describe('POST /v1/organization/unfreeze, then /confirm: a passkey and a reason'
 
   it.each([
     [409, 'ORG_NOT_FROZEN'],
+    [409, 'PENDING_REQUESTS_CANCELLED'],
     [409, 'PENDING_REQUESTS_TOO_MANY'],
     [403, 'STEP_UP_FAILED'],
   ] as const)('answers %i %s as the use case refuses', async (status, code) => {
     const { app } = await withChanges({ outcome: 'refused', status, code });
 
-    const response = await app.inject(post('/unfreeze/confirm', { reason: 'All clear', stepUpChallengeId: CHALLENGE }));
+    const response = await app.inject(
+      post('/unfreeze/confirm', { reason: 'All clear', pendingRequests: 'cancel', stepUpChallengeId: CHALLENGE }),
+    );
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });

@@ -261,7 +261,7 @@ describe(`suspending an agent: the kill switch (C1-3, Postgres ${server.version}
       ]);
       expect(JSON.parse((await eventsAbout(org, agent)).at(-1)?.details ?? '{}')).toMatchObject({
         pendingRequests: choice,
-        pendingStatementVersion: 2,
+        pendingStatementVersion: 3,
       });
     },
   );

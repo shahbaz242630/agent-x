@@ -1,16 +1,20 @@
 // The organisation's freeze routes (Phase 3 D1, partner decisions 3, 10 and
-// 11; organization-changes.ts), each an admin's:
+// 11, D2 decisions 12 and 14; organization-changes.ts):
 //
-// - `POST /v1/organization/freeze`, the instant brake, with no step-up:
+// - `POST /v1/organization/freeze`, the instant brake, with no step-up, an
+//   admin's or an approver's (decision 12):
 //   `pendingRequests`, `cancel` or `pause`, required (no default), and
 //   `confirmed: true`, the console's are-you-sure (decision 11). 200 with
 //   the organisation, FROZEN; one frozen already is answered as it is
 //   (409 PENDING_REQUESTS_CANCELLED for a pause over a cancel).
 // - `POST /v1/organization/unfreeze`, then `…/unfreeze/confirm` with the
-//   step-up's ID once signed in again (a passkey), each with the same reason:
-//   202 with the step-up, then 200 with the organisation, ACTIVE. 409
-//   ORG_NOT_FROZEN otherwise; 409 PENDING_REQUESTS_TOO_MANY while a freeze
-//   that cancels still has more to end than one move ends at once.
+//   step-up's ID once signed in again (a passkey), each with the same reason
+//   and `pendingRequests`, `cancel` (a fresh start) or `pause` (an un-pause),
+//   required (decision 14): 202 with the step-up, then 200 with the
+//   organisation, ACTIVE. 409 ORG_NOT_FROZEN otherwise; 409
+//   PENDING_REQUESTS_CANCELLED for an un-pause when its freeze cancelled
+//   them; 409 PENDING_REQUESTS_TOO_MANY for a fresh start past what one move
+//   ends at once. An admin's.
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -27,9 +31,10 @@ import {
   UNFREEZE_OPERATION,
   UNFREEZE_REASON_MOST,
   unfreezeReason,
+  UNFREEZING_ROLES,
 } from './organization-changes.ts';
 import { CHALLENGE_BODY_LIMIT, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
-import { FREEZE_BODY } from './suspensions.ts';
+import { FREEZE_BODY, UNFREEZE_PENDING_REQUESTS } from './suspensions.ts';
 
 /** The most a freeze's body may be: a choice and a confirmation, with room to spare. */
 const FREEZE_BODY_LIMIT = 96;
@@ -71,7 +76,9 @@ const FREEZE_SCHEMA = {
 
 const UNFREEZE_SCHEMA = {
   summary: 'Ask to unfreeze your organisation, with your reason',
-  body: z.strictObject({ reason: REASON }).describe('Why it is unfrozen.'),
+  body: z
+    .strictObject({ reason: REASON, pendingRequests: UNFREEZE_PENDING_REQUESTS })
+    .describe('Why it is unfrozen, and what happens to its held requests.'),
   response: {
     202: stepUpAsked(
       'OrganizationUnfreezeAsked',
@@ -83,8 +90,8 @@ const UNFREEZE_SCHEMA = {
 const UNFREEZE_CONFIRM_SCHEMA = {
   summary: 'Unfreeze your organisation, once signed in again for it',
   body: z
-    .strictObject({ reason: REASON, stepUpChallengeId: STEP_UP_SIGNED_IN })
-    .describe('The same reason as asked with, and the step-up signed in again for.'),
+    .strictObject({ reason: REASON, pendingRequests: UNFREEZE_PENDING_REQUESTS, stepUpChallengeId: STEP_UP_SIGNED_IN })
+    .describe('The same reason and choice as asked with, and the step-up signed in again for.'),
   response: { 200: CHANGED },
 };
 
@@ -130,14 +137,14 @@ export function registerOrganization(app: FastifyInstance, { changes }: { change
     {
       schema: UNFREEZE_SCHEMA,
       bodyLimit: UNFREEZE_BODY_LIMIT,
-      config: { access: [...FREEZING_ROLES], operation: UNFREEZE_OPERATION },
+      config: { access: [...UNFREEZING_ROLES], operation: UNFREEZE_OPERATION },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
       const written = await need(changes).unfreeze(
         member,
         idempotentRequest(request, member.orgId),
-        unfreezeReason(request.body.reason).note,
+        { reason: unfreezeReason(request.body.reason).note, pendingRequests: request.body.pendingRequests },
         request.id,
       );
       return answer(written, request, reply);
@@ -149,14 +156,18 @@ export function registerOrganization(app: FastifyInstance, { changes }: { change
     {
       schema: UNFREEZE_CONFIRM_SCHEMA,
       bodyLimit: UNFREEZE_BODY_LIMIT + CHALLENGE_BODY_LIMIT,
-      config: { access: [...FREEZING_ROLES], operation: UNFREEZE_CONFIRM_OPERATION },
+      config: { access: [...UNFREEZING_ROLES], operation: UNFREEZE_CONFIRM_OPERATION },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
       const written = await need(changes).unfreezeConfirm(
         member,
         idempotentRequest(request, member.orgId),
-        { stepUpChallengeId: request.body.stepUpChallengeId, reason: unfreezeReason(request.body.reason).note },
+        {
+          stepUpChallengeId: request.body.stepUpChallengeId,
+          reason: unfreezeReason(request.body.reason).note,
+          pendingRequests: request.body.pendingRequests,
+        },
         request.id,
       );
       return answer(written, request, reply);
