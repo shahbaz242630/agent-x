@@ -14,7 +14,9 @@
 //   source is answered as it stands, the partner not asked. An answer that
 //   ends the source (unknown to the partner, or gone for good: partnerEnds)
 //   first DENIES its pending requests in the same transaction (voidPendingOf,
-//   Phase 3 C3; decision 7: an ended source always cancels).
+//   Phase 3 C3; decision 7: an ended source always cancels). Before any of
+//   it, a consent the answer says ran out, or past its end by time, has its
+//   lapse logged once (E7c, consent-lapses.ts).
 // - `suspend` (`funding-sources.suspend`, D2-4b): the business's own brake on
 //   the source, one click and no step-up (ADR-014 §8: the instant brakes are
 //   never behind step-up), for an admin or a finance approver. The key
@@ -46,6 +48,7 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import {
   endUnknownToPartner,
+  expiredOnly,
   partnerEnds,
   SOURCES,
   type SourceRecord,
@@ -65,6 +68,7 @@ import {
   consentExpiryOf,
   holdsOverExpiry,
 } from './consent-expiry-choice.ts';
+import { lapsedBy, lapseRecorded } from './consent-lapses.ts';
 import {
   asked,
   createFundingSourceWork,
@@ -266,8 +270,20 @@ export function createFundingSourceChanges({
           const braked = { fundingSourceId: sourceId };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
         }
-        if (lookup.kind === 'not_found') await endUnknownToPartner(tx, states, key, found, actor);
-        else await updateFromPartner(tx, states, key, found, { state: lookup.source, actor, holdsExpired });
+        // The lapse (E7c), after the requests' locks (ADR-006 §6): of the consent a newer answer says ran out, or
+        // else of the one held, past its end. Recorded, the source's signed state moved on: read again to record from.
+        const lapsed =
+          lookup.kind === 'found' &&
+          lookup.source.statusChangedAt >= found.source.partnerChangedAt &&
+          expiredOnly(lookup.source)
+            ? { id: lookup.source.accountConsentId, expiresAt: new Date(lookup.source.consentExpiresAt) }
+            : lapsedBy(found.source, clock.now());
+        const now =
+          lapsed !== undefined && (await lapseRecorded(tx, states, found, member.orgId, lapsed))
+            ? await work.sourceIn(tx, states, key, 'change')
+            : found;
+        if (lookup.kind === 'not_found') await endUnknownToPartner(tx, states, key, now, actor);
+        else await updateFromPartner(tx, states, key, now, { state: lookup.source, actor, holdsExpired });
         return { status: 200, resourceId: sourceId };
       });
       return answer(member.orgId, correlationId, done);
@@ -318,7 +334,8 @@ export function createFundingSourceChanges({
         const inForce = await consentExpiryOf(tx, states, member.orgId, sourceId);
         // Chosen already: answered as it is, nothing recorded twice.
         if (inForce === consentExpiry) return { status: 200, resourceId: source.id };
-        const past = source.consentExpiresAt <= clock.now();
+        const lapsed = lapsedBy(source, clock.now());
+        const past = lapsed !== undefined;
         // Its consent ran out under a cancel (none chosen: the rule then): its requests are being cancelled already.
         if (past && consentExpiry === 'pause') throw new FundingSourceRefused(409, 'PENDING_REQUESTS_CANCELLED');
         if (past) {
@@ -326,11 +343,16 @@ export function createFundingSourceChanges({
           const braked = { fundingSourceId: source.id };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
         }
+        // Past the end, the lapse is logged under the choice it met, after the requests' locks and before the new choice (E7c).
+        const from =
+          lapsed !== undefined && (await lapseRecorded(tx, states, { source, state }, member.orgId, lapsed))
+            ? (await work.sourceIn(tx, states, key, 'change')).state
+            : state;
         await states.record(
           tx,
           SOURCES,
           key,
-          state,
+          from,
           {},
           {
             actor: { type: 'user', id: member.userId },

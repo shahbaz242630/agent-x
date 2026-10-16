@@ -376,6 +376,42 @@ describe('pending spend requests voided once their authority no longer stands (C
     expect(events.at(-1)).toMatchObject({ action: 'spend_request.voided', details: { causes: 'SOURCE_NOT_USABLE' } });
   });
 
+  it('logs the lapse of a consent run out once, before its voids; an aborted run logs none (E7c)', async () => {
+    const { w } = await ready();
+    clock.advanceBy(w.state.consentExpiresAt.getTime() - clock.now().getTime() + 60_000);
+    const stopped = new AbortController();
+    stopped.abort();
+
+    await voidsOf(only(w)).run(stopped.signal);
+    expect(lines('consent_lapse.recorded')).toEqual([]);
+    await voidsOf(only(w)).run();
+    await voidsOf(only(w)).run();
+
+    expect(lines('consent_lapse.recorded')).toHaveLength(1);
+    const lapses = (await shared.eventsAbout(w.org, w.source, SOURCES.subject)).filter(
+      ({ action }) => action === 'funding_source.consent_lapsed',
+    );
+    expect(lapses).toHaveLength(1);
+    expect(lapses[0]).toMatchObject({ details: { chosen: false } });
+  });
+
+  it('logs no lapse on a source tampered with past the app: its alarm raised, the run goes on (FX-TAMPER, E7c)', async () => {
+    const { w } = await ready();
+    const owner = await tamperAsOwner(database, SOURCES, w.org);
+    try {
+      await owner.stripSeals(w.source);
+    } finally {
+      await owner.end();
+    }
+    clock.advanceBy(w.state.consentExpiresAt.getTime() - clock.now().getTime() + 60_000);
+
+    await voidsOf(only(w)).run();
+
+    expect(lines('audit.integrity_failed')).not.toEqual([]);
+    expect(lines('consent_lapse.failed')).toHaveLength(1);
+    expect(lines('consent_lapse.recorded')).toEqual([]);
+  });
+
   it('moves nothing while everything stands, and leaves a cancelled request as it is', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);
