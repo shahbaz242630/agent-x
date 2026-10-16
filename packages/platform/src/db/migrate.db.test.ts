@@ -20,6 +20,7 @@ import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import {
   applyMigration,
   isLockTimeout,
+  LOCK_TIMEOUT_MS,
   LOCK_TRIES,
   MigrationFailed,
   MigrationNotAtomic,
@@ -163,6 +164,7 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
           config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
           destination: capture,
         }),
+        LOCK_TIMEOUT_MS,
       ).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(MigrationNotAtomic);
       expect(String(error)).toMatch(/Repair the database by hand/);
@@ -215,7 +217,7 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
   });
 
   describe('a file that needs a table another transaction holds', () => {
-    // A short wait and pause stand in for the job's 10 s and 5 s.
+    // A short wait and pause stand in for the job's 2 s and 5 s.
     const runWaiting = (pauseMs: number): Promise<string[]> =>
       runMigrations({
         connection: database.connection('owner'),
@@ -227,8 +229,7 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
         }),
         lockWait: { timeoutMs: 200, pauseMs },
       });
-    const lockWaits = (): unknown[] =>
-      capture.lines().filter((line) => line.event === 'db.migration.lock_wait_ran_out');
+    const lockWaits = () => capture.lines().filter((line) => line.event === 'db.migration.lock_wait_ran_out');
 
     async function untilLogged(lines: () => unknown[], count: number): Promise<void> {
       while (lines().length < count) await sleep(10);
@@ -255,11 +256,11 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
         const error = await runWaiting(10).catch((caught: unknown) => caught);
         expect(error).toBeInstanceOf(MigrationFailed);
         expect(isLockTimeout(error)).toBe(true);
-        expect(lockWaits()).toEqual([
-          expect.objectContaining({ migration: '0002_second.sql', try: 1 }),
-          expect.objectContaining({ migration: '0002_second.sql', try: 2 }),
-        ]);
-        expect(LOCK_TRIES).toBe(3);
+        // A line for each try but the last, which fails the run.
+        expect(lockWaits().map((line) => [line.migration, line.try])).toEqual(
+          Array.from({ length: LOCK_TRIES - 1 }, (_, index) => ['0002_second.sql', index + 1]),
+        );
+        expect(LOCK_TRIES).toBe(5);
         // The holder never noticed: its transaction still reads the table.
         await holder.query('select * from demo.one');
       } finally {
@@ -271,6 +272,7 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
 
     it('applies the file on a later try once the table is free', async () => {
       const holder = await holdTable();
+      const started = performance.now();
       const running = runWaiting(2000);
       try {
         await waitUntilQueued(database.as('admin'), 1);
@@ -281,6 +283,8 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
       }
       expect(await running).toEqual(['0002_second.sql']);
       expect(lockWaits()).toHaveLength(1);
+      // The retry came after the pause, not straight away.
+      expect(performance.now() - started).toBeGreaterThanOrEqual(2000);
     });
   });
 

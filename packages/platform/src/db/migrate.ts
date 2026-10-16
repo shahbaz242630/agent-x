@@ -16,10 +16,11 @@
 // - A session-level advisory lock lets only one run work at a time. Closing
 //   the connection releases it, even after a crash.
 // - A file waits at most LOCK_TIMEOUT_MS for each lock it takes. A file that
-//   needs a table to itself would otherwise wait behind any open transaction
-//   on it, and every new query on that table would queue behind the file, so
-//   the app would stall until the job was stopped. A wait that runs out rolls
-//   the file back, and it is tried again after a pause, LOCK_TRIES in all.
+//   needs a table to itself waits behind any open transaction on it, and
+//   every new query on that table queues behind the file, so the app stalls
+//   for as long as the file waits: without a limit, until the job was stopped.
+//   The wait is short so the stall is too; one that runs out rolls the file
+//   back, and it is tried again after a pause, LOCK_TRIES in all.
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -61,10 +62,10 @@ const TRANSACTION_ID = 'select pg_catalog.pg_current_xact_id()::text as id';
  */
 const RESET_SESSION = 'reset all; reset role; discard temp';
 
-/** How long a file waits for each lock before it is rolled back. */
-export const LOCK_TIMEOUT_MS = 10_000;
-/** Tries of one file whose lock wait ran out, the first included. */
-export const LOCK_TRIES = 3;
+/** How long a file waits for each lock before it is rolled back: the longest the app's queries queue behind it. */
+export const LOCK_TIMEOUT_MS = 2000;
+/** Tries of one file whose lock wait ran out, the first included: about 30 s in all. */
+export const LOCK_TRIES = 5;
 /** The pause before trying such a file again. */
 const LOCK_RETRY_PAUSE_MS = 5000;
 
@@ -240,7 +241,7 @@ export async function applyMigration(
   client: pg.Client,
   migration: Migration,
   logger: Logger,
-  lockTimeoutMs = LOCK_TIMEOUT_MS,
+  lockTimeoutMs: number,
 ): Promise<void> {
   await client.query('begin');
   let stillInOurTransaction: boolean;

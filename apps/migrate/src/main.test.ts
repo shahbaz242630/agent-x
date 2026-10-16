@@ -12,7 +12,8 @@ describe('what a failed run reports: names, never file contents', () => {
   });
 
   it('a migration that failed and was rolled back: its name and the error', () => {
-    const failed = new MigrationFailed('0004_z.sql', new Error('division by zero'));
+    // A coded cause other than a lock wait's: the reason is left out.
+    const failed = new MigrationFailed('0004_z.sql', Object.assign(new Error('division by zero'), { code: '22012' }));
     expect(failure(failed)).toEqual({ migration: '0004_z.sql', err: failed });
   });
 
