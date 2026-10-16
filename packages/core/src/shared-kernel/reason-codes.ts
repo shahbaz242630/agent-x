@@ -175,6 +175,10 @@ export const REASON_CODES = {
     'An earlier request to the same supplier that is still open, has an unknown outcome or was paid has an order reference the bank would carry the same way (as INV_22 and INV-22, or the same number in other digits), so this may be the same order: a person must approve it.',
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
+  RECHECK_NOT_OFFERED:
+    'Nothing the spend request was decided on has changed in a way that asks for a re-check, so approve it as it is: leave `recheck` out. Nothing was changed.',
+  RECHECK_REQUIRED:
+    'The supplier’s details changed after the spend request was decided and have been verified again, so it isn’t approved under the old ones: ask again with `recheck`, to see how it is weighed under the new details before you approve. Nothing was changed.',
   REQUEST_CHANGED:
     "Something the spend request was decided on has changed since (its mandate, a policy, the supplier, the funding source, the agent or the key it asked with), or it would no longer be allowed, so it can't be approved as it is. Reject it; the agent must ask again. Nothing was changed.",
   REQUEST_EXPIRED:

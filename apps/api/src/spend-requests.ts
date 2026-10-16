@@ -87,6 +87,7 @@ import {
   STEP_UP_CONFIRM,
   STEP_UP_SIGNED_IN,
   stepUpAsked,
+  stepUpAskedWith,
   UNCHECKED,
 } from './route-schemas.ts';
 import {
@@ -95,7 +96,13 @@ import {
   CANCELLING_ROLES,
   type SpendRequestCancels,
 } from './spend-request-cancels.ts';
-import { APPROVE_CONFIRM_OPERATION, APPROVE_OPERATION, type SpendRequestApprovals } from './spend-request-approvals.ts';
+import {
+  APPROVE_CONFIRM_OPERATION,
+  APPROVE_OPERATION,
+  RECHECK_STATEMENT,
+  type RecheckShown,
+  type SpendRequestApprovals,
+} from './spend-request-approvals.ts';
 import { DECIDE_OPERATION, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import type { RequestShown, SpendRequestReads } from './spend-request-reads.ts';
 import {
@@ -369,19 +376,65 @@ const shown = (request: SpendRequestRecord, to: 'agent' | 'member') => {
   };
 };
 
+/** The approver's ask to re-check one whose supplier's details changed (E5a), in both bodies. */
+const RECHECK = {
+  recheck: z
+    .literal(true)
+    .optional()
+    .describe(
+      'Only for a request whose supplier’s details changed after it was decided and were verified again (asked ' +
+        `for with RECHECK_REQUIRED): approve it checked again under the new details. ${RECHECK_STATEMENT}`,
+    ),
+};
+
+/** A re-check as the ask shows it (E5a): what changed, and how it is weighed now. */
+const RECHECK_SHOWN = z
+  .object({
+    fromSupplierVersionId: z.uuid().describe('The supplier’s details it was decided under.'),
+    supplierVersionId: z.uuid().describe('The supplier’s details, verified again, it is approved under.'),
+    decidedAs: z.enum(DECISIONS).describe('What its decision was when the agent asked.'),
+    decidedReasons: REASONS.describe('Why it was decided so then.'),
+    decision: z.enum(DECISIONS).describe('How it is weighed now, under the new details and today’s policies.'),
+    reasons: REASONS.describe('Why it is weighed so now.'),
+  })
+  .nullable()
+  .describe(
+    'With `recheck`: what changed and how it is weighed now. Confirming approves exactly this; if anything changes ' +
+      'first, the confirm is refused and you ask again. Null otherwise.',
+  );
+
+const shownRecheck = (view: RecheckShown | null) =>
+  view === null
+    ? null
+    : {
+        ...view,
+        decidedReasons: reasonsOf(view.decidedReasons),
+        reasons: reasonsOf(view.reasons),
+      };
+
 const APPROVE_SCHEMA = {
   summary: 'Ask to approve a spend request waiting for approval',
   params: SPEND_REQUEST_ID,
-  body: NOTHING,
+  body: z
+    .strictObject(RECHECK)
+    // Fastify gives a request sent with no body a null one.
+    .nullish()
+    .describe('Nothing, or `recheck` for one whose supplier’s details changed.'),
   response: {
-    202: stepUpAsked('SpendRequestApproveAsked', 'Approving a spend request, waiting for you to sign in again.'),
+    202: stepUpAskedWith(
+      'SpendRequestApproveAsked',
+      'Approving a spend request, waiting for you to sign in again; with `recheck`, how it is weighed now.',
+      { recheck: RECHECK_SHOWN },
+    ),
   },
 };
 
 const APPROVE_CONFIRM_SCHEMA = {
   summary: 'Approve a spend request, once signed in again for it',
   params: SPEND_REQUEST_ID,
-  body: STEP_UP_CONFIRM,
+  body: STEP_UP_CONFIRM.extend(RECHECK).describe(
+    'The step-up signed in again for, and any `recheck` it was asked with.',
+  ),
   response: {
     200: SPEND_REQUEST_SHOWN.describe(
       'The request as it now stands: APPROVED, weighed again as everything now stands, keeping its reservation and order claim.',
@@ -553,9 +606,11 @@ export function registerSpendRequests(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.body?.recheck === true,
         request.id,
       );
-      return answerAsked(asked, request, reply);
+      if (asked.outcome !== 'asked') return answerAsked(asked, request, reply);
+      return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId, recheck: shownRecheck(asked.recheck) });
     },
   );
 
@@ -573,6 +628,7 @@ export function registerSpendRequests(
         idempotentRequest(request, member.orgId),
         request.params.id,
         request.body.stepUpChallengeId,
+        request.body.recheck === true,
         request.id,
       );
       if (isUnwritten(approved)) return answerRefusal(approved, request, reply);

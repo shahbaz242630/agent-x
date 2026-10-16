@@ -259,7 +259,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     });
 
     const challengeId = askedFor(
-      await approvals.ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, CORRELATION),
+      await approvals.ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION),
     );
     await stepUp(w.admin, challengeId);
     const done = await approvals.confirm(
@@ -267,6 +267,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
       keyed(w.admin, APPROVE_CONFIRM_OPERATION),
       waiting.id,
       challengeId,
+      false,
       CORRELATION,
     );
 

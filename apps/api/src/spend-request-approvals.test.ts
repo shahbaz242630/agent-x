@@ -1,6 +1,6 @@
 // Phase 3 B4b: the approve routes over HTTP, their use case a stub: what each
-// hands it (the member, the idempotency request, the request's ID and the
-// step-up), the answers, who may call them before the use case runs (no
+// hands it (the member, the idempotency request, the request's ID, the
+// step-up and any re-check, E5a), the answers, who may call them before the use case runs (no
 // agent key: SEC-AG-07), a body that can't be one, and the use case's own
 // refusals. What the use case does is spend-request-approvals.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
@@ -58,7 +58,17 @@ interface Asked {
   readonly idempotent: IdempotentRequest;
   readonly requestId: string;
   readonly stepUpChallengeId?: string;
+  readonly recheck: boolean;
 }
+
+const RECHECKED = {
+  fromSupplierVersionId: '0199a0f0-0000-7000-8000-0000000000e2',
+  supplierVersionId: '0199a0f0-0000-7000-8000-0000000000e3',
+  decidedAs: 'REQUIRE_APPROVAL',
+  decidedReasons: ['APPROVAL_THRESHOLD'],
+  decision: 'ALLOW',
+  reasons: [],
+} as const;
 
 afterEach(closeServers);
 
@@ -69,12 +79,12 @@ async function withApprovals(
 ) {
   const asked: Asked[] = [];
   const approvals: SpendRequestApprovals = {
-    ask: (member, idempotent, requestId) => {
-      asked.push({ member, idempotent, requestId });
-      return Promise.resolve(answers.ask ?? { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID });
+    ask: (member, idempotent, requestId, recheck) => {
+      asked.push({ member, idempotent, requestId, recheck });
+      return Promise.resolve(answers.ask ?? { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID, recheck: null });
     },
-    confirm: (member, idempotent, requestId, stepUpChallengeId) => {
-      asked.push({ member, idempotent, requestId, stepUpChallengeId });
+    confirm: (member, idempotent, requestId, stepUpChallengeId, recheck) => {
+      asked.push({ member, idempotent, requestId, stepUpChallengeId, recheck });
       return Promise.resolve(answers.confirm ?? { outcome: 'approved', request: APPROVED });
     },
   };
@@ -126,7 +136,7 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
 
       const asking = await app.inject(ask());
       expect(asking.statusCode).toBe(202);
-      expect(asking.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID });
+      expect(asking.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID, recheck: null });
       const confirming = await app.inject(confirm({ stepUpChallengeId: CHALLENGE_ID }));
       expect(confirming.statusCode).toBe(200);
       expect(confirming.json()).toMatchObject({
@@ -136,8 +146,8 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
       });
 
       expect(asked).toEqual([
-        expect.objectContaining({ requestId: REQUEST_ID }),
-        expect.objectContaining({ requestId: REQUEST_ID, stepUpChallengeId: CHALLENGE_ID }),
+        expect.objectContaining({ requestId: REQUEST_ID, recheck: false }),
+        expect.objectContaining({ requestId: REQUEST_ID, stepUpChallengeId: CHALLENGE_ID, recheck: false }),
       ]);
       expect(asked[0]?.member).toMatchObject({ orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId });
       expect(asked.map(({ idempotent }) => idempotent.operation)).toEqual([
@@ -152,6 +162,35 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
 
     expect((await app.inject(ask({}))).statusCode).toBe(202);
     expect(asked).toHaveLength(1);
+  });
+
+  it('hands a re-check on to the use case in both, and answers what changed with each reason’s words (E5a)', async () => {
+    const { app, asked } = await withApprovals({
+      ask: { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID, recheck: RECHECKED },
+    });
+
+    const asking = await app.inject(ask({ recheck: true }));
+    expect(asking.statusCode).toBe(202);
+    expect(asking.json()).toEqual({
+      stepUpChallengeId: CHALLENGE_ID,
+      recheck: {
+        ...RECHECKED,
+        decidedReasons: [{ code: 'APPROVAL_THRESHOLD', message: expect.any(String) as unknown }],
+        reasons: [],
+      },
+    });
+    const confirming = await app.inject(confirm({ stepUpChallengeId: CHALLENGE_ID, recheck: true }));
+    expect(confirming.statusCode).toBe(200);
+    expect(asked.map(({ recheck }) => recheck)).toEqual([true, true]);
+  });
+
+  it('refuses a re-check that isn’t `true` in either, before the use case runs', async () => {
+    const { app, asked } = await withApprovals();
+
+    expect((await app.inject(ask({ recheck: false }))).statusCode).toBe(400);
+    expect((await app.inject(ask({ recheck: 'yes' }))).statusCode).toBe(400);
+    expect((await app.inject(confirm({ stepUpChallengeId: CHALLENGE_ID, recheck: 1 }))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
   });
 
   it.each(['developer', 'viewer'] as const)('refuses a %s before the use case runs', async (role) => {
@@ -186,6 +225,8 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
     [404, 'NOT_FOUND'],
     [409, 'REQUEST_NOT_WAITING'],
     [409, 'REQUEST_CHANGED'],
+    [409, 'RECHECK_REQUIRED'],
+    [400, 'RECHECK_NOT_OFFERED'],
     [409, 'REQUEST_EXPIRED'],
     [409, 'ORG_FROZEN'],
     [403, 'STEP_UP_FAILED'],
