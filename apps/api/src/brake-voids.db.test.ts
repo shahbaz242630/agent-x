@@ -1280,7 +1280,7 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
 
     it('is flagged as needing a re-check in the team’s list and its own read once carried, not before (E5c)', async () => {
       const { w, acting } = await ready();
-      const { waiting } = await pendingOf(w, acting);
+      const { approved, waiting } = await pendingOf(w, acting);
       const reads = createSpendRequestReads({ database: app, keys, ids, logger: logger() });
       const flagged = async () => {
         const listed = await reads.list(w.org, { after: null, limit: 50 }, 'waiting', CORRELATION);
@@ -1298,6 +1298,11 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
       expect(await flagged()).toEqual([true, true]);
       await shared.verified(w, supplierOfWorld(w));
       expect(await flagged()).toEqual([true, true]);
+      // One already approved, carried as well, has nothing to re-check.
+      const all = await reads.list(w.org, { after: null, limit: 50 }, 'all', CORRELATION);
+      expect(all.outcome === 'listed' && all.requests.find(({ request }) => request.id === approved.id)).toMatchObject({
+        needsRecheck: false,
+      });
     });
 
     it('answers a replayed ask with the re-check worked out again', async () => {

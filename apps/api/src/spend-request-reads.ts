@@ -203,9 +203,9 @@ const toldToAgent = ({ rejection, voiding }: Denial): readonly ReasonCode[] | nu
 /**
  * For each supplier a waiting request of the page names that has moved past
  * the details it was decided under, the versions changes chosen to pause
- * moved it on from (pausedFromOf), read once a supplier; null for one whose
- * history can't be believed (its alarm raised), whose requests are then left
- * out and named (A1b).
+ * moved it on from (pausedFromOf), read once a supplier. A history that
+ * can't be believed is a broken chain, a tamper: the list is refused, 503
+ * INTEGRITY_FAILED, as for any record it names (its alarm raised).
  */
 async function carriedFrom(
   tx: ReadTx,
@@ -213,29 +213,22 @@ async function carriedFrom(
   orgId: string,
   items: readonly SpendRequestListed[],
   suppliers: ReadonlyMap<string, { readonly id: string; readonly currentVersionId: string }>,
-): Promise<ReadonlyMap<string, readonly string[] | null>> {
+): Promise<ReadonlyMap<string, readonly string[]>> {
   const moved = new Map<string, { readonly id: string; readonly currentVersionId: string }>();
   for (const item of items) {
     const supplier = suppliers.get(item.request.supplierId);
-    if (
-      item.request.status === 'APPROVAL_REQUIRED' &&
-      supplier &&
-      supplier.currentVersionId !== item.supplierVersionId
-    ) {
-      moved.set(supplier.id, supplier);
-    }
+    const waiting = item.request.status === 'APPROVAL_REQUIRED' && item.supplierVersionId !== null;
+    if (waiting && supplier && supplier.currentVersionId !== item.supplierVersionId) moved.set(supplier.id, supplier);
   }
-  const carried = new Map<string, readonly string[] | null>();
+  const carried = new Map<string, readonly string[]>();
   for (const supplier of moved.values()) {
-    carried.set(
-      supplier.id,
-      await pausedFromOf(tx, states, orgId, supplier, () => new Unbelieved()).catch(nullIfUnbelieved),
-    );
+    const refusal = () => new RequestReadRefused(503, 'INTEGRITY_FAILED');
+    carried.set(supplier.id, await pausedFromOf(tx, states, orgId, supplier, refusal));
   }
   return carried;
 }
 
-/** A supplier's history that can't be believed, in a list: its requests left out, not the list refused. */
+/** A supplier's history that can't be believed, in one request's read: answered as unbelieved. */
 class Unbelieved extends Error {}
 
 const nullIfUnbelieved = (error: unknown): null => {
@@ -280,7 +273,7 @@ export function createSpendRequestReads({
       });
       const { listed, decisions } = read;
       if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
-      const named = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
+      const named = await work.answered(orgId, correlationId, async (tx, states) => {
         const agents = await agentsNamed(tx, states, orgId, [
           ...new Set(listed.items.map(({ request }) => request.agentId)),
         ]);
@@ -292,6 +285,7 @@ export function createSpendRequestReads({
         const carried = await carriedFrom(tx, states, orgId, listed.items, suppliers.suppliers);
         return { outcome: 'named' as const, agents, suppliers, carried };
       });
+      if (named.outcome === 'refused') return named;
       if (named.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
       const { agents, suppliers, carried } = named;
       const needsRecheck = (item: SpendRequestListed) => {
@@ -309,7 +303,6 @@ export function createSpendRequestReads({
       const stuck = (item: { readonly request: SpendRequestRecord }) =>
         agents.stuck.has(item.request.agentId) ||
         suppliers.stuck.has(item.request.supplierId) ||
-        carried.get(item.request.supplierId) === null ||
         expiresAt(item) === undefined;
       return {
         outcome: 'listed',
