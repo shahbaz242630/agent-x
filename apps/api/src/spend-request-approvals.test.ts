@@ -66,8 +66,8 @@ const RECHECKED = {
   supplierVersionId: '0199a0f0-0000-7000-8000-0000000000e3',
   decidedAs: 'REQUIRE_APPROVAL',
   decidedReasons: ['APPROVAL_THRESHOLD'],
-  decision: 'ALLOW',
-  reasons: [],
+  decision: 'REQUIRE_APPROVAL',
+  reasons: ['APPROVAL_THRESHOLD'],
 } as const;
 
 afterEach(closeServers);
@@ -176,7 +176,7 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
       recheck: {
         ...RECHECKED,
         decidedReasons: [{ code: 'APPROVAL_THRESHOLD', message: expect.any(String) as unknown }],
-        reasons: [],
+        reasons: [{ code: 'APPROVAL_THRESHOLD', message: expect.any(String) as unknown }],
       },
     });
     const confirming = await app.inject(confirm({ stepUpChallengeId: CHALLENGE_ID, recheck: true }));
