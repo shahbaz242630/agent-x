@@ -260,7 +260,8 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
         expect(lockWaits().map((line) => [line.migration, line.try])).toEqual(
           Array.from({ length: LOCK_TRIES - 1 }, (_, index) => ['0002_second.sql', index + 1]),
         );
-        expect(LOCK_TRIES).toBe(5);
+        // The job's own limits (partner, S117): the app's queries queue at most 2 s behind a file.
+        expect([LOCK_TIMEOUT_MS, LOCK_TRIES]).toEqual([2000, 5]);
         // The holder never noticed: its transaction still reads the table.
         await holder.query('select * from demo.one');
       } finally {
