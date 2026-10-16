@@ -20,7 +20,8 @@
 //   every new query on that table queues behind the file, so the app stalls
 //   for as long as the file waits: without a limit, until the job was stopped.
 //   The wait is short so the stall is too; one that runs out rolls the file
-//   back, and it is tried again after a pause, LOCK_TRIES in all.
+//   back, and it is tried again after a pause, LOCK_TRIES in all. A file's
+//   own SET LOCAL lock_timeout replaces the limit for that file (0005 waits 5 s).
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -243,9 +244,10 @@ export async function applyMigration(
   logger: Logger,
   lockTimeoutMs: number,
 ): Promise<void> {
-  await client.query('begin');
   let stillInOurTransaction: boolean;
   try {
+    // Inside the try, so a retry on a connection a failed rollback lost still names its file.
+    await client.query('begin');
     // LOCAL (the third argument), so it ends with the file's transaction. set_config takes the wait as a parameter.
     // eslint-disable-next-line agentx/tenant-setting-only-in-with-tenant -- Transaction-local lock_timeout on the runner's own unpooled client, not a tenant or session setting.
     await client.query("select pg_catalog.set_config('lock_timeout', $1, true)", [`${lockTimeoutMs}ms`]);
