@@ -1,6 +1,6 @@
 // A spend request ended before hand-off, its capacity and order given back
 // (PRD §4.2; ADR-006 §6, §10–§11; BR-09; partner decisions 10, Phase 3's 6;
-// Phase 2 D7, D8; Phase 3 B4a, C1): a request waiting for approval 72 hours
+// Phase 2 D7, D8; Phase 3 B4a, C1): a request waiting for approval past its wait (24, 48 or 72 hours, E6)
 // from its decision is EXPIRED; one cancelled by a person, or by the agent
 // that made it, before hand-off (waiting, approved or ready) is CANCELLED; one
 // a person rejects while it waits is DENIED, with their reason; and one whose
@@ -16,14 +16,14 @@
 // 0040's `held_for_its_request` and 0039's `claim_guard` allow only once the
 // request has ended. So no lock is taken after the head's.
 //
-// The 72 hours run from the decision's own event (`spend_request.decided`),
+// The wait runs from the decision's own event (`spend_request.decided`),
 // whose time the audit chain seals: a request still waiting has signed no
 // other since, so it is the verified read's own event. The row's `created_at`
 // is unsealed, so it only picks the candidates (`requestsWaitingSince`): a
 // request that claims to be older than it is is never expired early, and one
 // moved later past the app is only left holding (money kept, never paid). The
 // sealed time is the database's clock, `now` the app's: seconds apart at most,
-// against 72 hours.
+// against a wait of 24 hours or more (E6).
 import { holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
@@ -42,6 +42,7 @@ import {
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
 import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
+import { waitedOut } from '../domain/approval-wait.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
@@ -51,13 +52,6 @@ import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 type EndingsTransaction = Transaction<SpendRequestsTables & AuditTables & LimitReservationsTables>;
-
-/** How long a request waits for approval before it expires (partner decision 10; a constant for the Pilot). */
-export const WAITS_FOR_APPROVAL_MS = 72 * 3_600_000;
-
-/** Whether a request decided at `decidedAt` (its decision's sealed time) has waited for approval as long as it may. */
-export const waitedOut = (decidedAt: Date, now: Date): boolean =>
-  decidedAt.getTime() + WAITS_FOR_APPROVAL_MS <= now.getTime();
 
 /**
  * How many of its own requests an agent may cancel in 24 hours (partner
@@ -114,8 +108,8 @@ export async function requestsWaitingSince(
 }
 
 /**
- * Expires the request if it is still waiting for approval and its decision
- * was made WAITS_FOR_APPROVAL_MS or more before `now`, releasing its
+ * Expires the request if it is still waiting for approval and the wait its
+ * decision sealed has run out by `now` (domain/approval-wait.ts), releasing its
  * reservation and order claim, recorded as the API's.
  */
 export async function expireRequest(
@@ -128,17 +122,16 @@ export async function expireRequest(
   const read = await requestOf(tx, states, key, 'change');
   if (read.outcome !== 'found') return read;
   if (read.request.status !== 'APPROVAL_REQUIRED') return { outcome: 'not_open', request: read.request };
-  // Its 72 hours run from its decision as the chain sealed it, not its latest event: a carry (E4) moves no clock.
+  // Its wait runs from its decision as the chain sealed it, not its latest event: a carry (E4) moves no clock.
   // Every request held waiting was decided so (signRequest): none is a history that can't be believed (its alarm
   // raised) or a bug, so it throws rather than wait for good, and the job's error line alerts.
   const decision = await decisionOf(tx, states, key);
   if (decision === null) throw new Error(`A spend request waiting for approval has no decision to read: ${key.id}`);
-  if (!waitedOut(decision.decidedAt, now)) return { outcome: 'not_due' };
-  const decided = decision.decidedAt;
+  if (!waitedOut(decision, now)) return { outcome: 'not_due' };
   await endHolding(tx, states, keys, key, 'expire', now, {
     actor: ACTOR,
     action: 'spend_request.expired',
-    details: { decidedAt: decided.toISOString() },
+    details: { decidedAt: decision.decidedAt.toISOString(), approvalWaitHours: decision.waitHours },
   });
   return { outcome: 'ended', request: { ...read.request, status: 'EXPIRED' } };
 }

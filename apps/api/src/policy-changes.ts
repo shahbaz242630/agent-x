@@ -51,6 +51,7 @@ import {
   widerThanMandate,
 } from '@agentx/core/modules/mandates';
 import type { Outbox } from '@agentx/core/modules/notifications';
+import type { ApprovalWaitHours } from '@agentx/core/modules/spend-requests';
 import { suppliersFound } from '@agentx/core/modules/suppliers';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
@@ -61,11 +62,12 @@ import {
   MandateRefused,
   type MandateTx,
   mandateIn,
-  capChoiceOf,
+  organizationChoicesOf,
   policyRulesIn,
   toldAdminsAndApprovers,
   versionIn,
 } from './mandate-reads.ts';
+import { waitChoiceDetails } from './approval-wait-choice.ts';
 import { capChoiceDetails, type MonthlyCapChoice } from './monthly-cap-choice.ts';
 import {
   rejectWaiting,
@@ -124,12 +126,15 @@ export interface PolicyView {
   readonly current: PolicyVersionRecord | null;
   /** The organisation's monthly cap as its admin chose it (E2), or null: not chosen, or a mandate's policy. */
   readonly monthlyCapChoice: MonthlyCapChoice | null;
+  /** The organisation's approval wait as its admin chose it (E6), or null: not chosen (72 hours), or a mandate's policy. */
+  readonly approvalWait: ApprovalWaitHours | null;
 }
 
-/** A change's rules, with the organisation's monthly cap choice (E2): null, and only null, for a mandate's policy. */
+/** A change's rules, with the organisation's choices (E2's cap, E6's wait): null, and only null, for a mandate's policy. */
 interface PolicyAsked {
   readonly rules: PolicyRules;
   readonly capChoice: MonthlyCapChoice | null;
+  readonly approvalWait: ApprovalWaitHours | null;
 }
 
 export type PolicyChangeAsked =
@@ -181,7 +186,8 @@ const NOTICE = { organization: 'organization_policy_changed', mandate: 'mandate_
 /**
  * The change's SHA-256: the operation, the organisation, the policy, its
  * latest signed event (empty for one never set), the rules' hash and, for the
- * organisation's, the monthly cap choice with its words' version, IDs in
+ * organisation's, the monthly cap choice and the approval wait, each with its
+ * words' version, IDs in
  * lower case: any change to the policy since the ask, other rules or another
  * choice, make the step-up another change's.
  */
@@ -190,7 +196,7 @@ const changeHash = (
   orgId: string,
   policyId: string,
   existing: { readonly state: { readonly eventId: string } } | null,
-  { rules, capChoice }: PolicyAsked,
+  { rules, capChoice, approvalWait }: PolicyAsked,
   waiting: readonly string[],
 ) =>
   changeHashOf([
@@ -200,18 +206,22 @@ const changeHash = (
     existing?.state.eventId.toLowerCase() ?? '',
     rulesHash(rules),
     ...(capChoice === null ? [] : Object.values(capChoiceDetails(capChoice)).map(String)),
+    ...(approvalWait === null ? [] : Object.values(waitChoiceDetails(approvalWait)).map(String)),
     ...waiting,
   ]);
 
 /**
- * The rules checked again (policyRules), with a choice only for the
- * organisation's, saying what its rules do: an amount with a cap, none
- * without. The routes have checked it; this keeps another caller to it.
+ * The rules checked again (policyRules), with choices only for the
+ * organisation's: the cap's saying what its rules do (an amount with a cap,
+ * none without), and a wait always. The routes have checked them; this keeps
+ * another caller to them.
  */
-function askedOf(target: PolicyTarget, { rules, capChoice }: PolicyAsked): PolicyAsked {
+function askedOf(target: PolicyTarget, { rules, capChoice, approvalWait }: PolicyAsked): PolicyAsked {
   const expected = target.scope === 'mandate' ? null : rules.monthlyCap === null ? 'none' : 'amount';
   if (capChoice !== expected) throw new RangeError('The monthly cap choice must match the policy’s rules');
-  return { rules: policyRules(rules), capChoice };
+  if ((approvalWait === null) !== (target.scope === 'mandate'))
+    throw new RangeError('An approval wait is chosen with the organisation’s policy alone, and always');
+  return { rules: policyRules(rules), capChoice, approvalWait };
 }
 
 export function createPolicyChanges({
@@ -319,12 +329,17 @@ export function createPolicyChanges({
         ? orgId.toLowerCase()
         : (await mandateIn(tx, states, orgId, target.mandateId, 'share')).mandate.id;
     const current = (await policyRulesIn(tx, states, orgId, id))?.current ?? null;
+    const chosen =
+      target.scope === 'organization'
+        ? await organizationChoicesOf(tx, states, orgId, current)
+        : { capChoice: null, approvalWait: null };
     return {
       scope: target.scope,
       id,
       mandateId: target.scope === 'mandate' ? id : null,
       current,
-      monthlyCapChoice: target.scope === 'organization' ? await capChoiceOf(tx, states, orgId, current) : null,
+      monthlyCapChoice: chosen.capChoice,
+      approvalWait: chosen.approvalWait,
     };
   };
 
@@ -364,7 +379,7 @@ export function createPolicyChanges({
     async confirm(member, idempotent, target, sent, waiting, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const asked = askedOf(target, sent);
-        const { rules, capChoice } = asked;
+        const { rules, capChoice, approvalWait } = asked;
         const now = clock.now();
         await onePolicyChangeAtATime(tx, member.orgId);
         const held = await challenges.hold(tx, member.sessionId);
@@ -415,6 +430,7 @@ export function createPolicyChanges({
           details: {
             ...stepUpDetails(consumed),
             ...(capChoice === null ? {} : capChoiceDetails(capChoice)),
+            ...(approvalWait === null ? {} : waitChoiceDetails(approvalWait)),
             ...waitingDetails(choice, plan),
           },
         });

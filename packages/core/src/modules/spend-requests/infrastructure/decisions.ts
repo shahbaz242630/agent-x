@@ -24,6 +24,7 @@ import {
 } from '../../audit/index.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
 import { isReasonCode, type Money, minorOf, money, oneOf, type ReasonCode } from '../../../shared-kernel/index.ts';
+import type { ApprovalWaitHours } from '../domain/approval-wait.ts';
 import type { HeldAs } from '../domain/holdings.ts';
 import { SPEND_REQUEST, type SpendRequestStatus } from '../domain/spend-request.ts';
 import { SPEND_REQUESTS } from './requests.ts';
@@ -67,6 +68,8 @@ export interface NewRequest {
   readonly weighed: Readonly<Record<string, string | boolean | null>>;
   readonly decision: Decision;
   readonly reasons: readonly ReasonCode[];
+  /** How long it waits for approval, in force when it was decided (E6): sealed with a REQUIRE_APPROVAL decision alone. */
+  readonly approvalWait: ApprovalWaitHours;
   readonly createdAt: Date;
 }
 
@@ -105,6 +108,8 @@ export async function signRequest(
       decision: request.decision,
       reasons: request.reasons.join(' '),
       ...request.weighed,
+      // The wait it is held to, never moved by a later change of the organisation's (partner decision 20).
+      ...(request.decision === 'REQUIRE_APPROVAL' ? { approvalWaitHours: request.approvalWait } : {}),
       // What its reservation and claim were made as, sealed with the decision, for the holdings check (E1, E1b).
       ...(held === null
         ? {}

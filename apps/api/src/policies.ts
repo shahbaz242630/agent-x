@@ -18,7 +18,12 @@
 // the ask's body, answers which requests waiting for approval the rules
 // would reject and why, writing nothing (policy-waiting.ts).
 import { DECISIONS, MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
-import { orderReferenceOf, SpendAskRefused } from '@agentx/core/modules/spend-requests';
+import {
+  type ApprovalWaitHours,
+  LONGEST_APPROVAL_WAIT,
+  orderReferenceOf,
+  SpendAskRefused,
+} from '@agentx/core/modules/spend-requests';
 import {
   MOST_ALLOWED_SUPPLIERS,
   OVER_CAP,
@@ -35,6 +40,7 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
+import { APPROVAL_WAIT_HOURS } from './approval-wait-choice.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   MONTHLY_CAP_CHOICE,
@@ -133,17 +139,25 @@ const rulesChecked = (body: RuleFields, context: z.RefinementCtx): void => {
   issuesOf(() => rulesOf(body), PolicyRulesRefused, context);
 };
 
-/** A change's body: the organisation's names its monthly cap choice (E2). */
+/** A change's body: the organisation's names its monthly cap choice (E2) and its approval wait (E6). */
 type ChangeBody = RuleFields & {
   readonly monthlyCapChoice?: MonthlyCapChoice | undefined;
+  readonly approvalWaitHours?: ApprovalWaitHours | undefined;
   readonly waitingRequests?: WaitingChoice | undefined;
 };
 
 /** A change's choice for the waiting requests it would reject (E5d, decision 19): never the preview's. */
 const WAITING_FIELD = { waitingRequests: WAITING_REQUESTS.optional() };
 
-/** The organisation's rules with its choice, which must say what they do: an amount with a monthly cap, none without. */
-const ORGANIZATION_FIELDS = { ...RULE_FIELDS, monthlyCapChoice: MONTHLY_CAP_CHOICE };
+/**
+ * The organisation's rules with its choices: the cap's, which must say what
+ * they do (an amount with a monthly cap, none without), and the wait, always.
+ */
+const ORGANIZATION_FIELDS = {
+  ...RULE_FIELDS,
+  monthlyCapChoice: MONTHLY_CAP_CHOICE,
+  approvalWaitHours: APPROVAL_WAIT_HOURS,
+};
 
 const choiceChecked = (body: ChangeBody, context: z.RefinementCtx): void => {
   rulesChecked(body, context);
@@ -272,6 +286,18 @@ const POLICY = z
       .describe(
         'The organisation’s monthly cap per agent as its admin chose it: `amount` (current.monthlyCapMinor) or `none`; null: not chosen yet, so no agent may spend (ORG_MONTHLY_CAP_NOT_SET). Always null for a mandate’s policy.',
       ),
+    approvalWaitHours: z
+      .number()
+      .nullable()
+      .describe(
+        'How many hours the organisation’s requests wait for approval as its admin chose it: 24, 48 or 72; null: not chosen yet (72 in force), or a mandate’s policy.',
+      ),
+    approvalWaitInForceHours: z
+      .number()
+      .nullable()
+      .describe(
+        'The wait new requests get now: the one chosen, else 72. Each request keeps the wait it was asked under. Null for a mandate’s policy.',
+      ),
     suggestedMonthlyCapMinor: z
       .number()
       .describe(
@@ -295,7 +321,7 @@ const WAITING_PREVIEW = z
       .describe(
         'Oldest first, at most 20: each request waiting for approval that these rules would reject, though the ' +
           'rules in force don’t. One the rules in force refuse already, one whose supplier or mandate changed since, ' +
-          'and one past its 72 hours stay with their approvers and aren’t listed.',
+          'and one past its wait stay with their approvers and aren’t listed.',
       ),
     more: z
       .boolean()
@@ -423,17 +449,23 @@ const versionOf = (v: PolicyVersionRecord) => ({
   madeAt: v.madeAt.toISOString(),
 });
 
-const policyBody = ({ scope, id, mandateId, current, monthlyCapChoice }: PolicyView) => ({
+const policyBody = ({ scope, id, mandateId, current, monthlyCapChoice, approvalWait }: PolicyView) => ({
   scope,
   id,
   mandateId,
   current: current === null ? null : versionOf(current),
   monthlyCapChoice,
+  approvalWaitHours: approvalWait,
+  approvalWaitInForceHours: scope === 'organization' ? (approvalWait ?? LONGEST_APPROVAL_WAIT) : null,
   suggestedMonthlyCapMinor: SUGGESTED_MONTHLY_CAP_MINOR,
 });
 
-/** The body's rules, with its choice: none sent (a mandate's) is null. */
-const askedOf = (body: ChangeBody) => ({ rules: rulesOf(body), capChoice: body.monthlyCapChoice ?? null });
+/** The body's rules, with its choices: none sent (a mandate's) is null. */
+const askedOf = (body: ChangeBody) => ({
+  rules: rulesOf(body),
+  capChoice: body.monthlyCapChoice ?? null,
+  approvalWait: body.approvalWaitHours ?? null,
+});
 
 const targetOf = (kind: Kind, request: FastifyRequest): PolicyTarget => {
   if (kind === 'organization') return { scope: 'organization' };

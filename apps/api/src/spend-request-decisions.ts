@@ -62,7 +62,9 @@ import {
   claimsOn,
   type HeldAs,
   holdsCapacity,
+  type ApprovalWaitHours,
   insertRequest,
+  LONGEST_APPROVAL_WAIT,
   type NewRequest,
   requestOf,
   sealPayee,
@@ -83,7 +85,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import {
-  capChoiceOf,
+  organizationChoicesOf,
   MandateRefused,
   type MandateTables,
   policyRulesIn,
@@ -237,7 +239,8 @@ export async function mandateWeighedIn(
 
 /**
  * Level 4's second half, after the mandates: the mandate's policy and the
- * organisation's, with whether an admin chose its monthly cap (E2). A
+ * organisation's, with whether an admin chose its monthly cap (E2), and the
+ * approval wait it chose (E6), from the same read of its version's event. A
  * policy change's confirm (E5d) reads them here once it holds its policy for
  * the change, never before: a row read FOR SHARE isn't raised to change.
  */
@@ -249,8 +252,13 @@ export async function policiesIn(
 ): Promise<PoliciesWeighed> {
   const mandatePolicy = mandate === null ? null : rulesOf(await policyRulesIn(tx, states, orgId, mandate.id));
   const organization = await policyRulesIn(tx, states, orgId, orgId);
-  const organizationCapChosen = (await capChoiceOf(tx, states, orgId, organization?.current ?? null)) !== null;
-  return { mandatePolicy, organizationPolicy: rulesOf(organization), organizationCapChosen };
+  const chosen = await organizationChoicesOf(tx, states, orgId, organization?.current ?? null);
+  return {
+    mandatePolicy,
+    organizationPolicy: rulesOf(organization),
+    organizationCapChosen: chosen.capChoice !== null,
+    approvalWait: chosen.approvalWait,
+  };
 }
 
 /**
@@ -289,6 +297,8 @@ export interface PoliciesWeighed {
   readonly organizationPolicy: PolicyRules | null;
   readonly organizationCapChosen: boolean;
   readonly mandatePolicy: PolicyRules | null;
+  /** The organisation's chosen approval wait (E6), or null: not chosen, so 72 hours (partner, S119). */
+  readonly approvalWait: ApprovalWaitHours | null;
 }
 
 /**
@@ -323,7 +333,7 @@ export async function weigh(
   },
 ) {
   const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
-  const { mandatePolicy, organizationPolicy, organizationCapChosen } = rules(inForce, mandate);
+  const policies = rules(inForce, mandate);
   const { source, supplier, order, claims } = await payingIn(
     tx,
     states,
@@ -352,14 +362,14 @@ export async function weigh(
     now,
     agent,
     mandate,
-    policies: { mandatePolicy, organizationPolicy, organizationCapChosen },
+    policies,
     supplier,
     source,
     spent: money(spent, currency),
     split: money(split, currency),
     claims,
   });
-  return { input, mandate, supplier, order, month };
+  return { input, mandate, supplier, order, month, approvalWait: inForce.approvalWait };
 }
 
 /**
@@ -439,7 +449,7 @@ export function createSpendRequestDecisions({
     const now = clock.now();
     await currencyTaken(tx, asked.amount.currency);
     const { agent, keyId } = await actingIn(tx, states, acting, now);
-    const { input, mandate, supplier, order, month } = await weigh(tx, states, orgId, agent, asked, {
+    const { input, mandate, supplier, order, month, approvalWait } = await weigh(tx, states, orgId, agent, asked, {
       now,
       decides: true,
       monthOf: (zoneIfNew) => lockAgentMonth(tx, { orgId, agentId, zoneIfNew, at: now }),
@@ -472,6 +482,8 @@ export function createSpendRequestDecisions({
       weighed: decisionFacts(input),
       decision: made.decision,
       reasons: made.reasons,
+      // The wait in force now, sealed with it: a later change moves it never (decision 20); 72 until chosen (S119).
+      approvalWait: approvalWait ?? LONGEST_APPROVAL_WAIT,
       createdAt: now,
     };
 

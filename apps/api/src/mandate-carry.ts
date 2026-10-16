@@ -43,6 +43,7 @@ import { type Decision, decide, type DecisionMade } from '@agentx/core/modules/p
 import {
   claimsOnEach,
   decisionsOf,
+  type ApprovalClock,
   type HeldSealed,
   isPending,
   type OrderClaimsSeen,
@@ -207,8 +208,8 @@ export interface HeldAuthority {
   readonly suppliers: ReadonlyMap<string, SupplierRecord>;
   /** Each request's capacity as its decision sealed it: its month, and when it was reserved. */
   readonly held: ReadonlyMap<string, HeldSealed>;
-  /** When each request's decision was sealed: a waiting one's 72 hours run from it (E4b). */
-  readonly decidedAt: ReadonlyMap<string, Date>;
+  /** When each request's decision was sealed, and the wait it sealed: a waiting one's runs from it (E4b, E6). */
+  readonly clocks: ReadonlyMap<string, ApprovalClock>;
 }
 
 /** Levels 5–7 under the mandate read at 4, each read once for every request. */
@@ -236,9 +237,9 @@ export async function heldAuthority(
   // 7: the months their capacity is held in, and when, as their decisions sealed them, in one read.
   const decisions = await decisionsOf(tx, states, orgId, ids);
   const held = new Map(ids.map((id) => [id, known(decisions.get(id.toLowerCase())?.held)]));
-  const decidedAt = new Map(ids.map((id) => [id, known(decisions.get(id.toLowerCase())).decidedAt]));
+  const clocks = new Map(ids.map((id) => [id, known(decisions.get(id.toLowerCase()))]));
   if (decides) for (const month of monthsOf(held)) await lockAgentPeriod(tx, { agentId, month });
-  return { mandate, sources, suppliers, held, decidedAt };
+  return { mandate, sources, suppliers, held, clocks };
 }
 
 /**

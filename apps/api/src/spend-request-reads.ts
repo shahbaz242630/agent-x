@@ -36,6 +36,7 @@ import {
   decisionOf,
   decisionsOf,
   denialOf,
+  expiresAtOf,
   type RejectionShown,
   requestOf,
   requestsPage,
@@ -43,7 +44,6 @@ import {
   type SpendRequestRecord,
   type SpendRequestsTables,
   type VoidingShown,
-  WAITS_FOR_APPROVAL_MS,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf, suppliersNamed, type SuppliersTables, versionOf } from '@agentx/core/modules/suppliers';
 import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
@@ -63,7 +63,7 @@ export interface RequestShown {
   readonly request: SpendRequestRecord;
   /** When its latest move was signed. */
   readonly changedAt: Date;
-  /** When a waiting one expires: 72 hours from its decision's sealed time (D7), never a later event's (E4b); else null. */
+  /** When a waiting one expires: its sealed wait from its decision's sealed time (D7, E6), never a later event's (E4b); else null. */
   readonly expiresAt: Date | null;
   readonly agentName: string;
   readonly supplierName: string;
@@ -76,9 +76,9 @@ export interface RequestShown {
  * waiting; undefined for one waiting with no decision to believe, which is
  * then not shown.
  */
-const expiresAtOf = (request: SpendRequestRecord, decided: Decided | null | undefined): Date | null | undefined => {
+const expiresOf = (request: SpendRequestRecord, decided: Decided | null | undefined): Date | null | undefined => {
   if (request.status !== 'APPROVAL_REQUIRED') return null;
-  return decided ? new Date(decided.decidedAt.getTime() + WAITS_FOR_APPROVAL_MS) : undefined;
+  return decided ? expiresAtOf(decided) : undefined;
 };
 
 export type RequestsListed =
@@ -158,7 +158,7 @@ export async function requestInOrder(
     return { outcome: 'unbelieved' };
   }
   const waiting = request.status === 'APPROVAL_REQUIRED';
-  const expiresAt = expiresAtOf(request, waiting ? await decisionOf(tx, states, { orgId, id: request.id }) : null);
+  const expiresAt = expiresOf(request, waiting ? await decisionOf(tx, states, { orgId, id: request.id }) : null);
   if (expiresAt === undefined) return { outcome: 'unbelieved' };
   const decidedUnder = decidedAgainst(read.state).supplierVersionId;
   let carried: readonly string[] = [];
@@ -296,7 +296,7 @@ export function createSpendRequestReads({
         );
       };
       const expiresAt = ({ request }: { readonly request: SpendRequestRecord }) =>
-        expiresAtOf(request, decisions.get(request.id.toLowerCase()));
+        expiresOf(request, decisions.get(request.id.toLowerCase()));
       // A waiting one with no decision to believe is left out and named, as one that can't be checked (A1b).
       const stuck = (item: { readonly request: SpendRequestRecord }) =>
         agents.stuck.has(item.request.agentId) ||

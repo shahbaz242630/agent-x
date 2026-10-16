@@ -255,7 +255,7 @@ describe('pending spend requests voided once their authority no longer stands (C
       const suspends = await shared.eventsAbout(w.org, idOf(w, mandateId, which), SUSPENDS[which].type);
       expect(suspends.at(-1)).toMatchObject({
         action: SUSPENDS[which].action,
-        details: { pendingRequests: 'cancel', pendingStatementVersion: 3 },
+        details: { pendingRequests: 'cancel', pendingStatementVersion: 4 },
       });
     },
   );

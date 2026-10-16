@@ -208,6 +208,7 @@ const WAITING: WaitingRequest = {
   agentName: 'Procurement agent',
   agentId: '0199a0f0-0000-7000-8000-0000000003b4',
   consoleUrl: 'https://app.example.test',
+  expiresAt: new Date('2026-10-17T12:05:00.000Z'),
 };
 
 const waitingRequests = (

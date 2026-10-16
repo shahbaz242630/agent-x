@@ -149,7 +149,7 @@ const SPEND_REQUEST_SHOWN = z
     status: z
       .enum(SPEND_REQUEST.states)
       .describe(
-        'Where it stands: APPROVED (allowed), APPROVAL_REQUIRED (waiting for a person) or DENIED; later EXPIRED (waited 72 hours) or CANCELLED.',
+        'Where it stands: APPROVED (allowed), APPROVAL_REQUIRED (waiting for a person) or DENIED; later EXPIRED (its wait for approval ended: 24, 48 or 72 hours, as its organisation chose when it was asked) or CANCELLED.',
       ),
     decision: z
       .enum(DECISIONS)
@@ -243,7 +243,9 @@ const SPEND_REQUEST_LISTED = z
     expiresAt: z.iso
       .datetime()
       .nullable()
-      .describe('While it waits for approval: when it expires, 72 hours from its decision. Otherwise null.'),
+      .describe(
+        'While it waits for approval: when it expires, its decision’s time plus the wait its organisation had chosen then (24, 48 or 72 hours). Otherwise null.',
+      ),
     needsRecheck: z
       .boolean()
       .describe(

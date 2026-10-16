@@ -467,7 +467,7 @@
                   {
                     "type": "string",
                     "const": "REQUEST_EXPIRED",
-                    "description": "The spend request waited 72 hours for approval, so it has expired and can no longer be approved: its reservation and order claim were released. The agent must ask again."
+                    "description": "The spend request waited for approval as long as its organisation allows (24, 48 or 72 hours, as chosen when it was asked), so it has expired and can no longer be approved: its reservation and order claim were released. The agent must ask again."
                   },
                   {
                     "type": "string",
@@ -1613,6 +1613,18 @@
               }
             ]
           },
+          "approvalWaitHours": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "approvalWaitInForceHours": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "suggestedMonthlyCapMinor": {
             "type": "number"
           }
@@ -1623,6 +1635,8 @@
           "mandateId",
           "current",
           "monthlyCapChoice",
+          "approvalWaitHours",
+          "approvalWaitInForceHours",
           "suggestedMonthlyCapMinor"
         ],
         "additionalProperties": false,
@@ -14810,6 +14824,14 @@
                       "none"
                     ]
                   },
+                  "approvalWaitHours": {
+                    "type": "number",
+                    "enum": [
+                      24,
+                      48,
+                      72
+                    ]
+                  },
                   "waitingRequests": {
                     "type": "string",
                     "enum": [
@@ -14820,7 +14842,8 @@
                 },
                 "required": [
                   "currency",
-                  "monthlyCapChoice"
+                  "monthlyCapChoice",
+                  "approvalWaitHours"
                 ],
                 "additionalProperties": false
               }
@@ -14964,11 +14987,20 @@
                       "amount",
                       "none"
                     ]
+                  },
+                  "approvalWaitHours": {
+                    "type": "number",
+                    "enum": [
+                      24,
+                      48,
+                      72
+                    ]
                   }
                 },
                 "required": [
                   "currency",
-                  "monthlyCapChoice"
+                  "monthlyCapChoice",
+                  "approvalWaitHours"
                 ],
                 "additionalProperties": false
               }
@@ -15104,6 +15136,14 @@
                       "none"
                     ]
                   },
+                  "approvalWaitHours": {
+                    "type": "number",
+                    "enum": [
+                      24,
+                      48,
+                      72
+                    ]
+                  },
                   "waitingRequests": {
                     "type": "string",
                     "enum": [
@@ -15120,6 +15160,7 @@
                 "required": [
                   "currency",
                   "monthlyCapChoice",
+                  "approvalWaitHours",
                   "stepUpChallengeId"
                 ],
                 "additionalProperties": false

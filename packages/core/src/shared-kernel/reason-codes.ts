@@ -182,7 +182,7 @@ export const REASON_CODES = {
   REQUEST_CHANGED:
     "Something the spend request was decided on has changed since (its mandate, the supplier, the funding source, the agent or the key it asked with), or it would no longer be allowed, so it can't be approved as it is. If the supplier's new details are waiting to be verified under a pause, it can be approved, re-checked, once they are; otherwise reject it, and the agent asks again. Nothing was changed.",
   REQUEST_EXPIRED:
-    'The spend request waited 72 hours for approval, so it has expired and can no longer be approved: its reservation and order claim were released. The agent must ask again.',
+    'The spend request waited for approval as long as its organisation allows (24, 48 or 72 hours, as chosen when it was asked), so it has expired and can no longer be approved: its reservation and order claim were released. The agent must ask again.',
   REQUEST_NOT_CANCELLABLE:
     'The spend request has ended (denied or expired) or was handed off for payment already, so it can no longer be cancelled. Nothing was changed.',
   REQUEST_NOT_WAITING:

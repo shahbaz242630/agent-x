@@ -438,6 +438,19 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(await holdingsOf(w, asked.id)).toEqual({ reservation: 'RELEASED', released: true });
   });
 
+  it('refuses one past the 24 hours its organisation chose when it was asked, one asked before keeping 72 (E6)', async () => {
+    const { w, acting } = await ready();
+    const before = await ask(acting, w);
+    await shared.waitChosen(w, 24);
+    const after = await ask(acting, w);
+    clock.advanceBy(24 * HOUR_MS + 60_000);
+
+    expect(await asking(w.admin, after.id)).toEqual(refused(409, 'REQUEST_EXPIRED'));
+    expect(await statusOf(w, after.id)).toBe('EXPIRED');
+    // Signed in now: the admin's session has long been idle.
+    expect(requestOfAnswer(await approved(await member(w.org, 'approver'), before.id)).status).toBe('APPROVED');
+  });
+
   it('runs its 72 hours from its decision, not a later event of its own: past it by its decision, refused (E4b)', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);

@@ -59,6 +59,7 @@ const VIEW: PolicyView = {
     madeAt: new Date('2026-10-08T09:15:00.000Z'),
   },
   monthlyCapChoice: null,
+  approvalWait: null,
 };
 
 const ANSWERED = {
@@ -78,6 +79,8 @@ const ANSWERED = {
     madeAt: '2026-10-08T09:15:00.000Z',
   },
   monthlyCapChoice: null,
+  approvalWaitHours: null,
+  approvalWaitInForceHours: null,
   suggestedMonthlyCapMinor: 2_000_000,
 };
 
@@ -163,8 +166,9 @@ const PATHS = [
 
 describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation, chooses) => {
   // The body's choice, and as the use case is given it.
-  const choice = (chosen: 'amount' | 'none') => (chooses ? { monthlyCapChoice: chosen } : {});
+  const choice = (chosen: 'amount' | 'none') => (chooses ? { monthlyCapChoice: chosen, approvalWaitHours: 48 } : {});
   const kept = (chosen: 'amount' | 'none') => (chooses ? chosen : null);
+  const waitKept = chooses ? 48 : null;
   const RULES_SENT = { ...RULES, ...choice('amount') };
 
   it('asks a passkey step-up: 202, passing the member in their session, the key, the policy and its rules', async () => {
@@ -178,7 +182,7 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
         kind: 'ask',
         member: { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId },
         keyed: expect.objectContaining({ operation, key: 'k-1' }) as unknown,
-        subject: { target, rules: RULES_KEPT, capChoice: kept('amount') },
+        subject: { target, rules: RULES_KEPT, capChoice: kept('amount'), approvalWait: waitKept },
       },
     ]);
   });
@@ -193,7 +197,13 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
       expect.objectContaining({
         kind: 'confirm',
         keyed: expect.objectContaining({ operation: `${operation}.confirm` }) as unknown,
-        subject: { target, rules: RULES_KEPT, capChoice: kept('amount'), stepUpChallengeId: CHALLENGE },
+        subject: {
+          target,
+          rules: RULES_KEPT,
+          capChoice: kept('amount'),
+          approvalWait: waitKept,
+          stepUpChallengeId: CHALLENGE,
+        },
       }),
     ]);
   });
@@ -206,6 +216,7 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
       target,
       rules: { currency: 'AED', perOrderCap: null, monthlyCap: null, approvalThreshold: null, supplierIds: null },
       capChoice: kept('none'),
+      approvalWait: waitKept,
     });
   });
 
@@ -359,7 +370,7 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
       {
         kind: 'preview',
         member: { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId },
-        subject: { target, rules: RULES_KEPT, capChoice: kept('amount') },
+        subject: { target, rules: RULES_KEPT, capChoice: kept('amount'), approvalWait: waitKept },
       },
     ]);
   });
@@ -425,13 +436,14 @@ describe('the organisation’s monthly cap choice (E2, decision 15)', () => {
 
   it('takes `none` with no monthly cap, the other rules as they are', async () => {
     const { app, calls } = await withPolicies({ asked: ASKED });
-    const reply = await app.inject(post(path, { ...UNCAPPED, monthlyCapChoice: 'none' }));
+    const reply = await app.inject(post(path, { ...UNCAPPED, monthlyCapChoice: 'none', approvalWaitHours: 72 }));
 
     expect(reply.statusCode).toBe(202);
     expect(calls[0]?.subject).toEqual({
       target: { scope: 'organization' },
       rules: { ...RULES_KEPT, monthlyCap: null },
       capChoice: 'none',
+      approvalWait: 72,
     });
   });
 
@@ -465,5 +477,58 @@ describe('a mandate’s policy (C3)', () => {
 
     expect(reply.statusCode).toBe(400);
     expect(calls).toEqual([]);
+  });
+});
+
+describe('the organisation’s approval wait (E6, decisions 15 and 20)', () => {
+  const path = '/v1/policies/organization/change';
+  const CHOSEN = { ...RULES, monthlyCapChoice: 'amount' };
+
+  it.each([
+    ['no wait', CHOSEN],
+    ['a wait never offered', { ...CHOSEN, approvalWaitHours: 36 }],
+    ['no hours', { ...CHOSEN, approvalWaitHours: 0 }],
+    ['hours as a string', { ...CHOSEN, approvalWaitHours: '24' }],
+    ['a null wait', { ...CHOSEN, approvalWaitHours: null }],
+  ])('refuses %s at the edge, ask, confirm and preview', async (_what, body) => {
+    const { app, calls } = await withPolicies({});
+    for (const reply of [
+      await app.inject(post(path, body)),
+      await app.inject(post(`${path}/confirm`, { ...body, stepUpChallengeId: CHALLENGE })),
+      await app.inject(post(`${path}/preview`, body)),
+    ]) {
+      expect(reply.statusCode).toBe(400);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it.each([24, 48, 72])('passes a wait of %i hours to the use case', async (hours) => {
+    const { app, calls } = await withPolicies({ asked: ASKED });
+    const reply = await app.inject(post(path, { ...CHOSEN, approvalWaitHours: hours }));
+
+    expect(reply.statusCode).toBe(202);
+    expect(calls[0]?.subject).toMatchObject({ capChoice: 'amount', approvalWait: hours });
+  });
+
+  it('refuses a wait in a mandate’s policy: only the organisation’s names one', async () => {
+    const { app, calls } = await withPolicies({});
+    const reply = await app.inject(
+      post(`/v1/mandates/${MANDATE_ID}/policy/change`, { ...RULES, approvalWaitHours: 24 }),
+    );
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [24, 24],
+    [null, 72],
+  ] as const)('shows the organisation’s wait chosen as %s, %i in force', async (chosen, inForce) => {
+    const view = { ...VIEW, scope: 'organization' as const, id: ORG, mandateId: null, approvalWait: chosen };
+    const { app } = await withPolicies({ found: { outcome: 'found', ...view } }, 'viewer');
+    const reply = await app.inject({ method: 'GET', url: '/v1/policies/organization', headers });
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toMatchObject({ approvalWaitHours: chosen, approvalWaitInForceHours: inForce });
   });
 });

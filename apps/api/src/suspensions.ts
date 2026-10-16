@@ -67,7 +67,7 @@ const STATEMENTS = {
   pause:
     'Its requests are held as they are: none can be approved or paid while it is suspended, and they stand again ' +
     'once it is resumed, unless the admin reactivating a supplier chooses a fresh start. Requests waiting for ' +
-    'approval still expire after 72 hours. Requests an earlier stop has already cancelled (a supplier unverified ' +
+    'approval still expire when their wait ends. Requests an earlier stop has already cancelled (a supplier unverified ' +
     'with them cancelled) stay cancelled.',
 } as const satisfies Record<PendingChoice, string>;
 
@@ -75,7 +75,7 @@ const STATEMENTS = {
  * The version of STATEMENTS each event names: raised with any change to their
  * words (2: an earlier stop's cancel; 3: a supplier's fresh start; S113).
  */
-const STATEMENT_VERSION = 3;
+const STATEMENT_VERSION = 4;
 
 /** A suspend's choice, as its body names it. */
 const PENDING_REQUESTS = z
@@ -100,14 +100,14 @@ const REACTIVATE_STATEMENTS = {
     'Un-pause: its held requests stand again, at once if it comes back verified. If it comes back unverified (never ' +
     'verified, or new bank details still waiting), they stay held until a second person verifies it again; new bank ' +
     'details made current, or new details chosen to cancel, cancel them. Requests waiting for approval still expire ' +
-    'after 72 hours. Not offered when its suspension cancelled them.',
+    'when their wait ends. Not offered when its suspension cancelled them.',
 } as const satisfies Record<PendingChoice, string>;
 
 /**
  * The version of REACTIVATE_STATEMENTS each event names: raised with any
  * change to their words (2: new details may carry them, E3).
  */
-const REACTIVATE_STATEMENT_VERSION = 2;
+const REACTIVATE_STATEMENT_VERSION = 3;
 
 /** A supplier's reactivation: the reactivator's choice alone (decision 9). */
 export const REACTIVATE_BODY = z
@@ -136,11 +136,11 @@ const FREEZE_STATEMENTS = {
   pause:
     'Its spend requests are held as they are: none can be approved or paid while it is frozen, and they stand again ' +
     'once it is unfrozen, unless the admin unfreezing it chooses a fresh start. Requests waiting for approval still ' +
-    'expire after 72 hours.',
+    'expire when their wait ends.',
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of FREEZE_STATEMENTS each event names: raised with any change to their words (2: a fresh start, D2). */
-const FREEZE_STATEMENT_VERSION = 2;
+const FREEZE_STATEMENT_VERSION = 3;
 
 /** A freeze's body: the member's choice, and their confirmation (decision 11: the console's are-you-sure). */
 export const FREEZE_BODY = z
@@ -171,11 +171,11 @@ const UNFREEZE_STATEMENTS = {
     'now and the money held for it freed. This can’t be undone: the agents ask again.',
   pause:
     'Un-pause: the held spend requests stand again at once, unless something else still stops them. Requests ' +
-    'waiting for approval still expire after 72 hours. Not offered when its freeze cancelled them.',
+    'waiting for approval still expire when their wait ends. Not offered when its freeze cancelled them.',
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of UNFREEZE_STATEMENTS each event names: raised with any change to their words. */
-const UNFREEZE_STATEMENT_VERSION = 1;
+const UNFREEZE_STATEMENT_VERSION = 2;
 
 /** An unfreeze's choice, as its bodies name it (decision 14). */
 export const UNFREEZE_PENDING_REQUESTS = z
@@ -202,11 +202,11 @@ const PAYEE_STATEMENTS = {
     'Once the partner confirms the new bank details, its requests are held as they are: none can be approved or paid ' +
     'while the supplier is unverified. Confirming the new details cancels them; withdrawing the change, they stand ' +
     'again once the supplier is verified again. A supplier already suspended or unverified keeps the choice it was ' +
-    'stopped with. Requests waiting for approval still expire after 72 hours.',
+    'stopped with. Requests waiting for approval still expire when their wait ends.',
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of PAYEE_STATEMENTS each event names: raised with any change to their words (2: cancel always, C3c). */
-const PAYEE_STATEMENT_VERSION = 2;
+const PAYEE_STATEMENT_VERSION = 3;
 
 /** A payee registration's choice, as its body names it (decision 8). */
 export const PAYEE_PENDING_REQUESTS = z
@@ -238,14 +238,14 @@ const DETAILS_STATEMENTS = {
   pause:
     'Once you confirm the new details, its requests are held as they are: none can be approved or paid until a ' +
     'second person verifies the supplier with its new details, when approved ones stand again. Requests waiting ' +
-    'for approval can’t be approved under the old details, and still expire after 72 hours. New bank details made ' +
+    'for approval can’t be approved under the old details, and still expire when their wait ends. New bank details made ' +
     'current, or a later change chosen to cancel, cancel them, and so does an eleventh change in a row chosen to ' +
     'pause, for the requests held since before the first. A supplier already suspended or unverified keeps the ' +
     'choice it was stopped with.',
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of DETAILS_STATEMENTS each event names: raised with any change to their words. */
-export const DETAILS_STATEMENT_VERSION = 1;
+export const DETAILS_STATEMENT_VERSION = 2;
 
 /** A details change's choice, as its bodies name it (decision 15). */
 export const DETAILS_PENDING_REQUESTS = z

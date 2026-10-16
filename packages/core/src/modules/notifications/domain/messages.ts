@@ -57,6 +57,8 @@ export interface WaitingRequest {
   readonly agentName: string;
   readonly agentId: string;
   readonly consoleUrl: string;
+  /** When it expires, unless a person decides first: its decision's time and its wait (E6, partner S119). */
+  readonly expiresAt: Date;
 }
 
 /** Minor units as an amount reads in an email: AED 12,500.00 (two decimals, ADR-006 §1's currencies). */
@@ -307,7 +309,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   spend_request_waiting: {
     subject: () => "Agent X: an AI agent's spend request is waiting for approval",
     firstLine: () =>
-      "An AI agent of one of your Agent X organisations asked to pay a supplier, and its organisation's rules need a person to approve it. Nothing is paid unless an admin or approver approves it in Agent X, signing in again with a passkey; after 72 hours it expires.",
+      "An AI agent of one of your Agent X organisations asked to pay a supplier, and its organisation's rules need a person to approve it. Nothing is paid unless an admin or approver approves it in Agent X, signing in again with a passkey; it expires at the time shown below.",
     check:
       "Sign in to Agent X to see the request in full and approve or reject it. If you didn't expect it, reject it and tell the organisation's admins.",
   },
@@ -331,12 +333,26 @@ function article(word: string): string {
   return /^[aeiou]/.test(word) ? 'an' : 'a';
 }
 
+/** A time as the Pilot's people read it: 17 Oct 2026, 16:05 in the UAE (UTC+4, no daylight saving). */
+const UAE_TIME = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Dubai',
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+const uaeTime = (at: Date): string => UAE_TIME.format(at);
+
 /** The waiting request's own lines, between the email's first line and what to do. */
 function requestLines(request: WaitingRequest): string[] {
   return [
     `Amount: ${amountText(request.amountMinor, request.currency)}`,
     `Supplier: ${request.supplierName}`,
     `AI agent: ${request.agentName} (ID ${request.agentId})`,
+    `Expires: ${uaeTime(request.expiresAt)} UAE time (${request.expiresAt.toISOString()})`,
     `Agent X: ${request.consoleUrl}`,
   ];
 }

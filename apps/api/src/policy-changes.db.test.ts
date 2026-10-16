@@ -9,6 +9,9 @@
 // policy deleted past the app; and the lock order against the admin's demotion.
 // The organisation's monthly cap choice (E2): kept on the version's event, and
 // a version from before it with no cap read as not chosen.
+// The approval wait (E6): kept on the version's event with its words'
+// version, shown, a version from before it read as not chosen, bound to the
+// step-up, the organisation's alone and always.
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { policyOf, type PolicyRules, policyVersionOf, POLICIES, setPolicy } from '@agentx/core/modules/mandates';
@@ -32,6 +35,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { ABOVE_THE_CAP, capChoiceOf, DRAFT_ABOVE_THE_CAP, policyRulesIn } from './mandate-reads.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
+import { capChoiceDetails } from './monthly-cap-choice.ts';
 import {
   AED,
   askedFor,
@@ -82,6 +86,9 @@ const world = () => shared.world({ capChosen: false });
 const choiceOf = (target: PolicyTarget, rules: PolicyRules) =>
   target.scope === 'mandate' ? null : rules.monthlyCap === null ? 'none' : 'amount';
 
+/** The wait the organisation's change chooses (E6): 72 hours, as before it was chosen; a mandate's names none. */
+const waitOf = (target: PolicyTarget) => (target.scope === 'mandate' ? null : (72 as const));
+
 /** Rules that set only a monthly cap of `minor` fils, unless `more` says otherwise. */
 const rules = (minor: bigint, more: Partial<PolicyRules> = {}): PolicyRules => ({
   currency: 'AED',
@@ -97,7 +104,7 @@ const ask = (who: Member, target: PolicyTarget, asked: PolicyRules) =>
     who,
     keyed(who, POLICY_OPERATIONS[target.scope].ask),
     target,
-    { rules: asked, capChoice: choiceOf(target, asked) },
+    { rules: asked, capChoice: choiceOf(target, asked), approvalWait: waitOf(target) },
     undefined,
     CORRELATION,
   );
@@ -107,7 +114,7 @@ const confirm = (who: Member, target: PolicyTarget, asked: PolicyRules, challeng
     who,
     key ?? keyed(who, POLICY_OPERATIONS[target.scope].confirm),
     target,
-    { rules: asked, capChoice: choiceOf(target, asked) },
+    { rules: asked, capChoice: choiceOf(target, asked), approvalWait: waitOf(target) },
     undefined,
     challengeId,
     CORRELATION,
@@ -239,6 +246,7 @@ describe('the organisation’s policy (C3, decision 5)', () => {
       mandateId: null,
       current: null,
       monthlyCapChoice: null,
+      approvalWait: null,
     });
 
     const first = changedOf(await changed(w, ORGANIZATION, rules(1_000_000n)));
@@ -636,11 +644,104 @@ describe('the organisation’s monthly cap choice (E2, decision 15)', () => {
         w.admin,
         keyed(w.admin, POLICY_OPERATIONS[target.scope].ask),
         target,
-        { rules: asked, capChoice },
+        { rules: asked, capChoice, approvalWait: waitOf(target) },
         undefined,
         CORRELATION,
       ),
     ).rejects.toThrow(RangeError);
+  });
+});
+
+describe('the organisation’s approval wait (E6, decisions 15 and 20)', () => {
+  /** The organisation's change to a monthly cap of AED 10, its wait `hours`, as an operation (ask or confirm) sends it. */
+  const withWait = (hours: 24 | 48 | 72 | null) => ({
+    rules: rules(1_000n),
+    capChoice: 'amount' as const,
+    approvalWait: hours,
+  });
+
+  /** Asked with `askedHours`, signed in for with a passkey, confirmed with `confirmedHours`. */
+  async function waitChanged(w: World, askedHours: 24 | 48 | 72, confirmedHours = askedHours) {
+    const asked = await changes.ask(
+      w.admin,
+      keyed(w.admin, POLICY_OPERATIONS.organization.ask),
+      ORGANIZATION,
+      withWait(askedHours),
+      undefined,
+      CORRELATION,
+    );
+    const challengeId = askedFor(asked);
+    await stepUp(w.admin, challengeId);
+    return changes.confirm(
+      w.admin,
+      keyed(w.admin, POLICY_OPERATIONS.organization.confirm),
+      ORGANIZATION,
+      withWait(confirmedHours),
+      undefined,
+      challengeId,
+      CORRELATION,
+    );
+  }
+
+  it('keeps each wait on its version’s event with the words confirmed, and shows it; none until chosen', async () => {
+    const w = await world();
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toMatchObject({ approvalWait: null });
+
+    expect(changedOf(await waitChanged(w, 24))).toMatchObject({ approvalWait: 24 });
+    changedOf(await waitChanged(w, 48));
+
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toMatchObject({ approvalWait: 48 });
+    const made = (await policyEvents(w.org))
+      .filter(({ action }) => action === 'policy_version.made')
+      .map(({ details }) => JSON.parse(details) as Record<string, unknown>);
+    expect(made).toEqual([
+      expect.objectContaining({ approvalWaitHours: 24, approvalWaitStatementVersion: 1, methods: PASSKEY.join(' ') }),
+      expect.objectContaining({ approvalWaitHours: 48, approvalWaitStatementVersion: 1 }),
+    ]);
+  });
+
+  it('reads a version whose event keeps no wait (made before E6) as not chosen, its cap chosen still', async () => {
+    const w = await world();
+    await withSignedStates(app, w.org, shared.quiet(), (tx, states) =>
+      setPolicy(tx, states, {
+        orgId: w.org,
+        existing: null,
+        scope: 'organization',
+        mandateId: null,
+        versionId: ids.next(),
+        rules: rules(0n, { monthlyCap: null }),
+        madeBy: w.admin.membershipId,
+        madeAt: clock.now(),
+        actor: { type: 'user', id: w.admin.userId },
+        details: capChoiceDetails('none'),
+      }),
+    );
+
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toMatchObject({
+      monthlyCapChoice: 'none',
+      approvalWait: null,
+    });
+  });
+
+  it('refuses a confirm of another wait than the step-up was asked for: STEP_UP_FAILED, nothing changed', async () => {
+    const w = await world();
+
+    expect(await waitChanged(w, 48, 24)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toMatchObject({ current: null, approvalWait: null });
+  });
+
+  it('refuses no wait for the organisation’s, and one for a mandate’s, asked past the routes: nothing asked', async () => {
+    const w = await world();
+    const mandate: PolicyTarget = { scope: 'mandate', mandateId: await shared.inForce(registry, w) };
+
+    for (const [target, sent] of [
+      [ORGANIZATION, withWait(null)],
+      [mandate, { rules: rules(1_000n), capChoice: null, approvalWait: 24 as const }],
+    ] as const) {
+      await expect(
+        changes.ask(w.admin, keyed(w.admin, POLICY_OPERATIONS[target.scope].ask), target, sent, undefined, CORRELATION),
+      ).rejects.toThrow(RangeError);
+    }
   });
 });
 
