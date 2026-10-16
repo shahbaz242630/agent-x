@@ -189,7 +189,7 @@ async function rejectedOf(
   // Those that can't go stay whatever the rules: counted for every candidate, so weighed first.
   const order = [...all.filter((at) => !candidates.has(at)), ...all.filter((at) => candidates.has(at))];
   const goes = (request: SpendRequestRecord, { decision, reasons }: DecisionMade): boolean =>
-    candidates.has(requests.indexOf(request)) && !holdsCapacity(decision) && rejectedFor(decision, reasons) !== null;
+    candidates.has(requests.indexOf(request)) && rejectedFor(decision, reasons) !== null;
   return inOrder(order, proposedPolicies(inForce, scope), (request, made) => !goes(request, made))
     .filter(({ stays }) => !stays)
     .map(({ request, made }) => ({

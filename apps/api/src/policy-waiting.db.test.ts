@@ -249,11 +249,37 @@ describe('the requests waiting for approval a policy change would reject (E5d, d
     ).toEqual([first.id, third.id]);
   });
 
-  it('leaves out every one with a stop: the agent suspended', async () => {
+  it.each(['the agent suspended', 'the mandate suspended'] as const)(
+    'leaves out every one with a stop: %s',
+    async (which) => {
+      const { w } = await threeWaiting();
+      await shared.STOPS[which](w, await mandateIdOf(w));
+
+      expect(await listed(w.admin, ORGANIZATION, rulesOf(100_000n))).toEqual({ rejected: [], more: false });
+    },
+  );
+
+  it('leaves out every one of an agent with no mandate in force: revoked, its requests not yet voided by the job', async () => {
     const { w } = await threeWaiting();
-    await shared.STOPS['the agent suspended'](w);
+    await shared.movedPastTheUseCase(w, await mandateIdOf(w), 'revoke');
 
     expect(await listed(w.admin, ORGANIZATION, rulesOf(100_000n))).toEqual({ rejected: [], more: false });
+  });
+
+  it('lets a younger, smaller one stand when an older one goes: one that goes is never counted', async () => {
+    const { w, acting } = await ready();
+    const first = await ask(acting, w);
+    clock.advanceBy(60_000);
+    const second = await ask(acting, w);
+    clock.advanceBy(60_000);
+    const third = await ask(acting, w, { amount: AED(150_000n) });
+
+    // AED 3,600 a month: the first's AED 2,000 fits, the second's doesn't, the third's AED 1,500 does beside the first.
+    expect(await listed(w.admin, ORGANIZATION, rulesOf(360_000n))).toEqual({
+      rejected: [[second.id, ['POLICY_MONTHLY_CAP']]],
+      more: false,
+    });
+    expect([first.status, third.status]).toEqual(['APPROVAL_REQUIRED', 'APPROVAL_REQUIRED']);
   });
 
   it('leaves out one asked with a key since revoked, and one past its 72 hours', async () => {
