@@ -20,6 +20,8 @@ const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000d3';
 const SUPPLIERS = ['0199a0f0-0000-7000-8000-0000000000e1', '0199a0f0-0000-7000-8000-0000000000e2'];
 const ADMIN = '0199a0f0-0000-7000-8000-000000000033';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c1';
+const REQUEST_ID = '0199a0f0-0000-7000-8000-0000000000f1';
+const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 
 const LIVE: LiveSession = {
   sessionId: '0199a0f0-0000-7000-8000-000000000022',
@@ -79,7 +81,7 @@ const ANSWERED = {
 afterEach(closeServers);
 
 interface Call {
-  readonly kind: 'ask' | 'confirm' | 'show';
+  readonly kind: 'ask' | 'confirm' | 'show' | 'preview';
   readonly member?: unknown;
   readonly keyed?: IdempotentRequest;
   readonly subject?: unknown;
@@ -89,6 +91,7 @@ interface Answers {
   readonly asked?: PolicyChangeAsked;
   readonly changed?: PolicyChanged;
   readonly found?: Awaited<ReturnType<PolicyChanges['show']>>;
+  readonly previewed?: Awaited<ReturnType<PolicyChanges['preview']>>;
 }
 
 /** A server whose policy changes answer `answers`, the caller holding `role`. */
@@ -106,6 +109,10 @@ async function withPolicies(answers: Answers, role: Role = 'admin') {
     show: (orgId, target) => {
       calls.push({ kind: 'show', subject: { orgId, target } });
       return Promise.resolve(answers.found ?? { outcome: 'refused', status: 404, code: 'NOT_FOUND' });
+    },
+    preview: (member, target, asked) => {
+      calls.push({ kind: 'preview', member, subject: { target, ...asked } });
+      return Promise.resolve(answers.previewed ?? { outcome: 'refused', status: 404, code: 'NOT_FOUND' });
     },
   };
   const member: MembershipCheck = { outcome: 'active', id: ADMIN, role };
@@ -273,6 +280,65 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
 
     expect(reply.statusCode).toBe(403);
     expect(calls).toEqual([]);
+  });
+
+  it('previews the waiting requests the rules would reject (E5d): 200, oldest first, with what to do, no key taken', async () => {
+    const previewed = {
+      outcome: 'previewed' as const,
+      rejected: [{ id: REQUEST_ID, agentId: AGENT_ID, amount: AED(450_000n), reasons: ['POLICY_ORDER_CAP' as const] }],
+      more: true,
+    };
+    const { app, calls } = await withPolicies({ previewed });
+    const { 'idempotency-key': _key, ...unkeyed } = post('', {}).headers ?? {};
+    const reply = await app.inject({ ...post(`${path}/change/preview`, RULES_SENT), headers: unkeyed });
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toEqual({
+      rejected: [
+        {
+          id: REQUEST_ID,
+          agentId: AGENT_ID,
+          amountMinor: 450_000,
+          currency: 'AED',
+          reasons: [
+            {
+              code: 'POLICY_ORDER_CAP',
+              message: expect.any(String) as unknown,
+              whatToDo: 'Raise the per-order cap in the organisation’s or the mandate’s policy settings.',
+            },
+          ],
+        },
+      ],
+      more: true,
+    });
+    expect(calls).toEqual([
+      {
+        kind: 'preview',
+        member: { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId },
+        subject: { target, rules: RULES_KEPT, capChoice: kept('amount') },
+      },
+    ]);
+  });
+
+  it('previews none waiting, a preview refused, and refuses one not an admin’s or with rules the ask would refuse', async () => {
+    const none = await withPolicies({ previewed: { outcome: 'previewed', rejected: [], more: false } });
+    const empty = await none.app.inject(post(`${path}/change/preview`, RULES_SENT));
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ rejected: [], more: false });
+
+    const refused = await withPolicies({ previewed: { outcome: 'refused', status: 409, code: 'MANDATE_ENDED' } });
+    const ended = await refused.app.inject(post(`${path}/change/preview`, RULES_SENT));
+    expect(ended.statusCode).toBe(409);
+    expect(ended.json()).toMatchObject({ error: { code: 'MANDATE_ENDED' } });
+
+    const approver = await withPolicies({}, 'approver');
+    expect((await approver.app.inject(post(`${path}/change/preview`, RULES_SENT))).statusCode).toBe(403);
+    expect(approver.calls).toEqual([]);
+
+    const wrong = await withPolicies({});
+    const bad = await wrong.app.inject(post(`${path}/change/preview`, { ...RULES_SENT, currency: 7 }));
+    expect(bad.statusCode).toBe(400);
+    expect(wrong.calls).toEqual([]);
   });
 
   it('shows the policy to any member, or none set', async () => {

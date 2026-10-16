@@ -72,7 +72,7 @@ export interface PolicySimulations {
 }
 
 /** A proposed policy as the engine weighs it. */
-const proposedRules = (rules: Rules) => ({ ...rules, versionId: PROPOSED });
+export const proposedRules = (rules: Rules) => ({ ...rules, versionId: PROPOSED });
 
 /**
  * The policies to weigh: those in force, each replaced by its proposed rules.

@@ -13,6 +13,10 @@
 // The organisation's change names its monthly cap choice (decision 15, E2):
 // `amount` with a monthly cap, `none` without; no agent spends until one is
 // chosen (monthly-cap-choice.ts).
+//
+// The preview (E5d, decision 19): `POST …/change/preview`, an admin's, with
+// the ask's body, answers which requests waiting for approval the rules
+// would reject and why, writing nothing (policy-waiting.ts).
 import { DECISIONS, MONTHLY_CAP_FROM } from '@agentx/core/modules/policies';
 import { orderReferenceOf, SpendAskRefused } from '@agentx/core/modules/spend-requests';
 import {
@@ -46,7 +50,18 @@ import {
   type PolicyView,
 } from './policy-changes.ts';
 import { type PolicySimulations, SIMULATING_ROLES, type Simulated } from './policy-simulations.ts';
-import { AMOUNT, issuesOf, MANDATE_ID, REASONS, reasonsOf, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
+import type { WaitingPlan } from './policy-waiting.ts';
+import {
+  AMOUNT,
+  issuesOf,
+  MANDATE_ID,
+  REASONS,
+  reasonsOf,
+  RULE_DENIAL_SHOWN,
+  shownRules,
+  STEP_UP_SIGNED_IN,
+  stepUpAsked,
+} from './route-schemas.ts';
 
 /** Every member may see the organisation's policies, as its mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -259,6 +274,46 @@ const POLICY = z
   })
   .register(API_SCHEMAS, { id: 'Policy', description: 'A policy and the rules in force.' });
 
+const WAITING_PREVIEW = z
+  .object({
+    rejected: z
+      .array(
+        z.object({
+          id: z.uuid().describe('The spend request.'),
+          agentId: z.uuid().describe('The agent that asked.'),
+          amountMinor: z.number().describe('Whole minor units.'),
+          currency: z.string(),
+          reasons: z.array(RULE_DENIAL_SHOWN).describe('The rules that would reject it, with what to do.'),
+        }),
+      )
+      .describe(
+        'Oldest first, at most 20: each request waiting for approval that these rules would reject, though the ' +
+          'rules in force don’t. One the rules in force refuse already, one whose supplier or mandate changed since, ' +
+          'and one past its 72 hours stay with their approvers and aren’t listed.',
+      ),
+    more: z
+      .boolean()
+      .describe(
+        'True when there are others not listed: more than 20 would be rejected, or more than 100 are waiting and ' +
+          'none was weighed.',
+      ),
+  })
+  .register(API_SCHEMAS, {
+    id: 'PolicyWaitingPreview',
+    description: 'The requests waiting for approval a policy change would reject, written nothing.',
+  });
+
+const previewBody = ({ rejected, more }: WaitingPlan) => ({
+  rejected: rejected.map(({ id, agentId, amount, reasons }) => ({
+    id,
+    agentId,
+    amountMinor: Number(amount.minor),
+    currency: amount.currency,
+    reasons: shownRules(reasons),
+  })),
+  more,
+});
+
 /** Each kind's words, params and paths. */
 const KINDS = {
   organization: {
@@ -271,6 +326,7 @@ const KINDS = {
     show: 'Your organisation’s own policy: every agent’s defaults',
     ask: 'Ask to change the organisation’s policy, signing in again with a passkey',
     confirm: 'Change the organisation’s policy, once signed in again for it with a passkey',
+    preview: 'See which requests waiting for approval a change of the organisation’s policy would reject',
   },
   mandate: {
     path: '/v1/mandates/:id/policy',
@@ -279,6 +335,7 @@ const KINDS = {
     show: 'A mandate’s own policy, narrowing it for its agent',
     ask: 'Ask to change a mandate’s policy, within its terms, signing in again with a passkey',
     confirm: 'Change the mandate’s policy, once signed in again for it with a passkey',
+    preview: 'See which requests waiting for approval a change of a mandate’s policy would reject',
   },
 } as const;
 
@@ -325,6 +382,7 @@ const schemasOf = (kind: Kind) => {
       body: confirm,
       response: { 200: POLICY.describe('The policy with the new rules in force.') },
     },
+    preview: { summary: words.preview, ...params, body: ask, response: { 200: WAITING_PREVIEW } },
   };
 };
 
@@ -425,6 +483,25 @@ export function registerPolicies(
           request.id,
         );
         return answerAsked(asked, request, reply);
+      },
+    );
+
+    routes.post(
+      `${path}/change/preview`,
+      {
+        schema: schemas.preview,
+        bodyLimit: RULES_BODY_LIMIT,
+        config: { access: [...CHANGING_ROLES], writesNothing: true },
+      },
+      async (request, reply) => {
+        const previewed = await need(changes).preview(
+          memberInSessionOf(request),
+          targetOf(kind, request),
+          askedOf(request.body),
+          request.id,
+        );
+        if (previewed.outcome === 'refused') return answerRefusal(previewed, request, reply);
+        return previewBody(previewed);
       },
     );
 

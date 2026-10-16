@@ -4,6 +4,7 @@ import { MoneyRefused, REASON_CODES, type ReasonCode } from '@agentx/core/shared
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
+import { type RuleDenial, WHAT_TO_DO } from './approval-rejections.ts';
 
 /** An amount as a body sends it (ADR-006 §1): whole minor units, checked at the edge as a safe integer. */
 export const AMOUNT = z
@@ -95,3 +96,14 @@ export const REASONS = z
   .describe('Why it was decided so, each a reason code with what it means. Empty when allowed outright.');
 
 export const reasonsOf = (codes: readonly ReasonCode[]) => codes.map((code) => ({ code, message: REASON_CODES[code] }));
+
+/** One rule that would reject a request (decision 18), its words and what to do: as an approval's ask or a policy's preview shows it. */
+export const RULE_DENIAL_SHOWN = z.object({
+  code: z.string(),
+  message: z.string(),
+  whatToDo: z.string().describe('What your team can change so the agent may ask again.'),
+});
+
+/** Each rule with its words and what to do. */
+export const shownRules = (rules: readonly RuleDenial[]) =>
+  rules.map((code) => ({ code, message: REASON_CODES[code], whatToDo: WHAT_TO_DO[code] }));

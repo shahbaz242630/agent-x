@@ -65,7 +65,7 @@ import {
   SpendAskRefused,
   type SpendRequestRecord,
 } from '@agentx/core/modules/spend-requests';
-import { moneyFromJson, REASON_CODES } from '@agentx/core/shared-kernel';
+import { moneyFromJson } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -73,7 +73,7 @@ import { z } from 'zod';
 
 import { agentOf, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { type RuleDenial, WHAT_TO_DO } from './approval-rejections.ts';
+import type { RuleDenial } from './approval-rejections.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   AMOUNT,
@@ -85,6 +85,8 @@ import {
   pageQuery,
   REASONS,
   reasonsOf,
+  RULE_DENIAL_SHOWN,
+  shownRules,
   STEP_UP_CONFIRM,
   STEP_UP_SIGNED_IN,
   stepUpAsked,
@@ -413,13 +415,7 @@ const RECHECK_SHOWN = z
 
 /** A rejection as the ask shows it (decision 18; E5b): each rule that now refuses it, its words and what to do. */
 const REJECTION_SHOWN = z
-  .array(
-    z.object({
-      code: z.string(),
-      message: z.string(),
-      whatToDo: z.string().describe('What your team can change so the agent may ask again.'),
-    }),
-  )
+  .array(RULE_DENIAL_SHOWN)
   .nullable()
   .describe(
     'When today’s check refuses it under rules your team set (a limit or cap lowered, a supplier taken off a ' +
@@ -427,8 +423,7 @@ const REJECTION_SHOWN = z
       'that a person rejected it. Null when confirming approves it.',
   );
 
-const shownRejection = (rules: readonly RuleDenial[] | null) =>
-  rules?.map((code) => ({ code, message: REASON_CODES[code], whatToDo: WHAT_TO_DO[code] })) ?? null;
+const shownRejection = (rules: readonly RuleDenial[] | null) => (rules === null ? null : shownRules(rules));
 
 const shownRecheck = (view: RecheckShown | null) =>
   view === null
