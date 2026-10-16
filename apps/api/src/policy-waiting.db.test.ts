@@ -10,7 +10,7 @@
 // asked with a revoked key, one past its 72 hours, one decided under a
 // mandate version or supplier details no longer in force, one the rules
 // still allow. One that can't go is counted against the older ones. At most 20, `more` saying there are
-// others. It writes nothing; a member not an admin is refused; a request
+// others; past 100 waiting, the oldest 100 weighed, the younger holding theirs. It writes nothing; a member not an admin is refused; a request
 // tampered with refuses it, its alarm raised.
 import { AGENT_KEYS } from '@agentx/core/modules/agents';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
@@ -430,6 +430,38 @@ describe('the requests waiting for approval a policy change would reject (E5d, d
     // AED 100: all 21, the oldest 20 listed.
     const all = await listed(w.admin, ORGANIZATION, rulesOf(10_000n));
     expect(all).toEqual({ rejected: made.slice(0, 20).map((id) => [id, ['POLICY_MONTHLY_CAP']]), more: true });
+  });
+
+  it('past 100 waiting, weighs the oldest 100, the younger holding theirs: the oldest listed, never none (S118)', async () => {
+    const w = await shared.world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await shared.inForce(registry, w, { approvalThreshold: AED(5_000n) });
+    const acting = await shared.agentKey(w);
+    // The oldest AED 300, then 100 of AED 100: 101 waiting, AED 10,300, within every limit in force.
+    const made: string[] = [];
+    for (let at = 0; at < 101; at += 1) {
+      made.push((await ask(acting, w, { amount: AED(at === 0 ? 30_000n : 10_000n) })).id);
+      clock.advanceBy(1_000);
+    }
+
+    // AED 200 an order: the oldest alone, and there may be more beyond the 100 weighed.
+    expect(await listed(w.admin, ORGANIZATION, rulesOf(2_000_000n, 20_000n))).toEqual({
+      rejected: [[made[0], ['POLICY_ORDER_CAP']]],
+      more: true,
+    });
+    // AED 150 a month, the younger one's AED 100 counted held: none of the oldest fits, the oldest 20 listed.
+    expect(await listed(w.admin, ORGANIZATION, rulesOf(15_000n))).toEqual({
+      rejected: made.slice(0, 20).map((id) => [id, ['POLICY_MONTHLY_CAP']]),
+      more: true,
+    });
+
+    expect(await asking(w, ORGANIZATION, rulesOf(2_000_000n, 20_000n), 'reject')).toEqual(
+      refused(409, 'WAITING_REQUESTS_TOO_MANY_TO_REJECT'),
+    );
+    const { done, shown } = await changed(w, ORGANIZATION, rulesOf(2_000_000n, 20_000n), 'leave');
+    expect(shown).toMatchObject({ more: true, rejected: [{ id: made[0] }] });
+    expect(await versionEvent(w, done)).toMatchObject({ details: { waitingListed: 1, waitingMore: true } });
+    expect(await statusOf(w, made[0] ?? '')).toBe('APPROVAL_REQUIRED');
   });
 
   it('refuses a member who isn’t an admin, and rules the change itself would refuse', async () => {

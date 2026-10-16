@@ -34,7 +34,10 @@
 // The organisation's change weighs every agent's; a mandate's, that mandate's
 // agent's alone. At most 20 are listed, `more` saying there are others (the
 // partner, S118: the change still saves; only rejecting them all at once is
-// refused); past 100 waiting none is weighed, and `more` says so.
+// refused). Past 100 waiting the oldest 100 are weighed (their catch, S118:
+// the oldest are still shown), the younger counted as holding what they hold,
+// as `leave`, the only choice then, leaves them: so one listed is one each
+// approver's confirm would reject with them all still waiting.
 //
 // Reads (partner, S116: no row-by-row reads): the waiting requests' IDs in
 // one statement, then for each agent with any: the agent (3), its mandate in
@@ -85,7 +88,7 @@ import {
 
 type WaitingTx = DatabaseTransaction<DecisionTables>;
 
-/** The most waiting requests one change weighs: past it none is, and the plan says there are more. */
+/** The most waiting requests one change weighs, the oldest: past it the plan says there are more. */
 const MOST_WAITING_WEIGHED = 100;
 
 /** The most a change lists, and rejects at once (as a brake voids, or a carry carries: 20). */
@@ -147,7 +150,7 @@ export const WAITING_REQUESTS = z
 
 /**
  * The choice checked against the plan: one is needed when the change would
- * reject any (or more than 100 wait, none weighed), and refused otherwise;
+ * reject any (or more than 100 wait, the younger not weighed), and refused otherwise;
  * `reject` only when every one is listed (at most 20, partner S118: `leave`
  * saves the change whatever the count).
  */
@@ -230,15 +233,14 @@ export async function waitingPlan(
   scope: WaitingScope,
   { decides, locked }: { readonly decides: boolean; readonly locked?: () => Promise<void> } = { decides: false },
 ): Promise<WaitingPlan> {
-  const rows = await waitingRows(tx, scope);
-  const agents = rows === null ? [] : distinct(rows.map((row) => row.agent_id));
+  const { rows, beyond } = await waitingRows(tx, scope);
+  const agents = distinct(rows.map((row) => row.agent_id));
   const inForce = new Map<string, Awaited<ReturnType<typeof inForceOf>>>();
   for (const agentId of agents) inForce.set(agentId, await inForceOf(tx, states, scope.orgId, agentId));
   await locked?.();
-  if (rows === null) return { rejected: [], more: true };
   if (decides) {
     const again = await waitingRows(tx, scope);
-    const same = (again ?? []).map(({ id }) => id).join() === rows.map(({ id }) => id).join();
+    const same = again.beyond === beyond && again.rows.map(({ id }) => id).join() === rows.map(({ id }) => id).join();
     if (!same) throw new MandateRefused(403, 'STEP_UP_FAILED');
   }
   const weighed: AgentWeighed[] = [];
@@ -263,11 +265,17 @@ export async function waitingPlan(
   for (const agent of weighed) rejected.push(...(await rejectedOf(tx, states, { ...scope, decides }, agent)));
   const age = new Map(rows.map(({ id }, at) => [id, at]));
   rejected.sort((one, other) => known(age.get(one.id)) - known(age.get(other.id)));
-  return { rejected: rejected.slice(0, MOST_WAITING_REJECTED), more: rejected.length > MOST_WAITING_REJECTED };
+  return {
+    rejected: rejected.slice(0, MOST_WAITING_REJECTED),
+    more: beyond || rejected.length > MOST_WAITING_REJECTED,
+  };
 }
 
-/** The waiting requests' IDs and facts, oldest first, unlocked; null past MOST_WAITING_WEIGHED. */
-async function waitingRows(tx: WaitingTx, { orgId, mandateId }: WaitingScope): Promise<readonly WaitingRow[] | null> {
+/** The oldest waiting requests' IDs and facts, at most MOST_WAITING_WEIGHED, unlocked; `beyond`: younger ones wait. */
+async function waitingRows(
+  tx: WaitingTx,
+  { orgId, mandateId }: WaitingScope,
+): Promise<{ readonly rows: readonly WaitingRow[]; readonly beyond: boolean }> {
   let waiting = tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs and facts alone, each held to its signed state (requestsHeld)
     .selectFrom(SPEND_REQUESTS.table)
@@ -280,7 +288,7 @@ async function waitingRows(tx: WaitingTx, { orgId, mandateId }: WaitingScope): P
     .orderBy('id')
     .limit(MOST_WAITING_WEIGHED + 1)
     .execute();
-  return rows.length > MOST_WAITING_WEIGHED ? null : rows;
+  return { rows: rows.slice(0, MOST_WAITING_WEIGHED), beyond: rows.length > MOST_WAITING_WEIGHED };
 }
 
 /** Levels 3 and 4 for one agent: the agent, and its mandate in force. */
