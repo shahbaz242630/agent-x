@@ -561,6 +561,29 @@ describe('the admin chooses: reject them now, or leave them for their approvers 
     for (const id of [...made, fourth.id]) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
   });
 
+  it('refuses the step-up, not the choice, once one listed passed its 72 hours before the job reached it', async () => {
+    const { w, made } = await threeWaiting();
+    const asked = await asking(w, ORGANIZATION, rulesOf(300_000n), 'reject');
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    clock.advanceBy(72 * HOUR_MS);
+
+    expect(await confirming(w, ORGANIZATION, rulesOf(300_000n), 'reject', asked.stepUpChallengeId)).toEqual(
+      refused(403, 'STEP_UP_FAILED'),
+    );
+    for (const id of made) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('refuses the step-up for another choice than the ask’s: the admin confirms what they saw', async () => {
+    const { w, made } = await threeWaiting();
+    const asked = await asking(w, ORGANIZATION, rulesOf(300_000n), 'leave');
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+
+    expect(await confirming(w, ORGANIZATION, rulesOf(300_000n), 'reject', asked.stepUpChallengeId)).toEqual(
+      refused(403, 'STEP_UP_FAILED'),
+    );
+    for (const id of made) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+  });
+
   it('answers a replayed ask with the plan worked out again', async () => {
     const { w, made } = await threeWaiting();
     const key = keyed(w.admin, POLICY_OPERATIONS.organization.ask);

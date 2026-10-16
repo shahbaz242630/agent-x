@@ -89,6 +89,21 @@ export const POLICY_OPERATIONS = {
 /** Who may change a policy: an admin, with a passkey (decision 5). */
 export const CHANGING_ROLES = ['admin'] as const;
 
+/**
+ * The confirm's choice checked against its plan: a refusal here (one listed
+ * now, none now, or more now) is a plan changed since the ask, whose choice
+ * passed it, so it is the step-up's refusal (S118 review, 80): the admin asks
+ * again and sees the plan as it is.
+ */
+function confirmedChoice(plan: WaitingPlan, waiting: WaitingChoice | undefined): WaitingChoice | null {
+  try {
+    return waitingChosen(plan, waiting);
+  } catch (error) {
+    if (error instanceof MandateRefused) throw new MandateRefused(403, 'STEP_UP_FAILED');
+    throw error;
+  }
+}
+
 /** No waiting request weighed yet: an ask's plan until its transaction has read one. */
 const NONE_WAITING: WaitingPlan = { rejected: [], more: false };
 
@@ -365,7 +380,8 @@ export function createPolicyChanges({
         });
         if (read.changed === undefined) throw new Error('A policy change weighed its waiting requests unlocked');
         const { admin, id, mandateId, existing } = read.changed;
-        const choice = waitingChosen(plan, waiting);
+        // The ask's choice passed its plan: one this plan refuses means it isn't the plan the step-up bound.
+        const choice = confirmedChoice(plan, waiting);
         const consumed = await stepUps.consumed(
           tx,
           member,

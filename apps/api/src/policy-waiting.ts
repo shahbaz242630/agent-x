@@ -20,7 +20,16 @@
 //   and the older ones that stay (as a carry's, mandate-carry.ts): when a
 //   lower cap can't hold them all, the oldest stand. The youngest that stays
 //   was weighed with all that stay, so once those listed go, each approval
-//   left weighs no more than this plan did.
+//   left weighs no more than this plan did, but for a request decided while
+//   the confirm ran unlocked (below), which only ever leaves one unlisted.
+//
+// The confirm holds the policy it changes for the change, so no decision or
+// approval weighing it gets past it meanwhile: the organisation's always
+// (E2 sets it before any agent spends), a mandate's from its second
+// version. A mandate's first has no row to hold (S118 review, 82): one
+// decided under the mandate meanwhile, under the rules then in force, may be
+// left out of the plan; its approver weighs it again under the new rules
+// (decision 18). The plan errs to rejecting fewer, never more.
 //
 // The organisation's change weighs every agent's; a mandate's, that mandate's
 // agent's alone. At most 20 are listed, `more` saying there are others (the
@@ -239,7 +248,7 @@ export async function waitingPlan(
     // 4, the policies: at the confirm once its own is held for the change.
     const policies = await policiesIn(tx, states, scope.orgId, mandate);
     const own = rows.filter((row) => row.agent_id === agentId);
-    // 5–7 FOR SHARE: under the policy's lock no decision or approval of these agents weighs a month meanwhile.
+    // 5–7 FOR SHARE, no month locked: the policy held for the change keeps decisions and approvals out (above).
     const authority = await heldAuthority(tx, states, { ...scope, agentId, decides: false }, own, mandate);
     weighed.push({ ...policies, agent, agentId, mandate, authority, rows: own });
   }
