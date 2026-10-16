@@ -86,7 +86,8 @@ jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The whole suite ran 19-20 minutes by S119 and #370's merge passed 20 (cancelled): room while it is split.
+    timeout-minutes: 30
     env:
       # Corepack must not read a .corepack.env file from the repository, which
       # could turn off its signature checks or point it at another registry.
