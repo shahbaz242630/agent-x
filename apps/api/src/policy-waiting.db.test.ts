@@ -376,6 +376,20 @@ describe('the requests waiting for approval a policy change would reject (E5d, d
     expect([...made, ...others]).toHaveLength(6);
   });
 
+  it('leaves out one past the 24 hours its organisation chose when it was asked; one asked before keeps 72 (E6)', async () => {
+    const { w, acting } = await ready();
+    const before = await ask(acting, w);
+    await shared.waitChosen(w, 24);
+    await ask(acting, w);
+    clock.advanceBy(24 * HOUR_MS + 60_000);
+
+    // AED 10 a month: neither fits, but the younger one's wait is over: its approver can no longer approve it.
+    expect(await listed(w.admin, ORGANIZATION, rulesOf(1_000n))).toEqual({
+      rejected: [[before.id, ['POLICY_MONTHLY_CAP']]],
+      more: false,
+    });
+  });
+
   it.each(['the mandate superseded', 'the supplier’s details changed'] as const)(
     'leaves out every one decided under versions no longer in force: %s (its approver’s, or a void’s)',
     async (which) => {

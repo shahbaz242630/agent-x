@@ -8,7 +8,8 @@ import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { monthSpent } from '@agentx/core/modules/limit-reservations';
-import { requestOf } from '@agentx/core/modules/spend-requests';
+import { policyOf, setPolicy } from '@agentx/core/modules/mandates';
+import { type ApprovalWaitHours, requestOf } from '@agentx/core/modules/spend-requests';
 import {
   changeDetails,
   nextVersionNumber,
@@ -18,7 +19,9 @@ import {
 } from '@agentx/core/modules/suppliers';
 import { type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 
+import { waitChoiceDetails } from './approval-wait-choice.ts';
 import { type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
+import { capChoiceDetails, SUGGESTED_MONTHLY_CAP_MINOR } from './monthly-cap-choice.ts';
 import { AED, keys, mandateWorld, type MandateWorldTables, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import {
   type AgentActing,
@@ -164,6 +167,34 @@ export function spendWorld({
     change: (tx: DatabaseTransaction<SpendWorldTables>, states: SignedStates) => Promise<T>,
   ) => withSignedStates(app(), w.org, shared.quiet(), change);
 
+  /**
+   * The organisation's approval wait chosen as `hours` past the use case (E6),
+   * its rules and cap choice as the world's own: requests decided after it
+   * seal it.
+   */
+  const waitChosen = (w: World, hours: ApprovalWaitHours) =>
+    signed(w, async (tx, states) => {
+      const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'change');
+      return setPolicy(tx, states, {
+        orgId: w.org,
+        existing: read.outcome === 'found' ? read : null,
+        scope: 'organization',
+        mandateId: null,
+        versionId: ids.next(),
+        rules: {
+          currency: 'AED',
+          perOrderCap: null,
+          monthlyCap: AED(BigInt(SUGGESTED_MONTHLY_CAP_MINOR)),
+          approvalThreshold: null,
+          supplierIds: null,
+        },
+        madeBy: w.admin.membershipId,
+        madeAt: clock().now(),
+        actor: { type: 'user', id: w.admin.userId },
+        details: { ...capChoiceDetails('amount'), ...waitChoiceDetails(hours) },
+      });
+    });
+
   /** The agent's mandate in force: the world's only one. */
   const mandateIdOf = (w: World) =>
     withTenant(app(), w.org, async (tx) => {
@@ -242,5 +273,5 @@ export function spendWorld({
       ),
   } as const;
 
-  return { ...shared, ready, ask, statusOf, holdingsOf, spentOf, signed, mandateIdOf, STOPS };
+  return { ...shared, ready, ask, statusOf, holdingsOf, spentOf, signed, waitChosen, mandateIdOf, STOPS };
 }

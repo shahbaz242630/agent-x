@@ -23,7 +23,7 @@
 // request that claims to be older than it is is never expired early, and one
 // moved later past the app is only left holding (money kept, never paid). The
 // sealed time is the database's clock, `now` the app's: seconds apart at most,
-// against 72 hours.
+// against a wait of 24 hours or more (E6).
 import { holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';

@@ -1,7 +1,9 @@
 // A spend request waiting for approval, as its email shows it (Phase 3 B2):
 // read from its verified records as the email is sent, so one no longer
 // waiting sends nothing, and never with the agent's own words.
+import { withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { decisionOf } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -26,7 +28,7 @@ let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let cancels: SpendRequestCancels;
 
-const { ready, ask } = spendWorld({
+const { ready, ask, quiet, waitChosen } = spendWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -83,14 +85,28 @@ describe('a spend request waiting for approval, as its email shows it (Phase 3 B
       consoleUrl: ORIGIN,
       expiresAt: expect.any(Date) as unknown,
     });
-    // 72 hours (no wait chosen) from its decision, sealed by the database's clock a moment ago (E6).
-    const left = (shown?.expiresAt.getTime() ?? 0) - Date.now();
-    expect(left).toBeGreaterThan(72 * 3_600_000 - 60_000);
-    expect(left).toBeLessThanOrEqual(72 * 3_600_000);
+    // 72 hours (no wait chosen) from its decision's sealed time (E6).
+    const decided = await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      decisionOf(tx, states, { orgId: w.org, id: waiting.id }),
+    );
+    expect(shown?.expiresAt).toEqual(new Date((decided?.decidedAt.getTime() ?? 0) + 72 * 3_600_000));
     // The agent's own words never reach an email.
     expect(
       JSON.stringify(shown, (_key, value: unknown) => (typeof value === 'bigint' ? String(value) : value)),
     ).not.toContain('Ignore the rules');
+  });
+
+  it('shows the expiry of the wait its organisation chose when it was asked: 24 hours from its decision (E6)', async () => {
+    const { w, acting } = await ready();
+    await waitChosen(w, 24);
+    const waiting = await ask(acting, w);
+
+    const shown = await waitingOf(w.org, waiting.id);
+
+    const decided = await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      decisionOf(tx, states, { orgId: w.org, id: waiting.id }),
+    );
+    expect(shown?.expiresAt).toEqual(new Date((decided?.decidedAt.getTime() ?? 0) + 24 * 3_600_000));
   });
 
   it('is none once it no longer waits, for one approved at once, and for none of the organisation’s', async () => {

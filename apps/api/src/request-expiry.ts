@@ -26,6 +26,7 @@ import {
 } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import {
+  type Decided,
   decisionsOf,
   expireRequest,
   requestsWaitingSince,
@@ -126,7 +127,10 @@ export function createRequestExpiry({
  * (their decisions read in one statement a page), until `left` are kept or
  * the rows run out. Their order is the rows', so the job's next page, after
  * the last kept, reads again only rows not yet due. One whose decision can't
- * be read is kept: expireRequest judges it and fails loudly.
+ * be read is kept: expireRequest judges it and fails loudly. A page whose
+ * decisions can't be read at all (one past belief, say) keeps every row, so
+ * each is judged alone and the rest still expire (S119 review: one bad
+ * request must never hold the organisation's money for good).
  */
 async function duePage(
   tx: DatabaseTransaction<SpendRequestsTables & AuditTables>,
@@ -138,7 +142,12 @@ async function duePage(
   let from = after;
   for (;;) {
     const rows = await requestsWaitingSince(tx, orgId, before, left, from);
-    const decided = await decisionsOf(tx, states, orgId, rows);
+    let decided: ReadonlyMap<string, Decided>;
+    try {
+      decided = await decisionsOf(tx, states, orgId, rows);
+    } catch {
+      decided = new Map();
+    }
     for (const id of rows) {
       const decision = decided.get(id.toLowerCase());
       if (decision === undefined || waitedOut(decision, now)) due.push(id);
