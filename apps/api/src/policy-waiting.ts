@@ -221,7 +221,7 @@ export async function rejectWaiting(
  * crosswise. The agents (3) and their mandates in force (4); then `locked`,
  * where the confirm takes the policy for change (4, after the mandates);
  * the policies (4, read once the one changed is held); the requests' IDs read again, any other set than
- * before refused as STEP_UP_FAILED (one decided between: the plan isn't the
+ * before, or younger ones waiting where none did (or none where some did), refused as STEP_UP_FAILED (one decided between: the plan isn't the
  * one weighed); the sources (5) and suppliers (6), FOR SHARE; every request
  * (8), locked for change in one statement in order of ID; then the keys and
  * the totals, locking nothing. One whose signed state, history or holdings
