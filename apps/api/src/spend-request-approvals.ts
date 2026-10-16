@@ -75,7 +75,7 @@ import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwr
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { rejectedFor, rejectionNote } from './approval-rejections.ts';
+import { rejectedFor, rejectionNote, type RuleDenial } from './approval-rejections.ts';
 import { MandateRefused } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { agentAlone, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
@@ -140,7 +140,7 @@ const recheckDetails = (view: RecheckShown | null) =>
 export interface ApprovalShown {
   readonly recheck: RecheckShown | null;
   /** The rules the engine now refuses it under, so the confirm rejects it (E5b); null when it approves it. */
-  readonly rejection: readonly ReasonCode[] | null;
+  readonly rejection: readonly RuleDenial[] | null;
 }
 
 export type ApproveAsked =

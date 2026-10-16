@@ -22,21 +22,23 @@ export const WHAT_TO_DO = {
   DUPLICATE_ORDER_REFERENCE: 'Check the order isn’t already paid; if it isn’t, the agent asks with its own reference.',
 } as const satisfies Partial<Record<ReasonCode, string>>;
 
-type RuleDenial = keyof typeof WHAT_TO_DO;
+export type RuleDenial = keyof typeof WHAT_TO_DO;
 
 const isRuleDenial = (code: ReasonCode): code is RuleDenial => Object.hasOwn(WHAT_TO_DO, code);
-
-/** What the team can change for a rule that now denies it; null for any other reason. */
-export const whatToDoFor = (code: ReasonCode): string | null => (isRuleDenial(code) ? WHAT_TO_DO[code] : null);
 
 /**
  * The reasons a weighing that now refuses it would reject it for: those that
  * made the refusal, when every one is a rule the team set; null when any is
- * a stop (or it isn't refused).
+ * a stop (or it isn't refused). Unlike the agent's list, a policy's order cap
+ * is named beside another refusal: it may have refused as well, and the team
+ * changing only the other would see the agent refused again.
  */
 export function rejectedFor(decision: Decision, reasons: readonly ReasonCode[]): readonly RuleDenial[] | null {
   if (decision !== 'DENY' && decision !== 'REQUIRE_NEW_MANDATE') return null;
-  const made = reasonsShownToAgent(decision, reasons);
+  const orderCap = decision === 'DENY' && reasons.includes('POLICY_ORDER_CAP');
+  const made = [
+    ...new Set([...reasonsShownToAgent(decision, reasons), ...(orderCap ? ['POLICY_ORDER_CAP' as const] : [])]),
+  ];
   return made.length > 0 && made.every(isRuleDenial) ? made.filter(isRuleDenial) : null;
 }
 

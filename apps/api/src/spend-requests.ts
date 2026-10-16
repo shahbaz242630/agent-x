@@ -65,7 +65,7 @@ import {
   SpendAskRefused,
   type SpendRequestRecord,
 } from '@agentx/core/modules/spend-requests';
-import { moneyFromJson, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
+import { moneyFromJson, REASON_CODES } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -73,7 +73,7 @@ import { z } from 'zod';
 
 import { agentOf, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { whatToDoFor } from './approval-rejections.ts';
+import { type RuleDenial, WHAT_TO_DO } from './approval-rejections.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   AMOUNT,
@@ -420,8 +420,8 @@ const REJECTION_SHOWN = z
       'that a person rejected it. Null when confirming approves it.',
   );
 
-const shownRejection = (rules: readonly ReasonCode[] | null) =>
-  rules?.map((code) => ({ code, message: REASON_CODES[code], whatToDo: whatToDoFor(code) ?? '' })) ?? null;
+const shownRejection = (rules: readonly RuleDenial[] | null) =>
+  rules?.map((code) => ({ code, message: REASON_CODES[code], whatToDo: WHAT_TO_DO[code] })) ?? null;
 
 const shownRecheck = (view: RecheckShown | null) =>
   view === null

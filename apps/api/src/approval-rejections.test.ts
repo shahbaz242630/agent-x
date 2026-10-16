@@ -4,9 +4,18 @@
 import { rejectReason } from '@agentx/core/modules/spend-requests';
 import { describe, expect, it } from 'vitest';
 
-import { rejectedFor, rejectionNote, WHAT_TO_DO, whatToDoFor } from './approval-rejections.ts';
+import { rejectedFor, rejectionNote } from './approval-rejections.ts';
 
-const RULES = Object.keys(WHAT_TO_DO) as (keyof typeof WHAT_TO_DO)[];
+const RULES = [
+  'MANDATE_ORDER_LIMIT',
+  'MANDATE_MONTHLY_LIMIT',
+  'POLICY_ORDER_CAP',
+  'POLICY_MONTHLY_CAP',
+  'ORG_MONTHLY_CAP_NOT_SET',
+  'POLICY_SUPPLIER_NOT_ALLOWED',
+  'CURRENCY_NOT_ALLOWED',
+  'DUPLICATE_ORDER_REFERENCE',
+] as const;
 
 describe('rejectedFor: what a refusal at approval rejects it for', () => {
   it.each(['ALLOW', 'REQUIRE_APPROVAL'] as const)('rejects nothing the engine still lets through: %s', (decision) => {
@@ -35,9 +44,18 @@ describe('rejectedFor: what a refusal at approval rejects it for', () => {
     },
   );
 
-  it('gives what to do for each rule, and nothing for any other reason', () => {
-    for (const rule of RULES) expect(whatToDoFor(rule)).toBe(WHAT_TO_DO[rule]);
-    expect(whatToDoFor('AGENT_SUSPENDED')).toBeNull();
+  it('names a policy’s order cap beside another refusal: it may have refused as well', () => {
+    expect(rejectedFor('DENY', ['POLICY_MONTHLY_CAP', 'POLICY_ORDER_CAP'])).toEqual([
+      'POLICY_MONTHLY_CAP',
+      'POLICY_ORDER_CAP',
+    ]);
+    expect(rejectedFor('DENY', ['POLICY_ORDER_CAP', 'AGENT_SUSPENDED'])).toBeNull();
+  });
+
+  it.each(RULES)('rejects it for each rule the team set alone: %s', (rule) => {
+    // The mandate's own limits refuse as REQUIRE_NEW_MANDATE, the rest as DENY (the engine's DECIDES).
+    const decision = rule.startsWith('MANDATE_') ? 'REQUIRE_NEW_MANDATE' : 'DENY';
+    expect(rejectedFor(decision, [rule])).toEqual([rule]);
   });
 });
 
