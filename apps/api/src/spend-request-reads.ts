@@ -118,6 +118,9 @@ export interface SpendRequestReads {
 /** Refused inside a request's read, so its transaction ends there. */
 class RequestReadRefused extends UseCaseRefused {}
 
+/** A record that can't be believed (its alarm raised): 503 INTEGRITY_FAILED. */
+const integrityFailed = () => new RequestReadRefused(503, 'INTEGRITY_FAILED');
+
 /**
  * One request with its agent and supplier, in ADR-006's lock order, each
  * verified and locked `share`, in the caller's transaction, which must be
@@ -158,11 +161,15 @@ export async function requestInOrder(
   const expiresAt = expiresAtOf(request, waiting ? await decisionOf(tx, states, { orgId, id: request.id }) : null);
   if (expiresAt === undefined) return { outcome: 'unbelieved' };
   const decidedUnder = decidedAgainst(read.state).supplierVersionId;
-  const carried =
-    waiting && decidedUnder !== null && decidedUnder !== supplier.supplier.currentVersionId
-      ? await pausedFromOf(tx, states, orgId, supplier.supplier, () => new Unbelieved()).catch(nullIfUnbelieved)
-      : [];
-  if (carried === null) return { outcome: 'unbelieved' };
+  let carried: readonly string[] = [];
+  if (waiting && decidedUnder !== null && decidedUnder !== supplier.supplier.currentVersionId) {
+    try {
+      carried = await pausedFromOf(tx, states, orgId, supplier.supplier, integrityFailed);
+    } catch (error) {
+      if (error instanceof RequestReadRefused) return { outcome: 'unbelieved' };
+      throw error;
+    }
+  }
   // One named agent asked, one shown (agentsShown throws for a missing row).
   const [shown] = (await agentsShown(tx, orgId, [agent.agent])) as [AgentShown];
   return {
@@ -186,7 +193,7 @@ export async function requestInOrder(
 async function denialIn(tx: ReadTx, states: SignedStates, orgId: string, request: SpendRequestRecord): Promise<Denial> {
   if (request.status !== 'DENIED') return { rejection: null, voiding: null };
   const denial = await denialOf(tx, states, { orgId, id: request.id });
-  if (denial.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+  if (denial.outcome === 'tampered') throw integrityFailed();
   return {
     rejection: denial.outcome === 'rejected' ? denial.rejection : null,
     voiding: denial.outcome === 'voided' ? denial.voiding : null,
@@ -222,19 +229,10 @@ async function carriedFrom(
   }
   const carried = new Map<string, readonly string[]>();
   for (const supplier of moved.values()) {
-    const refusal = () => new RequestReadRefused(503, 'INTEGRITY_FAILED');
-    carried.set(supplier.id, await pausedFromOf(tx, states, orgId, supplier, refusal));
+    carried.set(supplier.id, await pausedFromOf(tx, states, orgId, supplier, integrityFailed));
   }
   return carried;
 }
-
-/** A supplier's history that can't be believed, in one request's read: answered as unbelieved. */
-class Unbelieved extends Error {}
-
-const nullIfUnbelieved = (error: unknown): null => {
-  if (error instanceof Unbelieved) return null;
-  throw error;
-};
 
 /** The entry a verified list's own rows point to; one missing is a bug. */
 function pointedTo<T>(named: ReadonlyMap<string, T>, id: string): T {
@@ -325,14 +323,14 @@ export function createSpendRequestReads({
       work.answered(orgId, correlationId, async (tx, states) => {
         const read = await requestInOrder(tx, states, orgId, requestId);
         if (read.outcome === 'none') throw new RequestReadRefused(404, 'NOT_FOUND');
-        if (read.outcome === 'unbelieved') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+        if (read.outcome === 'unbelieved') throw integrityFailed();
         return { ...read, ...(await denialIn(tx, states, orgId, read.shown.request)) };
       }),
 
     ofAgent: (orgId, agentId, requestId, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
         const read = await requestOf(tx, states, { orgId, id: requestId });
-        if (read.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+        if (read.outcome === 'tampered') throw integrityFailed();
         // Another agent's is answered as none: an agent can't learn another's requests exist.
         if (read.outcome === 'missing' || read.request.agentId !== agentId) {
           throw new RequestReadRefused(404, 'NOT_FOUND');
