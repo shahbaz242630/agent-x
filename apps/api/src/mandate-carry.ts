@@ -35,11 +35,11 @@
 // takes the head (12): their holdings change only under their requests'
 // locks, held here (as an approval's), and a cancel locks its own as a
 // brake's void does. The ask reads it all FOR SHARE and locks no month.
-import { type AuditActor, type AuditDetails, type SignedStates } from '@agentx/core/modules/audit';
+import { type AuditActor, type AuditDetails, type SignedStates, type VerifiedState } from '@agentx/core/modules/audit';
 import { type SourceCheck, sourceOf } from '@agentx/core/modules/funding-sources';
 import { changeHashOf } from '@agentx/core/modules/identity';
 import { lockAgentPeriod, monthsSpent, splitHeld } from '@agentx/core/modules/limit-reservations';
-import { type Decision, decide } from '@agentx/core/modules/policies';
+import { type Decision, decide, type DecisionMade } from '@agentx/core/modules/policies';
 import {
   claimsOnEach,
   decisionsOf,
@@ -144,13 +144,17 @@ export function carries(status: SpendRequestStatus, decidedAs: Decision, now: De
 export const planHashOf = (plan: readonly CarryPlanned[]): string =>
   changeHashOf(plan.map(({ id, outcome, reasons }) => `${id}:${outcome}:${reasons.join(',')}`)).toString('hex');
 
-/** Whose pending requests a carry weighs, and how: the confirm's locks (`decides`), or the ask's reads. */
-interface CarryScope {
+/** Whose pending requests are weighed, and how: a confirm's locks (`decides`), or an ask's reads. */
+export interface WeighScope {
   readonly orgId: string;
   readonly agentId: string;
-  readonly mandateId: string;
   readonly now: Date;
   readonly decides: boolean;
+}
+
+/** A carry's: the mandate whose pending requests it weighs. */
+interface CarryScope extends WeighScope {
+  readonly mandateId: string;
 }
 
 /**
@@ -178,38 +182,44 @@ export async function carryPlan(
     .execute();
   if (rows.length > MOST_CARRIED) throw new MandateRefused(409, 'PENDING_REQUESTS_TOO_MANY_TO_CARRY');
   if (rows.length === 0) return [];
-  const authority = await authorityOfCarry(tx, states, scope, rows);
-  const requests = await requestsHeld(tx, states, scope, rows);
-  return weighedInOrder(tx, scope, authority, requests);
+  // 4: the draft, the mandate's policy and the organisation's, once.
+  const { mandate, ...policies } = await authorityIn(tx, states, scope.orgId, scope.agentId, 'draft');
+  const authority = await heldAuthority(tx, states, scope, rows, known(mandate));
+  const requests = (await requestsHeld(tx, states, scope, rows)).map(({ request }) => request);
+  const outside = await outsideOf(tx, scope, authority, requests);
+  const agent = { id: scope.agentId, status: 'ACTIVE' };
+  return weighedInOrder({ now: scope.now, agent }, authority, policies, outside, requests, (request, made) =>
+    carries(request.status, request.decision, made.decision),
+  ).map(({ request, made, stays }) => ({ id: request.id, outcome: stays ? 'carry' : 'cancel', reasons: made.reasons }));
 }
 
 /** A pending request as its row names it: what the authority is read by, before its signed state is. */
-interface CarryRow {
+export interface PendingRow {
   readonly id: string;
   readonly supplier_id: string;
   readonly funding_source_id: string;
 }
 
-/** What every request of a carry is weighed under, read once: the draft and its policies, sources, suppliers, months. */
-interface CarryAuthority {
+/** What every request is weighed under but its policies, read once: the mandate, sources, suppliers, months. */
+export interface HeldAuthority {
   readonly mandate: MandateWeighed;
-  readonly policies: PoliciesWeighed;
   readonly sources: ReadonlyMap<string, SourceCheck>;
   readonly suppliers: ReadonlyMap<string, SupplierRecord>;
   /** Each request's capacity as its decision sealed it: its month, and when it was reserved. */
   readonly held: ReadonlyMap<string, HeldSealed>;
+  /** When each request's decision was sealed: a waiting one's 72 hours run from it (E4b). */
+  readonly decidedAt: ReadonlyMap<string, Date>;
 }
 
-/** Levels 4–7, each read once for every request. */
-async function authorityOfCarry(
+/** Levels 5–7 under the mandate read at 4, each read once for every request. */
+export async function heldAuthority(
   tx: CarryTx,
   states: SignedStates,
-  { orgId, agentId, decides }: CarryScope,
-  rows: readonly CarryRow[],
-): Promise<CarryAuthority> {
+  { orgId, agentId, decides }: WeighScope,
+  rows: readonly PendingRow[],
+  mandate: MandateWeighed,
+): Promise<HeldAuthority> {
   const ids = rows.map(({ id }) => id);
-  // 4: the draft, the mandate's policy and the organisation's, once.
-  const { mandate, ...policies } = await authorityIn(tx, states, orgId, agentId, 'draft');
   // 5 and 6: each set in order of ID, so no two carries lock them crosswise. A request's own exist (0039's keys).
   const sources = new Map<string, SourceCheck>();
   for (const id of distinct(rows.map((row) => row.funding_source_id))) {
@@ -226,8 +236,9 @@ async function authorityOfCarry(
   // 7: the months their capacity is held in, and when, as their decisions sealed them, in one read.
   const decisions = await decisionsOf(tx, states, orgId, ids);
   const held = new Map(ids.map((id) => [id, known(decisions.get(id.toLowerCase())?.held)]));
+  const decidedAt = new Map(ids.map((id) => [id, known(decisions.get(id.toLowerCase())).decidedAt]));
   if (decides) for (const month of monthsOf(held)) await lockAgentPeriod(tx, { agentId, month });
-  return { mandate: known(mandate), policies, sources, suppliers, held };
+  return { mandate, sources, suppliers, held, decidedAt };
 }
 
 /**
@@ -235,16 +246,20 @@ async function authorityOfCarry(
  * the confirm locked for the change it is about to make (8), first all in one
  * statement in order of ID, then each read for change; at the ask all in one
  * read, FOR SHARE. One not found pending, or naming other facts than its row
- * (changed past the app, its alarm raised): INTEGRITY_FAILED.
+ * (changed past the app, its alarm raised): INTEGRITY_FAILED. Each with its
+ * verified state, which names the versions it was decided against. One ended
+ * since its row was read (unlocked, a statement before) is `left out` by a
+ * caller that weighs only what still waits, rather than refused.
  */
-async function requestsHeld(
+export async function requestsHeld(
   tx: CarryTx,
   states: SignedStates,
-  { orgId, agentId, decides }: CarryScope,
-  rows: readonly CarryRow[],
-): Promise<readonly SpendRequestRecord[]> {
+  { orgId, agentId, decides }: WeighScope,
+  rows: readonly PendingRow[],
+  ended: 'refused' | 'left out' = 'refused',
+): Promise<readonly { readonly request: SpendRequestRecord; readonly state: VerifiedState }[]> {
   const ids = rows.map(({ id }) => id);
-  const read = new Map<string, SpendRequestRecord>();
+  const read = new Map<string, { readonly request: SpendRequestRecord; readonly state: VerifiedState }>();
   if (decides) {
     await tx
       // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the lock alone; each is verified below
@@ -257,47 +272,49 @@ async function requestsHeld(
       .execute();
     for (const id of ids) {
       const found = await requestOf(tx, states, { orgId, id }, 'change');
-      if (found.outcome === 'found') read.set(id, found.request);
+      if (found.outcome === 'found') read.set(id, found);
     }
   } else {
     for (const [id, found] of await requestsOf(tx, states, orgId, ids)) {
-      if (found.outcome === 'found') read.set(id, found.request);
+      if (found.outcome === 'found') read.set(id, found);
     }
   }
-  return rows.map((row) => {
-    const request = read.get(row.id);
+  return rows.flatMap((row) => {
+    const found = read.get(row.id) ?? integrityFailed();
     const asItsRow =
-      request !== undefined &&
-      isPending(request.status) &&
-      request.agentId === agentId &&
-      request.supplierId === row.supplier_id &&
-      request.fundingSourceId === row.funding_source_id;
-    return asItsRow ? request : integrityFailed();
+      found.request.agentId === agentId &&
+      found.request.supplierId === row.supplier_id &&
+      found.request.fundingSourceId === row.funding_source_id;
+    if (!asItsRow) return integrityFailed();
+    if (isPending(found.request.status)) return [found];
+    return ended === 'left out' ? [] : integrityFailed();
   });
 }
 
+/** What holds capacity or claims an order outside the requests weighed, read once: the weighing's only reads. */
+export interface HeldOutside {
+  readonly spent: ReadonlyMap<string, bigint>;
+  readonly split: ReadonlyMap<string, bigint>;
+  readonly since: Date;
+  readonly orders: readonly OrderClaimsSeen[];
+}
+
 /**
- * Each request weighed in memory, oldest first, by the engine through the
- * input a decision builds (inputOf), against what holds capacity or claims
- * an order outside the plan, read once, and the older requests carried before
- * it: in its month (the monthly limits), to its payee in the split window
- * (the split check), and to its payee as a lookalike order (a possible
- * duplicate). The younger ones, and those cancelled, aren't counted, so the
- * oldest stand when the new terms can't hold them all; and its own amount is
- * the engine's to add, once.
+ * Outside the requests weighed: each month's total, each payee's split total
+ * since the window opened (none with the split check off: the engine weighs
+ * no split then), and each request's order claims, in the requests' order.
  */
-async function weighedInOrder(
+export async function outsideOf(
   tx: CarryTx,
-  { agentId, now }: CarryScope,
-  { mandate, policies, sources, suppliers, held }: CarryAuthority,
+  { agentId, now }: Pick<WeighScope, 'agentId' | 'now'>,
+  { mandate, suppliers, held }: HeldAuthority,
   requests: readonly SpendRequestRecord[],
-): Promise<readonly CarryPlanned[]> {
+): Promise<HeldOutside> {
   const currency = mandate.perOrderLimit.currency;
   const inPlan = requests.map(({ id }) => id);
-  const spentOutside = await monthsSpent(tx, { agentId, months: monthsOf(held), currency, except: inPlan });
+  const spent = await monthsSpent(tx, { agentId, months: monthsOf(held), currency, except: inPlan });
   const since = windowStart(now, mandate.splitWindowHours);
-  // None read with the split check off: the engine weighs no split then.
-  const splitOutside = mandate.splitCheck
+  const split = mandate.splitCheck
     ? await splitTotalsOutside(tx, suppliers, { since, currency, except: inPlan })
     : new Map<string, bigint>();
   const orders = await claimsOnEach(
@@ -310,28 +327,58 @@ async function weighedInOrder(
     })),
     inPlan,
   );
+  return { spent, split, since, orders };
+}
+
+/** One request as weighed in order: the engine's answer, and whether it stays, counted against the younger ones. */
+export interface WeighedInOrder {
+  readonly request: SpendRequestRecord;
+  readonly made: DecisionMade;
+  readonly stays: boolean;
+}
+
+/**
+ * Each request weighed in memory, oldest first, by the engine through the
+ * input a decision builds (inputOf), against what holds capacity or claims
+ * an order outside them (`outside`) and the older ones that stay (`stays`):
+ * in its month (the monthly limits), to its payee in the split window (the
+ * split check), and to its payee as a lookalike order (a possible
+ * duplicate). The younger ones, and those that go, aren't counted, so the
+ * oldest stand when the rules can't hold them all; and its own amount is the
+ * engine's to add, once.
+ */
+export function weighedInOrder(
+  { now, agent }: { readonly now: Date; readonly agent: { readonly id: string; readonly status: string } },
+  { mandate, sources, suppliers, held }: HeldAuthority,
+  policies: PoliciesWeighed,
+  outside: HeldOutside,
+  requests: readonly SpendRequestRecord[],
+  stays: (request: SpendRequestRecord, made: DecisionMade) => boolean,
+): readonly WeighedInOrder[] {
+  const currency = mandate.perOrderLimit.currency;
+  const { since } = outside;
   const carried: { readonly request: SpendRequestRecord; readonly order: OrderClaimsSeen }[] = [];
   return requests.map((request, at) => {
     const { month } = known(held.get(request.id));
     const supplier = known(suppliers.get(request.supplierId));
-    const order = known(orders[at]);
+    const order = known(outside.orders[at]);
     const toItsPayee = carried.filter((other) => samePayee(supplier, known(suppliers.get(other.request.supplierId))));
     const made = decide(
       inputOf({
         asked: request,
         now,
-        agent: { id: agentId, status: 'ACTIVE' },
+        agent,
         mandate,
         policies,
         supplier,
         source: known(sources.get(request.fundingSourceId)),
         spent: money(
-          known(spentOutside.get(month)) +
+          known(outside.spent.get(month)) +
             sumOf(carried.filter((other) => known(held.get(other.request.id)).month === month)),
           currency,
         ),
         split: money(
-          (splitOutside.get(supplier.id) ?? 0n) +
+          (outside.split.get(supplier.id) ?? 0n) +
             sumOf(toItsPayee.filter((other) => known(held.get(other.request.id)).reservedAt >= since)),
           currency,
         ),
@@ -346,9 +393,9 @@ async function weighedInOrder(
         },
       }),
     );
-    const stands = carries(request.status, request.decision, made.decision);
-    if (stands) carried.push({ request, order });
-    return { id: request.id, outcome: stands ? 'carry' : 'cancel', reasons: made.reasons };
+    const staying = stays(request, made);
+    if (staying) carried.push({ request, order });
+    return { request, made, stays: staying };
   });
 }
 
@@ -387,10 +434,10 @@ const monthsOf = (held: ReadonlyMap<string, { readonly month: string }>): string
  * one missing is a history or a row changed past the app, so the carry is
  * refused.
  */
-const known = <Value>(value: Value | null | undefined): Value => value ?? integrityFailed();
+export const known = <Value>(value: Value | null | undefined): Value => value ?? integrityFailed();
 
 /** The IDs or months, each once, in order. */
-const distinct = (values: readonly string[]): string[] => [...new Set(values)].sort();
+export const distinct = (values: readonly string[]): string[] => [...new Set(values)].sort();
 
 /**
  * The plan carried out, in the confirm's transaction after its step-up is

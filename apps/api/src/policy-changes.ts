@@ -25,6 +25,9 @@
 //   step-up and kept on the version's event (monthly-cap-choice.ts). A
 //   mandate's policy names no choice.
 // - `show`, every member: the policy as it stands, or none set.
+// - `preview`, an admin's (E5d, decision 19): the requests waiting for
+//   approval the rules would reject, and why (policy-waiting.ts), checked as
+//   a change is but writing nothing, so the admin sees them before choosing.
 //
 // Lock order (ADR-006 §6): the idempotency key, the policies' lock (confirm),
 // the session's challenges (0b, confirm), the admin's membership (2a), the
@@ -47,7 +50,7 @@ import {
   setPolicy,
   widerThanMandate,
 } from '@agentx/core/modules/mandates';
-import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import type { Outbox } from '@agentx/core/modules/notifications';
 import { suppliersFound } from '@agentx/core/modules/suppliers';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
@@ -56,7 +59,6 @@ import type { Logger } from '@agentx/platform/observability';
 
 import {
   MandateRefused,
-  type MandateTables,
   type MandateTx,
   mandateIn,
   capChoiceOf,
@@ -65,7 +67,9 @@ import {
   versionIn,
 } from './mandate-reads.ts';
 import { capChoiceDetails, type MonthlyCapChoice } from './monthly-cap-choice.ts';
+import { type WaitingPlan, waitingPlan } from './policy-waiting.ts';
 import type { Refused } from './refused.ts';
+import type { DecisionTables } from './spend-request-decisions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
 /** Each kind's operations: the ask, which the step-up challenge names as its action too, and its confirm. */
@@ -131,6 +135,12 @@ export interface PolicyChanges {
     target: PolicyTarget,
     correlationId: string,
   ): Promise<({ readonly outcome: 'found' } & PolicyView) | Refused>;
+  preview(
+    member: SessionMember,
+    target: PolicyTarget,
+    asked: PolicyAsked,
+    correlationId: string,
+  ): Promise<({ readonly outcome: 'previewed' } & WaitingPlan) | Refused>;
 }
 
 /** What each kind's change records on the notice (0038). */
@@ -179,7 +189,7 @@ export function createPolicyChanges({
   outbox,
   logger,
 }: {
-  readonly database: Database<MandateTables & NotificationsTables>;
+  readonly database: Database<DecisionTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
@@ -321,6 +331,17 @@ export function createPolicyChanges({
     async show(orgId, target, correlationId) {
       const view = await work.answered(orgId, correlationId, (tx, states) => policyViewIn(tx, states, orgId, target));
       return 'outcome' in view ? view : { outcome: 'found', ...view };
+    },
+
+    async preview(member, target, sent, correlationId) {
+      const plan = await work.answered(member.orgId, correlationId, async (tx, states) => {
+        // Read before any wait below, as a decision's: the instant the requests are weighed at.
+        const now = clock.now();
+        const { rules } = askedOf(target, sent);
+        const { mandateId } = await changeable(tx, states, member, target, rules, 'share');
+        return waitingPlan(tx, states, { orgId: member.orgId, now, mandateId, rules });
+      });
+      return 'outcome' in plan ? plan : { outcome: 'previewed', ...plan };
     },
   };
 }

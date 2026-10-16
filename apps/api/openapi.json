@@ -1613,6 +1613,75 @@
         "additionalProperties": false,
         "description": "A policy and the rules in force."
       },
+      "PolicyWaitingPreview": {
+        "type": "object",
+        "properties": {
+          "rejected": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "agentId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "amountMinor": {
+                  "type": "number"
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "reasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "whatToDo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "code",
+                      "message",
+                      "whatToDo"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "agentId",
+                "amountMinor",
+                "currency",
+                "reasons"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "more": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rejected",
+          "more"
+        ],
+        "additionalProperties": false,
+        "description": "The requests waiting for approval a policy change would reject, written nothing."
+      },
       "AgentSelf": {
         "type": "object",
         "properties": {
@@ -14789,6 +14858,144 @@
         }
       }
     },
+    "/v1/policies/organization/change/preview": {
+      "post": {
+        "summary": "See which requests waiting for approval a change of the organisation’s policy would reject",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3}$"
+                  },
+                  "perOrderCap": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "capMinor": {
+                            "type": "number"
+                          },
+                          "over": {
+                            "type": "string",
+                            "enum": [
+                              "DENY",
+                              "REQUIRE_APPROVAL"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "capMinor",
+                          "over"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "monthlyCapMinor": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "approvalThresholdMinor": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "supplierIds": {
+                    "anyOf": [
+                      {
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "monthlyCapChoice": {
+                    "type": "string",
+                    "enum": [
+                      "amount",
+                      "none"
+                    ]
+                  }
+                },
+                "required": [
+                  "currency",
+                  "monthlyCapChoice"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 32768,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyWaitingPreview"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/policies/organization/change/confirm": {
       "post": {
         "operationId": "policies.organization.change.confirm",
@@ -15198,6 +15405,146 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MandatePolicyChangeAsked"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/policy/change/preview": {
+      "post": {
+        "summary": "See which requests waiting for approval a change of a mandate’s policy would reject",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3}$"
+                  },
+                  "perOrderCap": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "capMinor": {
+                            "type": "number"
+                          },
+                          "over": {
+                            "type": "string",
+                            "enum": [
+                              "DENY",
+                              "REQUIRE_APPROVAL"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "capMinor",
+                          "over"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "monthlyCapMinor": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "approvalThresholdMinor": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "supplierIds": {
+                    "anyOf": [
+                      {
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "currency"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 32768,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyWaitingPreview"
                 }
               }
             }
