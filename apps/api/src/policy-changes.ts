@@ -67,7 +67,15 @@ import {
   versionIn,
 } from './mandate-reads.ts';
 import { capChoiceDetails, type MonthlyCapChoice } from './monthly-cap-choice.ts';
-import { type WaitingPlan, waitingPlan } from './policy-waiting.ts';
+import {
+  rejectWaiting,
+  type WaitingChoice,
+  waitingChosen,
+  waitingDetails,
+  waitingHashParts,
+  type WaitingPlan,
+  waitingPlan,
+} from './policy-waiting.ts';
 import type { Refused } from './refused.ts';
 import type { DecisionTables } from './spend-request-decisions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
@@ -80,6 +88,28 @@ export const POLICY_OPERATIONS = {
 
 /** Who may change a policy: an admin, with a passkey (decision 5). */
 export const CHANGING_ROLES = ['admin'] as const;
+
+/**
+ * The confirm's choice checked against its plan: a refusal here (one listed
+ * now, none now, or more now) is a plan changed since the ask, whose choice
+ * passed it, so it is the step-up's refusal (S118 review, 80): the admin asks
+ * again and sees the plan as it is.
+ */
+function confirmedChoice(plan: WaitingPlan, waiting: WaitingChoice | undefined): WaitingChoice | null {
+  try {
+    return waitingChosen(plan, waiting);
+  } catch (error) {
+    if (error instanceof MandateRefused) throw new MandateRefused(403, 'STEP_UP_FAILED');
+    throw error;
+  }
+}
+
+/** No waiting request weighed yet: an ask's plan until its transaction has read one. */
+const NONE_WAITING: WaitingPlan = { rejected: [], more: false };
+
+/** The mandate a target names, in lower case as its rows hold it; null for the organisation's own. */
+const mandateIdOf = (target: PolicyTarget): string | null =>
+  target.scope === 'mandate' ? target.mandateId.toLowerCase() : null;
 
 /** Which policy: the organisation's own, or a mandate's. */
 export type PolicyTarget =
@@ -103,7 +133,7 @@ interface PolicyAsked {
 }
 
 export type PolicyChangeAsked =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string; readonly waiting: WaitingPlan }
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
   | Refused;
@@ -120,6 +150,7 @@ export interface PolicyChanges {
     idempotent: IdempotentRequest,
     target: PolicyTarget,
     asked: PolicyAsked,
+    waiting: WaitingChoice | undefined,
     correlationId: string,
   ): Promise<PolicyChangeAsked>;
   confirm(
@@ -127,6 +158,7 @@ export interface PolicyChanges {
     idempotent: IdempotentRequest,
     target: PolicyTarget,
     asked: PolicyAsked,
+    waiting: WaitingChoice | undefined,
     stepUpChallengeId: string,
     correlationId: string,
   ): Promise<PolicyChanged>;
@@ -159,6 +191,7 @@ const changeHash = (
   policyId: string,
   existing: { readonly state: { readonly eventId: string } } | null,
   { rules, capChoice }: PolicyAsked,
+  waiting: readonly string[],
 ) =>
   changeHashOf([
     POLICY_OPERATIONS[scope].ask,
@@ -167,6 +200,7 @@ const changeHash = (
     existing?.state.eventId.toLowerCase() ?? '',
     rulesHash(rules),
     ...(capChoice === null ? [] : Object.values(capChoiceDetails(capChoice)).map(String)),
+    ...waiting,
   ]);
 
 /**
@@ -253,6 +287,26 @@ export function createPolicyChanges({
     return { admin, id, mandateId, existing };
   };
 
+  /**
+   * The ask's, a replayed ask's and the preview's reads: every check a change
+   * makes, the policy read FOR SHARE, and its waiting requests' plan.
+   */
+  const weighedIn = async (
+    tx: MandateTx,
+    states: SignedStates,
+    member: SessionMember,
+    target: PolicyTarget,
+    rules: PolicyRules,
+  ) => {
+    // Read before any wait below, as a decision's: the instant the requests are weighed at.
+    const now = clock.now();
+    const read = await changeable(tx, states, member, target, rules, 'share');
+    return {
+      ...read,
+      plan: await waitingPlan(tx, states, { orgId: member.orgId, now, mandateId: read.mandateId, rules }),
+    };
+  };
+
   /** The policy as it now stands, or none set. */
   const policyViewIn = async (
     tx: MandateTx,
@@ -275,26 +329,59 @@ export function createPolicyChanges({
   };
 
   return {
-    async ask(member, idempotent, target, sent, correlationId) {
+    async ask(member, idempotent, target, sent, waiting, correlationId) {
+      let plan = NONE_WAITING;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const asked = askedOf(target, sent);
-        const { id, existing } = await changeable(tx, states, member, target, asked.rules, 'share');
+        const read = await weighedIn(tx, states, member, target, asked.rules);
+        plan = read.plan;
+        const choice = waitingChosen(plan, waiting);
         return stepUps.ask(tx, member, {
           action: POLICY_OPERATIONS[target.scope].ask,
-          changeHash: changeHash(target.scope, member.orgId, id, existing, asked),
+          changeHash: changeHash(
+            target.scope,
+            member.orgId,
+            read.id,
+            read.existing,
+            asked,
+            waitingHashParts(choice, plan),
+          ),
         });
       });
       if (isUnwritten(done)) return done;
-      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
+      // A replayed ask answers from its key's record, which keeps no plan: it is worked out again, as it now
+      // stands, so the admin always sees one. Changed since the step-up bound it, the confirm refuses (as E4c's).
+      if (done.outcome === 'replayed') {
+        const again = await work.answered(member.orgId, correlationId, async (tx, states) =>
+          weighedIn(tx, states, member, target, askedOf(target, sent).rules),
+        );
+        if ('outcome' in again) return again;
+        plan = again.plan;
+      }
+      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, waiting: plan };
     },
 
-    async confirm(member, idempotent, target, sent, stepUpChallengeId, correlationId) {
+    async confirm(member, idempotent, target, sent, waiting, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const asked = askedOf(target, sent);
         const { rules, capChoice } = asked;
+        const now = clock.now();
         await onePolicyChangeAtATime(tx, member.orgId);
         const held = await challenges.hold(tx, member.sessionId);
-        const { admin, id, mandateId, existing } = await changeable(tx, states, member, target, rules, 'change');
+        // 2a, before the agents the plan reads (3); `changeable` reads it again.
+        await work.memberIn(tx, states, member, CHANGING_ROLES);
+        const read: { changed?: Awaited<ReturnType<typeof changeable>> } = {};
+        const scope = { orgId: member.orgId, now, mandateId: mandateIdOf(target), rules };
+        const plan = await waitingPlan(tx, states, scope, {
+          decides: true,
+          locked: async () => {
+            read.changed = await changeable(tx, states, member, target, rules, 'change');
+          },
+        });
+        if (read.changed === undefined) throw new Error('A policy change weighed its waiting requests unlocked');
+        const { admin, id, mandateId, existing } = read.changed;
+        // The ask's choice passed its plan: one this plan refuses means it isn't the plan the step-up bound.
+        const choice = confirmedChoice(plan, waiting);
         const consumed = await stepUps.consumed(
           tx,
           member,
@@ -302,21 +389,34 @@ export function createPolicyChanges({
           stepUpChallengeId,
           {
             action: POLICY_OPERATIONS[target.scope].ask,
-            changeHash: changeHash(target.scope, member.orgId, id, existing, asked),
+            changeHash: changeHash(target.scope, member.orgId, id, existing, asked, waitingHashParts(choice, plan)),
           },
           { passkeyRequired: true },
         );
+        const versionId = ids.next();
+        if (choice === 'reject') {
+          await rejectWaiting(tx, states, keys, plan, {
+            orgId: member.orgId,
+            userId: member.userId,
+            evidence: { ...stepUpDetails(consumed), policyVersionId: versionId },
+            now,
+          });
+        }
         await setPolicy(tx, states, {
           orgId: member.orgId,
           existing,
           scope: target.scope,
           mandateId,
-          versionId: ids.next(),
+          versionId,
           rules,
           madeBy: admin.id,
-          madeAt: clock.now(),
+          madeAt: now,
           actor: { type: 'user', id: member.userId },
-          details: { ...stepUpDetails(consumed), ...(capChoice === null ? {} : capChoiceDetails(capChoice)) },
+          details: {
+            ...stepUpDetails(consumed),
+            ...(capChoice === null ? {} : capChoiceDetails(capChoice)),
+            ...waitingDetails(choice, plan),
+          },
         });
         await outbox.add(tx, toldAdminsAndApprovers(member.orgId, NOTICE[target.scope], id));
         return { status: 200, resourceId: id };
@@ -334,14 +434,10 @@ export function createPolicyChanges({
     },
 
     async preview(member, target, sent, correlationId) {
-      const plan = await work.answered(member.orgId, correlationId, async (tx, states) => {
-        // Read before any wait below, as a decision's: the instant the requests are weighed at.
-        const now = clock.now();
-        const { rules } = askedOf(target, sent);
-        const { mandateId } = await changeable(tx, states, member, target, rules, 'share');
-        return waitingPlan(tx, states, { orgId: member.orgId, now, mandateId, rules });
-      });
-      return 'outcome' in plan ? plan : { outcome: 'previewed', ...plan };
+      const read = await work.answered(member.orgId, correlationId, (tx, states) =>
+        weighedIn(tx, states, member, target, askedOf(target, sent).rules),
+      );
+      return 'outcome' in read ? read : { outcome: 'previewed', ...read.plan };
     },
   };
 }

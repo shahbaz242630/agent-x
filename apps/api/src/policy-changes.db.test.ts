@@ -98,6 +98,7 @@ const ask = (who: Member, target: PolicyTarget, asked: PolicyRules) =>
     keyed(who, POLICY_OPERATIONS[target.scope].ask),
     target,
     { rules: asked, capChoice: choiceOf(target, asked) },
+    undefined,
     CORRELATION,
   );
 
@@ -107,6 +108,7 @@ const confirm = (who: Member, target: PolicyTarget, asked: PolicyRules, challeng
     key ?? keyed(who, POLICY_OPERATIONS[target.scope].confirm),
     target,
     { rules: asked, capChoice: choiceOf(target, asked) },
+    undefined,
     challengeId,
     CORRELATION,
   );
@@ -635,6 +637,7 @@ describe('the organisation’s monthly cap choice (E2, decision 15)', () => {
         keyed(w.admin, POLICY_OPERATIONS[target.scope].ask),
         target,
         { rules: asked, capChoice },
+        undefined,
         CORRELATION,
       ),
     ).rejects.toThrow(RangeError);

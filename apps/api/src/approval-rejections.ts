@@ -42,14 +42,20 @@ export function rejectedFor(decision: Decision, reasons: readonly ReasonCode[]):
   return made.length > 0 && made.every(isRuleDenial) ? made.filter(isRuleDenial) : null;
 }
 
+/** When a rejection was made, as its note says: by its approver approving it, or by the admin changing a policy (E5d). */
+const REJECTED_WHEN = {
+  approval: 'Rejected on approval: today’s check denies it',
+  policy: 'Rejected when your team’s policy changed: the new rules deny it',
+} as const;
+
 /**
  * The note the rejection keeps, within REJECT_REASON_MOST: the rules by code
  * and what to do; past it, without the codes, which its event keeps whole
  * (`causes`).
  */
-export function rejectionNote(reasons: readonly ReasonCode[]): string {
+export function rejectionNote(reasons: readonly ReasonCode[], when: keyof typeof REJECTED_WHEN = 'approval'): string {
   const note = (rules: string) =>
-    `Rejected on approval: today’s check denies it under your team’s rules${rules}. Change them in settings, then the agent asks again.`;
+    `${REJECTED_WHEN[when]} under your team’s rules${rules}. Change them in settings, then the agent asks again.`;
   const named = note(` (${reasons.join(', ')})`);
   return named.length <= REJECT_REASON_MOST ? named : note('');
 }
