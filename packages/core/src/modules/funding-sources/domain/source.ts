@@ -79,7 +79,11 @@ export interface SourceRecord {
   readonly partnerChangedAt: Date;
 }
 
-/** Whether the source may fund a new request now: ACTIVE to Agent X and to the partner, its consent not yet expired. */
+/**
+ * Whether the source may fund a new request now: ACTIVE to Agent X and to the
+ * partner, its consent not yet expired. A source holding its requests over an
+ * expiry (decision 21) is ACTIVE to Agent X, UNAVAILABLE to the partner.
+ */
 export const mayFund = (
   source: Pick<SourceRecord, 'status' | 'availability' | 'consentExpiresAt'>,
   now: Date,

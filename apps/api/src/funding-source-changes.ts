@@ -60,6 +60,12 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import {
+  CONSENT_EXPIRY_CHOSEN,
+  consentExpiryDetails,
+  consentExpiryOf,
+  holdsOverExpiry,
+} from './consent-expiry-choice.ts';
+import {
   asked,
   createFundingSourceWork,
   type FundingSourceMember,
@@ -90,8 +96,19 @@ export const SUSPENDING_ROLES = ['admin', 'approver'] as const;
 /** Who may give a source its authority back: an admin (ADR-003 §8). */
 export const REACTIVATING_ROLES = ['admin'] as const;
 
+/** Choosing what a consent's expiry does to a source's requests (decision 21, E7). */
+export const CONSENT_EXPIRY_OPERATION = 'funding-sources.consent-expiry';
+
+/** Who may choose it: admins, as linking. */
+export const CONSENT_EXPIRY_ROLES = ['admin'] as const;
+
 export type SourceChangeWrite =
-  | { readonly outcome: 'changed'; readonly source: SourceRecord }
+  | {
+      readonly outcome: 'changed';
+      readonly source: SourceRecord;
+      /** Its admin's choice for when its consent runs out (decision 21), or null: none (so cancel). */
+      readonly consentExpiry: PendingChoice | null;
+    }
   | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
@@ -109,6 +126,14 @@ export interface FundingSourceChanges {
     idempotent: IdempotentRequest,
     sourceId: string,
     pendingRequests: PendingChoice,
+    correlationId: string,
+  ): Promise<SourceChangeWrite>;
+  /** An admin's choice for when the source's consent runs out (decision 21, E7): the source, with the choice in force. */
+  chooseConsentExpiry(
+    member: FundingSourceMember,
+    idempotent: IdempotentRequest,
+    sourceId: string,
+    consentExpiry: PendingChoice,
     correlationId: string,
   ): Promise<SourceChangeWrite>;
   reactivate(
@@ -166,11 +191,12 @@ export function createFundingSourceChanges({
   /** Answers the write: the source as it now stands, on a retry too. */
   const answer = async (orgId: string, correlationId: string, done: Written): Promise<SourceChangeWrite> => {
     if (isUnwritten(done)) return done;
-    const read = await work.answered(orgId, correlationId, (tx, states) =>
-      work.sourceIn(tx, states, { orgId, id: done.result.resourceId }, 'share'),
-    );
-    if ('outcome' in read && read.outcome === 'refused') return read;
-    return { outcome: 'changed', source: read.source };
+    const read = await work.answered(orgId, correlationId, async (tx, states) => {
+      const { source } = await work.sourceIn(tx, states, { orgId, id: done.result.resourceId }, 'share');
+      return { source, consentExpiry: await consentExpiryOf(tx, states, orgId, source.id) };
+    });
+    if ('outcome' in read) return read;
+    return { outcome: 'changed', ...read };
   };
 
   return {
@@ -230,12 +256,18 @@ export function createFundingSourceChanges({
           return { status: 200, resourceId: sourceId };
         }
         if (lookup === undefined || found.source.status === 'ENDED') return { status: 200, resourceId: sourceId };
-        if (lookup.kind === 'not_found' || partnerEnds(found.source, lookup.source)) {
+        // Consent run out on a source whose admin chose to hold its requests until it is renewed (decision 21, E7)
+        // neither ends it nor voids them: its choice is read only when the partner says the consent is gone.
+        const holdsExpired =
+          lookup.kind === 'found' &&
+          lookup.source.availability === 'UNAVAILABLE' &&
+          (await holdsOverExpiry(tx, states, member.orgId, sourceId));
+        if (lookup.kind === 'not_found' || partnerEnds(found.source, lookup.source, holdsExpired)) {
           const braked = { fundingSourceId: sourceId };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
         }
         if (lookup.kind === 'not_found') await endUnknownToPartner(tx, states, key, found, actor);
-        else await updateFromPartner(tx, states, key, found, { state: lookup.source, actor });
+        else await updateFromPartner(tx, states, key, found, { state: lookup.source, actor, holdsExpired });
         return { status: 200, resourceId: sourceId };
       });
       return answer(member.orgId, correlationId, done);
@@ -272,6 +304,40 @@ export function createFundingSourceChanges({
             "a source read as ACTIVE didn't suspend",
           );
         }
+        return { status: 200, resourceId: source.id };
+      });
+      return answer(member.orgId, correlationId, done);
+    },
+
+    async chooseConsentExpiry(member, idempotent, sourceId, consentExpiry, correlationId) {
+      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        await work.memberIn(tx, states, member, CONSENT_EXPIRY_ROLES);
+        const key = { orgId: member.orgId, id: sourceId };
+        const { source, state } = await work.sourceIn(tx, states, key, 'change');
+        if (source.status === 'ENDED') throw new FundingSourceRefused(409, 'SOURCE_NOT_USABLE');
+        const inForce = await consentExpiryOf(tx, states, member.orgId, sourceId);
+        // Chosen already: answered as it is, nothing recorded twice.
+        if (inForce === consentExpiry) return { status: 200, resourceId: source.id };
+        const past = source.consentExpiresAt <= clock.now();
+        // Its consent ran out under a cancel (none chosen: the rule then): its requests are being cancelled already.
+        if (past && consentExpiry === 'pause') throw new FundingSourceRefused(409, 'PENDING_REQUESTS_CANCELLED');
+        if (past) {
+          // A hold made a cancel past the expiry: cancelled now, as a suspend's cancel; the job takes any past the batch.
+          const braked = { fundingSourceId: source.id };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
+        }
+        await states.record(
+          tx,
+          SOURCES,
+          key,
+          state,
+          {},
+          {
+            actor: { type: 'user', id: member.userId },
+            action: CONSENT_EXPIRY_CHOSEN,
+            details: consentExpiryDetails(consentExpiry),
+          },
+        );
         return { status: 200, resourceId: source.id };
       });
       return answer(member.orgId, correlationId, done);

@@ -7,11 +7,13 @@
 //   ones too, as Agent X holds it.
 // An agent's sources are its mandate's (agent-mandate.ts, Phase 2 B5).
 import { type SourceRecord, sourcesPage } from '@agentx/core/modules/funding-sources';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { consentExpiryOf } from './consent-expiry-choice.ts';
 import { createFundingSourceWork, type FundingSourceTables } from './funding-source-work.ts';
 import { type Refused, refused } from './refused.ts';
 
@@ -30,7 +32,14 @@ export type SourcesListed =
     }
   | Refused;
 
-export type SourceShown = { readonly outcome: 'found'; readonly source: SourceRecord } | Refused;
+export type SourceShown =
+  | {
+      readonly outcome: 'found';
+      readonly source: SourceRecord;
+      /** Its admin's choice for when its consent runs out (decision 21, E7), or null: none (so cancel). */
+      readonly consentExpiry: PendingChoice | null;
+    }
+  | Refused;
 
 export interface FundingSourceReads {
   list(orgId: string, page: SourcePage, correlationId: string): Promise<SourcesListed>;
@@ -62,7 +71,11 @@ export function createFundingSourceReads({
     show: (orgId, sourceId, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
         const { source } = await work.sourceIn(tx, states, { orgId, id: sourceId }, 'share');
-        return { outcome: 'found' as const, source };
+        return {
+          outcome: 'found' as const,
+          source,
+          consentExpiry: await consentExpiryOf(tx, states, orgId, source.id),
+        };
       }),
   };
 }

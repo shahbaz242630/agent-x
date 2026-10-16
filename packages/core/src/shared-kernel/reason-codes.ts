@@ -152,7 +152,7 @@ export const REASON_CODES = {
   PENDING_CHOICE_REQUIRED:
     'A version is in force, so choose what happens to its pending requests: cancel them, or carry them over to the new version, each checked again under its terms. Nothing was changed.',
   PENDING_REQUESTS_CANCELLED:
-    "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed.",
+    "It is already suspended or frozen with its pending requests cancelled, or its bank consent ran out with them set to be cancelled, which can't be undone, so they can't be paused, kept or held now. Nothing was changed.",
   PENDING_REQUESTS_TOO_MANY:
     'More pending requests are left to cancel than one move cancels at once, so nothing was changed. Wait a few minutes while they are cancelled, then try again; if its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel first.',
   PENDING_REQUESTS_TOO_MANY_TO_CARRY:

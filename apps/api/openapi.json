@@ -392,7 +392,7 @@
                   {
                     "type": "string",
                     "const": "PENDING_REQUESTS_CANCELLED",
-                    "description": "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed."
+                    "description": "It is already suspended or frozen with its pending requests cancelled, or its bank consent ran out with them set to be cancelled, which can't be undone, so they can't be paused, kept or held now. Nothing was changed."
                   },
                   {
                     "type": "string",
@@ -2886,6 +2886,121 @@
         ],
         "additionalProperties": false,
         "description": "The organisation’s bank account as Agent X holds it: never an account number or a balance."
+      },
+      "FundingSourceShown": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "SUSPENDED",
+              "ENDED"
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "ACTIVE",
+              "SUSPENDED",
+              "UNAVAILABLE"
+            ]
+          },
+          "consentStatus": {
+            "type": "string"
+          },
+          "consentExpiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "holderName": {
+            "type": "string"
+          },
+          "accountType": {
+            "type": "string",
+            "enum": [
+              "retail",
+              "sme",
+              "corporate"
+            ]
+          },
+          "hint": {
+            "type": "string"
+          },
+          "controls": {
+            "type": "object",
+            "properties": {
+              "currency": {
+                "type": "string"
+              },
+              "period": {
+                "type": "string",
+                "enum": [
+                  "day",
+                  "week",
+                  "month",
+                  "year"
+                ]
+              },
+              "maxPaymentMinor": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "maxPeriodMinor": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "maxPeriodPayments": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "currency",
+              "period",
+              "maxPaymentMinor",
+              "maxPeriodMinor",
+              "maxPeriodPayments"
+            ],
+            "additionalProperties": false
+          },
+          "consentExpiry": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "cancel",
+                  "pause"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "availability",
+          "consentStatus",
+          "consentExpiresAt",
+          "holderName",
+          "accountType",
+          "hint",
+          "controls",
+          "consentExpiry"
+        ],
+        "additionalProperties": false,
+        "description": "A bank account as Agent X holds it, with its consent-expiry choice."
       },
       "FundingSourceReactivationAsked": {
         "type": "object",
@@ -10033,16 +10148,20 @@
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
+                "type": "object",
+                "properties": {
+                  "consentExpiry": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
-                ]
+                },
+                "required": [
+                  "consentExpiry"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -10424,7 +10543,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FundingSource"
+                  "$ref": "#/components/schemas/FundingSourceShown"
                 }
               }
             }
@@ -10488,7 +10607,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FundingSource"
+                  "$ref": "#/components/schemas/FundingSourceShown"
                 }
               }
             }
@@ -10582,7 +10701,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FundingSource"
+                  "$ref": "#/components/schemas/FundingSourceShown"
                 }
               }
             }
@@ -10681,7 +10800,105 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FundingSource"
+                  "$ref": "#/components/schemas/FundingSourceShown"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funding-sources/{id}/consent-expiry": {
+      "post": {
+        "operationId": "funding-sources.consent-expiry",
+        "summary": "Choose what happens to a bank account’s pending requests when its consent runs out",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "consentExpiry": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
+                  }
+                },
+                "required": [
+                  "consentExpiry"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 64,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundingSourceShown"
                 }
               }
             }
@@ -10871,7 +11088,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FundingSource"
+                  "$ref": "#/components/schemas/FundingSourceShown"
                 }
               }
             }

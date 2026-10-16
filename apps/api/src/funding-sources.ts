@@ -5,12 +5,18 @@
 //   201 with the link and `authoriseUrl`, the partner's page that takes the
 //   admin on to their bank. Admins.
 // - `POST /v1/funding-sources/link-sessions/:linkId/confirm`, once back from
-//   the bank: asks the partner, server to server, how the link ended. 202 with
+//   the bank, with `consentExpiry` (`cancel` or `pause`, required: decision
+//   21, E7): asks the partner, server to server, how the link ended. 202 with
 //   the link while the business hasn't finished at its bank; 200 with the
-//   link, settled, and the source it made, if it made one. Admins.
+//   link, settled, and the source it made, if it made one, its choice kept. Admins.
+// - `POST /v1/funding-sources/:id/consent-expiry` (E7): an admin's choice
+//   for when its consent runs out, `cancel` or `pause` (hold until renewed):
+//   200 with the source and its choice; the same choice answered as it is; a
+//   hold once the consent ran out under a cancel 409 PENDING_REQUESTS_CANCELLED,
+//   a cancel then cancels them at once; an ended source 409 SOURCE_NOT_USABLE.
 // - `GET /v1/funding-sources?after=&limit=` and `/v1/funding-sources/:id`
 //   (D2-4a): the sources as Agent X holds them, ENDED ones too, each verified
-//   against its signed state. Every member.
+//   against its signed state; one source with its consent-expiry choice (E7). Every member.
 // - `POST /v1/funding-sources/:id/refresh` (D2-4a): asks the partner, server
 //   to server, how the source stands now, and answers it brought up to that.
 //   Admins.
@@ -29,6 +35,7 @@
 // verified. The use cases are funding-source-links.ts, funding-source-reads.ts
 // and funding-source-changes.ts.
 import { type LinkRecord, MOST_SOURCES_A_PAGE, type SourceRecord } from '@agentx/core/modules/funding-sources';
+import { PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -38,6 +45,8 @@ import { need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import {
   type FundingSourceChanges,
+  CONSENT_EXPIRY_OPERATION,
+  CONSENT_EXPIRY_ROLES,
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
   REACTIVATING_ROLES,
@@ -66,6 +75,7 @@ import {
   stepUpAsked,
 } from './route-schemas.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
+import { CONSENT_EXPIRY } from './consent-expiry-choice.ts';
 
 /** Every member may see the organisation's sources. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -116,6 +126,20 @@ const SOURCE = z
     description: 'The organisation’s bank account as Agent X holds it: never an account number or a balance.',
   });
 
+/** A source with its admin's choice for when its consent runs out (E7): one source's read, and every change's answer. */
+const SOURCE_SHOWN = SOURCE.extend({
+  consentExpiry: z
+    .enum(PENDING_CHOICES)
+    .nullable()
+    .describe(
+      'What its admin chose for its pending requests when its bank consent runs out: `cancel` or `pause` (hold until ' +
+        'renewed); null: not chosen yet (linked before the choice), so they are cancelled.',
+    ),
+}).register(API_SCHEMAS, {
+  id: 'FundingSourceShown',
+  description: 'A bank account as Agent X holds it, with its consent-expiry choice.',
+});
+
 const START_SCHEMA = {
   summary: 'Start linking the organisation’s bank account',
   body: NOTHING,
@@ -134,10 +158,13 @@ const LINK_WITH_SOURCE = z.object({
   source: SOURCE.nullable().describe('The source the link made; null unless it is linked.'),
 });
 
+/** A link's confirm: the admin's choice for when the source's consent runs out, kept if it links (decision 21). */
+const CONFIRM_BODY = z.strictObject({ consentExpiry: CONSENT_EXPIRY }).describe('The admin’s consent-expiry choice.');
+
 const CONFIRM_SCHEMA = {
   summary: 'Ask the partner how the link ended, once back from the bank',
   params: z.object({ linkId: z.uuid().describe('The link, by its ID.') }),
-  body: NOTHING,
+  body: CONFIRM_BODY,
   response: {
     200: LINK_WITH_SOURCE.describe('The link, settled, and the source it made, if it made one.'),
     202: LINK_WITH_SOURCE.describe('The link, still waiting for the business at its bank: ask again later.'),
@@ -185,6 +212,11 @@ const sourceOf = (source: SourceRecord) => ({
   },
 });
 
+const sourceShownOf = (source: SourceRecord, consentExpiry: PendingChoice | null) => ({
+  ...sourceOf(source),
+  consentExpiry,
+});
+
 const PAGE = pageQuery(MOST_SOURCES_A_PAGE);
 
 const LIST_SCHEMA = {
@@ -202,17 +234,24 @@ const SOURCE_ID = z.object({ id: z.uuid().describe('The source, by its ID.') });
 const SHOW_SCHEMA = {
   summary: 'One of your organisation’s bank accounts',
   params: SOURCE_ID,
-  response: { 200: SOURCE },
+  response: { 200: SOURCE_SHOWN },
 };
 
 const REFRESH_SCHEMA = {
   summary: 'Ask the partner how a bank account stands now',
   params: SOURCE_ID,
   body: NOTHING,
-  response: { 200: SOURCE.describe('The source, brought up to the partner’s answer.') },
+  response: { 200: SOURCE_SHOWN.describe('The source, brought up to the partner’s answer.') },
 };
 
-const SOURCE_CHANGED = SOURCE.describe('The source, as the change left it.');
+const SOURCE_CHANGED = SOURCE_SHOWN.describe('The source, as the change left it.');
+
+const CONSENT_EXPIRY_SCHEMA = {
+  summary: 'Choose what happens to a bank account’s pending requests when its consent runs out',
+  params: SOURCE_ID,
+  body: z.strictObject({ consentExpiry: CONSENT_EXPIRY }).describe('The admin’s choice.'),
+  response: { 200: SOURCE_CHANGED },
+};
 
 const SUSPEND_SCHEMA = {
   summary: 'Suspend a bank account: the brake, at once and with no step-up, its pending requests cancelled or paused',
@@ -257,7 +296,8 @@ export function registerFundingSources(
 
   /** Answers a change: the source as it now stands, a step-up asked, or a refusal. */
   const answerChange = (written: SourceChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
-    if (written.outcome === 'changed') return reply.code(200).send(sourceOf(written.source));
+    if (written.outcome === 'changed')
+      return reply.code(200).send(sourceShownOf(written.source, written.consentExpiry));
     return answerAsked(written, request, reply);
   };
 
@@ -280,7 +320,7 @@ export function registerFundingSources(
     '/v1/funding-sources/link-sessions/:linkId/confirm',
     {
       schema: CONFIRM_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...LINKING_ROLES], operation: LINK_CONFIRM_OPERATION },
     },
     async (request, reply) => {
@@ -289,6 +329,7 @@ export function registerFundingSources(
         member,
         idempotentRequest(request, member.orgId),
         request.params.linkId,
+        request.body.consentExpiry,
         request.id,
       );
       if (isUnwritten(written)) return answerRefusal(written, request, reply);
@@ -319,7 +360,7 @@ export function registerFundingSources(
       const { orgId } = memberOf(request);
       const found = await need(reads).show(orgId, request.params.id, request.id);
       if (found.outcome === 'refused') return answerRefusal(found, request, reply);
-      return sourceOf(found.source);
+      return sourceShownOf(found.source, found.consentExpiry);
     },
   );
 
@@ -356,6 +397,26 @@ export function registerFundingSources(
         idempotentRequest(request, member.orgId),
         request.params.id,
         request.body.pendingRequests,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/funding-sources/:id/consent-expiry',
+    {
+      schema: CONSENT_EXPIRY_SCHEMA,
+      bodyLimit: CHOICE_BODY_LIMIT,
+      config: { access: [...CONSENT_EXPIRY_ROLES], operation: CONSENT_EXPIRY_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await need(changes).chooseConsentExpiry(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.consentExpiry,
         request.id,
       );
       return answerChange(written, request, reply);

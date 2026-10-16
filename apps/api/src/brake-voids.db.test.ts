@@ -35,6 +35,7 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   createFakeRail,
   type FinancialRailAdapter,
+  type FundingSourceState,
   type SourceLookup,
   SANDBOX_ACCOUNTS,
 } from '@agentx/core/modules/providers';
@@ -65,6 +66,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import { type AgentChanges, createAgentChanges, SUSPEND_OPERATION } from './agent-changes.ts';
 import {
   createFundingSourceChanges,
+  CONSENT_EXPIRY_OPERATION,
   REFRESH_OPERATION,
   SUSPEND_OPERATION as SOURCE_SUSPEND,
 } from './funding-source-changes.ts';
@@ -72,7 +74,16 @@ import { ACCEPT_CONFIRM_OPERATION, ACCEPT_OPERATION, createMandateAcceptance } f
 import { createMandateExpiry } from './mandate-expiry.ts';
 import { createMandateMoves, type MandateMove, type MandateMoves, MOVE_OPERATIONS } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
-import { AED, askedFor, draftedOf, keys, PASSKEY, type World } from './mandate-world.helper.test.ts';
+import {
+  AED,
+  askedFor,
+  draftedOf,
+  keys,
+  type Member,
+  PASSKEY,
+  refused,
+  type World,
+} from './mandate-world.helper.test.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createRequestVoids } from './request-voids.ts';
@@ -112,6 +123,7 @@ let app: Database<SpendWorldTables>;
 const ids = new SequentialIds(0xc2b0_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000c2';
 const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
 
 let clock: FixedClock;
 let capture: LogCapture;
@@ -226,6 +238,28 @@ const refreshed = (w: World, answer: (now: Date) => SourceLookup) => () =>
     ...services(),
     rail: { ...createFakeRail({ clock, ids }), getSourceState: () => Promise.resolve(answer(clock.now())) },
   }).refresh(w.admin, keyed(w.admin, REFRESH_OPERATION), w.source, CORRELATION);
+
+/** The world's source's consent-expiry choice made through its use case by `who` (decision 21, E7). */
+const consentChosen = (w: World, choice: PendingChoice, who: Member = w.admin) =>
+  createFundingSourceChanges({ ...services(), rail: undefined }).chooseConsentExpiry(
+    who,
+    keyed(who, CONSENT_EXPIRY_OPERATION),
+    w.source,
+    choice,
+    CORRELATION,
+  );
+
+/** The world's source refreshed, the partner answering it as it is but for `change` (given the time). */
+const answeredWith = (w: World, change: (now: Date) => Partial<FundingSourceState>) =>
+  refreshed(w, (now) => ({ kind: 'found', source: { ...w.state, ...change(now) } }))();
+
+/** The partner's answer of a consent that ran out just now: Expired at its end. */
+const ranOut = (now: Date): Partial<FundingSourceState> => ({
+  availability: 'UNAVAILABLE',
+  consentStatus: 'Expired',
+  consentExpiresAt: now,
+  statusChangedAt: now,
+});
 
 /** The world's organisation frozen through its use case by its admin, with `choice`. */
 const frozen = (w: World, choice: PendingChoice) =>
@@ -1847,5 +1881,130 @@ describe('what a brake leaves alone', () => {
 
     expect(await statusOf(w, cancelled.id)).toBe('CANCELLED');
     expect(await statusOf(w, waiting.id)).toBe('DENIED');
+  });
+});
+
+describe('a consent run out: cancel, or hold until renewed, as the admin chose (decision 21, E7)', () => {
+  it('held: a refresh keeps the source, unable to fund, voiding nothing; once renewed they stand again', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting, elsewhere } = await pendingOf(w, acting);
+    expect(await consentChosen(w, 'pause')).toMatchObject({ outcome: 'changed', consentExpiry: 'pause' });
+
+    expect(await answeredWith(w, ranOut)).toMatchObject({
+      outcome: 'changed',
+      source: { status: 'ACTIVE', availability: 'UNAVAILABLE', consentStatus: 'Expired' },
+      consentExpiry: 'pause',
+    });
+    await job(w).run();
+    for (const request of [approved, waiting, elsewhere]) expect(await statusOf(w, request.id)).toBe(request.status);
+    expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
+
+    // Renewed at the bank: a new consent for the same source, refreshed here.
+    clock.advanceBy(60_000);
+    expect(
+      await answeredWith(w, (now) => ({
+        availability: 'ACTIVE',
+        consentStatus: 'Authorized',
+        accountConsentId: 'renewed-consent',
+        replacesConsentId: w.state.accountConsentId,
+        consentExpiresAt: new Date(now.getTime() + 365 * DAY_MS),
+        statusChangedAt: now,
+      })),
+    ).toMatchObject({ outcome: 'changed', source: { status: 'ACTIVE', availability: 'ACTIVE' } });
+    await job(w).run();
+    for (const request of [approved, waiting, elsewhere]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
+  it('none chosen (linked before E7) or cancel: the refresh ends the source and voids them, as before', async () => {
+    for (const choice of [null, 'cancel'] as const) {
+      const { w, acting } = await ready();
+      const { approved, waiting } = await pendingOf(w, acting);
+      if (choice !== null) await consentChosen(w, choice);
+
+      expect(await answeredWith(w, ranOut)).toMatchObject({ outcome: 'changed', source: { status: 'ENDED' } });
+      for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+    }
+  });
+
+  it('held, but revoked before its end: the source ends and they are voided (only an expiry is held)', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await consentChosen(w, 'pause');
+
+    expect(
+      await answeredWith(w, (now) => ({ availability: 'UNAVAILABLE', consentStatus: 'Revoked', statusChangedAt: now })),
+    ).toMatchObject({ outcome: 'changed', source: { status: 'ENDED' } });
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
+  it('held past its end, then cancel: voided at once; a hold over that cancel refused; chosen again, as it is', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await consentChosen(w, 'pause');
+    await answeredWith(w, ranOut);
+
+    expect(await consentChosen(w, 'cancel')).toMatchObject({ outcome: 'changed', consentExpiry: 'cancel' });
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(await consentChosen(w, 'pause')).toEqual(refused(409, 'PENDING_REQUESTS_CANCELLED'));
+
+    const chosen = (await shared.eventsAbout(w.org, w.source, 'funding_source')).filter(
+      ({ action }) => action === 'funding_source.consent_expiry_chosen',
+    );
+    expect(chosen.map(({ details }) => details)).toEqual([
+      expect.objectContaining({ pendingRequests: 'pause', pendingStatementVersion: 1 }),
+      expect.objectContaining({ pendingRequests: 'cancel', pendingStatementVersion: 1 }),
+    ]);
+    expect(chosen.map(({ actorType }) => actorType)).toEqual(['user', 'user']);
+    expect((await consentChosen(w, 'cancel')).outcome).toBe('changed');
+    expect(
+      (await shared.eventsAbout(w.org, w.source, 'funding_source')).filter(
+        ({ action }) => action === 'funding_source.consent_expiry_chosen',
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('by its end alone, no refresh: the job holds them under a hold, voids them under none', async () => {
+    for (const choice of ['pause', null] as const) {
+      const { w, acting } = await ready();
+      const { approved, waiting } = await pendingOf(w, acting);
+      if (choice !== null) await consentChosen(w, choice);
+      // The partner's word: the consent ends in a minute.
+      await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+      clock.advanceBy(2 * 60_000);
+
+      await job(w).run();
+      for (const request of [approved, waiting]) {
+        expect(await statusOf(w, request.id)).toBe(choice === 'pause' ? request.status : 'DENIED');
+      }
+    }
+  });
+
+  it('the job, voiding a held request for another stop, names that stop alone: its consent is held (review, 82)', async () => {
+    const { w, acting } = await ready();
+    await consentChosen(w, 'pause');
+    // 21 pending: the agent's brake voids 20 in its own transaction, the job the last one.
+    const made = [];
+    for (let at = 0; at < 21; at += 1)
+      made.push(await ask(acting, w, { amount: AED(1_000n), orderReference: `INV-H${String(at)}` }));
+    expect(made.every(({ status }) => status === 'APPROVED' || status === 'APPROVAL_REQUIRED')).toBe(true);
+    await answeredWith(w, ranOut);
+    await suspended(w, 'cancel');
+    const left = [];
+    for (const { id } of made) if ((await statusOf(w, id)) !== 'DENIED') left.push(id);
+    expect(left).toHaveLength(1);
+
+    await job(w).run();
+
+    const last = (await shared.eventsAbout(w.org, left[0] ?? '', SPEND_REQUESTS.subject)).at(-1);
+    expect(last).toMatchObject({ action: 'spend_request.voided', details: { causes: 'AGENT_SUSPENDED' } });
+  });
+
+  it('is an admin’s: an approver refused, and an ended source refused', async () => {
+    const { w } = await ready();
+    const approver = await shared.member(w.org, 'approver');
+
+    expect(await consentChosen(w, 'pause', approver)).toEqual(refused(403, 'FORBIDDEN'));
+    await answeredWith(w, (now) => ({ availability: 'UNAVAILABLE', consentStatus: 'Revoked', statusChangedAt: now }));
+    expect(await consentChosen(w, 'pause')).toEqual(refused(409, 'SOURCE_NOT_USABLE'));
   });
 });

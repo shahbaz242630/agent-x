@@ -65,6 +65,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
+import { CONSENT_EXPIRY_EVENTS, holdsOverExpiry } from './consent-expiry-choice.ts';
 import {
   DETAILS_CHANGED,
   MOST_CARRIED_CHANGES,
@@ -160,8 +161,12 @@ async function stoppedByTheirRows(
         looksStopped('m.status', 'ACTIVE', 'mandate', 'm.id'),
         where('m.current_version_id', 'is distinct from', where.ref('r.mandate_version_id')),
         looksStopped('s.status', 'ACTIVE', 'source', 's.id'),
-        // The bank's availability needs no filter: its end (UNAVAILABLE) ends the source too (updateFromPartner).
-        where('s.consent_expires_at', '<=', now),
+        // The bank's availability needs no filter: its end (UNAVAILABLE) ends the source too (updateFromPartner), but
+        // consent run out on a source holding its requests (decision 21, E7), which its newest choice leaves out here.
+        where.and([
+          where('s.consent_expires_at', '<=', now),
+          where(where.fn.coalesce(choiceOf(CONSENT_EXPIRY_EVENTS, 's.id'), where.val('cancel')), '<>', 'pause'),
+        ]),
         looksStopped('p.status', 'VERIFIED', 'supplier', 'p.id'),
         // New details carry its requests only through changes chosen to pause (pausedFromOf, E3).
         where.and([
@@ -248,6 +253,7 @@ export function createRequestVoids({
     const mandate = await mandateOf(tx, states, { orgId, id: named.mandateId }, 'share');
     const source = await sourceOf(tx, states, { orgId, id: named.fundingSourceId }, 'share');
     const supplier = await supplierOf(tx, states, { orgId, id: named.supplierId }, 'share');
+    const consentPast = source.outcome === 'found' && source.source.consentExpiresAt <= now;
     // Nothing is judged on what can't be believed (each read tampered with has raised its own alarm) or isn't
     // there (each held by the request's foreign keys, 0039, and never deleted): the run logs it and goes on.
     if (
@@ -276,7 +282,9 @@ export function createRequestVoids({
       source: {
         status: source.source.status,
         availability: source.source.availability,
-        consentPast: source.source.consentExpiresAt <= now,
+        consentPast,
+        // Its admin's choice for an expiry (decision 21), read from the log only once the consent has run out.
+        consentHeld: consentPast && (await holdsOverExpiry(tx, states, orgId, source.source.id)),
       },
       supplier: { ...supplier.supplier, pausedFrom: await pausedFromOf(tx, states, orgId, supplier.supplier) },
       paused: await pausedOf(

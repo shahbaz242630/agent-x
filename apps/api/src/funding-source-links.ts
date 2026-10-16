@@ -51,8 +51,10 @@ import {
   settleLink,
   sourceOf,
   type SourceRecord,
+  SOURCES,
 } from '@agentx/core/modules/funding-sources';
 import type { SignedStates } from '@agentx/core/modules/audit';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import {
   createDatabaseRecords,
   createFakeRail,
@@ -70,6 +72,7 @@ import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/plat
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { CONSENT_EXPIRY_CHOSEN, consentExpiryDetails } from './consent-expiry-choice.ts';
 import {
   asked,
   createFundingSourceWork,
@@ -117,10 +120,12 @@ export type LinkConfirmWrite =
 
 export interface FundingSourceLinks {
   start(member: LinkingMember, idempotent: IdempotentRequest, correlationId: string): Promise<LinkStartWrite>;
+  /** `consentExpiry`: the admin's choice for when the source's consent runs out (decision 21), kept if it links. */
   confirm(
     member: LinkingMember,
     idempotent: IdempotentRequest,
     linkId: string,
+    consentExpiry: PendingChoice,
     correlationId: string,
   ): Promise<LinkConfirmWrite>;
 }
@@ -231,6 +236,7 @@ export function createFundingSourceLinks({
     member: LinkingMember,
     link: LinkRecord,
     outcome: LinkOutcome,
+    consentExpiry: PendingChoice,
   ): Promise<number> => {
     const key = { orgId: member.orgId, id: link.id };
     const now = clock.now();
@@ -260,6 +266,22 @@ export function createFundingSourceLinks({
       createdAt: now,
       actor: { type: 'user', id: member.userId },
     });
+    // The admin's choice for when its consent runs out (decision 21, E7), on its own event beside its first.
+    const sourceKey = { orgId: member.orgId, id: sourceId };
+    const added = await sourceOf(tx, states, sourceKey, 'change');
+    if (added.outcome !== 'found') throw new Error(`a source just added can't be read: ${sourceId}`);
+    await states.record(
+      tx,
+      SOURCES,
+      sourceKey,
+      added.state,
+      {},
+      {
+        actor: { type: 'user', id: member.userId },
+        action: CONSENT_EXPIRY_CHOSEN,
+        details: consentExpiryDetails(consentExpiry),
+      },
+    );
     await settleLink(tx, key, { outcome: 'linked', sourceId }, now);
     return 200;
   };
@@ -316,7 +338,7 @@ export function createFundingSourceLinks({
       return { outcome: 'started', link, authoriseUrl: session.authoriseUrl };
     },
 
-    async confirm(member, idempotent, linkId, correlationId) {
+    async confirm(member, idempotent, linkId, consentExpiry, correlationId) {
       if (rail === undefined) return PARTNER_UNAVAILABLE;
       // Only a link the organisation started is asked about, never an ID from anywhere else.
       const known = await answered(member.orgId, correlationId, async (tx) => {
@@ -337,7 +359,7 @@ export function createFundingSourceLinks({
         // Settled already, by this write's retry or another confirm (the lock waits for one at once, then reads what it
         // left): answered as it stands.
         if (link.outcome !== 'open' || outcome === undefined) return { status: 200, resourceId: linkId };
-        return { status: await settle(tx, states, member, link, outcome), resourceId: linkId };
+        return { status: await settle(tx, states, member, link, outcome, consentExpiry), resourceId: linkId };
       });
       // Still waiting leaves nothing written: answered with the link as it stands, open.
       if (isUnwritten(done)) return done;
