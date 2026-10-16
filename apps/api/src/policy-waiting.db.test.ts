@@ -4,9 +4,12 @@
 // Listed, oldest first, with the team's rules that would refuse each: a
 // lowered monthly cap rejects the younger ones once the oldest stand; a
 // lowered per-order cap, the organisation's or a mandate's (that mandate's
-// requests alone). Not listed: one the rules in force refuse already, one
-// with a stop (a suspended agent), one asked with a revoked key, one past its
-// 72 hours, one the rules still allow. At most 20, `more` saying there are
+// requests alone); each agent against its own month, oldest first across
+// them. Not listed: one the rules in force refuse already, each weighed as
+// its approver's confirm weighs it; one with a stop (a suspended agent), one
+// asked with a revoked key, one past its 72 hours, one decided under a
+// mandate version or supplier details no longer in force, one the rules
+// still allow. One that can't go is counted against the older ones. At most 20, `more` saying there are
 // others. It writes nothing; a member not an admin is refused; a request
 // tampered with refuses it, its alarm raised.
 import { AGENT_KEYS } from '@agentx/core/modules/agents';
@@ -188,15 +191,62 @@ describe('the requests waiting for approval a policy change would reject (E5d, d
 
   it('leaves out one the rules in force refuse already: it stays with its approver (S118)', async () => {
     const { w, made } = await threeWaiting();
-    const [first] = made;
-    // An earlier change, left for the approvers: AED 3,000 a month, refusing the younger two already.
-    await policySet(w, rulesOf(300_000n));
+    // An earlier change, left for the approvers: AED 5,000 a month. Each is weighed as its approver's confirm
+    // weighs it, the others counted: AED 6,000, so today's rules refuse each already.
+    await policySet(w, rulesOf(500_000n));
 
-    expect(await listed(w.admin, ORGANIZATION, rulesOf(300_000n))).toEqual({ rejected: [], more: false });
-    expect(await listed(w.admin, ORGANIZATION, rulesOf(100_000n))).toEqual({
-      rejected: [[first, ['POLICY_MONTHLY_CAP']]],
+    expect(await listed(w.admin, ORGANIZATION, rulesOf(100_000n))).toEqual({ rejected: [], more: false });
+    // AED 6,000 holds them all today; AED 3,000 holds the first alone.
+    await policySet(w, rulesOf(600_000n));
+    expect((await listed(w.admin, ORGANIZATION, rulesOf(300_000n))).rejected.map(([id]) => id)).toEqual(made.slice(1));
+  });
+
+  it('counts a younger one that can’t go (its key revoked) against an older one: as its approver’s confirm would', async () => {
+    const { w, acting } = await ready();
+    const older = await ask(acting, w);
+    clock.advanceBy(60_000);
+    const theirs = await shared.agentKey(w);
+    const younger = await ask(theirs, w);
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: theirs.keyId }, 'revoke', {
+        actor: OPERATOR,
+        action: 'agent_key.revoked',
+        details: {},
+      }),
+    );
+
+    // AED 3,000 a month: the younger one's AED 2,000 stays held whatever is chosen, so the older one doesn't fit.
+    expect(await listed(w.admin, ORGANIZATION, rulesOf(300_000n))).toEqual({
+      rejected: [[older.id, ['POLICY_MONTHLY_CAP']]],
       more: false,
     });
+    expect(await statusOf(w, younger.id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('weighs each agent against its own month, oldest first across them; a mandate’s change lists its agent’s alone', async () => {
+    const { w, acting } = await ready();
+    // The first agent's mandate, read before the second's is made.
+    const mandateId = await mandateIdOf(w);
+    const theirs = await shared.secondAgent(registry, w, { approvalThreshold: AED(100_000n) });
+    const first = await ask(acting, w);
+    clock.advanceBy(60_000);
+    const second = await ask(theirs, w);
+    clock.advanceBy(60_000);
+    const third = await ask(acting, w);
+
+    // AED 3,000 a month each: each agent's oldest fits, the first agent's younger one doesn't.
+    expect(await listed(w.admin, ORGANIZATION, rulesOf(300_000n))).toEqual({
+      rejected: [[third.id, ['POLICY_MONTHLY_CAP']]],
+      more: false,
+    });
+    expect((await listed(w.admin, ORGANIZATION, rulesOf(100_000n))).rejected.map(([id]) => id)).toEqual([
+      first.id,
+      second.id,
+      third.id,
+    ]);
+    expect(
+      (await listed(w.admin, { scope: 'mandate', mandateId }, rulesOf(100_000n))).rejected.map(([id]) => id),
+    ).toEqual([first.id, third.id]);
   });
 
   it('leaves out every one with a stop: the agent suspended', async () => {

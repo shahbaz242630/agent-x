@@ -13,13 +13,14 @@
 //   version and the supplier's details those it was decided against (one
 //   moved, even carried by a pause, is its approver's to re-check, E5a), and
 //   within its 72 hours (E4b, from its decision's sealed time);
-// - holding its capacity under the rules in force, weighed with every older
-//   one waiting counted;
+// - holding its capacity under the rules in force, weighed as its approver's
+//   confirm weighs it, with every other one waiting counted;
 // - refused under the new rules only by rules the team set (`rejectedFor`: a
-//   stop is never a rejection), weighed with the older ones that stay counted
-//   (as a carry's, mandate-carry.ts): when a lower cap can't hold them all,
-//   the oldest stand, and once the younger ones go each approval left weighs
-//   what this plan did.
+//   stop is never a rejection), weighed with every one that can't go counted
+//   and the older ones that stay (as a carry's, mandate-carry.ts): when a
+//   lower cap can't hold them all, the oldest stand. The youngest that stays
+//   was weighed with all that stay, so once those listed go, each approval
+//   left weighs no more than this plan did.
 //
 // The organisation's change weighs every agent's; a mandate's, that mandate's
 // agent's alone. At most 20 are listed, `more` saying there are others (the
@@ -30,9 +31,11 @@
 // one statement, then for each agent with any: the agent (3), its mandate in
 // force and the policies (4), then as a carry reads one mandate's
 // (`heldAuthority`, `requestsHeld`), the keys the requests' signed states
-// name, and what holds capacity outside them (`outsideOf`); each request
-// weighed twice in memory. All FOR SHARE, so the keys read after the requests
-// wait on nothing they hold: a key's revoke locks no request.
+// name, and what holds capacity outside them (`outsideOf`); then weighed in
+// memory, today each against all the others (at most 100 × 100 weighings),
+// under the new rules once. One ended since its row was read is left out. All
+// FOR SHARE, so the keys read after the requests wait on nothing they hold: a
+// key's revoke locks no request.
 import { agentKeyOf } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import type { DecisionMade } from '@agentx/core/modules/policies';
@@ -141,7 +144,7 @@ async function rejectedOf(
   if (mandate === null) return [];
   // 5–7, the requests (8), the keys they were asked with, then what holds capacity outside them.
   const authority = await heldAuthority(tx, states, scope, rows, mandate);
-  const read = await requestsHeld(tx, states, scope, rows);
+  const read = await requestsHeld(tx, states, scope, rows, 'left out');
   const asked = read.map(({ request, state }) => ({ request, against: decidedAgainst(state) }));
   const revoked = await revokedKeys(
     tx,
@@ -149,40 +152,45 @@ async function rejectedOf(
     orgId,
     asked.map(({ against }) => against.agentKeyId),
   );
-  const requests = read.map(({ request }) => request);
+  const requests = asked.map(({ request }) => request);
   const outside = await outsideOf(tx, scope, authority, requests);
 
-  const approvable = new Set(
-    asked
-      .filter(
-        ({ request, against }) =>
-          request.status === 'APPROVAL_REQUIRED' &&
-          !revoked.has(against.agentKeyId.toLowerCase()) &&
-          against.mandateVersionId === mandate.versionId &&
-          against.supplierVersionId === known(authority.suppliers.get(request.supplierId)).currentVersionId &&
-          !waitedOut(known(authority.decidedAt.get(request.id)), now),
-      )
-      .map(({ request }) => request.id),
+  /** The requests weighed in `order` (their indexes), each against those before it, as weighedInOrder does. */
+  const inOrder = (
+    order: readonly number[],
+    policies: PoliciesWeighed,
+    stays: (request: SpendRequestRecord, made: DecisionMade) => boolean,
+  ) =>
+    weighedInOrder(
+      { now, agent },
+      authority,
+      policies,
+      { ...outside, orders: order.map((at) => known(outside.orders[at])) },
+      order.map((at) => known(requests[at])),
+      stays,
+    );
+  const all = requests.map((_, at) => at);
+  // Its approver may approve it today, and today's rules, weighed as an approver's confirm weighs them (against
+  // every other one waiting: each last, so at most 100 × 100 weighings in memory), let it hold its capacity.
+  const candidates = new Set(
+    all.filter((at) => {
+      const { request, against } = known(asked[at]);
+      const today = inOrder([...all.filter((other) => other !== at), at], inForce, () => true).at(-1);
+      return (
+        request.status === 'APPROVAL_REQUIRED' &&
+        !revoked.has(against.agentKeyId.toLowerCase()) &&
+        against.mandateVersionId === mandate.versionId &&
+        against.supplierVersionId === known(authority.suppliers.get(request.supplierId)).currentVersionId &&
+        !waitedOut(known(authority.decidedAt.get(request.id)), now) &&
+        holdsCapacity(known(today).made.decision)
+      );
+    }),
   );
-  const weighing = { now, agent };
-  const heldToday = new Set(
-    weighedInOrder(weighing, authority, inForce, outside, requests, () => true)
-      .filter(({ made }) => holdsCapacity(made.decision))
-      .map(({ request }) => request.id),
-  );
+  // Those that can't go stay whatever the rules: counted for every candidate, so weighed first.
+  const order = [...all.filter((at) => !candidates.has(at)), ...all.filter((at) => candidates.has(at))];
   const goes = (request: SpendRequestRecord, { decision, reasons }: DecisionMade): boolean =>
-    approvable.has(request.id) &&
-    heldToday.has(request.id) &&
-    !holdsCapacity(decision) &&
-    rejectedFor(decision, reasons) !== null;
-  return weighedInOrder(
-    weighing,
-    authority,
-    proposedPolicies(inForce, scope),
-    outside,
-    requests,
-    (request, made) => !goes(request, made),
-  )
+    candidates.has(requests.indexOf(request)) && !holdsCapacity(decision) && rejectedFor(decision, reasons) !== null;
+  return inOrder(order, proposedPolicies(inForce, scope), (request, made) => !goes(request, made))
     .filter(({ stays }) => !stays)
     .map(({ request, made }) => ({
       id: request.id,

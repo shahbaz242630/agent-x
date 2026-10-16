@@ -247,13 +247,16 @@ export async function heldAuthority(
  * statement in order of ID, then each read for change; at the ask all in one
  * read, FOR SHARE. One not found pending, or naming other facts than its row
  * (changed past the app, its alarm raised): INTEGRITY_FAILED. Each with its
- * verified state, which names the versions it was decided against.
+ * verified state, which names the versions it was decided against. One ended
+ * since its row was read (unlocked, a statement before) is `left out` by a
+ * caller that weighs only what still waits, rather than refused.
  */
 export async function requestsHeld(
   tx: CarryTx,
   states: SignedStates,
   { orgId, agentId, decides }: WeighScope,
   rows: readonly PendingRow[],
+  ended: 'refused' | 'left out' = 'refused',
 ): Promise<readonly { readonly request: SpendRequestRecord; readonly state: VerifiedState }[]> {
   const ids = rows.map(({ id }) => id);
   const read = new Map<string, { readonly request: SpendRequestRecord; readonly state: VerifiedState }>();
@@ -276,15 +279,15 @@ export async function requestsHeld(
       if (found.outcome === 'found') read.set(id, found);
     }
   }
-  return rows.map((row) => {
-    const found = read.get(row.id);
+  return rows.flatMap((row) => {
+    const found = read.get(row.id) ?? integrityFailed();
     const asItsRow =
-      found !== undefined &&
-      isPending(found.request.status) &&
       found.request.agentId === agentId &&
       found.request.supplierId === row.supplier_id &&
       found.request.fundingSourceId === row.funding_source_id;
-    return asItsRow ? found : integrityFailed();
+    if (!asItsRow) return integrityFailed();
+    if (isPending(found.request.status)) return [found];
+    return ended === 'left out' ? [] : integrityFailed();
   });
 }
 
