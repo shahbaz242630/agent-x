@@ -1979,6 +1979,26 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
     }
   });
 
+  it('the job, voiding a held request for another stop, names that stop alone: its consent is held (review, 82)', async () => {
+    const { w, acting } = await ready();
+    await consentChosen(w, 'pause');
+    // 21 pending: the agent's brake voids 20 in its own transaction, the job the last one.
+    const made = [];
+    for (let at = 0; at < 21; at += 1)
+      made.push(await ask(acting, w, { amount: AED(1_000n), orderReference: `INV-H${String(at)}` }));
+    expect(made.every(({ status }) => status === 'APPROVED' || status === 'APPROVAL_REQUIRED')).toBe(true);
+    await answeredWith(w, ranOut);
+    await suspended(w, 'cancel');
+    const left = [];
+    for (const { id } of made) if ((await statusOf(w, id)) !== 'DENIED') left.push(id);
+    expect(left).toHaveLength(1);
+
+    await job(w).run();
+
+    const last = (await shared.eventsAbout(w.org, left[0] ?? '', SPEND_REQUESTS.subject)).at(-1);
+    expect(last).toMatchObject({ action: 'spend_request.voided', details: { causes: 'AGENT_SUSPENDED' } });
+  });
+
   it('is an admin’s: an approver refused, and an ended source refused', async () => {
     const { w } = await ready();
     const approver = await shared.member(w.org, 'approver');
