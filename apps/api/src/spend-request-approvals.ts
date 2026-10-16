@@ -190,6 +190,23 @@ async function namedBy(tx: ApproveTx, orgId: string, requestId: string) {
   );
 }
 
+/**
+ * The supplier's details a request was decided under, when new ones carried
+ * it there only through changes chosen to pause (E3): re-checked, never
+ * approved as decided. Null when moved otherwise (or decided under none).
+ */
+async function carriedFromOf(
+  tx: ApproveTx,
+  states: SignedStates,
+  orgId: string,
+  supplier: { readonly id: string; readonly currentVersionId: string },
+  decidedUnder: string | null,
+): Promise<string | null> {
+  if (decidedUnder === null) return null;
+  const pausedFrom = await pausedFromOf(tx, states, orgId, supplier, () => new MandateRefused(503, 'INTEGRITY_FAILED'));
+  return pausedFrom.includes(decidedUnder) ? decidedUnder : null;
+}
+
 export function createSpendRequestApprovals({
   database,
   keys,
@@ -277,16 +294,8 @@ export function createSpendRequestApprovals({
 
     const made = decide(weighed.input);
     const { supplier } = weighed;
-    // New details it was carried to by changes chosen to pause (E3): re-checked, never approved as decided.
     const moved = supplier !== null && supplier.currentVersionId !== against.supplierVersionId;
-    const carriedFrom =
-      moved &&
-      against.supplierVersionId !== null &&
-      (await pausedFromOf(tx, states, orgId, supplier, () => new MandateRefused(503, 'INTEGRITY_FAILED'))).includes(
-        against.supplierVersionId,
-      )
-        ? against.supplierVersionId
-        : null;
+    const carriedFrom = moved ? await carriedFromOf(tx, states, orgId, supplier, against.supplierVersionId) : null;
     const unchanged =
       key.outcome === 'found' &&
       key.key.status !== 'REVOKED' &&
