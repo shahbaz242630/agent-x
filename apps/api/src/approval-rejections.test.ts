@@ -22,6 +22,10 @@ describe('rejectedFor: what a refusal at approval rejects it for', () => {
     expect(rejectedFor(decision, ['APPROVAL_THRESHOLD'])).toBeNull();
   });
 
+  it('rejects nothing for a refusal that names no reason', () => {
+    expect(rejectedFor('DENY', [])).toBeNull();
+  });
+
   it('rejects it for a rule the team set', () => {
     expect(rejectedFor('DENY', ['POLICY_MONTHLY_CAP'])).toEqual(['POLICY_MONTHLY_CAP']);
   });
