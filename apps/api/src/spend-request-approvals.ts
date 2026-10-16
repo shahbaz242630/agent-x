@@ -137,7 +137,7 @@ const recheckDetails = (view: RecheckShown | null) =>
       };
 
 /** What confirming will do, as the ask shows it: re-checked or not, and rejected for its rules or approved. */
-export interface ApprovalShown {
+interface ApprovalShown {
   readonly recheck: RecheckShown | null;
   /** The rules the engine now refuses it under, so the confirm rejects it (E5b); null when it approves it. */
   readonly rejection: readonly RuleDenial[] | null;
