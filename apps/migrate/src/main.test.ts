@@ -16,6 +16,11 @@ describe('what a failed run reports: names, never file contents', () => {
     expect(failure(failed)).toEqual({ migration: '0004_z.sql', err: failed });
   });
 
+  it('a migration whose lock wait ran out every try: its name, that reason, and the error', () => {
+    const timedOut = new MigrationFailed('0006_v.sql', Object.assign(new Error('lock timeout'), { code: '55P03' }));
+    expect(failure(timedOut)).toEqual({ migration: '0006_v.sql', reason: 'lock_wait_ran_out', err: timedOut });
+  });
+
   it('a migration that ended its own transaction: its name and the error', () => {
     const notAtomic = new MigrationNotAtomic('0005_w.sql');
     expect(failure(notAtomic)).toEqual({ migration: '0005_w.sql', err: notAtomic });

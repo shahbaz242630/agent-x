@@ -1,15 +1,31 @@
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  LogCapture,
+  type TestClient,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
-import { applyMigration, MigrationFailed, MigrationNotAtomic, MigrationRefused, runMigrations } from './migrate.ts';
+import {
+  applyMigration,
+  isLockTimeout,
+  LOCK_TRIES,
+  MigrationFailed,
+  MigrationNotAtomic,
+  MigrationRefused,
+  runMigrations,
+} from './migrate.ts';
 import { TenantContextError } from './tenant.ts';
 
 const REPO_MIGRATIONS = fileURLToPath(new URL('../../../../db/migrations', import.meta.url));
@@ -196,6 +212,76 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
     const [first, second] = await Promise.all([run(), run()]);
     expect([...first, ...second].sort()).toEqual(['0001_first.sql', '0002_second.sql', '0003_third.sql']);
     expect(await ledger()).toHaveLength(3);
+  });
+
+  describe('a file that needs a table another transaction holds', () => {
+    // A short wait and pause stand in for the job's 10 s and 5 s.
+    const runWaiting = (pauseMs: number): Promise<string[]> =>
+      runMigrations({
+        connection: database.connection('owner'),
+        directory: folder,
+        logger: createLogger({
+          service: 'migrate',
+          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+          destination: capture,
+        }),
+        lockWait: { timeoutMs: 200, pauseMs },
+      });
+    const lockWaits = (): unknown[] =>
+      capture.lines().filter((line) => line.event === 'db.migration.lock_wait_ran_out');
+
+    async function untilLogged(lines: () => unknown[], count: number): Promise<void> {
+      while (lines().length < count) await sleep(10);
+    }
+
+    /** A transaction that has read demo.one and stays open, as a request part-way would. */
+    async function holdTable(): Promise<TestClient> {
+      const holder = await database.connect('owner');
+      await holder.query('begin');
+      await holder.query('select * from demo.one');
+      return holder;
+    }
+
+    beforeEach(async () => {
+      await write('0001_first.sql', 'create schema demo;\ncreate table demo.one (id int);\n');
+      await run();
+      // ALTER TABLE takes the table to itself (ACCESS EXCLUSIVE), as 0047's DROP TRIGGER did.
+      await write('0002_second.sql', 'alter table demo.one add column note text;\n');
+    });
+
+    it('gives up rather than waiting forever, tries LOCK_TRIES times, and leaves the file unapplied', async () => {
+      const holder = await holdTable();
+      try {
+        const error = await runWaiting(10).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(MigrationFailed);
+        expect(isLockTimeout(error)).toBe(true);
+        expect(lockWaits()).toEqual([
+          expect.objectContaining({ migration: '0002_second.sql', try: 1 }),
+          expect.objectContaining({ migration: '0002_second.sql', try: 2 }),
+        ]);
+        expect(LOCK_TRIES).toBe(3);
+        // The holder never noticed: its transaction still reads the table.
+        await holder.query('select * from demo.one');
+      } finally {
+        await holder.end();
+      }
+      expect((await ledger()).map((row) => row.name)).toEqual(['0001_first.sql']);
+      expect(await runWaiting(10)).toEqual(['0002_second.sql']);
+    });
+
+    it('applies the file on a later try once the table is free', async () => {
+      const holder = await holdTable();
+      const running = runWaiting(2000);
+      try {
+        await waitUntilQueued(database.as('admin'), 1);
+        // The first try's wait runs out; the holder lets go during the pause.
+        await within(5000, untilLogged(lockWaits, 1), 'the first lock wait to run out');
+      } finally {
+        await holder.end();
+      }
+      expect(await running).toEqual(['0002_second.sql']);
+      expect(lockWaits()).toHaveLength(1);
+    });
   });
 
   it('refuses a connection that already carries a tenant', async () => {
