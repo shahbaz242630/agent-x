@@ -2388,11 +2388,42 @@
                 "type": "null"
               }
             ]
+          },
+          "rejection": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "whatToDo": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "whatToDo"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "stepUpChallengeId",
-          "recheck"
+          "recheck",
+          "rejection"
         ],
         "additionalProperties": false,
         "description": "Approving a spend request, waiting for you to sign in again; with `recheck`, how it is weighed now."

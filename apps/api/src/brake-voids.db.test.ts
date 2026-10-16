@@ -1245,7 +1245,12 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
       };
 
       const asked = await asking(w, waiting.id, true);
-      expect(asked).toEqual({ outcome: 'asked', stepUpChallengeId: expect.any(String) as unknown, recheck });
+      expect(asked).toEqual({
+        outcome: 'asked',
+        stepUpChallengeId: expect.any(String) as unknown,
+        recheck,
+        rejection: null,
+      });
       const challengeId = askedFor(asked);
       await stepUp(w.admin, challengeId);
       // The confirm takes the re-check it was asked with, or it is refused as one not re-checked.

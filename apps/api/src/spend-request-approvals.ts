@@ -27,6 +27,13 @@
 //   (RecheckShown, bound into the step-up), and the confirm records it on the
 //   approval. Without `recheck` it is RECHECK_REQUIRED (409); `recheck` on
 //   one with nothing to re-check is RECHECK_NOT_OFFERED (400);
+// - rejected (decision 18; E5b): one the engine now refuses only under rules
+//   the team set (a limit or cap lowered, a supplier off a policy: rejectedFor)
+//   is shown at the ask as rejected, with each rule and what to do, bound into
+//   the step-up; the confirm rejects it (`spend_request.rejected`, the
+//   approver's, with a note and the rules as `causes`), its holdings released.
+//   A refusal with any stop in it (a suspended agent, mandate or source, an
+//   unverified supplier: perhaps a pause the team chose) stays REQUEST_CHANGED;
 // - one past its 72 hours, that the expiry job hasn't reached yet, is
 //   refused (REQUEST_EXPIRED, 409) and then expired at once, its reservation
 //   and claim released (SEC-LIM-12), in a transaction of its own.
@@ -58,6 +65,7 @@ import {
   expireRequest,
   decisionOf,
   holdsCapacity,
+  rejectRequest,
   requestOf,
   type SpendRequestRecord,
   waitedOut,
@@ -67,6 +75,7 @@ import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwr
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { rejectedFor, rejectionNote, type RuleDenial } from './approval-rejections.ts';
 import { MandateRefused } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { agentAlone, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
@@ -127,14 +136,22 @@ const recheckDetails = (view: RecheckShown | null) =>
         recheckStatementVersion: RECHECK_STATEMENT_VERSION,
       };
 
+/** What confirming will do, as the ask shows it: re-checked or not, and rejected for its rules or approved. */
+interface ApprovalShown {
+  readonly recheck: RecheckShown | null;
+  /** The rules the engine now refuses it under, so the confirm rejects it (E5b); null when it approves it. */
+  readonly rejection: readonly RuleDenial[] | null;
+}
+
 export type ApproveAsked =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string; readonly recheck: RecheckShown | null }
+  | ({ readonly outcome: 'asked'; readonly stepUpChallengeId: string } & ApprovalShown)
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
   | Refused;
 
 export type Approved =
-  | { readonly outcome: 'approved'; readonly request: SpendRequestRecord }
+  /** Approved; or rejected, the engine now refusing it under rules the team set (E5b). */
+  | { readonly outcome: 'approved' | 'rejected'; readonly request: SpendRequestRecord }
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
   | Refused;
@@ -160,10 +177,16 @@ export interface SpendRequestApprovals {
 
 /**
  * The approval's SHA-256: the organisation and the request's latest event,
- * IDs in lower case (see rejectHash), and any re-check as shown.
+ * IDs in lower case (see rejectHash), any re-check as shown, and any
+ * rejection with its rules.
  */
-const approveHash = (orgId: string, requestEvent: string, view: RecheckShown | null): Buffer =>
-  changeHashOf([orgId.toLowerCase(), requestEvent.toLowerCase(), ...recheckHashParts(view)]);
+const approveHash = (orgId: string, requestEvent: string, { recheck, rejection }: ApprovalShown): Buffer =>
+  changeHashOf([
+    orgId.toLowerCase(),
+    requestEvent.toLowerCase(),
+    ...recheckHashParts(recheck),
+    ...(rejection === null ? [] : ['reject', rejection.join(',')]),
+  ]);
 
 /**
  * What the request's row names, read before any lock (levels 3–7 come
@@ -331,16 +354,18 @@ export function createSpendRequestApprovals({
       key.key.status !== 'REVOKED' &&
       weighed.mandate !== null &&
       weighed.mandate.versionId === against.mandateVersionId &&
-      supplierNow.move !== 'moved' &&
-      holdsCapacity(made.decision);
-    if (!unchanged) throw new MandateRefused(409, 'REQUEST_CHANGED');
-    const view = recheckShown(supplierNow, recheck, request, made);
+      supplierNow.move !== 'moved';
+    const rejection = holdsCapacity(made.decision) ? null : rejectedFor(made.decision, made.reasons);
+    if (!unchanged || (rejection === null && !holdsCapacity(made.decision))) {
+      throw new MandateRefused(409, 'REQUEST_CHANGED');
+    }
+    const shown: ApprovalShown = { recheck: recheckShown(supplierNow, recheck, request, made), rejection };
     // The policies it is approved under, which may be newer than its decision's: kept with the approval.
     const weighedUnder = {
       organizationPolicyVersionId: made.versions.organizationPolicy,
       mandatePolicyVersionId: made.versions.mandatePolicy,
     };
-    return { read, weighedUnder, view };
+    return { read, weighedUnder, shown };
   }
 
   /**
@@ -364,50 +389,60 @@ export function createSpendRequestApprovals({
 
   return {
     async ask(member, idempotent, requestId, recheck, correlationId) {
-      let shown: RecheckShown | null = null;
+      let shown: ApprovalShown = { recheck: null, rejection: null };
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        const { read, view } = await approvable(tx, states, member, requestId, false, recheck);
-        shown = view;
+        const asked = await approvable(tx, states, member, requestId, false, recheck);
+        shown = asked.shown;
         return stepUps.ask(tx, member, {
           action: APPROVE_OPERATION,
-          changeHash: approveHash(member.orgId, read.state.eventId, view),
+          changeHash: approveHash(member.orgId, asked.read.state.eventId, asked.shown),
         });
       });
       if (isUnwritten(done)) return expiredIfDue(done, member.orgId, requestId, correlationId);
-      // A replayed ask answers from its key's record, which keeps no re-check: it is worked out again, as it now
-      // stands (as E4c's plan). Changed since the step-up bound it, the confirm refuses.
-      if (done.outcome === 'replayed' && recheck) {
+      // A replayed ask answers from its key's record, which keeps neither a re-check nor a rejection: they are
+      // worked out again, as it now stands (as E4c's plan). Changed since the step-up bound them, the confirm refuses.
+      if (done.outcome === 'replayed') {
         const again = await work.answered(member.orgId, correlationId, async (tx, states) => ({
-          view: (await approvable(tx, states, member, requestId, false, recheck)).view,
+          shown: (await approvable(tx, states, member, requestId, false, recheck)).shown,
         }));
         // Refused now (expired, say), as a first ask would be: one past its 72 hours is expired at once.
         if ('outcome' in again) return expiredIfDue(again, member.orgId, requestId, correlationId);
-        shown = again.view;
+        shown = again.shown;
       }
-      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, recheck: shown };
+      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, ...shown };
     },
 
     async confirm(member, idempotent, requestId, stepUpChallengeId, recheck, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
-        const { read, weighedUnder, view } = await approvable(tx, states, member, requestId, true, recheck);
+        const { read, weighedUnder, shown } = await approvable(tx, states, member, requestId, true, recheck);
         const consumed = await stepUps.consumed(
           tx,
           member,
           held,
           stepUpChallengeId,
-          { action: APPROVE_OPERATION, changeHash: approveHash(member.orgId, read.state.eventId, view) },
+          { action: APPROVE_OPERATION, changeHash: approveHash(member.orgId, read.state.eventId, shown) },
           { passkeyRequired: true },
         );
         const key = { orgId: member.orgId, id: requestId };
-        const approved = await approveRequest(tx, states, keys, key, {
-          userId: member.userId,
-          stepUp: {
-            ...stepUpDetails(consumed),
-            ...weighedUnder,
-            ...recheckDetails(view),
-          },
-        });
+        const evidence = { ...stepUpDetails(consumed), ...weighedUnder, ...recheckDetails(shown.recheck) };
+        if (shown.rejection !== null) {
+          // Decision 18: rejected as the approver's, with what to do, its rules kept whole as `causes`.
+          await rejectRequest(
+            tx,
+            states,
+            keys,
+            key,
+            {
+              userId: member.userId,
+              reason: rejectionNote(shown.rejection),
+              stepUp: { ...evidence, causes: shown.rejection.join(',') },
+            },
+            clock.now(),
+          );
+          return { status: 200, resourceId: requestId };
+        }
+        const approved = await approveRequest(tx, states, keys, key, { userId: member.userId, stepUp: evidence });
         // The judging raised the alarm: nothing is approved on holdings changed past the app.
         if (approved === 'mismatch') throw new MandateRefused(503, 'INTEGRITY_FAILED');
         return { status: 200, resourceId: requestId };
@@ -417,10 +452,11 @@ export function createSpendRequestApprovals({
       return work.answered(member.orgId, correlationId, async (tx, states) => {
         const found = await requestOf(tx, states, { orgId: member.orgId, id: done.result.resourceId });
         if (found.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-        // Requests are never deleted (0039's grants): one approved is there.
+        // Requests are never deleted (0039's grants): one approved or rejected is there.
         if (found.outcome !== 'found')
           throw new Error(`An approved spend request is missing: ${done.result.resourceId}`);
-        return { outcome: 'approved' as const, request: found.request };
+        const outcome = found.request.status === 'DENIED' ? ('rejected' as const) : ('approved' as const);
+        return { outcome, request: found.request };
       });
     },
   };

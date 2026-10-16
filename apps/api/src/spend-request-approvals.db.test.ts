@@ -8,10 +8,12 @@
 // monthly cap is approved, its own order no duplicate of itself), in the
 // month its capacity is held in (one decided before midnight on the 31st is
 // approved after it, the new month's spending aside). Anything it was decided
-// on changed since (a policy tightened past it, the mandate superseded or
-// suspended, the supplier's details or status, the source, the agent, its key
-// revoked) is REQUEST_CHANGED (SEC-LIM-10), while routine changes (a looser
-// policy, its key rotated out) leave it approvable; past its 72 hours REQUEST_EXPIRED, and then
+// on changed since (the mandate superseded or suspended, the supplier's
+// details or status, the source, the agent, its key revoked) is
+// REQUEST_CHANGED (SEC-LIM-10), while routine changes (a looser policy, its
+// key rotated out) leave it approvable; a policy tightened past it is shown
+// at the ask as rejected, with what to do, and the confirm rejects it, its
+// holdings released (decision 18, E5b), unless a stop refuses it too; past its 72 hours REQUEST_EXPIRED, and then
 // expired, its holdings released (SEC-LIM-12); a frozen organisation
 // ORG_FROZEN (decision 3), one unfrozen past the app INTEGRITY_FAILED and held
 // (SEC-DB-08). A developer or viewer is FORBIDDEN, and a role
@@ -159,11 +161,14 @@ const policySet = (w: World, mandateId: string | null, cap: bigint) => {
   });
 };
 
+/** Each policy tightened past a request since it was decided: AED 1,000 a month, below the AED 2,000 it asks. */
+const TIGHTENED = {
+  'the organisation’s policy': (w: World) => policySet(w, null, 100_000n),
+  'the mandate’s policy': (w: World, mandateId: string) => policySet(w, mandateId, 100_000n),
+} as const;
+
 /** Each change since a request was decided that makes it another's to approve (SEC-LIM-10). */
 const CHANGES = {
-  // AED 1,000 a month, below the AED 2,000 it asks.
-  'the organisation’s policy tightened past it': (w: World) => policySet(w, null, 100_000n),
-  'the mandate’s policy tightened past it': (w: World, mandateId: string) => policySet(w, mandateId, 100_000n),
   ...shared.STOPS,
   'the key it asked with revoked': (w: World, _mandateId: string, keyId: string) =>
     signed(w, (tx, states) =>
@@ -319,6 +324,58 @@ describe('approving a spend request waiting for approval (B4b)', () => {
       expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
     },
   );
+
+  it.each(Object.keys(TIGHTENED) as (keyof typeof TIGHTENED)[])(
+    '%s tightened past it: shown as rejected with what to do; the confirm rejects it, its holdings released (decision 18, E5b)',
+    async (which) => {
+      const { w, acting } = await ready();
+      const waiting = await ask(acting, w, { orderReference: 'INV-R1' });
+      const earlier = askedFor(await asking(w.admin, waiting.id));
+      await stepUp(w.admin, earlier);
+      await TIGHTENED[which](w, await mandateOf(w));
+
+      // The step-up asked before bound an approval: confirming it now is another change.
+      expect(await confirming(w.admin, waiting.id, earlier)).toEqual(refused(403, 'STEP_UP_FAILED'));
+      const asked = await asking(w.admin, waiting.id);
+      expect(asked).toMatchObject({ outcome: 'asked', recheck: null, rejection: ['POLICY_MONTHLY_CAP'] });
+      const challengeId = askedFor(asked);
+      await stepUp(w.admin, challengeId);
+      const answer = await confirming(w.admin, waiting.id, challengeId);
+      expect(answer).toMatchObject({ outcome: 'rejected', request: { id: waiting.id, status: 'DENIED' } });
+
+      expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'RELEASED', released: true });
+      expect(await spentOf(w, acting)).toBe(0n);
+      expect((await eventsOf(w, waiting.id)).at(-1)).toMatchObject({
+        action: 'spend_request.rejected',
+        actorType: 'user',
+        details: {
+          stepUpChallengeId: challengeId,
+          causes: 'POLICY_MONTHLY_CAP',
+          reason:
+            'Rejected on approval: today’s check denies it under your team’s rules (POLICY_MONTHLY_CAP). Change them in settings, then the agent asks again.',
+        },
+      });
+      // Its order is no longer claimed, and the agent learns only that a person rejected it (decision 6).
+      expect((await ask(acting, w, { amount: AED(50_000n), orderReference: 'INV-R1' })).reasons).not.toContain(
+        'DUPLICATE_ORDER_REFERENCE',
+      );
+      const reads = createSpendRequestReads({ database: app, keys, ids, logger: testLogger(new LogCapture()) });
+      expect(await reads.ofAgent(w.org, acting.agentId, waiting.id, CORRELATION)).toMatchObject({
+        request: { status: 'DENIED' },
+        endedBecause: ['APPROVAL_REJECTED'],
+      });
+    },
+  );
+
+  it('a policy tightened past it and a stop as well: REQUEST_CHANGED, still waiting (a stop is never a rejection)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    await policySet(w, null, 100_000n);
+    await shared.STOPS['the agent suspended'](w);
+
+    expect(await asking(w.admin, waiting.id)).toEqual(refused(409, 'REQUEST_CHANGED'));
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+  });
 
   it.each([null, 'mandate'] as const)(
     'approves it under a looser policy set since (%s scope; the organisation’s if null): weighed as it now is',
