@@ -455,6 +455,9 @@ describe('the requests waiting for approval a policy change would reject (E5d, d
       more: true,
     });
 
+    // The rules in force: none of the oldest 100 listed, yet the younger weren't weighed, so the admin still chooses.
+    expect(await listed(w.admin, ORGANIZATION, LOOSE)).toEqual({ rejected: [], more: true });
+    expect(await asking(w, ORGANIZATION, LOOSE)).toEqual(refused(409, 'WAITING_CHOICE_REQUIRED'));
     expect(await asking(w, ORGANIZATION, rulesOf(2_000_000n, 20_000n), 'reject')).toEqual(
       refused(409, 'WAITING_REQUESTS_TOO_MANY_TO_REJECT'),
     );
