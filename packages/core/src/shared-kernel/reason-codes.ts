@@ -258,6 +258,12 @@ export const REASON_CODES = {
     "Your role was given or approved by a person who entered this supplier's details, so you can't be their second person. Nothing was changed. Ask another admin or finance approver.",
   VERIFIER_TOO_NEW:
     "You've been a member of this organisation for less than 14 days, so you can't verify a supplier yet. Nothing was changed.",
+  WAITING_CHOICE_NOT_OFFERED:
+    'These rules would reject no request waiting for approval, so there is nothing to reject or leave: leave `waitingRequests` out. Nothing was changed.',
+  WAITING_CHOICE_REQUIRED:
+    'These rules would reject requests waiting for approval (the preview lists them), so choose what happens to them: reject them now, or leave them for their approvers. Nothing was changed.',
+  WAITING_REQUESTS_TOO_MANY_TO_REJECT:
+    'These rules would reject more requests waiting for approval than can be rejected at once (20), so nothing was changed. Choose to leave them for their approvers, or have some approved or rejected first, then try again.',
 } as const satisfies Readonly<Record<string, string>>;
 
 export type ReasonCode = keyof typeof REASON_CODES;

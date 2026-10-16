@@ -13,12 +13,16 @@
 // others. It writes nothing; a member not an admin is refused; a request
 // tampered with refuses it, its alarm raised.
 import { AGENT_KEYS } from '@agentx/core/modules/agents';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { policyOf, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
+import { rejectRequest, requestOf } from '@agentx/core/modules/spend-requests';
+import type { SignedStates } from '@agentx/core/modules/audit';
+import { supplierOf } from '@agentx/core/modules/suppliers';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { HOUR_MS } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, type DatabaseTransaction, type IdempotentRequest } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -27,13 +31,18 @@ import {
   tamperAsOwner,
   type TestDatabase,
   testLogger,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { mandateIn } from './mandate-reads.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, type Member, OPERATOR, refused, type World } from './mandate-world.helper.test.ts';
 import { capChoiceDetails } from './monthly-cap-choice.ts';
-import { createPolicyChanges, type PolicyTarget } from './policy-changes.ts';
+import { createPolicyChanges, POLICY_OPERATIONS, type PolicyChanged, type PolicyTarget } from './policy-changes.ts';
+import type { WaitingChoice } from './policy-waiting.ts';
+import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 
@@ -57,7 +66,7 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { ready, ask, statusOf, holdingsOf, signed, mandateIdOf, eventsAbout } = shared;
+const { ready, ask, statusOf, holdingsOf, signed, mandateIdOf, eventsAbout, keyed, stepUp, spentOf } = shared;
 
 const ORGANIZATION: PolicyTarget = { scope: 'organization' };
 
@@ -73,8 +82,10 @@ const rulesOf = (monthly: bigint, perOrder?: bigint): PolicyRules => ({
 /** The world's own monthly cap (AED 20,000): what the rules in force allow. */
 const LOOSE = rulesOf(2_000_000n);
 
-/** The preview of `rules` on `target`, asked by `who`. */
-const preview = (who: Member, target: PolicyTarget, rules: PolicyRules) =>
+type SignedTx = DatabaseTransaction<SpendWorldTables>;
+
+/** The policy changes' use case, as the app makes it. */
+const changes = () =>
   createPolicyChanges({
     database: app,
     keys,
@@ -83,7 +94,72 @@ const preview = (who: Member, target: PolicyTarget, rules: PolicyRules) =>
     challenges: createStepUpChallenges({ ids, clock }),
     outbox: createOutbox({ ids, clock }),
     logger: testLogger(capture),
-  }).preview(who, target, { rules, capChoice: target.scope === 'organization' ? 'amount' : null }, CORRELATION);
+  });
+
+/** `rules` as a change of `target` sends them: the organisation's with its monthly cap chosen. */
+const askedOf = (target: PolicyTarget, rules: PolicyRules) => ({
+  rules,
+  capChoice: target.scope === 'organization' ? ('amount' as const) : null,
+});
+
+/** The preview of `rules` on `target`, asked by `who`. */
+const preview = (who: Member, target: PolicyTarget, rules: PolicyRules) =>
+  changes().preview(who, target, askedOf(target, rules), CORRELATION);
+
+/** The change of `target` to `rules` asked by the admin with `waiting`: the ask's answer. */
+const asking = (w: World, target: PolicyTarget, rules: PolicyRules, waiting?: WaitingChoice, key?: IdempotentRequest) =>
+  changes().ask(
+    w.admin,
+    key ?? keyed(w.admin, POLICY_OPERATIONS[target.scope].ask),
+    target,
+    askedOf(target, rules),
+    waiting,
+    CORRELATION,
+  );
+
+/** The step-up of an ask signed in for with a passkey, then the change confirmed with `waiting`. */
+async function confirming(
+  w: World,
+  target: PolicyTarget,
+  rules: PolicyRules,
+  waiting: WaitingChoice | undefined,
+  challengeId: string,
+) {
+  await stepUp(w.admin, challengeId);
+  return changes().confirm(
+    w.admin,
+    keyed(w.admin, POLICY_OPERATIONS[target.scope].confirm),
+    target,
+    askedOf(target, rules),
+    waiting,
+    challengeId,
+    CORRELATION,
+  );
+}
+
+/** Asked then confirmed with `waiting`: the confirm's answer, and the plan the ask showed. */
+async function changed(w: World, target: PolicyTarget, rules: PolicyRules, waiting?: WaitingChoice) {
+  const asked = await asking(w, target, rules, waiting);
+  if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+  return { done: await confirming(w, target, rules, waiting, asked.stepUpChallengeId), shown: asked.waiting };
+}
+
+/** The event of the version a change made, with its choice. */
+async function versionEvent(w: World, done: PolicyChanged) {
+  if (done.outcome !== 'changed' || done.current === null) throw new Error(`not changed: ${JSON.stringify(done)}`);
+  return (await eventsAbout(w.org, done.current.id, 'policy_version')).at(-1);
+}
+
+/** The request rejected by a person, past the use case, in the caller's transaction. */
+const rejectedPastTheUseCase = (tx: SignedTx, states: SignedStates, w: World, id: string) =>
+  rejectRequest(
+    tx,
+    states,
+    keys,
+    { orgId: w.org, id },
+    { userId: w.admin.userId, reason: 'Not needed now', stepUp: {} },
+    clock.now(),
+  );
 
 /** The preview's listed requests as their IDs and reasons, and whether there are more. */
 async function listed(who: Member, target: PolicyTarget, rules: PolicyRules) {
@@ -377,5 +453,216 @@ describe('the requests waiting for approval a policy change would reject (E5d, d
 
     expect(await preview(w.admin, ORGANIZATION, rulesOf(100_000n))).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(capture.lines().some(({ event }) => event === 'audit.integrity_failed')).toBe(true);
+  });
+});
+
+describe('the admin chooses: reject them now, or leave them for their approvers (E5d-b, decision 19)', () => {
+  it('rejects each one listed when the change is confirmed: its money freed, the rules and the version kept', async () => {
+    const { w, acting, made } = await threeWaiting();
+    const [first = '', second = '', third = ''] = made;
+
+    const { done, shown } = await changed(w, ORGANIZATION, rulesOf(300_000n), 'reject');
+
+    expect(shown.rejected.map(({ id }) => id)).toEqual([second, third]);
+    expect(done).toMatchObject({ outcome: 'changed' });
+    expect(await versionEvent(w, done)).toMatchObject({
+      action: 'policy_version.made',
+      actorType: 'user',
+      details: { waitingRequests: 'reject', waitingStatementVersion: 1, waitingListed: 2, waitingMore: false },
+    });
+    const versionId = done.outcome === 'changed' ? done.current?.id : undefined;
+    for (const id of [second, third]) {
+      expect(await statusOf(w, id)).toBe('DENIED');
+      expect(await holdingsOf(w, id)).toEqual({ reservation: 'RELEASED', released: true });
+      expect((await eventsAbout(w.org, id, SPEND_REQUESTS.subject)).at(-1)).toMatchObject({
+        action: 'spend_request.rejected',
+        actorType: 'user',
+        details: {
+          causes: 'POLICY_MONTHLY_CAP',
+          policyVersionId: versionId,
+          reason:
+            'Rejected when your team’s policy changed: the new rules deny it under your team’s rules (POLICY_MONTHLY_CAP). Change them in settings, then the agent asks again.',
+        },
+      });
+    }
+    expect(await statusOf(w, first)).toBe('APPROVAL_REQUIRED');
+    expect(await spentOf(w, acting)).toBe(200_000n);
+    // The agent learns only that a person rejected it (decision 6).
+    const reads = createSpendRequestReads({ database: app, keys, ids, logger: testLogger(capture) });
+    expect(await reads.ofAgent(w.org, acting.agentId, second, CORRELATION)).toMatchObject({
+      endedBecause: ['APPROVAL_REJECTED'],
+    });
+  });
+
+  it('leaves them waiting, their money held, when the admin chooses to', async () => {
+    const { w, made } = await threeWaiting();
+
+    const { done } = await changed(w, ORGANIZATION, rulesOf(300_000n), 'leave');
+
+    expect(done).toMatchObject({ outcome: 'changed' });
+    expect(await versionEvent(w, done)).toMatchObject({
+      details: { waitingRequests: 'leave', waitingStatementVersion: 1, waitingListed: 2, waitingMore: false },
+    });
+    for (const id of made) {
+      expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+      expect(await holdingsOf(w, id)).toEqual({ reservation: 'HELD', released: false });
+    }
+  });
+
+  it('rejects a mandate’s listed ones on its policy’s change', async () => {
+    const { w, made } = await threeWaiting();
+    const mandateId = await mandateIdOf(w);
+    const target: PolicyTarget = { scope: 'mandate', mandateId };
+
+    const { done } = await changed(w, target, rulesOf(100_000n), 'reject');
+
+    for (const id of made) expect(await statusOf(w, id)).toBe('DENIED');
+    expect(await versionEvent(w, done)).toMatchObject({ details: { waitingRequests: 'reject', waitingListed: 3 } });
+  });
+
+  it('asks for a choice only when the change would reject one: required, or refused, nothing changed', async () => {
+    const { w } = await threeWaiting();
+
+    expect(await asking(w, ORGANIZATION, rulesOf(300_000n))).toEqual(refused(409, 'WAITING_CHOICE_REQUIRED'));
+    expect(await asking(w, ORGANIZATION, LOOSE, 'leave')).toEqual(refused(400, 'WAITING_CHOICE_NOT_OFFERED'));
+    const none = await changed(w, ORGANIZATION, LOOSE);
+    expect(none.done).toMatchObject({ outcome: 'changed' });
+    expect((await versionEvent(w, none.done))?.details).not.toHaveProperty('waitingRequests');
+  });
+
+  it('refuses to reject more than 20 at once, and saves the change leaving them', async () => {
+    const w = await shared.world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await shared.inForce(registry, w, { approvalThreshold: AED(10_000n) });
+    const acting = await shared.agentKey(w);
+    for (let at = 0; at < 22; at += 1) {
+      await ask(acting, w, { amount: AED(20_000n) });
+      clock.advanceBy(1_000);
+    }
+
+    expect(await asking(w, ORGANIZATION, rulesOf(10_000n), 'reject')).toEqual(
+      refused(409, 'WAITING_REQUESTS_TOO_MANY_TO_REJECT'),
+    );
+    const { done } = await changed(w, ORGANIZATION, rulesOf(10_000n), 'leave');
+    expect(done).toMatchObject({ outcome: 'changed' });
+    expect(await versionEvent(w, done)).toMatchObject({ details: { waitingListed: 20, waitingMore: true } });
+  });
+
+  it('refuses the step-up once the plan changed since the ask: another one waiting, nothing rejected', async () => {
+    const { w, acting, made } = await threeWaiting();
+    const asked = await asking(w, ORGANIZATION, rulesOf(300_000n), 'reject');
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    // A fourth decided under the rules in force: the new ones would reject it too.
+    const fourth = await ask(acting, w);
+
+    expect(await confirming(w, ORGANIZATION, rulesOf(300_000n), 'reject', asked.stepUpChallengeId)).toEqual(
+      refused(403, 'STEP_UP_FAILED'),
+    );
+    for (const id of [...made, fourth.id]) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('answers a replayed ask with the plan worked out again', async () => {
+    const { w, made } = await threeWaiting();
+    const key = keyed(w.admin, POLICY_OPERATIONS.organization.ask);
+    const once = await asking(w, ORGANIZATION, rulesOf(300_000n), 'reject', key);
+
+    const again = await asking(w, ORGANIZATION, rulesOf(300_000n), 'reject', key);
+
+    expect(again).toEqual(once);
+    expect(again.outcome === 'asked' && again.waiting.rejected.map(({ id }) => id)).toEqual(made.slice(1));
+  });
+
+  it('rejects them while the organisation is frozen: it only frees money (S118)', async () => {
+    const { w, made } = await threeWaiting();
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, ORGANIZATIONS, { orgId: w.org, id: w.org }, 'freeze', {
+        actor: OPERATOR,
+        action: 'organization.freeze',
+        details: {},
+      }),
+    );
+
+    await changed(w, ORGANIZATION, rulesOf(300_000n), 'reject');
+
+    expect(await Promise.all(made.map((id) => statusOf(w, id)))).toEqual(['APPROVAL_REQUIRED', 'DENIED', 'DENIED']);
+  });
+});
+
+describe('the confirm waits in the lock order, never crosswise (forced)', () => {
+  /** The confirm, made while `holder`'s transaction holds its locks, queued behind it, then let go: both answers. */
+  async function whileHeld(
+    w: World,
+    holder: (tx: SignedTx, states: SignedStates, gate: () => Promise<void>) => Promise<unknown>,
+  ) {
+    const asked = await asking(w, ORGANIZATION, rulesOf(300_000n), 'reject');
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    await stepUp(w.admin, asked.stepUpChallengeId);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const holding_ = signed(w, (tx, states) =>
+      holder(tx, states, async () => {
+        holding(undefined);
+        await gate;
+      }),
+    );
+    await held;
+    const racing = within(
+      20_000,
+      changes().confirm(
+        w.admin,
+        keyed(w.admin, POLICY_OPERATIONS.organization.confirm),
+        ORGANIZATION,
+        askedOf(ORGANIZATION, rulesOf(300_000n)),
+        'reject',
+        asked.stepUpChallengeId,
+        CORRELATION,
+      ),
+      'the policy’s confirm',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    return { held: await holding_, racing: await racing };
+  }
+
+  it('waits for an acceptance holding the mandate, which then reads the policy: both go through', async () => {
+    const { w, made } = await threeWaiting();
+    const mandateId = await mandateIdOf(w);
+
+    const { racing } = await whileHeld(w, async (tx, states, gate) => {
+      await mandateIn(tx, states, w.org, mandateId, 'change');
+      await gate();
+      // As an acceptance weighs its carry: the policies, after the mandate.
+      return policyOf(tx, states, { orgId: w.org, id: w.org }, 'share');
+    });
+
+    expect(racing).toMatchObject({ outcome: 'changed' });
+    expect(await statusOf(w, made[1] ?? '')).toBe('DENIED');
+  });
+
+  it('waits for a brake holding a supplier, which then locks a request: both go through', async () => {
+    const { w, made } = await threeWaiting();
+
+    const { racing } = await whileHeld(w, async (tx, states, gate) => {
+      await supplierOf(tx, states, { orgId: w.org, id: w.suppliers[0] ?? '' }, 'change');
+      await gate();
+      // As a brake's void: its requests, after the supplier.
+      return requestOf(tx, states, { orgId: w.org, id: made[0] ?? '' }, 'change');
+    });
+
+    expect(racing).toMatchObject({ outcome: 'changed' });
+    expect(await statusOf(w, made[2] ?? '')).toBe('DENIED');
+  });
+
+  it('waits for a request held for change, then refuses: it is no longer the plan the step-up bound', async () => {
+    const { w, made } = await threeWaiting();
+
+    const { racing } = await whileHeld(w, async (tx, states, gate) => {
+      await requestOf(tx, states, { orgId: w.org, id: made[2] ?? '' }, 'change');
+      await gate();
+      return rejectedPastTheUseCase(tx, states, w, made[2] ?? '');
+    });
+
+    expect(racing).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await statusOf(w, made[1] ?? '')).toBe('APPROVAL_REQUIRED');
   });
 });

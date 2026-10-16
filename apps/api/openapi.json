@@ -668,6 +668,21 @@
                     "type": "string",
                     "const": "VERIFIER_TOO_NEW",
                     "description": "You've been a member of this organisation for less than 14 days, so you can't verify a supplier yet. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "WAITING_CHOICE_NOT_OFFERED",
+                    "description": "These rules would reject no request waiting for approval, so there is nothing to reject or leave: leave `waitingRequests` out. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "WAITING_CHOICE_REQUIRED",
+                    "description": "These rules would reject requests waiting for approval (the preview lists them), so choose what happens to them: reject them now, or leave them for their approvers. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "WAITING_REQUESTS_TOO_MANY_TO_REJECT",
+                    "description": "These rules would reject more requests waiting for approval than can be rejected at once (20), so nothing was changed. Choose to leave them for their approvers, or have some approved or rejected first, then try again."
                   }
                 ]
               },
@@ -3759,10 +3774,14 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "waiting": {
+            "$ref": "#/components/schemas/PolicyWaitingPreview"
           }
         },
         "required": [
-          "stepUpChallengeId"
+          "stepUpChallengeId",
+          "waiting"
         ],
         "additionalProperties": false,
         "description": "Changing the organisation’s policy, waiting for the admin to sign in again."
@@ -3774,10 +3793,14 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "waiting": {
+            "$ref": "#/components/schemas/PolicyWaitingPreview"
           }
         },
         "required": [
-          "stepUpChallengeId"
+          "stepUpChallengeId",
+          "waiting"
         ],
         "additionalProperties": false,
         "description": "Changing a mandate’s policy, waiting for the admin to sign in again."
@@ -14786,6 +14809,13 @@
                       "amount",
                       "none"
                     ]
+                  },
+                  "waitingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "reject",
+                      "leave"
+                    ]
                   }
                 },
                 "required": [
@@ -15074,6 +15104,13 @@
                       "none"
                     ]
                   },
+                  "waitingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "reject",
+                      "leave"
+                    ]
+                  },
                   "stepUpChallengeId": {
                     "type": "string",
                     "format": "uuid",
@@ -15350,6 +15387,13 @@
                       {
                         "type": "null"
                       }
+                    ]
+                  },
+                  "waitingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "reject",
+                      "leave"
                     ]
                   }
                 },
@@ -15641,6 +15685,13 @@
                       {
                         "type": "null"
                       }
+                    ]
+                  },
+                  "waitingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "reject",
+                      "leave"
                     ]
                   },
                   "stepUpChallengeId": {

@@ -21,6 +21,9 @@ const SUPPLIERS = ['0199a0f0-0000-7000-8000-0000000000e1', '0199a0f0-0000-7000-8
 const ADMIN = '0199a0f0-0000-7000-8000-000000000033';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c1';
 const REQUEST_ID = '0199a0f0-0000-7000-8000-0000000000f1';
+
+/** An ask answered, its change rejecting no waiting request. */
+const ASKED = { outcome: 'asked', stepUpChallengeId: CHALLENGE, waiting: { rejected: [], more: false } } as const;
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 
 const LIVE: LiveSession = {
@@ -98,12 +101,13 @@ interface Answers {
 async function withPolicies(answers: Answers, role: Role = 'admin') {
   const calls: Call[] = [];
   const changes: PolicyChanges = {
-    ask: (member, keyed, target, asked) => {
-      calls.push({ kind: 'ask', member, keyed, subject: { target, ...asked } });
+    ask: (member, keyed, target, asked, waiting) => {
+      calls.push({ kind: 'ask', member, keyed, subject: { target, ...asked, ...(waiting && { waiting }) } });
       return Promise.resolve(answers.asked ?? { outcome: 'busy' as const });
     },
-    confirm: (member, keyed, target, asked, stepUpChallengeId) => {
-      calls.push({ kind: 'confirm', member, keyed, subject: { target, ...asked, stepUpChallengeId } });
+    confirm: (member, keyed, target, asked, waiting, stepUpChallengeId) => {
+      const subject = { target, ...asked, ...(waiting && { waiting }), stepUpChallengeId };
+      calls.push({ kind: 'confirm', member, keyed, subject });
       return Promise.resolve(answers.changed ?? { outcome: 'busy' as const });
     },
     show: (orgId, target) => {
@@ -164,11 +168,11 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
   const RULES_SENT = { ...RULES, ...choice('amount') };
 
   it('asks a passkey step-up: 202, passing the member in their session, the key, the policy and its rules', async () => {
-    const { app, calls } = await withPolicies({ asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+    const { app, calls } = await withPolicies({ asked: ASKED });
     const reply = await app.inject(post(`${path}/change`, RULES_SENT));
 
     expect(reply.statusCode).toBe(202);
-    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE, waiting: { rejected: [], more: false } });
     expect(calls).toEqual([
       {
         kind: 'ask',
@@ -195,7 +199,7 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
   });
 
   it('takes a policy that sets nothing: every rule left out or null', async () => {
-    const { app, calls } = await withPolicies({ asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+    const { app, calls } = await withPolicies({ asked: ASKED });
     await app.inject(post(`${path}/change`, { currency: 'AED', monthlyCapMinor: null, ...choice('none') }));
 
     expect(calls[0]?.subject).toEqual({
@@ -279,6 +283,46 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
     const reply = await app.inject(post(`${path}/change`, RULES_SENT));
 
     expect(reply.statusCode).toBe(403);
+    expect(calls).toEqual([]);
+  });
+
+  it('passes the choice for the waiting requests to the ask and the confirm, and answers the ask with them (E5d-b)', async () => {
+    const waiting = {
+      rejected: [
+        { id: REQUEST_ID, agentId: AGENT_ID, amount: AED(450_000n), reasons: ['POLICY_MONTHLY_CAP' as const] },
+      ],
+      more: false,
+    };
+    const { app, calls } = await withPolicies({
+      asked: { ...ASKED, waiting },
+      changed: { outcome: 'changed', ...VIEW },
+    });
+    const asked = await app.inject(post(`${path}/change`, { ...RULES_SENT, waitingRequests: 'reject' }));
+    const confirmed = await app.inject(
+      post(`${path}/change/confirm`, { ...RULES_SENT, waitingRequests: 'leave', stepUpChallengeId: CHALLENGE }),
+    );
+
+    expect(asked.statusCode).toBe(202);
+    expect(asked.json()).toMatchObject({
+      stepUpChallengeId: CHALLENGE,
+      waiting: { rejected: [{ id: REQUEST_ID, amountMinor: 450_000, reasons: [{ code: 'POLICY_MONTHLY_CAP' }] }] },
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(calls.map(({ kind, subject }) => [kind, (subject as { waiting?: string }).waiting])).toEqual([
+      ['ask', 'reject'],
+      ['confirm', 'leave'],
+    ]);
+  });
+
+  it('refuses a choice it doesn’t know, or one sent to the preview', async () => {
+    const { app, calls } = await withPolicies({ asked: ASKED });
+    for (const [url, body] of [
+      [`${path}/change`, { ...RULES_SENT, waitingRequests: 'cancel' }],
+      [`${path}/change/confirm`, { ...RULES_SENT, waitingRequests: true, stepUpChallengeId: CHALLENGE }],
+      [`${path}/change/preview`, { ...RULES_SENT, waitingRequests: 'reject' }],
+    ] as const) {
+      expect((await app.inject(post(url, body))).statusCode).toBe(400);
+    }
     expect(calls).toEqual([]);
   });
 
@@ -380,7 +424,7 @@ describe('the organisation’s monthly cap choice (E2, decision 15)', () => {
   });
 
   it('takes `none` with no monthly cap, the other rules as they are', async () => {
-    const { app, calls } = await withPolicies({ asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+    const { app, calls } = await withPolicies({ asked: ASKED });
     const reply = await app.inject(post(path, { ...UNCAPPED, monthlyCapChoice: 'none' }));
 
     expect(reply.statusCode).toBe(202);

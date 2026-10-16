@@ -214,19 +214,43 @@ export async function authorityIn(
   agentId: string,
   version: 'inForce' | 'draft' = 'inForce',
 ) {
+  const mandate = await mandateWeighedIn(tx, states, orgId, agentId, version);
+  return { mandate, ...(await policiesIn(tx, states, orgId, mandate)) };
+}
+
+/** Level 4's first half: the agent's open mandate with the version asked for, or null for none. */
+export async function mandateWeighedIn(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  agentId: string,
+  version: 'inForce' | 'draft' = 'inForce',
+): Promise<MandateWeighed | null> {
   const open = await openMandateOfAgent(tx, states, orgId, agentId);
   believed(open);
-  let mandate: MandateWeighed | null = null;
   const found = open.outcome === 'found' ? open.mandate : null;
   const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
-  if (found !== null && versionId !== null) {
-    const version = await versionIn(tx, states, orgId, found.id, versionId);
-    mandate = { ...version, ...found, versionId: version.id };
-  }
+  if (found === null || versionId === null) return null;
+  const read = await versionIn(tx, states, orgId, found.id, versionId);
+  return { ...read, ...found, versionId: read.id };
+}
+
+/**
+ * Level 4's second half, after the mandates: the mandate's policy and the
+ * organisation's, with whether an admin chose its monthly cap (E2). A
+ * policy change's confirm (E5d) reads them here once it holds its policy for
+ * the change, never before: a row read FOR SHARE isn't raised to change.
+ */
+export async function policiesIn(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  mandate: { readonly id: string } | null,
+): Promise<PoliciesWeighed> {
   const mandatePolicy = mandate === null ? null : rulesOf(await policyRulesIn(tx, states, orgId, mandate.id));
   const organization = await policyRulesIn(tx, states, orgId, orgId);
   const organizationCapChosen = (await capChoiceOf(tx, states, orgId, organization?.current ?? null)) !== null;
-  return { mandate, mandatePolicy, organizationPolicy: rulesOf(organization), organizationCapChosen };
+  return { mandatePolicy, organizationPolicy: rulesOf(organization), organizationCapChosen };
 }
 
 /**

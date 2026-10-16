@@ -50,7 +50,7 @@ import {
   type PolicyView,
 } from './policy-changes.ts';
 import { type PolicySimulations, SIMULATING_ROLES, type Simulated } from './policy-simulations.ts';
-import type { WaitingPlan } from './policy-waiting.ts';
+import { WAITING_REQUESTS, type WaitingChoice, type WaitingPlan } from './policy-waiting.ts';
 import {
   AMOUNT,
   issuesOf,
@@ -60,7 +60,7 @@ import {
   RULE_DENIAL_SHOWN,
   shownRules,
   STEP_UP_SIGNED_IN,
-  stepUpAsked,
+  stepUpAskedWith,
 } from './route-schemas.ts';
 
 /** Every member may see the organisation's policies, as its mandates. */
@@ -134,7 +134,13 @@ const rulesChecked = (body: RuleFields, context: z.RefinementCtx): void => {
 };
 
 /** A change's body: the organisation's names its monthly cap choice (E2). */
-type ChangeBody = RuleFields & { readonly monthlyCapChoice?: MonthlyCapChoice | undefined };
+type ChangeBody = RuleFields & {
+  readonly monthlyCapChoice?: MonthlyCapChoice | undefined;
+  readonly waitingRequests?: WaitingChoice | undefined;
+};
+
+/** A change's choice for the waiting requests it would reject (E5d, decision 19): never the preview's. */
+const WAITING_FIELD = { waitingRequests: WAITING_REQUESTS.optional() };
 
 /** The organisation's rules with its choice, which must say what they do: an amount with a monthly cap, none without. */
 const ORGANIZATION_FIELDS = { ...RULE_FIELDS, monthlyCapChoice: MONTHLY_CAP_CHOICE };
@@ -341,22 +347,31 @@ const KINDS = {
 
 type Kind = keyof typeof KINDS;
 
-const ASK_WORDS = 'Every rule of the new version.';
+const ASK_WORDS = 'Every rule of the new version, and what happens to the waiting requests they would reject.';
+const PREVIEW_WORDS = 'Every rule of the new version, as the ask sends them.';
 const CONFIRM_WORDS = 'The same rules as the ask, with the step-up it answered, signed in again for.';
 
 /** Each kind's ask and confirm bodies: only the organisation's names its monthly cap choice. */
 const BODIES = {
   organization: {
-    ask: z.strictObject(ORGANIZATION_FIELDS).superRefine(choiceChecked).describe(ASK_WORDS),
+    preview: z.strictObject(ORGANIZATION_FIELDS).superRefine(choiceChecked).describe(PREVIEW_WORDS),
+    ask: z
+      .strictObject({ ...ORGANIZATION_FIELDS, ...WAITING_FIELD })
+      .superRefine(choiceChecked)
+      .describe(ASK_WORDS),
     confirm: z
-      .strictObject({ ...ORGANIZATION_FIELDS, stepUpChallengeId: STEP_UP_SIGNED_IN })
+      .strictObject({ ...ORGANIZATION_FIELDS, ...WAITING_FIELD, stepUpChallengeId: STEP_UP_SIGNED_IN })
       .superRefine(choiceChecked)
       .describe(CONFIRM_WORDS),
   },
   mandate: {
-    ask: z.strictObject(RULE_FIELDS).superRefine(rulesChecked).describe(ASK_WORDS),
+    preview: z.strictObject(RULE_FIELDS).superRefine(rulesChecked).describe(PREVIEW_WORDS),
+    ask: z
+      .strictObject({ ...RULE_FIELDS, ...WAITING_FIELD })
+      .superRefine(rulesChecked)
+      .describe(ASK_WORDS),
     confirm: z
-      .strictObject({ ...RULE_FIELDS, stepUpChallengeId: STEP_UP_SIGNED_IN })
+      .strictObject({ ...RULE_FIELDS, ...WAITING_FIELD, stepUpChallengeId: STEP_UP_SIGNED_IN })
       .superRefine(rulesChecked)
       .describe(CONFIRM_WORDS),
   },
@@ -366,6 +381,7 @@ const schemasOf = (kind: Kind) => {
   const words = KINDS[kind];
   const params = words.params === undefined ? {} : { params: words.params };
   // Either kind's, as the handlers read them alike.
+  const preview: z.ZodType<ChangeBody> = BODIES[kind].preview;
   const ask: z.ZodType<ChangeBody> = BODIES[kind].ask;
   const confirm: z.ZodType<ChangeBody & { readonly stepUpChallengeId: string }> = BODIES[kind].confirm;
   return {
@@ -374,7 +390,15 @@ const schemasOf = (kind: Kind) => {
       summary: words.ask,
       ...params,
       body: ask,
-      response: { 202: stepUpAsked(words.asked[0], words.asked[1]) },
+      response: {
+        202: stepUpAskedWith(words.asked[0], words.asked[1], {
+          waiting: WAITING_PREVIEW.describe(
+            'The requests waiting for approval these rules would reject, as the preview lists them: what ' +
+              '`waitingRequests` applies to. Confirming applies exactly this; if anything changes first, the ' +
+              'confirm is refused and you ask again.',
+          ),
+        }),
+      },
     },
     confirm: {
       summary: words.confirm,
@@ -382,7 +406,7 @@ const schemasOf = (kind: Kind) => {
       body: confirm,
       response: { 200: POLICY.describe('The policy with the new rules in force.') },
     },
-    preview: { summary: words.preview, ...params, body: ask, response: { 200: WAITING_PREVIEW } },
+    preview: { summary: words.preview, ...params, body: preview, response: { 200: WAITING_PREVIEW } },
   };
 };
 
@@ -480,9 +504,13 @@ export function registerPolicies(
           idempotentRequest(request, member.orgId),
           targetOf(kind, request),
           askedOf(request.body),
+          request.body.waitingRequests,
           request.id,
         );
-        return answerAsked(asked, request, reply);
+        if (asked.outcome !== 'asked') return answerAsked(asked, request, reply);
+        return reply
+          .code(202)
+          .send({ stepUpChallengeId: asked.stepUpChallengeId, waiting: previewBody(asked.waiting) });
       },
     );
 
@@ -519,6 +547,7 @@ export function registerPolicies(
           idempotentRequest(request, member.orgId),
           targetOf(kind, request),
           askedOf(request.body),
+          request.body.waitingRequests,
           request.body.stepUpChallengeId,
           request.id,
         );
