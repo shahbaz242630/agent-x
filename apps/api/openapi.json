@@ -451,8 +451,18 @@
                   },
                   {
                     "type": "string",
+                    "const": "RECHECK_NOT_OFFERED",
+                    "description": "Nothing the spend request was decided on has changed in a way that asks for a re-check, so approve it as it is: leave `recheck` out. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "RECHECK_REQUIRED",
+                    "description": "The supplier’s details changed after the spend request was decided and have been verified again, so it isn’t approved under the old ones: ask again with `recheck`, to see how it is weighed under the new details before you approve. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "REQUEST_CHANGED",
-                    "description": "Something the spend request was decided on has changed since (its mandate, a policy, the supplier, the funding source, the agent or the key it asked with), or it would no longer be allowed, so it can't be approved as it is. Reject it; the agent must ask again. Nothing was changed."
+                    "description": "Something the spend request was decided on has changed since (its mandate, the supplier, the funding source, the agent or the key it asked with), or it would no longer be allowed, so it can't be approved as it is. If the supplier's new details are waiting to be verified under a pause, it can be approved, re-checked, once they are; otherwise reject it, and the agent asks again. Nothing was changed."
                   },
                   {
                     "type": "string",
@@ -2291,13 +2301,101 @@
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "recheck": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "fromSupplierVersionId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "supplierVersionId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "decidedAs": {
+                    "type": "string",
+                    "enum": [
+                      "DENY",
+                      "REQUIRE_NEW_MANDATE",
+                      "REQUIRE_APPROVAL",
+                      "ALLOW"
+                    ]
+                  },
+                  "decidedReasons": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "DENY",
+                      "REQUIRE_NEW_MANDATE",
+                      "REQUIRE_APPROVAL",
+                      "ALLOW"
+                    ]
+                  },
+                  "reasons": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "fromSupplierVersionId",
+                  "supplierVersionId",
+                  "decidedAs",
+                  "decidedReasons",
+                  "decision",
+                  "reasons"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
-          "stepUpChallengeId"
+          "stepUpChallengeId",
+          "recheck"
         ],
         "additionalProperties": false,
-        "description": "Approving a spend request, waiting for you to sign in again."
+        "description": "Approving a spend request, waiting for you to sign in again; with `recheck`, how it is weighed now."
       },
       "Agent": {
         "type": "object",
@@ -7684,7 +7782,14 @@
                 "anyOf": [
                   {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                      "recheck": {
+                        "type": "boolean",
+                        "enum": [
+                          true
+                        ]
+                      }
+                    },
                     "additionalProperties": false
                   },
                   {
@@ -7782,6 +7887,12 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "recheck": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
                   }
                 },
                 "required": [

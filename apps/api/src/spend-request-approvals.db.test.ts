@@ -96,10 +96,10 @@ const shared = spendWorld({
 const { ready, ask, statusOf, holdingsOf, spentOf, member, keyed, stepUp, eventsAbout } = shared;
 
 const asking = (who: Member, requestId: string) =>
-  approvals.ask(who, keyed(who, APPROVE_OPERATION), requestId, CORRELATION);
+  approvals.ask(who, keyed(who, APPROVE_OPERATION), requestId, false, CORRELATION);
 
 const confirming = (who: Member, requestId: string, challengeId: string, key?: IdempotentRequest) =>
-  approvals.confirm(who, key ?? keyed(who, APPROVE_CONFIRM_OPERATION), requestId, challengeId, CORRELATION);
+  approvals.confirm(who, key ?? keyed(who, APPROVE_CONFIRM_OPERATION), requestId, challengeId, false, CORRELATION);
 
 /** Asks, signs in again with `amr` and confirms: the confirm's answer. */
 async function approved(who: Member, requestId: string, amr?: readonly string[]) {

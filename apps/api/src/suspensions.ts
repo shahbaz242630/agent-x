@@ -278,13 +278,15 @@ export const MOST_CARRIED_CHANGES = 10;
  * from before the choice, which names no version it follows). A request
  * decided under one of them isn't void for its new details; its supplier's
  * status is judged as ever. Throws for a history that can't be believed (its
- * alarm already raised).
+ * alarm already raised): `unbelieved`'s error, a plain one when not given (a
+ * use case passes its INTEGRITY_FAILED refusal).
  */
 export async function pausedFromOf(
   tx: AuditTransaction,
   states: SignedStates,
   orgId: string,
   supplier: { readonly id: string; readonly currentVersionId: string },
+  unbelieved: () => Error = () => new Error(`A supplier's version history can't be believed: ${supplier.id}`),
 ): Promise<readonly string[]> {
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SUPPLIERS.subject],
@@ -293,7 +295,7 @@ export async function pausedFromOf(
     limit: MOST_CARRIED_CHANGES,
     newest: true,
   });
-  if (history.outcome !== 'read') throw new Error(`A supplier's version history can't be believed: ${supplier.id}`);
+  if (history.outcome !== 'read') throw unbelieved();
   const carried: string[] = [];
   let expected = supplier.currentVersionId;
   for (const { event } of history.events.toReversed()) {

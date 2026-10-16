@@ -27,7 +27,8 @@
 // details change's choice the same way: cancel voids them at once whatever
 // the supplier's status; pause carries them to the new details, standing
 // once the supplier is verified again (a waiting one not approved under the
-// old details, decision 16), until a new payee or a change chosen to cancel.
+// old details, decision 16, but re-checked by its approver, E5a), until a new
+// payee or a change chosen to cancel.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createSessions, createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -75,7 +76,11 @@ import { AED, askedFor, draftedOf, keys, PASSKEY, type World } from './mandate-w
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createRequestVoids } from './request-voids.ts';
-import { APPROVE_OPERATION, createSpendRequestApprovals } from './spend-request-approvals.ts';
+import {
+  APPROVE_CONFIRM_OPERATION,
+  APPROVE_OPERATION,
+  createSpendRequestApprovals,
+} from './spend-request-approvals.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 import {
   createSupplierChanges,
@@ -1196,26 +1201,135 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
     expect((await supplierNow(w)).status).toBe('VERIFIED');
   });
 
-  it('a waiting request carried to the new details isn’t approved under the old ones: REQUEST_CHANGED (decision 16, E5)', async () => {
-    const { w, acting } = await ready();
-    const { waiting } = await pendingOf(w, acting);
-    await changedDetails(w, 'pause');
-    await shared.verified(w, supplierOfWorld(w));
-    const approvals = createSpendRequestApprovals({
-      database: app,
-      keys,
-      ids,
-      clock,
-      challenges: createStepUpChallenges({ ids, clock }),
-      logger: logger(),
+  describe('a waiting request carried to the new details: its approver re-checks it (decisions 16, 18; E5a)', () => {
+    const approvals = () =>
+      createSpendRequestApprovals({
+        database: app,
+        keys,
+        ids,
+        clock,
+        challenges: createStepUpChallenges({ ids, clock }),
+        logger: logger(),
+      });
+    /** The admin's ask to approve, with or without a re-check, under `key` if given. */
+    const asking = (w: World, id: string, recheck: boolean, key = keyed(w.admin, APPROVE_OPERATION)) =>
+      approvals().ask(w.admin, key, id, recheck, CORRELATION);
+    const confirming = (w: World, id: string, challengeId: string, recheck: boolean) =>
+      approvals().confirm(w.admin, keyed(w.admin, APPROVE_CONFIRM_OPERATION), id, challengeId, recheck, CORRELATION);
+    /** The world's waiting request carried by a pause to new details, verified again; the details it was decided under. */
+    const carried = async () => {
+      const { w, acting } = await ready();
+      const { waiting } = await pendingOf(w, acting);
+      const before = (await supplierNow(w)).currentVersionId;
+      await changedDetails(w, 'pause');
+      await shared.verified(w, supplierOfWorld(w));
+      return { w, waiting, before, after: (await supplierNow(w)).currentVersionId };
+    };
+
+    it('isn’t approved under the old details: asked without a re-check, RECHECK_REQUIRED, nothing changed', async () => {
+      const { w, waiting } = await carried();
+
+      expect(await asking(w, waiting.id, false)).toEqual({ outcome: 'refused', status: 409, code: 'RECHECK_REQUIRED' });
+      expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
     });
 
-    expect(await approvals.ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, CORRELATION)).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'REQUEST_CHANGED',
+    it('re-checked: shown what changed and how it is weighed now, then approved with the re-check on its event', async () => {
+      const { w, waiting, before, after } = await carried();
+      const recheck = {
+        fromSupplierVersionId: before,
+        supplierVersionId: after,
+        decidedAs: 'REQUIRE_APPROVAL',
+        decidedReasons: ['APPROVAL_THRESHOLD'],
+        decision: 'REQUIRE_APPROVAL',
+        reasons: ['APPROVAL_THRESHOLD'],
+      };
+
+      const asked = await asking(w, waiting.id, true);
+      expect(asked).toEqual({ outcome: 'asked', stepUpChallengeId: expect.any(String) as unknown, recheck });
+      const challengeId = askedFor(asked);
+      await stepUp(w.admin, challengeId);
+      // The confirm takes the re-check it was asked with, or it is refused as one not re-checked.
+      expect(await confirming(w, waiting.id, challengeId, false)).toMatchObject({ code: 'RECHECK_REQUIRED' });
+      expect(await confirming(w, waiting.id, challengeId, true)).toMatchObject({
+        outcome: 'approved',
+        request: { id: waiting.id, status: 'APPROVED' },
+      });
+
+      expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
+      expect((await shared.eventsAbout(w.org, waiting.id, 'spend_request')).at(-1)).toMatchObject({
+        action: 'spend_request.approved',
+        details: {
+          stepUpChallengeId: challengeId,
+          recheckedFromSupplierVersionId: before,
+          recheckedSupplierVersionId: after,
+          recheckedDecision: 'REQUIRE_APPROVAL',
+          recheckedReasons: 'APPROVAL_THRESHOLD',
+          recheckStatementVersion: 1,
+        },
+      });
+      const holdings = await signed(w, (tx, states) =>
+        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+      );
+      expect(holdings).toMatchObject({ mismatched: 0, tampered: 0 });
     });
-    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+
+    it('answers a replayed ask with the re-check worked out again', async () => {
+      const { w, waiting } = await carried();
+      const key = keyed(w.admin, APPROVE_OPERATION);
+
+      const first = await asking(w, waiting.id, true, key);
+      expect(await asking(w, waiting.id, true, key)).toEqual(first);
+    });
+
+    it('answers a replayed ask with the refusal as it now stands, once the details changed again', async () => {
+      const { w, waiting } = await carried();
+      const key = keyed(w.admin, APPROVE_OPERATION);
+      expect(await asking(w, waiting.id, true, key)).toMatchObject({ outcome: 'asked' });
+
+      await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co');
+      expect(await asking(w, waiting.id, true, key)).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'REQUEST_CHANGED',
+      });
+    });
+
+    it('refuses a confirm once the details changed again after the ask: STEP_UP_FAILED, still waiting', async () => {
+      const { w, waiting } = await carried();
+      const challengeId = askedFor(await asking(w, waiting.id, true));
+      await stepUp(w.admin, challengeId);
+
+      await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co');
+      await shared.verified(w, supplierOfWorld(w));
+      expect(await confirming(w, waiting.id, challengeId, true)).toMatchObject({ code: 'STEP_UP_FAILED' });
+      expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    });
+
+    it('stays REQUEST_CHANGED while the new details wait to be verified, re-check or not', async () => {
+      const { w, acting } = await ready();
+      const { waiting } = await pendingOf(w, acting);
+      await changedDetails(w, 'pause');
+
+      for (const recheck of [false, true]) {
+        expect(await asking(w, waiting.id, recheck)).toEqual({
+          outcome: 'refused',
+          status: 409,
+          code: 'REQUEST_CHANGED',
+        });
+      }
+    });
+
+    it('offers no re-check for one whose supplier is unchanged: RECHECK_NOT_OFFERED', async () => {
+      const { w, acting } = await ready();
+      const { waiting } = await pendingOf(w, acting);
+
+      expect(await asking(w, waiting.id, true)).toEqual({
+        outcome: 'refused',
+        status: 400,
+        code: 'RECHECK_NOT_OFFERED',
+      });
+      expect(await asking(w, waiting.id, false)).toMatchObject({ outcome: 'asked', recheck: null });
+    });
   });
 });
 

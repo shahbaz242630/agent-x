@@ -386,11 +386,18 @@ describe('approvals racing a revoke and the agent’s requests (Phase 3 B4b, SEC
       // Each its own approver, in a session of their own, so no confirm waits on another's challenges (0b).
       const approver = await shared.member(w.org, 'approver');
       const challengeId = askedFor(
-        await approvals.ask(approver, keyed(approver, APPROVE_OPERATION), waiting.id, CORRELATION),
+        await approvals.ask(approver, keyed(approver, APPROVE_OPERATION), waiting.id, false, CORRELATION),
       );
       await shared.stepUp(approver, challengeId);
       confirms.push(() =>
-        approvals.confirm(approver, keyed(approver, APPROVE_CONFIRM_OPERATION), waiting.id, challengeId, CORRELATION),
+        approvals.confirm(
+          approver,
+          keyed(approver, APPROVE_CONFIRM_OPERATION),
+          waiting.id,
+          challengeId,
+          false,
+          CORRELATION,
+        ),
       );
     }
     const [first, ...rest] = confirms;

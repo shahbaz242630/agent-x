@@ -20,6 +20,13 @@
 //   ask again (SEC-LIM-10). Routine changes don't void it: a policy changed
 //   since is weighed as it now is, and a key rotated out (expired, not
 //   revoked) still stands behind what it asked;
+// - re-checked (decisions 15.3, 16, 18; E5a): one whose supplier moved to new
+//   details only through changes chosen to pause (E3, pausedFromOf), now
+//   verified, isn't approved under the old details: its approver asks with
+//   `recheck`, is shown what changed and how the engine weighs it now
+//   (RecheckShown, bound into the step-up), and the confirm records it on the
+//   approval. Without `recheck` it is RECHECK_REQUIRED (409); `recheck` on
+//   one with nothing to re-check is RECHECK_NOT_OFFERED (400);
 // - one past its 72 hours, that the expiry job hasn't reached yet, is
 //   refused (REQUEST_EXPIRED, 409) and then expired at once, its reservation
 //   and claim released (SEC-LIM-12), in a transaction of its own.
@@ -44,7 +51,7 @@ import { agentKeyOf } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { lockAgentPeriod } from '@agentx/core/modules/limit-reservations';
-import { decide } from '@agentx/core/modules/policies';
+import { decide, type Decision } from '@agentx/core/modules/policies';
 import {
   approveRequest,
   decidedAgainst,
@@ -55,7 +62,7 @@ import {
   type SpendRequestRecord,
   waitedOut,
 } from '@agentx/core/modules/spend-requests';
-import { type Clock, type IdGenerator, money } from '@agentx/core/shared-kernel';
+import { type Clock, type IdGenerator, money, type ReasonCode } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -64,6 +71,7 @@ import { MandateRefused } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { agentAlone, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
+import { pausedFromOf } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
 export const APPROVE_OPERATION = 'spend-requests.approve';
@@ -71,8 +79,56 @@ export const APPROVE_CONFIRM_OPERATION = 'spend-requests.approve.confirm';
 
 type ApproveTx = DatabaseTransaction<DecisionTables>;
 
+/**
+ * A re-check as the ask shows it and the approval keeps it (E5a): the
+ * supplier's details it was decided under and those it is approved under,
+ * and the engine's decision and reasons then and now.
+ */
+export interface RecheckShown {
+  readonly fromSupplierVersionId: string;
+  readonly supplierVersionId: string;
+  readonly decidedAs: Decision;
+  readonly decidedReasons: readonly ReasonCode[];
+  readonly decision: Decision;
+  readonly reasons: readonly ReasonCode[];
+}
+
+/** The words a re-check is confirmed with: the console's confirm shows them, the approval keeps their version. */
+export const RECHECK_STATEMENT =
+  'The supplier’s details changed after this request was decided, and a second person has verified them. ' +
+  'Approving it checks it again under the new details and today’s policies, as shown: its amount, order and ' +
+  'the month its money is held in are unchanged.';
+
+/** The version of RECHECK_STATEMENT each re-check names: raised with any change to its words. */
+const RECHECK_STATEMENT_VERSION = 1;
+
+/** A re-check as the step-up binds it: what changed, the decision and reasons now, and its words' version. */
+const recheckHashParts = (view: RecheckShown | null): readonly string[] =>
+  view === null
+    ? []
+    : [
+        'recheck',
+        String(RECHECK_STATEMENT_VERSION),
+        view.fromSupplierVersionId.toLowerCase(),
+        view.supplierVersionId.toLowerCase(),
+        view.decision,
+        view.reasons.join(','),
+      ];
+
+/** A re-check as the approval's event keeps it, beside the step-up's evidence; nothing for none. */
+const recheckDetails = (view: RecheckShown | null) =>
+  view === null
+    ? {}
+    : {
+        recheckedFromSupplierVersionId: view.fromSupplierVersionId,
+        recheckedSupplierVersionId: view.supplierVersionId,
+        recheckedDecision: view.decision,
+        recheckedReasons: view.reasons.join(' '),
+        recheckStatementVersion: RECHECK_STATEMENT_VERSION,
+      };
+
 export type ApproveAsked =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string; readonly recheck: RecheckShown | null }
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
   | Refused;
@@ -84,10 +140,12 @@ export type Approved =
   | Refused;
 
 export interface SpendRequestApprovals {
+  /** `recheck`: the approver asks to re-check one whose supplier's details changed (E5a). */
   ask(
     member: SessionMember,
     idempotent: IdempotentRequest,
     requestId: string,
+    recheck: boolean,
     correlationId: string,
   ): Promise<ApproveAsked>;
   confirm(
@@ -95,13 +153,17 @@ export interface SpendRequestApprovals {
     idempotent: IdempotentRequest,
     requestId: string,
     stepUpChallengeId: string,
+    recheck: boolean,
     correlationId: string,
   ): Promise<Approved>;
 }
 
-/** The approval's SHA-256: the organisation and the request's latest event, IDs in lower case (see rejectHash). */
-const approveHash = (orgId: string, requestEvent: string): Buffer =>
-  changeHashOf([orgId.toLowerCase(), requestEvent.toLowerCase()]);
+/**
+ * The approval's SHA-256: the organisation and the request's latest event,
+ * IDs in lower case (see rejectHash), and any re-check as shown.
+ */
+const approveHash = (orgId: string, requestEvent: string, view: RecheckShown | null): Buffer =>
+  changeHashOf([orgId.toLowerCase(), requestEvent.toLowerCase(), ...recheckHashParts(view)]);
 
 /**
  * What the request's row names, read before any lock (levels 3–7 come
@@ -126,6 +188,55 @@ async function namedBy(tx: ApproveTx, orgId: string, requestId: string) {
       .where('id', '=', requestId)
       .executeTakeFirst()
   );
+}
+
+/** Where the supplier's details stand against those a request was decided under. */
+type SupplierMove =
+  | { readonly move: 'same' }
+  /** New details that carried it only through changes chosen to pause (E3): re-checked, never approved as decided. */
+  | { readonly move: 'carried'; readonly from: string; readonly to: string }
+  /** Moved otherwise, or no supplier: it can't be approved. */
+  | { readonly move: 'moved' };
+
+async function supplierMoveOf(
+  tx: ApproveTx,
+  states: SignedStates,
+  orgId: string,
+  supplier: { readonly id: string; readonly currentVersionId: string } | null,
+  decidedUnder: string | null,
+): Promise<SupplierMove> {
+  if (supplier === null) return { move: 'moved' };
+  if (supplier.currentVersionId === decidedUnder) return { move: 'same' };
+  if (decidedUnder === null) return { move: 'moved' };
+  const pausedFrom = await pausedFromOf(tx, states, orgId, supplier, () => new MandateRefused(503, 'INTEGRITY_FAILED'));
+  return pausedFrom.includes(decidedUnder)
+    ? { move: 'carried', from: decidedUnder, to: supplier.currentVersionId }
+    : { move: 'moved' };
+}
+
+/**
+ * The re-check shown for one carried to new details, which must be asked
+ * for; none otherwise, where asking for one is refused.
+ */
+function recheckShown(
+  supplier: SupplierMove,
+  recheck: boolean,
+  request: SpendRequestRecord,
+  made: { readonly decision: Decision; readonly reasons: readonly ReasonCode[] },
+): RecheckShown | null {
+  if (supplier.move !== 'carried') {
+    if (recheck) throw new MandateRefused(400, 'RECHECK_NOT_OFFERED');
+    return null;
+  }
+  if (!recheck) throw new MandateRefused(409, 'RECHECK_REQUIRED');
+  return {
+    fromSupplierVersionId: supplier.from,
+    supplierVersionId: supplier.to,
+    decidedAs: request.decision,
+    decidedReasons: request.reasons,
+    decision: made.decision,
+    reasons: made.reasons,
+  };
 }
 
 export function createSpendRequestApprovals({
@@ -157,6 +268,7 @@ export function createSpendRequestApprovals({
     member: SessionMember,
     requestId: string,
     decides: boolean,
+    recheck: boolean,
   ) {
     const { orgId } = member;
     // Read before the lock waits below, as a decision's: the instant it is weighed at.
@@ -213,21 +325,22 @@ export function createSpendRequestApprovals({
     }
 
     const made = decide(weighed.input);
+    const supplierNow = await supplierMoveOf(tx, states, orgId, weighed.supplier, against.supplierVersionId);
     const unchanged =
       key.outcome === 'found' &&
       key.key.status !== 'REVOKED' &&
       weighed.mandate !== null &&
       weighed.mandate.versionId === against.mandateVersionId &&
-      weighed.supplier !== null &&
-      weighed.supplier.currentVersionId === against.supplierVersionId &&
+      supplierNow.move !== 'moved' &&
       holdsCapacity(made.decision);
     if (!unchanged) throw new MandateRefused(409, 'REQUEST_CHANGED');
+    const view = recheckShown(supplierNow, recheck, request, made);
     // The policies it is approved under, which may be newer than its decision's: kept with the approval.
     const weighedUnder = {
       organizationPolicyVersionId: made.versions.organizationPolicy,
       mandatePolicyVersionId: made.versions.mandatePolicy,
     };
-    return { read, weighedUnder };
+    return { read, weighedUnder, view };
   }
 
   /**
@@ -250,34 +363,50 @@ export function createSpendRequestApprovals({
   }
 
   return {
-    async ask(member, idempotent, requestId, correlationId) {
+    async ask(member, idempotent, requestId, recheck, correlationId) {
+      let shown: RecheckShown | null = null;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        const { read } = await approvable(tx, states, member, requestId, false);
+        const { read, view } = await approvable(tx, states, member, requestId, false, recheck);
+        shown = view;
         return stepUps.ask(tx, member, {
           action: APPROVE_OPERATION,
-          changeHash: approveHash(member.orgId, read.state.eventId),
+          changeHash: approveHash(member.orgId, read.state.eventId, view),
         });
       });
       if (isUnwritten(done)) return expiredIfDue(done, member.orgId, requestId, correlationId);
-      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
+      // A replayed ask answers from its key's record, which keeps no re-check: it is worked out again, as it now
+      // stands (as E4c's plan). Changed since the step-up bound it, the confirm refuses.
+      if (done.outcome === 'replayed' && recheck) {
+        const again = await work.answered(member.orgId, correlationId, async (tx, states) => ({
+          view: (await approvable(tx, states, member, requestId, false, recheck)).view,
+        }));
+        // Refused now (expired, say), as a first ask would be: one past its 72 hours is expired at once.
+        if ('outcome' in again) return expiredIfDue(again, member.orgId, requestId, correlationId);
+        shown = again.view;
+      }
+      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, recheck: shown };
     },
 
-    async confirm(member, idempotent, requestId, stepUpChallengeId, correlationId) {
+    async confirm(member, idempotent, requestId, stepUpChallengeId, recheck, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
-        const { read, weighedUnder } = await approvable(tx, states, member, requestId, true);
+        const { read, weighedUnder, view } = await approvable(tx, states, member, requestId, true, recheck);
         const consumed = await stepUps.consumed(
           tx,
           member,
           held,
           stepUpChallengeId,
-          { action: APPROVE_OPERATION, changeHash: approveHash(member.orgId, read.state.eventId) },
+          { action: APPROVE_OPERATION, changeHash: approveHash(member.orgId, read.state.eventId, view) },
           { passkeyRequired: true },
         );
         const key = { orgId: member.orgId, id: requestId };
         const approved = await approveRequest(tx, states, keys, key, {
           userId: member.userId,
-          stepUp: { ...stepUpDetails(consumed), ...weighedUnder },
+          stepUp: {
+            ...stepUpDetails(consumed),
+            ...weighedUnder,
+            ...recheckDetails(view),
+          },
         });
         // The judging raised the alarm: nothing is approved on holdings changed past the app.
         if (approved === 'mismatch') throw new MandateRefused(503, 'INTEGRITY_FAILED');
