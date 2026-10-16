@@ -54,6 +54,10 @@ describe('rejectedFor: what a refusal at approval rejects it for', () => {
       'POLICY_ORDER_CAP',
     ]);
     expect(rejectedFor('DENY', ['POLICY_ORDER_CAP', 'AGENT_SUSPENDED'])).toBeNull();
+    // Beside a REQUIRE_NEW_MANDATE it didn't refuse (it would have made a DENY): it only asked for an approval.
+    expect(rejectedFor('REQUIRE_NEW_MANDATE', ['MANDATE_MONTHLY_LIMIT', 'POLICY_ORDER_CAP'])).toEqual([
+      'MANDATE_MONTHLY_LIMIT',
+    ]);
   });
 
   it.each(RULES)('rejects it for each rule the team set alone: %s', (rule) => {
