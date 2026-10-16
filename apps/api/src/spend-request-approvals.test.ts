@@ -81,7 +81,9 @@ async function withApprovals(
   const approvals: SpendRequestApprovals = {
     ask: (member, idempotent, requestId, recheck) => {
       asked.push({ member, idempotent, requestId, recheck });
-      return Promise.resolve(answers.ask ?? { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID, recheck: null });
+      return Promise.resolve(
+        answers.ask ?? { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID, recheck: null, rejection: null },
+      );
     },
     confirm: (member, idempotent, requestId, stepUpChallengeId, recheck) => {
       asked.push({ member, idempotent, requestId, stepUpChallengeId, recheck });
@@ -136,7 +138,7 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
 
       const asking = await app.inject(ask());
       expect(asking.statusCode).toBe(202);
-      expect(asking.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID, recheck: null });
+      expect(asking.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID, recheck: null, rejection: null });
       const confirming = await app.inject(confirm({ stepUpChallengeId: CHALLENGE_ID }));
       expect(confirming.statusCode).toBe(200);
       expect(confirming.json()).toMatchObject({
@@ -166,7 +168,7 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
 
   it('hands a re-check on to the use case in both, and answers what changed with each reason’s words (E5a)', async () => {
     const { app, asked } = await withApprovals({
-      ask: { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID, recheck: RECHECKED },
+      ask: { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID, recheck: RECHECKED, rejection: null },
     });
 
     const asking = await app.inject(ask({ recheck: true }));
@@ -178,10 +180,40 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
         decidedReasons: [{ code: 'APPROVAL_THRESHOLD', message: expect.any(String) as unknown }],
         reasons: [{ code: 'APPROVAL_THRESHOLD', message: expect.any(String) as unknown }],
       },
+      rejection: null,
     });
     const confirming = await app.inject(confirm({ stepUpChallengeId: CHALLENGE_ID, recheck: true }));
     expect(confirming.statusCode).toBe(200);
     expect(asked.map(({ recheck }) => recheck)).toEqual([true, true]);
+  });
+
+  it('shows a rejection with each rule’s words and what to do, and answers the confirm’s DENIED (decision 18, E5b)', async () => {
+    const { app } = await withApprovals({
+      ask: {
+        outcome: 'asked',
+        stepUpChallengeId: CHALLENGE_ID,
+        recheck: null,
+        rejection: ['POLICY_MONTHLY_CAP'],
+      },
+      confirm: { outcome: 'rejected', request: { ...APPROVED, status: 'DENIED' } },
+    });
+
+    const asking = await app.inject(ask());
+    expect(asking.statusCode).toBe(202);
+    expect(asking.json()).toEqual({
+      stepUpChallengeId: CHALLENGE_ID,
+      recheck: null,
+      rejection: [
+        {
+          code: 'POLICY_MONTHLY_CAP',
+          message: expect.stringMatching(/./) as unknown,
+          whatToDo: 'Raise the monthly cap in the organisation’s or the mandate’s policy settings.',
+        },
+      ],
+    });
+    const confirming = await app.inject(confirm({ stepUpChallengeId: CHALLENGE_ID }));
+    expect(confirming.statusCode).toBe(200);
+    expect(confirming.json()).toMatchObject({ id: REQUEST_ID, status: 'DENIED' });
   });
 
   it('refuses a re-check that isn’t `true` in either, before the use case runs', async () => {

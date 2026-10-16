@@ -65,7 +65,7 @@ import {
   SpendAskRefused,
   type SpendRequestRecord,
 } from '@agentx/core/modules/spend-requests';
-import { moneyFromJson } from '@agentx/core/shared-kernel';
+import { moneyFromJson, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -73,6 +73,7 @@ import { z } from 'zod';
 
 import { agentOf, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
+import { whatToDoFor } from './approval-rejections.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   AMOUNT,
@@ -403,6 +404,25 @@ const RECHECK_SHOWN = z
       'first, the confirm is refused and you ask again. Null otherwise.',
   );
 
+/** A rejection as the ask shows it (decision 18; E5b): each rule that now refuses it, its words and what to do. */
+const REJECTION_SHOWN = z
+  .array(
+    z.object({
+      code: z.string(),
+      message: z.string(),
+      whatToDo: z.string().describe('What your team can change so the agent may ask again.'),
+    }),
+  )
+  .nullable()
+  .describe(
+    'When today’s check refuses it under rules your team set (a limit or cap lowered, a supplier taken off a ' +
+      'policy): confirming **rejects** it, its money freed, with these kept on its record; the agent learns only ' +
+      'that a person rejected it. Null when confirming approves it.',
+  );
+
+const shownRejection = (rules: readonly ReasonCode[] | null) =>
+  rules?.map((code) => ({ code, message: REASON_CODES[code], whatToDo: whatToDoFor(code) ?? '' })) ?? null;
+
 const shownRecheck = (view: RecheckShown | null) =>
   view === null
     ? null
@@ -424,7 +444,7 @@ const APPROVE_SCHEMA = {
     202: stepUpAskedWith(
       'SpendRequestApproveAsked',
       'Approving a spend request, waiting for you to sign in again; with `recheck`, how it is weighed now.',
-      { recheck: RECHECK_SHOWN },
+      { recheck: RECHECK_SHOWN, rejection: REJECTION_SHOWN },
     ),
   },
 };
@@ -437,7 +457,7 @@ const APPROVE_CONFIRM_SCHEMA = {
   ),
   response: {
     200: SPEND_REQUEST_SHOWN.describe(
-      'The request as it now stands: APPROVED, weighed again as everything now stands, keeping its reservation and order claim.',
+      'The request as it now stands: APPROVED, weighed again as everything now stands, keeping its reservation and order claim; or DENIED, rejected under your team’s rules as the ask showed, its money freed.',
     ),
   },
 };
@@ -610,7 +630,11 @@ export function registerSpendRequests(
         request.id,
       );
       if (asked.outcome !== 'asked') return answerAsked(asked, request, reply);
-      return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId, recheck: shownRecheck(asked.recheck) });
+      return reply.code(202).send({
+        stepUpChallengeId: asked.stepUpChallengeId,
+        recheck: shownRecheck(asked.recheck),
+        rejection: shownRejection(asked.rejection),
+      });
     },
   );
 
