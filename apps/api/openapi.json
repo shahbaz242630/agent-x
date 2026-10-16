@@ -462,7 +462,7 @@
                   {
                     "type": "string",
                     "const": "REQUEST_CHANGED",
-                    "description": "Something the spend request was decided on has changed since (its mandate, a policy, the supplier, the funding source, the agent or the key it asked with), or it would no longer be allowed, so it can't be approved as it is. Reject it; the agent must ask again. Nothing was changed."
+                    "description": "Something the spend request was decided on has changed since (its mandate, the supplier, the funding source, the agent or the key it asked with), or it would no longer be allowed, so it can't be approved as it is. If the supplier's new details are waiting to be verified under a pause, it can be approved, re-checked, once they are; otherwise reject it, and the agent asks again. Nothing was changed."
                   },
                   {
                     "type": "string",

@@ -282,7 +282,9 @@ export function createSpendRequestApprovals({
     const carriedFrom =
       moved &&
       against.supplierVersionId !== null &&
-      (await pausedFromOf(tx, states, orgId, supplier)).includes(against.supplierVersionId)
+      (await pausedFromOf(tx, states, orgId, supplier, () => new MandateRefused(503, 'INTEGRITY_FAILED'))).includes(
+        against.supplierVersionId,
+      )
         ? against.supplierVersionId
         : null;
     const unchanged =
@@ -353,7 +355,8 @@ export function createSpendRequestApprovals({
         const again = await work.answered(member.orgId, correlationId, async (tx, states) => ({
           view: (await approvable(tx, states, member, requestId, false, recheck)).view,
         }));
-        if ('outcome' in again) return again;
+        // Refused now (expired, say), as a first ask would be: one past its 72 hours is expired at once.
+        if ('outcome' in again) return expiredIfDue(again, member.orgId, requestId, correlationId);
         shown = again.view;
       }
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, recheck: shown };

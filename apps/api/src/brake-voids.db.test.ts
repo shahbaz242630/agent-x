@@ -1281,6 +1281,19 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
       expect(await asking(w, waiting.id, true, key)).toEqual(first);
     });
 
+    it('answers a replayed ask with the refusal as it now stands, once the details changed again', async () => {
+      const { w, waiting } = await carried();
+      const key = keyed(w.admin, APPROVE_OPERATION);
+      expect(await asking(w, waiting.id, true, key)).toMatchObject({ outcome: 'asked' });
+
+      await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co');
+      expect(await asking(w, waiting.id, true, key)).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'REQUEST_CHANGED',
+      });
+    });
+
     it('refuses a confirm once the details changed again after the ask: STEP_UP_FAILED, still waiting', async () => {
       const { w, waiting } = await carried();
       const challengeId = askedFor(await asking(w, waiting.id, true));
