@@ -190,21 +190,53 @@ async function namedBy(tx: ApproveTx, orgId: string, requestId: string) {
   );
 }
 
-/**
- * The supplier's details a request was decided under, when new ones carried
- * it there only through changes chosen to pause (E3): re-checked, never
- * approved as decided. Null when moved otherwise (or decided under none).
- */
-async function carriedFromOf(
+/** Where the supplier's details stand against those a request was decided under. */
+type SupplierMove =
+  | { readonly move: 'same' }
+  /** New details that carried it only through changes chosen to pause (E3): re-checked, never approved as decided. */
+  | { readonly move: 'carried'; readonly from: string; readonly to: string }
+  /** Moved otherwise, or no supplier: it can't be approved. */
+  | { readonly move: 'moved' };
+
+async function supplierMoveOf(
   tx: ApproveTx,
   states: SignedStates,
   orgId: string,
-  supplier: { readonly id: string; readonly currentVersionId: string },
+  supplier: { readonly id: string; readonly currentVersionId: string } | null,
   decidedUnder: string | null,
-): Promise<string | null> {
-  if (decidedUnder === null) return null;
+): Promise<SupplierMove> {
+  if (supplier === null) return { move: 'moved' };
+  if (supplier.currentVersionId === decidedUnder) return { move: 'same' };
+  if (decidedUnder === null) return { move: 'moved' };
   const pausedFrom = await pausedFromOf(tx, states, orgId, supplier, () => new MandateRefused(503, 'INTEGRITY_FAILED'));
-  return pausedFrom.includes(decidedUnder) ? decidedUnder : null;
+  return pausedFrom.includes(decidedUnder)
+    ? { move: 'carried', from: decidedUnder, to: supplier.currentVersionId }
+    : { move: 'moved' };
+}
+
+/**
+ * The re-check shown for one carried to new details, which must be asked
+ * for; none otherwise, where asking for one is refused.
+ */
+function recheckShown(
+  supplier: SupplierMove,
+  recheck: boolean,
+  request: SpendRequestRecord,
+  made: { readonly decision: Decision; readonly reasons: readonly ReasonCode[] },
+): RecheckShown | null {
+  if (supplier.move !== 'carried') {
+    if (recheck) throw new MandateRefused(400, 'RECHECK_NOT_OFFERED');
+    return null;
+  }
+  if (!recheck) throw new MandateRefused(409, 'RECHECK_REQUIRED');
+  return {
+    fromSupplierVersionId: supplier.from,
+    supplierVersionId: supplier.to,
+    decidedAs: request.decision,
+    decidedReasons: request.reasons,
+    decision: made.decision,
+    reasons: made.reasons,
+  };
 }
 
 export function createSpendRequestApprovals({
@@ -293,32 +325,16 @@ export function createSpendRequestApprovals({
     }
 
     const made = decide(weighed.input);
-    const { supplier } = weighed;
-    const moved = supplier !== null && supplier.currentVersionId !== against.supplierVersionId;
-    const carriedFrom = moved ? await carriedFromOf(tx, states, orgId, supplier, against.supplierVersionId) : null;
+    const supplierNow = await supplierMoveOf(tx, states, orgId, weighed.supplier, against.supplierVersionId);
     const unchanged =
       key.outcome === 'found' &&
       key.key.status !== 'REVOKED' &&
       weighed.mandate !== null &&
       weighed.mandate.versionId === against.mandateVersionId &&
-      supplier !== null &&
-      (!moved || carriedFrom !== null) &&
+      supplierNow.move !== 'moved' &&
       holdsCapacity(made.decision);
     if (!unchanged) throw new MandateRefused(409, 'REQUEST_CHANGED');
-    if ((carriedFrom !== null) !== recheck) {
-      throw recheck ? new MandateRefused(400, 'RECHECK_NOT_OFFERED') : new MandateRefused(409, 'RECHECK_REQUIRED');
-    }
-    const view: RecheckShown | null =
-      carriedFrom === null
-        ? null
-        : {
-            fromSupplierVersionId: carriedFrom,
-            supplierVersionId: supplier.currentVersionId,
-            decidedAs: request.decision,
-            decidedReasons: request.reasons,
-            decision: made.decision,
-            reasons: made.reasons,
-          };
+    const view = recheckShown(supplierNow, recheck, request, made);
     // The policies it is approved under, which may be newer than its decision's: kept with the approval.
     const weighedUnder = {
       organizationPolicyVersionId: made.versions.organizationPolicy,
