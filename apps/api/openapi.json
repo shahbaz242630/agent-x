@@ -2021,6 +2021,9 @@
                 "type": "null"
               }
             ]
+          },
+          "needsRecheck": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -2036,7 +2039,8 @@
           "mandateId",
           "bankReference",
           "changedAt",
-          "expiresAt"
+          "expiresAt",
+          "needsRecheck"
         ],
         "additionalProperties": false,
         "description": "A spend request, as the team sees it in a list."
@@ -2169,6 +2173,9 @@
               }
             ]
           },
+          "needsRecheck": {
+            "type": "boolean"
+          },
           "agentWrote": {
             "type": "object",
             "properties": {
@@ -2272,6 +2279,7 @@
           "bankReference",
           "changedAt",
           "expiresAt",
+          "needsRecheck",
           "agentWrote",
           "rejection",
           "voiding"

@@ -1278,6 +1278,28 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
       expect(holdings).toMatchObject({ mismatched: 0, tampered: 0 });
     });
 
+    it('is flagged as needing a re-check in the team’s list and its own read once carried, not before (E5c)', async () => {
+      const { w, acting } = await ready();
+      const { waiting } = await pendingOf(w, acting);
+      const reads = createSpendRequestReads({ database: app, keys, ids, logger: logger() });
+      const flagged = async () => {
+        const listed = await reads.list(w.org, { after: null, limit: 50 }, 'waiting', CORRELATION);
+        if (listed.outcome !== 'listed') throw new Error(`not listed: ${JSON.stringify(listed)}`);
+        const shown = await reads.show(w.org, waiting.id, CORRELATION);
+        if (shown.outcome !== 'found') throw new Error(`not found: ${JSON.stringify(shown)}`);
+        return [
+          listed.requests.find(({ request }) => request.id === waiting.id)?.needsRecheck,
+          shown.shown.needsRecheck,
+        ];
+      };
+
+      expect(await flagged()).toEqual([false, false]);
+      await changedDetails(w, 'pause');
+      expect(await flagged()).toEqual([true, true]);
+      await shared.verified(w, supplierOfWorld(w));
+      expect(await flagged()).toEqual([true, true]);
+    });
+
     it('answers a replayed ask with the re-check worked out again', async () => {
       const { w, waiting } = await carried();
       const key = keyed(w.admin, APPROVE_OPERATION);
