@@ -23,7 +23,7 @@ import {
   RailUnavailable,
   USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { PendingChoice, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -119,8 +119,8 @@ const keyed = (who: LinkingMember, operation: string, key = nextKey()): Idempote
 
 const start = (who: LinkingMember, key?: string) =>
   links.start(who, keyed(who, LINK_START_OPERATION, key), CORRELATION);
-const confirm = (who: LinkingMember, linkId: string, key?: string) =>
-  links.confirm(who, keyed(who, LINK_CONFIRM_OPERATION, key), linkId, CORRELATION);
+const confirm = (who: LinkingMember, linkId: string, key?: string, consentExpiry: PendingChoice = 'cancel') =>
+  links.confirm(who, keyed(who, LINK_CONFIRM_OPERATION, key), linkId, consentExpiry, CORRELATION);
 
 const startedOf = (write: LinkStartWrite) => {
   if (write.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(write)}`);
@@ -232,7 +232,7 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
       logger: testLogger(),
     });
     expect(await none.start(admin, keyed(admin, LINK_START_OPERATION), CORRELATION)).toEqual(unavailable);
-    expect(await none.confirm(admin, keyed(admin, LINK_CONFIRM_OPERATION), ids.next(), CORRELATION)).toEqual(
+    expect(await none.confirm(admin, keyed(admin, LINK_CONFIRM_OPERATION), ids.next(), 'cancel', CORRELATION)).toEqual(
       unavailable,
     );
     expect((await rows(org)).links).toEqual([]);
@@ -463,6 +463,33 @@ describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})
     expect(settled).toMatchObject({ outcome: 'rejected', sourceId: null });
     expect(source).toBeNull();
     expect((await rows(org)).sources).toEqual([]);
+  });
+
+  it('keeps the admin’s consent-expiry choice on its own event beside the source’s first (decision 21, E7)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { link, authoriseUrl } = startedOf(await start(admin));
+    await rail.bank.approve(org, sessionOf(authoriseUrl), ACCOUNT);
+
+    const { source } = confirmedOf(await confirm(admin, link.id, undefined, 'pause'));
+
+    const events = await withTenant(app, org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select(['action', 'actor_type', 'details'])
+        .where('subject_id', '=', source?.id ?? '')
+        .orderBy('seq')
+        .execute(),
+    );
+    expect(events.map(({ action }) => action)).toEqual([
+      'funding_source.linked',
+      'funding_source.consent_expiry_chosen',
+    ]);
+    expect(events[1]).toMatchObject({ actor_type: 'user' });
+    expect(JSON.parse(String(events[1]?.details))).toMatchObject({
+      pendingRequests: 'pause',
+      pendingStatementVersion: 1,
+    });
   });
 
   it('adds the source the partner confirms, ACTIVE, and settles the link with it, once', async () => {

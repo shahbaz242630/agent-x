@@ -187,6 +187,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/fake-bank/sessions/{sessionRef}/reject',
       'POST /v1/funding-sources/link-sessions',
       'POST /v1/funding-sources/link-sessions/{linkId}/confirm',
+      'POST /v1/funding-sources/{id}/consent-expiry',
       'POST /v1/funding-sources/{id}/reactivate',
       'POST /v1/funding-sources/{id}/reactivate/confirm',
       'POST /v1/funding-sources/{id}/refresh',
@@ -1227,8 +1228,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // mandate's, each read, changed and confirmed (C3), an agent's spend request (D4r), the simulator (C4), a spend request's cancel by a member and by its agent
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
-    // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), with each GET's HEAD.
-    expect(answers).toHaveLength(140);
+    // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
+    // choice (E7), with each GET's HEAD.
+    expect(answers).toHaveLength(141);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1257,6 +1259,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'FundingSource',
       'FundingSourceLink',
       'FundingSourceReactivationAsked',
+      'FundingSourceShown',
       'HoldClearingAsked',
       'HoldInvestigation',
       'IntegrityHold',

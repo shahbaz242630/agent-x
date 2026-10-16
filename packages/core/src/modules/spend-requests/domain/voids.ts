@@ -11,7 +11,9 @@
 // voids nothing, its requests standing again on resume or unfreeze. The bank's own suspension of a source (its availability
 // SUSPENDED) pauses, by the same decision: nobody on the team chose it.
 // Consent the bank ended (revoked, expired, consumed or rejected: its
-// availability UNAVAILABLE) or past its end, a revoke, an expiry, a
+// availability UNAVAILABLE) or past its end voids too, but for consent that
+// ran out on a source whose admin chose to hold its requests until it is
+// renewed (decision 21, E7): they stand again once it is. A revoke, an expiry, a
 // supersede, an ended source and a supplier no longer verified always void,
 // but for one a payee registration unverified with its requests paused, as the
 // registering admin chose (decision 8): its requests stand again once it is
@@ -68,8 +70,17 @@ export interface AuthorityNow {
   readonly organizationStatus: string;
   readonly agentStatus: string;
   readonly mandate: { readonly status: string; readonly currentVersionId: string | null } | null;
-  /** Its own status, the bank's word on it (its availability), and whether its consent has run out. */
-  readonly source: { readonly status: string; readonly availability: string; readonly consentPast: boolean };
+  /**
+   * Its own status, the bank's word on it (its availability), whether its
+   * consent has run out, and whether its admin chose to hold its requests
+   * when it does (decision 21, E7).
+   */
+  readonly source: {
+    readonly status: string;
+    readonly availability: string;
+    readonly consentPast: boolean;
+    readonly consentHeld: boolean;
+  };
   /**
    * Its status and current version, and the versions that one carries
    * requests from: each moved on from by a details change chosen to pause
@@ -101,9 +112,13 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly R
   ) {
     causes.push('MANDATE_NOT_IN_FORCE');
   }
-  // The bank's suspension pauses; any other word of its but ACTIVE ends the consent.
+  // The bank's suspension pauses; any other word of its but ACTIVE ends the consent, but consent run out on a source
+  // holding its requests until it is renewed (decision 21): the bank's word then is that expiry (updateFromPartner).
   const bankEnded = source.availability !== 'ACTIVE' && source.availability !== 'SUSPENDED';
-  if (stopped(source.status, 'ACTIVE', 'source') || bankEnded || source.consentPast) causes.push('SOURCE_NOT_USABLE');
+  const heldPast = source.consentPast && source.consentHeld;
+  if (stopped(source.status, 'ACTIVE', 'source') || (!heldPast && (bankEnded || source.consentPast))) {
+    causes.push('SOURCE_NOT_USABLE');
+  }
   if (supplier === null || stopped(supplier.status, 'VERIFIED', 'supplier')) causes.push('SUPPLIER_NOT_VERIFIED');
   if (supplier !== null && supplier.currentVersionId !== decided.supplierVersionId) {
     const carried = decided.supplierVersionId !== null && supplier.pausedFrom.includes(decided.supplierVersionId);

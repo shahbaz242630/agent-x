@@ -136,7 +136,13 @@ async function linked(admin: SessionMember, accountId = ACCOUNT): Promise<Source
   const started = await links.start(admin, keyed(admin, LINK_START_OPERATION), CORRELATION);
   if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   await rail.bank.approve(admin.orgId, started.link.sessionRef, accountId);
-  const confirmed = await links.confirm(admin, keyed(admin, LINK_CONFIRM_OPERATION), started.link.id, CORRELATION);
+  const confirmed = await links.confirm(
+    admin,
+    keyed(admin, LINK_CONFIRM_OPERATION),
+    started.link.id,
+    'cancel',
+    CORRELATION,
+  );
   if (confirmed.outcome !== 'confirmed' || confirmed.source === null) {
     throw new Error(`not linked: ${JSON.stringify(confirmed)}`);
   }
@@ -177,6 +183,8 @@ const eventsAbout = (org: string, sourceId: string) =>
       .select(['action', 'actor_type', 'actor_id', 'details'])
       .where('subject_type', '=', 'funding_source')
       .where('subject_id', '=', sourceId)
+      // The link's consent-expiry choice (E7) aside: the brake tests read it (brake-voids.db.test.ts).
+      .where('action', '<>', 'funding_source.consent_expiry_chosen')
       .orderBy('seq')
       .execute(),
   );

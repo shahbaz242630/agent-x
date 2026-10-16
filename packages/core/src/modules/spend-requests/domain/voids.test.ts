@@ -15,7 +15,7 @@ const STANDING: AuthorityNow = {
   organizationStatus: 'ACTIVE',
   agentStatus: 'ACTIVE',
   mandate: { status: 'ACTIVE', currentVersionId: 'mv1' },
-  source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },
+  source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false, consentHeld: false },
   supplier: { status: 'VERIFIED', currentVersionId: 'sv1', pausedFrom: [] },
   paused: new Set(),
 };
@@ -36,22 +36,22 @@ describe('voidCauses', () => {
     ['the mandate not found', { mandate: null }, 'MANDATE_NOT_IN_FORCE'],
     [
       'the source suspended',
-      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } },
+      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false, consentHeld: false } },
       'SOURCE_NOT_USABLE',
     ],
     [
       'the source ended',
-      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false } },
+      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false, consentHeld: false } },
       'SOURCE_NOT_USABLE',
     ],
     [
       'the source’s consent past',
-      { source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: true } },
+      { source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: true, consentHeld: false } },
       'SOURCE_NOT_USABLE',
     ],
     [
       'the source’s consent ended by the bank',
-      { source: { status: 'ACTIVE', availability: 'UNAVAILABLE', consentPast: false } },
+      { source: { status: 'ACTIVE', availability: 'UNAVAILABLE', consentPast: false, consentHeld: false } },
       'SOURCE_NOT_USABLE',
     ],
     [
@@ -84,7 +84,7 @@ describe('voidCauses', () => {
         organizationStatus: 'FROZEN',
         agentStatus: 'SUSPENDED',
         mandate: null,
-        source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false },
+        source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false, consentHeld: false },
         supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2', pausedFrom: [] },
         paused: new Set(),
       }),
@@ -101,17 +101,40 @@ describe('voidCauses', () => {
   it('finds none for the bank’s own suspension of the source, and one once the bank ends its consent, paused or not', () => {
     const bank = (availability: string) => ({
       ...STANDING,
-      source: { status: 'ACTIVE', availability, consentPast: false },
+      source: { status: 'ACTIVE', availability, consentPast: false, consentHeld: false },
     });
     expect(voidCauses(DECIDED, bank('SUSPENDED'))).toEqual([]);
     expect(voidCauses(DECIDED, { ...bank('UNAVAILABLE'), paused: EVERY_PAUSED })).toEqual(['SOURCE_NOT_USABLE']);
+  });
+
+  it('finds none for consent run out on a source holding its requests until renewed (decision 21, E7)', () => {
+    const source = (availability: string, consentPast: boolean, consentHeld: boolean, status = 'ACTIVE') => ({
+      ...STANDING,
+      source: { status, availability, consentPast, consentHeld },
+    });
+    // Past its end, by time alone or the bank's word on it (an expiry kept, updateFromPartner).
+    expect(voidCauses(DECIDED, source('ACTIVE', true, true))).toEqual([]);
+    expect(voidCauses(DECIDED, source('UNAVAILABLE', true, true))).toEqual([]);
+    // Not held, or the consent gone before its end (revoked, consumed): void.
+    expect(voidCauses(DECIDED, source('ACTIVE', true, false))).toEqual(['SOURCE_NOT_USABLE']);
+    expect(voidCauses(DECIDED, source('UNAVAILABLE', false, true))).toEqual(['SOURCE_NOT_USABLE']);
+    // A hold excuses the expiry only: the source ended, or suspended to cancel, still voids.
+    expect(voidCauses(DECIDED, source('ACTIVE', true, true, 'ENDED'))).toEqual(['SOURCE_NOT_USABLE']);
+    expect(voidCauses(DECIDED, source('ACTIVE', true, true, 'SUSPENDED'))).toEqual(['SOURCE_NOT_USABLE']);
+    expect(voidCauses(DECIDED, { ...source('ACTIVE', true, true, 'SUSPENDED'), paused: new Set(['source']) })).toEqual(
+      [],
+    );
   });
 
   it.each([
     ['the organisation', 'organization', { organizationStatus: 'FROZEN' }],
     ['the agent', 'agent', { agentStatus: 'SUSPENDED' }],
     ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }],
-    ['the source', 'source', { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } }],
+    [
+      'the source',
+      'source',
+      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false, consentHeld: false } },
+    ],
     ['the supplier', 'supplier', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } }],
     // Decision 8: a payee registration's unverify, its requests paused by the registering admin.
     [
@@ -138,12 +161,12 @@ describe('voidCauses', () => {
     ],
     [
       'the source ended',
-      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false } },
+      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false, consentHeld: false } },
       'SOURCE_NOT_USABLE',
     ],
     [
       'the source’s consent past while paused',
-      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: true } },
+      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: true, consentHeld: false } },
       'SOURCE_NOT_USABLE',
     ],
     [

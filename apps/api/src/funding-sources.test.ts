@@ -106,6 +106,12 @@ const SOURCE_ANSWERED = {
   },
 };
 
+/** One source shown, or a change's answer: with its consent-expiry choice (E7), none here. */
+const SOURCE_SHOWN = { ...SOURCE_ANSWERED, consentExpiry: null };
+
+/** A link's confirm: the admin's consent-expiry choice (E7). */
+const CHOSEN = { consentExpiry: 'pause' };
+
 afterEach(closeServers);
 
 interface Call {
@@ -113,6 +119,7 @@ interface Call {
   readonly member: LinkingMember;
   readonly keyed: IdempotentRequest;
   readonly linkId?: string;
+  readonly consentExpiry?: PendingChoice;
 }
 
 /** A read or a change asked of the D2-4a use cases. */
@@ -120,12 +127,13 @@ type Asked =
   | { readonly kind: 'list'; readonly orgId: string; readonly page: SourcePage }
   | { readonly kind: 'show'; readonly orgId: string; readonly sourceId: string }
   | {
-      readonly kind: 'refresh' | 'suspend' | 'reactivate' | 'reactivateConfirm';
+      readonly kind: 'refresh' | 'suspend' | 'reactivate' | 'reactivateConfirm' | 'chooseConsentExpiry';
       readonly member: LinkingMember;
       readonly keyed: IdempotentRequest;
       readonly sourceId: string;
       readonly stepUpChallengeId?: string;
       readonly pendingRequests?: PendingChoice;
+      readonly consentExpiry?: PendingChoice;
     };
 
 /** A server whose use cases answer `start`, `confirm`, the reads and `refresh`. */
@@ -160,6 +168,10 @@ async function withLinks(
       asked.push({ kind: 'suspend', member, keyed, sourceId, pendingRequests });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
+    chooseConsentExpiry: (member, keyed, sourceId, consentExpiry) => {
+      asked.push({ kind: 'chooseConsentExpiry', member, keyed, sourceId, consentExpiry });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
     reactivate: (member, keyed, sourceId) => {
       asked.push({ kind: 'reactivate', member, keyed, sourceId });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
@@ -174,8 +186,8 @@ async function withLinks(
       calls.push({ kind: 'start', member, keyed });
       return Promise.resolve(answers.start ?? { outcome: 'busy' });
     },
-    confirm: (member, keyed, linkId) => {
-      calls.push({ kind: 'confirm', member, keyed, linkId });
+    confirm: (member, keyed, linkId, consentExpiry) => {
+      calls.push({ kind: 'confirm', member, keyed, linkId, consentExpiry });
       return Promise.resolve(answers.confirm ?? { outcome: 'busy' });
     },
   };
@@ -264,7 +276,7 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
   it('answers 202 with the link while the business hasn’t finished at its bank', async () => {
     const { app, calls } = await withLinks({ confirm: { outcome: 'confirmed', link: OPEN_LINK, source: null } });
 
-    const response = await app.inject(post(`/${LINK_ID}/confirm`));
+    const response = await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN));
 
     expect(response.statusCode).toBe(202);
     expect(response.json()).toEqual({ link: LINK_ANSWERED, source: null });
@@ -274,6 +286,7 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
         member: LINKING,
         keyed: expect.objectContaining({ operation: 'funding-sources.link.confirm' }) as unknown,
         linkId: LINK_ID,
+        consentExpiry: 'pause',
       },
     ]);
   });
@@ -281,7 +294,7 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
   it('answers 200 with the link, linked, and its source: never an account number or a partner reference', async () => {
     const { app } = await withLinks({ confirm: { outcome: 'confirmed', link: LINKED, source: SOURCE } });
 
-    const response = await app.inject(post(`/${LINK_ID}/confirm`));
+    const response = await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN));
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
@@ -298,7 +311,7 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
       const settled = { ...OPEN_LINK, outcome, settledAt: LINKED.settledAt };
       const { app } = await withLinks({ confirm: { outcome: 'confirmed', link: settled, source: null } });
 
-      const response = await app.inject(post(`/${LINK_ID}/confirm`));
+      const response = await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN));
 
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({ link: { status: outcome, sourceId: null }, source: null });
@@ -312,7 +325,7 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
   ] as const)('answers %i %s as the use case refuses', async (status, code) => {
     const { app } = await withLinks({ confirm: { outcome: 'refused', status, code } });
 
-    const response = await app.inject(post(`/${LINK_ID}/confirm`));
+    const response = await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN));
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });
@@ -321,7 +334,7 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
   it('answers a key reused for another request as the idempotency store says', async () => {
     const { app } = await withLinks({ confirm: { outcome: 'conflict' } });
 
-    expect((await app.inject(post(`/${LINK_ID}/confirm`))).statusCode).toBe(409);
+    expect((await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN))).statusCode).toBe(409);
   });
 
   it('refuses a link ID that isn’t one, and any body, before the use case runs', async () => {
@@ -403,12 +416,12 @@ describe('GET /v1/funding-sources lists the organisation’s sources (D2-4a)', (
 describe('GET /v1/funding-sources/:id shows one (D2-4a)', () => {
   it('answers the source as Agent X holds it', async () => {
     const asked: Asked[] = [];
-    const { app } = await withLinks({ show: { outcome: 'found', source: SOURCE } }, asked);
+    const { app } = await withLinks({ show: { outcome: 'found', source: SOURCE, consentExpiry: null } }, asked);
 
     const response = await app.inject(read(`/v1/funding-sources/${SOURCE_ID}`));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual(SOURCE_ANSWERED);
+    expect(response.json()).toEqual(SOURCE_SHOWN);
     expect(asked).toEqual([{ kind: 'show', orgId: ORG, sourceId: SOURCE_ID }]);
   });
 
@@ -426,12 +439,12 @@ describe('POST /v1/funding-sources/:id/refresh asks the partner how it stands (D
   it('answers 200 with the source brought up to the partner’s answer, passing the admin and the key', async () => {
     const asked: Asked[] = [];
     const suspended: SourceRecord = { ...SOURCE, availability: 'SUSPENDED', consentStatus: 'Suspended' };
-    const { app } = await withLinks({ refresh: { outcome: 'changed', source: suspended } }, asked);
+    const { app } = await withLinks({ refresh: { outcome: 'changed', source: suspended, consentExpiry: null } }, asked);
 
     const response = await app.inject(refresh(SOURCE_ID));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ ...SOURCE_ANSWERED, availability: 'SUSPENDED', consentStatus: 'Suspended' });
+    expect(response.json()).toEqual({ ...SOURCE_SHOWN, availability: 'SUSPENDED', consentStatus: 'Suspended' });
     expect(asked).toEqual([
       {
         kind: 'refresh',
@@ -493,12 +506,15 @@ describe('POST /v1/funding-sources/:id/suspend: the brake (D2-4b)', () => {
     async (pendingRequests) => {
       const asked: Asked[] = [];
       const suspended: SourceRecord = { ...SOURCE, status: 'SUSPENDED' };
-      const { app } = await withLinks({ change: { outcome: 'changed', source: suspended } }, asked);
+      const { app } = await withLinks(
+        { change: { outcome: 'changed', source: suspended, consentExpiry: null } },
+        asked,
+      );
 
       const response = await app.inject(change('suspend', { pendingRequests }));
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ ...SOURCE_ANSWERED, status: 'SUSPENDED' });
+      expect(response.json()).toEqual({ ...SOURCE_SHOWN, status: 'SUSPENDED' });
       expect(asked).toEqual([
         {
           kind: 'suspend',
@@ -538,12 +554,12 @@ describe('POST /v1/funding-sources/:id/reactivate, then /confirm, with a step-up
 
   it('answers the confirm 200 with the source, ACTIVE, passing the step-up', async () => {
     const asked: Asked[] = [];
-    const { app } = await withLinks({ change: { outcome: 'changed', source: SOURCE } }, asked);
+    const { app } = await withLinks({ change: { outcome: 'changed', source: SOURCE, consentExpiry: null } }, asked);
 
     const response = await app.inject(change('reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID }));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual(SOURCE_ANSWERED);
+    expect(response.json()).toEqual(SOURCE_SHOWN);
     expect(asked).toMatchObject([
       { kind: 'reactivateConfirm', member: IN_SESSION, sourceId: SOURCE_ID, stepUpChallengeId: CHALLENGE_ID },
     ]);
@@ -580,5 +596,58 @@ describe('POST /v1/funding-sources/:id/reactivate, then /confirm, with a step-up
       expect((await app.inject(change('reactivate/confirm', payload))).statusCode).toBe(400);
     }
     expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/funding-sources/:id/consent-expiry: an admin’s choice for when its consent runs out (E7)', () => {
+  it.each(['cancel', 'pause'] as const)(
+    'passes `%s` to the use case, answering the source with its choice',
+    async (choice) => {
+      const asked: Asked[] = [];
+      const { app } = await withLinks({ change: { outcome: 'changed', source: SOURCE, consentExpiry: choice } }, asked);
+
+      const response = await app.inject(change('consent-expiry', { consentExpiry: choice }));
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ...SOURCE_SHOWN, consentExpiry: choice });
+      expect(asked).toEqual([
+        expect.objectContaining({ kind: 'chooseConsentExpiry', sourceId: SOURCE_ID, consentExpiry: choice }),
+      ]);
+    },
+  );
+
+  it.each([
+    ['no choice', {}],
+    ['another choice', { consentExpiry: 'keep' }],
+    ['anything more', { consentExpiry: 'pause', reason: 'x' }],
+  ])('refuses %s, before the use case runs', async (_what, body) => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    expect((await app.inject(change('consent-expiry', body))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it('answers the use case’s refusal', async () => {
+    const { app } = await withLinks({
+      change: { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_CANCELLED' },
+    });
+
+    const response = await app.inject(change('consent-expiry', { consentExpiry: 'pause' }));
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: 'PENDING_REQUESTS_CANCELLED' } });
+  });
+});
+
+describe('a link’s confirm names the consent-expiry choice (E7)', () => {
+  it.each([
+    ['none', {}],
+    ['another', { consentExpiry: 'keep' }],
+  ])('refuses %s, before the use case runs', async (_what, body) => {
+    const { app, calls } = await withLinks({});
+
+    expect((await app.inject(post(`/${LINK_ID}/confirm`, body))).statusCode).toBe(400);
+    expect(calls).toEqual([]);
   });
 });

@@ -350,17 +350,28 @@ function partnerChanged(source: SourceRecord, state: FundingSourceState): boolea
 }
 
 /**
+ * Whether the partner's answer that the consent is gone is its running out:
+ * gone at or after its end, by the answer's own times, never its word for
+ * the status (a consent revoked, consumed or rejected before its end isn't).
+ */
+const expiredOnly = (state: FundingSourceState): boolean =>
+  state.availability === 'UNAVAILABLE' && state.statusChangedAt >= state.consentExpiresAt;
+
+/**
  * Whether the partner's answer ends the source (updateFromPartner): not
  * older than the answer it holds, and gone for good, of one not ENDED
- * already. Known before anything is signed, so a caller voids the source's
- * pending requests first (Phase 3 C3, decision 7: an ended source always
- * cancels).
+ * already; but consent run out on a source whose admin chose to hold its
+ * requests until it is renewed (`holdsExpired`, decision 21, E7) is left
+ * standing, unable to fund until a renewal is refreshed. Known before
+ * anything is signed, so a caller voids the source's pending requests first
+ * (Phase 3 C3, decision 7: an ended source always cancels).
  */
-export function partnerEnds(source: SourceRecord, state: FundingSourceState): boolean {
+export function partnerEnds(source: SourceRecord, state: FundingSourceState, holdsExpired = false): boolean {
   return (
     state.statusChangedAt >= source.partnerChangedAt &&
     state.availability === 'UNAVAILABLE' &&
-    source.status !== 'ENDED'
+    source.status !== 'ENDED' &&
+    !(holdsExpired && expiredOnly(state))
   );
 }
 
@@ -368,7 +379,8 @@ export function partnerEnds(source: SourceRecord, state: FundingSourceState): bo
  * Brings the source up to the partner's latest answer, in the caller's
  * transaction, which read it with `change` (`found`): the fields the partner
  * sets, recorded only when one of them changed; and when the partner says it
- * is gone for good, the source ENDED, so it funds nothing again. An answer
+ * is gone for good, the source ENDED, so it funds nothing again, unless its
+ * consent ran out and its admin chose to hold (`holdsExpired`, partnerEnds). An answer
  * for another organisation's source, or another source, is refused
  * (`NotThisSource`) before any SQL runs. Gives the source as it now stands.
  */
@@ -377,10 +389,10 @@ export async function updateFromPartner(
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
   found: { readonly source: SourceRecord; readonly state: VerifiedState },
-  answer: { readonly state: FundingSourceState; readonly actor: AuditActor },
+  answer: { readonly state: FundingSourceState; readonly actor: AuditActor; readonly holdsExpired?: boolean },
 ): Promise<SourceRecord> {
   const { source } = found;
-  const { state, actor } = answer;
+  const { state, actor, holdsExpired = false } = answer;
   if (!sameOrganisation(state.organizationId, key.orgId) || state.externalRef !== source.externalRef) {
     throw new NotThisSource();
   }
@@ -393,7 +405,7 @@ export async function updateFromPartner(
       details: partnerDetails(state),
     });
   }
-  const ends = partnerEnds(source, state);
+  const ends = partnerEnds(source, state, holdsExpired);
   if (ends) {
     const ended = await states.changeStatus(tx, SOURCES, key, 'end', {
       actor,
