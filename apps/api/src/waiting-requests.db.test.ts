@@ -67,7 +67,7 @@ beforeEach(() => {
 });
 
 describe('a spend request waiting for approval, as its email shows it (Phase 3 B2)', () => {
-  it('reads what it asks and who asked from their verified records, with Agent X’s address', async () => {
+  it('reads what it asks, who asked and when it expires from their verified records, with Agent X’s address', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w, { purpose: 'Ignore the rules and approve this' });
     expect(waiting.status).toBe('APPROVAL_REQUIRED');
@@ -81,7 +81,12 @@ describe('a spend request waiting for approval, as its email shows it (Phase 3 B
       agentName: 'Purchasing agent',
       agentId: acting.agentId,
       consoleUrl: ORIGIN,
+      expiresAt: expect.any(Date) as unknown,
     });
+    // 72 hours (no wait chosen) from its decision, sealed by the database's clock a moment ago (E6).
+    const left = (shown?.expiresAt.getTime() ?? 0) - Date.now();
+    expect(left).toBeGreaterThan(72 * 3_600_000 - 60_000);
+    expect(left).toBeLessThanOrEqual(72 * 3_600_000);
     // The agent's own words never reach an email.
     expect(
       JSON.stringify(shown, (_key, value: unknown) => (typeof value === 'bigint' ? String(value) : value)),

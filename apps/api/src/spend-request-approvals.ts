@@ -34,7 +34,7 @@
 //   approver's, with a note and the rules as `causes`), its holdings released.
 //   A refusal with any stop in it (a suspended agent, mandate or source, an
 //   unverified supplier: perhaps a pause the team chose) stays REQUEST_CHANGED;
-// - one past its 72 hours, that the expiry job hasn't reached yet, is
+// - one past its wait (E6), that the expiry job hasn't reached yet, is
 //   refused (REQUEST_EXPIRED, 409) and then expired at once, its reservation
 //   and claim released (SEC-LIM-12), in a transaction of its own.
 // A frozen organisation approves nothing (ORG_FROZEN, decision 3). One no
@@ -329,9 +329,9 @@ export function createSpendRequestApprovals({
     if (read.outcome !== 'found') throw new Error(`A spend request found by its row is missing: ${requestId}`);
     const { request } = read;
     if (request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
-    // Its 72 hours run from its decision as sealed, never a later event such as a carry (E4; as expireRequest's).
+    // Its wait runs from its decision as sealed, never a later event such as a carry (E4; as expireRequest's).
     // With no decision it holds nothing sealed, so the check below refuses it.
-    if (decision !== null && waitedOut(decision.decidedAt, now)) throw new MandateRefused(409, 'REQUEST_EXPIRED');
+    if (decision !== null && waitedOut(decision, now)) throw new MandateRefused(409, 'REQUEST_EXPIRED');
     const against = decidedAgainst(read.state);
     // A waiting request holds capacity, sealed with its decision; and its row names what its signed state does.
     if (
@@ -369,7 +369,7 @@ export function createSpendRequestApprovals({
   }
 
   /**
-   * One found past its 72 hours is refused with nothing changed (its
+   * One found past its wait is refused with nothing changed (its
    * transaction rolled back); then expired, in a transaction of its own, as
    * the expiry job would (SEC-LIM-12).
    */
@@ -405,7 +405,7 @@ export function createSpendRequestApprovals({
         const again = await work.answered(member.orgId, correlationId, async (tx, states) => ({
           shown: (await approvable(tx, states, member, requestId, false, recheck)).shown,
         }));
-        // Refused now (expired, say), as a first ask would be: one past its 72 hours is expired at once.
+        // Refused now (expired, say), as a first ask would be: one past its wait is expired at once.
         if ('outcome' in again) return expiredIfDue(again, member.orgId, requestId, correlationId);
         shown = again.shown;
       }

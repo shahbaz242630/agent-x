@@ -29,6 +29,7 @@ import { sql, type Transaction } from 'kysely';
 import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
 import { type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
 import { bankKeyOf } from '../domain/asked.ts';
+import { type ApprovalClock, approvalWaitOf } from '../domain/approval-wait.ts';
 import { type ClaimHolding, type HeldSealed, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
@@ -92,13 +93,13 @@ async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[
 
 /**
  * A request's decision as its signed event holds it: what it sealed of what
- * the request holds (null for none), and when the chain recorded it, which a
- * waiting request's 72 hours run from (D7). Not its latest event's time: a
- * carry to a new mandate version (E4) is a later event that moves no clock.
+ * the request holds (null for none), when the chain recorded it, which a
+ * waiting request's wait runs from (D7), and that wait (E6: 72 for one
+ * decided before). Not its latest event's time: a carry to a new mandate
+ * version (E4) is a later event that moves no clock.
  */
-export interface Decided {
+export interface Decided extends ApprovalClock {
   readonly held: HeldSealed | null;
-  readonly decidedAt: Date;
 }
 
 /**
@@ -123,7 +124,10 @@ export async function decisionsOf(
   if (history.outcome !== 'read') return new Map();
   const decided = history.events.map(
     ({ event, recordedAt }) =>
-      [event.subject.id.toLowerCase(), { held: heldOf(event.details), decidedAt: recordedAt }] as const,
+      [
+        event.subject.id.toLowerCase(),
+        { held: heldOf(event.details), decidedAt: recordedAt, waitHours: approvalWaitOf(event.details) },
+      ] as const,
   );
   // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
   const counts = new Map<string, number>();
@@ -136,7 +140,7 @@ export async function decisionsOf(
 
 /**
  * One request's decision, read as the holdings check reads it (Phase 3 B4b:
- * the month an approval weighs it in; E4b: when its 72 hours run from); null
+ * the month an approval weighs it in; E4b, E6: when its wait runs from, and how long); null
  * for a request with no decision, or a history that can't be believed (its
  * alarm raised).
  */

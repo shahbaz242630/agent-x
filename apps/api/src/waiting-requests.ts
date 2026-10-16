@@ -37,7 +37,9 @@ export function createWaitingRequests({
         async (tx, states): Promise<WaitingRequest | undefined> => {
           const read = await requestInOrder(tx, states, orgId, requestId);
           if (read.outcome !== 'found' || read.shown.request.status !== 'APPROVAL_REQUIRED') return undefined;
-          const { request, agentName, supplierName } = read.shown;
+          const { request, agentName, supplierName, expiresAt } = read.shown;
+          // Waiting, so its expiry was read from its decision (requestInOrder).
+          if (expiresAt === null) return undefined;
           return {
             amountMinor: request.amount.minor,
             currency: request.amount.currency,
@@ -45,6 +47,7 @@ export function createWaitingRequests({
             agentName,
             agentId: request.agentId,
             consoleUrl: publicOrigin,
+            expiresAt,
           };
         },
       ),

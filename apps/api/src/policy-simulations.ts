@@ -95,6 +95,7 @@ const policiesFor =
         organizationPolicy === undefined ? inForce.organizationPolicy : proposedRules(organizationPolicy),
       organizationCapChosen: organizationPolicy !== undefined || inForce.organizationCapChosen,
       mandatePolicy: mandatePolicy === undefined ? inForce.mandatePolicy : proposedRules(mandatePolicy),
+      approvalWait: inForce.approvalWait,
     };
   };
 

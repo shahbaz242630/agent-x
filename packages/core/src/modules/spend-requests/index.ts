@@ -7,7 +7,7 @@
 // through its route (D4r), its text checked here, with the bank reference its
 // order reference becomes (decision 8); and the holdings check, comparing each
 // request's reservation and claim with its signed state (E1); a request
-// waiting for approval expired after 72 hours, or cancelled before hand-off,
+// waiting for approval expired after their wait (E6), or cancelled before hand-off,
 // its holdings released (D7, D8), or rejected by a person with a reason
 // (Phase 3 B4a), or approved by one, weighed again (B4b); and one whose
 // authority no longer stands voided, its holdings released (C1).
@@ -66,9 +66,16 @@ export {
   type VoidingShown,
   voidPendingOf,
   voidRequest,
-  WAITS_FOR_APPROVAL_MS,
-  waitedOut,
 } from './infrastructure/endings.ts';
+export {
+  APPROVAL_WAITS,
+  type ApprovalClock,
+  type ApprovalWaitHours,
+  expiresAtOf,
+  LONGEST_APPROVAL_WAIT,
+  SHORTEST_APPROVAL_WAIT_MS,
+  waitedOut,
+} from './domain/approval-wait.ts';
 export {
   type AuthorityNow,
   isPending,

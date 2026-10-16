@@ -12,8 +12,12 @@
 // reservation or claim reaching for the audit head (forced), is waited for;
 // expireRequest's own answers for a request moved on or not there; and an
 // organisation list that can't be read, logged as an error.
+// E6: the wait in force sealed on each decision and kept past a lowered one
+// (decision 20), on the expiry too; a due one behind a page not yet due (past
+// the shortest wait by their rows) still reached.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { checkHoldings, expireRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { policyOf, setPolicy } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -29,8 +33,10 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { waitChoiceDetails } from './approval-wait-choice.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, type World } from './mandate-world.helper.test.ts';
+import { capChoiceDetails } from './monthly-cap-choice.ts';
 import { createRequestExpiry, type RequestExpiry } from './request-expiry.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { changedPastTheApp, spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
@@ -72,6 +78,30 @@ const lines = (event: string) => capture.lines().filter((line) => line.event ===
 const pastTheWait = (early = 0) => {
   clock.advanceBy(SEVENTY_TWO_HOURS + MINUTE - early);
 };
+
+/** The organisation's approval wait chosen as `hours` past the use case, its rules as the world's (E6). */
+const waitChosen = (w: World, hours: 24 | 48 | 72) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'change');
+    return setPolicy(tx, states, {
+      orgId: w.org,
+      existing: read.outcome === 'found' ? read : null,
+      scope: 'organization',
+      mandateId: null,
+      versionId: ids.next(),
+      rules: {
+        currency: 'AED',
+        perOrderCap: null,
+        monthlyCap: AED(2_000_000n),
+        approvalThreshold: null,
+        supplierIds: null,
+      },
+      madeBy: w.admin.membershipId,
+      madeAt: clock.now(),
+      actor: { type: 'user', id: w.admin.userId },
+      details: { ...capChoiceDetails('amount'), ...waitChoiceDetails(hours) },
+    });
+  });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -159,6 +189,13 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     const allowed = await ask(acting, w, other);
     const denied = await ask(acting, w, { ...other, orderReference: allowed.orderReference });
     expect([allowed.decision, denied.decision]).toEqual(['ALLOW', 'DENY']);
+    // Only a decision that waits seals a wait (E6).
+    for (const { id } of [allowed, denied]) {
+      const decided = (await shared.eventsAbout(w.org, id, SPEND_REQUESTS.subject)).find(
+        ({ action }) => action === 'spend_request.decided',
+      );
+      expect(decided?.details).not.toHaveProperty('approvalWaitHours');
+    }
     pastTheWait(2 * MINUTE);
 
     await expiryOf(only(w)).run();
@@ -262,6 +299,36 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     ]);
     await job.run();
     expect([await statusOf(w, first.id), await statusOf(w, second.id)]).toEqual(['EXPIRED', 'EXPIRED']);
+  });
+
+  it('seals the wait in force on each decision, keeps it past a lowered one, and reaches a due one behind a page not yet (E6)', async () => {
+    const { w, acting } = await ready();
+    // Three asked under 72 hours (the world's wait, not chosen), then the wait lowered to 24 and one more asked.
+    const notYet = [await ask(acting, w), await ask(acting, w), await ask(acting, w)];
+    await waitChosen(w, 24);
+    const due = await ask(acting, w);
+    clock.advanceBy(24 * HOUR + MINUTE);
+
+    // Pages of two: every row is past the shortest wait, but the first three keep their 72 hours (decision 20), so
+    // the page reads on past them to the one due, which comes last by ID.
+    await expiryOf(only(w), 2).run();
+
+    expect(await statusOf(w, due.id)).toBe('EXPIRED');
+    for (const { id } of notYet) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+    expect(lines('request_expiry.failed')).toEqual([]);
+    const decided = async (id: string) =>
+      (await shared.eventsAbout(w.org, id, SPEND_REQUESTS.subject)).find(
+        ({ action }) => action === 'spend_request.decided',
+      );
+    expect(await decided(notYet[0]?.id ?? '')).toMatchObject({ details: { approvalWaitHours: 72 } });
+    expect(await decided(due.id)).toMatchObject({ details: { decision: 'REQUIRE_APPROVAL', approvalWaitHours: 24 } });
+    const events = await shared.eventsAbout(w.org, due.id, SPEND_REQUESTS.subject);
+    expect(events.at(-1)).toMatchObject({ action: 'spend_request.expired', details: { approvalWaitHours: 24 } });
+
+    // Past their own 72 hours, the rest go too.
+    clock.advanceBy(48 * HOUR);
+    await expiryOf(only(w)).run();
+    for (const { id } of notYet) expect(await statusOf(w, id)).toBe('EXPIRED');
   });
 
   it('a run stopped expires nothing more', async () => {

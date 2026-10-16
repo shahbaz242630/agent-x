@@ -24,12 +24,13 @@ import {
   policyVersionOf,
 } from '@agentx/core/modules/mandates';
 import type { Notice, NoticeKind } from '@agentx/core/modules/notifications';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { ApprovalWaitHours, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { monthlyCapOf, type MonthlyCapFrom } from '@agentx/core/modules/policies';
 import { compare, type Money, money } from '@agentx/core/shared-kernel';
 import type { DatabaseTransaction } from '@agentx/platform/db';
 
+import { waitChoiceIn } from './approval-wait-choice.ts';
 import { capChoiceIn, type MonthlyCapChoice } from './monthly-cap-choice.ts';
 import { UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
@@ -193,8 +194,28 @@ export async function capChoiceOf(
   orgId: string,
   current: PolicyVersionRecord | null,
 ): Promise<MonthlyCapChoice | null> {
-  if (current === null) return null;
-  if (current.monthlyCap !== null) return 'amount';
+  if (current !== null && current.monthlyCap !== null) return 'amount';
+  return (await organizationChoicesOf(tx, states, orgId, current)).capChoice;
+}
+
+/** The organisation's choices its policy version in force keeps: the monthly cap (E2) and the approval wait (E6). */
+export interface OrganizationChoices {
+  readonly capChoice: MonthlyCapChoice | null;
+  /** Null: not chosen (a version from before E6, or none set), and requests wait 72 hours (partner, S119). */
+  readonly approvalWait: ApprovalWaitHours | null;
+}
+
+/**
+ * Both choices, as capChoiceOf reads the cap's, the version's event read once
+ * whatever its cap (a decision's one more indexed read), believed only whole.
+ */
+export async function organizationChoicesOf(
+  tx: MandateTx,
+  states: SignedStates,
+  orgId: string,
+  current: PolicyVersionRecord | null,
+): Promise<OrganizationChoices> {
+  if (current === null) return { capChoice: null, approvalWait: null };
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [POLICY_VERSIONS.subject],
     subjectId: current.id,
@@ -203,7 +224,9 @@ export async function capChoiceOf(
     newest: true,
   });
   if (history.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-  return capChoiceIn(history.events.at(-1)?.event.details) === 'none' ? 'none' : null;
+  const details = history.events.at(-1)?.event.details;
+  const capChoice = current.monthlyCap !== null ? 'amount' : capChoiceIn(details) === 'none' ? 'none' : null;
+  return { capChoice, approvalWait: waitChoiceIn(details) };
 }
 
 /**

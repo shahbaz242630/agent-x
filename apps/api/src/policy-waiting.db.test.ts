@@ -100,6 +100,7 @@ const changes = () =>
 const askedOf = (target: PolicyTarget, rules: PolicyRules) => ({
   rules,
   capChoice: target.scope === 'organization' ? ('amount' as const) : null,
+  approvalWait: target.scope === 'organization' ? (72 as const) : null,
 });
 
 /** The preview of `rules` on `target`, asked by `who`. */
@@ -503,7 +504,7 @@ describe('the admin chooses: reject them now, or leave them for their approvers 
     expect(await versionEvent(w, done)).toMatchObject({
       action: 'policy_version.made',
       actorType: 'user',
-      details: { waitingRequests: 'reject', waitingStatementVersion: 1, waitingListed: 2, waitingMore: false },
+      details: { waitingRequests: 'reject', waitingStatementVersion: 2, waitingListed: 2, waitingMore: false },
     });
     const versionId = done.outcome === 'changed' ? done.current?.id : undefined;
     for (const id of [second, third]) {
@@ -536,7 +537,7 @@ describe('the admin chooses: reject them now, or leave them for their approvers 
 
     expect(done).toMatchObject({ outcome: 'changed' });
     expect(await versionEvent(w, done)).toMatchObject({
-      details: { waitingRequests: 'leave', waitingStatementVersion: 1, waitingListed: 2, waitingMore: false },
+      details: { waitingRequests: 'leave', waitingStatementVersion: 2, waitingListed: 2, waitingMore: false },
     });
     for (const id of made) {
       expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');

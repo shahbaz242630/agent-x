@@ -141,7 +141,7 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     for (const { details } of events) expect(details).toMatchObject({ methods: PASSKEY.join(' ') });
     // The suspend keeps the admin's choice for the mandate's pending requests (decision 7), the others none.
     expect(events.map(({ details }) => details.pendingRequests)).toEqual(['cancel', undefined, undefined]);
-    expect(events[0]?.details).toMatchObject({ pendingStatementVersion: 3 });
+    expect(events[0]?.details).toMatchObject({ pendingStatementVersion: 4 });
     expect(await noticesOf(w.org)).toEqual(
       ['mandate_suspended', 'mandate_resumed', 'mandate_revoked'].map((kind) => ({
         kind,
@@ -251,7 +251,7 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     );
     expect((await eventsAbout(w.org, id)).at(-1)).toMatchObject({
       action: 'mandate.suspended',
-      details: { pendingRequests: 'pause', pendingStatementVersion: 3 },
+      details: { pendingRequests: 'pause', pendingStatementVersion: 4 },
     });
   });
 

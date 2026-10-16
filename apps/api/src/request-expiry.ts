@@ -1,43 +1,53 @@
 // Spend requests left waiting for approval expired (PRD §4.2; ADR-006 §10;
 // BR-09; partner decision 10; Phase 2 D7): the API's job, on a timer of its
-// own, moving each request APPROVAL_REQUIRED for 72 hours from its decision
-// to EXPIRED, recorded as the API's, its reservation and order claim released
+// own, moving each request APPROVAL_REQUIRED past the wait its decision
+// sealed (24, 48 or 72 hours from it: E6) to EXPIRED, recorded as the API's, its reservation and order claim released
 // in the same transaction, so the agent's monthly budget, the split total and
 // the order are free again. No one is emailed yet (Phase 3's approvals).
 //
 // For each organisation the directory lists, the candidates are found by
-// their rows (`requestsWaitingSince`, 0042's index), a page at a time, each
-// page after the last, so requests refused on every run (tampered with) can't
-// fill a page and keep the rest waiting; then each in a transaction of its
-// own, judged by its decision's sealed time (`expireRequest`). A request
+// their rows (`requestsWaitingSince`, 0042's index: waiting at least the
+// shortest wait), a page at a time, each page after the last, so requests
+// refused on every run (tampered with) can't fill a page and keep the rest
+// waiting; each page kept to those whose sealed wait has run out, read in the
+// page's one transaction (`duePage`), so one not yet due takes no lock and no
+// transaction of its own every run; then each in a transaction of its own,
+// judged again under its lock (`expireRequest`). A request
 // approved, denied or cancelled meanwhile is left as it is.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next. A run that can't read the
 // organisation list is an error the integrity-runs alert counts (E2c).
-import { type AuditTables, type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
+import {
+  type AuditTables,
+  type SignedStates,
+  type SignedStatesServices,
+  withSignedStates,
+} from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import {
+  decisionsOf,
   expireRequest,
   requestsWaitingSince,
+  SHORTEST_APPROVAL_WAIT_MS,
   type SpendRequestsTables,
-  WAITS_FOR_APPROVAL_MS,
+  waitedOut,
 } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database } from '@agentx/platform/db';
+import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
 
-/** How often waiting requests are looked for, once the last run has ended: a request expires within this of its 72 hours. */
+/** How often waiting requests are looked for, once the last run has ended: a request expires within this of its wait. */
 export const REQUEST_EXPIRY_EVERY_MS = 5 * 60_000;
 
 /** How many of an organisation's requests one run expires, and how many candidates a page holds: the rest wait for the next run. */
 const MOST_EXPIRED_A_RUN = 100;
 
 export interface RequestExpiry {
-  /** Expires the requests waiting past their 72 hours, up to MOST_EXPIRED_A_RUN an organisation, until the signal is aborted. Never throws. */
+  /** Expires the requests waiting past their wait, up to MOST_EXPIRED_A_RUN an organisation, until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
@@ -78,15 +88,17 @@ export function createRequestExpiry({
     }
   };
 
-  /** Expires the organisation's requests past their 72 hours, up to its share; false if the signal stopped it. */
+  /** Expires the organisation's requests past their wait, up to its share; false if the signal stopped it. */
   const expireIn = (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const log = logger.child({ orgId });
-    const before = new Date(clock.now().getTime() - WAITS_FOR_APPROVAL_MS);
+    const now = clock.now();
     return expireInPages({
       most,
       signal,
       page: (left, after) =>
-        withSignedStates(database, orgId, services(log), (tx) => requestsWaitingSince(tx, orgId, before, left, after)),
+        withSignedStates(database, orgId, services(log), (tx, states) =>
+          duePage(tx, states, { orgId, now, left, after }),
+        ),
       expire: (requestId) => expiredLogged(log, orgId, requestId),
       unreadable: (error) => {
         log.error('request_expiry.unreadable', { err: error });
@@ -105,4 +117,33 @@ export function createRequestExpiry({
         (orgId) => expireIn(orgId, signal),
       ),
   };
+}
+
+/**
+ * The IDs of the organisation's requests due to expire, in order of ID after
+ * `after`, at most `left`: its rows waiting at least the shortest wait, read
+ * `left` at a time, each kept once the wait its decision sealed has run out
+ * (their decisions read in one statement a page), until `left` are kept or
+ * the rows run out. Their order is the rows', so the job's next page, after
+ * the last kept, reads again only rows not yet due. One whose decision can't
+ * be read is kept: expireRequest judges it and fails loudly.
+ */
+async function duePage(
+  tx: DatabaseTransaction<SpendRequestsTables & AuditTables>,
+  states: SignedStates,
+  { orgId, now, left, after }: { orgId: string; now: Date; left: number; after: string | undefined },
+): Promise<readonly string[]> {
+  const before = new Date(now.getTime() - SHORTEST_APPROVAL_WAIT_MS);
+  const due: string[] = [];
+  let from = after;
+  for (;;) {
+    const rows = await requestsWaitingSince(tx, orgId, before, left, from);
+    const decided = await decisionsOf(tx, states, orgId, rows);
+    for (const id of rows) {
+      const decision = decided.get(id.toLowerCase());
+      if (decision === undefined || waitedOut(decision, now)) due.push(id);
+    }
+    if (due.length >= left || rows.length < left) return due.slice(0, left);
+    from = rows.at(-1);
+  }
 }

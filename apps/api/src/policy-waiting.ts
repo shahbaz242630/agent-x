@@ -12,7 +12,7 @@
 // - one its approver may approve today: its key not revoked, the mandate's
 //   version and the supplier's details those it was decided against (one
 //   moved, even carried by a pause, is its approver's to re-check, E5a), and
-//   within its 72 hours (E4b, from its decision's sealed time);
+//   within its wait (E4b, E6: from its decision's sealed time);
 // - holding its capacity under the rules in force, weighed as its approver's
 //   confirm weighs it, with every other one waiting counted;
 // - refused under the new rules only by rules the team set (`rejectedFor`: a
@@ -133,11 +133,11 @@ const WAITING_STATEMENTS = {
     'be rejected at once.',
   leave:
     'Once you confirm, the requests listed keep waiting and their money stays held. Each is rejected, with why and ' +
-    'what to do, when its approver approves it under the new rules, or it expires after its 72 hours.',
+    'what to do, when its approver approves it under the new rules, or it expires when its wait ends.',
 } as const satisfies Record<WaitingChoice, string>;
 
 /** The version of WAITING_STATEMENTS each change names: raised with any change to their words. */
-const WAITING_STATEMENT_VERSION = 1;
+const WAITING_STATEMENT_VERSION = 2;
 
 /** A change's choice, as its bodies name it: only when the change would reject a waiting request. */
 export const WAITING_REQUESTS = z
@@ -368,7 +368,7 @@ async function rejectedOf(
         !revoked.has(against.agentKeyId.toLowerCase()) &&
         against.mandateVersionId === mandate.versionId &&
         against.supplierVersionId === known(authority.suppliers.get(request.supplierId)).currentVersionId &&
-        !waitedOut(known(authority.decidedAt.get(request.id)), now) &&
+        !waitedOut(known(authority.clocks.get(request.id)), now) &&
         holdsCapacity(known(today).made.decision)
       );
     }),

@@ -308,6 +308,7 @@ describe('a notice’s email (B5-1b)', () => {
       agentName: 'Procurement agent',
       agentId: '0199a0f0-0000-7000-8000-0000000003b4',
       consoleUrl: 'https://app.example.test',
+      expiresAt: new Date('2026-10-17T12:05:00.000Z'),
     };
     const message = messageFor(waitingNotice, 'a@example.test', undefined, waiting);
 
@@ -317,12 +318,13 @@ describe('a notice’s email (B5-1b)', () => {
       expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
     });
 
-    it('shows what it asks and who asked, and Agent X’s address, read as it is sent (B2)', () => {
+    it('shows what it asks, who asked, when it expires in UAE time (E6), and Agent X’s address, read as it is sent (B2)', () => {
       expect(message.text).toContain(
         [
           'Amount: AED 12,345,678.05',
           'Supplier: Gulf Office Supplies',
           `AI agent: Procurement agent (ID ${waiting.agentId})`,
+          'Expires: 17 Oct 2026, 16:05 UAE time (2026-10-17T12:05:00.000Z)',
           'Agent X: https://app.example.test',
         ].join('\n'),
       );

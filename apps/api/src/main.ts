@@ -16,7 +16,7 @@
 //    notices' sweep (B5-1b); and the security events' recorder, writing its
 //    counts each minute (B2-5b); and mandates past their end expired, each
 //    five minutes (Phase 2 B4), and spend requests waiting for approval past
-//    72 hours expired, each five minutes (D7). Role grants write their notices to the
+//    their wait (24, 48 or 72 hours, E6) expired, each five minutes (D7). Role grants write their notices to the
 //    outbox (B5-1b); the sender sends them by email, each minute, once the
 //    config names email (B5-3)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
@@ -830,7 +830,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     createHoldingsCheck({ list: () => listedOrganizations(database), database, keys, ids: uuidV7Ids, logger }),
     HOLDINGS_CHECK_EVERY_MS,
   );
-  // Spend requests waiting for approval past 72 hours expired, their holdings released (Phase 2 D7), on a timer of its own.
+  // Spend requests waiting for approval past their wait expired, their holdings released (Phase 2 D7), on a timer of its own.
   const requestExpiring = scheduleRuns(
     createRequestExpiry({
       list: () => listedOrganizations(database),
