@@ -15,9 +15,17 @@
 //   or a ledger row this build has no file for, stops the run.
 // - A session-level advisory lock lets only one run work at a time. Closing
 //   the connection releases it, even after a crash.
+// - A file waits at most LOCK_TIMEOUT_MS for each lock it takes. A file that
+//   needs a table to itself waits behind any open transaction on it, and
+//   every new query on that table queues behind the file, so the app stalls
+//   for as long as the file waits: without a limit, until the job was stopped.
+//   The wait is short so the stall is too; one that runs out rolls the file
+//   back, and it is tried again after a pause, LOCK_TRIES in all. A file's
+//   own SET LOCAL lock_timeout replaces the limit for that file (0005 waits 5 s).
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import pg from 'pg';
 
@@ -54,6 +62,16 @@ const TRANSACTION_ID = 'select pg_catalog.pg_current_xact_id()::text as id';
  * also drop the advisory lock, so the parts are reset one by one.
  */
 const RESET_SESSION = 'reset all; reset role; discard temp';
+
+/** How long a file waits for each lock before it is rolled back: the longest the app's queries queue behind it. */
+export const LOCK_TIMEOUT_MS = 2000;
+/** Tries of one file whose lock wait ran out, the first included: about 30 s in all. */
+export const LOCK_TRIES = 5;
+/** The pause before trying such a file again. */
+const LOCK_RETRY_PAUSE_MS = 5000;
+
+/** Postgres's `lock_not_available`: a lock wait ran out. */
+const LOCK_NOT_AVAILABLE = '55P03';
 
 export interface Migration {
   readonly name: string;
@@ -99,6 +117,12 @@ export class MigrationNotAtomic extends Error {
     this.name = 'MigrationNotAtomic';
     this.migration = migration;
   }
+}
+
+/** Whether a migration failed only because a lock wait ran out, so it may be tried again. */
+export function isLockTimeout(error: unknown): error is MigrationFailed {
+  const cause = error instanceof MigrationFailed ? error.cause : undefined;
+  return typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === LOCK_NOT_AVAILABLE;
 }
 
 /** Reads and checks every migration file in the folder, in order. Throws MigrationRefused listing every problem. */
@@ -151,6 +175,8 @@ export interface MigrationOptions {
   /** The folder of migration files, db/migrations. */
   readonly directory: string;
   readonly logger: Logger;
+  /** Each lock's wait and the pause before a retry; LOCK_TIMEOUT_MS and 5 s when not given. Tests shorten them. */
+  readonly lockWait?: { readonly timeoutMs: number; readonly pauseMs: number };
 }
 
 /** Applies every migration not yet applied, in order, and returns their names. */
@@ -177,8 +203,9 @@ export async function runMigrations(options: MigrationOptions): Promise<string[]
     if (problems.length > 0) throw new MigrationRefused(problems);
 
     const pending = files.slice(applied.length);
+    const lockWait = options.lockWait ?? { timeoutMs: LOCK_TIMEOUT_MS, pauseMs: LOCK_RETRY_PAUSE_MS };
     for (const migration of pending) {
-      await applyMigration(client, migration, options.logger);
+      await applyWithLockRetries(client, migration, options.logger, lockWait);
       options.logger.info('db.migration.applied', { migration: migration.name, checksum: migration.checksum });
     }
     options.logger.info('db.migrations.done', { applied: pending.length, total: files.length });
@@ -188,14 +215,42 @@ export async function runMigrations(options: MigrationOptions): Promise<string[]
   }
 }
 
+/** Applies one migration, trying it again after a pause when only a lock wait ran out, LOCK_TRIES in all. */
+async function applyWithLockRetries(
+  client: pg.Client,
+  migration: Migration,
+  logger: Logger,
+  lockWait: { readonly timeoutMs: number; readonly pauseMs: number },
+): Promise<void> {
+  for (let tryNumber = 1; ; tryNumber += 1) {
+    try {
+      await applyMigration(client, migration, logger, lockWait.timeoutMs);
+      return;
+    } catch (error) {
+      if (tryNumber >= LOCK_TRIES || !isLockTimeout(error)) throw error;
+      logger.warn('db.migration.lock_wait_ran_out', { migration: migration.name, try: tryNumber });
+      await sleep(lockWait.pauseMs);
+    }
+  }
+}
+
 /**
  * Applies one migration in its own transaction, with its ledger row, then
  * resets the session. Exported for its tests; runMigrations is the way in.
  */
-export async function applyMigration(client: pg.Client, migration: Migration, logger: Logger): Promise<void> {
-  await client.query('begin');
+export async function applyMigration(
+  client: pg.Client,
+  migration: Migration,
+  logger: Logger,
+  lockTimeoutMs: number,
+): Promise<void> {
   let stillInOurTransaction: boolean;
   try {
+    // Inside the try, so a retry on a connection a failed rollback lost still names its file.
+    await client.query('begin');
+    // LOCAL (the third argument), so it ends with the file's transaction. set_config takes the wait as a parameter.
+    // eslint-disable-next-line agentx/tenant-setting-only-in-with-tenant -- Transaction-local lock_timeout on the runner's own unpooled client, not a tenant or session setting.
+    await client.query("select pg_catalog.set_config('lock_timeout', $1, true)", [`${lockTimeoutMs}ms`]);
     const before = await client.query<{ id: string }>(TRANSACTION_ID);
     // eslint-disable-next-line agentx/no-string-built-sql -- Migration files are reviewed SQL from the repository, checksummed and run by the migration role; they are the one place SQL text comes from a file.
     await client.query(migration.sql);

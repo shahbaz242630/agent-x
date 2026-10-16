@@ -8,7 +8,13 @@
 import { fileURLToPath } from 'node:url';
 
 import { ConfigError, loadMigrationConfig, type MigrationConfig } from '@agentx/platform/config';
-import { MigrationFailed, MigrationNotAtomic, MigrationRefused, runMigrations } from '@agentx/platform/db';
+import {
+  isLockTimeout,
+  MigrationFailed,
+  MigrationNotAtomic,
+  MigrationRefused,
+  runMigrations,
+} from '@agentx/platform/db';
 import {
   createLogger,
   createStartupLogger,
@@ -45,6 +51,8 @@ export interface MigrateOptions {
 /** What went wrong, in the fields the operator needs: names, never file contents or values. */
 export function failure(error: unknown): Record<string, unknown> {
   if (error instanceof MigrationRefused) return { problems: error.problems };
+  // Nothing wrong with the file: something held its table each try, so re-running the release is the fix.
+  if (isLockTimeout(error)) return { migration: error.migration, reason: 'lock_wait_ran_out', err: error };
   if (error instanceof MigrationFailed || error instanceof MigrationNotAtomic) {
     return { migration: error.migration, err: error };
   }

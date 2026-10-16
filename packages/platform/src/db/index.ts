@@ -22,6 +22,7 @@ export {
   sweepIdempotencyKeys,
 } from './idempotency.ts';
 export {
+  isLockTimeout,
   MigrationFailed,
   MigrationNotAtomic,
   type MigrationOptions,

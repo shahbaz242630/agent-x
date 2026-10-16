@@ -12,8 +12,14 @@ describe('what a failed run reports: names, never file contents', () => {
   });
 
   it('a migration that failed and was rolled back: its name and the error', () => {
-    const failed = new MigrationFailed('0004_z.sql', new Error('division by zero'));
+    // A coded cause other than a lock wait's: the reason is left out.
+    const failed = new MigrationFailed('0004_z.sql', Object.assign(new Error('division by zero'), { code: '22012' }));
     expect(failure(failed)).toEqual({ migration: '0004_z.sql', err: failed });
+  });
+
+  it('a migration whose lock wait ran out every try: its name, that reason, and the error', () => {
+    const timedOut = new MigrationFailed('0006_v.sql', Object.assign(new Error('lock timeout'), { code: '55P03' }));
+    expect(failure(timedOut)).toEqual({ migration: '0006_v.sql', reason: 'lock_wait_ran_out', err: timedOut });
   });
 
   it('a migration that ended its own transaction: its name and the error', () => {
