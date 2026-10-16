@@ -228,6 +228,8 @@ export const MOST_REQUESTS_A_PAGE = 50;
 export interface SpendRequestListed {
   readonly request: SpendRequestRecord;
   readonly changedAt: Date;
+  /** The supplier's details it was decided under (E5c: a waiting one moved since may need a re-check). */
+  readonly supplierVersionId: string | null;
 }
 
 /**
@@ -254,7 +256,11 @@ export async function requestsPage(
       : { most: MOST_REQUESTS_A_PAGE, rows: 'spend requests', statuses: ['APPROVAL_REQUIRED'] },
     (verified) => ({
       outcome: 'shown',
-      items: verified.map(({ id, state }) => ({ request: recordFrom(id, state), changedAt: state.recordedAt })),
+      items: verified.map(({ id, state }) => ({
+        request: recordFrom(id, state),
+        changedAt: state.recordedAt,
+        supplierVersionId: decidedAgainst(state).supplierVersionId,
+      })),
     }),
   );
 }

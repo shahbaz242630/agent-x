@@ -6,7 +6,11 @@
 // answer, 503 INTEGRITY_FAILED, and holds the organisation. One that can't
 // be checked right now (a backlog of events), a request or the agent or
 // supplier it names, leaves only that request out of a list, named in
-// `unchecked`: the list shows the rest (A1b, partner decision 5; B3b).
+// `unchecked`: the list shows the rest (A1b, partner decision 5; B3b). A
+// waiting one carried to its supplier's new details by changes chosen to
+// pause is marked `needsRecheck` (decision 18; E5c), its approver re-checking
+// it before approving (E5a): each such supplier's moves read once, and one
+// whose history can't be believed leaves its requests out, named.
 //
 // ADR-006's lock order (agent 3, supplier 6, request 8) is kept, so a read
 // never waits on a brake that waits on it (C2's cascades lock the agent, then
@@ -28,12 +32,14 @@ import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown }
 import type { PageAsked, SignedStates } from '@agentx/core/modules/audit';
 import {
   type Decided,
+  decidedAgainst,
   decisionOf,
   decisionsOf,
   denialOf,
   type RejectionShown,
   requestOf,
   requestsPage,
+  type SpendRequestListed,
   type SpendRequestRecord,
   type SpendRequestsTables,
   type VoidingShown,
@@ -46,6 +52,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { type Refused, refused } from './refused.ts';
+import { pausedFromOf } from './suspensions.ts';
 import { createUseCaseWork, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 export type RequestReadTables = UseCaseTables & AgentsTables & SuppliersTables & SpendRequestsTables;
@@ -60,6 +67,8 @@ export interface RequestShown {
   readonly expiresAt: Date | null;
   readonly agentName: string;
   readonly supplierName: string;
+  /** Waiting, carried to its supplier's new details: its approver re-checks it before approving (E5a). */
+  readonly needsRecheck: boolean;
 }
 
 /**
@@ -109,6 +118,9 @@ export interface SpendRequestReads {
 /** Refused inside a request's read, so its transaction ends there. */
 class RequestReadRefused extends UseCaseRefused {}
 
+/** A record that can't be believed (its alarm raised): 503 INTEGRITY_FAILED. */
+const integrityFailed = () => new RequestReadRefused(503, 'INTEGRITY_FAILED');
+
 /**
  * One request with its agent and supplier, in ADR-006's lock order, each
  * verified and locked `share`, in the caller's transaction, which must be
@@ -148,6 +160,16 @@ export async function requestInOrder(
   const waiting = request.status === 'APPROVAL_REQUIRED';
   const expiresAt = expiresAtOf(request, waiting ? await decisionOf(tx, states, { orgId, id: request.id }) : null);
   if (expiresAt === undefined) return { outcome: 'unbelieved' };
+  const decidedUnder = decidedAgainst(read.state).supplierVersionId;
+  let carried: readonly string[] = [];
+  if (waiting && decidedUnder !== null && decidedUnder !== supplier.supplier.currentVersionId) {
+    try {
+      carried = await pausedFromOf(tx, states, orgId, supplier.supplier, integrityFailed);
+    } catch (error) {
+      if (error instanceof RequestReadRefused) return { outcome: 'unbelieved' };
+      throw error;
+    }
+  }
   // One named agent asked, one shown (agentsShown throws for a missing row).
   const [shown] = (await agentsShown(tx, orgId, [agent.agent])) as [AgentShown];
   return {
@@ -158,6 +180,7 @@ export async function requestInOrder(
       expiresAt,
       agentName: shown.name,
       supplierName: version.version.displayName,
+      needsRecheck: decidedUnder !== null && carried.includes(decidedUnder),
     },
   };
 }
@@ -170,7 +193,7 @@ export async function requestInOrder(
 async function denialIn(tx: ReadTx, states: SignedStates, orgId: string, request: SpendRequestRecord): Promise<Denial> {
   if (request.status !== 'DENIED') return { rejection: null, voiding: null };
   const denial = await denialOf(tx, states, { orgId, id: request.id });
-  if (denial.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+  if (denial.outcome === 'tampered') throw integrityFailed();
   return {
     rejection: denial.outcome === 'rejected' ? denial.rejection : null,
     voiding: denial.outcome === 'voided' ? denial.voiding : null,
@@ -183,6 +206,33 @@ const toldToAgent = ({ rejection, voiding }: Denial): readonly ReasonCode[] | nu
   if (voiding !== null) return ['REQUEST_VOIDED', ...voiding.causes];
   return null;
 };
+
+/**
+ * For each supplier a waiting request of the page names that has moved past
+ * the details it was decided under, the versions changes chosen to pause
+ * moved it on from (pausedFromOf), read once a supplier. A history that
+ * can't be believed is a broken chain, a tamper: the list is refused, 503
+ * INTEGRITY_FAILED, as for any record it names (its alarm raised).
+ */
+async function carriedFrom(
+  tx: ReadTx,
+  states: SignedStates,
+  orgId: string,
+  items: readonly SpendRequestListed[],
+  suppliers: ReadonlyMap<string, { readonly id: string; readonly currentVersionId: string }>,
+): Promise<ReadonlyMap<string, readonly string[]>> {
+  const moved = new Map<string, { readonly id: string; readonly currentVersionId: string }>();
+  for (const item of items) {
+    const supplier = suppliers.get(item.request.supplierId);
+    const waiting = item.request.status === 'APPROVAL_REQUIRED' && item.supplierVersionId !== null;
+    if (waiting && supplier && supplier.currentVersionId !== item.supplierVersionId) moved.set(supplier.id, supplier);
+  }
+  const carried = new Map<string, readonly string[]>();
+  for (const supplier of moved.values()) {
+    carried.set(supplier.id, await pausedFromOf(tx, states, orgId, supplier, integrityFailed));
+  }
+  return carried;
+}
 
 /** The entry a verified list's own rows point to; one missing is a bug. */
 function pointedTo<T>(named: ReadonlyMap<string, T>, id: string): T {
@@ -221,7 +271,7 @@ export function createSpendRequestReads({
       });
       const { listed, decisions } = read;
       if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
-      const named = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
+      const named = await work.answered(orgId, correlationId, async (tx, states) => {
         const agents = await agentsNamed(tx, states, orgId, [
           ...new Set(listed.items.map(({ request }) => request.agentId)),
         ]);
@@ -230,10 +280,21 @@ export function createSpendRequestReads({
           ...new Set(listed.items.map(({ request }) => request.supplierId)),
         ]);
         if (suppliers.outcome === 'tampered') return suppliers;
-        return { outcome: 'named' as const, agents, suppliers };
+        const carried = await carriedFrom(tx, states, orgId, listed.items, suppliers.suppliers);
+        return { outcome: 'named' as const, agents, suppliers, carried };
       });
+      if (named.outcome === 'refused') return named;
       if (named.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
-      const { agents, suppliers } = named;
+      const { agents, suppliers, carried } = named;
+      const needsRecheck = (item: SpendRequestListed) => {
+        const supplier = pointedTo(suppliers.suppliers, item.request.supplierId);
+        return (
+          item.request.status === 'APPROVAL_REQUIRED' &&
+          item.supplierVersionId !== supplier.currentVersionId &&
+          item.supplierVersionId !== null &&
+          (carried.get(supplier.id)?.includes(item.supplierVersionId) ?? false)
+        );
+      };
       const expiresAt = ({ request }: { readonly request: SpendRequestRecord }) =>
         expiresAtOf(request, decisions.get(request.id.toLowerCase()));
       // A waiting one with no decision to believe is left out and named, as one that can't be checked (A1b).
@@ -245,12 +306,13 @@ export function createSpendRequestReads({
         outcome: 'listed',
         requests: listed.items
           .filter((item) => !stuck(item))
-          .map(({ request, changedAt }) => ({
-            request,
-            changedAt,
-            expiresAt: expiresAt({ request }) ?? null,
-            agentName: pointedTo(agents.agents, request.agentId).name,
-            supplierName: pointedTo(suppliers.suppliers, request.supplierId).displayName,
+          .map((item) => ({
+            request: item.request,
+            changedAt: item.changedAt,
+            expiresAt: expiresAt(item) ?? null,
+            agentName: pointedTo(agents.agents, item.request.agentId).name,
+            supplierName: pointedTo(suppliers.suppliers, item.request.supplierId).displayName,
+            needsRecheck: needsRecheck(item),
           })),
         next: listed.next,
         unchecked: [...listed.unchecked, ...listed.items.filter(stuck).map(({ request }) => request.id)],
@@ -261,14 +323,14 @@ export function createSpendRequestReads({
       work.answered(orgId, correlationId, async (tx, states) => {
         const read = await requestInOrder(tx, states, orgId, requestId);
         if (read.outcome === 'none') throw new RequestReadRefused(404, 'NOT_FOUND');
-        if (read.outcome === 'unbelieved') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+        if (read.outcome === 'unbelieved') throw integrityFailed();
         return { ...read, ...(await denialIn(tx, states, orgId, read.shown.request)) };
       }),
 
     ofAgent: (orgId, agentId, requestId, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
         const read = await requestOf(tx, states, { orgId, id: requestId });
-        if (read.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+        if (read.outcome === 'tampered') throw integrityFailed();
         // Another agent's is answered as none: an agent can't learn another's requests exist.
         if (read.outcome === 'missing' || read.request.agentId !== agentId) {
           throw new RequestReadRefused(404, 'NOT_FOUND');

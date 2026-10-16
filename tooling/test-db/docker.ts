@@ -85,7 +85,8 @@ export async function removeExpiredContainers(now: number): Promise<void> {
     `{{.ID}} {{.Label "${EXPIRES_LABEL}"}}`,
   ]);
   const expired = expiredContainerIds(listing, now);
-  if (expired.length > 0) await dockerOk(['rm', '--force', ...expired]);
+  // --volumes: the image's data volume too, or each run leaves one behind (S117: 650 of them, 46 GB).
+  if (expired.length > 0) await dockerOk(['rm', '--force', '--volumes', ...expired]);
 }
 
 export interface PostgresContainer {
@@ -127,7 +128,7 @@ export async function startPostgres(image: string, superuserLogin: string, now: 
     )
   ).trim();
   const stop = async (): Promise<void> => {
-    await dockerOk(['rm', '--force', id]);
+    await dockerOk(['rm', '--force', '--volumes', id]);
   };
 
   try {

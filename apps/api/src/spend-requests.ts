@@ -242,6 +242,12 @@ const SPEND_REQUEST_LISTED = z
       .datetime()
       .nullable()
       .describe('While it waits for approval: when it expires, 72 hours from its decision. Otherwise null.'),
+    needsRecheck: z
+      .boolean()
+      .describe(
+        'Waiting, and its supplier’s details changed since it was decided (an admin chose to pause it): approve it ' +
+          'with `recheck`, once the new details are verified, to see how it is weighed under them.',
+      ),
   })
   .register(API_SCHEMAS, { id: 'SpendRequestListed', description: 'A spend request, as the team sees it in a list.' });
 
@@ -343,7 +349,7 @@ const REJECT_CONFIRM_SCHEMA = {
 };
 
 /** A request as a list shows it to the team. */
-const listed = ({ request, changedAt, expiresAt, agentName, supplierName }: RequestShown) => ({
+const listed = ({ request, changedAt, expiresAt, agentName, supplierName, needsRecheck }: RequestShown) => ({
   id: request.id,
   status: request.status,
   decision: request.decision,
@@ -357,6 +363,7 @@ const listed = ({ request, changedAt, expiresAt, agentName, supplierName }: Requ
   bankReference: bankReferenceOf(request.orderReference, request.id),
   changedAt: changedAt.toISOString(),
   expiresAt: expiresAt?.toISOString() ?? null,
+  needsRecheck,
 });
 
 /** The request as answered: to its agent, a refusal's own reasons alone (reasonsShownToAgent); to a person, all. */

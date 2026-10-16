@@ -64,6 +64,8 @@ const SHOWN: RequestShown = {
   expiresAt: new Date('2026-10-16T10:00:00.000Z'),
   agentName: 'Purchasing agent',
   supplierName: 'Gulf Office Supplies LLC',
+  // Carried to its supplier's new details (E5c): shown to the team as needing a re-check.
+  needsRecheck: true,
 };
 
 /** The list's answer for SHOWN: no agent's words, the bank's reference, 72 hours from its decision. */
@@ -81,6 +83,7 @@ const LISTED_ANSWER = {
   bankReference: 'INV-22',
   changedAt: '2026-10-14T09:00:00.000Z',
   expiresAt: '2026-10-16T10:00:00.000Z',
+  needsRecheck: true,
 };
 
 type Role = 'admin' | 'approver' | 'developer' | 'viewer';
