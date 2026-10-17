@@ -251,7 +251,7 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
       w.admin,
       keyed(w.admin, REDRAFT_OPERATION),
       id,
-      shared.termsOf(w, { ...TERMS, purpose: 'Office supplies, renewed' }),
+      { terms: shared.termsOf(w, { ...TERMS, purpose: 'Office supplies, renewed' }), overLimit: 'refuse' },
       CORRELATION,
     );
     expect(redrafted.outcome).toBe('drafted');
@@ -275,7 +275,7 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
       w.admin,
       keyed(w.admin, REDRAFT_OPERATION),
       mandateId,
-      shared.termsOf(w, { ...TERMS, purpose: 'Office supplies, renewed' }),
+      { terms: shared.termsOf(w, { ...TERMS, purpose: 'Office supplies, renewed' }), overLimit: 'refuse' },
       CORRELATION,
     );
     const suspend = () =>

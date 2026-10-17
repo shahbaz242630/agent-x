@@ -239,7 +239,10 @@ export function spendWorld({
         w.admin,
         shared.keyed(w.admin, REDRAFT_OPERATION),
         mandateId,
-        shared.termsOf(w, { purpose: 'Office supplies, renewed', approvalThreshold: AED(100_000n) }),
+        {
+          terms: shared.termsOf(w, { purpose: 'Office supplies, renewed', approvalThreshold: AED(100_000n) }),
+          overLimit: 'refuse',
+        },
         CORRELATION,
       );
       if (redrafted.outcome !== 'drafted') throw new Error(`not drafted: ${redrafted.outcome}`);

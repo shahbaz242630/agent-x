@@ -70,13 +70,14 @@ const draftOf = (w: World, overrides: Partial<MandateDraft['terms']> = {}, agent
   timeZone: 'Asia/Dubai',
   splitWindowHours: 24,
   terms: termsOf(w, overrides),
+  overLimit: 'refuse',
 });
 
 const draft = (who: Member, given: MandateDraft, key?: string) =>
   registry.draft(who, keyed(who, DRAFT_OPERATION, key), given, CORRELATION);
 
 const redraft = (who: Member, mandateId: string, terms: MandateDraft['terms']) =>
-  registry.redraft(who, keyed(who, REDRAFT_OPERATION), mandateId, terms, CORRELATION);
+  registry.redraft(who, keyed(who, REDRAFT_OPERATION), mandateId, { terms, overLimit: 'refuse' }, CORRELATION);
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });

@@ -167,7 +167,7 @@ describe('mandates ended by the clock (B4)', () => {
         w.admin,
         keyed(w.admin, REDRAFT_OPERATION),
         id,
-        termsOf(w, { endsAt: inHours(3) }),
+        { terms: termsOf(w, { endsAt: inHours(3) }), overLimit: 'refuse' },
         'a-correlation',
       ),
     ).pending?.version.id;

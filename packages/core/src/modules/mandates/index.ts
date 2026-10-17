@@ -11,6 +11,8 @@ export {
   MANDATE,
   type MandateStatus,
   MOST_ALLOWED_SUPPLIERS,
+  OVER_LIMIT,
+  type OverLimit,
   SPLIT_WINDOW_HOURS,
 } from './domain/mandate.ts';
 export {

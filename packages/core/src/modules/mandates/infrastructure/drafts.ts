@@ -35,7 +35,14 @@ import {
   type VerifiedState,
 } from '../../audit/index.ts';
 import { minorOf, money, oneOf, timeOf, wholeOf } from '../../../shared-kernel/index.ts';
-import { CONSENT_LIMITS, isEnded, MANDATE, type MandateStatus, OPEN_STATES } from '../domain/mandate.ts';
+import {
+  CONSENT_LIMITS,
+  isEnded,
+  MANDATE,
+  type MandateStatus,
+  OPEN_STATES,
+  type OverLimit,
+} from '../domain/mandate.ts';
 import { type MandateTerms, mandateTerms } from '../domain/terms.ts';
 import { MANDATE_VERSIONS, MANDATES } from './mandates.ts';
 import type { MandatesTables } from './tables.ts';
@@ -243,10 +250,15 @@ function mandateVersionIn(id: string, state: StateCheck, mandateId: string): Man
 /** The facts of a mandate a version's terms are bound to: they never change (0035's `fixed_at_creation`). */
 type Binding = Pick<MandateRecord, 'id' | 'agentId' | 'timeZone' | 'splitWindowHours'>;
 
-/** SHA-256 of the version's terms with the mandate's facts and its number, as canonical JSON, in lower-case hex. */
-export function termsHash(of: Binding, version: number, terms: MandateTerms): string {
+/**
+ * SHA-256 of the version's terms with the mandate's facts, its number and its
+ * over-limit choice (v2, E9: the acceptance's passkey covers it too), as
+ * canonical JSON, in lower-case hex. Kept, never recomputed: a version drafted
+ * before E9 keeps its v1 hash.
+ */
+export function termsHash(of: Binding, version: number, terms: MandateTerms, overLimit: OverLimit): string {
   const canonical = JSON.stringify([
-    'agentx.mandate_terms.v1',
+    'agentx.mandate_terms.v2',
     of.id.toLowerCase(),
     of.agentId.toLowerCase(),
     of.timeZone,
@@ -262,6 +274,7 @@ export function termsHash(of: Binding, version: number, terms: MandateTerms): st
     terms.splitCheck,
     terms.consentLimits,
     terms.endsAt?.toISOString() ?? null,
+    overLimit,
   ]);
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
@@ -275,6 +288,8 @@ interface NewVersion {
   readonly version: number;
   /** As mandateTerms keeps them (checked again by draftMandate or draftVersion); the use case has checked the suppliers and source are the organisation's. */
   readonly terms: MandateTerms;
+  /** Over the mandate's own limits: refuse, or an admin's approval (decision 23), in its terms hash; the use case puts it on the event (`details`), not a sealed field. */
+  readonly overLimit: OverLimit;
   /** The membership of the member who drafted it, checked active by the use case. */
   readonly draftedBy: string;
   readonly draftedAt: Date;
@@ -289,7 +304,7 @@ async function addVersion(
   tx: MandatesTransaction,
   states: SignedStates,
   of: Binding,
-  { orgId, id, version, terms, draftedBy, draftedAt, actor, details = {} }: NewVersion,
+  { orgId, id, version, terms, overLimit, draftedBy, draftedAt, actor, details = {} }: NewVersion,
 ): Promise<RecordedState> {
   const fields = {
     mandate_id: of.id,
@@ -304,7 +319,7 @@ async function addVersion(
     split_check: terms.splitCheck ? 'on' : 'off',
     consent_limits: terms.consentLimits,
     ends_at: terms.endsAt,
-    terms_hash: termsHash(of, version, terms),
+    terms_hash: termsHash(of, version, terms, overLimit),
     drafted_by: draftedBy,
     drafted_at: draftedAt,
   };

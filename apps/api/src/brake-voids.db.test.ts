@@ -193,7 +193,13 @@ async function superseding(w: World, mandateId: string): Promise<Press> {
   });
   const terms = termsOf(w, { purpose: 'Office supplies, renewed', approvalThreshold: AED(100_000n) });
   const drafted = draftedOf(
-    await registry.redraft(w.admin, keyed(w.admin, REDRAFT_OPERATION), mandateId, terms, CORRELATION),
+    await registry.redraft(
+      w.admin,
+      keyed(w.admin, REDRAFT_OPERATION),
+      mandateId,
+      { terms, overLimit: 'refuse' },
+      CORRELATION,
+    ),
   );
   const versionId = drafted.pending?.version.id ?? '';
   const challengeId = askedFor(

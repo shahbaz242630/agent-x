@@ -38,7 +38,7 @@
 // is something past the app, and fails the request (D3's `taken`).
 import { agentKeyOf, agentOf, isLiveKey } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
-import { mayFund, sourceOf } from '@agentx/core/modules/funding-sources';
+import { mayFund, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   type LimitReservationsTables,
   lockAgentMonth,
@@ -50,6 +50,7 @@ import { currencyAllowed, openMandateOfAgent, type PolicyVersionRecord } from '@
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
+  type ConsentCeiling,
   decide,
   type DecisionInput,
   decisionFacts,
@@ -85,11 +86,13 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import {
+  consentOf,
   organizationChoicesOf,
   MandateRefused,
   type MandateTables,
   policyRulesIn,
   toldAdminsAndApprovers,
+  overLimitOf,
   versionIn,
 } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
@@ -234,8 +237,16 @@ export async function mandateWeighedIn(
   const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
   if (found === null || versionId === null) return null;
   const read = await versionIn(tx, states, orgId, found.id, versionId);
-  return { ...read, ...found, versionId: read.id };
+  // Drafted before E9 (decision 23): no choice, refused as it always was.
+  const overLimit = (await overLimitOf(tx, states, orgId, read.id)) ?? 'refuse';
+  return { ...read, ...found, versionId: read.id, overLimit };
 }
+
+/** The source's bank consent as the engine weighs an approval over the mandate's own limits against it. */
+const consentCeilingOf = (source: SourceRecord): ConsentCeiling => {
+  const { maxPayment, maxPeriod, limitPeriod } = consentOf(source);
+  return { maxPayment, maxMonth: limitPeriod === 'month' ? maxPeriod : null };
+};
 
 /**
  * Level 4's second half, after the mandates: the mandate's policy and the
@@ -413,6 +424,7 @@ export function inputOf({
     splitOpen: split,
     duplicateOrder: claims.duplicate,
     possibleDuplicate: claims.possible,
+    consent: source.outcome === 'found' ? consentCeilingOf(source.source) : null,
   };
 }
 

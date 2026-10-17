@@ -48,3 +48,12 @@ export const MOST_ALLOWED_SUPPLIERS = 100;
 /** Whether a limit above the bank consent's is refused or allowed with a warning (partner, S86); always chosen, no default (Phase 3 decision 15). */
 export const CONSENT_LIMITS = ['strict', 'flexible'] as const;
 export type ConsentLimits = (typeof CONSENT_LIMITS)[number];
+
+/**
+ * A request over the mandate's own per-order or monthly limit: refused, or sent
+ * to an admin's approval within the bank consent (Phase 3 decisions 15, 23);
+ * always chosen when drafting, no default. A version drafted before E9 keeps none,
+ * and is weighed as refuse.
+ */
+export const OVER_LIMIT = ['refuse', 'approval'] as const;
+export type OverLimit = (typeof OVER_LIMIT)[number];

@@ -16,6 +16,11 @@
                 "anyOf": [
                   {
                     "type": "string",
+                    "const": "ADMIN_APPROVAL_ONLY",
+                    "description": "The request is above its mandate's own per-order or monthly limit, so only an admin of the organisation may approve it. Ask an admin to approve it, or reject it. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGENT_ADDS_SPENT",
                     "description": "The organisation has registered as many agents as it may in 24 hours, so this one wasn't registered. Try again tomorrow; if no one at the organisation registered them, tell its admins at once."
                   },
@@ -242,7 +247,7 @@
                   {
                     "type": "string",
                     "const": "MANDATE_MONTHLY_LIMIT",
-                    "description": "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit, so it is refused and no approval can allow it. It needs a new mandate version with a higher limit, or capacity freeing up. Nothing was reserved."
+                    "description": "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit. If the mandate chose to send such requests for approval and it is within the bank consent, it waits for an admin's approval; otherwise it is refused, and it needs a new mandate version with a higher limit, or capacity freeing up."
                   },
                   {
                     "type": "string",
@@ -272,7 +277,7 @@
                   {
                     "type": "string",
                     "const": "MANDATE_ORDER_LIMIT",
-                    "description": "The amount is above the mandate's per-order limit, so it is refused and no approval can allow it. Only a new mandate version with a higher limit could. Nothing was reserved."
+                    "description": "The amount is above the mandate's per-order limit. If the mandate chose to send such requests for approval and it is within the bank consent, it waits for an admin's approval; otherwise it is refused, and only a new mandate version with a higher limit could allow it."
                   },
                   {
                     "type": "string",
@@ -1039,6 +1044,14 @@
               }
             ]
           },
+          "overLimit": {
+            "type": "string",
+            "enum": [
+              "refuse",
+              "approval",
+              "not-chosen"
+            ]
+          },
           "termsHash": {
             "type": "string"
           },
@@ -1078,6 +1091,7 @@
           "splitCheck",
           "consentLimits",
           "endsAt",
+          "overLimit",
           "termsHash",
           "draftedBy",
           "draftedAt",
@@ -13256,6 +13270,13 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "overLimit": {
+                    "type": "string",
+                    "enum": [
+                      "refuse",
+                      "approval"
+                    ]
                   }
                 },
                 "required": [
@@ -13271,7 +13292,8 @@
                   "fundingSourceId",
                   "splitCheck",
                   "consentLimits",
-                  "endsAt"
+                  "endsAt",
+                  "overLimit"
                 ],
                 "additionalProperties": false
               }
@@ -13617,6 +13639,13 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "overLimit": {
+                    "type": "string",
+                    "enum": [
+                      "refuse",
+                      "approval"
+                    ]
                   }
                 },
                 "required": [
@@ -13629,7 +13658,8 @@
                   "fundingSourceId",
                   "splitCheck",
                   "consentLimits",
-                  "endsAt"
+                  "endsAt",
+                  "overLimit"
                 ],
                 "additionalProperties": false
               }

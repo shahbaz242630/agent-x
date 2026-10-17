@@ -9,7 +9,11 @@
 // REQUIRE_APPROVAL, then ALLOW. So an ended mandate is always DENY, and an
 // approval can never allow more than the mandate.
 //
-// - Over the mandate's own per-order or monthly limit: REQUIRE_NEW_MANDATE.
+// - Over the mandate's own per-order or monthly limit: REQUIRE_NEW_MANDATE,
+//   or REQUIRE_APPROVAL (an admin's, decision 23) when its version chose so
+//   and the request is within the bank consent: per payment always, per month
+//   when the consent counts by the month. Past the consent the bank would
+//   refuse it, so it stays refused.
 // - Per-order cap, approval threshold, supplier list: each policy narrows on
 //   its own, so the tightest of the three always applies.
 // - The monthly cap per agent (decision 5): the mandate's policy's if it sets
@@ -32,6 +36,15 @@ export type Decision = (typeof DECISIONS)[number];
 /** What a policy's per-order cap does to an order over it: refuse it, or send it for approval. */
 export type OverCap = 'DENY' | 'REQUIRE_APPROVAL';
 
+/** What the mandate's version does to a request over its own limits (decision 23): the mandates module's OverLimit. */
+export type MandateOverLimit = 'refuse' | 'approval';
+
+/** The bank consent's limits an approval over the mandate's own may go to: per payment, and per month or null when it counts by another period. */
+export interface ConsentCeiling {
+  readonly maxPayment: Money;
+  readonly maxMonth: Money | null;
+}
+
 /** The request as the agent made it, its amounts already Money (A1). */
 export interface SpendAsked {
   readonly amount: Money;
@@ -53,6 +66,8 @@ export interface MandateInForce {
   readonly fundingSourceId: string;
   readonly splitCheck: boolean;
   readonly endsAt: Date | null;
+  /** Over its own limits (decision 23): a version drafted before E9 is weighed as refuse. */
+  readonly overLimit: MandateOverLimit;
 }
 
 /** A policy's version in force: each rule null where it sets none. */
@@ -89,6 +104,8 @@ export interface DecisionInput {
   readonly duplicateOrder: boolean;
   /** Whether an open claim's order, in another form, the rail would carry alike (decision 11a). */
   readonly possibleDuplicate: boolean;
+  /** The source's bank consent, or null for no source of the organisation's: nothing over the mandate's limits goes to approval then. */
+  readonly consent: ConsentCeiling | null;
 }
 
 /** Where the monthly cap per agent came from: `none` chosen, or `not-set` (no cap, every request DENY). */
@@ -168,11 +185,16 @@ export function decide(input: DecisionInput): DecisionMade {
  * The reasons an agent is shown (partner decision 11c, widened S102): on a
  * refusal (DENY, REQUIRE_NEW_MANDATE), only those that made it, so a request
  * refused for nothing it holds never tells the agent where its hidden approval
- * line or caps lie; on an approval, all of them. The evidence and the team
- * keep the full list.
+ * line or caps lie; on an approval, all of them but the mandate's own limits
+ * (partner, S121): one sent for approval past them (decision 23) never tells
+ * the agent that asking past its limits can still work. Past the per-order
+ * limit it is past the approval threshold too, which it is shown. The evidence
+ * and the team keep the full list.
  */
 export function reasonsShownToAgent(decision: Decision, reasons: readonly ReasonCode[]): readonly ReasonCode[] {
-  if (decision !== 'DENY' && decision !== 'REQUIRE_NEW_MANDATE') return reasons;
+  if (decision !== 'DENY' && decision !== 'REQUIRE_NEW_MANDATE') {
+    return reasons.filter((code) => code !== 'MANDATE_ORDER_LIMIT' && code !== 'MANDATE_MONTHLY_LIMIT');
+  }
   // A policy's order cap denies or asks approval as the policy says, which the record doesn't keep: shown only
   // when nothing else could have denied, so it denied.
   const made = reasons.filter((code) => code !== 'POLICY_ORDER_CAP' && (DECIDES[code] ?? 'DENY') === decision);
@@ -226,6 +248,12 @@ function mandateInForce(input: DecisionInput, mandate: MandateInForce): boolean 
   );
 }
 
+/** Within the bank consent, in its currency: per payment always, per month when it counts by the month. */
+function withinConsent(consent: ConsentCeiling | null, amount: Money, monthTotal: Money): boolean {
+  if (consent?.maxPayment.currency !== amount.currency) return false;
+  return !over(amount, consent.maxPayment) && (consent.maxMonth === null || !over(monthTotal, consent.maxMonth));
+}
+
 /** The limits, caps and thresholds, all in the mandate's currency. */
 function amountChecks(
   input: DecisionInput,
@@ -237,8 +265,11 @@ function amountChecks(
   const { amount } = input.request;
   const monthTotal = plus(input.monthSpent, amount);
 
-  if (over(amount, mandate.perOrderLimit)) fail('MANDATE_ORDER_LIMIT');
-  if (over(monthTotal, mandate.monthlyLimit)) fail('MANDATE_MONTHLY_LIMIT');
+  // The agent's month is every mandate's (decision 4), so against the consent it is at least the source's own: the safe side.
+  const beyond = mandate.overLimit === 'approval' && withinConsent(input.consent, amount, monthTotal);
+  const overOwn = beyond ? 'REQUIRE_APPROVAL' : 'REQUIRE_NEW_MANDATE';
+  if (over(amount, mandate.perOrderLimit)) fail('MANDATE_ORDER_LIMIT', overOwn);
+  if (over(monthTotal, mandate.monthlyLimit)) fail('MANDATE_MONTHLY_LIMIT', overOwn);
   for (const { perOrderCap } of policies) {
     if (perOrderCap !== null && over(amount, perOrderCap.cap)) fail('POLICY_ORDER_CAP', perOrderCap.over);
   }
@@ -300,8 +331,11 @@ export function decisionInputText(input: DecisionInput): string {
     null,
     // From G5 (decision 11a): a decision sealed before it has no `possibleDuplicate` fact, and its text ends above.
     input.possibleDuplicate,
-    // Last, from E2: a decision sealed before it has no `organizationCapChosen` fact, and its text ends above.
+    // From E2: a decision sealed before it has no `organizationCapChosen` fact, and its text ends above.
     input.organizationCapChosen,
+    // Last, from E9: a decision sealed before it has no `overLimit` or consent facts, and its text ends above.
+    mandate?.overLimit ?? null,
+    input.consent === null ? null : [amount(input.consent.maxPayment), amount(input.consent.maxMonth)],
   ]);
 }
 
@@ -326,5 +360,11 @@ export function decisionFacts(input: DecisionInput): Readonly<Record<string, str
     // None since E2 (decision 15): a decision sealed before it keeps the AED 20,000 default it weighed.
     defaultMonthlyCap: null,
     organizationCapChosen: input.organizationCapChosen,
+    // From E9 (decision 23): what the version chose over its limits, and the consent an approval past them may reach.
+    overLimit: input.mandate?.overLimit ?? null,
+    consentMaxPayment: moneyText(input.consent?.maxPayment ?? null),
+    consentMaxMonth: moneyText(input.consent?.maxMonth ?? null),
   };
 }
+
+const moneyText = (m: Money | null): string | null => (m === null ? null : `${String(m.minor)} ${m.currency}`);

@@ -308,12 +308,17 @@ export function mandateWorld({
     );
 
   /** A mandate drafted by the registry for the world's agent: its ID and its draft's. */
-  async function drafted(registry: MandateRegistry, w: World, overrides: Partial<MandateDraft['terms']> = {}) {
+  async function drafted(
+    registry: MandateRegistry,
+    w: World,
+    overrides: Partial<MandateDraft['terms']> = {},
+    overLimit: MandateDraft['overLimit'] = 'refuse',
+  ) {
     const write = draftedOf(
       await registry.draft(
         w.admin,
         keyed(w.admin, DRAFT_OPERATION),
-        { agentId: w.agent, timeZone: 'Asia/Dubai', splitWindowHours: 24, terms: termsOf(w, overrides) },
+        { agentId: w.agent, timeZone: 'Asia/Dubai', splitWindowHours: 24, terms: termsOf(w, overrides), overLimit },
         'test-correlation',
       ),
     );
@@ -340,8 +345,13 @@ export function mandateWorld({
   }
 
   /** A mandate drafted for the world's agent and accepted: ACTIVE. Its ID. */
-  async function inForce(registry: MandateRegistry, w: World, overrides: Partial<MandateDraft['terms']> = {}) {
-    const { id } = await drafted(registry, w, overrides);
+  async function inForce(
+    registry: MandateRegistry,
+    w: World,
+    overrides: Partial<MandateDraft['terms']> = {},
+    overLimit: MandateDraft['overLimit'] = 'refuse',
+  ) {
+    const { id } = await drafted(registry, w, overrides, overLimit);
     await acceptedPastTheUseCase(w, id);
     return id;
   }
