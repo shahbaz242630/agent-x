@@ -50,12 +50,16 @@ describe('the login service’s names for the audit log (decision 25)', () => {
     expect(asked).toEqual([{ url: `${ISSUER}/v2/users`, authorization: 'Bearer directory-words' }]);
   });
 
-  it('fills kept names only with the login service’s names to fill them from', () => {
-    const fetch = () => Promise.reject(new Error('not called'));
+  it('fills kept names only with sign-in and the directory token, asking nothing until it runs', () => {
+    const asked: unknown[] = [];
+    const fetch = (url: unknown) => {
+      asked.push(url);
+      return Promise.reject(new Error('not called'));
+    };
     const parts = { database: {} as never, keys: {} as never, clock: { now: () => new Date() }, logger: {} as never };
-    expect(contactFillFrom({ directory: undefined, ...parts })).toBeUndefined();
-    expect(contactFillFrom({ directory: directoryNamesFrom(loadConfig(EMAIL), fetch), ...parts })).toHaveProperty(
-      'run',
-    );
+
+    expect(contactFillFrom({ config: loadConfig(SIGN_IN), fetch, ...parts })).toBeUndefined();
+    expect(contactFillFrom({ config: loadConfig(EMAIL), fetch, ...parts })).toHaveProperty('run');
+    expect(asked).toEqual([]);
   });
 });
