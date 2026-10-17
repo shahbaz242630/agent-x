@@ -42,6 +42,10 @@ export const REASON_CODES = {
     'A person at your organisation rejected this request, so it will not be paid. Its reservation was released; ask again only if what you need has changed.',
   APPROVAL_THRESHOLD:
     "The amount is above the approval threshold, the lowest of the mandate's and its policies', so a person must approve it.",
+  AUDIT_EXPORTS_SPENT:
+    'You have downloaded the audit log as many times as you may in an hour (5), so this one was not made. Try again later.',
+  AUDIT_EXPORT_TOO_LARGE:
+    'The range holds more events than one download may (10,000), so nothing was downloaded or logged. Download it in shorter ranges, or for fewer actions.',
   BAD_REQUEST: "The request is malformed, so it can't be read.",
   BANK_ACCOUNT_UNKNOWN:
     "The staging bank holds no account by this ID, so nothing was approved. List the bank's accounts and pick one of them.",

@@ -101,6 +101,16 @@
                   },
                   {
                     "type": "string",
+                    "const": "AUDIT_EXPORTS_SPENT",
+                    "description": "You have downloaded the audit log as many times as you may in an hour (5), so this one was not made. Try again later."
+                  },
+                  {
+                    "type": "string",
+                    "const": "AUDIT_EXPORT_TOO_LARGE",
+                    "description": "The range holds more events than one download may (10,000), so nothing was downloaded or logged. Download it in shorter ranges, or for fewer actions."
+                  },
+                  {
+                    "type": "string",
                     "const": "BAD_REQUEST",
                     "description": "The request is malformed, so it can't be read."
                   },
@@ -871,6 +881,55 @@
         ],
         "additionalProperties": false,
         "description": "One signed event of the organisation’s audit log."
+      },
+      "AuditLogExport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string",
+            "enum": [
+              "text/csv",
+              "application/x-ndjson"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "events": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "upToSeq": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "fileName",
+          "contentType",
+          "content",
+          "events",
+          "upToSeq"
+        ],
+        "additionalProperties": false,
+        "description": "A download of the audit log, logged."
       },
       "IntegrityHold": {
         "type": "object",
@@ -5868,6 +5927,123 @@
                   "required": [
                     "events",
                     "next"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audit-log/exports": {
+      "post": {
+        "operationId": "audit-log.export",
+        "summary": "Download your organisation’s audit log, as CSV or NDJSON: the download is itself logged",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "to": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "actions": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "csv",
+                      "ndjson"
+                    ]
+                  }
+                },
+                "required": [
+                  "from",
+                  "to",
+                  "format"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 4096,
+        "responses": {
+          "201": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "export": {
+                      "$ref": "#/components/schemas/AuditLogExport"
+                    }
+                  },
+                  "required": [
+                    "export"
                   ],
                   "additionalProperties": false
                 }

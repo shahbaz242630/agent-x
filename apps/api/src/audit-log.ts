@@ -35,12 +35,12 @@ import { createUseCaseWork, UseCaseRefused, type UseCaseTables } from './use-cas
 export const MOST_LOG_EVENTS_A_PAGE = 100;
 
 /** The most actions one page may be filtered to. */
-const MOST_ACTIONS_FILTERED = 20;
+export const MOST_ACTIONS_FILTERED = 20;
 
 /** The details a signed state's event carries that are the platform's seal, not the organisation's record. */
 const SEALS_NOT_SHOWN: ReadonlySet<string> = new Set(['stateFingerprint', 'stateKeyVersion']);
 
-class AuditLogRefused extends UseCaseRefused {}
+export class AuditLogRefused extends UseCaseRefused {}
 
 export type LogPageAnswer =
   { readonly outcome: 'page'; readonly events: readonly LogEvent[]; readonly next: bigint | null } | Refused;
@@ -73,7 +73,7 @@ export function createAuditLog({
 }
 
 /** A whole number as the log's sequence names it, in text: JSON numbers can't hold every one. */
-const SEQ = z.string().regex(/^[1-9][0-9]{0,18}$/);
+export const SEQ = z.string().regex(/^[1-9][0-9]{0,18}$/);
 
 const LOG_EVENT = z
   .object({
@@ -149,19 +149,26 @@ const PAGE_SCHEMA = {
   },
 };
 
-/** An event as the page shows it: the platform's own seals left out. */
-const shownOf = ({ seq, id, recordedAt, event, hash, prevHash }: LogEvent) => ({
+/** An event's facts as an organisation is shown them, page or download: the platform's own seals left out. */
+export const factsShown = (details: LogEvent['event']['details']) =>
+  Object.entries(details).filter(([name]) => !SEALS_NOT_SHOWN.has(name));
+
+/** An event's own fields as an organisation is shown them, page or download, beside its facts in the form each needs. */
+export const eventShown = ({ seq, id, recordedAt, event, hash, prevHash }: LogEvent) => ({
   seq: seq.toString(),
   id,
   recordedAt: recordedAt.toISOString(),
   actor: event.actor,
   action: event.action,
   subject: event.subject,
-  details: Object.entries(event.details)
-    .filter(([name]) => !SEALS_NOT_SHOWN.has(name))
-    .map(([name, value]) => ({ name, value })),
   hash,
   prevHash,
+});
+
+/** An event as the page shows it: its facts as name/value pairs, the platform's own seals left out. */
+const shownOf = (logged: LogEvent) => ({
+  ...eventShown(logged),
+  details: factsShown(logged.event.details).map(([name, value]) => ({ name, value })),
 });
 
 /** The log's route. Without `log` it is still documented, and no one reaches it. */
