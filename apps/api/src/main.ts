@@ -94,6 +94,7 @@ import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
 import { createAuditLog } from './audit-log.ts';
+import { createAuditLogExports } from './audit-log-exports.ts';
 import { createFundingSourceChanges } from './funding-source-changes.ts';
 import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
@@ -496,6 +497,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
     auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger }),
+    auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     holdClearings: createHoldClearings({
       database,
       keys,

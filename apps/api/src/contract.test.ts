@@ -180,6 +180,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/agents/{id}/reactivate',
       'POST /v1/agents/{id}/reactivate/confirm',
       'POST /v1/agents/{id}/suspend',
+      'POST /v1/audit-log/exports',
       'POST /v1/auth/sign-out',
       'POST /v1/factor-resets/confirm',
       'POST /v1/factor-resets/{id}/cancel',
@@ -1233,8 +1234,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a), with each GET's HEAD.
-    expect(answers).toHaveLength(145);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), with each GET's HEAD.
+    expect(answers).toHaveLength(146);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1253,6 +1254,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'AgentSelf',
       'AgentSupplier',
       'AuditLogEvent',
+      'AuditLogExport',
       'ConfirmationAsked',
       'Error',
       'FactorReset',
