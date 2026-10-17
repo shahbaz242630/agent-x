@@ -238,7 +238,7 @@ export async function mandateWeighedIn(
   if (found === null || versionId === null) return null;
   const read = await versionIn(tx, states, orgId, found.id, versionId);
   // Drafted before E9 (decision 23): no choice, refused as it always was.
-  const overLimit = (await overLimitOf(tx, states, orgId, read.id)) ?? 'refuse';
+  const overLimit = (await overLimitOf(tx, states, orgId, found.id, read.id)) ?? 'refuse';
   return { ...read, ...found, versionId: read.id, overLimit };
 }
 

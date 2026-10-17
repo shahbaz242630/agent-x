@@ -15,6 +15,7 @@ import {
   consentCheck,
   MANDATE_VERSIONS,
   type MandateRecord,
+  MANDATES,
   type MandatesTables,
   type MandateVersionRecord,
   mandateOf,
@@ -35,7 +36,7 @@ import type { DatabaseTransaction } from '@agentx/platform/db';
 
 import { waitChoiceIn } from './approval-wait-choice.ts';
 import { capChoiceIn, type MonthlyCapChoice } from './monthly-cap-choice.ts';
-import { overLimitIn } from './over-limit-choice.ts';
+import { OVER_LIMIT_CHOSEN, overLimitIn } from './over-limit-choice.ts';
 import { UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 /** The mandates' tables, with the requests and holdings a brake's cascade ends (C2b). */
@@ -145,20 +146,34 @@ async function versionShown(
   if (versionId === null) return null;
   const version = await versionIn(tx, states, orgId, mandateId, versionId);
   const source = await sourceIn(tx, states, orgId, version.fundingSourceId);
-  const overLimit = await overLimitOf(tx, states, orgId, version.id);
+  const overLimit = await overLimitOf(tx, states, orgId, mandateId, version.id);
   return { version, overLimit, consentWarnings: consentCheck(version, consentOf(source)).problems };
 }
 
 /**
- * A version's over-limit choice (decision 23), from its drafted event, believed
- * only whole: null for one drafted before E9 (refused). One more indexed read.
+ * A version's over-limit choice (decision 23): the mandate's newest choice made
+ * on it while in force (E9b), else its drafted event's; null for one drafted
+ * before E9 and never chosen since (refused). A newer version starts from its
+ * own drafted choice, as the mandate's newest names an older one. Each event
+ * believed only whole; two indexed reads.
  */
 export async function overLimitOf(
   tx: MandateTx,
   states: SignedStates,
   orgId: string,
+  mandateId: string,
   versionId: string,
 ): Promise<OverLimit | null> {
+  const chosen = await states.historyOf(tx, orgId, {
+    subjectTypes: [MANDATES.subject],
+    subjectId: mandateId,
+    actions: [OVER_LIMIT_CHOSEN],
+    limit: 1,
+    newest: true,
+  });
+  if (chosen.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  const latest = chosen.events.at(-1)?.event.details;
+  if (latest?.versionId === versionId.toLowerCase()) return overLimitIn(latest);
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [MANDATE_VERSIONS.subject],
     subjectId: versionId,
