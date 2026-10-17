@@ -773,12 +773,13 @@ describe(`a person's kept name and address (E10d, decision 25, Postgres ${server
       .selectAll()
       .where('user_id', '=', sara.userId)
       .executeTakeFirstOrThrow();
-    if (row.name_ciphertext === null || row.email_ciphertext === null) throw new Error('nothing kept');
+    const saraName = row.name_ciphertext;
+    if (saraName === null) throw new Error('nothing kept');
     const owner = await database.connect('admin');
     try {
       await owner.query(
         'update identity.user_contacts set name_ciphertext = $2, name_key_version = 1, email_ciphertext = $3, email_key_version = 1 where user_id = $1',
-        [mallory.userId, row.name_ciphertext, row.name_ciphertext],
+        [mallory.userId, saraName, saraName],
       );
     } finally {
       await owner.end();
@@ -799,11 +800,7 @@ describe(`a person's kept name and address (E10d, decision 25, Postgres ${server
       ).toThrow();
     }
     expect(() =>
-      keys.decrypt(
-        'field-encryption',
-        { ciphertext: row.name_ciphertext ?? Buffer.alloc(0), keyVersion: 1 },
-        contactData(sara.userId, 'email'),
-      ),
+      keys.decrypt('field-encryption', { ciphertext: saraName, keyVersion: 1 }, contactData(sara.userId, 'email')),
     ).toThrow();
   });
 });

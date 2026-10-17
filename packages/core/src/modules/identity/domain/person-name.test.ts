@@ -12,6 +12,7 @@ describe('personName', () => {
     expect(personName('Sara\nAdmin\u0000')).toBe('Sara Admin');
     expect(personName('Sara\u202eniamdA')).toBe('Sara niamdA');
     expect(personName('A\u2066B\u2069C\u200fD\u0085E')).toBe('A B C D E');
+    expect(personName('A\u061cB')).toBe('A B');
   });
 
   it('takes nothing that isn’t a name: not text, empty, broken text or too long', () => {

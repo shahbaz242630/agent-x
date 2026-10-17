@@ -7,8 +7,8 @@
 /** The longest name kept, in UTF-16 units: the login service's own limit is 200. */
 export const MOST_NAME_LENGTH = 200;
 
-// eslint-disable-next-line no-control-regex -- Taking control characters out is the point.
-const NOT_TEXT = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+/** Control characters, and every bidi control: marks (U+061C too), embeddings, overrides and isolates. */
+const NOT_TEXT = /[\p{Cc}\p{Bidi_Control}]/gu;
 
 /** The name to keep, one line with single spaces, or undefined for none or one that isn't text or is too long. */
 export function personName(value: unknown): string | undefined {
