@@ -49,7 +49,11 @@ const SYSTEM_NAMES: Readonly<Record<string, string>> = {
 const NO_NAME: ActorName = { name: null, email: null, shownFrom: null };
 
 /** An actor's key in a namer's answer. */
-export const actorKey = (actor: AuditActor): string => `${actor.type}:${actor.id}`;
+const actorKey = (actor: AuditActor): string => `${actor.type}:${actor.id}`;
+
+/** An actor's name in a namer's answer; nulls for one it doesn't name. */
+export const nameOf = (names: ReadonlyMap<string, ActorName>, actor: AuditActor): ActorName =>
+  names.get(actorKey(actor)) ?? NO_NAME;
 
 /** What Agent X itself holds for a page's actors, read in the organisation's transaction. */
 export interface ActorsHeld {
@@ -91,21 +95,38 @@ export function createActorNamer({
   readonly logger: Logger;
 }): ActorNamer {
   let asking = directory !== undefined;
+  /** Each person the login service already answered for, by Agent X ID: a download's later batches don't ask again. */
+  const answered = new Map<string, DirectoryEntry | undefined>();
 
-  /** The login service's entries for these people, or none once it has failed. */
-  const fromDirectory = async (people: readonly KeptPerson[]): Promise<ReadonlyMap<string, DirectoryEntry>> => {
-    const subjects = people.filter((person) => person.issuer === directory?.issuer).map((person) => person.subject);
-    if (!asking || directory === undefined || subjects.length === 0) return new Map();
-    try {
-      return await directory.entriesOf(subjects);
-    } catch (error) {
-      asking = false;
-      logger.warn('audit_log.names_unavailable', { err: error });
-      return new Map();
+  /**
+   * The login service's entries for these people, by their Agent X ID, or none
+   * once it has failed. Only its own people are asked about: another issuer's
+   * alike subject isn't theirs.
+   */
+  const fromDirectory = async (
+    people: ReadonlyMap<string, KeptPerson>,
+  ): Promise<ReadonlyMap<string, DirectoryEntry>> => {
+    const theirs = [...people].filter(
+      ([userId, person]) => person.issuer === directory?.issuer && !answered.has(userId),
+    );
+    if (asking && directory !== undefined && theirs.length > 0) {
+      try {
+        const entries = await directory.entriesOf(theirs.map(([, person]) => person.subject));
+        for (const [userId, person] of theirs) answered.set(userId, entries.get(person.subject));
+      } catch (error) {
+        asking = false;
+        logger.warn('audit_log.names_unavailable', { err: error });
+      }
     }
+    return new Map(
+      [...people.keys()].flatMap((userId) => {
+        const entry = answered.get(userId);
+        return entry === undefined ? [] : [[userId, entry] as const];
+      }),
+    );
   };
 
-  const personName = (person: KeptPerson | undefined, now: DirectoryEntry | undefined): ActorName => {
+  const personShown = (person: KeptPerson | undefined, now: DirectoryEntry | undefined): ActorName => {
     const name = now?.name ?? person?.name;
     const email = now?.email ?? person?.email;
     if (name === undefined && email === undefined) return NO_NAME;
@@ -118,17 +139,14 @@ export function createActorNamer({
     async namesOf(events, held) {
       const unreadable = [...held.people.values()].filter((person) => person.unreadable).length;
       if (unreadable > 0) logger.warn('audit_log.kept_names_unreadable', { count: unreadable });
-      const now = await fromDirectory([...held.people.values()]);
+      const now = await fromDirectory(held.people);
       const names = new Map<string, ActorName>();
       for (const { event } of events) {
         const { actor } = event;
         const key = actorKey(actor);
         if (names.has(key)) continue;
         if (actor.type === 'user') {
-          const person = held.people.get(actor.id);
-          // Only the login service's own subjects were asked about: another issuer's alike subject isn't theirs.
-          const current = person?.issuer === directory?.issuer ? now.get(person?.subject ?? '') : undefined;
-          names.set(key, personName(person, current));
+          names.set(key, personShown(held.people.get(actor.id), now.get(actor.id)));
         } else if (actor.type === 'agent') {
           const name = held.agents.get(actor.id);
           names.set(key, name === undefined ? NO_NAME : { name, email: null, shownFrom: 'agent' });

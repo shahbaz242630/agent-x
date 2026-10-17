@@ -16,3 +16,7 @@ export function personName(value: unknown): string | undefined {
   const name = value.replace(NOT_TEXT, ' ').replace(/\s+/g, ' ').trim();
   return name.length === 0 || name.length > MOST_NAME_LENGTH ? undefined : name;
 }
+
+/** The name a profile gives: its full name, or its given and family names together, as personName keeps it. */
+export const nameFromParts = (full: unknown, given: unknown, family: unknown): string | undefined =>
+  personName(full) ?? personName([given, family].filter((part) => typeof part === 'string').join(' '));

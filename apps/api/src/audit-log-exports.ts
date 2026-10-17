@@ -40,12 +40,13 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { type ActorName, actorsHeld, createActorNamer } from './actor-names.ts';
+import { type ActorName, createActorNamer } from './actor-names.ts';
 import {
   type AuditLogTables,
   AuditLogRefused,
   eventShown,
   factsShown,
+  heldLogPage,
   MOST_ACTIONS_FILTERED,
   SEQ,
 } from './audit-log.ts';
@@ -192,13 +193,9 @@ export function createAuditLogExports({
     let beforeSeq = upToSeq === null ? null : upToSeq + 1n;
     while (beforeSeq !== null) {
       const before = beforeSeq;
-      const read = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
-        const page = await states.logPageOf(tx, orgId, { ...asked, beforeSeq: before, limit: EXPORT_BATCH });
-        if (page.outcome === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-        const held = await actorsHeld(tx, states, keys, orgId, page.events);
-        if (held === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-        return { ...page, held };
-      });
+      const read = await work.inOrganisation(orgId, correlationId, (tx, states) =>
+        heldLogPage(tx, states, keys, orgId, { ...asked, beforeSeq: before, limit: EXPORT_BATCH }),
+      );
       const names = await namer.namesOf(read.events, read.held);
       lines.push(...read.events.map((event) => lineOf(asked.format, event, names)));
       beforeSeq = read.next;

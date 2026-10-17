@@ -117,7 +117,7 @@ export async function keptPeopleOf(
       };
       const name = opened(row.name_ciphertext, row.name_key_version, 'name');
       const email = opened(row.email_ciphertext, row.email_key_version, 'email');
-      return [row.id, { issuer: row.issuer, subject: row.subject, name, email, unreadable }] as const;
+      return [row.id, { issuer: row.issuer, subject: row.subject, name, email, unreadable }];
     }),
   );
 }

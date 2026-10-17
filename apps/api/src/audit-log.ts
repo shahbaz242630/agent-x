@@ -20,10 +20,10 @@
 //   kept; an agent by its name; Agent X's own parts by theirs.
 // Reading a page isn't itself logged (decision 24: a download is, E10b).
 import type { AgentsTables } from '@agentx/core/modules/agents';
-import type { LogEvent, LogPageToRead } from '@agentx/core/modules/audit';
+import type { LogEvent, LogPageToRead, SignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { actionProblems, type IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database } from '@agentx/platform/db';
+import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
@@ -31,7 +31,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
-import { type ActorName, actorKey, actorsHeld, createActorNamer, SHOWN_FROM } from './actor-names.ts';
+import { type ActorName, actorsHeld, createActorNamer, nameOf, SHOWN_FROM } from './actor-names.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerRefusal } from './idempotent-writes.ts';
 import type { Refused } from './refused.ts';
@@ -64,6 +64,25 @@ export interface AuditLog {
 /** The tables a page of the log reads: its events, and what names their actors. */
 export type AuditLogTables = UseCaseTables & AgentsTables;
 
+/**
+ * A page of the log and what Agent X holds to name its actors, in the
+ * organisation's transaction, a page or a download's batch alike; an event or
+ * an agent that can't be believed is AuditLogRefused INTEGRITY_FAILED.
+ */
+export async function heldLogPage(
+  tx: DatabaseTransaction<AuditLogTables>,
+  states: SignedStates,
+  keys: KeyProvider,
+  orgId: string,
+  asked: LogPageToRead,
+) {
+  const page = await states.logPageOf(tx, orgId, asked);
+  if (page.outcome === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+  const held = await actorsHeld(tx, states, keys, orgId, page.events);
+  if (held === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+  return { events: page.events, next: page.next, held };
+}
+
 export function createAuditLog({
   database,
   keys,
@@ -81,13 +100,10 @@ export function createAuditLog({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: AuditLogRefused });
   return {
     async page(orgId, asked, correlationId) {
-      const read = await work.answered(orgId, correlationId, async (tx, states) => {
-        const page = await states.logPageOf(tx, orgId, asked);
-        if (page.outcome === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-        const held = await actorsHeld(tx, states, keys, orgId, page.events);
-        if (held === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-        return { outcome: 'page' as const, events: page.events, next: page.next, held };
-      });
+      const read = await work.answered(orgId, correlationId, async (tx, states) => ({
+        outcome: 'page' as const,
+        ...(await heldLogPage(tx, states, keys, orgId, asked)),
+      }));
       if (read.outcome === 'refused') return read;
       const namer = createActorNamer({ directory, logger: logger.child({ correlationId }) });
       return { ...read, names: await namer.namesOf(read.events, read.held) };
@@ -119,7 +135,7 @@ const LOG_EVENT = z
           .enum(SHOWN_FROM)
           .nullable()
           .describe(
-            'Where the name was found: `login_service` (as it is now), `kept_copy` (as at their latest sign-in, when the login service couldn’t answer or no longer has them), `agent` or `agent_x`; null for neither.',
+            'Where the name was found: `login_service` (it gave the name or email as they are now; the kept copy fills what it lacks), `kept_copy` (as at their latest sign-in, when the login service couldn’t answer or no longer has them), `agent` or `agent_x`; null for neither.',
           ),
       })
       .describe('Who did it.'),
@@ -198,7 +214,7 @@ export const eventShown = (
   seq: seq.toString(),
   id,
   recordedAt: recordedAt.toISOString(),
-  actor: { ...event.actor, ...(names.get(actorKey(event.actor)) ?? { name: null, email: null, shownFrom: null }) },
+  actor: { ...event.actor, ...nameOf(names, event.actor) },
   action: event.action,
   subject: event.subject,
   hash,

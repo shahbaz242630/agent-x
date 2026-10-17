@@ -13,7 +13,7 @@
 //   DirectoryUnavailable (or LoginTokenRefused), naming the step, never the
 //   answer, and the log falls back to the kept copy.
 import { invitationEmail } from '../domain/invitation.ts';
-import { personName } from '../domain/person-name.ts';
+import { nameFromParts } from '../domain/person-name.ts';
 import { field, ZITADEL_ID } from './zitadel-answer.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
@@ -50,13 +50,13 @@ export interface DirectoryNames {
 function entryOf(user: unknown): readonly [string, DirectoryEntry] | undefined {
   const subject = field(user, 'userId');
   if (typeof subject !== 'string' || !ZITADEL_ID.test(subject)) return undefined;
-  const profile = field(field(user, 'human'), 'profile');
-  const email = field(field(user, 'human'), 'email');
-  const parts = [field(profile, 'givenName'), field(profile, 'familyName')].filter((part) => typeof part === 'string');
+  const human = field(user, 'human');
+  const profile = field(human, 'profile');
+  const email = field(human, 'email');
   return [
     subject,
     {
-      name: personName(field(profile, 'displayName')) ?? personName(parts.join(' ')),
+      name: nameFromParts(field(profile, 'displayName'), field(profile, 'givenName'), field(profile, 'familyName')),
       email: field(email, 'isVerified') === true ? invitationEmail(field(email, 'email')) : undefined,
     },
   ];

@@ -75,6 +75,18 @@ describe('the audit log’s actors, by name (decision 25)', () => {
     expect(asked).toEqual([['101']]);
   });
 
+  it('asks about each person once a namer, however many batches name them', async () => {
+    const { directory, asked } = directoryOf({ '101': { name: 'Sara Khan' } });
+    const namer = createActorNamer({ directory, logger: testLogger() });
+    const page = held({ [SARA]: person('101'), [OMAR]: person('102') });
+
+    await namer.namesOf([by({ type: 'user', id: SARA })], held({ [SARA]: person('101') }));
+    const names = await namer.namesOf([by({ type: 'user', id: SARA }), by({ type: 'user', id: OMAR })], page);
+
+    expect(names.get(`user:${SARA}`)).toMatchObject({ name: 'Sara Khan', shownFrom: 'login_service' });
+    expect(asked).toEqual([['101'], ['102']]);
+  });
+
   it('names from the kept copy one the login service no longer has, and the ID alone with neither', async () => {
     const { directory } = directoryOf({});
     const namer = createActorNamer({ directory, logger: testLogger() });
