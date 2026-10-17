@@ -5,9 +5,9 @@
 // (keepUserContact). So the audit log can name them even once the login
 // service no longer has them.
 //
-// - It runs at the API's start and once a day after: a person the login
-//   service no longer has stays without a copy, and is asked about again on
-//   the next run only, at most a hundred a call.
+// - It runs at the API's start and hourly after: a person the login service
+//   no longer has stays without a copy, and is asked about again on the next
+//   run only, at most a hundred a call; with none to fill, a run is one read.
 // - Each person is kept by one statement of their own that only adds a copy:
 //   a sign-in meanwhile keeps its own, newer values, and two runs at once add
 //   one row.

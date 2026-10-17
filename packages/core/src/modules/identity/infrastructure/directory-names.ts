@@ -8,7 +8,9 @@
 //   subjects in its own ID shape; anyone else is left out of the answer.
 // - A person the login service no longer has is left out too: the log then
 //   names them from the copy Agent X kept (user-contacts.ts).
-// - Short in time, as a page waits on it: a login service that is slow, can't
+// - Short in time for a page, which waits on it (PAGE_CALL_TIMEOUT_MS); longer
+//   for a background fill, as a login service scaled to zero takes a while to
+//   wake. A login service that is slow, can't
 //   be reached, refuses the token or answers otherwise throws
 //   DirectoryUnavailable (or LoginTokenRefused), naming the step, never the
 //   answer, and the log falls back to the kept copy.
@@ -17,8 +19,8 @@ import { nameFromParts } from '../domain/person-name.ts';
 import { field, ZITADEL_ID } from './zitadel-answer.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
-/** How long one call may take: a page of the log waits on it. */
-const CALL_TIMEOUT_MS = 2500;
+/** How long one call may take unless said: a page of the log waits on it. */
+const PAGE_CALL_TIMEOUT_MS = 2500;
 
 /** The most people one call asks about. */
 export const MOST_A_CALL = 100;
@@ -62,8 +64,11 @@ function entryOf(user: unknown): readonly [string, DirectoryEntry] | undefined {
   ];
 }
 
-export function createDirectoryNames(login: ZitadelCallOptions): DirectoryNames {
-  const call = createZitadelCall(login, { timeoutMs: CALL_TIMEOUT_MS, mostAnswerBytes: MOST_ANSWER_BYTES });
+export function createDirectoryNames(
+  login: ZitadelCallOptions,
+  { timeoutMs = PAGE_CALL_TIMEOUT_MS }: { readonly timeoutMs?: number } = {},
+): DirectoryNames {
+  const call = createZitadelCall(login, { timeoutMs, mostAnswerBytes: MOST_ANSWER_BYTES });
   const unavailable = (how: string) => new DirectoryUnavailable(how);
 
   return {

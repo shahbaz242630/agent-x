@@ -194,8 +194,8 @@ const SWEEP_EVERY_MS = HOUR_MS;
  */
 const ROW_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
 
-/** How often people with no kept name are looked up at the login service (decision 25, E10d-4): at the start, then daily. */
-const CONTACT_FILL_EVERY_MS = 24 * HOUR_MS;
+/** How often people with no kept name are looked up at the login service (decision 25, E10d-4): at the start, then hourly, so a run the login service failed is soon tried again. */
+const CONTACT_FILL_EVERY_MS = HOUR_MS;
 
 /** How often the recorder writes the security events' counts whose minute has ended (B2-5b). */
 const RECORD_EVERY_MS = 60_000;
@@ -798,7 +798,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   logger.info('api.idp_events', { copying: idpCopying.running });
   // The kept names of people who signed in before they were kept (decision 25), once the login service can be asked.
   const contactFilling = scheduleRunsIfAny(
-    contactFillFrom({ directory, database, keys, clock: systemClock, logger }),
+    contactFillFrom({ config, fetch: outboundFetch, database, keys, clock: systemClock, logger }),
     CONTACT_FILL_EVERY_MS,
   );
   logger.info('api.contact_fill', { filling: contactFilling.running });
