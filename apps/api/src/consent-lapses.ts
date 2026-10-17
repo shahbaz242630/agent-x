@@ -14,7 +14,8 @@
 // cancel, as the lock order has the chain head last (ADR-006 §6). Each holds
 // the source for change, so the check and the record are one step.
 import type { AuditTransaction, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
-import { SOURCES, type SourceRecord } from '@agentx/core/modules/funding-sources';
+import { expiredOnly, SOURCES, type SourceRecord } from '@agentx/core/modules/funding-sources';
+import type { FundingSourceState } from '@agentx/core/modules/providers';
 
 import { consentExpiryOf } from './consent-expiry-choice.ts';
 
@@ -76,3 +77,26 @@ export const lapsedBy = (source: SourceRecord, now: Date): LapsedConsent | undef
   source.status !== 'ENDED' && source.consentExpiresAt <= now
     ? { id: source.accountConsentId, expiresAt: source.consentExpiresAt }
     : undefined;
+
+/**
+ * The consent whose lapse a refresh meets, given the partner's answer (none
+ * when it found no source): the one a newer answer says ran out; none when a
+ * newer answer says the consent held ended otherwise (revoked, consumed or
+ * rejected before its end, whatever the time now); else the one held, past
+ * its end, so a renewal never replaces a consent whose lapse isn't logged.
+ */
+export function lapseAnswered(
+  source: SourceRecord,
+  answer: FundingSourceState | undefined,
+  now: Date,
+): LapsedConsent | undefined {
+  if (
+    answer !== undefined &&
+    answer.statusChangedAt >= source.partnerChangedAt &&
+    answer.availability === 'UNAVAILABLE'
+  ) {
+    if (expiredOnly(answer)) return { id: answer.accountConsentId, expiresAt: answer.consentExpiresAt };
+    if (answer.accountConsentId === source.accountConsentId) return undefined;
+  }
+  return lapsedBy(source, now);
+}

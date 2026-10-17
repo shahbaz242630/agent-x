@@ -3,10 +3,11 @@
 // records nothing.
 import type { AuditTransaction, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import type { SourceRecord } from '@agentx/core/modules/funding-sources';
+import type { FundingSourceState } from '@agentx/core/modules/providers';
 import { describe, expect, it } from 'vitest';
 
 import { consentExpiryDetails } from './consent-expiry-choice.ts';
-import { CONSENT_LAPSED, lapsedBy, lapseRecorded } from './consent-lapses.ts';
+import { CONSENT_LAPSED, lapseAnswered, lapsedBy, lapseRecorded } from './consent-lapses.ts';
 
 const TX = {} as AuditTransaction;
 const FOUND = { source: { id: 'source' }, state: {} as VerifiedState };
@@ -82,5 +83,37 @@ describe('a consent’s lapse (E7c)', () => {
     expect(lapsedBy(source('SUSPENDED', now), now)).toEqual({ id: 'consent-1', expiresAt: now });
     expect(lapsedBy(source('ENDED', CONSENT.expiresAt), now)).toBeUndefined();
     expect(lapsedBy(source('ACTIVE', new Date(now.getTime() + 1)), now)).toBeUndefined();
+  });
+
+  it('a refresh meets the consent a newer answer says ran out, none for one ended early, else the one held', () => {
+    const now = new Date('2026-10-16T12:00:00Z');
+    const before = new Date('2026-10-16T09:00:00Z');
+    const held = {
+      status: 'ACTIVE',
+      accountConsentId: 'consent-1',
+      consentExpiresAt: CONSENT.expiresAt,
+      partnerChangedAt: before,
+    } as SourceRecord;
+    const answer = (change: Partial<FundingSourceState>) =>
+      ({
+        availability: 'UNAVAILABLE',
+        accountConsentId: 'consent-1',
+        consentExpiresAt: CONSENT.expiresAt,
+        statusChangedAt: CONSENT.expiresAt,
+        ...change,
+      }) as FundingSourceState;
+    const early = new Date('2026-10-16T09:30:00Z');
+
+    // Ran out, by the answer's own times: the answer's consent.
+    expect(lapseAnswered(held, answer({ accountConsentId: 'consent-2' }), now)).toMatchObject({ id: 'consent-2' });
+    // Revoked before its end: no lapse, though its end has passed by now.
+    expect(lapseAnswered(held, answer({ statusChangedAt: early }), now)).toBeUndefined();
+    // Another consent's early end, a stale answer, one still available, or none: the one held, past its end.
+    expect(lapseAnswered(held, answer({ statusChangedAt: early, accountConsentId: 'consent-2' }), now)).toEqual(
+      CONSENT,
+    );
+    expect(lapseAnswered(held, answer({ statusChangedAt: new Date('2026-10-16T08:00:00Z') }), now)).toEqual(CONSENT);
+    expect(lapseAnswered(held, answer({ availability: 'ACTIVE' }), now)).toEqual(CONSENT);
+    expect(lapseAnswered(held, undefined, now)).toEqual(CONSENT);
   });
 });

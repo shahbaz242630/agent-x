@@ -35,7 +35,8 @@
 //
 // Before any of that, each consent run out by time on a source not ended has
 // its lapse logged once (E7c, consent-lapses.ts), so what the run then voids
-// follows the record of why, or of the hold that keeps it.
+// usually follows the record of why (a lapse that fails, or past a run's
+// share, is logged on a later run, after them).
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next.

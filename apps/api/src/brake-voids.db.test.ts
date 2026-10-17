@@ -2081,6 +2081,48 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
       ]);
     });
 
+    it('renewed past its end before any run: the refresh logs the old consent’s lapse before taking the renewal (review)', async () => {
+      const { w } = await ready();
+      await consentChosen(w, 'pause');
+      await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+      clock.advanceBy(2 * 60_000);
+
+      await answeredWith(w, (now) => ({
+        availability: 'ACTIVE',
+        consentStatus: 'Authorized',
+        accountConsentId: 'renewed-consent',
+        replacesConsentId: w.state.accountConsentId,
+        consentExpiresAt: new Date(now.getTime() + 365 * DAY_MS),
+        statusChangedAt: now,
+      }));
+      await job(w).run();
+
+      const actions = (await sourceEvents(w)).map(({ action }) => action);
+      expect(actions.slice(-2)).toEqual(['funding_source.consent_lapsed', 'funding_source.partner_changed']);
+      expect((await lapsesOf(w)).map(({ details }) => details.consentId)).toEqual([w.state.accountConsentId]);
+    });
+
+    it('revoked before its end, refreshed only after it: no lapse, the source ended (review)', async () => {
+      const { w, acting } = await ready();
+      const { approved } = await pendingOf(w, acting);
+      await consentChosen(w, 'pause');
+      await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+      const revokedAt = new Date(clock.now().getTime() + 30_000);
+      clock.advanceBy(2 * 60_000);
+
+      expect(
+        await answeredWith(w, () => ({
+          availability: 'UNAVAILABLE',
+          consentStatus: 'Revoked',
+          statusChangedAt: revokedAt,
+        })),
+      ).toMatchObject({ outcome: 'changed', source: { status: 'ENDED' } });
+      await job(w).run();
+
+      expect(await lapsesOf(w)).toEqual([]);
+      expect(await statusOf(w, approved.id)).toBe('DENIED');
+    });
+
     it('a hold made a cancel past the end: the lapse names the hold it met, before the new choice', async () => {
       const { w } = await ready();
       await consentChosen(w, 'pause');
