@@ -73,7 +73,13 @@ const drafted = (w: World, overrides: Partial<MandateDraft['terms']> = {}) => sh
 /** A later draft of the mandate: its ID. */
 async function redrafted(w: World, mandateId: string, overrides: Partial<MandateDraft['terms']> = {}) {
   const write = draftedOf(
-    await registry.redraft(w.admin, keyed(w.admin, REDRAFT_OPERATION), mandateId, termsOf(w, overrides), CORRELATION),
+    await registry.redraft(
+      w.admin,
+      keyed(w.admin, REDRAFT_OPERATION),
+      mandateId,
+      { terms: termsOf(w, overrides), overLimit: 'refuse' },
+      CORRELATION,
+    ),
   );
   return write.pending?.version.id ?? '';
 }

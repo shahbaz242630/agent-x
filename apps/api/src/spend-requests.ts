@@ -10,10 +10,11 @@
 // Every request recorded answers 201 with its decision and the reasons, a
 // denied one too: the agent learns why, and the evidence keeps it. A refusal
 // shows the agent only the reasons that made it (partner decision 11c), so a
-// request refused for nothing it holds never maps its hidden approval line. Only what
-// can't be recorded is refused: CURRENCY_NOT_ALLOWED (422), ORG_FROZEN (409),
-// a key no longer live (401), INTEGRITY_FAILED (503), and the idempotency
-// key's own answers. The answer shows the bank reference the order reference
+// request refused for nothing it holds never maps its hidden approval line;
+// one sent for approval past its mandate's own limits (decision 23) never
+// names them. Only what can't be recorded is refused: CURRENCY_NOT_ALLOWED
+// (422), ORG_FROZEN (409), a key no longer live (401), INTEGRITY_FAILED
+// (503), and the idempotency key's own answers. The answer shows the bank reference the order reference
 // becomes on the rail when that differs from it (decision 8): the same
 // mapping as hand-off's.
 //

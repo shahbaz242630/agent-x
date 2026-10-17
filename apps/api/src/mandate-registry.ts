@@ -36,6 +36,7 @@ import {
   MOST_DRAFTS_A_DAY,
   oneDraftAtATime,
   openMandateOfAgent,
+  type OverLimit,
 } from '@agentx/core/modules/mandates';
 import { suppliersFound } from '@agentx/core/modules/suppliers';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
@@ -53,6 +54,7 @@ import {
   sourceIn,
   viewIn,
 } from './mandate-reads.ts';
+import { overLimitDetails } from './over-limit-choice.ts';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork, type Member, type Written } from './use-case-work.ts';
 
@@ -69,7 +71,12 @@ export interface MandateDraft {
   readonly timeZone: string;
   readonly splitWindowHours: number;
   readonly terms: MandateTerms;
+  /** Over the mandate's own limits (decision 23). */
+  readonly overLimit: OverLimit;
 }
+
+/** A later version as a body gives it: its terms and its over-limit choice. */
+type VersionDraft = Pick<MandateDraft, 'terms' | 'overLimit'>;
 
 /** Where a page starts, and how many it holds at most (MOST_MANDATES_A_PAGE). */
 interface MandatePage {
@@ -103,7 +110,7 @@ export interface MandateRegistry {
     member: Member,
     idempotent: IdempotentRequest,
     mandateId: string,
-    terms: MandateTerms,
+    version: VersionDraft,
     correlationId: string,
   ): Promise<MandateWrite>;
   list(orgId: string, page: MandatePage, correlationId: string): Promise<MandatesListed>;
@@ -164,7 +171,7 @@ export function createMandateRegistry({
   };
 
   return {
-    async draft(member, idempotent, { agentId, timeZone, splitWindowHours, terms }, correlationId) {
+    async draft(member, idempotent, { agentId, timeZone, splitWindowHours, terms, overLimit }, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const now = clock.now();
         const admin = await drafting(tx, states, member, now);
@@ -188,17 +195,18 @@ export function createMandateRegistry({
           timeZone,
           splitWindowHours,
           terms,
+          overLimit,
           draftedBy: admin.id,
           draftedAt: now,
           actor: { type: 'user', id: member.userId },
-          details,
+          details: { ...details, ...overLimitDetails(overLimit) },
         });
         return { status: 201, resourceId: id };
       });
       return draftedAfter(member.orgId, correlationId, done);
     },
 
-    async redraft(member, idempotent, mandateId, terms, correlationId) {
+    async redraft(member, idempotent, mandateId, { terms, overLimit }, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const now = clock.now();
         const admin = await drafting(tx, states, member, now);
@@ -209,10 +217,11 @@ export function createMandateRegistry({
           orgId: member.orgId,
           id: ids.next(),
           terms,
+          overLimit,
           draftedBy: admin.id,
           draftedAt: now,
           actor: { type: 'user', id: member.userId },
-          details,
+          details: { ...details, ...overLimitDetails(overLimit) },
         });
         return { status: 200, resourceId: read.mandate.id };
       });

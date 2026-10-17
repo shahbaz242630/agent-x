@@ -4,8 +4,9 @@
 // it; the database's checks (0035) hold the same shapes.
 //
 // The limits nest: approval threshold ≤ per-order ≤ monthly (PRD §3.3: over
-// the mandate's own limits is REQUIRE_NEW_MANDATE, never an approval). All
-// three are in the mandate's one currency, as Money (A1).
+// the mandate's own limits is REQUIRE_NEW_MANDATE, unless the version chose to
+// send it to an admin's approval, Phase 3 decision 23). All three are in the
+// mandate's one currency, as Money (A1).
 //
 // The terms are checked against the bank consent of their funding source
 // (partner, S86–S87): per payment always, and per month when the consent's

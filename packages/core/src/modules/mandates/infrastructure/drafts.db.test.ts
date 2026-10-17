@@ -102,6 +102,7 @@ async function drafted(given: MandateTerms = terms(), agentId = agent): Promise<
       timeZone: 'Asia/Dubai',
       splitWindowHours: 24,
       terms: given,
+      overLimit: 'refuse',
       draftedBy: ids.next(),
       draftedAt: clock.now(),
       actor: OPERATOR,
@@ -120,6 +121,7 @@ async function redrafted(mandateId: string, given: MandateTerms = terms()): Prom
       orgId: org,
       id,
       terms: given,
+      overLimit: 'refuse',
       draftedBy: ids.next(),
       draftedAt: clock.now(),
       actor: OPERATOR,
@@ -199,7 +201,7 @@ describe('drafting a mandate (B2)', () => {
         id: versionId,
         mandateId: id,
         version: 1,
-        termsHash: termsHash(binding, 1, { ...given, supplierIds: [...given.supplierIds].sort() }),
+        termsHash: termsHash(binding, 1, { ...given, supplierIds: [...given.supplierIds].sort() }, 'refuse'),
         draftedBy: expect.any(String) as unknown,
         draftedAt: clock.now(),
       },
@@ -211,21 +213,22 @@ describe('drafting a mandate (B2)', () => {
     expect(await openOf()).toEqual({ outcome: 'missing' });
   });
 
-  it('binds each version’s terms hash to the mandate, the version’s number and every term', () => {
+  it('binds each version’s terms hash to the mandate, the version’s number, every term and the over-limit choice', () => {
     const binding = { id: org, agentId: agent, timeZone: 'Asia/Dubai', splitWindowHours: 24 };
     const base = terms();
-    const hash = termsHash(binding, 1, base);
+    const hash = termsHash(binding, 1, base, 'refuse');
 
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
     for (const changed of [
-      termsHash({ ...binding, agentId: source }, 1, base),
-      termsHash({ ...binding, timeZone: 'Europe/London' }, 1, base),
-      termsHash({ ...binding, splitWindowHours: 25 }, 1, base),
-      termsHash(binding, 2, base),
-      termsHash(binding, 1, { ...base, monthlyLimit: AED(2_000_001n) }),
-      termsHash(binding, 1, { ...base, supplierIds: [base.supplierIds[0] ?? ''] }),
-      termsHash(binding, 1, { ...base, splitCheck: false }),
-      termsHash(binding, 1, { ...base, consentLimits: 'flexible' }),
+      termsHash({ ...binding, agentId: source }, 1, base, 'refuse'),
+      termsHash({ ...binding, timeZone: 'Europe/London' }, 1, base, 'refuse'),
+      termsHash({ ...binding, splitWindowHours: 25 }, 1, base, 'refuse'),
+      termsHash(binding, 2, base, 'refuse'),
+      termsHash(binding, 1, { ...base, monthlyLimit: AED(2_000_001n) }, 'refuse'),
+      termsHash(binding, 1, { ...base, supplierIds: [base.supplierIds[0] ?? ''] }, 'refuse'),
+      termsHash(binding, 1, { ...base, splitCheck: false }, 'refuse'),
+      termsHash(binding, 1, { ...base, consentLimits: 'flexible' }, 'refuse'),
+      termsHash(binding, 1, base, 'approval'),
     ]) {
       expect(changed).not.toBe(hash);
     }

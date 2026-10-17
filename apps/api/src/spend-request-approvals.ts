@@ -17,7 +17,10 @@
 //   policies as they now are, must still say ALLOW or REQUIRE_APPROVAL (an
 //   approver may approve over the threshold, never past a DENY or
 //   REQUIRE_NEW_MANDATE): otherwise REQUEST_CHANGED (409), for the agent to
-//   ask again (SEC-LIM-10). Routine changes don't void it: a policy changed
+//   ask again (SEC-LIM-10). One over the mandate's own limits, sent for
+//   approval as its version chose (decision 23), only an admin approves:
+//   ADMIN_APPROVAL_ONLY (403) for a finance approver, who may still reject
+//   it. Routine changes don't void it: a policy changed
 //   since is weighed as it now is, and a key rotated out (expired, not
 //   revoked) still stands behind what it asked;
 // - re-checked (decisions 15.3, 16, 18; E5a): one whose supplier moved to new
@@ -77,6 +80,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { rejectedFor, rejectionNote, type RuleDenial } from './approval-rejections.ts';
 import { MandateRefused } from './mandate-reads.ts';
+import { overMandateLimit } from './over-limit-choice.ts';
 import type { Refused } from './refused.ts';
 import { agentAlone, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
@@ -110,6 +114,11 @@ export const RECHECK_STATEMENT =
 
 /** The version of RECHECK_STATEMENT each re-check names: raised with any change to its words. */
 const RECHECK_STATEMENT_VERSION = 1;
+
+/** Past the mandate's own limits only an admin approves, as only an admin sets them (decision 23): ADMIN_APPROVAL_ONLY. */
+const adminPastTheLimits = (approver: { readonly role: string }, reasons: readonly ReasonCode[]): void => {
+  if (overMandateLimit(reasons) && approver.role !== 'admin') throw new MandateRefused(403, 'ADMIN_APPROVAL_ONLY');
+};
 
 /** A re-check as the step-up binds it: what changed, the decision and reasons now, and its words' version. */
 const recheckHashParts = (view: RecheckShown | null): readonly string[] =>
@@ -297,7 +306,7 @@ export function createSpendRequestApprovals({
     // Read before the lock waits below, as a decision's: the instant it is weighed at.
     const now = clock.now();
     await notFrozen(tx, states, orgId);
-    await work.memberIn(tx, states, member, DECIDING_ROLES);
+    const approver = await work.memberIn(tx, states, member, DECIDING_ROLES);
     const named = await namedBy(tx, orgId, requestId);
     if (named === undefined) throw new MandateRefused(404, 'NOT_FOUND');
     const agent = await agentAlone(tx, states, { orgId, agentId: named.agent_id });
@@ -359,6 +368,7 @@ export function createSpendRequestApprovals({
     if (!unchanged || (rejection === null && !holdsCapacity(made.decision))) {
       throw new MandateRefused(409, 'REQUEST_CHANGED');
     }
+    if (rejection === null) adminPastTheLimits(approver, made.reasons);
     const shown: ApprovalShown = { recheck: recheckShown(supplierNow, recheck, request, made), rejection };
     // The policies it is approved under, which may be newer than its decision's: kept with the approval.
     const weighedUnder = {

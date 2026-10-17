@@ -11,6 +11,8 @@ export {
   MANDATE,
   type MandateStatus,
   MOST_ALLOWED_SUPPLIERS,
+  OVER_LIMIT,
+  type OverLimit,
   SPLIT_WINDOW_HOURS,
 } from './domain/mandate.ts';
 export {
@@ -35,6 +37,7 @@ export {
   MOST_MANDATES_A_PAGE,
   oneDraftAtATime,
   openMandateOfAgent,
+  VERSION_DRAFTED,
 } from './infrastructure/drafts.ts';
 export { acceptDraft, agentOfMandate, mandatesOfAgent } from './infrastructure/acceptance.ts';
 export {

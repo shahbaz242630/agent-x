@@ -281,6 +281,21 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(requestOfAnswer(await approved(w.admin, waiting.id)).status).toBe('APPROVED');
   });
 
+  it('only an admin approves one sent for approval past its mandate’s own limit (decision 23); an approver is refused', async () => {
+    const w = await shared.world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await policySet(w, null, w.maxPayment * 4n);
+    const limits = { perOrderLimit: AED(w.maxPayment / 2n), approvalThreshold: AED(w.maxPayment / 4n) };
+    await shared.inForce(registry, w, limits, 'approval');
+    const acting = await shared.agentKey(w);
+    const waiting = await ask(acting, w, { amount: AED(w.maxPayment) });
+    expect(waiting.status).toBe('APPROVAL_REQUIRED');
+
+    expect(await asking(await member(w.org, 'approver'), waiting.id)).toEqual(refused(403, 'ADMIN_APPROVAL_ONLY'));
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    expect(requestOfAnswer(await approved(w.admin, waiting.id)).status).toBe('APPROVED');
+  });
+
   it('counts the request once: one over half the monthly cap is approved (its own reservation and claim left out)', async () => {
     const { w, acting } = await ready();
     // AED 12,000 of the organisation's AED 20,000 cap: counted twice it would be past it.

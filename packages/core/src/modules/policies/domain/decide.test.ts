@@ -43,6 +43,7 @@ const MANDATE: MandateInForce = {
   fundingSourceId: SOURCE,
   splitCheck: true,
   endsAt: null,
+  overLimit: 'refuse',
 };
 
 /** A policy that sets nothing, as an organisation's whose only row is there. */
@@ -70,6 +71,7 @@ function input(dirhams: number, changes: Partial<DecisionInput> = {}): DecisionI
     splitOpen: aed(0),
     duplicateOrder: false,
     possibleDuplicate: false,
+    consent: { maxPayment: aed(100_000), maxMonth: aed(200_000) },
     ...changes,
   };
 }
@@ -206,6 +208,71 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
       decision: 'DENY',
       reasons: ['DUPLICATE_ORDER_REFERENCE', 'MANDATE_ORDER_LIMIT', 'POLICY_MONTHLY_CAP', 'APPROVAL_THRESHOLD'],
     });
+  });
+});
+
+describe('decide: over the mandate’s own limits, sent for approval (decision 23)', () => {
+  const approving = { ...MANDATE, overLimit: 'approval' as const };
+  const policy = orgPolicy({ monthlyCap: aed(500_000) });
+  const consent = (maxPayment: number, maxMonth: number | null) => ({
+    maxPayment: aed(maxPayment),
+    maxMonth: maxMonth === null ? null : aed(maxMonth),
+  });
+
+  it('asks approval past the per-order limit within the consent’s per payment, exactly at it too', () => {
+    const at = { mandate: approving, organizationPolicy: policy, consent: consent(30_000, null) };
+    expect(decide(input(30_000, at))).toMatchObject({
+      decision: 'REQUIRE_APPROVAL',
+      reasons: ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'],
+    });
+    // Past the consent the bank would refuse it, which the team didn't set: named, so no approval rejects it for the limit.
+    expect(decide(input(30_000.01, at))).toMatchObject({
+      decision: 'REQUIRE_NEW_MANDATE',
+      reasons: ['MANDATE_ORDER_LIMIT', 'MANDATE_LIMIT_PAST_CONSENT', 'APPROVAL_THRESHOLD'],
+    });
+  });
+
+  it('asks approval past the monthly limit within the consent’s month, exactly at it too', () => {
+    const spent = { mandate: approving, organizationPolicy: policy, monthSpent: aed(45_000) };
+    const at = { ...spent, consent: consent(100_000, 55_000) };
+    expect(decide(input(10_000, at))).toMatchObject({
+      decision: 'REQUIRE_APPROVAL',
+      reasons: ['MANDATE_MONTHLY_LIMIT'],
+    });
+    expect(decide(input(10_000.01, at))).toMatchObject({
+      decision: 'REQUIRE_NEW_MANDATE',
+      reasons: ['MANDATE_MONTHLY_LIMIT', 'MANDATE_LIMIT_PAST_CONSENT', 'APPROVAL_THRESHOLD'],
+    });
+    // A consent counted by another period is weighed per payment alone.
+    expect(decide(input(10_000.01, { ...spent, consent: consent(100_000, null) })).decision).toBe('REQUIRE_APPROVAL');
+  });
+
+  it('needs a new mandate as always when the version chose refuse, or with no consent in its currency', () => {
+    const past = { organizationPolicy: policy, consent: consent(100_000, null) };
+    expect(decide(input(25_000.01, past))).toMatchObject({
+      decision: 'REQUIRE_NEW_MANDATE',
+      reasons: ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'],
+    });
+    // Within its own limits the consent is never named here, whatever it allows.
+    expect(decide(input(5_000, { ...past, consent: consent(1_000, null) })).reasons).toEqual([]);
+    expect(decide(input(25_000.01, { ...past, mandate: approving, consent: null })).decision).toBe(
+      'REQUIRE_NEW_MANDATE',
+    );
+    const inUsd = { maxPayment: money(10_000_000n, 'USD'), maxMonth: null };
+    expect(decide(input(25_000.01, { ...past, mandate: approving, consent: inUsd })).decision).toBe(
+      'REQUIRE_NEW_MANDATE',
+    );
+  });
+
+  it('still denies what the organisation’s cap or a refusing policy denies', () => {
+    const past = { mandate: approving, consent: consent(100_000, null) };
+    const lowCap = orgPolicy({ monthlyCap: aed(25_000) });
+    expect(decide(input(25_000.01, { ...past, organizationPolicy: lowCap }))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['MANDATE_ORDER_LIMIT', 'POLICY_MONTHLY_CAP', 'APPROVAL_THRESHOLD'],
+    });
+    const capped = orgPolicy({ monthlyCap: aed(500_000), perOrderCap: { cap: aed(25_000), over: 'DENY' } });
+    expect(decide(input(25_000.01, { ...past, organizationPolicy: capped })).decision).toBe('DENY');
   });
 });
 
@@ -384,6 +451,10 @@ describe('decisionInputText', () => {
       { ...base, organizationPolicy: orgPolicy({ perOrderCap: { cap: aed(4_000), over: 'REQUIRE_APPROVAL' } }) },
       { ...base, mandatePolicy: NO_RULES },
       { ...base, mandate: { ...MANDATE, endsAt: NOW } },
+      { ...base, mandate: { ...MANDATE, overLimit: 'approval' as const } },
+      { ...base, consent: null },
+      { ...base, consent: { maxPayment: aed(1), maxMonth: aed(200_000) } },
+      { ...base, consent: { maxPayment: aed(100_000), maxMonth: null } },
       { ...base, now: new Date(NOW.getTime() + 1) },
     ]) {
       expect(decisionInputText(changed)).not.toBe(decisionInputText(base));
@@ -404,9 +475,12 @@ describe('decisionInputText', () => {
       possibleDuplicate: false,
       defaultMonthlyCap: null,
       organizationCapChosen: true,
+      overLimit: 'refuse',
+      consentMaxPayment: '10000000 AED',
+      consentMaxMonth: '20000000 AED',
     });
     // A fact added to the text must be added here too, or kept in a versioned record: this counts them.
-    expect(JSON.parse(decisionInputText(base))).toHaveLength(14);
+    expect(JSON.parse(decisionInputText(base))).toHaveLength(16);
     for (const changed of [
       { ...base, now: new Date(NOW.getTime() + 1) },
       { ...base, agent: { ...base.agent, status: 'SUSPENDED' } },
@@ -418,18 +492,28 @@ describe('decisionInputText', () => {
       { ...base, duplicateOrder: true },
       { ...base, possibleDuplicate: true },
       { ...base, organizationCapChosen: false },
+      { ...base, mandate: { ...MANDATE, overLimit: 'approval' as const } },
+      { ...base, consent: { maxPayment: aed(1), maxMonth: aed(200_000) } },
+      { ...base, consent: { maxPayment: aed(100_000), maxMonth: null } },
     ]) {
       expect(decisionFacts(changed)).not.toEqual(decisionFacts(base));
     }
   });
 
-  it("keeps the old default's place empty, and the admin's choice last (E2)", () => {
+  it("keeps the old default's place empty, the admin's choice (E2), then the over-limit choice and consent last (E9)", () => {
     const textOf = (given: DecisionInput) => JSON.parse(decisionInputText(given)) as unknown[];
     const text = textOf(input(5_000));
     expect(text[11]).toBeNull();
-    expect(text.at(-2)).toBe(false);
-    expect(text.at(-1)).toBe(true);
-    expect(textOf(input(5_000, { organizationCapChosen: false })).at(-1)).toBe(false);
+    expect(text[12]).toBe(false);
+    expect(text[13]).toBe(true);
+    expect(textOf(input(5_000, { organizationCapChosen: false }))[13]).toBe(false);
+    expect(text.slice(-2)).toEqual(['refuse', ['10000000 AED', '20000000 AED']]);
+    expect(textOf(input(5_000, { mandate: null, consent: null })).slice(-2)).toEqual([null, null]);
+    expect(decisionFacts(input(5_000, { mandate: null, consent: null }))).toMatchObject({
+      overLimit: null,
+      consentMaxPayment: null,
+      consentMaxMonth: null,
+    });
   });
 
   it('reads IDs in any case, and keeps amounts as exact text', () => {
@@ -475,6 +559,8 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
     splitOpen: minor,
     duplicateOrder: fc.boolean(),
     possibleDuplicate: fc.boolean(),
+    overLimit: fc.constantFrom<'refuse' | 'approval'>('refuse', 'approval'),
+    consent: maybe(fc.record({ maxPayment: anAed, maxMonth: maybe(anAed) })),
   })
   .map((g) => {
     const [threshold = 1n, perOrder = 1n, monthly = 1n] = g.limits;
@@ -491,6 +577,7 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
         monthlyLimit: money(monthly, 'AED'),
         supplierIds: g.mandateSuppliers,
         splitCheck: g.splitCheck,
+        overLimit: g.overLimit,
       },
       supplierStatus: g.supplierStatus,
       sourceMayFund: g.sourceMayFund,
@@ -501,6 +588,7 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
       splitOpen: money(g.splitOpen, 'AED'),
       duplicateOrder: g.duplicateOrder,
       possibleDuplicate: g.possibleDuplicate,
+      consent: g.consent,
     });
   });
 
@@ -526,6 +614,18 @@ describe('reasonsShownToAgent (decision 11c)', () => {
     ]);
   });
 
+  it('never names the mandate’s own limits to the agent on an approval (partner, S121)', () => {
+    expect(reasonsShownToAgent('REQUIRE_APPROVAL', ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'])).toEqual([
+      'APPROVAL_THRESHOLD',
+    ]);
+    expect(reasonsShownToAgent('REQUIRE_APPROVAL', ['MANDATE_MONTHLY_LIMIT'])).toEqual([]);
+    // A refusal past the consent is shown as it is: both made it.
+    expect(reasonsShownToAgent('REQUIRE_NEW_MANDATE', ['MANDATE_ORDER_LIMIT', 'MANDATE_LIMIT_PAST_CONSENT'])).toEqual([
+      'MANDATE_ORDER_LIMIT',
+      'MANDATE_LIMIT_PAST_CONSENT',
+    ]);
+  });
+
   it('shows a policy’s order cap only when nothing else could have denied', () => {
     expect(reasonsShownToAgent('DENY', ['POLICY_ORDER_CAP', 'APPROVAL_THRESHOLD'])).toEqual(['POLICY_ORDER_CAP']);
     expect(reasonsShownToAgent('DENY', ['POLICY_MONTHLY_CAP', 'POLICY_ORDER_CAP'])).toEqual(['POLICY_MONTHLY_CAP']);
@@ -533,19 +633,29 @@ describe('reasonsShownToAgent (decision 11c)', () => {
 });
 
 describe('decide: properties', () => {
-  it('never allows, or sends for approval, what the mandate does not allow (SEC-LIM-05, -06)', () => {
+  it('never allows, or sends for approval, what the mandate does not allow (SEC-LIM-05, -06; decision 23)', () => {
     fc.assert(
       fc.property(anyInput, (given) => {
         const { decision } = decide(given);
         if (rank(decision) < rank('REQUIRE_APPROVAL')) return;
-        const { mandate, request, monthSpent, now } = given;
+        const { mandate, request, monthSpent, now, consent } = given;
         if (mandate === null) throw new Error('anyInput always has a mandate');
         expect(mandate.status).toBe('ACTIVE');
         expect(mandate.agentId).toBe(given.agent.id);
         expect(mandate.endsAt === null || now < mandate.endsAt).toBe(true);
         expect(request.fundingSourceId).toBe(mandate.fundingSourceId);
-        expect(request.amount.minor).toBeLessThanOrEqual(mandate.perOrderLimit.minor);
-        expect(monthSpent.minor + request.amount.minor).toBeLessThanOrEqual(mandate.monthlyLimit.minor);
+        const monthTotal = monthSpent.minor + request.amount.minor;
+        const withinOwn =
+          request.amount.minor <= mandate.perOrderLimit.minor && monthTotal <= mandate.monthlyLimit.minor;
+        if (!withinOwn) {
+          // Past its own limits only as its version chose, to a person, and never past the bank consent.
+          expect(mandate.overLimit).toBe('approval');
+          expect(decision).toBe('REQUIRE_APPROVAL');
+          if (consent === null) throw new Error('sent for approval past the mandate with no consent');
+          expect(request.amount.minor).toBeLessThanOrEqual(consent.maxPayment.minor);
+          if (consent.maxMonth !== null) expect(monthTotal).toBeLessThanOrEqual(consent.maxMonth.minor);
+          expect(decide(given).reasons).not.toContain('MANDATE_LIMIT_PAST_CONSENT');
+        }
         expect(mandate.supplierIds).toContain(request.supplierId);
         if (decision === 'ALLOW') expect(request.amount.minor).toBeLessThanOrEqual(mandate.approvalThreshold.minor);
         // A possible duplicate is never allowed without a person (decision 11a).
@@ -587,7 +697,11 @@ describe('decide: properties', () => {
           expect(shown).not.toContain('APPROVAL_THRESHOLD');
           expect(shown).not.toContain('AGGREGATE_THRESHOLD');
           expect(shown).not.toContain('POSSIBLE_DUPLICATE_ORDER');
-        } else expect(shown).toEqual(reasons);
+        } else {
+          expect(shown).not.toContain('MANDATE_ORDER_LIMIT');
+          expect(shown).not.toContain('MANDATE_MONTHLY_LIMIT');
+          expect(shown).toEqual(reasons.filter((code) => !code.startsWith('MANDATE_')));
+        }
       }),
     );
   });

@@ -13,15 +13,18 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import {
   type ConsentAllows,
   consentCheck,
+  MANDATE_VERSIONS,
   type MandateRecord,
   type MandatesTables,
   type MandateVersionRecord,
   mandateOf,
   mandateVersionOf,
+  type OverLimit,
   POLICY_VERSIONS,
   policyOf,
   type PolicyVersionRecord,
   policyVersionOf,
+  VERSION_DRAFTED,
 } from '@agentx/core/modules/mandates';
 import type { Notice, NoticeKind } from '@agentx/core/modules/notifications';
 import type { ApprovalWaitHours, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -32,6 +35,7 @@ import type { DatabaseTransaction } from '@agentx/platform/db';
 
 import { waitChoiceIn } from './approval-wait-choice.ts';
 import { capChoiceIn, type MonthlyCapChoice } from './monthly-cap-choice.ts';
+import { overLimitIn } from './over-limit-choice.ts';
 import { UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 /** The mandates' tables, with the requests and holdings a brake's cascade ends (C2b). */
@@ -50,6 +54,8 @@ export class MandateRefused extends UseCaseRefused {}
 /** A version as the routes show it: its terms, and how they now stand against the bank consent and the agent's monthly cap. */
 export interface VersionShown {
   readonly version: MandateVersionRecord;
+  /** Over its own limits, as its drafted event keeps it (decision 23), or null: drafted before E9, so refused. */
+  readonly overLimit: OverLimit | null;
   readonly consentWarnings: readonly string[];
   /** Where the agent's monthly cap in force holds it below these terms: none when they fit. */
   readonly capWarnings: readonly string[];
@@ -139,7 +145,29 @@ async function versionShown(
   if (versionId === null) return null;
   const version = await versionIn(tx, states, orgId, mandateId, versionId);
   const source = await sourceIn(tx, states, orgId, version.fundingSourceId);
-  return { version, consentWarnings: consentCheck(version, consentOf(source)).problems };
+  const overLimit = await overLimitOf(tx, states, orgId, version.id);
+  return { version, overLimit, consentWarnings: consentCheck(version, consentOf(source)).problems };
+}
+
+/**
+ * A version's over-limit choice (decision 23), from its drafted event, believed
+ * only whole: null for one drafted before E9 (refused). One more indexed read.
+ */
+export async function overLimitOf(
+  tx: MandateTx,
+  states: SignedStates,
+  orgId: string,
+  versionId: string,
+): Promise<OverLimit | null> {
+  const history = await states.historyOf(tx, orgId, {
+    subjectTypes: [MANDATE_VERSIONS.subject],
+    subjectId: versionId,
+    actions: [VERSION_DRAFTED],
+    limit: 1,
+    newest: true,
+  });
+  if (history.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  return overLimitIn(history.events.at(-1)?.event.details);
 }
 
 /** Whether the agent's cap holds the version below its own monthly limit: never compared across currencies (C2 denies those). */

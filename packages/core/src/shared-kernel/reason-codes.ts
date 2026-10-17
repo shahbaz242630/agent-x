@@ -12,6 +12,8 @@
  *   evidence depend on it. Add new codes in alphabetical order.
  */
 export const REASON_CODES = {
+  ADMIN_APPROVAL_ONLY:
+    "The request is above its mandate's own per-order or monthly limit, so only an admin of the organisation may approve it. Ask an admin to approve it, or reject it. Nothing was changed.",
   AGENT_ADDS_SPENT:
     "The organisation has registered as many agents as it may in 24 hours, so this one wasn't registered. Try again tomorrow; if no one at the organisation registered them, tell its admins at once.",
   AGENT_CANCELS_SPENT:
@@ -96,8 +98,10 @@ export const REASON_CODES = {
     "The draft's end date has passed, so it can't be accepted. Draft a new version with a later end. Nothing was changed.",
   MANDATE_ENDED:
     'The mandate is revoked or expired, or its end date has passed, so it can no longer change. Draft a new mandate for the agent instead. Nothing was changed.',
+  MANDATE_LIMIT_PAST_CONSENT:
+    "The request is above the mandate's own limit and above what its funding source's bank consent allows, per payment or per month, so the bank would refuse it. It is refused: it needs a smaller request, or the bank consent raised when it is renewed.",
   MANDATE_MONTHLY_LIMIT:
-    "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit, so it is refused and no approval can allow it. It needs a new mandate version with a higher limit, or capacity freeing up. Nothing was reserved.",
+    "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit. If the mandate chose to send such requests for approval and it is within the bank consent, it waits for an admin's approval; otherwise it is refused, and it needs a new mandate version with a higher limit, or capacity freeing up.",
   MANDATE_NOT_ACTIVE: 'The mandate is not in force (ACTIVE), so there is nothing to suspend. Nothing was changed.',
   MANDATE_NOT_IN_FORCE:
     'The agent has no mandate in force for this request: none was accepted yet, it is suspended, revoked or expired, its end date has passed, or a newer version replaced the one it was decided under. So the request is refused. Nothing is held for the request.',
@@ -107,7 +111,7 @@ export const REASON_CODES = {
   MANDATE_OPEN:
     'The agent already has a mandate waiting for acceptance or in force. Draft a new version of that mandate instead. Nothing was changed.',
   MANDATE_ORDER_LIMIT:
-    "The amount is above the mandate's per-order limit, so it is refused and no approval can allow it. Only a new mandate version with a higher limit could. Nothing was reserved.",
+    "The amount is above the mandate's per-order limit. If the mandate chose to send such requests for approval and it is within the bank consent, it waits for an admin's approval; otherwise it is refused, and only a new mandate version with a higher limit could allow it.",
   MANDATE_PAST_CONSENT:
     "A limit is above what the funding source's bank consent allows, or the mandate's currency is not the source's, and the mandate is strict about its consent. Lower the limit, or make the mandate flexible. Nothing was changed.",
   MANDATE_SUSPENDED:

@@ -56,6 +56,7 @@ import {
 } from './mandate-moves.ts';
 import type { MandateView, VersionShown } from './mandate-reads.ts';
 import { MONTHLY_CAP_FROM_FIELD } from './monthly-cap-choice.ts';
+import { OVER_LIMIT_CHOICE, OVER_LIMIT_SHOWN } from './over-limit-choice.ts';
 import {
   AMOUNT,
   CHALLENGE_BODY_LIMIT,
@@ -90,8 +91,10 @@ const DRAFT_BODY_LIMIT = 16_384;
 const TERM_FIELDS = {
   purpose: z.string().describe(`What the agent may spend on: 1 to ${String(PURPOSE_MOST)} visible characters.`),
   currency: z.string().describe('The mandate’s currency, its funding source’s: AED in the Pilot.'),
-  perOrderLimitMinor: AMOUNT.describe('The most one request may be. Above it: REQUIRE_NEW_MANDATE.'),
-  monthlyLimitMinor: AMOUNT.describe('The most the agent may spend in a month, every mandate of its counted.'),
+  perOrderLimitMinor: AMOUNT.describe('The most one request may be. Above it: as `overLimit` chooses.'),
+  monthlyLimitMinor: AMOUNT.describe(
+    'The most the agent may spend in a month, every mandate of its counted. Above it: as `overLimit` chooses.',
+  ),
   approvalThresholdMinor: AMOUNT.describe('Above it, a person must approve the request. At most the per-order limit.'),
   supplierIds: z
     .array(z.uuid())
@@ -116,6 +119,7 @@ const TERM_FIELDS = {
     .datetime()
     .nullable()
     .describe('When it ends, in the future, or null: until revoked. Chosen with no default (decision 15).'),
+  overLimit: OVER_LIMIT_CHOICE,
 };
 
 type TermFields = z.infer<z.ZodObject<typeof TERM_FIELDS>>;
@@ -163,6 +167,7 @@ const VERSION = z
     splitCheck: z.boolean(),
     consentLimits: z.enum(CONSENT_LIMITS),
     endsAt: z.iso.datetime().nullable().describe('When it ends, or null: until revoked.'),
+    overLimit: OVER_LIMIT_SHOWN,
     termsHash: z
       .string()
       .describe('SHA-256 of these terms with the mandate they bind: what an acceptance is bound to.'),
@@ -417,7 +422,7 @@ const mandateBody = (mandate: MandateRecord) => ({
   status: mandate.status,
 });
 
-const versionOf = ({ version: v, consentWarnings, capWarnings }: VersionShown) => ({
+const versionOf = ({ version: v, overLimit, consentWarnings, capWarnings }: VersionShown) => ({
   id: v.id,
   version: v.version,
   purpose: v.purpose,
@@ -430,6 +435,7 @@ const versionOf = ({ version: v, consentWarnings, capWarnings }: VersionShown) =
   splitCheck: v.splitCheck,
   consentLimits: v.consentLimits,
   endsAt: v.endsAt?.toISOString() ?? null,
+  overLimit: overLimit ?? ('not-chosen' as const),
   termsHash: v.termsHash,
   draftedBy: v.draftedBy,
   draftedAt: v.draftedAt.toISOString(),
@@ -486,6 +492,7 @@ export function registerMandates(
         timeZone: timeZoneOf(body.timeZone) ?? body.timeZone,
         splitWindowHours: body.splitWindowHours,
         terms: termsKept(body),
+        overLimit: body.overLimit,
       };
       const written = await need(registry).draft(member, idempotentRequest(request, member.orgId), draft, request.id);
       return answer(written, 201, request, reply);
@@ -505,7 +512,7 @@ export function registerMandates(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
-        termsKept(request.body),
+        { terms: termsKept(request.body), overLimit: request.body.overLimit },
         request.id,
       );
       return answer(written, 200, request, reply);

@@ -107,7 +107,7 @@ async function asking(w: World, mandateId: string, terms: Partial<MandateDraft['
       w.admin,
       keyed(w.admin, REDRAFT_OPERATION),
       mandateId,
-      termsOf(w, { ...FIRST, purpose: 'Office supplies, renewed', ...terms }),
+      { terms: termsOf(w, { ...FIRST, purpose: 'Office supplies, renewed', ...terms }), overLimit: 'refuse' },
       CORRELATION,
     ),
   );

@@ -36,6 +36,10 @@ describe('rejectedFor: what a refusal at approval rejects it for', () => {
     ]);
   });
 
+  it('never rejects for the bank consent: no rule the team set, so the request waits as it was (decision 23)', () => {
+    expect(rejectedFor('REQUIRE_NEW_MANDATE', ['MANDATE_ORDER_LIMIT', 'MANDATE_LIMIT_PAST_CONSENT'])).toBeNull();
+  });
+
   it('rejects for a policy’s order cap when nothing else could have refused it', () => {
     expect(rejectedFor('DENY', ['POLICY_ORDER_CAP'])).toEqual(['POLICY_ORDER_CAP']);
   });

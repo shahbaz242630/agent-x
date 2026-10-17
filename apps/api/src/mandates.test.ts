@@ -71,6 +71,7 @@ const VIEW: MandateView = {
       draftedBy: ADMIN,
       draftedAt: new Date('2026-10-07T09:15:00.000Z'),
     },
+    overLimit: 'approval',
     consentWarnings: ['the per-order limit is above the bank consent’s per payment'],
     capWarnings: [],
   },
@@ -92,6 +93,7 @@ const VERSION_ANSWERED = {
   splitCheck: true,
   consentLimits: 'flexible',
   endsAt: '2027-01-01T00:00:00.000Z',
+  overLimit: 'approval',
   termsHash: 'a'.repeat(64),
   draftedBy: ADMIN,
   draftedAt: '2026-10-07T09:15:00.000Z',
@@ -160,8 +162,8 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
       calls.push({ kind: 'draft', keyed, subject: draft });
       return written();
     },
-    redraft: (_member, keyed, mandateId, terms) => {
-      calls.push({ kind: 'redraft', keyed, subject: { mandateId, terms } });
+    redraft: (_member, keyed, mandateId, version) => {
+      calls.push({ kind: 'redraft', keyed, subject: { mandateId, ...version } });
       return written();
     },
     list: (orgId, page) => {
@@ -204,6 +206,7 @@ const TERMS = {
   splitCheck: true,
   consentLimits: 'strict',
   endsAt: null,
+  overLimit: 'approval',
 };
 
 /** A draft's own settings, each chosen (decision 15). */
@@ -232,6 +235,7 @@ describe('POST /v1/mandates drafts a mandate (B2)', () => {
       consentLimits: 'strict',
       endsAt: null,
     });
+    expect(draft.overLimit).toBe('approval');
     expect(calls[0]?.keyed).toMatchObject({ orgId: ORG, operation: 'mandates.draft', key: 'k-1' });
   });
 
@@ -268,6 +272,9 @@ describe('POST /v1/mandates drafts a mandate (B2)', () => {
     ['no split check', { splitCheck: undefined }],
     ['no consent limits', { consentLimits: undefined }],
     ['no end, not even null', { endsAt: undefined }],
+    // Decision 23: over the mandate's own limits is chosen too.
+    ['no over-limit choice', { overLimit: undefined }],
+    ['an over-limit choice it doesn’t know', { overLimit: 'ask' }],
   ])('refuses %s at the edge, the registry never asked', async (_what, change) => {
     const { app, calls } = await withMandates({ write: DRAFTED });
     const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...SETTINGS, ...TERMS, ...change }));
@@ -307,7 +314,7 @@ describe('POST /v1/mandates/:id/supersede drafts a later version (B2)', () => {
     expect(calls[0]).toMatchObject({
       kind: 'redraft',
       keyed: { operation: 'mandates.redraft' },
-      subject: { mandateId: MANDATE_ID, terms: { purpose: 'Office supplies' } },
+      subject: { mandateId: MANDATE_ID, terms: { purpose: 'Office supplies' }, overLimit: 'approval' },
     });
   });
 
@@ -315,6 +322,7 @@ describe('POST /v1/mandates/:id/supersede drafts a later version (B2)', () => {
     ['no split check', { splitCheck: undefined }],
     ['no consent limits', { consentLimits: undefined }],
     ['no end, not even null', { endsAt: undefined }],
+    ['no over-limit choice (decision 23)', { overLimit: undefined }],
   ])('refuses %s at the edge, the registry never asked (decision 15)', async (_what, change) => {
     const { app, calls } = await withMandates({ write: DRAFTED });
     const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/supersede`, { ...TERMS, ...change }));
@@ -697,6 +705,17 @@ describe('reading mandates (B2)', () => {
     const reply = await app.inject(get(`/v1/mandates/${MANDATE_ID}`));
 
     expect(reply.json()).toMatchObject({ agentMonthlyCap: { capMinor: null, currency: null, from } });
+  });
+
+  it('shows a version drafted before the over-limit choice as not chosen (decision 23: it refuses)', async () => {
+    const before: MandateView = {
+      ...VIEW,
+      pending: VIEW.pending === null ? null : { ...VIEW.pending, overLimit: null },
+    };
+    const { app } = await withMandates({ found: { outcome: 'found', ...before } }, 'viewer');
+    const reply = await app.inject(get(`/v1/mandates/${MANDATE_ID}`));
+
+    expect(reply.json()).toMatchObject({ pending: { overLimit: 'not-chosen' } });
   });
 
   it('answers one not found', async () => {

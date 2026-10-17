@@ -22,7 +22,14 @@
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { MANDATE_VERSIONS, MANDATES, policyOf, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
+import {
+  draftMandate,
+  MANDATE_VERSIONS,
+  MANDATES,
+  policyOf,
+  type PolicyRules,
+  setPolicy,
+} from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
@@ -81,7 +88,7 @@ let simulations: PolicySimulations;
 let capture: LogCapture;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'spend-request-decisions' });
-const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout, verified } = shared;
+const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout, verified, acceptedPastTheUseCase } = shared;
 
 /**
  * A world whose agent has a key and a mandate in force (unless `mandate` is
@@ -739,7 +746,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
       w.admin,
       shared.keyed(w.admin, REDRAFT_OPERATION),
       mandateId ?? '',
-      shared.termsOf(w, { purpose: 'Office supplies, renewed' }),
+      { terms: shared.termsOf(w, { purpose: 'Office supplies, renewed' }), overLimit: 'refuse' },
       CORRELATION,
     );
     expect(redrafted.outcome).toBe('drafted');
@@ -1211,25 +1218,25 @@ describe('the simulator (C4, decision 9)', () => {
   });
 });
 
-describe("the organisation's monthly cap, chosen by its admin (E2, decision 15)", () => {
-  /** The organisation's policy made one with no cap, its event's choice `details`: none chosen, or none recorded (before E2). */
-  const uncapped = (w: World, details: Readonly<Record<string, string | number>>) =>
-    withSignedStates(app, w.org, quiet(), async (tx, states) => {
-      const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'change');
-      return setPolicy(tx, states, {
-        orgId: w.org,
-        existing: read.outcome === 'found' ? read : null,
-        scope: 'organization',
-        mandateId: null,
-        versionId: ids.next(),
-        rules: { currency: 'AED', perOrderCap: null, monthlyCap: null, approvalThreshold: null, supplierIds: null },
-        madeBy: w.admin.membershipId,
-        madeAt: clock.now(),
-        actor: OPERATOR,
-        details,
-      });
+/** The organisation's policy made one with no cap, its event's choice `details`: none chosen, or none recorded (before E2). */
+const uncapped = (w: World, details: Readonly<Record<string, string | number>>) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'change');
+    return setPolicy(tx, states, {
+      orgId: w.org,
+      existing: read.outcome === 'found' ? read : null,
+      scope: 'organization',
+      mandateId: null,
+      versionId: ids.next(),
+      rules: { currency: 'AED', perOrderCap: null, monthlyCap: null, approvalThreshold: null, supplierIds: null },
+      madeBy: w.admin.membershipId,
+      madeAt: clock.now(),
+      actor: OPERATOR,
+      details,
     });
+  });
 
+describe("the organisation's monthly cap, chosen by its admin (E2, decision 15)", () => {
   it("denies every request until an admin chose it, even under a mandate policy's cap, holding nothing", async () => {
     const { w, mandateId, acting } = await ready({ capChosen: false });
 
@@ -1280,6 +1287,89 @@ describe("the organisation's monthly cap, chosen by its admin (E2, decision 15)"
     );
     const decided = (await eventsAbout(w.org, request?.id ?? '', 'spend_request')).at(-1);
     expect(decided?.details).toMatchObject({ organizationCapChosen: true, defaultMonthlyCap: null });
+  });
+});
+
+describe('over the mandate’s own limits: refuse, or an admin’s approval (E9, decision 23)', () => {
+  /** A world whose mandate allows half the source's consent per order, its version choosing `overLimit`. */
+  async function overLimited(overLimit: 'refuse' | 'approval') {
+    const w = await world();
+    for (const supplier of w.suppliers) await verified(w, supplier);
+    // No organisation cap, so only the mandate's limits and the consent weigh the amounts (the cap stays hard: decide.test.ts).
+    await uncapped(w, capChoiceDetails('none'));
+    const limits = { perOrderLimit: AED(w.maxPayment / 2n), approvalThreshold: AED(w.maxPayment / 4n) };
+    const mandateId = await shared.inForce(registry, w, limits, overLimit);
+    return { w, mandateId, acting: await agentKey(w) };
+  }
+
+  it('sends one past its per-order limit for approval as its version chose, up to the consent: held, sealed with both', async () => {
+    const { w, acting } = await overLimited('approval');
+
+    const atConsent = decidedOf(await ask(acting, asking(w, { amount: AED(w.maxPayment) })));
+    expect(atConsent).toMatchObject({
+      decision: 'REQUIRE_APPROVAL',
+      reasons: ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'],
+      status: 'APPROVAL_REQUIRED',
+    });
+    expect((await heldBy(w.org, atConsent.id)).reservation).toMatchObject({ state: 'HELD' });
+    expect(await waitingNotices(w.org)).toEqual([{ recipient_user_id: null, about_id: atConsent.id }]);
+    const decided = (await eventsAbout(w.org, atConsent.id, 'spend_request')).at(-1);
+    expect(decided?.details).toMatchObject({ overLimit: 'approval', consentMaxPayment: `${String(w.maxPayment)} AED` });
+
+    // A fils past the bank consent the bank would refuse: a new mandate, holding nothing.
+    const past = decidedOf(await ask(acting, asking(w, { amount: AED(w.maxPayment + 1n), orderReference: 'INV-2' })));
+    expect(past).toMatchObject({ decision: 'REQUIRE_NEW_MANDATE', status: 'DENIED' });
+    expect((await heldBy(w.org, past.id)).reservation).toBeUndefined();
+  });
+
+  it('refuses one past its limit as REQUIRE_NEW_MANDATE when its version chose refuse, sealed so', async () => {
+    const { w, acting } = await overLimited('refuse');
+
+    const request = decidedOf(await ask(acting, asking(w, { amount: AED(w.maxPayment) })));
+    expect(request).toMatchObject({ decision: 'REQUIRE_NEW_MANDATE', status: 'DENIED' });
+    expect((await eventsAbout(w.org, request.id, 'spend_request')).at(-1)?.details).toMatchObject({
+      overLimit: 'refuse',
+    });
+  });
+
+  it('keeps the choice on the version’s drafted event, with the words confirmed', async () => {
+    const { w, mandateId } = await overLimited('approval');
+    const view = await registry.show(w.org, mandateId, CORRELATION);
+    if (view.outcome !== 'found') throw new Error(`not found: ${view.outcome}`);
+
+    expect(view.current?.overLimit).toBe('approval');
+    const drafted = await eventsAbout(w.org, view.current?.version.id ?? '', 'mandate_version');
+    expect(drafted.at(0)?.details).toMatchObject({ overLimit: 'approval', overLimitStatementVersion: 1 });
+  });
+
+  it('refuses past the limit under a version with no choice on its event (drafted before E9), shown not chosen', async () => {
+    const w = await world();
+    for (const supplier of w.suppliers) await verified(w, supplier);
+    await uncapped(w, capChoiceDetails('none'));
+    const [id, versionId] = [ids.next(), ids.next()];
+    // As a version drafted before E9: its event keeps no choice, whatever went into its hash.
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      draftMandate(tx, states, {
+        orgId: w.org,
+        id,
+        versionId,
+        agentId: w.agent,
+        timeZone: 'Asia/Dubai',
+        splitWindowHours: 24,
+        terms: shared.termsOf(w, { perOrderLimit: AED(w.maxPayment / 2n), approvalThreshold: AED(w.maxPayment / 4n) }),
+        overLimit: 'approval',
+        draftedBy: w.admin.membershipId,
+        draftedAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    await acceptedPastTheUseCase(w, id);
+    const acting = await agentKey(w);
+
+    const request = decidedOf(await ask(acting, asking(w, { amount: AED(w.maxPayment) })));
+    expect(request).toMatchObject({ decision: 'REQUIRE_NEW_MANDATE', status: 'DENIED' });
+    const view = await registry.show(w.org, id, CORRELATION);
+    expect(view.outcome === 'found' ? view.current?.overLimit : view.outcome).toBeNull();
   });
 });
 

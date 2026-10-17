@@ -85,13 +85,16 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import {
+  consentOf,
   organizationChoicesOf,
   MandateRefused,
   type MandateTables,
   policyRulesIn,
   toldAdminsAndApprovers,
+  overLimitOf,
   versionIn,
 } from './mandate-reads.ts';
+import { consentCeilingOf } from './over-limit-choice.ts';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork } from './use-case-work.ts';
 
@@ -234,7 +237,9 @@ export async function mandateWeighedIn(
   const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
   if (found === null || versionId === null) return null;
   const read = await versionIn(tx, states, orgId, found.id, versionId);
-  return { ...read, ...found, versionId: read.id };
+  // Drafted before E9 (decision 23): no choice, refused as it always was.
+  const overLimit = (await overLimitOf(tx, states, orgId, read.id)) ?? 'refuse';
+  return { ...read, ...found, versionId: read.id, overLimit };
 }
 
 /**
@@ -413,6 +418,7 @@ export function inputOf({
     splitOpen: split,
     duplicateOrder: claims.duplicate,
     possibleDuplicate: claims.possible,
+    consent: source.outcome === 'found' ? consentCeilingOf(consentOf(source.source)) : null,
   };
 }
 
