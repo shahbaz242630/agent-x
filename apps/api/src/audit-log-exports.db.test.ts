@@ -5,7 +5,7 @@
 // the same file; the cap, the hourly budget, a member not an admin; and an
 // event that can't be believed refusing the file, the organisation held.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -13,6 +13,8 @@ import {
   SequentialIds,
   type TestDatabase,
   testLogger,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -21,6 +23,7 @@ import {
   type AuditLogExports,
   createAuditLogExports,
   EXPORT_OPERATION,
+  EXPORTS_LOCK,
   type ExportAsked,
   type ExportWrite,
 } from './audit-log-exports.ts';
@@ -175,6 +178,38 @@ describe('downloading the audit log (E10b, decision 24)', () => {
     expect(await exports.export(approver, keyed(approver, EXPORT_OPERATION), few, CORRELATION)).toEqual(
       refused(403, 'FORBIDDEN'),
     );
+  });
+
+  it('counts an admin’s download in flight before their next: the sixth waits on their lock, then is refused (ADR-006 §6, 2b)', async () => {
+    const w = await world();
+    const few = asked('csv', [AUDIT_LOG_EXPORTED]);
+    for (let n = 0; n < 4; n += 1)
+      fileOf(await exports.export(w.admin, keyed(w.admin, EXPORT_OPERATION), few, CORRELATION));
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The fifth, its lock taken and its record made, held open before it commits.
+    const fifth = withTenant(app, w.org, async (tx) => {
+      await holdTransactionLock(tx, EXPORTS_LOCK, w.org, w.admin.userId);
+      await trail.record(tx, w.org, {
+        actor: { type: 'user', id: w.admin.userId },
+        action: AUDIT_LOG_EXPORTED,
+        subject: { type: 'audit_log', id: w.org, version: 1 },
+        details: { format: 'csv' },
+      });
+      holding(undefined);
+      await gate;
+    });
+    await held;
+    const sixth = within(
+      20_000,
+      exports.export(w.admin, keyed(w.admin, EXPORT_OPERATION), few, CORRELATION),
+      'the sixth',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+
+    await fifth;
+    expect(await sixth).toEqual(refused(409, 'AUDIT_EXPORTS_SPENT'));
   });
 
   it('refuses a file with an event that can’t be believed: INTEGRITY_FAILED, the organisation held', async () => {

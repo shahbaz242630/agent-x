@@ -149,21 +149,26 @@ const PAGE_SCHEMA = {
   },
 };
 
-/** An event as the page shows it: the platform's own seals left out. */
 /** An event's facts as an organisation is shown them, page or download: the platform's own seals left out. */
 export const factsShown = (details: LogEvent['event']['details']) =>
   Object.entries(details).filter(([name]) => !SEALS_NOT_SHOWN.has(name));
 
-const shownOf = ({ seq, id, recordedAt, event, hash, prevHash }: LogEvent) => ({
+/** An event's own fields as an organisation is shown them, page or download, beside its facts in the form each needs. */
+export const eventShown = ({ seq, id, recordedAt, event, hash, prevHash }: LogEvent) => ({
   seq: seq.toString(),
   id,
   recordedAt: recordedAt.toISOString(),
   actor: event.actor,
   action: event.action,
   subject: event.subject,
-  details: factsShown(event.details).map(([name, value]) => ({ name, value })),
   hash,
   prevHash,
+});
+
+/** An event as the page shows it: its facts as name/value pairs, the platform's own seals left out. */
+const shownOf = (logged: LogEvent) => ({
+  ...eventShown(logged),
+  details: factsShown(logged.event.details).map(([name, value]) => ({ name, value })),
 });
 
 /** The log's route. Without `log` it is still documented, and no one reaches it. */

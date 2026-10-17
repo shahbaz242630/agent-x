@@ -26,8 +26,8 @@ import {
   eventsInRange,
   type LogEvent,
 } from '@agentx/core/modules/audit';
-import { actionProblems, type Clock, HOUR_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { actionProblems, type Clock, DAY_MS, HOUR_MS, type IdGenerator } from '@agentx/core/shared-kernel';
+import { type Database, holdTransactionLock, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
@@ -36,9 +36,9 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { AuditLogRefused, factsShown, MOST_ACTIONS_FILTERED, SEQ } from './audit-log.ts';
+import { AuditLogRefused, eventShown, factsShown, MOST_ACTIONS_FILTERED, SEQ } from './audit-log.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
-import type { Refused } from './refused.ts';
+import { type Refused, refused } from './refused.ts';
 import { createUseCaseWork, type Member, type UseCaseTables } from './use-case-work.ts';
 
 export const EXPORT_OPERATION = 'audit-log.export';
@@ -54,6 +54,9 @@ const MOST_EXPORT_DAYS = 366;
 
 /** The most downloads one admin makes in an hour. */
 const MOST_EXPORTS_AN_HOUR = 5;
+
+/** The advisory lock an admin's downloads count their hourly budget under (ADR-006 §6, 2b). */
+export const EXPORTS_LOCK = 'audit-log-exports';
 
 /** How many events one read of the download takes. */
 const EXPORT_BATCH = 500;
@@ -123,38 +126,19 @@ const CSV_HEADER = [
 ];
 
 /** One event as the file holds it. */
-const lineOf = (format: ExportFormat, { seq, id, recordedAt, event, hash, prevHash }: LogEvent): string => {
-  const facts = Object.fromEntries(factsShown(event.details));
-  if (format === 'ndjson') {
-    const { actor, action, subject } = event;
-    return JSON.stringify({
-      seq: seq.toString(),
-      id,
-      recordedAt: recordedAt.toISOString(),
-      actor,
-      action,
-      subject,
-      details: facts,
-      hash,
-      prevHash,
-    });
-  }
-  return [
-    seq.toString(),
-    recordedAt.toISOString(),
-    event.actor.type,
-    event.actor.id,
-    event.action,
-    event.subject.type,
-    event.subject.id,
-    String(event.subject.version),
-    JSON.stringify(facts),
-    hash,
-    prevHash,
-  ]
+const lineOf = (format: ExportFormat, logged: LogEvent): string => {
+  const shown = eventShown(logged);
+  const facts = Object.fromEntries(factsShown(logged.event.details));
+  if (format === 'ndjson') return JSON.stringify({ ...shown, details: facts });
+  const { actor, subject } = shown;
+  return [shown.seq, shown.recordedAt, actor.type, actor.id, shown.action, subject.type, subject.id]
+    .concat([String(subject.version), JSON.stringify(facts), shown.hash, shown.prevHash])
     .map(csvCell)
     .join(',');
 };
+
+/** A day of a range, as the file's name holds it. */
+const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
 
 export function createAuditLogExports({
   database,
@@ -183,7 +167,7 @@ export function createAuditLogExports({
     upToSeq: bigint | null,
     correlationId: string,
   ) => {
-    const lines = asked.format === 'csv' ? [CSV_HEADER.map(csvCell).join(',')] : [];
+    const lines: string[] = [];
     let beforeSeq = upToSeq === null ? null : upToSeq + 1n;
     while (beforeSeq !== null) {
       const before = beforeSeq;
@@ -194,13 +178,13 @@ export function createAuditLogExports({
       lines.push(...read.events.map((event) => lineOf(asked.format, event)));
       beforeSeq = read.next;
     }
-    const day = (at: Date) => at.toISOString().slice(0, 10);
+    const header = asked.format === 'csv' ? [CSV_HEADER.map(csvCell).join(',')] : [];
     return {
       id,
-      fileName: `audit-log-${day(asked.from)}-to-${day(asked.to)}.${asked.format}`,
+      fileName: `audit-log-${dayOf(asked.from)}-to-${dayOf(asked.to)}.${asked.format}`,
       contentType: CONTENT_TYPES[asked.format],
-      content: `${lines.join('\n')}\n`,
-      events: lines.length - (asked.format === 'csv' ? 1 : 0),
+      content: `${[...header, ...lines].join('\n')}\n`,
+      events: lines.length,
       upToSeq,
     };
   };
@@ -210,6 +194,8 @@ export function createAuditLogExports({
       const actor: AuditActor = { type: 'user', id: member.userId };
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
+        // Under the admin's own download lock (ADR-006 §6, 2b), so their other download in flight commits or rolls back before this counts.
+        await holdTransactionLock(tx, EXPORTS_LOCK, member.orgId, member.userId);
         const since = new Date(clock.now().getTime() - HOUR_MS);
         if ((await actorEventsSince(tx, member.orgId, actor, AUDIT_LOG_EXPORTED, since)) >= MOST_EXPORTS_AN_HOUR) {
           throw new AuditLogRefused(409, 'AUDIT_EXPORTS_SPENT');
@@ -244,7 +230,7 @@ export function createAuditLogExports({
       try {
         return { outcome: 'exported', file: await fileOf(member.orgId, id, asked, made.upToSeq, correlationId) };
       } catch (error) {
-        if (error instanceof AuditLogRefused) return { outcome: 'refused', status: error.status, code: error.code };
+        if (error instanceof AuditLogRefused) return refused(error.status, error.code);
         throw error;
       }
     },
@@ -271,7 +257,7 @@ const EXPORT_SCHEMA = {
     })
     .superRefine((body, context) => {
       const span = new Date(body.to).getTime() - new Date(body.from).getTime();
-      if (span <= 0 || span > MOST_EXPORT_DAYS * 24 * HOUR_MS) {
+      if (span <= 0 || span > MOST_EXPORT_DAYS * DAY_MS) {
         context.addIssue({
           code: 'custom',
           message: `the range starts before it ends, ${String(MOST_EXPORT_DAYS)} days at most`,
@@ -289,7 +275,7 @@ const EXPORT_SCHEMA = {
           .object({
             id: z.uuid().describe('The download’s own record in the log.'),
             fileName: z.string().describe('A name to save it as.'),
-            contentType: z.enum([CONTENT_TYPES.csv, CONTENT_TYPES.ndjson]).describe('The file’s type.'),
+            contentType: z.enum(Object.values(CONTENT_TYPES)).describe('The file’s type.'),
             content: z.string().describe('The file, whole: its events newest first.'),
             events: z.int().min(0).describe('How many events it holds.'),
             upToSeq: SEQ.nullable().describe('The newest event it holds; null for none.'),
