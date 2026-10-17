@@ -2,7 +2,7 @@ import type { Generated } from 'kysely';
 
 import type { TamperSign } from '../../audit/index.ts';
 
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql, 0049_user_contacts.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
@@ -11,6 +11,7 @@ export interface IdentityTables {
   'identity.memberships': MembershipsTable;
   'identity.invitations': InvitationsTable;
   'identity.session_emails': SessionEmailsTable;
+  'identity.user_contacts': UserContactsTable;
   'identity.registered_contacts': RegisteredContactsTable;
   'identity.factor_resets': FactorResetsTable;
   'identity.factor_reset_confirmations': FactorResetConfirmationsTable;
@@ -106,6 +107,15 @@ interface SessionEmailsTable {
   session_id: string;
   email_ciphertext: Buffer;
   email_key_version: number;
+}
+
+interface UserContactsTable {
+  user_id: string;
+  name_ciphertext: Buffer | null;
+  name_key_version: number | null;
+  email_ciphertext: Buffer | null;
+  email_key_version: number | null;
+  updated_at: Date;
 }
 
 interface RegisteredContactsTable {
