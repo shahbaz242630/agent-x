@@ -17,7 +17,7 @@ export const REASON_CODES = {
   AGENT_CANCELS_SPENT:
     "The agent has cancelled as many of its own spend requests as it may in 24 hours, so this one wasn't cancelled. An admin or finance approver can still cancel it; if the agent keeps cancelling, look at what it is doing.",
   AGENT_KEYS_FULL:
-    'The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, or revoke one, then rotate again. Nothing was changed.',
+    'The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, revoke one, or rotate ending the old key at once, then try again. Nothing was changed.',
   AGENT_KEYS_SPENT:
     "The organisation has issued as many agent keys as it may in 24 hours, so this one wasn't issued. Try again tomorrow; if no one at the organisation rotated them, tell its admins at once.",
   AGENT_KEY_NOT_LIVE: 'The key is revoked or expired, so there is nothing to rotate. Nothing was changed.',

@@ -5,22 +5,26 @@
 // registering is), each with step-up, with a passkey for an admin (SEC-HA-12).
 //
 // - `rotate` (`agents.keys.rotate`), then its confirm: a new key for the
-//   agent, and the old one kept working to the end of the overlap
-//   (KEY_OVERLAP_HOURS), so the agent can switch without a gap. A developer
+//   agent, and the old one, as the member chooses each time (Phase 3 E8,
+//   decision 22, key-rotation-choice.ts): kept working to the end of the
+//   overlap (KEY_OVERLAP_HOURS), so the agent can switch without a gap, or
+//   ended at once (revoked, as after a leak). A developer
 //   rotates only the agents they own; an admin, any (the S68 audit: a new
 //   key is a working credential for the agent, so another member's agent
 //   isn't a developer's to take). The ask: the
 //   key claimed first; the member read again; the agent and the key, read
 //   for change; the key the agent's, and live (AGENT_KEY_NOT_LIVE for one
 //   revoked or expired); fewer than MOST_LIVE_KEYS of the agent's keys live
-//   (AGENT_KEYS_FULL: a rotation already in its overlap is waited out, or a
-//   key revoked); a challenge bound to the organisation and the key's latest
-//   event, so it rotates exactly that key as it stood. The confirm: the
+//   once it is done (AGENT_KEYS_FULL: a rotation already in its overlap is
+//   waited out, or a key revoked; ending the old key at once adds none); a
+//   challenge bound to the organisation, the key's latest event and the
+//   choice, so it rotates exactly that key as it stood, as chosen. The confirm: the
 //   organisation's lock for issuing keys; the member; the day's budget
 //   (AGENT_KEYS_SPENT); the same reads and checks; the challenge consumed;
 //   then the new key, with the scopes both the old key and the agent hold,
 //   expiring in KEY_DAYS, shown this once; and the old key's expiry brought
-//   forward to the end of the overlap (never later than it was). A suspended
+//   forward to the end of the overlap (never later than it was), or the old
+//   key revoked; the choice on both keys' events. A suspended
 //   agent's key may be rotated: after a leak, suspend first, rotate, then
 //   reactivate.
 // - `revoke` (`agents.keys.revoke`), then its confirm: the key stops at once,
@@ -61,6 +65,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
+import { type OldKeyChoice, rotationDetails } from './key-rotation-choice.ts';
 import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Asking to rotate a key: its operation, which the step-up challenge names as its action too. */
@@ -87,6 +92,8 @@ export type AgentKeyChangeWrite =
   | {
       readonly outcome: 'rotated';
       readonly agent: AgentWithKeys;
+      /** What was done with the old key, as chosen. */
+      readonly oldKey: OldKeyChoice;
       /** The new key, answered this once; null on a retry of the same write. */
       readonly key: string | null;
     }
@@ -99,12 +106,14 @@ export interface AgentKeyChanges {
     member: AgentMember,
     idempotent: IdempotentRequest,
     named: KeyNamed,
+    oldKey: OldKeyChoice,
     correlationId: string,
   ): Promise<AgentKeyChangeWrite>;
   rotateConfirm(
     member: AgentMember,
     idempotent: IdempotentRequest,
     named: KeyNamed,
+    oldKey: OldKeyChoice,
     stepUpChallengeId: string,
     correlationId: string,
   ): Promise<AgentKeyChangeWrite>;
@@ -125,13 +134,14 @@ export interface AgentKeyChanges {
 
 /**
  * The pending change's SHA-256: the organisation and the key's latest
- * event, IDs in lower case. That event is the key's own, read from its
- * signed state, so it names the key and exactly the state it was asked in: a
- * key rotated or revoked since can't be changed by it. Which change it is,
- * a rotation or a revocation, is the challenge's own action.
+ * event, IDs in lower case, and a rotation's choice for the old key. That
+ * event is the key's own, read from its signed state, so it names the key
+ * and exactly the state it was asked in: a key rotated or revoked since
+ * can't be changed by it, nor a rotation confirmed as the other choice. Which
+ * change it is, a rotation or a revocation, is the challenge's own action.
  */
-const keyChangeHash = (orgId: string, keyEventId: string): Buffer =>
-  changeHashOf([orgId.toLowerCase(), keyEventId.toLowerCase()]);
+const keyChangeHash = (orgId: string, keyEventId: string, oldKey?: OldKeyChoice): Buffer =>
+  changeHashOf([orgId.toLowerCase(), keyEventId.toLowerCase(), ...(oldKey === undefined ? [] : [oldKey])]);
 
 export function createAgentKeyChanges({
   database,
@@ -168,13 +178,23 @@ export function createAgentKeyChanges({
     return { agent: agentRead.agent, key: keyRead.key, state: keyRead.state };
   };
 
-  /** A key that may be rotated now: live, and its agent with room for one more live key. */
-  const keyToRotate = async (tx: AgentTx, states: SignedStates, orgId: string, named: KeyNamed, now: Date) => {
+  /**
+   * A key that may be rotated now: live, and its agent with room for the new
+   * key once it is done (the old one ended at once leaves a place).
+   */
+  const keyToRotate = async (
+    tx: AgentTx,
+    states: SignedStates,
+    orgId: string,
+    { named, oldKey }: { readonly named: KeyNamed; readonly oldKey: OldKeyChoice },
+    now: Date,
+  ) => {
     const read = await keyToChange(tx, states, orgId, named);
     if (!isLiveKey(read.key, now)) throw new AgentRefused(409, 'AGENT_KEY_NOT_LIVE');
     const listed = await agentKeysOf(tx, states, orgId, read.agent.id);
     if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
-    if (listed.keys.filter((key) => isLiveKey(key, now)).length >= MOST_LIVE_KEYS) {
+    const ending = oldKey === 'end_now' ? 1 : 0;
+    if (listed.keys.filter((key) => isLiveKey(key, now)).length - ending >= MOST_LIVE_KEYS) {
       throw new AgentRefused(409, 'AGENT_KEYS_FULL');
     }
     return read;
@@ -202,8 +222,9 @@ export function createAgentKeyChanges({
     member: AgentMember,
     operation: string,
     keyEventId: string,
+    oldKey?: OldKeyChoice,
   ): Promise<{ status: number; resourceId: string }> => {
-    return stepUps.ask(tx, member, { action: operation, changeHash: keyChangeHash(member.orgId, keyEventId) });
+    return stepUps.ask(tx, member, { action: operation, changeHash: keyChangeHash(member.orgId, keyEventId, oldKey) });
   };
 
   /** Consumes the step-up for the change, with a passkey for an admin (SEC-HA-12): STEP_UP_FAILED otherwise. */
@@ -215,13 +236,14 @@ export function createAgentKeyChanges({
     keyEventId: string,
     held: HeldChallenges,
     stepUpChallengeId: string,
+    oldKey?: OldKeyChoice,
   ) =>
     stepUps.consumed(
       tx,
       member,
       held,
       stepUpChallengeId,
-      { action: operation, changeHash: keyChangeHash(member.orgId, keyEventId) },
+      { action: operation, changeHash: keyChangeHash(member.orgId, keyEventId, oldKey) },
       { passkeyRequired: role === 'admin' },
     );
 
@@ -235,18 +257,18 @@ export function createAgentKeyChanges({
   };
 
   return {
-    async rotate(member, idempotent, named, correlationId) {
+    async rotate(member, idempotent, named, oldKey, correlationId) {
       return asked(
         await work.write(member, idempotent, correlationId, async (tx, states) => {
           const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
-          const { state, agent } = await keyToRotate(tx, states, member.orgId, named, clock.now());
+          const { state, agent } = await keyToRotate(tx, states, member.orgId, { named, oldKey }, clock.now());
           mayRotate(role, membershipId, agent.owner);
-          return ask(tx, member, ROTATE_OPERATION, state.eventId);
+          return ask(tx, member, ROTATE_OPERATION, state.eventId, oldKey);
         }),
       );
     },
 
-    async rotateConfirm(member, idempotent, named, stepUpChallengeId, correlationId) {
+    async rotateConfirm(member, idempotent, named, oldKey, stepUpChallengeId, correlationId) {
       let key: string | null = null;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneKeyIssueAtATime(tx, member.orgId);
@@ -254,7 +276,7 @@ export function createAgentKeyChanges({
         const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
         const now = clock.now();
         await work.keyBudgetLeft(tx, member.orgId, now);
-        const old = await keyToRotate(tx, states, member.orgId, named, now);
+        const old = await keyToRotate(tx, states, member.orgId, { named, oldKey }, now);
         mayRotate(role, membershipId, old.agent.owner);
         const consumed = await steppedUp(
           tx,
@@ -264,25 +286,40 @@ export function createAgentKeyChanges({
           old.state.eventId,
           held,
           stepUpChallengeId,
+          oldKey,
         );
         const actor = { type: 'user' as const, id: member.userId };
+        // The choice, on both keys' events.
+        const chosen = rotationDetails(oldKey);
         const issued = await work.issueKey(tx, states, {
           orgId: member.orgId,
           agentId: old.agent.id,
           scopes: old.key.scopes.filter((scope) => old.agent.scopes.includes(scope)),
           now,
           actor,
-          details: { ...stepUpDetails(consumed), rotates: old.key.id },
+          details: { ...stepUpDetails(consumed), rotates: old.key.id, ...chosen },
         });
-        await bringKeyExpiryForward(tx, states, {
-          orgId: member.orgId,
-          key: old.key,
-          state: old.state,
-          expiresAt: rotatedKeyExpiresAt(old.key.expiresAt, now),
-          actor,
-          action: 'agent_key.rotated',
-          details: { rotatedTo: issued.id },
-        });
+        const ended = { rotatedTo: issued.id, ...chosen };
+        if (oldKey === 'end_now') {
+          movedAsRead(
+            await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.key.id }, 'revoke', {
+              actor,
+              action: 'agent_key.revoked',
+              details: { reason: 'rotated', ...ended },
+            }),
+            "a live key didn't revoke",
+          );
+        } else {
+          await bringKeyExpiryForward(tx, states, {
+            orgId: member.orgId,
+            key: old.key,
+            state: old.state,
+            expiresAt: rotatedKeyExpiresAt(old.key.expiresAt, now),
+            actor,
+            action: 'agent_key.rotated',
+            details: ended,
+          });
+        }
         key = issued.text;
         return { status: 201, resourceId: old.agent.id };
       });
@@ -290,7 +327,7 @@ export function createAgentKeyChanges({
       // The key is set only by a write done now: a retry answers it as null, as it was shown once.
       const agent = await reread(member, correlationId, done.result.resourceId);
       if ('outcome' in agent) return agent;
-      return { outcome: 'rotated', agent, key };
+      return { outcome: 'rotated', agent, key, oldKey };
     },
 
     async revoke(member, idempotent, named, correlationId) {

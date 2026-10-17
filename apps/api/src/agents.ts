@@ -29,10 +29,12 @@
 //   admin or developer of the organisation, AGENT_OWNER_UNCHANGED for the
 //   agent's owner already, AGENT_KEYS_SPENT past the day's key budget.
 // - `POST /v1/agents/:id/keys/:keyId/rotate`, then `…/rotate/confirm` with the
-//   step-up's ID (C1-4b): a new key, shown this once, and the old one kept
-//   working for the overlap (24 hours): 202 with the step-up, then 201 with
-//   the agent, its keys and the new key. 409 AGENT_KEY_NOT_LIVE for a key
-//   revoked or expired, AGENT_KEYS_FULL while a rotation's overlap runs,
+//   step-up's ID (C1-4b): a new key, shown this once, and the old one, as
+//   chosen in both bodies (`oldKey`, Phase 3 E8, decision 22): kept working
+//   for the overlap (24 hours), or ended at once: 202 with the step-up, then
+//   201 with the agent, its keys, the new key and the choice. 409
+//   AGENT_KEY_NOT_LIVE for a key revoked or expired, AGENT_KEYS_FULL while a
+//   rotation's overlap runs (unless ending the old key at once),
 //   AGENT_KEYS_SPENT past the day's budget. Admins and developers.
 // - `POST /v1/agents/:id/keys/:keyId/revoke`, then `…/revoke/confirm` (C1-4b):
 //   the key stops at once: 202, then 200 with the agent and its keys. 409
@@ -93,6 +95,7 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAsked,
 } from './route-schemas.ts';
+import { OLD_KEY } from './key-rotation-choice.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 
 /**
@@ -267,26 +270,31 @@ const KEY_CHANGE_ASKED = stepUpAsked(
   "Rotating or revoking an agent's key, waiting for you to sign in again.",
 );
 
+const ROTATE_BODY = z.strictObject({ oldKey: OLD_KEY }).describe('The choice for the old key.');
+
 const ROTATE_SCHEMA = {
-  summary: "Ask to rotate an agent's key: a new one, the old one kept working for the overlap",
+  summary: "Ask to rotate an agent's key: a new one, the old one kept working for the overlap or ended at once",
   params: KEY_NAMED,
-  body: NOTHING,
+  body: ROTATE_BODY,
   response: { 202: KEY_CHANGE_ASKED },
 };
 
 const ROTATE_CONFIRM_SCHEMA = {
   summary: 'Rotate the key, once signed in again for it',
   params: KEY_NAMED,
-  body: STEP_UP_CONFIRM,
+  body: STEP_UP_CONFIRM.extend(ROTATE_BODY.shape).describe(
+    'The step-up signed in again for, and the choice it was asked with.',
+  ),
   response: {
     201: AGENT_WITH_KEYS.extend({
       key: z
         .string()
         .nullable()
         .describe(
-          'The new key, `axk_<keyId>_<secret>`, shown this once: give it to the agent before the old one expires. Null on a retry of the same request.',
+          'The new key, `axk_<keyId>_<secret>`, shown this once: give it to the agent (with the overlap, before the old one expires). Null on a retry of the same request.',
         ),
-    }).describe('The agent and its keys: the new one, and the old one expiring at the end of the overlap.'),
+      oldKey: OLD_KEY.describe('What was done with the old key, as chosen.'),
+    }).describe('The agent and its keys: the new one, and the old one expiring at the end of the overlap, or revoked.'),
   },
 };
 
@@ -520,7 +528,7 @@ export function registerAgents(
   /** Answers a key change: the agent as it now stands (with the new key, once), a step-up asked, or a refusal. */
   const answerKeyChange = (written: AgentKeyChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
     if (written.outcome === 'rotated') {
-      return reply.code(201).send({ ...withKeysOf(written.agent), key: written.key });
+      return reply.code(201).send({ ...withKeysOf(written.agent), key: written.key, oldKey: written.oldKey });
     }
     if (written.outcome === 'revoked') return reply.code(200).send(withKeysOf(written.agent));
     return answerAsked(written, request, reply);
@@ -532,7 +540,7 @@ export function registerAgents(
     '/v1/agents/:id/keys/:keyId/rotate',
     {
       schema: ROTATE_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...KEY_CHANGING_ROLES], operation: ROTATE_OPERATION },
     },
     async (request, reply) => {
@@ -541,6 +549,7 @@ export function registerAgents(
         member,
         idempotentRequest(request, member.orgId),
         named(request.params),
+        request.body.oldKey,
         request.id,
       );
       return answerKeyChange(written, request, reply);
@@ -560,6 +569,7 @@ export function registerAgents(
         member,
         idempotentRequest(request, member.orgId),
         named(request.params),
+        request.body.oldKey,
         request.body.stepUpChallengeId,
         request.id,
       );
