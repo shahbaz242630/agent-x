@@ -6,7 +6,7 @@
 // own error, naming the step, never the answer. A token refused (401, 403) is
 // the one failure they share: LoginTokenRefused, which an alert counts by its
 // name (partner, S88), so a token that stopped working tells someone.
-import type { OutboundFetch } from '@agentx/platform/outbound';
+import { type OutboundFetch, OutboundRefused } from '@agentx/platform/outbound';
 
 import { boundedText } from './zitadel-answer.ts';
 import { routedToIssuer } from './zitadel-route.ts';
@@ -14,6 +14,23 @@ import { routedToIssuer } from './zitadel-route.ts';
 /** The login service refused the token (401 or 403): expired, revoked, or its role taken away. */
 export class LoginTokenRefused extends Error {
   override readonly name = 'LoginTokenRefused';
+}
+
+/** A network error's own code, such as ECONNREFUSED: letters, digits and underscores. */
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{1,40}$/;
+
+/**
+ * Why a call failed, for its error: the allowlist's own refusal (a redirect,
+ * an origin not allowed), a call past its time, or the network error's kind
+ * and code. Never anything the login service said (S122: staging's feed
+ * failed for 10 days as "the call failed", with nothing to tell why).
+ */
+function whyFailed(error: unknown): string {
+  if (error instanceof OutboundRefused) return error.message;
+  if (!(error instanceof Error)) return 'not an error';
+  if (error.name === 'TimeoutError') return 'it took too long';
+  const code = (error.cause as { code?: unknown } | undefined)?.code;
+  return typeof code === 'string' && ERROR_CODE.test(code) ? `${error.name}, ${code}` : error.name;
 }
 
 /** A token: visible ASCII, bounded. */
@@ -68,8 +85,8 @@ export function createZitadelCall(
     let response: Response;
     try {
       response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-    } catch {
-      throw unavailable('the call failed');
+    } catch (error) {
+      throw unavailable(`the call failed (${whyFailed(error)})`);
     }
     if (response.status !== 200) {
       await response.body?.cancel();

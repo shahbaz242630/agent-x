@@ -119,7 +119,7 @@ describe('ending the sessions at the login service', () => {
     [
       'a call that fails',
       zitadel(undefined, () => new TypeError('fetch failed')),
-      'reading the sessions: the call failed',
+      'reading the sessions: the call failed (TypeError)',
     ],
     ['no list', zitadel({ sessions: 'all' }), 'reading the sessions: the answer holds no list of at most 100'],
     [

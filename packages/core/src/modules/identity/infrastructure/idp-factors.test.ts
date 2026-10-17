@@ -303,7 +303,7 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
       const { fetch } = zitadel(everyKind(), () => new TypeError('fetch failed'));
 
       await expect(removerWith(fetch).removeAll(SUBJECT)).rejects.toThrow(
-        failure('reading the factors: the call failed'),
+        failure('reading the factors: the call failed (TypeError)'),
       );
     });
 

@@ -4,6 +4,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { createDirectoryNames, DirectoryUnavailable, MOST_A_CALL } from './directory-names.ts';
+import { OutboundRefused } from '@agentx/platform/outbound';
+
 import { LoginTokenRefused } from './zitadel-call.ts';
 
 const ISSUER = 'https://auth.example.test';
@@ -107,7 +109,7 @@ describe('the login service’s names (decision 25)', () => {
 
   it('throws, naming the step, for a login service that can’t be reached, answers otherwise, or refuses the token', async () => {
     await expect(directoryAnswering(['network']).directory.entriesOf(['101'])).rejects.toThrow(
-      new DirectoryUnavailable('the call failed'),
+      new DirectoryUnavailable('the call failed (TypeError)'),
     );
     await expect(directoryAnswering([{ status: 500 }]).directory.entriesOf(['101'])).rejects.toThrow(
       new DirectoryUnavailable('it answered 500'),
@@ -115,5 +117,31 @@ describe('the login service’s names (decision 25)', () => {
     await expect(directoryAnswering([{ status: 403 }]).directory.entriesOf(['101'])).rejects.toBeInstanceOf(
       LoginTokenRefused,
     );
+  });
+
+  it.each<[string, unknown, string]>([
+    [
+      'the allowlist refused it',
+      new OutboundRefused('it answered with a redirect'),
+      'Outbound request refused: it answered with a redirect',
+    ],
+    ['it took too long', new DOMException('timed out', 'TimeoutError'), 'it took too long'],
+    [
+      'a network error with a code',
+      new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ECONNREFUSED' }) }),
+      'TypeError, ECONNREFUSED',
+    ],
+    ['a code not a code', new TypeError('fetch failed', { cause: { code: 'not one!' } }), 'TypeError'],
+    ['something not an error', 'nope', 'not an error'],
+  ])('says why a call failed when %s, never what was answered', async (_what, thrown, why) => {
+    const directory = createDirectoryNames({
+      issuer: ISSUER,
+      internalOrigin: undefined,
+      token: READER_WORDS,
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- a fetch may reject with anything: that case is tested.
+      fetch: () => Promise.reject(thrown),
+    });
+
+    await expect(directory.entriesOf(['101'])).rejects.toThrow(new DirectoryUnavailable(`the call failed (${why})`));
   });
 });
