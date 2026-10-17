@@ -13,6 +13,7 @@ import {
   type ClaimedNotice,
   isAboutAMandate,
   isAboutAnAgent,
+  isAboutAnAuditEntry,
   isAboutAPerson,
   isAboutASupplier,
   isAboutASpendRequest,
@@ -313,11 +314,19 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       "Sign in to Agent X to see the request in full and approve or reject it. If you didn't expect it, reject it and tell the organisation's admins.",
   },
+  // About an audit log entry (0050): Agent X's own team read the log for a case, to every admin (ADR-005 §6).
+  audit_log_exported: {
+    subject: () => "Agent X: our team exported your organisation's audit log",
+    firstLine: () =>
+      "Agent X's own team exported the audit log of one of your Agent X organisations for a case: a dispute, or a regulator's request. The export only reads the log; it changed nothing.",
+    check:
+      "Sign in to Agent X and open the audit log to see this entry: its case reference, the dates it covers and how many events it held. If you didn't expect it, tell the organisation's other admins.",
+  },
 };
 
 const NEWLINE = '\n';
 
-/** What a notice is about, by its ID alone: a membership, a person, an agent, a mandate, the organisation, a spend request, a supplier, or a registered contact. */
+/** What a notice is about, by its ID alone: a membership, a person, an agent, a mandate, the organisation, a spend request, an audit log entry, a supplier, or a registered contact. */
 function aboutLine(notice: ClaimedNotice): string {
   if (notice.membershipId !== null) return `Membership: ${notice.membershipId}`;
   const id = notice.aboutId ?? '';
@@ -326,6 +335,7 @@ function aboutLine(notice: ClaimedNotice): string {
   if (isAboutAMandate(notice.kind)) return `Mandate: ${id}`;
   if (isAboutTheOrganization(notice.kind)) return `Organisation: ${id}`;
   if (isAboutASpendRequest(notice.kind)) return `Spend request: ${id}`;
+  if (isAboutAnAuditEntry(notice.kind)) return `Audit log entry: ${id}`;
   return isAboutASupplier(notice.kind) ? `Supplier: ${id}` : `Registered contact: ${id}`;
 }
 

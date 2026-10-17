@@ -292,6 +292,23 @@ describe('a notice’s email (B5-1b)', () => {
     });
   });
 
+  describe('E10c our team’s export of the audit log for a case (0050, Phase 3; ADR-005 §6)', () => {
+    const entry = '0199a0f0-0000-7000-8000-00000000e10c';
+
+    it('tells every admin, naming the log entry by ID alone and where to read the case reference', () => {
+      const message = messageFor(
+        { ...NOTICE, kind: 'audit_log_exported', membershipId: null, role: null, aboutId: entry },
+        'a@example.test',
+      );
+
+      expect(message.subject).toBe("Agent X: our team exported your organisation's audit log");
+      expect(message.text).toContain(`Audit log entry: ${entry}`);
+      expect(message.text).toContain('open the audit log to see this entry: its case reference');
+      expect(message.text).toContain("You're told because you're an admin of this organisation.");
+      expect(message.text).toContain("This email can't approve or change anything.");
+    });
+  });
+
   describe('B1, B2 a spend request waiting for approval (0045, Phase 3; partner decision 2; SEC-HA-11)', () => {
     const request = '0199a0f0-0000-7000-8000-0000000003b2';
     const waitingNotice: ClaimedNotice = {
