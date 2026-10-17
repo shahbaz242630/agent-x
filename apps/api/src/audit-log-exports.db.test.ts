@@ -141,6 +141,17 @@ describe('downloading the audit log (E10b, decision 24)', () => {
     expect(row).toContain('"{""note"":""=HYPERLINK(\\""x\\"")""}"');
   });
 
+  it('counts an event recorded at the range’s own start, as the file holds it', async () => {
+    const w = await world();
+    const sealed = await noted(w, { note: 'at the start' });
+    const from = { ...asked('ndjson', ['probe.noted']), from: sealed.recordedAt };
+
+    const file = fileOf(await exports.export(w.admin, keyed(w.admin, EXPORT_OPERATION), from, CORRELATION));
+    expect(file.events).toBe(1);
+    const recorded = await withTenant(app, w.org, (tx) => trail.recordedEvent(tx, w.org, { eventId: file.id }));
+    expect(recorded).toMatchObject({ kind: 'recorded', event: { details: { events: 1 } } });
+  });
+
   it('answers a retry with its key with the same file, events recorded since left out', async () => {
     const w = await world();
     const key = keyed(w.admin, EXPORT_OPERATION);
@@ -153,15 +164,20 @@ describe('downloading the audit log (E10b, decision 24)', () => {
   it('refuses a range past the cap with nothing logged, an admin’s sixth in an hour, and a member not an admin', async () => {
     const w = await world();
     for (let n = 0; n < 50; n += 1) await noted(w, { n });
-    expect(await exports.export(w.admin, keyed(w.admin, EXPORT_OPERATION), asked('csv'), CORRELATION)).toEqual(
-      refused(409, 'AUDIT_EXPORT_TOO_LARGE'),
-    );
+    // Exactly the cap is downloaded; one past it is refused, nothing logged.
+    expect(
+      await exports.export(w.admin, keyed(w.admin, EXPORT_OPERATION), asked('csv', ['probe.noted']), CORRELATION),
+    ).toMatchObject({ outcome: 'exported', file: { events: 50 } });
+    await noted(w, { n: 50 });
+    expect(
+      await exports.export(w.admin, keyed(w.admin, EXPORT_OPERATION), asked('csv', ['probe.noted']), CORRELATION),
+    ).toEqual(refused(409, 'AUDIT_EXPORT_TOO_LARGE'));
     const few = asked('csv', ['probe.noted', AUDIT_LOG_EXPORTED]);
     expect(
       await exports.export(w.admin, keyed(w.admin, EXPORT_OPERATION), asked('csv', [AUDIT_LOG_EXPORTED]), CORRELATION),
-    ).toMatchObject({ outcome: 'exported', file: { events: 0 } });
+    ).toMatchObject({ outcome: 'exported', file: { events: 1 } });
 
-    for (let n = 0; n < 4; n += 1) {
+    for (let n = 0; n < 3; n += 1) {
       fileOf(
         await exports.export(
           w.admin,
