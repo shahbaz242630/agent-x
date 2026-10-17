@@ -56,6 +56,8 @@ import {
   type Sessions,
   type StepUpChallenges,
   type SignIn,
+  createDirectoryNames,
+  type DirectoryNames,
 } from '@agentx/core/modules/identity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { MandatesTables } from '@agentx/core/modules/mandates';
@@ -229,6 +231,21 @@ function signInFrom(
     ids: uuidV7Ids,
     clock: systemClock,
     keys,
+  });
+}
+
+/**
+ * The login service's names for the audit log (decision 25), read with the
+ * directory token the address book uses; undefined without one, and the log
+ * names people from the copy Agent X kept.
+ */
+function directoryNamesFrom(config: Config): DirectoryNames | undefined {
+  if (config.signIn === undefined || config.email === undefined) return undefined;
+  return createDirectoryNames({
+    issuer: config.signIn.issuer,
+    internalOrigin: config.signIn.internalOrigin,
+    token: config.email.directoryToken,
+    fetch: createOutboundFetch(config.outbound.allowedOrigins),
   });
 }
 
@@ -409,6 +426,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // Where role grants write their notices (B5-1b), and the notices' sweep reads.
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
+  const directory = directoryNamesFrom(config);
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
@@ -496,8 +514,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
-    auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger }),
-    auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger, directory }),
+    auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger, directory }),
     holdClearings: createHoldClearings({
       database,
       keys,

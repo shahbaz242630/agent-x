@@ -5,6 +5,7 @@
 // the same file; the cap, the hourly budget, a member not an admin; and an
 // event that can't be believed refusing the file, the organisation held.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -92,6 +93,7 @@ beforeEach(() => {
     ids,
     clock,
     logger: testLogger(new LogCapture()),
+    directory: undefined,
     mostEvents: 50,
   });
 });
@@ -135,10 +137,44 @@ describe('downloading the audit log (E10b, decision 24)', () => {
     const [header, row] = file.content.trimEnd().split('\n');
     expect(file).toMatchObject({ contentType: 'text/csv', events: 1 });
     expect(header).toBe(
-      '"seq","recordedAt","actorType","actorId","action","subjectType","subjectId","subjectVersion","details","hash","prevHash"',
+      '"seq","recordedAt","actorType","actorId","actorName","actorEmail","actorNameFrom","action","subjectType","subjectId","subjectVersion","details","hash","prevHash"',
     );
+    expect(row).toContain('"system","test-operator","Agent X (test-operator)","","agent_x","probe.noted"');
     // The facts' cell is JSON text, its quotes doubled: it begins with `{`, never a formula (csvCell's own tests).
     expect(row).toContain('"{""note"":""=HYPERLINK(\\""x\\"")""}"');
+  });
+
+  it('names each person beside their ID in both formats, a name a spreadsheet would run made text (decision 25)', async () => {
+    const w = await world();
+    const directory: DirectoryNames = {
+      issuer: 'https://auth.example.test',
+      entriesOf: (subjects) =>
+        Promise.resolve(
+          new Map(subjects.map((subject) => [subject, { name: '=HYPERLINK("y")', email: 'sara@example.test' }])),
+        ),
+    };
+    const named = createAuditLogExports({ database: app, keys, ids, clock, logger: testLogger(), directory });
+    await named.export(w.admin, keyed(w.admin, EXPORT_OPERATION), asked('csv', ['probe.noted']), CORRELATION);
+    const ofDownloads = asked('csv', [AUDIT_LOG_EXPORTED]);
+
+    const csv = fileOf(await named.export(w.admin, keyed(w.admin, EXPORT_OPERATION), ofDownloads, CORRELATION));
+    const ndjson = fileOf(
+      await named.export(w.admin, keyed(w.admin, EXPORT_OPERATION), { ...ofDownloads, format: 'ndjson' }, CORRELATION),
+    );
+
+    expect(csv.content).toContain(
+      `"user","${w.admin.userId}","'=HYPERLINK(""y"")","sara@example.test","login_service"`,
+    );
+    const [line] = ndjson.content.trimEnd().split('\n');
+    expect(JSON.parse(line ?? '')).toMatchObject({
+      actor: {
+        type: 'user',
+        id: w.admin.userId,
+        name: '=HYPERLINK("y")',
+        email: 'sara@example.test',
+        shownFrom: 'login_service',
+      },
+    });
   });
 
   it('counts an event recorded at the range’s own start, as the file holds it', async () => {

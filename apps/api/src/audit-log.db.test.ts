@@ -2,8 +2,8 @@
 // the API, on the real migrated schema as the app role: every event of the
 // organisation, newest first, its own alone; and an event that can't be
 // believed refusing the page, the alarm raised and the organisation held.
-import { withSignedStates } from '@agentx/core/modules/audit';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -46,7 +46,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-17T08:00:00Z'));
-  log = createAuditLog({ database: app, keys, ids, logger: testLogger(new LogCapture()) });
+  log = createAuditLog({ database: app, keys, ids, logger: testLogger(new LogCapture()), directory: undefined });
 });
 
 describe('the organisation’s audit log (E10a, decision 24)', () => {
@@ -63,6 +63,45 @@ describe('the organisation’s audit log (E10a, decision 24)', () => {
     if (otherPage.outcome !== 'page') throw new Error('no page');
     const theirs = new Set(otherPage.events.map((e) => e.id));
     expect(page.events.some((e) => theirs.has(e.id))).toBe(false);
+  });
+
+  it('names each actor beside their ID: a person from the copy kept, an agent and Agent X’s parts by theirs (decision 25)', async () => {
+    const w = await world();
+    const trail = createAuditTrail({ keys, ids });
+    await withTenant(app, w.org, (tx) =>
+      trail.record(tx, w.org, {
+        actor: { type: 'agent', id: w.agent },
+        action: 'probe.noted',
+        subject: { type: 'probe', id: w.org, version: 1 },
+        details: {},
+      }),
+    );
+    // As a sign-in keeps it (user-contacts.ts): the name bound to its person and its field.
+    const name = keys.encrypt('field-encryption', Buffer.from('Sara Khan'), [
+      'identity.user_contacts',
+      w.admin.userId,
+      'name',
+    ]);
+    await app
+      .insertInto('identity.user_contacts')
+      .values({
+        user_id: w.admin.userId,
+        name_ciphertext: name.ciphertext,
+        name_key_version: name.keyVersion,
+        email_ciphertext: null,
+        email_key_version: null,
+        updated_at: clock.now(),
+      })
+      .execute();
+
+    const page = await pageOf(w.org);
+    if (page.outcome !== 'page') throw new Error(`no page: ${JSON.stringify(page)}`);
+
+    expect(Object.fromEntries(page.names)).toEqual({
+      [`user:${w.admin.userId}`]: { name: 'Sara Khan', email: null, shownFrom: 'kept_copy' },
+      [`agent:${w.agent}`]: { name: 'Purchasing agent', email: null, shownFrom: 'agent' },
+      'system:test-operator': { name: 'Agent X (test-operator)', email: null, shownFrom: 'agent_x' },
+    });
   });
 
   it('refuses a page with an event that can’t be believed: INTEGRITY_FAILED, the organisation held', async () => {

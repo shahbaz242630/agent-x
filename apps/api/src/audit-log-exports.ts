@@ -19,6 +19,9 @@
 //   as JSON text; every cell a spreadsheet would read as a formula starts
 //   with `'` (SEC-EVD-04). The platform's own seals are left out of both, as
 //   from a page (factsShown).
+// - Each actor is named beside their ID, as on a page (decision 25,
+//   actor-names.ts), as at the download: a retry's file holds the same
+//   events, its names as the login service has them then.
 import {
   actorEventsSince,
   type AuditActor,
@@ -26,6 +29,7 @@ import {
   eventsInRange,
   type LogEvent,
 } from '@agentx/core/modules/audit';
+import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { actionProblems, type Clock, DAY_MS, HOUR_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, holdTransactionLock, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -36,10 +40,18 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { AuditLogRefused, eventShown, factsShown, MOST_ACTIONS_FILTERED, SEQ } from './audit-log.ts';
+import { type ActorName, actorsHeld, createActorNamer } from './actor-names.ts';
+import {
+  type AuditLogTables,
+  AuditLogRefused,
+  eventShown,
+  factsShown,
+  MOST_ACTIONS_FILTERED,
+  SEQ,
+} from './audit-log.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { type Refused, refused } from './refused.ts';
-import { createUseCaseWork, type Member, type UseCaseTables } from './use-case-work.ts';
+import { createUseCaseWork, type Member } from './use-case-work.ts';
 
 export const EXPORT_OPERATION = 'audit-log.export';
 
@@ -116,6 +128,9 @@ const CSV_HEADER = [
   'recordedAt',
   'actorType',
   'actorId',
+  'actorName',
+  'actorEmail',
+  'actorNameFrom',
   'action',
   'subjectType',
   'subjectId',
@@ -125,13 +140,14 @@ const CSV_HEADER = [
   'prevHash',
 ];
 
-/** One event as the file holds it. */
-const lineOf = (format: ExportFormat, logged: LogEvent): string => {
-  const shown = eventShown(logged);
+/** One event as the file holds it, its actor named. */
+const lineOf = (format: ExportFormat, logged: LogEvent, names: ReadonlyMap<string, ActorName>): string => {
+  const shown = eventShown(logged, names);
   const facts = Object.fromEntries(factsShown(logged.event.details));
   if (format === 'ndjson') return JSON.stringify({ ...shown, details: facts });
   const { actor, subject } = shown;
-  return [shown.seq, shown.recordedAt, actor.type, actor.id, shown.action, subject.type, subject.id]
+  return [shown.seq, shown.recordedAt, actor.type, actor.id, actor.name ?? '', actor.email ?? '', actor.shownFrom ?? '']
+    .concat([shown.action, subject.type, subject.id])
     .concat([String(subject.version), JSON.stringify(facts), shown.hash, shown.prevHash])
     .map(csvCell)
     .join(',');
@@ -146,13 +162,16 @@ export function createAuditLogExports({
   ids,
   clock,
   logger,
+  directory,
   mostEvents = MOST_EXPORTED_EVENTS,
 }: {
-  readonly database: Database<UseCaseTables>;
+  readonly database: Database<AuditLogTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
+  /** The login service's names; undefined when none is set up, and people are named from the kept copy. */
+  readonly directory: DirectoryNames | undefined;
   /** The cap, MOST_EXPORTED_EVENTS unless a test sets it lower: ten thousand events are too many to record in one. */
   readonly mostEvents?: number;
 }): AuditLogExports {
@@ -168,14 +187,20 @@ export function createAuditLogExports({
     correlationId: string,
   ) => {
     const lines: string[] = [];
+    // One namer for the whole download: once the login service fails, no later batch waits on it.
+    const namer = createActorNamer({ directory, logger: logger.child({ correlationId }) });
     let beforeSeq = upToSeq === null ? null : upToSeq + 1n;
     while (beforeSeq !== null) {
       const before = beforeSeq;
-      const read = await work.inOrganisation(orgId, correlationId, (tx, states) =>
-        states.logPageOf(tx, orgId, { ...asked, beforeSeq: before, limit: EXPORT_BATCH }),
-      );
-      if (read.outcome === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-      lines.push(...read.events.map((event) => lineOf(asked.format, event)));
+      const read = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
+        const page = await states.logPageOf(tx, orgId, { ...asked, beforeSeq: before, limit: EXPORT_BATCH });
+        if (page.outcome === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+        const held = await actorsHeld(tx, states, keys, orgId, page.events);
+        if (held === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+        return { ...page, held };
+      });
+      const names = await namer.namesOf(read.events, read.held);
+      lines.push(...read.events.map((event) => lineOf(asked.format, event, names)));
       beforeSeq = read.next;
     }
     const header = asked.format === 'csv' ? [CSV_HEADER.map(csvCell).join(',')] : [];
