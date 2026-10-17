@@ -9,7 +9,7 @@ import { createKeyProvider } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import type { IdentityTables } from './tables.ts';
-import { keepUserContact } from './user-contacts.ts';
+import { keepUserContact, keptPeopleOf } from './user-contacts.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -144,5 +144,47 @@ describe('identity.user_contacts', () => {
     expect(
       await app.selectFrom('identity.user_contacts').select('user_id').where('user_id', '=', userId).execute(),
     ).toEqual([]);
+  });
+
+  it('reads each person known, their kept values opened, in one statement; one that won’t open shows as missing', async () => {
+    const keys = createKeyProvider(
+      { 'field-encryption': { current: 1, versions: new Map([[1, Buffer.alloc(32, 9)]]) } },
+      ['field-encryption'],
+    );
+    const sara = await aPerson();
+    const omar = await aPerson();
+    const nobody = await aPerson();
+    await keepUserContact(app, keys, sara, { name: 'Sara Khan', verifiedEmail: 'sara@example.test' }, AT);
+    const saras = await app
+      .selectFrom('identity.user_contacts')
+      .selectAll()
+      .where('user_id', '=', sara)
+      .executeTakeFirstOrThrow();
+    // Sara's sealed name copied into Omar's row, as someone with the database's keys might.
+    await app
+      .insertInto('identity.user_contacts')
+      .values({ ...saras, user_id: omar })
+      .execute();
+
+    const people = await keptPeopleOf(app, keys, [sara, omar, nobody, sara]);
+
+    expect(people.get(sara)).toEqual({
+      issuer: 'https://auth.example.test',
+      subject: sara.replaceAll('-', ''),
+      name: 'Sara Khan',
+      email: 'sara@example.test',
+      unreadable: false,
+    });
+    expect(people.get(omar)).toMatchObject({ name: undefined, email: undefined, unreadable: true });
+    expect(people.get(nobody)).toMatchObject({ name: undefined, email: undefined, unreadable: false });
+    expect((await keptPeopleOf(app, keys, [])).size).toBe(0);
+
+    // A name alone, then an address alone: each kept without the other, the earlier one kept.
+    await keepUserContact(app, keys, nobody, { name: 'Lina', verifiedEmail: undefined }, AT);
+    await keepUserContact(app, keys, nobody, { name: undefined, verifiedEmail: 'lina@example.test' }, AT);
+    expect((await keptPeopleOf(app, keys, [nobody])).get(nobody)).toMatchObject({
+      name: 'Lina',
+      email: 'lina@example.test',
+    });
   });
 });

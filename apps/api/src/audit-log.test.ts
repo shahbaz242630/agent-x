@@ -67,7 +67,10 @@ const TOO_MANY_ACTIONS = Array.from({ length: 21 }, (_, n) => `a.b${String(n)}`)
 
 describe('GET /v1/audit-log (E10a, decision 24)', () => {
   it('answers a page newest first, the platform’s seals left out, the next page named', async () => {
-    const { app, asked } = await withLog({ outcome: 'page', events: [EVENT], next: 12_345_678_901_234_567n });
+    const names = new Map([
+      [`user:${LIVE.userId}`, { name: 'Sara Khan', email: 'sara@example.test', shownFrom: 'login_service' as const }],
+    ]);
+    const { app, asked } = await withLog({ outcome: 'page', events: [EVENT], next: 12_345_678_901_234_567n, names });
     const reply = await app.inject(
       get(`${RANGE}&actions=mandate.over_limit_chosen,mandate.accepted&before=99&limit=5`),
     );
@@ -79,7 +82,13 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
           seq: '12345678901234567',
           id: EVENT.id,
           recordedAt: '2026-10-17T08:00:00.123Z',
-          actor: { type: 'user', id: LIVE.userId },
+          actor: {
+            type: 'user',
+            id: LIVE.userId,
+            name: 'Sara Khan',
+            email: 'sara@example.test',
+            shownFrom: 'login_service',
+          },
           action: 'mandate.over_limit_chosen',
           subject: EVENT.event.subject,
           details: [
@@ -104,7 +113,7 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
   });
 
   it('asks every action and a whole page when none are named, answering the end as null', async () => {
-    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null });
+    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
     const reply = await app.inject(get(RANGE));
 
     expect(reply.json()).toEqual({ events: [], next: null });
@@ -120,7 +129,7 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
     ['a start that isn’t a seq', `${RANGE}&before=0`],
     ['a field of its own', `${RANGE}&role=admin`],
   ])('refuses %s at the edge, the log never asked', async (_what, query) => {
-    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null });
+    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
 
     expect((await app.inject(get(query))).statusCode).toBe(400);
     expect(asked).toEqual([]);
@@ -135,7 +144,7 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
   });
 
   it.each(['approver', 'developer', 'viewer'] as const)('refuses a member who is a %s (admins only)', async (role) => {
-    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null }, role);
+    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() }, role);
 
     expect((await app.inject(get(RANGE))).statusCode).toBe(403);
     expect(asked).toEqual([]);

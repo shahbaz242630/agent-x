@@ -121,6 +121,7 @@ import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
+import { directoryNamesFrom } from './kept-names.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
@@ -409,6 +410,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // Where role grants write their notices (B5-1b), and the notices' sweep reads.
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
+  const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
@@ -496,8 +498,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
-    auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger }),
-    auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger, directory }),
+    auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger, directory }),
     holdClearings: createHoldClearings({
       database,
       keys,

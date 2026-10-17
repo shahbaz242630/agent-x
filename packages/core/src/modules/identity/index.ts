@@ -53,6 +53,12 @@ export {
 } from './domain/step-up.ts';
 export { AddressBookUnavailable, createAddressBook } from './infrastructure/address-book.ts';
 export {
+  createDirectoryNames,
+  type DirectoryEntry,
+  type DirectoryNames,
+  DirectoryUnavailable,
+} from './infrastructure/directory-names.ts';
+export {
   createIdpEventCopier,
   IDP_EVENT_COPIED,
   type IdpEventCopier,
@@ -239,4 +245,5 @@ export {
   stepUpDetails,
 } from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
+export { type KeptPerson, keptPeopleOf } from './infrastructure/user-contacts.ts';
 export { subjectOfUser, userForSubject, userOfSubject } from './infrastructure/users.ts';

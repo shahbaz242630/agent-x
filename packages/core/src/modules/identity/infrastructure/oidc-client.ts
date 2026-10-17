@@ -55,7 +55,7 @@ import { createLocalJWKSet, errors as joseErrors, type JSONWebKeySet, type JWTPa
 import type { Clock } from '../../../shared-kernel/index.ts';
 import { isBreakGlassLogin } from '../domain/break-glass.ts';
 import { invitationEmail } from '../domain/invitation.ts';
-import { personName } from '../domain/person-name.ts';
+import { nameFromParts } from '../domain/person-name.ts';
 import { checkEvidence, checkSubject, type SignInEvidence, type Subject } from '../domain/sign-in.ts';
 import { boundedText } from './zitadel-answer.ts';
 import { routedToIssuer } from './zitadel-route.ts';
@@ -426,9 +426,7 @@ export function createOidcClient({
     if (isBreakGlassLogin(info.preferred_username, issuer)) {
       throw new SignInFailed('break_glass', "the login is the login service's break-glass admin");
     }
-    const name =
-      personName(info.name) ??
-      personName([info.given_name, info.family_name].filter((part) => typeof part === 'string').join(' '));
+    const name = nameFromParts(info.name, info.given_name, info.family_name);
     return { verifiedEmail: info.email_verified === true ? invitationEmail(info.email) : undefined, name };
   }
 

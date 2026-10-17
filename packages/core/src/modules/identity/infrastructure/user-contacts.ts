@@ -76,3 +76,48 @@ export async function keepUserContact(
     )
     .execute();
 }
+
+/** A person as the log names them from what Agent X holds: who they sign in as, and their kept values. */
+export interface KeptPerson {
+  readonly issuer: string;
+  readonly subject: string;
+  readonly name: string | undefined;
+  readonly email: string | undefined;
+  /** A kept value that wouldn't open (changed, or copied from another row): shown as missing. */
+  readonly unreadable: boolean;
+}
+
+/** Each of these people Agent X knows, in one statement, their kept values opened. */
+export async function keptPeopleOf(
+  db: Handle,
+  keys: KeyProvider,
+  userIds: readonly string[],
+): Promise<ReadonlyMap<string, KeptPerson>> {
+  if (userIds.length === 0) return new Map();
+  const rows = await db
+    .selectFrom('identity.users as u')
+    .leftJoin('identity.user_contacts as c', 'c.user_id', 'u.id')
+    .select(['u.id', 'u.issuer', 'u.subject', 'c.name_ciphertext', 'c.name_key_version'])
+    .select(['c.email_ciphertext', 'c.email_key_version'])
+    .where('u.id', 'in', [...new Set(userIds)])
+    .execute();
+  return new Map(
+    rows.map((row) => {
+      let unreadable = false;
+      const opened = (ciphertext: Buffer | null, keyVersion: number | null, field: Field) => {
+        if (ciphertext === null || keyVersion === null) return undefined;
+        try {
+          return keys
+            .decrypt('field-encryption', { ciphertext, keyVersion }, contactData(row.id, field))
+            .toString('utf8');
+        } catch {
+          unreadable = true;
+          return undefined;
+        }
+      };
+      const name = opened(row.name_ciphertext, row.name_key_version, 'name');
+      const email = opened(row.email_ciphertext, row.email_key_version, 'email');
+      return [row.id, { issuer: row.issuer, subject: row.subject, name, email, unreadable }];
+    }),
+  );
+}
