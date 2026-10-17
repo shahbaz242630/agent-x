@@ -14,7 +14,9 @@
 //   source is answered as it stands, the partner not asked. An answer that
 //   ends the source (unknown to the partner, or gone for good: partnerEnds)
 //   first DENIES its pending requests in the same transaction (voidPendingOf,
-//   Phase 3 C3; decision 7: an ended source always cancels).
+//   Phase 3 C3; decision 7: an ended source always cancels). Before any of
+//   it, a consent the answer says ran out, or past its end by time, has its
+//   lapse logged once (E7c, consent-lapses.ts).
 // - `suspend` (`funding-sources.suspend`, D2-4b): the business's own brake on
 //   the source, one click and no step-up (ADR-014 §8: the instant brakes are
 //   never behind step-up), for an admin or a finance approver. The key
@@ -65,6 +67,7 @@ import {
   consentExpiryOf,
   holdsOverExpiry,
 } from './consent-expiry-choice.ts';
+import { lapseAnswered, lapsedBy, type LapsedConsent, lapseRecorded } from './consent-lapses.ts';
 import {
   asked,
   createFundingSourceWork,
@@ -188,6 +191,22 @@ export function createFundingSourceChanges({
     return { id: read.source.id, suspendedBy: read.state.eventId };
   };
 
+  /**
+   * The source read for change, after its consent's lapse is recorded when one
+   * is given and not logged yet (E7c): recorded, its signed state moved on, so
+   * read again for what follows to record from (each verified state used once).
+   */
+  const afterLapse = async (
+    tx: FundingSourceTx,
+    states: SignedStates,
+    key: { readonly orgId: string; readonly id: string },
+    found: Awaited<ReturnType<typeof work.sourceIn>>,
+    lapsed: LapsedConsent | undefined,
+  ) =>
+    lapsed !== undefined && (await lapseRecorded(tx, states, found, key.orgId, lapsed))
+      ? work.sourceIn(tx, states, key, 'change')
+      : found;
+
   /** Answers the write: the source as it now stands, on a retry too. */
   const answer = async (orgId: string, correlationId: string, done: Written): Promise<SourceChangeWrite> => {
     if (isUnwritten(done)) return done;
@@ -266,8 +285,11 @@ export function createFundingSourceChanges({
           const braked = { fundingSourceId: sourceId };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
         }
-        if (lookup.kind === 'not_found') await endUnknownToPartner(tx, states, key, found, actor);
-        else await updateFromPartner(tx, states, key, found, { state: lookup.source, actor, holdsExpired });
+        // The lapse (E7c), after the requests' locks (ADR-006 §6), before the source ends or takes a renewal.
+        const answered = lookup.kind === 'found' ? lookup.source : undefined;
+        const current = await afterLapse(tx, states, key, found, lapseAnswered(found.source, answered, clock.now()));
+        if (lookup.kind === 'not_found') await endUnknownToPartner(tx, states, key, current, actor);
+        else await updateFromPartner(tx, states, key, current, { state: lookup.source, actor, holdsExpired });
         return { status: 200, resourceId: sourceId };
       });
       return answer(member.orgId, correlationId, done);
@@ -313,19 +335,23 @@ export function createFundingSourceChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, CONSENT_EXPIRY_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
-        const { source, state } = await work.sourceIn(tx, states, key, 'change');
+        const read = await work.sourceIn(tx, states, key, 'change');
+        const { source } = read;
         if (source.status === 'ENDED') throw new FundingSourceRefused(409, 'SOURCE_NOT_USABLE');
         const inForce = await consentExpiryOf(tx, states, member.orgId, sourceId);
         // Chosen already: answered as it is, nothing recorded twice.
         if (inForce === consentExpiry) return { status: 200, resourceId: source.id };
-        const past = source.consentExpiresAt <= clock.now();
+        const lapsed = lapsedBy(source, clock.now());
         // Its consent ran out under a cancel (none chosen: the rule then): its requests are being cancelled already.
-        if (past && consentExpiry === 'pause') throw new FundingSourceRefused(409, 'PENDING_REQUESTS_CANCELLED');
-        if (past) {
+        if (lapsed !== undefined && consentExpiry === 'pause')
+          throw new FundingSourceRefused(409, 'PENDING_REQUESTS_CANCELLED');
+        if (lapsed !== undefined) {
           // A hold made a cancel past the expiry: cancelled now, as a suspend's cancel; the job takes any past the batch.
           const braked = { fundingSourceId: source.id };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
         }
+        // Past the end, the lapse is logged under the choice it met, after the requests' locks and before the new choice (E7c).
+        const { state } = await afterLapse(tx, states, key, read, lapsed);
         await states.record(
           tx,
           SOURCES,

@@ -17,6 +17,7 @@ export {
 export {
   addSource,
   endUnknownToPartner,
+  expiredOnly,
   MOST_SOURCES_A_PAGE,
   NotThisSource,
   SOURCES,

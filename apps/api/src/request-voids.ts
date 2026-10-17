@@ -33,6 +33,11 @@
 // row tampered back to ACTIVE does; nothing can be approved or handed off
 // under a suspension meanwhile.
 //
+// Before any of that, each consent run out by time on a source not ended has
+// its lapse logged once (E7c, consent-lapses.ts), so what the run then voids
+// usually follows the record of why (a lapse that fails, or past a run's
+// share, is logged on a later run, after them).
+//
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next.
 import { agentOf, type AgentsTables } from '@agentx/core/modules/agents';
@@ -45,7 +50,7 @@ import {
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type FundingSourcesTables, sourceOf } from '@agentx/core/modules/funding-sources';
+import { type FundingSourcesTables, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
@@ -66,6 +71,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
 import { CONSENT_EXPIRY_EVENTS, holdsOverExpiry } from './consent-expiry-choice.ts';
+import { CONSENT_LAPSED, lapsedBy, lapseRecorded } from './consent-lapses.ts';
 import {
   DETAILS_CHANGED,
   MOST_CARRIED_CHANGES,
@@ -80,6 +86,9 @@ export const REQUEST_VOIDS_EVERY_MS = 5 * 60_000;
 
 /** How many of an organisation's requests one run voids, and how many candidates a page holds: the rest wait for the next run. */
 const MOST_VOIDED_A_RUN = 100;
+
+/** How many of an organisation's lapsed consents one run records: the rest wait for the next. */
+const MOST_LAPSES_A_RUN = 50;
 
 type VoidTables = SpendRequestsTables &
   LimitReservationsTables &
@@ -184,6 +193,46 @@ async function stoppedByTheirRows(
       ]);
     })
     .orderBy('r.id')
+    .limit(most)
+    .execute();
+  return rows.map(({ id }) => id);
+}
+
+/**
+ * The IDs of the organisation's sources not ended whose consent has run out
+ * by `now` and whose newest lapse, unverified, names another consent or
+ * none, in order of ID, after `after` when given, at most `most`: each then
+ * judged through its signed state.
+ */
+async function lapsedByTheirRows(
+  tx: VoidTx,
+  orgId: string,
+  now: Date,
+  most: number,
+  after: string | undefined,
+): Promise<readonly string[]> {
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each judged through its signed state before anything is recorded
+    .selectFrom('funding_sources.sources as s')
+    .select('s.id')
+    .where('s.org_id', '=', orgId)
+    .where('s.status', '<>', 'ENDED')
+    .where('s.consent_expires_at', '<=', now)
+    .where((where) => (after === undefined ? where.lit(true) : where('s.id', '>', after)))
+    .where((where) =>
+      where(
+        newestDetail({
+          type: SOURCES.subject,
+          idColumn: 's.id',
+          orgColumn: 's.org_id',
+          actions: [CONSENT_LAPSED],
+          key: 'consentId',
+        }),
+        'is distinct from',
+        where.ref('s.account_consent_id'),
+      ),
+    )
+    .orderBy('s.id')
     .limit(most)
     .execute();
   return rows.map(({ id }) => id);
@@ -313,9 +362,40 @@ export function createRequestVoids({
     }
   };
 
-  /** Voids the organisation's pending requests whose authority no longer stands, up to its share; false if the signal stopped it. */
-  const voidIn = (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
+  /** Records the source's lapse if its consent has run out and it isn't logged yet, logging what came of it; whether it did. Never throws. */
+  const lapseLogged = async (log: Logger, orgId: string, sourceId: string): Promise<boolean> => {
+    try {
+      return await withSignedStates(database, orgId, services(log), async (tx, states) => {
+        const found = await sourceOf(tx, states, { orgId, id: sourceId }, 'change');
+        // Tampered with (its alarm raised) or missing: nothing recorded on it.
+        if (found.outcome !== 'found') throw new Error(`A source whose consent ran out can't be believed: ${sourceId}`);
+        const lapsed = lapsedBy(found.source, clock.now());
+        const recorded = lapsed !== undefined && (await lapseRecorded(tx, states, found, orgId, lapsed));
+        if (recorded) log.info('consent_lapse.recorded', { sourceId });
+        return recorded;
+      });
+    } catch (error) {
+      log.error('consent_lapse.failed', { sourceId, err: error });
+      return false;
+    }
+  };
+
+  /** Logs the organisation's lapsed consents, then voids its pending requests whose authority no longer stands, each up to its share; false if the signal stopped it. */
+  const voidIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const log = logger.child({ orgId });
+    const lapsesDone = await expireInPages({
+      most: MOST_LAPSES_A_RUN,
+      signal,
+      page: (left, after) =>
+        withSignedStates(database, orgId, services(log), (tx) =>
+          lapsedByTheirRows(tx, orgId, clock.now(), left, after),
+        ),
+      expire: (sourceId) => lapseLogged(log, orgId, sourceId),
+      unreadable: (error) => {
+        log.error('consent_lapse.unreadable', { err: error });
+      },
+    });
+    if (!lapsesDone) return false;
     return expireInPages({
       most,
       signal,

@@ -354,7 +354,7 @@ function partnerChanged(source: SourceRecord, state: FundingSourceState): boolea
  * gone at or after its end, by the answer's own times, never its word for
  * the status (a consent revoked, consumed or rejected before its end isn't).
  */
-const expiredOnly = (state: FundingSourceState): boolean =>
+export const expiredOnly = (state: FundingSourceState): boolean =>
   state.availability === 'UNAVAILABLE' && state.statusChangedAt >= state.consentExpiresAt;
 
 /**
