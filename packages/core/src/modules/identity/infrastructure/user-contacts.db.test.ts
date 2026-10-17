@@ -5,9 +5,11 @@ import { randomUUID } from 'node:crypto';
 
 import { createTestDatabase, type TestDatabase, testLogger } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { createKeyProvider } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import type { IdentityTables } from './tables.ts';
+import { keepUserContact } from './user-contacts.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -123,5 +125,24 @@ describe('identity.user_contacts', () => {
     await expect(
       app.deleteFrom('identity.user_contacts').where('user_id', '=', userId).execute(),
     ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('keeps nothing the sign-in didn’t vouch for as a name or one address', async () => {
+    const userId = await aPerson();
+    const keys = createKeyProvider(
+      {
+        'field-encryption': { current: 1, versions: new Map([[1, Buffer.alloc(32, 9)]]) },
+      },
+      ['field-encryption'],
+    );
+    const keep = (name: string | undefined, verifiedEmail: string | undefined) =>
+      keepUserContact(app, keys, userId, { name, verifiedEmail }, AT);
+
+    await expect(keep(' ', undefined)).rejects.toThrow("A person's name refused");
+    await expect(keep('Sara', 'not an address')).rejects.toThrow("A person's address refused");
+    await keep(undefined, undefined);
+    expect(
+      await app.selectFrom('identity.user_contacts').select('user_id').where('user_id', '=', userId).execute(),
+    ).toEqual([]);
   });
 });

@@ -22,8 +22,11 @@
 //   login service's break-glass admin fails (`break_glass`), so that login
 //   never holds a session here, nor anything a session leads to. So an
 //   endpoint that fails fails the sign-in too, as the login service
-//   unavailable (503, to try again): no sign-in stands unchecked. The rest of
-//   the profile is never kept.
+//   unavailable (503, to try again): no sign-in stands unchecked.
+// - E10d (decision 25): the profile's name comes out too, as one line of
+//   text, kept with the verified address so the audit log can say who did
+//   what when the login service can't (user-contacts.ts). The rest of the
+//   profile is never kept.
 //
 // Every call to the login service goes through the outbound fetch, so only
 // the allowlist's origins are reached and no redirect is followed
@@ -52,6 +55,7 @@ import { createLocalJWKSet, errors as joseErrors, type JSONWebKeySet, type JWTPa
 import type { Clock } from '../../../shared-kernel/index.ts';
 import { isBreakGlassLogin } from '../domain/break-glass.ts';
 import { invitationEmail } from '../domain/invitation.ts';
+import { personName } from '../domain/person-name.ts';
 import { checkEvidence, checkSubject, type SignInEvidence, type Subject } from '../domain/sign-in.ts';
 import { boundedText } from './zitadel-answer.ts';
 import { routedToIssuer } from './zitadel-route.ts';
@@ -88,6 +92,8 @@ export interface VerifiedSignIn {
   readonly idTokenHash: Buffer;
   /** The person's email address, in lower case, only when the login service says it is verified. */
   readonly verifiedEmail: string | undefined;
+  /** The person's name as their profile gives it, one line of text, if it gives one (decision 25). */
+  readonly name: string | undefined;
 }
 
 /** Why a sign-in failed, for its answer and its security event (B2-5). */
@@ -357,7 +363,7 @@ export function createOidcClient({
   }
 
   /** The ID token's claims, checked, down to the sign-in they name. */
-  async function verified(idToken: string, nonce: string): Promise<Omit<VerifiedSignIn, 'verifiedEmail'>> {
+  async function verified(idToken: string, nonce: string): Promise<Omit<VerifiedSignIn, 'verifiedEmail' | 'name'>> {
     const now = clock.now();
     const payload = await checkedToken(idToken, now);
     const invalid = (why: string): never => {
@@ -392,17 +398,21 @@ export function createOidcClient({
   }
 
   /**
-   * The person's verified address, from the userinfo endpoint with the
-   * access token: the answer must name the same person; an address comes out
-   * only with `email_verified` true, and only as one address (the invitation's
-   * own rule), in lower case. An answer about another person fails the
+   * The person's verified address and name, from the userinfo endpoint with
+   * the access token: the answer must name the same person; an address comes
+   * out only with `email_verified` true, and only as one address (the
+   * invitation's own rule), in lower case; the name as its `name`, or its
+   * given and family names, as one line (personName). An answer about another person fails the
    * sign-in, and so does one naming the break-glass admin's login (B4-6c).
    * Since that check rests on the answer, an endpoint that can't be reached,
    * or answers with anything but a JSON object, fails the sign-in as the
    * login service unavailable, to be tried again (B4-6c review): never a
    * sign-in let through unchecked. (B4-4a let one stand without an address.)
    */
-  async function verifiedEmailOf(accessToken: string, subject: string): Promise<string | undefined> {
+  async function profileOf(
+    accessToken: string,
+    subject: string,
+  ): Promise<Pick<VerifiedSignIn, 'verifiedEmail' | 'name'>> {
     const { userinfoEndpoint } = await discover();
     const response = await call(userinfoEndpoint, {
       headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
@@ -416,8 +426,10 @@ export function createOidcClient({
     if (isBreakGlassLogin(info.preferred_username, issuer)) {
       throw new SignInFailed('break_glass', "the login is the login service's break-glass admin");
     }
-    if (info.email_verified !== true) return undefined;
-    return invitationEmail(info.email);
+    const name =
+      personName(info.name) ??
+      personName([info.given_name, info.family_name].filter((part) => typeof part === 'string').join(' '));
+    return { verifiedEmail: info.email_verified === true ? invitationEmail(info.email) : undefined, name };
   }
 
   return {
@@ -483,8 +495,7 @@ export function createOidcClient({
       }
       // The ID token first: nothing is asked of the userinfo endpoint for a sign-in that doesn't stand.
       const signedIn = await verified(tokens.id_token, flow.nonce);
-      const verifiedEmail = await verifiedEmailOf(tokens.access_token, signedIn.subject.subject);
-      return { ...signedIn, verifiedEmail };
+      return { ...signedIn, ...(await profileOf(tokens.access_token, signedIn.subject.subject)) };
     },
   };
 }

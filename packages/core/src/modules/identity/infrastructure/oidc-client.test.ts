@@ -684,6 +684,26 @@ describe('the settings', () => {
   });
 });
 
+describe('E10d the person’s name, from the userinfo endpoint (decision 25)', () => {
+  it.each<[string, Record<string, unknown>, string | undefined]>([
+    ['its name, as one line', { name: ' Sara\n Khan ', given_name: 'S', family_name: 'K' }, 'Sara Khan'],
+    ['the given and family names, without a name', { given_name: 'Sara', family_name: 'Khan' }, 'Sara Khan'],
+    ['the given name alone', { given_name: 'Sara', family_name: 7 }, 'Sara'],
+    ['the parts, when the name isn’t one', { name: '\u202e', given_name: 'Sara' }, 'Sara'],
+    ['none, when nothing is given', {}, undefined],
+  ])('gives %s', async (_what, profile, name) => {
+    service.userinfo = { sub: SUBJECT, email: 'sara@example.test', email_verified: true, ...profile };
+
+    await expect(signIn()).resolves.toMatchObject({ name, verifiedEmail: 'sara@example.test' });
+  });
+
+  it('gives the name even when the address isn’t verified', async () => {
+    service.userinfo = { sub: SUBJECT, name: 'Sara Khan', email: 'sara@example.test', email_verified: false };
+
+    await expect(signIn()).resolves.toMatchObject({ name: 'Sara Khan', verifiedEmail: undefined });
+  });
+});
+
 describe('B4-4a the verified email address, from the userinfo endpoint', () => {
   it('asks with the access token, once the ID token stands, and gives the address in lower case', async () => {
     const signedIn = await signIn();

@@ -32,6 +32,10 @@
 // (session-emails.ts); a step-up's is never taken, as the session keeps its
 // own.
 //
+// E10d (decision 25): a sign-in's name and verified address, as the login
+// service gave them, are kept for the person too, in the same transaction
+// (user-contacts.ts), for the audit log to say who did what.
+//
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -47,6 +51,7 @@ import { recordSessionEmail } from './session-emails.ts';
 import type { LiveSession, Sessions } from './sessions.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+import { keepUserContact } from './user-contacts.ts';
 import { subjectOfUser, userForSubject, userOfSubject } from './users.ts';
 
 export interface SignInBegun {
@@ -215,7 +220,7 @@ export function createSignIn({
       if (taken.stepUpChallengeId !== undefined) {
         return completeStepUp(taken.stepUpChallengeId, taken, { code, state }, previousCookie);
       }
-      const { subject, evidence, verifiedEmail } = await oidc.finish(taken.flow, { code, state });
+      const { subject, evidence, verifiedEmail, name } = await oidc.finish(taken.flow, { code, state });
       // The sign-in asked for was a fresh one: a login service that answered with one it kept is refused.
       if (evidence.authTime.getTime() < earliestAuthTime(taken.startedAt)) {
         throw new SignInFailed('stale_authentication', 'the sign-in was made before the flow began');
@@ -225,6 +230,7 @@ export function createSignIn({
         if (previousCookie !== undefined) await sessions.end(tx, previousCookie);
         const { sessionId, cookie } = await sessions.open(tx, userId, evidence);
         if (verifiedEmail !== undefined) await recordSessionEmail(tx, keys, sessionId, verifiedEmail);
+        await keepUserContact(tx, keys, userId, { name, verifiedEmail }, clock.now());
         return { userId, sessionId, cookie, returnTo: taken.returnTo, stepUpChallengeId: undefined };
       });
     },

@@ -1,5 +1,6 @@
 // The address book (B5-3): a person's email address at send time, from the
-// login service, since Agent X keeps none (B5-1b). A notice's recipient is an
+// login service, its home (B5-1b; the copy kept since decision 25 is for the
+// audit log only, never where a notice goes). A notice's recipient is an
 // Agent X user; their row gives the issuer and subject they sign in as, and
 // the login service (Zitadel's user API, `GET /v2/users/<subject>`) gives the
 // address, which is taken only when it says it is verified.

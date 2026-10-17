@@ -8,11 +8,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import type { SignInEvidence, Subject } from '../domain/sign-in.ts';
 import { createLoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
+import { openField } from './sealed-fields.ts';
 import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
 import { createSessions, type Sessions } from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+import { contactData } from './user-contacts.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -50,6 +52,8 @@ class StandInClient implements OidcClient {
   proves: SignInEvidence = evidence;
   /** The verified address the next sign-in gives, if any. */
   verifiedEmail: string | undefined = undefined;
+  /** The name the next sign-in gives, if any. */
+  name: string | undefined = undefined;
 
   start(options?: { prompt?: 'login'; nonce?: string }) {
     this.started += 1;
@@ -73,7 +77,13 @@ class StandInClient implements OidcClient {
     if (this.failWith !== undefined) throw this.failWith;
     if (returned.state !== flow.state) throw new SignInFailed('state_mismatch', 'test');
     const subject: Subject = { issuer: ISSUER, subject: this.subject };
-    return { subject, evidence: this.proves, idTokenHash: Buffer.alloc(32, 7), verifiedEmail: this.verifiedEmail };
+    return {
+      subject,
+      evidence: this.proves,
+      idTokenHash: Buffer.alloc(32, 7),
+      verifiedEmail: this.verifiedEmail,
+      name: this.name,
+    };
   }
 }
 
@@ -656,5 +666,141 @@ describe(`a sign-in's verified address (B4-4a, Postgres ${server.version})`, () 
     await expect(
       app.deleteFrom('identity.session_emails').where('session_id', '=', done.sessionId).execute(),
     ).rejects.toMatchObject({ code: '42501' });
+  });
+});
+
+describe(`a person's kept name and address (E10d, decision 25, Postgres ${server.version})`, () => {
+  /** The person's kept values, opened; a field kept for no one opens as undefined. */
+  const keptFor = async (userId: string) => {
+    const row = await app
+      .selectFrom('identity.user_contacts')
+      .selectAll()
+      .where('user_id', '=', userId)
+      .executeTakeFirst();
+    if (row === undefined) return undefined;
+    const opened = (ciphertext: Buffer | null, keyVersion: number | null, field: 'name' | 'email') =>
+      ciphertext === null || keyVersion === null
+        ? undefined
+        : openField(
+            keys,
+            { ciphertext, keyVersion },
+            contactData(userId, field),
+            (cause) => new Error('unreadable', { cause }),
+          );
+    return {
+      name: opened(row.name_ciphertext, row.name_key_version, 'name'),
+      email: opened(row.email_ciphertext, row.email_key_version, 'email'),
+      updatedAt: row.updated_at,
+    };
+  };
+
+  it('keeps the name and verified address, encrypted, as of the sign-in', async () => {
+    client.name = 'Sara  Khan';
+    client.verifiedEmail = 'Sara.Khan@Example.test';
+
+    const done = await roundTrip();
+
+    expect(await keptFor(done.userId)).toEqual({
+      name: 'Sara Khan',
+      email: 'sara.khan@example.test',
+      updatedAt: clock.now(),
+    });
+    const row = await app
+      .selectFrom('identity.user_contacts')
+      .selectAll()
+      .where('user_id', '=', done.userId)
+      .executeTakeFirstOrThrow();
+    expect(row.name_ciphertext?.toString('latin1')).not.toContain('Sara');
+    expect(row.email_ciphertext?.toString('latin1').toLowerCase()).not.toContain('sara');
+  });
+
+  it('refreshes them at the next sign-in, keeping a value the login service didn’t give this time', async () => {
+    client.name = 'Sara Khan';
+    client.verifiedEmail = 'sara@example.test';
+    const first = await roundTrip();
+    clock.advanceBy(60_000);
+    client.proves = { ...evidence, authTime: clock.now() };
+
+    client.name = 'Sara Al Mansoori';
+    client.verifiedEmail = undefined;
+    const second = await roundTrip(undefined, first.cookie);
+
+    expect(second.userId).toBe(first.userId);
+    expect(await keptFor(first.userId)).toEqual({
+      name: 'Sara Al Mansoori',
+      email: 'sara@example.test',
+      updatedAt: clock.now(),
+    });
+
+    client.name = undefined;
+    client.verifiedEmail = 'sara.new@example.test';
+    await roundTrip(undefined, second.cookie);
+    expect(await keptFor(first.userId)).toMatchObject({ name: 'Sara Al Mansoori', email: 'sara.new@example.test' });
+  });
+
+  it('keeps nothing for a person whose sign-in gave neither', async () => {
+    const done = await roundTrip();
+
+    expect(await keptFor(done.userId)).toBeUndefined();
+  });
+
+  it('keeps a name alone when the address isn’t verified', async () => {
+    client.name = 'Omar';
+
+    const done = await roundTrip();
+
+    expect(await keptFor(done.userId)).toMatchObject({ name: 'Omar', email: undefined });
+  });
+
+  it('refuses a name that isn’t one, opening no session', async () => {
+    client.name = '\u202e';
+    const before = await app.selectFrom('identity.sessions').select('id').execute();
+
+    await expect(roundTrip()).rejects.toThrow(RangeError);
+    expect(await app.selectFrom('identity.sessions').select('id').execute()).toEqual(before);
+  });
+
+  it('won’t open a value copied to another person, or one field as the other', async () => {
+    client.name = 'Sara Khan';
+    client.verifiedEmail = 'sara@example.test';
+    const sara = await roundTrip();
+    client.subject = `${client.subject}9`;
+    client.name = 'Mallory';
+    client.verifiedEmail = undefined;
+    const mallory = await roundTrip();
+    const row = await app
+      .selectFrom('identity.user_contacts')
+      .selectAll()
+      .where('user_id', '=', sara.userId)
+      .executeTakeFirstOrThrow();
+    const saraName = row.name_ciphertext;
+    if (saraName === null) throw new Error('nothing kept');
+    const owner = await database.connect('admin');
+    try {
+      await owner.query(
+        'update identity.user_contacts set name_ciphertext = $2, name_key_version = 1, email_ciphertext = $3, email_key_version = 1 where user_id = $1',
+        [mallory.userId, saraName, saraName],
+      );
+    } finally {
+      await owner.end();
+    }
+    const swapped = await app
+      .selectFrom('identity.user_contacts')
+      .selectAll()
+      .where('user_id', '=', mallory.userId)
+      .executeTakeFirstOrThrow();
+
+    for (const [ciphertext, field] of [
+      [swapped.name_ciphertext, 'name'],
+      [swapped.email_ciphertext, 'email'],
+    ] as const) {
+      if (ciphertext === null) throw new Error('nothing kept');
+      expect(() =>
+        keys.decrypt('field-encryption', { ciphertext, keyVersion: 1 }, contactData(mallory.userId, field)),
+      ).toThrow();
+    }
+    expect(() =>
+      keys.decrypt('field-encryption', { ciphertext: saraName, keyVersion: 1 }, contactData(sara.userId, 'email')),
+    ).toThrow();
   });
 });
