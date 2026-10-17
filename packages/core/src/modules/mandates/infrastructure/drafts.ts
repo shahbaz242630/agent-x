@@ -279,6 +279,9 @@ export function termsHash(of: Binding, version: number, terms: MandateTerms, ove
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
+/** The action of a version's first event: it keeps what the use case put in its details, such as the over-limit choice. */
+export const VERSION_DRAFTED = 'mandate_version.drafted';
+
 /** A version of a mandate's terms, as a use case drafts it. */
 interface NewVersion {
   readonly orgId: string;
@@ -330,7 +333,7 @@ async function addVersion(
     .execute();
   return states.record(tx, MANDATE_VERSIONS, { orgId, id }, 'new', fields, {
     actor,
-    action: 'mandate_version.drafted',
+    action: VERSION_DRAFTED,
     details: { ...details, mandateId: of.id, version, termsHash: fields.terms_hash },
   });
 }

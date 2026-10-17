@@ -225,7 +225,11 @@ describe('decide: over the mandate’s own limits, sent for approval (decision 2
       decision: 'REQUIRE_APPROVAL',
       reasons: ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'],
     });
-    expect(decide(input(30_000.01, at)).decision).toBe('REQUIRE_NEW_MANDATE');
+    // Past the consent the bank would refuse it, which the team didn't set: named, so no approval rejects it for the limit.
+    expect(decide(input(30_000.01, at))).toMatchObject({
+      decision: 'REQUIRE_NEW_MANDATE',
+      reasons: ['MANDATE_ORDER_LIMIT', 'MANDATE_LIMIT_PAST_CONSENT', 'APPROVAL_THRESHOLD'],
+    });
   });
 
   it('asks approval past the monthly limit within the consent’s month, exactly at it too', () => {
@@ -235,14 +239,22 @@ describe('decide: over the mandate’s own limits, sent for approval (decision 2
       decision: 'REQUIRE_APPROVAL',
       reasons: ['MANDATE_MONTHLY_LIMIT'],
     });
-    expect(decide(input(10_000.01, at)).decision).toBe('REQUIRE_NEW_MANDATE');
+    expect(decide(input(10_000.01, at))).toMatchObject({
+      decision: 'REQUIRE_NEW_MANDATE',
+      reasons: ['MANDATE_MONTHLY_LIMIT', 'MANDATE_LIMIT_PAST_CONSENT', 'APPROVAL_THRESHOLD'],
+    });
     // A consent counted by another period is weighed per payment alone.
     expect(decide(input(10_000.01, { ...spent, consent: consent(100_000, null) })).decision).toBe('REQUIRE_APPROVAL');
   });
 
   it('needs a new mandate as always when the version chose refuse, or with no consent in its currency', () => {
     const past = { organizationPolicy: policy, consent: consent(100_000, null) };
-    expect(decide(input(25_000.01, past)).decision).toBe('REQUIRE_NEW_MANDATE');
+    expect(decide(input(25_000.01, past))).toMatchObject({
+      decision: 'REQUIRE_NEW_MANDATE',
+      reasons: ['MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'],
+    });
+    // Within its own limits the consent is never named here, whatever it allows.
+    expect(decide(input(5_000, { ...past, consent: consent(1_000, null) })).reasons).toEqual([]);
     expect(decide(input(25_000.01, { ...past, mandate: approving, consent: null })).decision).toBe(
       'REQUIRE_NEW_MANDATE',
     );
@@ -607,6 +619,11 @@ describe('reasonsShownToAgent (decision 11c)', () => {
       'APPROVAL_THRESHOLD',
     ]);
     expect(reasonsShownToAgent('REQUIRE_APPROVAL', ['MANDATE_MONTHLY_LIMIT'])).toEqual([]);
+    // A refusal past the consent is shown as it is: both made it.
+    expect(reasonsShownToAgent('REQUIRE_NEW_MANDATE', ['MANDATE_ORDER_LIMIT', 'MANDATE_LIMIT_PAST_CONSENT'])).toEqual([
+      'MANDATE_ORDER_LIMIT',
+      'MANDATE_LIMIT_PAST_CONSENT',
+    ]);
   });
 
   it('shows a policy’s order cap only when nothing else could have denied', () => {
@@ -637,6 +654,7 @@ describe('decide: properties', () => {
           if (consent === null) throw new Error('sent for approval past the mandate with no consent');
           expect(request.amount.minor).toBeLessThanOrEqual(consent.maxPayment.minor);
           if (consent.maxMonth !== null) expect(monthTotal).toBeLessThanOrEqual(consent.maxMonth.minor);
+          expect(decide(given).reasons).not.toContain('MANDATE_LIMIT_PAST_CONSENT');
         }
         expect(mandate.supplierIds).toContain(request.supplierId);
         if (decision === 'ALLOW') expect(request.amount.minor).toBeLessThanOrEqual(mandate.approvalThreshold.minor);

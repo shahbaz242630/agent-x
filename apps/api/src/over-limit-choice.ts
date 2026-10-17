@@ -9,6 +9,7 @@
 // chosen.
 import type { AuditDetails } from '@agentx/core/modules/audit';
 import { OVER_LIMIT, type OverLimit } from '@agentx/core/modules/mandates';
+import { MANDATE_LIMIT_CODES } from '@agentx/core/modules/policies';
 import type { ReasonCode } from '@agentx/core/shared-kernel';
 import { z } from 'zod';
 
@@ -54,4 +55,4 @@ export const overLimitIn = (details: AuditDetails | undefined): OverLimit | null
 
 /** Whether a weighing found the request over its mandate's own limits: one only an admin may approve (decision 23). */
 export const overMandateLimit = (reasons: readonly ReasonCode[]): boolean =>
-  reasons.includes('MANDATE_ORDER_LIMIT') || reasons.includes('MANDATE_MONTHLY_LIMIT');
+  reasons.some((code) => MANDATE_LIMIT_CODES.includes(code));

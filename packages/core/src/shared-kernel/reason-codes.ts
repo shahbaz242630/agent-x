@@ -98,6 +98,8 @@ export const REASON_CODES = {
     "The draft's end date has passed, so it can't be accepted. Draft a new version with a later end. Nothing was changed.",
   MANDATE_ENDED:
     'The mandate is revoked or expired, or its end date has passed, so it can no longer change. Draft a new mandate for the agent instead. Nothing was changed.',
+  MANDATE_LIMIT_PAST_CONSENT:
+    "The request is above the mandate's own limit and above what its funding source's bank consent allows, per payment or per month, so the bank would refuse it. It is refused: it needs a smaller request, or the bank consent raised when it is renewed.",
   MANDATE_MONTHLY_LIMIT:
     "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit. If the mandate chose to send such requests for approval and it is within the bank consent, it waits for an admin's approval; otherwise it is refused, and it needs a new mandate version with a higher limit, or capacity freeing up.",
   MANDATE_NOT_ACTIVE: 'The mandate is not in force (ACTIVE), so there is nothing to suspend. Nothing was changed.',

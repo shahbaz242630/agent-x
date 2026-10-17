@@ -21,6 +21,7 @@ node_modules/
 !/tooling/gate-proofs/fixtures/boundaries/installed-cloud-sdk/node_modules/
 dist/
 build/
+*.tsbuildinfo
 coverage/
 .turbo/
 

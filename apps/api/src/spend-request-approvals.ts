@@ -19,7 +19,8 @@
 //   REQUIRE_NEW_MANDATE): otherwise REQUEST_CHANGED (409), for the agent to
 //   ask again (SEC-LIM-10). One over the mandate's own limits, sent for
 //   approval as its version chose (decision 23), only an admin approves:
-//   ADMIN_APPROVAL_ONLY (403) for a finance approver, who may still reject it. Routine changes don't void it: a policy changed
+//   ADMIN_APPROVAL_ONLY (403) for a finance approver, who may still reject
+//   it. Routine changes don't void it: a policy changed
 //   since is weighed as it now is, and a key rotated out (expired, not
 //   revoked) still stands behind what it asked;
 // - re-checked (decisions 15.3, 16, 18; E5a): one whose supplier moved to new

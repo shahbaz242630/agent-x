@@ -24,6 +24,7 @@ import {
   policyOf,
   type PolicyVersionRecord,
   policyVersionOf,
+  VERSION_DRAFTED,
 } from '@agentx/core/modules/mandates';
 import type { Notice, NoticeKind } from '@agentx/core/modules/notifications';
 import type { ApprovalWaitHours, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -168,9 +169,6 @@ export async function overLimitOf(
   if (history.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
   return overLimitIn(history.events.at(-1)?.event.details);
 }
-
-/** The action whose event keeps a mandate version's over-limit choice (`addVersion`'s). */
-const VERSION_DRAFTED = 'mandate_version.drafted';
 
 /** Whether the agent's cap holds the version below its own monthly limit: never compared across currencies (C2 denies those). */
 const heldBelow = (

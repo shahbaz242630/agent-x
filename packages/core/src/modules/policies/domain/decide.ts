@@ -13,7 +13,8 @@
 //   or REQUIRE_APPROVAL (an admin's, decision 23) when its version chose so
 //   and the request is within the bank consent: per payment always, per month
 //   when the consent counts by the month. Past the consent the bank would
-//   refuse it, so it stays refused.
+//   refuse it: REQUIRE_NEW_MANDATE with MANDATE_LIMIT_PAST_CONSENT beside it,
+//   whatever the choice, as no rule the team set made it so (decision 18).
 // - Per-order cap, approval threshold, supplier list: each policy narrows on
 //   its own, so the tightest of the three always applies.
 // - The monthly cap per agent (decision 5): the mandate's policy's if it sets
@@ -125,10 +126,14 @@ export interface DecisionMade {
   readonly monthlyCapFrom: MonthlyCapFrom;
 }
 
+/** The mandate's own limits (decision 23): past them only an admin approves, and the agent is never told on an approval. */
+export const MANDATE_LIMIT_CODES: readonly ReasonCode[] = ['MANDATE_ORDER_LIMIT', 'MANDATE_MONTHLY_LIMIT'];
+
 /** Which decision each reason makes. */
 const DECIDES: Readonly<Partial<Record<ReasonCode, Decision>>> = {
   MANDATE_ORDER_LIMIT: 'REQUIRE_NEW_MANDATE',
   MANDATE_MONTHLY_LIMIT: 'REQUIRE_NEW_MANDATE',
+  MANDATE_LIMIT_PAST_CONSENT: 'REQUIRE_NEW_MANDATE',
   APPROVAL_THRESHOLD: 'REQUIRE_APPROVAL',
   AGGREGATE_THRESHOLD: 'REQUIRE_APPROVAL',
   POSSIBLE_DUPLICATE_ORDER: 'REQUIRE_APPROVAL',
@@ -193,7 +198,7 @@ export function decide(input: DecisionInput): DecisionMade {
  */
 export function reasonsShownToAgent(decision: Decision, reasons: readonly ReasonCode[]): readonly ReasonCode[] {
   if (decision !== 'DENY' && decision !== 'REQUIRE_NEW_MANDATE') {
-    return reasons.filter((code) => code !== 'MANDATE_ORDER_LIMIT' && code !== 'MANDATE_MONTHLY_LIMIT');
+    return reasons.filter((code) => !MANDATE_LIMIT_CODES.includes(code));
   }
   // A policy's order cap denies or asks approval as the policy says, which the record doesn't keep: shown only
   // when nothing else could have denied, so it denied.
@@ -254,6 +259,9 @@ function withinConsent(consent: ConsentCeiling | null, amount: Money, monthTotal
   return !over(amount, consent.maxPayment) && (consent.maxMonth === null || !over(monthTotal, consent.maxMonth));
 }
 
+/** An amount as the evidence keeps it, exact: `500000 AED`. */
+const moneyText = (m: Money | null): string | null => (m === null ? null : `${String(m.minor)} ${m.currency}`);
+
 /** The limits, caps and thresholds, all in the mandate's currency. */
 function amountChecks(
   input: DecisionInput,
@@ -266,10 +274,13 @@ function amountChecks(
   const monthTotal = plus(input.monthSpent, amount);
 
   // The agent's month is every mandate's (decision 4), so against the consent it is at least the source's own: the safe side.
-  const beyond = mandate.overLimit === 'approval' && withinConsent(input.consent, amount, monthTotal);
-  const overOwn = beyond ? 'REQUIRE_APPROVAL' : 'REQUIRE_NEW_MANDATE';
-  if (over(amount, mandate.perOrderLimit)) fail('MANDATE_ORDER_LIMIT', overOwn);
-  if (over(monthTotal, mandate.monthlyLimit)) fail('MANDATE_MONTHLY_LIMIT', overOwn);
+  const pastConsent = !withinConsent(input.consent, amount, monthTotal);
+  const overOwn = mandate.overLimit === 'approval' && !pastConsent ? 'REQUIRE_APPROVAL' : 'REQUIRE_NEW_MANDATE';
+  const overOrder = over(amount, mandate.perOrderLimit);
+  const overMonth = over(monthTotal, mandate.monthlyLimit);
+  if (overOrder) fail('MANDATE_ORDER_LIMIT', overOwn);
+  if (overMonth) fail('MANDATE_MONTHLY_LIMIT', overOwn);
+  if ((overOrder || overMonth) && pastConsent) fail('MANDATE_LIMIT_PAST_CONSENT');
   for (const { perOrderCap } of policies) {
     if (perOrderCap !== null && over(amount, perOrderCap.cap)) fail('POLICY_ORDER_CAP', perOrderCap.over);
   }
@@ -289,7 +300,7 @@ function amountChecks(
  * free text, as none is weighed.
  */
 export function decisionInputText(input: DecisionInput): string {
-  const amount = (m: Money | null): string | null => (m === null ? null : `${String(m.minor)} ${m.currency}`);
+  const amount = moneyText;
   const rules = (p: PolicyRules | null): unknown[] | null =>
     p === null
       ? null
@@ -366,5 +377,3 @@ export function decisionFacts(input: DecisionInput): Readonly<Record<string, str
     consentMaxMonth: moneyText(input.consent?.maxMonth ?? null),
   };
 }
-
-const moneyText = (m: Money | null): string | null => (m === null ? null : `${String(m.minor)} ${m.currency}`);

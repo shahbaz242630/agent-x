@@ -12,6 +12,7 @@ export {
   decide,
   MONTHLY_CAP_FROM,
   type MandateInForce,
+  MANDATE_LIMIT_CODES,
   type MandateOverLimit,
   monthlyCapOf,
   type MonthlyCapFrom,
