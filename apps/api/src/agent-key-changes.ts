@@ -289,15 +289,17 @@ export function createAgentKeyChanges({
           oldKey,
         );
         const actor = { type: 'user' as const, id: member.userId };
+        // The choice, on both keys' events.
+        const chosen = rotationDetails(oldKey);
         const issued = await work.issueKey(tx, states, {
           orgId: member.orgId,
           agentId: old.agent.id,
           scopes: old.key.scopes.filter((scope) => old.agent.scopes.includes(scope)),
           now,
           actor,
-          details: { ...stepUpDetails(consumed), rotates: old.key.id, ...rotationDetails(oldKey) },
+          details: { ...stepUpDetails(consumed), rotates: old.key.id, ...chosen },
         });
-        const ended = { rotatedTo: issued.id, ...rotationDetails(oldKey) };
+        const ended = { rotatedTo: issued.id, ...chosen };
         if (oldKey === 'end_now') {
           movedAsRead(
             await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.key.id }, 'revoke', {
