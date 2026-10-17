@@ -1508,6 +1508,24 @@ describe('a page of the whole log, for the organisation’s admins (logPage; Pha
     expect(seqsOf(await page({ from: middle }))).toEqual([3n, 2n]);
     expect(seqsOf(await page({ to: middle }))).toEqual([1n]);
     expect(seqsOf(await page({ actions: ['other.stepped'] }))).toEqual([2n]);
+    // At its own moment: inside a range from it, outside one to it.
+    expect(seqsOf(await page({ from: first.recordedAt, to: middle }))).toEqual([1n]);
+    expect(seqsOf(await page({ to: first.recordedAt }))).toEqual([]);
+  });
+
+  it('is broken for a chain holding an event past its head, even when the page asks only for another', async () => {
+    await record(org, event(1));
+    const [head] = await attacker.query('select seq, hash, mac, mac_key_version from audit.heads where org_id = $1', [
+      org,
+    ]);
+    if (head === undefined) throw new Error('The chain has no head');
+    await record(org, { ...event(2), action: 'other.stepped' });
+    await attacker.query(
+      'update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1',
+      [org, head.seq, head.hash, head.mac, head.mac_key_version],
+    );
+
+    expect(await page({ actions: ['probe.stepped'] })).toEqual({ kind: 'broken', seq: 2n });
   });
 
   it('is broken, never short, for an event that can’t be believed, and empty for a chain never started', async () => {
