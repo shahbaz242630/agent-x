@@ -102,6 +102,8 @@ export const REASON_CODES = {
     "The request is above the mandate's own limit and above what its funding source's bank consent allows, per payment or per month, so the bank would refuse it. It is refused: it needs a smaller request, or the bank consent raised when it is renewed.",
   MANDATE_MONTHLY_LIMIT:
     "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit. If the mandate chose to send such requests for approval and it is within the bank consent, it waits for an admin's approval; otherwise it is refused, and it needs a new mandate version with a higher limit, or capacity freeing up.",
+  MANDATE_NOT_ACCEPTED:
+    "The mandate has no version in force yet: its draft's own choice applies once it is accepted. Accept it, or draft a new version with another choice. Nothing was changed.",
   MANDATE_NOT_ACTIVE: 'The mandate is not in force (ACTIVE), so there is nothing to suspend. Nothing was changed.',
   MANDATE_NOT_IN_FORCE:
     'The agent has no mandate in force for this request: none was accepted yet, it is suspended, revoked or expired, its end date has passed, or a newer version replaced the one it was decided under. So the request is refused. Nothing is held for the request.',

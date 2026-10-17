@@ -12,8 +12,10 @@ import type { ReasonCode } from '@agentx/core/shared-kernel';
 
 /** What the team can change for each rule that now denies it: shown to the approver before they confirm. */
 export const WHAT_TO_DO = {
-  MANDATE_ORDER_LIMIT: 'Raise the mandate’s per-order limit (accept a new version with a higher one).',
-  MANDATE_MONTHLY_LIMIT: 'Raise the mandate’s monthly limit (accept a new version with a higher one).',
+  MANDATE_ORDER_LIMIT:
+    'Raise the mandate’s per-order limit (accept a new version with a higher one), or choose to send such requests for approval.',
+  MANDATE_MONTHLY_LIMIT:
+    'Raise the mandate’s monthly limit (accept a new version with a higher one), or choose to send such requests for approval.',
   POLICY_ORDER_CAP: 'Raise the per-order cap in the organisation’s or the mandate’s policy settings.',
   POLICY_MONTHLY_CAP: 'Raise the monthly cap in the organisation’s or the mandate’s policy settings.',
   ORG_MONTHLY_CAP_NOT_SET: 'Choose the organisation’s monthly cap in its policy settings.',

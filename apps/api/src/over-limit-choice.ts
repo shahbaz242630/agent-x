@@ -35,6 +35,9 @@ export const OVER_LIMIT_CHOICE = z
       `\`refuse\`: ${OVER_LIMIT_STATEMENTS.refuse} \`approval\`: ${OVER_LIMIT_STATEMENTS.approval}`,
   );
 
+/** The action of a choice made on the mandate in force (E9b, partner S121: any time, either way), naming its version. */
+export const OVER_LIMIT_CHOSEN = 'mandate.over_limit_chosen';
+
 /** The choice a version shows: `not-chosen` for one drafted before E9, which refuses. */
 export const OVER_LIMIT_SHOWN = z
   .enum([...OVER_LIMIT, 'not-chosen'])
@@ -47,7 +50,7 @@ export const OVER_LIMIT_SHOWN = z
 export const overLimitDetails = (choice: OverLimit) =>
   ({ overLimit: choice, overLimitStatementVersion: OVER_LIMIT_STATEMENT_VERSION }) as const;
 
-/** The choice a version's drafted event keeps, or null: none recorded (a version from before E9). */
+/** The choice an event keeps (a version's drafted one, or a later choice on it), or null: none recorded (a version from before E9). */
 export const overLimitIn = (details: AuditDetails | undefined): OverLimit | null => {
   const chosen = details?.overLimit;
   return chosen === 'refuse' || chosen === 'approval' ? chosen : null;

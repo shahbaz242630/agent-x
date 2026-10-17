@@ -117,7 +117,17 @@ const DETAILS_ANSWERED = {
 afterEach(closeServers);
 
 interface Call {
-  readonly kind: 'draft' | 'redraft' | 'list' | 'show' | 'accept' | 'acceptConfirm' | 'ask' | 'confirm';
+  readonly kind:
+    | 'draft'
+    | 'redraft'
+    | 'list'
+    | 'show'
+    | 'accept'
+    | 'acceptConfirm'
+    | 'ask'
+    | 'confirm'
+    | 'chooseOverLimit'
+    | 'chooseOverLimitConfirm';
   readonly member?: unknown;
   readonly keyed?: IdempotentRequest;
   readonly subject?: unknown;
@@ -154,6 +164,19 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
     },
     confirm: (member, keyed, mandateId, chosen, stepUpChallengeId) => {
       calls.push({ kind: 'confirm', member, keyed, subject: { mandateId, chosen, stepUpChallengeId } });
+      return Promise.resolve(answers.moved ?? { outcome: 'busy' as const });
+    },
+    chooseOverLimit: (member, keyed, mandateId, overLimit) => {
+      calls.push({ kind: 'chooseOverLimit', member, keyed, subject: { mandateId, overLimit } });
+      return Promise.resolve(answers.moveAsked ?? { outcome: 'busy' as const });
+    },
+    chooseOverLimitConfirm: (member, keyed, mandateId, overLimit, stepUpChallengeId) => {
+      calls.push({
+        kind: 'chooseOverLimitConfirm',
+        member,
+        keyed,
+        subject: { mandateId, overLimit, stepUpChallengeId },
+      });
       return Promise.resolve(answers.moved ?? { outcome: 'busy' as const });
     },
   };
@@ -580,6 +603,70 @@ describe.each<{ move: MandateMove; status: string; body: object; chosen: MoveCho
 
     expect((await app.inject(post(ask, body))).statusCode).toBe(403);
     expect((await app.inject(post(`${ask}/confirm`, { ...body, stepUpChallengeId: CHALLENGE }))).statusCode).toBe(403);
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('POST /v1/mandates/:id/over-limit, then …/confirm: choose now on the mandate in force (E9b, decision 23)', () => {
+  const ask = `/v1/mandates/${MANDATE_ID}/over-limit`;
+
+  it('asks a passkey step-up: 202, passing the member in their session, the key and the choice', async () => {
+    const { app, calls } = await withMandates({ moveAsked: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+    const reply = await app.inject(post(ask, { overLimit: 'approval' }));
+
+    expect(reply.statusCode).toBe(202);
+    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(calls).toEqual([
+      {
+        kind: 'chooseOverLimit',
+        member: { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId },
+        keyed: expect.objectContaining({ operation: 'mandates.over-limit', key: 'k-1' }) as unknown,
+        subject: { mandateId: MANDATE_ID, overLimit: 'approval' },
+      },
+    ]);
+  });
+
+  it('confirms: 200 with the mandate, passing the step-up and the choice', async () => {
+    const { app, calls } = await withMandates({ moved: { outcome: 'moved', ...VIEW } });
+    const reply = await app.inject(post(`${ask}/confirm`, { overLimit: 'refuse', stepUpChallengeId: CHALLENGE }));
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toEqual(DETAILS_ANSWERED);
+    expect(calls[0]).toMatchObject({
+      kind: 'chooseOverLimitConfirm',
+      keyed: { operation: 'mandates.over-limit.confirm' },
+      subject: { mandateId: MANDATE_ID, overLimit: 'refuse', stepUpChallengeId: CHALLENGE },
+    });
+  });
+
+  it.each([
+    ['an ask with no choice: there is no default', ask, {}],
+    ['an ask with a choice it doesn’t know', ask, { overLimit: 'ask' }],
+    ['a confirm with no choice', `${ask}/confirm`, { stepUpChallengeId: CHALLENGE }],
+    ['a confirm with no step-up', `${ask}/confirm`, { overLimit: 'approval' }],
+  ])('refuses %s at the edge', async (_what, url, body) => {
+    const { app, calls } = await withMandates({});
+
+    expect((await app.inject(post(url, body))).statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it('answers the use case’s refusal, on the ask and the confirm', async () => {
+    const refused = { outcome: 'refused', status: 409, code: 'MANDATE_NOT_ACCEPTED' } as const;
+    const { app } = await withMandates({ moveAsked: refused, moved: refused });
+    for (const reply of [
+      await app.inject(post(ask, { overLimit: 'approval' })),
+      await app.inject(post(`${ask}/confirm`, { overLimit: 'approval', stepUpChallengeId: CHALLENGE })),
+    ]) {
+      expect(reply.statusCode).toBe(409);
+      expect(reply.json()).toMatchObject({ error: { code: 'MANDATE_NOT_ACCEPTED' } });
+    }
+  });
+
+  it('refuses a member who isn’t an admin', async () => {
+    const { app, calls } = await withMandates({}, 'approver');
+
+    expect((await app.inject(post(ask, { overLimit: 'approval' }))).statusCode).toBe(403);
     expect(calls).toEqual([]);
   });
 });

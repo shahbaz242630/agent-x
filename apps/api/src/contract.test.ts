@@ -199,6 +199,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/mandates',
       'POST /v1/mandates/{id}/accept',
       'POST /v1/mandates/{id}/accept/confirm',
+      'POST /v1/mandates/{id}/over-limit',
+      'POST /v1/mandates/{id}/over-limit/confirm',
       'POST /v1/mandates/{id}/policy/change',
       'POST /v1/mandates/{id}/policy/change/confirm',
       'POST /v1/mandates/{id}/policy/change/preview',
@@ -1229,8 +1231,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), with each GET's HEAD.
-    expect(answers).toHaveLength(141);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), with each GET's HEAD.
+    expect(answers).toHaveLength(143);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1271,6 +1273,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'Mandate',
       'MandateAcceptanceAsked',
       'MandateDetails',
+      'MandateOverLimitAsked',
       'MandatePolicyChangeAsked',
       'MandateResumptionAsked',
       'MandateRevocationAsked',
