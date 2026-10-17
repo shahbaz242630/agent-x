@@ -27,7 +27,7 @@
                   {
                     "type": "string",
                     "const": "AGENT_KEYS_FULL",
-                    "description": "The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, or revoke one, then rotate again. Nothing was changed."
+                    "description": "The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, revoke one, or rotate ending the old key at once, then try again. Nothing was changed."
                   },
                   {
                     "type": "string",
@@ -9581,22 +9581,26 @@
     "/v1/agents/{id}/keys/{keyId}/rotate": {
       "post": {
         "operationId": "agents.keys.rotate",
-        "summary": "Ask to rotate an agent's key: a new one, the old one kept working for the overlap",
+        "summary": "Ask to rotate an agent's key: a new one, the old one kept working for the overlap or ended at once",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
+                "type": "object",
+                "properties": {
+                  "oldKey": {
+                    "type": "string",
+                    "enum": [
+                      "overlap",
+                      "end_now"
+                    ]
                   }
-                ]
+                },
+                "required": [
+                  "oldKey"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -9698,10 +9702,18 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "oldKey": {
+                    "type": "string",
+                    "enum": [
+                      "overlap",
+                      "end_now"
+                    ]
                   }
                 },
                 "required": [
-                  "stepUpChallengeId"
+                  "stepUpChallengeId",
+                  "oldKey"
                 ],
                 "additionalProperties": false
               }
@@ -9778,12 +9790,20 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "oldKey": {
+                      "type": "string",
+                      "enum": [
+                        "overlap",
+                        "end_now"
+                      ]
                     }
                   },
                   "required": [
                     "agent",
                     "keys",
-                    "key"
+                    "key",
+                    "oldKey"
                   ],
                   "additionalProperties": false
                 }

@@ -59,6 +59,7 @@ import {
   ROTATE_CONFIRM_OPERATION,
   ROTATE_OPERATION,
 } from './agent-key-changes.ts';
+import type { OldKeyChoice } from './key-rotation-choice.ts';
 import type { AgentMember, AgentTables } from './agent-writes.ts';
 
 type Tables = AgentTables & OrganizationsTables;
@@ -188,14 +189,27 @@ const keyed = (who: AgentMember, operation: string, payload: string): Idempotent
 
 const named = ({ agentId, keyId }: KeyNamed): KeyNamed => ({ agentId, keyId });
 
-const rotate = (who: AgentMember, key: KeyNamed) =>
-  changes.rotate(who, keyed(who, ROTATE_OPERATION, JSON.stringify(key)), named(key), CORRELATION);
+const rotate = (who: AgentMember, key: KeyNamed, oldKey: OldKeyChoice = 'overlap') =>
+  changes.rotate(
+    who,
+    keyed(who, ROTATE_OPERATION, JSON.stringify({ ...key, oldKey })),
+    named(key),
+    oldKey,
+    CORRELATION,
+  );
 
-const rotateConfirm = (who: AgentMember, key: KeyNamed, challengeId: string, idempotent?: IdempotentRequest) =>
+const rotateConfirm = (
+  who: AgentMember,
+  key: KeyNamed,
+  challengeId: string,
+  idempotent?: IdempotentRequest,
+  oldKey: OldKeyChoice = 'overlap',
+) =>
   changes.rotateConfirm(
     who,
-    idempotent ?? keyed(who, ROTATE_CONFIRM_OPERATION, JSON.stringify({ ...key, challengeId })),
+    idempotent ?? keyed(who, ROTATE_CONFIRM_OPERATION, JSON.stringify({ ...key, challengeId, oldKey })),
     named(key),
+    oldKey,
     challengeId,
     CORRELATION,
   );
@@ -227,10 +241,15 @@ const askedFor = (write: AgentKeyChangeWrite): string => {
 };
 
 /** Asks, steps up and confirms a rotation. */
-async function rotated(who: AgentMember, key: KeyNamed, amr: readonly string[] = PASSKEY) {
-  const challengeId = askedFor(await rotate(who, key));
+async function rotated(
+  who: AgentMember,
+  key: KeyNamed,
+  amr: readonly string[] = PASSKEY,
+  oldKey: OldKeyChoice = 'overlap',
+) {
+  const challengeId = askedFor(await rotate(who, key, oldKey));
   await stepUp(who, challengeId, amr);
-  const write = await rotateConfirm(who, key, challengeId);
+  const write = await rotateConfirm(who, key, challengeId, undefined, oldKey);
   if (write.outcome !== 'rotated') throw new Error(`not rotated: ${JSON.stringify(write)}`);
   return write;
 }
@@ -321,6 +340,8 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
       rotates: old.keyId,
       agentId: old.agentId,
       stepUpChallengeId: expect.any(String) as unknown,
+      rotation: 'overlap',
+      rotationStatementVersion: 1,
     });
     const oldEvents = await eventsAbout(org, old.keyId);
     expect(oldEvents.map(({ action, actor_id: actor }) => [action, actor])).toEqual([
@@ -330,7 +351,10 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
     expect(JSON.parse(oldEvents[1]?.details ?? '{}')).toMatchObject({
       rotatedTo: newKeyId,
       expiresAt: new Date(START.getTime() + DAY_MS).toISOString(),
+      rotation: 'overlap',
+      rotationStatementVersion: 1,
     });
+    expect(write.oldKey).toBe('overlap');
   });
 
   it('both keys work through the overlap; from its end, only the new one: the old key rotated out', async () => {
@@ -576,6 +600,74 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
       await holder.query('rollback');
       await holder.end();
     }
+  });
+});
+
+describe(`ending the old key at once, as chosen (E8, decision 22, Postgres ${server.version})`, () => {
+  it('revokes the old key in the confirm: refused at once, the new one works, the choice on both events', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const old = await agentWithKey(org, developer);
+
+    const write = await rotated(developer, old, APP_CODE, 'end_now');
+
+    const newKeyId = parseAgentKey(write.key ?? '')?.keyId ?? '';
+    expect(write.oldKey).toBe('end_now');
+    expect(write.agent.keys.find(({ id }) => id === old.keyId)?.status).toBe('REVOKED');
+    expect(await check(old.text)).toEqual({ outcome: 'refused' });
+    expect(await check(write.key ?? '')).toMatchObject({ outcome: 'accepted', key: { agentId: old.agentId } });
+    const oldEvents = await eventsAbout(org, old.keyId);
+    expect(oldEvents.map(({ action, actor_id: actor }) => [action, actor])).toEqual([
+      ['agent_key.issued', OPERATOR.id],
+      ['agent_key.revoked', developer.userId],
+    ]);
+    expect(JSON.parse(oldEvents[1]?.details ?? '{}')).toMatchObject({
+      reason: 'rotated',
+      rotatedTo: newKeyId,
+      rotation: 'end_now',
+      rotationStatementVersion: 1,
+    });
+    expect(JSON.parse((await eventsAbout(org, newKeyId))[0]?.details ?? '{}')).toMatchObject({
+      rotates: old.keyId,
+      rotation: 'end_now',
+      rotationStatementVersion: 1,
+    });
+  });
+
+  it('binds the step-up to the choice: one signed for the overlap can’t end the key at once, nor the other way', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const old = await agentWithKey(org, developer);
+    const forOverlap = askedFor(await rotate(developer, old, 'overlap'));
+    await stepUp(developer, forOverlap);
+
+    expect(await rotateConfirm(developer, old, forOverlap, undefined, 'end_now')).toEqual(
+      refusal(403, 'STEP_UP_FAILED'),
+    );
+    const forEnding = askedFor(await rotate(developer, old, 'end_now'));
+    await stepUp(developer, forEnding);
+    expect(await rotateConfirm(developer, old, forEnding, undefined, 'overlap')).toEqual(
+      refusal(403, 'STEP_UP_FAILED'),
+    );
+    expect(await keysIn(org)).toBe(1);
+  });
+
+  it('ends a key at once while an overlap runs (it adds no live key); the overlap still can’t', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const old = await agentWithKey(org, developer);
+    const first = await rotated(developer, old);
+    const newKey = { agentId: old.agentId, keyId: parseAgentKey(first.key ?? '')?.keyId ?? '' };
+
+    expect(await rotate(developer, newKey, 'overlap')).toEqual(refusal(409, 'AGENT_KEYS_FULL'));
+    const write = await rotated(developer, newKey, PASSKEY, 'end_now');
+
+    const statuses = new Map(write.agent.keys.map(({ id, status }) => [id, status]));
+    expect(statuses.get(old.keyId)).toBe('ACTIVE');
+    expect(statuses.get(newKey.keyId)).toBe('REVOKED');
+    expect(write.agent.keys).toHaveLength(3);
+    expect(await check(old.text)).toMatchObject({ outcome: 'accepted' });
+    expect(await check(write.key ?? '')).toMatchObject({ outcome: 'accepted' });
   });
 });
 

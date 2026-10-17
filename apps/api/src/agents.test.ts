@@ -165,12 +165,12 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
   };
   const keyChanged = () => Promise.resolve(answers.keyChange ?? { outcome: 'busy' as const });
   const keyChanges: AgentKeyChanges = {
-    rotate: (member, keyed, named) => {
-      calls.push({ kind: 'rotate', member, keyed, subject: named });
+    rotate: (member, keyed, named, oldKey) => {
+      calls.push({ kind: 'rotate', member, keyed, subject: [named, oldKey] });
       return keyChanged();
     },
-    rotateConfirm: (member, keyed, named, challengeId) => {
-      calls.push({ kind: 'rotateConfirm', member, keyed, subject: [named, challengeId] });
+    rotateConfirm: (member, keyed, named, oldKey, challengeId) => {
+      calls.push({ kind: 'rotateConfirm', member, keyed, subject: [named, oldKey, challengeId] });
       return keyChanged();
     },
     revoke: (member, keyed, named) => {
@@ -571,14 +571,14 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
   });
 
   it.each([
-    ['/rotate', 'rotate', 'agents.keys.rotate'],
-    ['/revoke', 'revoke', 'agents.keys.revoke'],
+    ['/rotate', 'rotate', 'agents.keys.rotate', { oldKey: 'end_now' }, [NAMED, 'end_now']],
+    ['/revoke', 'revoke', 'agents.keys.revoke', undefined, NAMED],
   ])(
-    'asks a step-up for %s: 202, passing the member, the key and the agent and key named',
-    async (path, kind, operation) => {
+    'asks a step-up for %s: 202, passing the member, the key and the agent and key named (and the choice, E8)',
+    async (path, kind, operation, body, subject) => {
       const { app, calls } = await withAgents({ keyChange: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
 
-      const response = await app.inject(keyChange(path));
+      const response = await app.inject(keyChange(path, body));
 
       expect(response.statusCode).toBe(202);
       expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
@@ -587,7 +587,7 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
           kind,
           member: REGISTERING,
           keyed: expect.objectContaining({ orgId: ORG, operation, key: 'k-1' }) as unknown,
-          subject: NAMED,
+          subject,
         },
       ]);
     },
@@ -595,10 +595,17 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
 
   it('rotates once stepped up: 201 with the agent, both keys and the new key, shown this once', async () => {
     const { app, calls } = await withAgents({
-      keyChange: { outcome: 'rotated', agent: { agent: AGENT, keys: [OVERLAPPING, NEW_KEY] }, key: NEW_TEXT },
+      keyChange: {
+        outcome: 'rotated',
+        agent: { agent: AGENT, keys: [OVERLAPPING, NEW_KEY] },
+        key: NEW_TEXT,
+        oldKey: 'overlap',
+      },
     });
 
-    const response = await app.inject(keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE }));
+    const response = await app.inject(
+      keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE, oldKey: 'overlap' }),
+    );
 
     expect(response.statusCode).toBe(201);
     expect(response.json()).toEqual({
@@ -608,6 +615,7 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
         { ...AGENT_ANSWERED.keys[0], id: NEW_KEY_ID, expiresAt: '2026-12-28T09:15:00.000Z' },
       ],
       key: NEW_TEXT,
+      oldKey: 'overlap',
     });
     expect(response.body).not.toContain(KEY.secretMac.toString('hex'));
     expect(calls).toEqual([
@@ -615,20 +623,22 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
         kind: 'rotateConfirm',
         member: REGISTERING,
         keyed: expect.objectContaining({ operation: 'agents.keys.rotate.confirm' }) as unknown,
-        subject: [NAMED, CHALLENGE],
+        subject: [NAMED, 'overlap', CHALLENGE],
       },
     ]);
   });
 
   it('answers a retry of the rotation with the key as null: it was shown once', async () => {
     const { app } = await withAgents({
-      keyChange: { outcome: 'rotated', agent: { agent: AGENT, keys: [OVERLAPPING, NEW_KEY] }, key: null },
+      keyChange: { outcome: 'rotated', agent: { agent: AGENT, keys: [NEW_KEY] }, key: null, oldKey: 'end_now' },
     });
 
-    const response = await app.inject(keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE }));
+    const response = await app.inject(
+      keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE, oldKey: 'end_now' }),
+    );
 
     expect(response.statusCode).toBe(201);
-    expect(response.json()).toMatchObject({ key: null });
+    expect(response.json()).toMatchObject({ key: null, oldKey: 'end_now' });
   });
 
   it('revokes once stepped up: 200 with the agent and its keys', async () => {
@@ -647,11 +657,17 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
   });
 
   it.each<[string, InjectOptions]>([
-    ['a rotation with a body', keyChange('/rotate', { now: true })],
+    ['a rotation with no choice (E8: no default)', keyChange('/rotate')],
+    ['a rotation with a choice unknown', keyChange('/rotate', { oldKey: 'later' })],
+    ['a rotation with more than its choice', keyChange('/rotate', { oldKey: 'overlap', now: true })],
+    ['a rotation’s confirm with no choice', keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE })],
     ['a revocation with a body', keyChange('/revoke', { reason: 'leaked' })],
-    ['a confirm with no step-up', keyChange('/rotate/confirm', {})],
+    ['a confirm with no step-up', keyChange('/rotate/confirm', { oldKey: 'overlap' })],
     ['a confirm with a step-up that isn’t an ID', keyChange('/revoke/confirm', { stepUpChallengeId: 'c-1' })],
-    ['a key that isn’t an ID', { ...keyChange('/rotate'), url: `/v1/agents/${AGENT_ID}/keys/not-an-id/rotate` }],
+    [
+      'a key that isn’t an ID',
+      { ...keyChange('/rotate', { oldKey: 'overlap' }), url: `/v1/agents/${AGENT_ID}/keys/not-an-id/rotate` },
+    ],
     ['an agent that isn’t an ID', { ...keyChange('/revoke'), url: `/v1/agents/not-an-id/keys/${KEY_ID}/revoke` }],
   ])('refuses %s with 400, never reaching the use case', async (_, request) => {
     const { app, calls } = await withAgents({ keyChange: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
@@ -671,7 +687,9 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
   ])('answers a refusal as its status and code: %j', async (answer, status, code) => {
     const { app } = await withAgents({ keyChange: answer });
 
-    const response = await app.inject(keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE }));
+    const response = await app.inject(
+      keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE, oldKey: 'overlap' }),
+    );
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });
