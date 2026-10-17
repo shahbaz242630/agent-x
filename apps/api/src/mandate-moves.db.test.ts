@@ -322,10 +322,10 @@ describe('choosing what happens past a mandate’s own limits, on the mandate in
       challengeId,
       CORRELATION,
     );
-  /** Asks, signs in again with a passkey and confirms `overLimit`: the confirm's answer. */
-  async function chose(w: World, id: string, overLimit: OverLimit) {
+  /** Asks, signs in again with `amr` and confirms `overLimit`: the confirm's answer. */
+  async function chose(w: World, id: string, overLimit: OverLimit, amr: readonly string[] = PASSKEY) {
     const challengeId = askedFor(await askOverLimit(w.admin, id, overLimit));
-    await stepUp(w.admin, challengeId);
+    await stepUp(w.admin, challengeId, amr);
     return confirmOverLimit(w.admin, id, overLimit, challengeId);
   }
   /** The choice the mandate's version in force shows. */
@@ -391,6 +391,14 @@ describe('choosing what happens past a mandate’s own limits, on the mandate in
     );
     expect(redrafted.outcome).toBe('drafted');
     await acceptedPastTheUseCase(w, id);
+    expect(await shownOf(w, id)).toBe('refuse');
+  });
+
+  it('refuses a step-up signed in with an app code: STEP_UP_FAILED, nothing chosen (a passkey, as every admin move)', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w, {}, 'refuse');
+
+    expect(await chose(w, id, 'approval', APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
     expect(await shownOf(w, id)).toBe('refuse');
   });
 
