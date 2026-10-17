@@ -8,8 +8,8 @@
 // before it. A version drafted before E9 keeps none: it refuses, shown as not
 // chosen.
 import type { AuditDetails } from '@agentx/core/modules/audit';
-import { OVER_LIMIT, type OverLimit } from '@agentx/core/modules/mandates';
-import { MANDATE_LIMIT_CODES } from '@agentx/core/modules/policies';
+import { type ConsentAllows, OVER_LIMIT, type OverLimit } from '@agentx/core/modules/mandates';
+import { type ConsentCeiling, MANDATE_LIMIT_CODES } from '@agentx/core/modules/policies';
 import type { ReasonCode } from '@agentx/core/shared-kernel';
 import { z } from 'zod';
 
@@ -56,3 +56,9 @@ export const overLimitIn = (details: AuditDetails | undefined): OverLimit | null
 /** Whether a weighing found the request over its mandate's own limits: one only an admin may approve (decision 23). */
 export const overMandateLimit = (reasons: readonly ReasonCode[]): boolean =>
   reasons.some((code) => MANDATE_LIMIT_CODES.includes(code));
+
+/** The bank consent an approval past the mandate's own limits may reach: per payment, and per month only when it counts by the month. */
+export const consentCeilingOf = ({ maxPayment, maxPeriod, limitPeriod }: ConsentAllows): ConsentCeiling => ({
+  maxPayment,
+  maxMonth: limitPeriod === 'month' ? maxPeriod : null,
+});
