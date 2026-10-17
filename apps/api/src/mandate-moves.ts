@@ -31,6 +31,16 @@
 //   C2b): a pause made a cancel too. The request-voids job takes any past
 //   the batch.
 //
+// - The over-limit choice (`mandates.over-limit`, `.confirm`; decision 23,
+//   E9b, partner S121): an admin sets the mandate's version in force to refuse
+//   or send for approval past its own limits, any time and either way, with
+//   the same ask and passkey confirm, the choice bound into the challenge. Its
+//   event (`mandate.over_limit_chosen`, naming the version) is about the
+//   mandate, its signed state unchanged, so any later change to the mandate
+//   makes an older step-up another change's. A mandate ended is MANDATE_ENDED;
+//   one with no version in force yet, MANDATE_NOT_ACCEPTED (its draft's own
+//   choice applies once accepted).
+//
 // Lock order (ADR-006 §6): the idempotency key, the session's challenges (0b,
 // confirm only), the admin's membership (2a), the mandate (4), the version in
 // force (a resume's, read), the challenge consumed, the mandate's pending
@@ -39,7 +49,7 @@
 // spend whatever its mandate says.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
-import { isEnded, MANDATES } from '@agentx/core/modules/mandates';
+import { isEnded, MANDATES, type OverLimit } from '@agentx/core/modules/mandates';
 import type { NoticeKind, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
@@ -57,9 +67,10 @@ import {
   versionIn,
   viewIn,
 } from './mandate-reads.ts';
+import { OVER_LIMIT_CHOSEN, overLimitDetails } from './over-limit-choice.ts';
 import type { Refused } from './refused.ts';
 import { choiceDetails, pausedOf, SUSPENDS } from './suspensions.ts';
-import { createStepUps, createUseCaseWork, movedAsRead, type SessionMember } from './use-case-work.ts';
+import { createStepUps, createUseCaseWork, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** The moves, by the state machine's events (MANDATE). */
 export const MANDATE_MOVES = ['suspend', 'resume', 'revoke'] as const;
@@ -76,6 +87,9 @@ export const MOVE_OPERATIONS = {
   resume: { ask: 'mandates.resume', confirm: 'mandates.resume.confirm' },
   revoke: { ask: 'mandates.revoke', confirm: 'mandates.revoke.confirm' },
 } as const satisfies Record<MandateMove, { ask: string; confirm: string }>;
+
+/** The over-limit choice's operations (E9b): the ask, which the challenge names as its action too, and its confirm. */
+export const OVER_LIMIT_OPERATIONS = { ask: 'mandates.over-limit', confirm: 'mandates.over-limit.confirm' } as const;
 
 /** What each move records, and whom it tells (0036). */
 const MOVED = {
@@ -115,6 +129,21 @@ export interface MandateMoves {
     stepUpChallengeId: string,
     correlationId: string,
   ): Promise<MandateMoved>;
+  chooseOverLimit(
+    member: SessionMember,
+    idempotent: IdempotentRequest,
+    mandateId: string,
+    overLimit: OverLimit,
+    correlationId: string,
+  ): Promise<MoveAsked>;
+  chooseOverLimitConfirm(
+    member: SessionMember,
+    idempotent: IdempotentRequest,
+    mandateId: string,
+    overLimit: OverLimit,
+    stepUpChallengeId: string,
+    correlationId: string,
+  ): Promise<MandateMoved>;
 }
 
 /**
@@ -131,6 +160,10 @@ const moveHash = (orgId: string, mandateEvent: string, chosen: MoveChosen): Buff
     mandateEvent.toLowerCase(),
     ...(chosen.move === 'suspend' ? [chosen.pendingRequests] : []),
   ]);
+
+/** The over-limit choice's SHA-256: the organisation, the mandate's latest event (IDs in lower case) and the choice. */
+const overLimitHash = (orgId: string, mandateEvent: string, overLimit: OverLimit): Buffer =>
+  changeHashOf([orgId.toLowerCase(), mandateEvent.toLowerCase(), overLimit]);
 
 /** Whether the move ends the mandate's pending requests: a revoke, or a suspend that cancels them (decision 7). */
 const cancels = (chosen: MoveChosen): boolean =>
@@ -204,6 +237,30 @@ export function createMandateMoves({
     return read;
   };
 
+  /** The mandate read (`share` or `change`) and verified, open with a version in force: what an over-limit choice is made on. */
+  const choosable = async (
+    tx: MandateTx,
+    states: SignedStates,
+    orgId: string,
+    mandateId: string,
+    lock: 'share' | 'change',
+  ) => {
+    const read = await mandateIn(tx, states, orgId, mandateId, lock);
+    if (isEnded(read.mandate.status)) throw new MandateRefused(409, 'MANDATE_ENDED');
+    const versionId = read.mandate.currentVersionId;
+    if (versionId === null) throw new MandateRefused(409, 'MANDATE_NOT_ACCEPTED');
+    return { ...read, versionId };
+  };
+
+  /** A confirm's answer: the mandate as it now stands, on a retry too. */
+  const movedAfter = async (member: SessionMember, correlationId: string, done: Written): Promise<MandateMoved> => {
+    if (isUnwritten(done)) return done;
+    const view = await work.answered(member.orgId, correlationId, (tx, states) =>
+      viewIn(tx, states, member.orgId, done.result.resourceId),
+    );
+    return 'outcome' in view ? view : { outcome: 'moved', ...view };
+  };
+
   return {
     async ask(member, idempotent, mandateId, chosen, correlationId) {
       const { move } = chosen;
@@ -254,11 +311,55 @@ export function createMandateMoves({
         await outbox.add(tx, toldAdminsAndApprovers(member.orgId, MOVED[move].notice, id));
         return { status: 200, resourceId: id };
       });
+      return movedAfter(member, correlationId, done);
+    },
+
+    async chooseOverLimit(member, idempotent, mandateId, overLimit, correlationId) {
+      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        await work.memberIn(tx, states, member, MOVING_ROLES);
+        const read = await choosable(tx, states, member.orgId, mandateId, 'share');
+        return stepUps.ask(tx, member, {
+          action: OVER_LIMIT_OPERATIONS.ask,
+          changeHash: overLimitHash(member.orgId, read.state.eventId, overLimit),
+        });
+      });
       if (isUnwritten(done)) return done;
-      const view = await work.answered(member.orgId, correlationId, (tx, states) =>
-        viewIn(tx, states, member.orgId, done.result.resourceId),
-      );
-      return 'outcome' in view ? view : { outcome: 'moved', ...view };
+      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
+    },
+
+    async chooseOverLimitConfirm(member, idempotent, mandateId, overLimit, stepUpChallengeId, correlationId) {
+      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, member.sessionId);
+        await work.memberIn(tx, states, member, MOVING_ROLES);
+        const read = await choosable(tx, states, member.orgId, mandateId, 'change');
+        const consumed = await stepUps.consumed(
+          tx,
+          member,
+          held,
+          stepUpChallengeId,
+          { action: OVER_LIMIT_OPERATIONS.ask, changeHash: overLimitHash(member.orgId, read.state.eventId, overLimit) },
+          { passkeyRequired: true },
+        );
+        const { id } = read.mandate;
+        await states.record(
+          tx,
+          MANDATES,
+          { orgId: member.orgId, id },
+          read.state,
+          {},
+          {
+            actor: { type: 'user', id: member.userId },
+            action: OVER_LIMIT_CHOSEN,
+            details: {
+              ...stepUpDetails(consumed),
+              versionId: read.versionId.toLowerCase(),
+              ...overLimitDetails(overLimit),
+            },
+          },
+        );
+        return { status: 200, resourceId: id };
+      });
+      return movedAfter(member, correlationId, done);
     },
   };
 }

@@ -33,6 +33,7 @@ import {
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
+import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
@@ -49,11 +50,13 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { createMandateMoves } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
 import { closeServers, routeServer } from './route-server.helper.test.ts';
 import {
   AED,
+  askedFor,
   keys,
   mandateWorld,
   type MandateWorldTables,
@@ -1329,6 +1332,43 @@ describe('over the mandate’s own limits: refuse, or an admin’s approval (E9,
     expect(request).toMatchObject({ decision: 'REQUIRE_NEW_MANDATE', status: 'DENIED' });
     expect((await eventsAbout(w.org, request.id, 'spend_request')).at(-1)?.details).toMatchObject({
       overLimit: 'refuse',
+    });
+  });
+
+  it('weighs a choice made later on the version in force over its drafted one (E9b)', async () => {
+    const { w, mandateId, acting } = await overLimited('refuse');
+    const moves = createMandateMoves({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: createStepUpChallenges({ ids, clock }),
+      outbox: createOutbox({ ids, clock }),
+      logger: testLogger(new LogCapture()),
+    });
+    const challengeId = askedFor(
+      await moves.chooseOverLimit(
+        w.admin,
+        shared.keyed(w.admin, 'mandates.over-limit'),
+        mandateId,
+        'approval',
+        CORRELATION,
+      ),
+    );
+    await shared.stepUp(w.admin, challengeId);
+    const chosen = await moves.chooseOverLimitConfirm(
+      w.admin,
+      shared.keyed(w.admin, 'mandates.over-limit.confirm'),
+      mandateId,
+      'approval',
+      challengeId,
+      CORRELATION,
+    );
+    expect(chosen.outcome).toBe('moved');
+
+    expect(decidedOf(await ask(acting, asking(w, { amount: AED(w.maxPayment) })))).toMatchObject({
+      decision: 'REQUIRE_APPROVAL',
+      status: 'APPROVAL_REQUIRED',
     });
   });
 

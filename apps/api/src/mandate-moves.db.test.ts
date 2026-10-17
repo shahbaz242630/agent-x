@@ -6,7 +6,8 @@
 // another move or for the mandate as it stood before; a tampered mandate; and
 // the lock order against the admin's demotion.
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
-import { MANDATES } from '@agentx/core/modules/mandates';
+import { withSignedStates } from '@agentx/core/modules/audit';
+import { draftMandate, MANDATES, type OverLimit } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, type IdempotentRequest } from '@agentx/platform/db';
@@ -29,6 +30,7 @@ import {
   type MandateMoves,
   MOVE_OPERATIONS,
   type MoveChosen,
+  OVER_LIMIT_OPERATIONS,
 } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
@@ -37,10 +39,12 @@ import {
   type Member,
   mandateWorld,
   type MandateWorldTables,
+  OPERATOR,
   PASSKEY,
   refused,
   type World,
 } from './mandate-world.helper.test.ts';
+import { REDRAFT_OPERATION } from './mandate-registry.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -303,6 +307,116 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     }
 
     expect(await ask(w.admin, id, 'suspend')).toEqual(refused(503, 'INTEGRITY_FAILED'));
+  });
+});
+
+describe('choosing what happens past a mandate’s own limits, on the mandate in force (E9b, decision 23)', () => {
+  const askOverLimit = (who: Member, id: string, overLimit: OverLimit) =>
+    moves.chooseOverLimit(who, keyed(who, OVER_LIMIT_OPERATIONS.ask), id, overLimit, CORRELATION);
+  const confirmOverLimit = (who: Member, id: string, overLimit: OverLimit, challengeId: string) =>
+    moves.chooseOverLimitConfirm(
+      who,
+      keyed(who, OVER_LIMIT_OPERATIONS.confirm),
+      id,
+      overLimit,
+      challengeId,
+      CORRELATION,
+    );
+  /** Asks, signs in again with a passkey and confirms `overLimit`: the confirm's answer. */
+  async function chose(w: World, id: string, overLimit: OverLimit) {
+    const challengeId = askedFor(await askOverLimit(w.admin, id, overLimit));
+    await stepUp(w.admin, challengeId);
+    return confirmOverLimit(w.admin, id, overLimit, challengeId);
+  }
+  /** The choice the mandate's version in force shows. */
+  const shownOf = async (w: World, id: string) => {
+    const view = await registry.show(w.org, id, CORRELATION);
+    return view.outcome === 'found' ? view.current?.overLimit : view.outcome;
+  };
+
+  it('chooses for a mandate drafted before E9 (none on its version’s event), with a passkey: kept on the mandate’s event', async () => {
+    const w = await world();
+    const [id, versionId] = [ids.next(), ids.next()];
+    await withSignedStates(app, w.org, shared.quiet(), (tx, states) =>
+      draftMandate(tx, states, {
+        orgId: w.org,
+        id,
+        versionId,
+        agentId: w.agent,
+        timeZone: 'Asia/Dubai',
+        splitWindowHours: 24,
+        terms: shared.termsOf(w),
+        overLimit: 'refuse',
+        draftedBy: w.admin.membershipId,
+        draftedAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    await acceptedPastTheUseCase(w, id);
+    expect(await shownOf(w, id)).toBeNull();
+
+    expect(movedOf(await chose(w, id, 'approval')).current?.overLimit).toBe('approval');
+    expect((await eventsAbout(w.org, id)).at(-1)).toMatchObject({
+      action: 'mandate.over_limit_chosen',
+      details: {
+        versionId,
+        overLimit: 'approval',
+        overLimitStatementVersion: 1,
+        stepUpChallengeId: expect.any(String) as unknown,
+      },
+    });
+  });
+
+  it('changes it any time, either way, each chosen again: the newest stands', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w, {}, 'approval');
+
+    movedOf(await chose(w, id, 'refuse'));
+    expect(await shownOf(w, id)).toBe('refuse');
+    movedOf(await chose(w, id, 'approval'));
+    expect(await shownOf(w, id)).toBe('approval');
+  });
+
+  it('starts a newly accepted version from its own drafted choice, not one made on the version before', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w, {}, 'refuse');
+    movedOf(await chose(w, id, 'approval'));
+
+    const redrafted = await registry.redraft(
+      w.admin,
+      keyed(w.admin, REDRAFT_OPERATION),
+      id,
+      { terms: shared.termsOf(w, { purpose: 'Office supplies, renewed' }), overLimit: 'refuse' },
+      CORRELATION,
+    );
+    expect(redrafted.outcome).toBe('drafted');
+    await acceptedPastTheUseCase(w, id);
+    expect(await shownOf(w, id)).toBe('refuse');
+  });
+
+  it('refuses a step-up asked with the other choice, or before the mandate changed: STEP_UP_FAILED, nothing chosen', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w, {}, 'refuse');
+    const other = askedFor(await askOverLimit(w.admin, id, 'refuse'));
+    await stepUp(w.admin, other);
+    expect(await confirmOverLimit(w.admin, id, 'approval', other)).toEqual(refused(403, 'STEP_UP_FAILED'));
+
+    const stale = askedFor(await askOverLimit(w.admin, id, 'approval'));
+    await stepUp(w.admin, stale);
+    movedOf(await chose(w, id, 'refuse'));
+    expect(await confirmOverLimit(w.admin, id, 'approval', stale)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await shownOf(w, id)).toBe('refuse');
+  });
+
+  it('refuses a mandate with no version in force (MANDATE_NOT_ACCEPTED), one ended, and a member not an admin', async () => {
+    const w = await world();
+    const { id: waiting } = await shared.drafted(registry, w);
+    expect(await askOverLimit(w.admin, waiting, 'approval')).toEqual(refused(409, 'MANDATE_NOT_ACCEPTED'));
+    await acceptedPastTheUseCase(w, waiting);
+
+    expect(await askOverLimit(await member(w.org, 'approver'), waiting, 'approval')).toEqual(refused(403, 'FORBIDDEN'));
+    movedOf(await moved(w, waiting, 'revoke'));
+    expect(await askOverLimit(w.admin, waiting, 'approval')).toEqual(refused(409, 'MANDATE_ENDED'));
   });
 });
 
