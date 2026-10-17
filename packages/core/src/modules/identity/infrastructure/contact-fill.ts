@@ -73,9 +73,10 @@ export function createContactFill({
         for (;;) {
           if (signal?.aborted === true) break;
           const people = await unkept(afterId);
-          if (people.length === 0) break;
+          const last = people.at(-1);
+          if (last === undefined) break;
           kept += await keepPage(people);
-          afterId = people.at(-1)?.id ?? afterId;
+          afterId = last.id;
           if (people.length < MOST_A_CALL) break;
         }
       } catch (error) {
