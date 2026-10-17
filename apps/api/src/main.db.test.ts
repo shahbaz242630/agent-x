@@ -129,6 +129,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       'api.listening',
       'api.notices',
       'api.idp_events',
+      'api.contact_fill',
       'api.factor_resets',
     ]);
     expect((await api?.inject('/health'))?.json()).toEqual({ status: 'ok' });

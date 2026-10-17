@@ -121,7 +121,7 @@ import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
-import { directoryNamesFrom } from './kept-names.ts';
+import { contactFillFrom, directoryNamesFrom } from './kept-names.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
@@ -193,6 +193,9 @@ const SWEEP_EVERY_MS = HOUR_MS;
  * each a batch of 1,000 rows at a time, at most 100 batches a run.
  */
 const ROW_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
+
+/** How often people with no kept name are looked up at the login service (decision 25, E10d-4): at the start, then daily. */
+const CONTACT_FILL_EVERY_MS = 24 * HOUR_MS;
 
 /** How often the recorder writes the security events' counts whose minute has ended (B2-5b). */
 const RECORD_EVERY_MS = 60_000;
@@ -793,6 +796,12 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   const idpCopying = scheduleRunsIfAny(copier, IDP_EVENTS_EVERY_MS);
   logger.info('api.idp_events', { copying: idpCopying.running });
+  // The kept names of people who signed in before they were kept (decision 25), once the login service can be asked.
+  const contactFilling = scheduleRunsIfAny(
+    contactFillFrom({ directory, database, keys, clock: systemClock, logger }),
+    CONTACT_FILL_EVERY_MS,
+  );
+  logger.info('api.contact_fill', { filling: contactFilling.running });
   // Resets of lost second factors carried out once cooled off (B6-3c), on a timer of their own.
   const removals = resetRemovalsFrom({
     config,
@@ -877,6 +886,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           noticeSweeping.stop(),
           noticeSending?.stop(),
           idpCopying.stop(),
+          contactFilling.stop(),
           factorRemoving.stop(),
           expiring.stop(),
           historyChecking.stop(),

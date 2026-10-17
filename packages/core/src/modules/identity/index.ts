@@ -52,6 +52,7 @@ export {
   stepUpRefusal,
 } from './domain/step-up.ts';
 export { AddressBookUnavailable, createAddressBook } from './infrastructure/address-book.ts';
+export { type ContactFill, createContactFill } from './infrastructure/contact-fill.ts';
 export {
   createDirectoryNames,
   type DirectoryEntry,
