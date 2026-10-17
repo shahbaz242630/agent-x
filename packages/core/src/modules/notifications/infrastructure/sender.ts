@@ -1,6 +1,7 @@
 // The notice sender (ADR-003 §10; B5-1b): takes the outbox's due notices a
 // batch at a time and sends each through the notifier, to the address the
-// address book gives for its recipient at send time (Agent X keeps none).
+// address book gives for its recipient at send time, from the login service
+// (the copy Agent X keeps names people in the audit log only, decision 25).
 //
 // - A notice to the organisation's admins is turned into one to each active
 //   admin the audience finds, but the member it is about (`fanOut`), and
