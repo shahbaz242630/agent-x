@@ -191,6 +191,23 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // key's cascade). A changed address could accept another's invitation.
       appMay: ['SELECT', 'INSERT'],
     },
+    'identity.user_contacts': {
+      reason:
+        "A person's name and verified email address, encrypted (decision 25, E10d), for the audit log to name them when the login service can't: a person belongs to no one organisation, and is named the same in each of theirs",
+      columns: [
+        'user_id',
+        'name_ciphertext',
+        'name_key_version',
+        'email_ciphertext',
+        'email_key_version',
+        'updated_at',
+      ],
+      // Added at a first sign-in and refreshed at each later one; kept for the
+      // log (partner, S122: never deleted by the app). Moving a row to another
+      // person would name them for someone else's actions.
+      appMay: ['SELECT', 'INSERT'],
+      appMayUpdate: ['name_ciphertext', 'name_key_version', 'email_ciphertext', 'email_key_version', 'updated_at'],
+    },
     'identity.users': {
       reason:
         "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
