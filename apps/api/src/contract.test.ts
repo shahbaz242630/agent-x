@@ -117,6 +117,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/agents',
       'GET /v1/agents/{id}',
       'GET /v1/approvals',
+      'GET /v1/audit-log',
       'GET /v1/auth/callback',
       'GET /v1/auth/session',
       'GET /v1/auth/sign-in',
@@ -146,6 +147,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/agents',
       'HEAD /v1/agents/{id}',
       'HEAD /v1/approvals',
+      'HEAD /v1/audit-log',
       'HEAD /v1/auth/callback',
       'HEAD /v1/auth/session',
       'HEAD /v1/auth/sign-in',
@@ -1231,8 +1233,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), with each GET's HEAD.
-    expect(answers).toHaveLength(143);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a), with each GET's HEAD.
+    expect(answers).toHaveLength(145);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1250,6 +1252,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'AgentRegistrationAsked',
       'AgentSelf',
       'AgentSupplier',
+      'AuditLogEvent',
       'ConfirmationAsked',
       'Error',
       'FactorReset',

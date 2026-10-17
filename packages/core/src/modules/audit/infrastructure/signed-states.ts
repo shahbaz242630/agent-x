@@ -72,6 +72,8 @@ import {
   type AuditTrail,
   type AuditTransaction,
   type HistoryToRead,
+  type LogEvent,
+  type LogPageToRead,
   type LatestSignedState,
   lockChainHead,
   type ReadEvent,
@@ -303,6 +305,11 @@ export type HistoryCheck =
   | { readonly outcome: 'read'; readonly events: readonly ReadEvent[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
+/** A page of the whole log (logPageOf): its events newest first and the next page's start; or tampered with, the alarm raised. */
+export type LogPage =
+  | { readonly outcome: 'read'; readonly events: readonly LogEvent[]; readonly next: bigint | null }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
 /**
  * The check verifiedStates gave the row `id`, in lower case as the database
  * lists IDs: it answers every ID asked, so one missing is a bug, never a row
@@ -511,6 +518,12 @@ export interface SignedStates {
    * TooManyEventsToRead.
    */
   historyOf(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<HistoryCheck>;
+  /**
+   * A page of the organisation's whole log for its admins (E10; the trail's
+   * logPage), any event that can't be believed raising the alarm and the
+   * hold, as historyOf's: never a page with it left out.
+   */
+  logPageOf(tx: AuditTransaction, orgId: string, find: LogPageToRead): Promise<LogPage>;
   /**
    * Clears the organisation's hold (ADR-012 §2, B3+-2c): a person, never the
    * app or an operator alone (invariant 13), with the step-up they confirmed
@@ -1038,6 +1051,12 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'read', events: read.events });
   };
 
+  const logPageOf = async (tx: AuditTransaction, orgId: string, find: LogPageToRead): Promise<LogPage> => {
+    const read = await trail.logPage(tx, orgId, find);
+    if (read.kind === 'broken') return alarm('organisation', { orgId, id: orgId }, 'log', read.seq);
+    return Object.freeze({ outcome: 'read', events: read.events, next: read.next });
+  };
+
   /** The table's next objects, its rows' and the log's together (SignedStates.objectIds). */
   const objectIdsOf = async (
     tx: AuditTransaction,
@@ -1291,6 +1310,7 @@ export function createSignedStates({
     holdInvestigation,
 
     historyOf,
+    logPageOf,
 
     async clearIntegrityHold(
       tx: AuditTransaction,

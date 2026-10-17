@@ -90,6 +90,7 @@ import {
 } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 
+import { createAuditLog } from './audit-log.ts';
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
@@ -494,6 +495,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
+    auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger }),
     holdClearings: createHoldClearings({
       database,
       keys,
