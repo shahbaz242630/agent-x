@@ -108,6 +108,36 @@ describe('filling kept names from the login service (decision 25)', () => {
     expect(again.asked).toEqual([[gone.subject]]);
   });
 
+  it('never changes a copy a sign-in kept meanwhile, counting only those it added', async () => {
+    const signedIn = await aPerson();
+    const { directory } = directoryNaming();
+    // The sign-in keeps its newer name while the fill is asking the login service.
+    const racing: DirectoryNames = {
+      issuer: ISSUER,
+      entriesOf: async (asking) => {
+        await keepUserContact(app, keys, signedIn.id, { name: 'Newer name', verifiedEmail: undefined }, AT);
+        // Earlier tests' people left without a copy are named by no one here, so the count is this person's alone.
+        return directory.entriesOf(asking.filter((subject) => subject === signedIn.subject));
+      },
+    };
+    const capture = new LogCapture();
+
+    await createContactFill({
+      db: app,
+      keys,
+      directory: racing,
+      clock: new FixedClock(AT),
+      logger: testLogger(capture),
+    }).run();
+
+    expect((await keptPeopleOf(app, keys, [signedIn.id])).get(signedIn.id)).toMatchObject({
+      name: 'Newer name',
+      email: undefined,
+    });
+    const [done] = capture.lines().filter((line) => line.event === 'identity.contact_fill_done');
+    expect(done).toMatchObject({ kept: 0 });
+  });
+
   it('ends the run when the login service fails, logging how many were kept and never a name', async () => {
     const person = await aPerson();
     const capture = new LogCapture();

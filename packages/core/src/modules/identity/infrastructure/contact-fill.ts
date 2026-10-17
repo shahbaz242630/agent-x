@@ -8,8 +8,9 @@
 // - It runs at the API's start and once a day after: a person the login
 //   service no longer has stays without a copy, and is asked about again on
 //   the next run only, at most a hundred a call.
-// - Each person is kept by one statement of their own: two runs at once, or a
-//   sign-in meanwhile, refresh the same row (its upsert) and lose nothing.
+// - Each person is kept by one statement of their own that only adds a copy:
+//   a sign-in meanwhile keeps its own, newer values, and two runs at once add
+//   one row.
 // - A login service that fails ends the run, logged by its step, never a name,
 //   and the next run tries again. It logs how many were kept, never who.
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -51,6 +52,19 @@ export function createContactFill({
       .limit(MOST_A_CALL)
       .execute();
 
+  /** Keeps a copy for each of these people the login service names; how many it added. */
+  const keepPage = async (people: readonly { readonly id: string; readonly subject: string }[]) => {
+    const entries = await directory.entriesOf(people.map((person) => person.subject));
+    let added = 0;
+    for (const person of people) {
+      const entry = entries.get(person.subject);
+      if (entry === undefined) continue;
+      const given = { name: entry.name, verifiedEmail: entry.email };
+      if (await keepUserContact(db, keys, person.id, given, clock.now(), { onlyIfMissing: true })) added += 1;
+    }
+    return added;
+  };
+
   return {
     async run(signal) {
       let kept = 0;
@@ -60,13 +74,7 @@ export function createContactFill({
           if (signal?.aborted === true) break;
           const people = await unkept(afterId);
           if (people.length === 0) break;
-          const entries = await directory.entriesOf(people.map((person) => person.subject));
-          for (const person of people) {
-            const entry = entries.get(person.subject);
-            if (entry === undefined || (entry.name === undefined && entry.email === undefined)) continue;
-            await keepUserContact(db, keys, person.id, { name: entry.name, verifiedEmail: entry.email }, clock.now());
-            kept += 1;
-          }
+          kept += await keepPage(people);
           afterId = people.at(-1)?.id ?? afterId;
           if (people.length < MOST_A_CALL) break;
         }

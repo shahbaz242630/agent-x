@@ -32,7 +32,10 @@ export interface ContactGiven {
 /**
  * Keeps the person's name and verified address as of `at`, in the sign-in's
  * own transaction. Throws a RangeError for a value that isn't a name or one
- * address: the OIDC client gives only ones it has checked.
+ * address: the OIDC client gives only ones it has checked. `onlyIfMissing`
+ * (the fill, contact-fill.ts) adds a copy for a person with none and never
+ * changes one, so a lookup made before a sign-in can't overwrite what the
+ * sign-in kept. True when a row was written.
  */
 export async function keepUserContact(
   db: Handle,
@@ -40,21 +43,22 @@ export async function keepUserContact(
   userId: string,
   given: ContactGiven,
   at: Date,
-): Promise<void> {
+  { onlyIfMissing = false }: { readonly onlyIfMissing?: boolean } = {},
+): Promise<boolean> {
   const name = given.name === undefined ? undefined : personName(given.name);
   const email = given.verifiedEmail === undefined ? undefined : invitationEmail(given.verifiedEmail);
   if (name === undefined && given.name !== undefined) throw new RangeError("A person's name refused: it is not one");
   if (email === undefined && given.verifiedEmail !== undefined) {
     throw new RangeError("A person's address refused: it is not one");
   }
-  if (name === undefined && email === undefined) return;
+  if (name === undefined && email === undefined) return false;
   const sealed = (value: string | undefined, field: Field) =>
     value === undefined
       ? undefined
       : keys.encrypt('field-encryption', Buffer.from(value, 'utf8'), contactData(userId, field));
   const sealedName = sealed(name, 'name');
   const sealedEmail = sealed(email, 'email');
-  await db
+  const [written] = await db
     .insertInto('identity.user_contacts')
     .values({
       user_id: userId,
@@ -66,15 +70,18 @@ export async function keepUserContact(
     })
     // Each field's pair moves together: a value missing this time keeps the one before, with its key.
     .onConflict((conflict) =>
-      conflict.column('user_id').doUpdateSet({
-        name_ciphertext: sql`coalesce(excluded.name_ciphertext, user_contacts.name_ciphertext)`,
-        name_key_version: sql`coalesce(excluded.name_key_version, user_contacts.name_key_version)`,
-        email_ciphertext: sql`coalesce(excluded.email_ciphertext, user_contacts.email_ciphertext)`,
-        email_key_version: sql`coalesce(excluded.email_key_version, user_contacts.email_key_version)`,
-        updated_at: sql`excluded.updated_at`,
-      }),
+      onlyIfMissing
+        ? conflict.column('user_id').doNothing()
+        : conflict.column('user_id').doUpdateSet({
+            name_ciphertext: sql`coalesce(excluded.name_ciphertext, user_contacts.name_ciphertext)`,
+            name_key_version: sql`coalesce(excluded.name_key_version, user_contacts.name_key_version)`,
+            email_ciphertext: sql`coalesce(excluded.email_ciphertext, user_contacts.email_ciphertext)`,
+            email_key_version: sql`coalesce(excluded.email_key_version, user_contacts.email_key_version)`,
+            updated_at: sql`excluded.updated_at`,
+          }),
     )
     .execute();
+  return (written?.numInsertedOrUpdatedRows ?? 0n) > 0n;
 }
 
 /** A person as the log names them from what Agent X holds: who they sign in as, and their kept values. */
