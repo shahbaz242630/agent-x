@@ -161,9 +161,11 @@ const moveHash = (orgId: string, mandateEvent: string, chosen: MoveChosen): Buff
     ...(chosen.move === 'suspend' ? [chosen.pendingRequests] : []),
   ]);
 
-/** The over-limit choice's SHA-256: the organisation, the mandate's latest event (IDs in lower case) and the choice. */
-const overLimitHash = (orgId: string, mandateEvent: string, overLimit: OverLimit): Buffer =>
-  changeHashOf([orgId.toLowerCase(), mandateEvent.toLowerCase(), overLimit]);
+/** The over-limit choice's challenge, one for the ask and the confirm: its action, and its SHA-256 of the organisation, the mandate's latest event (IDs in lower case) and the choice. */
+const overLimitChange = (orgId: string, mandateEvent: string, overLimit: OverLimit) => ({
+  action: OVER_LIMIT_OPERATIONS.ask,
+  changeHash: changeHashOf([orgId.toLowerCase(), mandateEvent.toLowerCase(), overLimit]),
+});
 
 /** Whether the move ends the mandate's pending requests: a revoke, or a suspend that cancels them (decision 7). */
 const cancels = (chosen: MoveChosen): boolean =>
@@ -318,10 +320,7 @@ export function createMandateMoves({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, MOVING_ROLES);
         const read = await choosable(tx, states, member.orgId, mandateId, 'share');
-        return stepUps.ask(tx, member, {
-          action: OVER_LIMIT_OPERATIONS.ask,
-          changeHash: overLimitHash(member.orgId, read.state.eventId, overLimit),
-        });
+        return stepUps.ask(tx, member, overLimitChange(member.orgId, read.state.eventId, overLimit));
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -337,7 +336,7 @@ export function createMandateMoves({
           member,
           held,
           stepUpChallengeId,
-          { action: OVER_LIMIT_OPERATIONS.ask, changeHash: overLimitHash(member.orgId, read.state.eventId, overLimit) },
+          overLimitChange(member.orgId, read.state.eventId, overLimit),
           { passkeyRequired: true },
         );
         const { id } = read.mandate;

@@ -322,12 +322,14 @@ const ACCEPT_SCHEMA = {
   },
 };
 
+/** A confirm's body: the step-up, and the choice it was asked with. */
+const confirmWith = <Shape extends z.ZodRawShape>(shape: Shape) =>
+  STEP_UP_CONFIRM.extend(shape).describe('The step-up signed in again for, and the choice it was asked with.');
+
 const ACCEPT_CONFIRM_SCHEMA = {
   summary: 'Accept the draft, once signed in again for it with a passkey',
   params: MANDATE_ID,
-  body: STEP_UP_CONFIRM.extend(PENDING_CHOICE).describe(
-    'The step-up signed in again for, and the choice it was asked with.',
-  ),
+  body: confirmWith(PENDING_CHOICE),
   response: {
     200: MANDATE_DETAILS.describe(
       'The mandate with the draft in force (ACTIVE, if it was its first), the version it replaced superseded.',
@@ -374,17 +376,13 @@ const OVER_LIMIT_SCHEMAS = {
   confirm: {
     summary: 'Choose what happens past the mandate’s limits, once signed in again for it with a passkey',
     params: MANDATE_ID,
-    body: STEP_UP_CONFIRM.extend(OVER_LIMIT_BODY.shape).describe(
-      'The step-up signed in again for, and the choice it was asked with.',
-    ),
+    body: confirmWith(OVER_LIMIT_BODY.shape),
     response: { 200: MANDATE_DETAILS.describe('The mandate, its version in force holding the choice.') },
   },
 };
 
 /** A suspend's confirm: the step-up, and the choice it was asked with. */
-const SUSPEND_CONFIRM = STEP_UP_CONFIRM.extend(SUSPEND_BODY.shape).describe(
-  'The step-up signed in again for, and the choice it was asked with.',
-);
+const SUSPEND_CONFIRM = confirmWith(SUSPEND_BODY.shape);
 
 /** The move as its body names it: a suspend with its choice, which its schema requires (decision 7). */
 const chosenFrom = (move: MandateMove, body: object | null | undefined): MoveChosen => {
