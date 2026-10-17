@@ -2,13 +2,13 @@
 // the use case, its query checked at the edge and the platform's own seals
 // left out. What the read does in the database is audit-log.db.test.ts and the
 // audit trail's logPage tests; who reaches it, role-matrix.test.ts.
-import type { LogEvent } from '@agentx/core/modules/audit';
+import type { LogEvent, LogPageToRead } from '@agentx/core/modules/audit';
 import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import type { AuditLog, LogPageAnswer, LogPageAsked } from './audit-log.ts';
+import type { AuditLog, LogPageAnswer } from './audit-log.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -41,7 +41,7 @@ const EVENT: LogEvent = {
 afterEach(closeServers);
 
 async function withLog(answer: LogPageAnswer, role: Role = 'admin') {
-  const asked: LogPageAsked[] = [];
+  const asked: LogPageToRead[] = [];
   const log: AuditLog = {
     page: (orgId, page) => {
       expect(orgId).toBe(ORG);

@@ -1053,6 +1053,7 @@ export function createSignedStates({
 
   const logPageOf = async (tx: AuditTransaction, orgId: string, find: LogPageToRead): Promise<LogPage> => {
     const read = await trail.logPage(tx, orgId, find);
+    // As historyOf: the organisation's own log, so the alarm names it.
     if (read.kind === 'broken') return alarm('organisation', { orgId, id: orgId }, 'log', read.seq);
     return Object.freeze({ outcome: 'read', events: read.events, next: read.next });
   };

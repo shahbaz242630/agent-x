@@ -38,8 +38,8 @@ import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
-import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
+import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { answerClientError } from './client-errors.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';

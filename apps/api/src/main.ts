@@ -90,10 +90,10 @@ import {
 } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 
-import { createAuditLog } from './audit-log.ts';
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
+import { createAuditLog } from './audit-log.ts';
 import { createFundingSourceChanges } from './funding-source-changes.ts';
 import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';

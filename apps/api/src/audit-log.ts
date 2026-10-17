@@ -16,8 +16,8 @@
 //   and its key's version are taken out of the details. The hashes stay, so
 //   an admin can see each event's link to the one before.
 // Reading a page isn't itself logged (decision 24: a download is, E10b).
-import type { LogEvent } from '@agentx/core/modules/audit';
-import type { IdGenerator } from '@agentx/core/shared-kernel';
+import type { LogEvent, LogPageToRead } from '@agentx/core/modules/audit';
+import { actionProblems, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -40,25 +40,13 @@ const MOST_ACTIONS_FILTERED = 20;
 /** The details a signed state's event carries that are the platform's seal, not the organisation's record. */
 const SEALS_NOT_SHOWN: ReadonlySet<string> = new Set(['stateFingerprint', 'stateKeyVersion']);
 
-/** An action as the log names one: lower-case words joined by `.` or `_` (the audit's own rule). */
-const ACTION = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
-
 class AuditLogRefused extends UseCaseRefused {}
-
-/** A page asked for: its range, its actions, where it starts before, and how many. */
-export interface LogPageAsked {
-  readonly from: Date;
-  readonly to: Date;
-  readonly actions: readonly string[] | undefined;
-  readonly beforeSeq: bigint | undefined;
-  readonly limit: number;
-}
 
 export type LogPageAnswer =
   { readonly outcome: 'page'; readonly events: readonly LogEvent[]; readonly next: bigint | null } | Refused;
 
 export interface AuditLog {
-  page(orgId: string, asked: LogPageAsked, correlationId: string): Promise<LogPageAnswer>;
+  page(orgId: string, asked: LogPageToRead, correlationId: string): Promise<LogPageAnswer>;
 }
 
 export function createAuditLog({
@@ -147,7 +135,7 @@ const PAGE_SCHEMA = {
         context.addIssue({ code: 'custom', message: 'the range starts before it ends' });
       }
       const actions = query.actions?.split(',') ?? [];
-      if (actions.length > MOST_ACTIONS_FILTERED || !actions.every((action) => ACTION.test(action))) {
+      if (actions.length > MOST_ACTIONS_FILTERED || !actions.every((action) => actionProblems(action).length === 0)) {
         context.addIssue({ code: 'custom', message: 'actions are event names, comma-separated, 20 at most' });
       }
     }),
