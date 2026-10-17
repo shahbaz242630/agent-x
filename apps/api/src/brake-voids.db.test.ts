@@ -1999,6 +1999,161 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
     expect(last).toMatchObject({ action: 'spend_request.voided', details: { causes: 'AGENT_SUSPENDED' } });
   });
 
+  describe('the lapse, logged once per consent with the choice in force (E7c; the partner’s S119 rule)', () => {
+    /** The source's events, oldest first, its lapses and what they name. */
+    const sourceEvents = async (w: World) => shared.eventsAbout(w.org, w.source, 'funding_source');
+    const lapsesOf = async (w: World) =>
+      (await sourceEvents(w)).filter(({ action }) => action === 'funding_source.consent_lapsed');
+
+    it('by its end alone: the job logs it once, as the API’s, under a hold, a cancel and none chosen', async () => {
+      for (const choice of ['pause', 'cancel', null] as const) {
+        const { w } = await ready();
+        if (choice !== null) await consentChosen(w, choice);
+        const ends = new Date(clock.now().getTime() + 60_000);
+        await answeredWith(w, (now) => ({ consentExpiresAt: ends, statusChangedAt: now }));
+        await job(w).run();
+        expect(await lapsesOf(w)).toEqual([]);
+
+        clock.advanceBy(2 * 60_000);
+        await job(w).run();
+        await job(w).run();
+
+        const lapses = await lapsesOf(w);
+        expect(lapses).toHaveLength(1);
+        expect(lapses[0]).toMatchObject({
+          actorType: 'system',
+          details: {
+            consentId: w.state.accountConsentId,
+            consentExpiresAt: ends.toISOString(),
+            pendingRequests: choice ?? 'cancel',
+            chosen: choice !== null,
+          },
+        });
+      }
+    });
+
+    it('a refresh saying it ran out logs it, before the end under a cancel; the job adds none', async () => {
+      for (const choice of ['pause', 'cancel'] as const) {
+        const { w, acting } = await ready();
+        await pendingOf(w, acting);
+        await consentChosen(w, choice);
+
+        await answeredWith(w, ranOut);
+        await job(w).run();
+
+        const actions = (await sourceEvents(w)).map(({ action }) => action);
+        expect(actions.filter((action) => action === 'funding_source.consent_lapsed')).toHaveLength(1);
+        if (choice === 'cancel') {
+          expect(actions.slice(-3)).toEqual([
+            'funding_source.consent_lapsed',
+            'funding_source.partner_changed',
+            'funding_source.ended',
+          ]);
+        }
+        expect((await lapsesOf(w))[0]?.details).toMatchObject({ pendingRequests: choice, chosen: true });
+      }
+    });
+
+    it('held, renewed, then run out again: each consent’s lapse once', async () => {
+      const { w } = await ready();
+      await consentChosen(w, 'pause');
+      await answeredWith(w, ranOut);
+      clock.advanceBy(60_000);
+      const ends = new Date(clock.now().getTime() + 60_000);
+      await answeredWith(w, (now) => ({
+        availability: 'ACTIVE',
+        consentStatus: 'Authorized',
+        accountConsentId: 'renewed-consent',
+        replacesConsentId: w.state.accountConsentId,
+        consentExpiresAt: ends,
+        statusChangedAt: now,
+      }));
+      await job(w).run();
+      expect(await lapsesOf(w)).toHaveLength(1);
+
+      clock.advanceBy(2 * 60_000);
+      await job(w).run();
+      await job(w).run();
+
+      expect((await lapsesOf(w)).map(({ details }) => details.consentId)).toEqual([
+        w.state.accountConsentId,
+        'renewed-consent',
+      ]);
+    });
+
+    it('renewed past its end before any run: the refresh logs the old consent’s lapse before taking the renewal (review)', async () => {
+      const { w } = await ready();
+      await consentChosen(w, 'pause');
+      await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+      clock.advanceBy(2 * 60_000);
+
+      await answeredWith(w, (now) => ({
+        availability: 'ACTIVE',
+        consentStatus: 'Authorized',
+        accountConsentId: 'renewed-consent',
+        replacesConsentId: w.state.accountConsentId,
+        consentExpiresAt: new Date(now.getTime() + 365 * DAY_MS),
+        statusChangedAt: now,
+      }));
+      await job(w).run();
+
+      const actions = (await sourceEvents(w)).map(({ action }) => action);
+      expect(actions.slice(-2)).toEqual(['funding_source.consent_lapsed', 'funding_source.partner_changed']);
+      expect((await lapsesOf(w)).map(({ details }) => details.consentId)).toEqual([w.state.accountConsentId]);
+    });
+
+    it('revoked before its end, refreshed only after it: no lapse, the source ended (review)', async () => {
+      const { w, acting } = await ready();
+      const { approved } = await pendingOf(w, acting);
+      await consentChosen(w, 'pause');
+      await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+      const revokedAt = new Date(clock.now().getTime() + 30_000);
+      clock.advanceBy(2 * 60_000);
+
+      expect(
+        await answeredWith(w, () => ({
+          availability: 'UNAVAILABLE',
+          consentStatus: 'Revoked',
+          statusChangedAt: revokedAt,
+        })),
+      ).toMatchObject({ outcome: 'changed', source: { status: 'ENDED' } });
+      await job(w).run();
+
+      expect(await lapsesOf(w)).toEqual([]);
+      expect(await statusOf(w, approved.id)).toBe('DENIED');
+    });
+
+    it('a hold made a cancel past the end: the lapse names the hold it met, before the new choice', async () => {
+      const { w } = await ready();
+      await consentChosen(w, 'pause');
+      await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+      clock.advanceBy(2 * 60_000);
+
+      expect((await consentChosen(w, 'cancel')).outcome).toBe('changed');
+      await job(w).run();
+
+      const events = (await sourceEvents(w)).slice(-2);
+      expect(events.map(({ action }) => action)).toEqual([
+        'funding_source.consent_lapsed',
+        'funding_source.consent_expiry_chosen',
+      ]);
+      expect(events[0]?.details).toMatchObject({ pendingRequests: 'pause', chosen: true });
+    });
+
+    it('none for a consent revoked before its end, nor for one not yet run out', async () => {
+      const { w } = await ready();
+      await consentChosen(w, 'pause');
+      await job(w).run();
+      expect(await lapsesOf(w)).toEqual([]);
+
+      await answeredWith(w, (now) => ({ availability: 'UNAVAILABLE', consentStatus: 'Revoked', statusChangedAt: now }));
+      clock.advanceBy(w.state.consentExpiresAt.getTime() - clock.now().getTime() + 60_000);
+      await job(w).run();
+
+      expect(await lapsesOf(w)).toEqual([]);
+    });
+  });
+
   it('is an admin’s: an approver refused, and an ended source refused', async () => {
     const { w } = await ready();
     const approver = await shared.member(w.org, 'approver');
