@@ -93,6 +93,7 @@ import type { FastifyInstance } from 'fastify';
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
+import { createAuditLog } from './audit-log.ts';
 import { createFundingSourceChanges } from './funding-source-changes.ts';
 import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
@@ -494,6 +495,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
+    auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger }),
     holdClearings: createHoldClearings({
       database,
       keys,

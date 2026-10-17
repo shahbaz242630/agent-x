@@ -31,6 +31,7 @@ import {
   type AuditTrail,
   createAuditTrail,
   type HistoryToRead,
+  type LogPageToRead,
   TooManyEventsAboutObject,
   TooManyEventsToRead,
 } from './audit-trail.ts';
@@ -1467,5 +1468,79 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
     await expect(
       withTenant(app, newOrg(), (tx) => trail.recordedEvents(tx, org, { subjectTypes: ['membership'], limit: 1 })),
     ).rejects.toThrow("the transaction isn't withTenant's for this organisation");
+  });
+});
+
+describe('a page of the whole log, for the organisation’s admins (logPage; Phase 3 E10, decision 24)', () => {
+  const EVER = { from: new Date('2000-01-01T00:00:00Z'), to: new Date('2100-01-01T00:00:00Z') };
+  const page = (find: Partial<LogPageToRead> = {}, orgId = org) =>
+    withTenant(app, orgId, (tx) => trail.logPage(tx, orgId, { ...EVER, limit: 10, ...find }));
+  const seqsOf = (read: Awaited<ReturnType<typeof page>>) =>
+    read.kind === 'read' ? read.events.map((e) => e.seq) : read;
+  /** A moment a millisecond past the event, as the log's clock keeps it, then a pause so the next is later. */
+  const after = async ({ recordedAt }: { readonly recordedAt: Date }): Promise<Date> => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Date(recordedAt.getTime() + 1);
+  };
+
+  it('gives every event of every kind newest first, each whole with its chain links, paged by `next`', async () => {
+    await record(org, event(1), { ...event(2), action: 'other.stepped' }, event(3));
+
+    const first = await page({ limit: 2 });
+    expect(seqsOf(first)).toEqual([3n, 2n]);
+    expect(first).toMatchObject({ kind: 'read', next: 2n });
+    if (first.kind !== 'read') return;
+    const [third, second] = first.events;
+    expect(third).toMatchObject({ event: { action: 'probe.stepped', details: { step: 3 } } });
+    expect(third?.prevHash).toBe(second?.hash);
+    expect(third?.hash).toMatch(/^[0-9a-f]{64}$/);
+    const rest = await page({ limit: 2, beforeSeq: 2n });
+    expect(seqsOf(rest)).toEqual([1n]);
+    expect(rest).toMatchObject({ next: null });
+  });
+
+  it('keeps to the range, from inclusive and to exclusive, and to the actions named', async () => {
+    const [first] = await record(org, event(1));
+    if (first === undefined) throw new Error('nothing recorded');
+    const middle = await after(first);
+    await record(org, { ...event(2), action: 'other.stepped' }, event(3));
+
+    expect(seqsOf(await page({ from: middle }))).toEqual([3n, 2n]);
+    expect(seqsOf(await page({ to: middle }))).toEqual([1n]);
+    expect(seqsOf(await page({ actions: ['other.stepped'] }))).toEqual([2n]);
+    // At its own moment: inside a range from it, outside one to it.
+    expect(seqsOf(await page({ from: first.recordedAt, to: middle }))).toEqual([1n]);
+    expect(seqsOf(await page({ to: first.recordedAt }))).toEqual([]);
+  });
+
+  it('is broken for a chain holding an event past its head, even when the page asks only for another', async () => {
+    await record(org, event(1));
+    const [head] = await attacker.query('select seq, hash, mac, mac_key_version from audit.heads where org_id = $1', [
+      org,
+    ]);
+    if (head === undefined) throw new Error('The chain has no head');
+    await record(org, { ...event(2), action: 'other.stepped' });
+    await attacker.query(
+      'update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1',
+      [org, head.seq, head.hash, head.mac, head.mac_key_version],
+    );
+
+    expect(await page({ actions: ['probe.stepped'] })).toEqual({ kind: 'broken', seq: 2n });
+  });
+
+  it('is broken, never short, for an event that can’t be believed, and empty for a chain never started', async () => {
+    expect(await page()).toEqual({ kind: 'read', events: [], next: null });
+    await record(org, event(1), event(2));
+    await attacker.query(`update audit.events set details = '{"step":9}' where org_id = $1 and seq = 1`, [org]);
+
+    expect(await page()).toEqual({ kind: 'broken', seq: 1n });
+  });
+
+  it('refuses a range that doesn’t start before it ends, a limit under 1, and another organisation’s transaction', async () => {
+    await expect(page({ from: EVER.to, to: EVER.to })).rejects.toThrow('starts before it ends');
+    await expect(page({ limit: 0 })).rejects.toThrow('The limit is a whole number from 1');
+    await expect(withTenant(app, newOrg(), (tx) => trail.logPage(tx, org, { ...EVER, limit: 1 }))).rejects.toThrow(
+      "the transaction isn't withTenant's for this organisation",
+    );
   });
 });

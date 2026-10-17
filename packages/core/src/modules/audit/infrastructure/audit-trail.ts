@@ -158,6 +158,33 @@ export type RecordedEventCheck = { readonly kind: 'none' } | ({ readonly kind: '
  */
 type RecordedEventsCheck = { readonly kind: 'recorded'; readonly events: readonly ReadEvent[] } | BrokenRead;
 
+/** A page of the organisation's whole log (logPage), newest first, each event with its chain links. */
+export interface LogPageToRead {
+  /** Recorded at or after it. */
+  readonly from: Date;
+  /** Recorded before it. */
+  readonly to: Date;
+  /** Only these actions, when named. */
+  readonly actions?: readonly string[] | undefined;
+  /** Only events before this one in the chain: the page before's `next`. */
+  readonly beforeSeq?: bigint | undefined;
+  /** The most events the page holds. */
+  readonly limit: number;
+}
+
+/** An event of the log as its page shows it: whole, with the hashes that link it into the chain, as hex. */
+export interface LogEvent extends ReadEvent {
+  readonly hash: string;
+  readonly prevHash: string;
+}
+
+/**
+ * A page of the log: `read`, its events newest first, each whole, and the
+ * seq the next page starts before (null for none); or `broken`.
+ */
+type LogPageCheck =
+  { readonly kind: 'read'; readonly events: readonly LogEvent[]; readonly next: bigint | null } | BrokenRead;
+
 /**
  * Thrown by recordedEvents for more events than its caller's limit: a
  * history read whole or not at all, never cut short unseen.
@@ -280,6 +307,17 @@ export interface AuditTrail {
    * withTenant's transaction for that organisation, like `verify`.
    */
   recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck>;
+  /**
+   * A page of the organisation's whole log for its admins (Phase 3 E10,
+   * decision 24): every event recorded in [from, to), of `actions` when named,
+   * before `beforeSeq`, newest first, in one statement with the chain's head
+   * (0048's indexes). Each believed only whole, as recordedEvents believes
+   * one: its MAC seals its seq and its link to the event before, so no event
+   * on the page can stand anywhere else in the chain. An event deleted is the
+   * chain's check's and anchor's to find, as for any read of the log. Only in
+   * withTenant's transaction for that organisation.
+   */
+  logPage(tx: AuditTransaction, orgId: string, find: LogPageToRead): Promise<LogPageCheck>;
 }
 
 /**
@@ -427,6 +465,16 @@ function wholeEvent(
   row: Readonly<Record<string, unknown>>,
   head: ChainHead | undefined,
 ): ReadEvent | undefined {
+  return wholeEntry(keys, chain, row, head)?.read;
+}
+
+/** As wholeEvent, with the sealed fields it checked: the log's page shows their hashes (E10). */
+function wholeEntry(
+  keys: KeyProvider,
+  chain: Chain,
+  row: Readonly<Record<string, unknown>>,
+  head: ChainHead | undefined,
+): { readonly read: ReadEvent; readonly sealed: Omit<StoredEntry, 'content'> } | undefined {
   const sealed = sealedFields(row);
   const content = contentOf(row);
   const details = detailsObject(row.details);
@@ -441,7 +489,7 @@ function wholeEvent(
   }
   // contentOf read each of these as text, and the version as a number, or the row wasn't whole.
   const { actor_type: actorType, actor_id: actorId, action, subject_type: type, subject_id: subjectId } = row;
-  return Object.freeze({
+  const read = Object.freeze({
     id: sealed.id,
     seq: sealed.seq,
     recordedAt: sealed.recordedAt,
@@ -452,6 +500,7 @@ function wholeEvent(
       details: Object.freeze({ ...details }) as AuditEvent['details'],
     }),
   });
+  return { read, sealed };
 }
 
 /** A read that can't be believed, at `seq` when it could be read. */
@@ -882,6 +931,40 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         events.push(read);
       }
       return Object.freeze({ kind: 'recorded', events: Object.freeze(events) });
+    },
+
+    async logPage(tx: AuditTransaction, orgId: string, { from, to, actions, beforeSeq, limit }: LogPageToRead) {
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+      if (from.getTime() >= to.getTime()) throw new RangeError('The page’s range starts before it ends');
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      const which = sql.join(
+        [
+          sql`e.recorded_at >= ${from} and e.recorded_at < ${to}`,
+          ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
+          ...(beforeSeq === undefined ? [] : [sql`e.seq < ${beforeSeq}`]),
+        ],
+        sql` and `,
+      );
+      // One past the limit tells there is a next page; the rows come back in chain order.
+      const rows = await eventsWithHead(tx, chain, which, limit + 1, undefined, true);
+      const [first] = rows;
+      const past = first?.past_head;
+      if (typeof past === 'bigint') return brokenAt(past);
+      const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
+      const picked = rows.filter((row) => row.seq !== null);
+      const shown = picked.slice(Math.max(0, picked.length - limit));
+      const events: LogEvent[] = [];
+      for (const row of shown) {
+        const whole = wholeEntry(keys, chain, row, head);
+        if (whole === undefined) return brokenAt(row.seq);
+        const { read, sealed } = whole;
+        events.push(
+          Object.freeze({ ...read, hash: sealed.hash.toString('hex'), prevHash: sealed.prevHash.toString('hex') }),
+        );
+      }
+      const next = picked.length > limit ? (events[0]?.seq ?? null) : null;
+      return Object.freeze({ kind: 'read', events: Object.freeze(events.toReversed()), next });
     },
   });
   holdRecorders.set(trail, (tx, orgId, event) => recordAs(true, tx, orgId, event));

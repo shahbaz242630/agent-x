@@ -39,6 +39,7 @@ import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
+import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { answerClientError } from './client-errors.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
@@ -133,6 +134,8 @@ export interface ServerOptions {
   readonly membershipChanges?: MembershipChanges | undefined;
   /** Showing and investigating the integrity hold (the identity module's hold-investigations.ts); without it, no one reaches those routes. */
   readonly holdInvestigations?: HoldInvestigations | undefined;
+  /** Reading the organisation's audit log (audit-log.ts, E10); without it, no one reaches the route. */
+  readonly auditLog?: AuditLog | undefined;
   /** Clearing the integrity hold (the identity module's hold-clearing.ts); without it, no one reaches those routes. */
   readonly holdClearings?: HoldClearings | undefined;
   /** Reads an organisation's registered contacts (registered-contacts.ts); without it, no one reaches the list. */
@@ -343,6 +346,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerMembers(app, options.listMembers);
   registerMemberChanges(app, options.membershipChanges);
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
+  registerAuditLog(app, { log: options.auditLog });
   registerOrganization(app, { changes: options.organizationChanges });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
