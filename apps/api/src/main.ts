@@ -56,8 +56,6 @@ import {
   type Sessions,
   type StepUpChallenges,
   type SignIn,
-  createDirectoryNames,
-  type DirectoryNames,
 } from '@agentx/core/modules/identity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { MandatesTables } from '@agentx/core/modules/mandates';
@@ -123,6 +121,7 @@ import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
+import { directoryNamesFrom } from './kept-names.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
@@ -231,21 +230,6 @@ function signInFrom(
     ids: uuidV7Ids,
     clock: systemClock,
     keys,
-  });
-}
-
-/**
- * The login service's names for the audit log (decision 25), read with the
- * directory token the address book uses; undefined without one, and the log
- * names people from the copy Agent X kept.
- */
-function directoryNamesFrom(config: Config): DirectoryNames | undefined {
-  if (config.signIn === undefined || config.email === undefined) return undefined;
-  return createDirectoryNames({
-    issuer: config.signIn.issuer,
-    internalOrigin: config.signIn.internalOrigin,
-    token: config.email.directoryToken,
-    fetch: createOutboundFetch(config.outbound.allowedOrigins),
   });
 }
 
@@ -426,7 +410,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // Where role grants write their notices (B5-1b), and the notices' sweep reads.
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
-  const directory = directoryNamesFrom(config);
+  const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
