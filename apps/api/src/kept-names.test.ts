@@ -4,7 +4,7 @@
 import { loadConfig } from '@agentx/platform/config';
 import { describe, expect, it } from 'vitest';
 
-import { directoryNamesFrom } from './kept-names.ts';
+import { contactFillFrom, directoryNamesFrom } from './kept-names.ts';
 
 const ISSUER = 'https://auth.agentx.example';
 const ENDPOINT = 'https://acs.agentx.example';
@@ -48,5 +48,14 @@ describe('the login service’s names for the audit log (decision 25)', () => {
     expect(directory?.issuer).toBe(ISSUER);
     await directory?.entriesOf(['101']);
     expect(asked).toEqual([{ url: `${ISSUER}/v2/users`, authorization: 'Bearer directory-words' }]);
+  });
+
+  it('fills kept names only with the login service’s names to fill them from', () => {
+    const fetch = () => Promise.reject(new Error('not called'));
+    const parts = { database: {} as never, keys: {} as never, clock: { now: () => new Date() }, logger: {} as never };
+    expect(contactFillFrom({ directory: undefined, ...parts })).toBeUndefined();
+    expect(contactFillFrom({ directory: directoryNamesFrom(loadConfig(EMAIL), fetch), ...parts })).toHaveProperty(
+      'run',
+    );
   });
 });

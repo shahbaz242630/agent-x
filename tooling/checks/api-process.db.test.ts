@@ -110,6 +110,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
           'api.listening',
           'api.notices',
           'api.idp_events',
+          'api.contact_fill',
           'api.factor_resets',
         ]);
       },
