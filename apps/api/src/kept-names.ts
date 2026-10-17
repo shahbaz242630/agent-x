@@ -19,7 +19,7 @@ import type { Logger } from '@agentx/platform/observability';
 import type { OutboundFetch } from '@agentx/platform/outbound';
 
 /** How long one of the fill's calls may wait: a login service scaled to zero takes a while to wake, as the event feed's does. */
-const FILL_CALL_TIMEOUT_MS = 20_000;
+const FILL_CALL_TIMEOUT_MS = 60_000;
 
 /**
  * The login service's names, or undefined when the config names no directory

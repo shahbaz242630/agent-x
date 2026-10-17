@@ -18,8 +18,13 @@ import { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from '../doma
 import { field } from './zitadel-answer.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
-/** How long one call to the login service may take. */
-const CALL_TIMEOUT_MS = 20_000;
+/**
+ * How long one call to the login service may take: long enough for one
+ * scaled to zero to wake, as staging's does (S122: its container started 19 s
+ * into the call, and every run had timed out at 20 s for 10+ days). The call
+ * holds no database connection while it waits.
+ */
+const CALL_TIMEOUT_MS = 60_000;
 
 /** The most an answer may hold: a page of events, each with a payload we don't read. */
 const MOST_ANSWER_BYTES = 2 * 1024 * 1024;
