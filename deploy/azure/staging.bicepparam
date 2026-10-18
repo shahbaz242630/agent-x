@@ -27,3 +27,9 @@ param appsZoneRedundant = false
 
 // Staging runs synthetic traffic only, so any error event is worth a look.
 param appErrorAlertThreshold = 0
+
+// The audit exports: kept unchangeable three days, which proves the lock
+// without leaving test files for years; one copy is enough for synthetic data.
+param evidenceRetentionDays = 3
+param evidenceImmutability = 'Unlocked'
+param evidenceRedundancy = 'Standard_LRS'

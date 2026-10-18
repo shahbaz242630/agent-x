@@ -31,6 +31,7 @@ export type RuleId =
   | 'database-tls'
   | 'database-backup'
   | 'vault'
+  | 'evidence-store'
   | 'workspace'
   | 'log-quota-alerts'
   | 'alert-counts-only'
@@ -110,6 +111,9 @@ const TYPES = {
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
   server: 'Microsoft.DBforPostgreSQL/flexibleServers',
   setting: 'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
+  storage: 'Microsoft.Storage/storageAccounts',
+  blobService: 'Microsoft.Storage/storageAccounts/blobServices',
+  container: 'Microsoft.Storage/storageAccounts/blobServices/containers',
   vault: 'Microsoft.KeyVault/vaults',
   vaultSecret: 'Microsoft.KeyVault/vaults/secrets',
   workspace: 'Microsoft.OperationalInsights/workspaces',
@@ -604,6 +608,25 @@ const isCopiedKey = (snapshot: Snapshot, secret: PredictedResource, value: unkno
   return type !== undefined && from !== undefined && ofType(snapshot, type).some((service) => service.id === from);
 };
 
+/** The audit exports' role's one data action: Put Blob of a file not there yet (Microsoft), never overwrite or read. */
+const EVIDENCE_WRITE = 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action';
+
+/** The one container the audit exports go to (modules/evidence.bicep). */
+const EVIDENCE_CONTAINER = 'audit-exports';
+
+/** The audit exports' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
+const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-writer');
+
+/**
+ * How long each environment keeps an export unchangeable (decision 27):
+ * production five years, Locked for good; staging a few days and Unlocked, so
+ * a test file never holds the account (and its resource group) for years.
+ */
+const EVIDENCE_KEPT = {
+  production: { state: 'Locked', days: (days: number) => days === 1826, sku: 'Standard_ZRS' },
+  staging: { state: 'Unlocked', days: (days: number) => days >= 1 && days <= 7, sku: 'Standard_LRS' },
+} as const;
+
 /** Key Vault Secrets User, by its id: reads a secret's value and nothing else (Microsoft's built-in role). */
 const VAULT_READER_ROLE = '4633458b-17de-408a-b874-0445c86b69e6';
 
@@ -831,6 +854,9 @@ const required: Check = (snapshot, _expected, add) => {
     ['the key vault', TYPES.vault, 1, Infinity],
     ['the Postgres server', TYPES.server, 1, Infinity],
     ['the Container Apps environment', TYPES.environment, 1, 1],
+    ['the audit-export store', TYPES.storage, 1, 1],
+    ["the audit-export store's blob service", TYPES.blobService, 1, 1],
+    ["the audit-export store's container", TYPES.container, 1, 1],
   ];
   for (const [what, type, least, most] of counts) {
     const found = ofType(snapshot, type).length;
@@ -1281,11 +1307,9 @@ const doorOf = (rule: unknown): string =>
  * Every door the apps subnet may have out, and why it is there. The first three
  * are this deployment's own addresses, the next five Azure's service tags,
  * which Azure keeps current; then GitHub's published addresses, two sets,
- * which nothing keeps current but the refresher (github-ranges.ts); and one
- * more service tag for the apps' own outbound calls: email (B5).
- *
- * What is deliberately absent: `Storage.<region>`, which Microsoft's list needs
- * only for images hosted in Azure Container Registry.
+ * which nothing keeps current but the refresher (github-ranges.ts); and two
+ * more service tags for the apps' own outbound calls: email (B5) and the
+ * audit exports' store (E10c), in this region alone.
  */
 const egressDoors = (region: string, apps: string, database: string): readonly (readonly [string, string])[] => [
   [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
@@ -1306,6 +1330,8 @@ const egressDoors = (region: string, apps: string, database: string): readonly (
   ],
   // Broad, every Front Door site: the API's list of exact origins is the real limit.
   ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
+  // Every account in the region, not ours alone: the store's own network rule is the limit until PL-43.
+  [`Tcp to Storage.${region} on 443`, "the operator's audit exports, to the write-once store"],
 ];
 
 /**
@@ -1487,6 +1513,175 @@ const vault: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** What the audit-export store's account must be, each a line a problem names; `kept` is its environment's. */
+function evidenceAccountProblems(
+  account: PredictedResource,
+  kept: (typeof EVIDENCE_KEPT)[keyof typeof EVIDENCE_KEPT],
+  appsSubnets: ReadonlySet<unknown>,
+): string[] {
+  const properties = account.properties;
+  const acls = at(properties, 'networkAcls');
+  const subnetRules = list(at(acls, 'virtualNetworkRules'));
+  const policy = at(properties, 'immutableStorageWithVersioning', 'immutabilityPolicy');
+  const required: readonly (readonly [string, boolean])[] = [
+    ['kind StorageV2', account.kind === 'StorageV2'],
+    [`${kept.sku} copies`, at(account, 'sku', 'name') === kept.sku],
+    [
+      'TLS 1.2 or later, HTTPS only',
+      at(properties, 'minimumTlsVersion') === 'TLS1_2' && at(properties, 'supportsHttpsTrafficOnly') === true,
+    ],
+    [
+      'Entra sign-in only (shared keys off, OAuth by default)',
+      at(properties, 'allowSharedKeyAccess') === false && at(properties, 'defaultToOAuthAuthentication') === true,
+    ],
+    [
+      'no public blobs, and no copying from another tenant',
+      at(properties, 'allowBlobPublicAccess') === false &&
+        at(properties, 'allowCrossTenantReplication') === false &&
+        at(properties, 'allowedCopyScope') === 'AAD',
+    ],
+    [
+      'no other way in (hierarchical names, SFTP, local users, NFS)',
+      ['isHnsEnabled', 'isSftpEnabled', 'isLocalUserEnabled', 'isNfsV3Enabled'].every(
+        (key) => at(properties, key) === false,
+      ),
+    ],
+    [
+      'requests refused by default, with no exceptions for Azure services, addresses or resources',
+      at(acls, 'defaultAction') === 'Deny' &&
+        at(acls, 'bypass') === 'None' &&
+        list(at(acls, 'ipRules')).length === 0 &&
+        list(at(acls, 'resourceAccessRules')).length === 0,
+    ],
+    [
+      "this deployment's apps subnet as the only subnet let in",
+      subnetRules.length === 1 && appsSubnets.has(at(subnetRules[0], 'id')),
+    ],
+    ['infrastructure encryption', at(properties, 'encryption', 'requireInfrastructureEncryption') === true],
+    [
+      `version-level immutability, ${kept.state}, for this environment's days, with no appends to a kept file`,
+      at(properties, 'immutableStorageWithVersioning', 'enabled') === true &&
+        at(policy, 'state') === kept.state &&
+        kept.days(Number(at(policy, 'immutabilityPeriodSinceCreationInDays'))) &&
+        at(policy, 'allowProtectedAppendWrites') === false,
+    ],
+  ];
+  return required.filter(([, holds]) => !holds).map(([what]) => what);
+}
+
+/**
+ * The write-once store for our team's audit exports (ADR-005 §6, E10c;
+ * decisions 27 and 28): one account, as `evidenceAccountProblems` says, with
+ * versioning on its one blob service and one private container; no other
+ * Storage resource (a lifecycle rule, a file share, a local user); the apps
+ * subnet keeps the service endpoint its network rule needs. Its one custom
+ * role allows adding a new file and nothing else, assignable in the resource
+ * group alone, and is given once, on the container, to the operator's
+ * identity. Its logs are `resource-logs`'s.
+ */
+const evidenceStore: Check = (snapshot, expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'evidence-store', resource, message });
+  };
+  const appsSubnets = appsSubnetIds(snapshot);
+  for (const account of ofType(snapshot, TYPES.storage)) {
+    for (const what of evidenceAccountProblems(account, EVIDENCE_KEPT[expected.environment], appsSubnets)) {
+      problem(account.name, `must have ${what}`);
+    }
+  }
+  evidencePartsProblems(snapshot, problem);
+  for (const network of ofType(snapshot, TYPES.network)) {
+    const endpoints = list(at(appsSubnetOf(network), 'properties', 'serviceEndpoints'));
+    const kept = endpoints.some(
+      (endpoint) =>
+        at(endpoint, 'service') === 'Microsoft.Storage' &&
+        JSON.stringify(at(endpoint, 'locations')) === JSON.stringify([network.location]),
+    );
+    if (!kept) {
+      problem(network.name, "must keep its apps subnet's Storage service endpoint, in its own region, for the store");
+    }
+  }
+  evidenceAccessProblems(snapshot, ofType(snapshot, TYPES.container), problem);
+};
+
+/** The store's blob service, its container and no other Storage resource, a part of `evidence-store`. */
+function evidencePartsProblems(snapshot: Snapshot, problem: (resource: string, message: string) => void): void {
+  const accounts = ofType(snapshot, TYPES.storage);
+  const blobServices = ofType(snapshot, TYPES.blobService);
+  for (const service of blobServices) {
+    if (!accounts.some((account) => service.id === `${account.id}/blobServices/default`)) {
+      problem(service.name, "must be the default blob service of this deployment's store");
+    }
+    if (at(service.properties, 'isVersioningEnabled') !== true) {
+      problem(service.name, 'must keep versions: version-level immutability keeps every one');
+    }
+  }
+  const containers = ofType(snapshot, TYPES.container);
+  for (const container of containers) {
+    if (
+      !blobServices.some((service) => container.id === `${service.id}/containers/${EVIDENCE_CONTAINER}`) ||
+      at(container.properties, 'publicAccess') !== 'None'
+    ) {
+      problem(container.name, `must be ${EVIDENCE_CONTAINER} in this deployment's store, with no public access`);
+    }
+  }
+  const known: readonly string[] = [TYPES.storage, TYPES.blobService, TYPES.container];
+  for (const resource of snapshot.predictedResources) {
+    if (resource.type.toLowerCase().startsWith('microsoft.storage/') && !known.includes(resource.type)) {
+      problem(resource.name, `is a ${resource.type}: the store holds one container and nothing else`);
+    }
+  }
+}
+
+/** The store's custom role and its one assignment, a part of `evidence-store`. */
+function evidenceAccessProblems(
+  snapshot: Snapshot,
+  containers: readonly PredictedResource[],
+  problem: (resource: string, message: string) => void,
+): void {
+  const group = groupOf(snapshot);
+  const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => role.name === evidenceRoleName(group));
+  for (const role of roles) {
+    const scopes = list(at(role.properties, 'assignableScopes'));
+    const permissions = list(at(role.properties, 'permissions'));
+    if (
+      scopes.length !== 1 ||
+      scopes[0] !== group ||
+      permissions.flatMap((entry) => list(at(entry, 'actions'))).length > 0 ||
+      actionSet(permissions.flatMap((entry) => list(at(entry, 'dataActions')))) !== actionSet([EVIDENCE_WRITE])
+    ) {
+      problem(
+        role.name,
+        `must allow ${EVIDENCE_WRITE} alone, no action, and be assignable in this deployment's resource group alone`,
+      );
+    }
+  }
+  if (roles.length !== 1) {
+    problem('the deployment', `needs one custom role for the audit exports; the snapshot has ${String(roles.length)}`);
+  }
+  const role = customRoleId(group, evidenceRoleName(group));
+  const assignments = ofType(snapshot, TYPES.roleAssignment).filter((assignment) => roleOf(assignment) === role);
+  for (const assignment of assignments) {
+    const identity = principalOf(snapshot, assignment);
+    if (
+      !containers.some((container) => container.id === scopeOf(assignment)) ||
+      identity === undefined ||
+      workloadOf(identity.name) !== 'operator'
+    ) {
+      problem(
+        assignment.name,
+        "must give the audit exports' role on the export container alone, to the operator's identity (principalType ServicePrincipal)",
+      );
+    }
+  }
+  if (assignments.length !== 1) {
+    problem(
+      'the deployment',
+      `must give the audit exports' role once, to the operator; it gives it ${String(assignments.length)} times`,
+    );
+  }
+}
+
 const workspaceAndQuota: Check = (snapshot, _expected, add) => {
   const alerts = ofType(snapshot, TYPES.alert);
   for (const workspace of ofType(snapshot, TYPES.workspace)) {
@@ -1600,6 +1795,10 @@ const resourceLogs: Check = (snapshot, _expected, add) => {
     [TYPES.vault, (log) => at(log, 'categoryGroup') === 'audit' || at(log, 'categoryGroup') === 'allLogs'],
     [TYPES.server, (log) => at(log, 'category') === 'PostgreSQLLogs'],
     [TYPES.dnsPolicy, (log) => at(log, 'category') === 'DnsResponse'],
+    // The audit exports' store: every read, write and delete (StorageBlobLogs).
+    ...['StorageRead', 'StorageWrite', 'StorageDelete'].map(
+      (category) => [TYPES.blobService, (log: unknown) => at(log, 'category') === category] as const,
+    ),
   ];
   for (const [type, isTheLog] of wanted) {
     for (const resource of ofType(snapshot, type)) {
@@ -2165,8 +2364,13 @@ const releaseIdentityId = (snapshot: Snapshot, environment: string): string =>
  */
 const releaseRoleId = (snapshot: Snapshot): string => {
   const group = groupOf(snapshot);
+  return customRoleId(group, releaseRoleName(group));
+};
+
+/** A custom role of the resource group's, as a role assignment names it: at the subscription, without case. */
+const customRoleId = (group: string, name: string): string => {
   const subscription = /^\/subscriptions\/[^/]+/.exec(group)?.[0] ?? '';
-  return `${subscription}/providers/${TYPES.roleDefinition}/${releaseRoleName(group)}`.toLowerCase();
+  return `${subscription}/providers/${TYPES.roleDefinition}/${name}`.toLowerCase();
 };
 
 /**
@@ -2180,7 +2384,8 @@ const ACCESS_TYPE = /authorization|roleassignment|roledefinition/i;
 
 /**
  * Who reads what (ADR-002 Amendment G2c). Every role assignment in the
- * deployment but CI's role's (`release-access`) gives Key Vault Secrets User on
+ * deployment but CI's role's (`release-access`) and the audit exports'
+ * (`evidence-store`) gives Key Vault Secrets User on
  * one secret it writes, to an identity it creates, named a service principal:
  * no other role, and nothing at the vault, the resource group or the
  * subscription. Together they are exactly GRANTS, so no identity reads
@@ -2203,10 +2408,11 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   }
   const secrets = new Map(ofType(snapshot, TYPES.vaultSecret).map((secret) => [secret.id, secretNameOf(secret)]));
   const release = releaseRoleId(snapshot);
+  const evidence = customRoleId(groupOf(snapshot), evidenceRoleName(groupOf(snapshot)));
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
-    if (role === release) continue;
+    if (role === release || role === evidence) continue;
     const secret = secrets.get(scopeOf(assignment));
     const identity = principalOf(snapshot, assignment);
     if (
@@ -2250,8 +2456,9 @@ const actionSet = (actions: readonly unknown[]): string =>
  * the one names.bicep calls release, which no app or job runs as, and only
  * for GitHub's issuer, this
  * environment's subject and the token exchange: no other identity can be
- * signed in to from outside Azure. And it defines exactly one custom role,
- * named as `releaseRoleName` names it, which allows RELEASE_ACTIONS and no data
+ * signed in to from outside Azure. And it defines exactly one custom role
+ * besides the audit exports' (`evidence-store`), named as `releaseRoleName`
+ * names it, which allows RELEASE_ACTIONS and no data
  * action, and can be given in this deployment's resource group only. Where that role is given is the apps
  * deployment's to say (G4-2b), and `release-access`'s to check.
  */
@@ -2301,7 +2508,10 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
 /** CI's custom role, half of `release-identity`: exactly one, named so, given in the resource group alone, allowing RELEASE_ACTIONS and no data action. */
 function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, message: string) => void): void {
   const groups = ofType(snapshot, TYPES.group).map((group) => group.id);
-  const roles = ofType(snapshot, TYPES.roleDefinition);
+  // The audit exports' role is `evidence-store`'s, which holds it to one data action.
+  const roles = ofType(snapshot, TYPES.roleDefinition).filter(
+    (role) => role.name !== evidenceRoleName(groupOf(snapshot)),
+  );
   const roleName = releaseRoleName(groupOf(snapshot));
   for (const role of roles) {
     if (role.name !== roleName) {
@@ -2887,9 +3097,16 @@ const containerTelemetry: Check = (snapshot, _expected, add) => {
 const PLATFORM_PREFIX = 'CONTAINER_APP_';
 
 /**
+ * Where a container gets its identity's token (Microsoft): one set here could
+ * send the operator's token request, and the export, somewhere else (E10c).
+ */
+const IDENTITY_SETTING = /^(?:IDENTITY_ENDPOINT|IDENTITY_HEADER|MSI_)/;
+
+/**
  * No container, job or app, sets one of Azure's own variables: one the
  * deployment set could stand in for the platform's, and the operator's
- * platform event records the run's name as Azure gives it (B1c-2b). Names
+ * platform event records the run's name as Azure gives it (B1c-2b), and gets
+ * its token where Azure says (E10c). Names
  * are matched as written, since Linux tells capitals apart: a name that
  * differs only in them is a variable of its own.
  */
@@ -2897,11 +3114,11 @@ const platformSettings: Check = (snapshot, _expected, add) => {
   for (const job of workloadsIn(snapshot)) {
     for (const container of containersOf(job)) {
       for (const name of list(at(container, 'env')).map((entry) => text(at(entry, 'name')))) {
-        if (!name.startsWith(PLATFORM_PREFIX)) continue;
+        if (!name.startsWith(PLATFORM_PREFIX) && !IDENTITY_SETTING.test(name)) continue;
         add({
           rule: 'platform-settings',
           resource: job.name,
-          message: `sets ${name}: Azure sets its ${PLATFORM_PREFIX} variables in every container itself, and one set here could stand in for the platform's`,
+          message: `sets ${name}: Azure sets its ${PLATFORM_PREFIX} and identity variables in every container itself, and one set here could stand in for the platform's`,
         });
       }
     }
@@ -2922,6 +3139,7 @@ const CHECKS: readonly Check[] = [
   dnsWatch,
   dnsAllow,
   vault,
+  evidenceStore,
   workspaceAndQuota,
   alertRules,
   resourceLogs,
