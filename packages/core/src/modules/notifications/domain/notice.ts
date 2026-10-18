@@ -79,6 +79,13 @@ const ORGANIZATION_NOTICE_KINDS = [
 /** The kinds about a spend request, `aboutId` its ID (0045): one waiting for approval, told to every admin and approver (partner decision 2, S104). */
 const SPEND_REQUEST_NOTICE_KINDS = ['spend_request_waiting'] as const;
 
+/**
+ * The kinds about an entry of the organisation's audit log, `aboutId` the
+ * entry's event ID (0050): Agent X's own team exported the log for a case,
+ * told to every admin (ADR-005 §6, partner decision 24).
+ */
+const AUDIT_LOG_NOTICE_KINDS = ['audit_log_exported'] as const;
+
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,
   ...CONTACT_NOTICE_KINDS,
@@ -90,6 +97,7 @@ export const NOTICE_KINDS = [
   ...MANDATE_NOTICE_KINDS,
   ...ORGANIZATION_NOTICE_KINDS,
   ...SPEND_REQUEST_NOTICE_KINDS,
+  ...AUDIT_LOG_NOTICE_KINDS,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -120,6 +128,9 @@ export const isAboutTheOrganization = (kind: NoticeKind): boolean =>
 export const isAboutASpendRequest = (kind: NoticeKind): boolean =>
   SPEND_REQUEST_NOTICE_KINDS.some((each) => each === kind);
 
+/** Whether a kind is about an entry of the audit log, `aboutId` its event ID (0050). */
+export const isAboutAnAuditEntry = (kind: NoticeKind): boolean => AUDIT_LOG_NOTICE_KINDS.some((each) => each === kind);
+
 /** Whether a kind is told to every admin and approver: what lets an agent spend, and what waits on them (0036, 0038, 0045). */
 export const isToAdminsAndApprovers = (kind: NoticeKind): boolean =>
   isAboutAMandate(kind) || isAboutTheOrganization(kind) || isAboutASpendRequest(kind);
@@ -146,7 +157,7 @@ export interface Notice {
   readonly membershipId: string | null;
   /** The role that membership holds now; null for any other. */
   readonly role: NoticeRole | null;
-  /** What any other notice is about (B6-1b): a registered contact, a person, a reset (the link's), a supplier or an agent. */
+  /** What any other notice is about (B6-1b): a registered contact, a person, a reset (the link's), a supplier, an agent or an audit log entry. */
   readonly aboutId?: string | null;
 }
 

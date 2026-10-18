@@ -58,6 +58,8 @@ const MANDATE = '0199a0f0-0000-7000-8000-00000000b6b6';
 /** A spend request a notice is about (0045), and one decided before its email went (B2). */
 const REQUEST = '0199a0f0-0000-7000-8000-0000000003b3';
 const DECIDED = '0199a0f0-0000-7000-8000-0000000003b5';
+/** An audit log entry a notice is about: our team's export for a case (0050). */
+const ENTRY = '0199a0f0-0000-7000-8000-00000000e10c';
 const ADDRESSES = new Map([
   [ADMIN, 'admin@example.test'],
   [APPROVER, 'approver@example.test'],
@@ -580,6 +582,26 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       expect(sent.every(({ text }) => text.includes(about))).toBe(true);
     },
   );
+
+  it('E10c sends our team’s export of the audit log to every active admin alone, naming the log entry', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const exported: Notice = {
+      orgId: ORG,
+      recipientUserId: null,
+      kind: 'audit_log_exported',
+      membershipId: null,
+      role: null,
+      aboutId: ENTRY,
+    };
+    await app.transaction().execute((tx) => outbox.add(tx, [exported]));
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    // Not the approver or the viewer: the log is read by admins alone (decision 26).
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'other.admin@example.test']);
+    expect(sent.every(({ text }) => text.includes(`Audit log entry: ${ENTRY}`))).toBe(true);
+  });
 
   it('B2 sends a waiting request with what it asks, read as it is sent, and its console address', async () => {
     await sql`delete from notifications.outbox`.execute(app);
