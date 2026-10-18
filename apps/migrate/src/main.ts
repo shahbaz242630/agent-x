@@ -67,7 +67,8 @@ async function migrate(config: MigrationConfig, directory: string, logger: Logge
       directory,
       logger,
     });
-    logger.info('migrate.done', { applied });
+    // How many: each has its own db.migration.applied line, and a list of names would be cut past the logger's 50 items.
+    logger.info('migrate.done', { applied: applied.length });
     return 0;
   } catch (error) {
     logger.error('migrate.failed', failure(error));
