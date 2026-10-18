@@ -77,6 +77,7 @@ describe('E10c-3 the write-once container', () => {
   });
 
   it.each([
+    ['403, as staging answers a second write', 403, 'UnauthorizedBlobOverwrite'],
     ['409', 409, 'BlobAlreadyExists'],
     ['412', 412, 'ConditionNotMet'],
   ])('answers a blob there already as such (%s), and never writes over it', async (_what, status, code) => {
@@ -100,6 +101,12 @@ describe('E10c-3 the write-once container', () => {
       'a code that is no constant',
       refusedWith(500, 'Server Busy; try later'),
       'the blob service answered 500 (no code)',
+    ],
+    ['a 403 with no code', refusedWith(403), 'the blob service answered 403 (no code)'],
+    [
+      'an overwrite code under another status',
+      refusedWith(409, 'UnauthorizedBlobOverwrite'),
+      'the blob service answered 409 (UnauthorizedBlobOverwrite)',
     ],
     ['no code at all', refusedWith(503), 'the blob service answered 503 (no code)'],
   ])('fails on %s, naming the status and code alone', async (_what, answer, said) => {
