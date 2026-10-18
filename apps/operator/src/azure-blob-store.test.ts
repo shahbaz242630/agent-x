@@ -72,10 +72,15 @@ describe('E10c-3 the write-once container', () => {
         'x-ms-meta-sha256': createHash('sha256').update(CONTENT).digest('hex'),
       },
     });
+    // The time of the request, as the service's page asks of every write.
+    expect(new Headers(blob?.init.headers).get('x-ms-date')).toMatch(/ GMT$/);
   });
 
-  it('answers a blob there already as such, and never writes over it', async () => {
-    const { store } = azure(undefined, refusedWith(409, 'BlobAlreadyExists'));
+  it.each([
+    ['409', 409, 'BlobAlreadyExists'],
+    ['412', 412, 'ConditionNotMet'],
+  ])('answers a blob there already as such (%s), and never writes over it', async (_what, status, code) => {
+    const { store } = azure(undefined, refusedWith(status, code));
 
     expect(await store.put(NAME, CONTENT)).toBe('there_already');
   });
@@ -115,6 +120,7 @@ describe('E10c-3 the write-once container', () => {
       Response.json({ access_token: 7 }),
       "the identity endpoint's answer holds no token",
     ],
+    ['answers with no JSON', new Response('<html>busy</html>'), "the identity endpoint's answer holds no token"],
   ])('writes nothing when the identity endpoint %s', async (_what, answer, said) => {
     const { calls, store } = azure(answer);
 

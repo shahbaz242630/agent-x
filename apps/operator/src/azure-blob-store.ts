@@ -33,8 +33,12 @@ const BLOB_API_VERSION = '2024-11-04';
 /** How long one call may take: a file of 10,000 events is about 20 MB. */
 const CALL_TIMEOUT_MS = 120_000;
 
-/** Azure's own code for a write refused because the blob is there already. */
-const ALREADY_THERE = 'BlobAlreadyExists';
+/**
+ * Azure's own answers to a write refused because the blob is there already:
+ * 409 BlobAlreadyExists, as the service answers `If-None-Match: *` on Put
+ * Blob; 412 ConditionNotMet, as its page on conditions describes it.
+ */
+const ALREADY_THERE: ReadonlySet<string> = new Set(['409 BlobAlreadyExists', '412 ConditionNotMet']);
 
 export interface AzureBlobSettings {
   readonly url: string;
@@ -93,7 +97,8 @@ export function azureBlobStore({
       await response.body?.cancel();
       throw new EvidenceStoreFailed(`the identity endpoint answered ${String(response.status)}`);
     }
-    const found = tokenIn(await response.json());
+    // An answer that isn't JSON is one without a token: the parser's error would quote it.
+    const found = tokenIn(await response.json().catch(() => undefined));
     if (found === undefined) throw new EvidenceStoreFailed("the identity endpoint's answer holds no token");
     return found;
   };
@@ -106,6 +111,7 @@ export function azureBlobStore({
         headers: {
           authorization: `Bearer ${bearer}`,
           'x-ms-version': BLOB_API_VERSION,
+          'x-ms-date': new Date().toUTCString(),
           'x-ms-blob-type': 'BlockBlob',
           'if-none-match': '*',
           'content-type': 'application/x-ndjson',
@@ -119,7 +125,7 @@ export function azureBlobStore({
       await response.body?.cancel();
       if (response.status === 201) return 'written';
       const code = errorCodeOf(response);
-      if (response.status === 409 && code === ALREADY_THERE) return 'there_already';
+      if (ALREADY_THERE.has(`${String(response.status)} ${code}`)) return 'there_already';
       throw new EvidenceStoreFailed(`the blob service answered ${String(response.status)} (${code})`);
     },
   };
