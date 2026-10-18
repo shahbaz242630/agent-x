@@ -15,6 +15,8 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { type OperatorProcess, runOperator, USAGE } from './main.ts';
 import {
+  AUDIT_EXPORT_USAGE,
+  auditExportRequest,
   createOrganizationRequest,
   FIRST_ADMIN_USAGE,
   firstAdminRequest,
@@ -482,6 +484,134 @@ describe("B4-6b the first admin's request, only ever from a file", () => {
       "the invitation's ID must be a UUIDv7, in lower case",
       "the token's hash must be 64 lower-case hex digits",
     ]);
+  });
+});
+
+describe('E10c an audit export for a case, only ever from a file', () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-audit-export-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const FROM = '2026-10-01T00:00:00Z';
+  const TO = '2026-11-01T00:00:00Z';
+  const CASE = 'DSP-2026/0417';
+  const EXPORTING = { ...ENV, AGENTX_EVIDENCE_DIR: folder };
+  const asked = (overrides: Partial<Record<'org' | 'from' | 'to' | 'reason' | 'id', string>> = {}) =>
+    requestFile(
+      auditExportRequest(
+        overrides.org ?? NEW_ID,
+        overrides.from ?? FROM,
+        overrides.to ?? TO,
+        overrides.reason ?? CASE,
+        overrides.id ?? NEW_ID,
+      ),
+    );
+
+  it('reads a well-formed request, then connects, never repeating the case reference', async () => {
+    const { events, line, text } = await run(['--request', asked()], EXPORTING);
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: 'audit-export' });
+    expect(text).not.toContain(CASE);
+  });
+
+  it('refuses to connect with no store set for the file', async () => {
+    const { events, line } = await run(['--request', asked()]);
+
+    expect(events).toEqual(['operator.starting', 'operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      'no store for an audit export is set: AGENTX_EVIDENCE_DIR, in development and test',
+    ]);
+  });
+
+  it('refuses it typed', async () => {
+    const { events, line, text } = await run(
+      JSON.parse(auditExportRequest(NEW_ID, FROM, TO, CASE, NEW_ID)) as string[],
+      EXPORTING,
+    );
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `audit-export runs only from a request file: ${AUDIT_EXPORT_USAGE}`,
+    ]);
+    expect(text).not.toContain(CASE);
+  });
+
+  it.each([
+    ['a word missing', JSON.stringify(['audit-export', '--org', NEW_ID, '--from', FROM, '--to', TO, '--reason', CASE])],
+    [
+      'a word more',
+      JSON.stringify([...(JSON.parse(auditExportRequest(NEW_ID, FROM, TO, CASE, NEW_ID)) as string[]), 'x']),
+    ],
+    [
+      'a flag misnamed',
+      JSON.stringify(['audit-export', '--org', NEW_ID, '--from', FROM, '--to', TO, '--case', CASE, '--id', NEW_ID]),
+    ],
+  ])('refuses %s, naming the shape', async (_what, contents) => {
+    const { events, line, text } = await run(['--request', requestFile(contents)], EXPORTING);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `the request file holds ${AUDIT_EXPORT_USAGE} as a JSON list, and nothing else`,
+    ]);
+    expect(text).not.toContain(CASE);
+  });
+
+  it('names each ID, time and the case reference that isn’t one, never repeating the reference', async () => {
+    const reason = 'a note about the case';
+    const { line, text } = await run(
+      ['--request', asked({ org: 'not-an-id', id: NEW_ID.toUpperCase(), from: '2026-10-01', reason })],
+      EXPORTING,
+    );
+
+    expect(line('operator.refused')?.problems).toEqual([
+      "the organisation's ID must be a UUIDv7, in lower case",
+      "the export's ID must be a UUIDv7, in lower case",
+      '--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z',
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+    ]);
+    expect(text).not.toContain(reason);
+  });
+
+  it.each([
+    ['a day that isn’t one', { from: '2026-02-30T00:00:00Z' }, '--from and --to must each be a UTC time'],
+    ['a time with an offset', { to: '2026-11-01T04:00:00+04:00' }, '--from and --to must each be a UTC time'],
+    ['a range that ends where it starts', { to: FROM }, 'the range starts before it ends, 366 days at most'],
+    ['a range that ends first', { from: TO, to: FROM }, 'the range starts before it ends, 366 days at most'],
+    [
+      'a range a millisecond past 366 days',
+      { from: '2025-01-01T00:00:00Z', to: '2026-01-02T00:00:00.001Z' },
+      'the range starts before it ends, 366 days at most',
+    ],
+  ])('refuses %s', async (_what, overrides, problem) => {
+    const { line } = await run(['--request', asked(overrides)], EXPORTING);
+
+    expect(line('operator.refused')?.problems).toEqual([expect.stringContaining(problem)]);
+  });
+
+  it.each([
+    ['2 characters', 'AB', false],
+    ['3 characters', 'ABC', true],
+    ['64 characters', `A${'b'.repeat(63)}`, true],
+    ['65 characters', `A${'b'.repeat(64)}`, false],
+    ['a space', 'DSP 2026', false],
+    ['a mark first', '-DSP-2026', false],
+    ['a letter beyond ASCII', 'DSP-2026-é', false],
+    ['every mark allowed', 'a.b_c/d-e', true],
+  ])('takes a case reference of %s only as the rule says', async (_what, reason, taken) => {
+    const { events } = await run(['--request', asked({ reason })], EXPORTING);
+
+    expect(events.includes('operator.refused')).toBe(!taken);
+  });
+
+  it('takes a range of exactly 366 days, to the millisecond', async () => {
+    const { events } = await run(
+      ['--request', asked({ from: '2025-01-01T00:00:00.000Z', to: '2026-01-02T00:00:00.000Z' })],
+      EXPORTING,
+    );
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
   });
 });
 

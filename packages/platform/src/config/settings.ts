@@ -273,6 +273,9 @@ const SETTINGS = {
   AGENTX_DB_HOST: { schema: databaseHost },
   // The restore drill's copy of the database (S78): the operator's restore check reads it, read-only, beside the live one.
   AGENTX_DB_DRILL_HOST: { schema: databaseHost.optional() },
+  // Where the operator's audit export for a case writes its file in development and test (Phase 3 E10c): a local folder,
+  // each file made once. Deployed, the write-once container in the UAE (ADR-005 §6, E10c-3).
+  AGENTX_EVIDENCE_DIR: { schema: mountedFolder.optional() },
   AGENTX_DB_PORT: { schema: wholeNumber({ min: 1, max: 65_535 }), default: '5432' },
   AGENTX_DB_NAME: { schema: identifier, default: 'agentx' },
   AGENTX_DB_TLS: { schema: tlsMode, default: 'verify-full' },
@@ -401,6 +404,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_KEYS_CURRENT',
       ...LOCATION,
       'AGENTX_DB_DRILL_HOST',
+      'AGENTX_EVIDENCE_DIR',
       'AGENTX_DB_USER',
       'AGENTX_DB_PASSWORD',
       'AGENTX_DB_PASSWORD_FILE',

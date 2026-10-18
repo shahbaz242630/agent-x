@@ -9,7 +9,10 @@
 // invite-first-admin.ts), only ever from a file: the token's hash is made
 // where the link is shown, and the address is never typed on a command line.
 // Or ask for the restore drill's check (S78, restore-check.ts): read-only,
-// against the drill's copy (AGENTX_DB_DRILL_HOST) and the live server.
+// against the drill's copy (AGENTX_DB_DRILL_HOST) and the live server. Or
+// export an organisation's audit log for a case (Phase 3 E10c,
+// audit-export.ts): only from a file, its case reference never logged, the
+// file to the evidence store alone.
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -55,18 +58,26 @@ import {
   type Output,
 } from '@agentx/platform/observability';
 
+import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
+import { folderStore } from './evidence-store.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
 import {
+  AUDIT_EXPORT_USAGE,
+  CASE_REFERENCE,
   FIRST_ADMIN_USAGE,
   NO_REQUEST_PROBLEM,
   REQUEST_LIMIT_BYTES,
+  REQUEST_TIME,
   REQUEST_USAGE,
   RESTORE_CHECK,
   TOKEN_HASH_HEX,
   UUID_V7,
 } from './request.ts';
 import { checkRestoredCopy } from './restore-check.ts';
+
+/** Every table the commands reach. */
+type CommandTables = FirstAdminTables & AuditExportTables;
 
 const SERVICE = 'operator';
 
@@ -115,6 +126,16 @@ type Request =
       /** The invitation's ID. */
       readonly id: string;
       readonly tokenHash: Buffer;
+    }
+  | {
+      readonly command: 'audit-export';
+      readonly orgId: string;
+      readonly from: Date;
+      readonly to: Date;
+      /** Sealed on both chains; never logged, nor repeated in a problem. */
+      readonly caseRef: string;
+      /** The export's ID: its record's on the organisation's chain. */
+      readonly id: string;
     }
   | { readonly command: typeof RESTORE_CHECK };
 
@@ -190,6 +211,7 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
 /** The commands read by a shape of their own, by their first word: create-organization is the rest. */
 const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boolean) => Request | Problems> = new Map([
   ['invite-first-admin', firstAdminRequest],
+  ['audit-export', auditExportAsked],
   [RESTORE_CHECK, restoreCheckAsked],
 ]);
 
@@ -262,6 +284,53 @@ function firstAdminRequest(words: readonly string[], fromFile: boolean): Request
   };
 }
 
+/** The longest range one export covers (decision 24: 12 months, a leap year's included), as an admin's download. */
+const MOST_EXPORT_DAYS = 366;
+const DAY_MS = 86_400_000;
+
+/** A request file's time, or undefined for one that isn't REQUEST_TIME or isn't a real moment (2026-02-30). */
+function requestTime(text: string | undefined): Date | undefined {
+  if (text === undefined || !REQUEST_TIME.test(text)) return undefined;
+  const at = new Date(text);
+  return at.toISOString().replace('.000Z', 'Z') === text.replace('.000Z', 'Z') ? at : undefined;
+}
+
+/**
+ * The audit export a request file asks for (Phase 3 E10c), or the problems;
+ * never typed. The case reference is repeated in no problem.
+ */
+function auditExportAsked(words: readonly string[], fromFile: boolean): Request | Problems {
+  const [, orgFlag, orgId, fromFlag, fromText, toFlag, toText, reasonFlag, caseRef, idFlag, id, ...more] = words;
+  if (!fromFile) return problem(`audit-export runs only from a request file: ${AUDIT_EXPORT_USAGE}`);
+  const shaped =
+    orgFlag === '--org' &&
+    fromFlag === '--from' &&
+    toFlag === '--to' &&
+    reasonFlag === '--reason' &&
+    idFlag === '--id' &&
+    id !== undefined &&
+    more.length === 0;
+  if (!shaped) return problem(`the request file holds ${AUDIT_EXPORT_USAGE} as a JSON list, and nothing else`);
+  const from = requestTime(fromText);
+  const to = requestTime(toText);
+  const span = from !== undefined && to !== undefined ? to.getTime() - from.getTime() : undefined;
+  const problems = [
+    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
+    ...(UUID_V7.test(id) ? [] : ["the export's ID must be a UUIDv7, in lower case"]),
+    ...(from !== undefined && to !== undefined
+      ? []
+      : ['--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z']),
+    ...(span === undefined || (span > 0 && span <= MOST_EXPORT_DAYS * DAY_MS)
+      ? []
+      : [`the range starts before it ends, ${String(MOST_EXPORT_DAYS)} days at most`]),
+    ...(CASE_REFERENCE.test(String(caseRef))
+      ? []
+      : ['the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
+  ];
+  if (problems.length > 0 || from === undefined || to === undefined) return { problems };
+  return { command: 'audit-export', orgId: String(orgId), from, to, caseRef: String(caseRef), id };
+}
+
 /**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
@@ -287,8 +356,8 @@ async function connect(
   config: OperatorConfig,
   logger: Logger,
   to?: { readonly host: string; readonly readOnly: boolean },
-): Promise<Database<FirstAdminTables> | undefined> {
-  const database = createDatabase<FirstAdminTables>(
+): Promise<Database<CommandTables> | undefined> {
+  const database = createDatabase<CommandTables>(
     { ...config.db, ...to, maxConnections: 1, applicationName: APPLICATION_NAME },
     logger,
   );
@@ -322,9 +391,16 @@ async function run(
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
+  if (request.command === 'audit-export' && config.evidence.directory === null) {
+    logger.error('operator.refused', {
+      problems: ['no store for an audit export is set: AGENTX_EVIDENCE_DIR, in development and test'],
+    });
+    return 1;
+  }
   const database = await connect(config, logger);
   if (database === undefined) return 1;
   if (request.command === 'invite-first-admin') return inviteFirst(config, keys, request, database, logger);
+  if (request.command === 'audit-export') return auditExport(config, keys, request, database, logger);
   // The request file's, or made here, by the server: known before the work, so a failure can name it.
   const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
@@ -396,6 +472,28 @@ async function inviteFirst(
     }
     log.error('operator.failed', { command: request.command, invitationId, err: error });
     return 1;
+  } finally {
+    await database.destroy();
+  }
+}
+
+/** Exports an organisation's audit log for a case (Phase 3 E10c): the exit code. */
+async function auditExport(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Extract<Request, { command: 'audit-export' }>,
+  database: Database<CommandTables>,
+  logger: Logger,
+): Promise<number> {
+  try {
+    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    return await exportAuditLog(
+      database,
+      { keys, ids: uuidV7Ids, logger },
+      // Checked before the run connected.
+      folderStore(String(config.evidence.directory)),
+      { ...request, exportId: request.id, release: config.release, run: config.run },
+    );
   } finally {
     await database.destroy();
   }

@@ -4,7 +4,7 @@
 // walls, and a failure anywhere leaves nothing behind. What it refuses before
 // it connects is main.test.ts.
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -29,7 +29,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
-import { firstAdminRequest, restoreCheckRequest } from './request.ts';
+import { auditExportRequest, firstAdminRequest, restoreCheckRequest } from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({ create: undefined as Error | undefined, readOnly: [] as boolean[] }));
@@ -580,6 +580,42 @@ describe(`B4-6b the operator invites an organisation's first admin (Postgres ${s
     expect(done.line('operator.refused')).toMatchObject({ problems: ["the organisation's records can't be verified"] });
     const rows = await database.as('backup').query('select 1 from identity.invitations where id = $1', [asked.id]);
     expect(rows).toEqual([]);
+  });
+});
+
+describe(`E10c the operator exports an organisation's audit log for a case, as the job runs it (Postgres ${server.version})`, () => {
+  it('writes the file to the evidence store from a request file, checking the schema first, never logging the case', async () => {
+    const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-export-'));
+    try {
+      const orgId = uuidV7Ids.next();
+      const created = path.join(folder, 'create-request');
+      writeFileSync(created, JSON.stringify(['create-organization', '--name', NAME, '--id', orgId]));
+      expect((await run(['--request', created])).code).toBe(0);
+      const exportId = uuidV7Ids.next();
+      const asked = path.join(folder, 'export-request');
+      const CASE = 'DSP-2026/0417';
+      // A day either side of now: a range is 366 days at most.
+      const around = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
+      writeFileSync(asked, auditExportRequest(orgId, around(-1), around(1), CASE, exportId));
+      const store = path.join(folder, 'evidence');
+
+      const { code, events, line, text } = await run(
+        ['--request', asked],
+        envFor('app', { AGENTX_EVIDENCE_DIR: store }),
+      );
+
+      expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.audit_exported']);
+      expect(code).toBe(0);
+      expect(line('operator.audit_exported')).toMatchObject({ orgId, exportId, events: 2, release: 'r-operator' });
+      expect(
+        readFileSync(path.join(store, orgId, `${exportId}.ndjson`), 'utf8')
+          .trimEnd()
+          .split(/\n/),
+      ).toHaveLength(2);
+      expect(text).not.toContain(CASE);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
   });
 });
 
