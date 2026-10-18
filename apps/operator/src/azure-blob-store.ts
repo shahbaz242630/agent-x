@@ -37,8 +37,8 @@ const CALL_TIMEOUT_MS = 120_000;
 /**
  * Azure's own answers to a write refused because the blob is there already:
  * 403 UnauthorizedBlobOverwrite, as staging answered a second write of one
- * export (S125: the writer role holds `blobs/add/action` alone, so the
- * service refuses the overwrite before it weighs `If-None-Match`); 409
+ * export (S125: the writer role holds `blobs/add/action` alone, which may
+ * add a blob but never write over one); 409
  * BlobAlreadyExists, as it answers `If-None-Match: *` for an identity that
  * may write; 412 ConditionNotMet, as its page on conditions describes it.
  * Only these codes: any other 403 is a refusal of the identity, a failure.
