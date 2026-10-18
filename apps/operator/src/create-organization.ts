@@ -28,7 +28,7 @@ import type { Database } from '@agentx/platform/db';
 export type OperatorTables = OrganizationsTables & DirectoryTables & AuditTables & PlatformControlsTables;
 
 /** Who acts, on both chains: the operator's command, by its process's name. */
-const OPERATOR = Object.freeze({ type: 'system', id: 'operator' } as const);
+export const OPERATOR = Object.freeze({ type: 'system', id: 'operator' } as const);
 
 export interface CreatedOrganization {
   readonly orgId: string;

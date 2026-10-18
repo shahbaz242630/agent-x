@@ -234,6 +234,9 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
     expect(second.code).toBe(0);
     expect(second.line('operator.audit_exported')).toMatchObject({ recordedBefore: true, write: 'written' });
     expect(third.line('operator.audit_exported')).toMatchObject({ recordedBefore: true, write: 'there_already' });
+    // No hash of a file this run didn't write.
+    expect(third.line('operator.audit_exported')).not.toHaveProperty('sha256');
+    expect(third.line('operator.audit_exported')).not.toHaveProperty('bytes');
     expect(await eventsOf(orgId)).toEqual(recorded);
     expect(await noticesOf(orgId)).toHaveLength(1);
     expect(await platformExportsOf(orgId)).toHaveLength(1);
@@ -269,6 +272,20 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
     expect(code).toBe(1);
     expect(line('operator.refused')?.problems).toEqual(['the export ID names another record: write a new request']);
     expect(await eventsOf(orgId)).toHaveLength(2);
+  });
+
+  it('refuses an export ID another organisation’s export has, recording and telling nothing', async () => {
+    const first = requestFor(await organization());
+    await exported(first);
+    const orgId = await organization();
+
+    const { code, line } = await exported({ ...first, orgId });
+
+    expect(code).toBe(1);
+    expect(line('operator.refused')?.problems).toEqual(['the export ID names another record: write a new request']);
+    expect(await eventsOf(orgId)).toHaveLength(2);
+    expect(await noticesOf(orgId)).toEqual([]);
+    expect(await platformExportsOf(orgId)).toEqual([]);
   });
 
   it('refuses a range past the most events one export holds, recording nothing, and takes one at it', async () => {

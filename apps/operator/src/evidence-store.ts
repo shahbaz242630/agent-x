@@ -1,8 +1,11 @@
 // Where the operator's audit export for a case puts its file (Phase 3 E10c,
 // ADR-005 §6): written once, never changed, never to the run's log. Deployed,
 // the write-once container in the UAE (E10c-3); in development and test, a
-// local folder standing in for it, each file made once (`wx`).
-import { mkdir, writeFile } from 'node:fs/promises';
+// local folder standing in for it: each file written whole under a name of
+// its own first, then linked to its name, which refuses one there already,
+// so a run stopped half-way never leaves half a file under the name.
+import { randomUUID } from 'node:crypto';
+import { link, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 /** How a write went: the file written now, or one of its name there already (an earlier run's, its answer lost). */
@@ -22,13 +25,17 @@ export function folderStore(directory: string): EvidenceStore {
   return {
     async put(name, content) {
       const path = join(directory, name);
+      const whole = `${path}.${randomUUID()}.part`;
       await mkdir(dirname(path), { recursive: true });
       try {
-        await writeFile(path, content, { flag: 'wx' });
+        await writeFile(whole, content, { flag: 'wx' });
+        await link(whole, path);
         return 'written';
       } catch (error) {
         if (fileSystemError(error) && error.code === 'EEXIST') return 'there_already';
         throw error;
+      } finally {
+        await rm(whole, { force: true });
       }
     },
   };

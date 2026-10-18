@@ -17,13 +17,15 @@
 //    lines, each actor named from what Agent X keeps (decision 27). One that
 //    can't be believed holds the organisation, and no file is written.
 // 3. Then the store, once (evidence-store.ts): never the run's log, which
-//    names the export, the counts and the file's SHA-256 alone, never the case
+//    names the export, the counts and the written file's SHA-256 alone, never the case
 //    reference or an event.
 //
 // The export's ID is made where the request was written, so a request run
 // again finds its record: the same request (case, range) writes the file
 // that wasn't, to the same seq, recording and telling nothing again; any
-// other is refused. The record marks the read authorised, not that the file
+// other is refused, in this organisation or another (the platform chain names
+// every export). A file found there already is left as it is: the run says
+// so, and names no hash of what it rebuilt. The record marks the read authorised, not that the file
 // was written: a run that failed after it says so, and is run again.
 import { createHash } from 'node:crypto';
 
@@ -34,31 +36,30 @@ import {
   type SignedStatesServices,
   withSignedStates,
 } from '@agentx/core/modules/audit';
-import { createActorNamer, heldLogPage, type LogReadTables, ndjsonLine } from '@agentx/core/modules/evidence';
+import {
+  AUDIT_LOG_EXPORTED,
+  createActorNamer,
+  EXPORT_BATCH,
+  heldLogPage,
+  type LogReadTables,
+  MOST_EXPORTED_EVENTS,
+  ndjsonLine,
+} from '@agentx/core/modules/evidence';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
-import { createPlatformChain } from '@agentx/core/modules/platform-controls';
+import { createPlatformChain, platformEventWith } from '@agentx/core/modules/platform-controls';
 import { type IdGenerator, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
-import type { OperatorTables } from './create-organization.ts';
+import { OPERATOR, type OperatorTables } from './create-organization.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 
 /** Every table the export reaches: both chains, the names of the log's actors, and the admins' notice. */
 export type AuditExportTables = OperatorTables & LogReadTables & NotificationsTables;
 
-/** Who acts, on both chains: the operator's command. */
-const OPERATOR = Object.freeze({ type: 'system', id: 'operator' } as const);
-
-/** The action an export records on the organisation's chain, as an admin's own download does. */
-const AUDIT_LOG_EXPORTED = 'audit_log.exported';
-
-/** The most events one export holds, as an admin's download (partner, S121): a larger case is exported in parts. */
-const MOST_EXPORTED_EVENTS = 10_000;
-
-/** How many events one read of the file takes. */
-const EXPORT_BATCH = 500;
+/** The platform's own record of an export, naming the organisation and the export. */
+const PLATFORM_EXPORTED = 'operator.audit_log_exported';
 
 export interface AuditExportRequest {
   readonly orgId: string;
@@ -72,16 +73,19 @@ export interface AuditExportRequest {
   readonly run: string | null;
 }
 
-/** Why the export can't be made: each reason, never the case reference. */
+/** Why the export can't be made, never naming the case reference. */
 class AuditExportRefused extends Error {
   readonly problems: readonly string[];
 
-  constructor(problems: readonly string[]) {
-    super(`The audit export refused: ${problems.join('; ')}`);
+  constructor(problem: string) {
+    super(`The audit export refused: ${problem}`);
     this.name = 'AuditExportRefused';
-    this.problems = problems;
+    this.problems = [problem];
   }
 }
+
+/** Refused for an export ID that names any other record or export. */
+const ANOTHER_RECORD = 'the export ID names another record: write a new request';
 
 /** The export as recorded: how many events, the newest one's seq, and whether an earlier run recorded it. */
 interface Recorded {
@@ -114,7 +118,7 @@ function recordedBefore(found: ReadEvent, request: AuditExportRequest): Recorded
     details.caseRef === request.caseRef &&
     details.from === request.from.toISOString() &&
     details.to === request.to.toISOString();
-  if (!same) throw new AuditExportRefused(['the export ID names another record: write a new request']);
+  if (!same) throw new AuditExportRefused(ANOTHER_RECORD);
   const { events, upToSeq } = details;
   return {
     events: Number(events),
@@ -136,18 +140,20 @@ function record(
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   return withSignedStates(database, orgId, services, async (tx, states) => {
     const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
-    if (organization.outcome === 'missing') throw new AuditExportRefused(['no organisation has this ID']);
+    if (organization.outcome === 'missing') throw new AuditExportRefused('no organisation has this ID');
     if (organization.outcome === 'tampered') {
-      throw new AuditExportRefused(["the organisation's records can't be verified"]);
+      throw new AuditExportRefused("the organisation's records can't be verified");
     }
     const found = await trail.recordedEvent(tx, orgId, { eventId: exportId });
-    if (found.kind === 'broken') throw new AuditExportRefused(["the organisation's audit log can't be verified"]);
+    if (found.kind === 'broken') throw new AuditExportRefused("the organisation's audit log can't be verified");
     if (found.kind === 'recorded') return recordedBefore(found, request);
+    // Another organisation's export of this ID: one export ID names one export.
+    if (await platformEventWith(tx, PLATFORM_EXPORTED, { exportId })) throw new AuditExportRefused(ANOTHER_RECORD);
     const range = await eventsInRange(tx, orgId, { from, to, actions: undefined });
     if (range.events > mostEvents) {
-      throw new AuditExportRefused([
+      throw new AuditExportRefused(
         `the range holds more than ${String(mostEvents)} events: export it in parts, each its own request`,
-      ]);
+      );
     }
     const details = detailsOf(request, range.events, range.upToSeq);
     await trail.record(tx, orgId, {
@@ -161,7 +167,7 @@ function record(
     ]);
     await platform.record(tx, {
       actor: OPERATOR,
-      action: 'operator.audit_log_exported',
+      action: PLATFORM_EXPORTED,
       details: { orgId, exportId, caseRef, from: details.from, to: details.to, events: range.events, release, run },
     });
     return { events: range.events, upToSeq: range.upToSeq, recordedBefore: false };
@@ -186,7 +192,7 @@ async function fileOf(
       heldLogPage(tx, states, services.keys, orgId, { from, to, beforeSeq: before, limit: EXPORT_BATCH }),
     );
     if (read === 'tampered') {
-      throw new AuditExportRefused(["an event in the range, or an agent it names, can't be verified"]);
+      throw new AuditExportRefused("an event in the range, or an agent it names, can't be verified");
     }
     const names = await namer.namesOf(read.events, read.held);
     lines.push(...read.events.map((event) => ndjsonLine(event, names)));
@@ -227,13 +233,10 @@ export async function exportAuditLog(
     const content = await fileOf(database, services, request, made.upToSeq, log);
     const file = `${request.orgId}/${request.exportId}.ndjson`;
     const write = await store.put(file, content);
-    log.info('operator.audit_exported', {
-      ...recorded,
-      file,
-      write,
-      bytes: content.length,
-      sha256: createHash('sha256').update(content).digest('hex'),
-    });
+    // The hash of what this run wrote; a file there already is an earlier run's, which this one didn't write.
+    const written =
+      write === 'written' ? { bytes: content.length, sha256: createHash('sha256').update(content).digest('hex') } : {};
+    log.info('operator.audit_exported', { ...recorded, file, write, ...written });
     return 0;
   } catch (error) {
     log.error(

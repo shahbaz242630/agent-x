@@ -5,6 +5,7 @@
 // the same file; the cap, the hourly budget, a member not an admin; and an
 // event that can't be believed refusing the file, the organisation held.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import { AUDIT_LOG_EXPORTED } from '@agentx/core/modules/evidence';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
 import {
@@ -20,7 +21,6 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
-  AUDIT_LOG_EXPORTED,
   type AuditLogExports,
   createAuditLogExports,
   EXPORT_OPERATION,

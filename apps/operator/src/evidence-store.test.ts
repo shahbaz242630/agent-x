@@ -1,7 +1,7 @@
 // Phase 3 E10c: the local folder standing in for the write-once container:
 // each file made once, a second write of its name answered, never written
 // over, and any other failure of the disk passed on.
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -39,6 +39,15 @@ describe('E10c the local evidence store', () => {
 
     expect([first, second]).toEqual(['written', 'there_already']);
     expect(readFileSync(path.join(folder, 'org-1', 'export-1.ndjson'), 'utf8')).toBe('first\n');
+    // Each write's own whole copy is gone once it is linked, or refused.
+    expect(readdirSync(path.join(folder, 'org-1'))).toEqual(['export-1.ndjson']);
+  });
+
+  it('leaves nothing under the name when the write stops half-way', async () => {
+    faults.write = Object.assign(new Error('the run was stopped'), { code: 'EINTR' });
+
+    await expect(folderStore(folder).put('org-2/export-1.ndjson', Buffer.from('x'))).rejects.toThrow();
+    expect(readdirSync(path.join(folder, 'org-2'))).toEqual([]);
   });
 
   it('passes on any other failure of the disk', async () => {

@@ -37,9 +37,10 @@
 //    catch: the failure names the organisation's ID, to look for first)
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
+import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
-import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { DAY_MS, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
   assertRuntimeRole,
@@ -60,7 +61,7 @@ import {
 
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
-import { folderStore } from './evidence-store.ts';
+import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
 import {
   AUDIT_EXPORT_USAGE,
@@ -284,15 +285,16 @@ function firstAdminRequest(words: readonly string[], fromFile: boolean): Request
   };
 }
 
-/** The longest range one export covers (decision 24: 12 months, a leap year's included), as an admin's download. */
-const MOST_EXPORT_DAYS = 366;
-const DAY_MS = 86_400_000;
-
-/** A request file's time, or undefined for one that isn't REQUEST_TIME or isn't a real moment (2026-02-30). */
+/**
+ * A request file's time, or undefined for one that isn't REQUEST_TIME or isn't
+ * a real moment: no date at all (month 13, hour 25), or one a date rolls over
+ * (30 February). Without its Z, the text starts the moment's own ISO form,
+ * to the second or the millisecond.
+ */
 function requestTime(text: string | undefined): Date | undefined {
   if (text === undefined || !REQUEST_TIME.test(text)) return undefined;
   const at = new Date(text);
-  return at.toISOString().replace('.000Z', 'Z') === text.replace('.000Z', 'Z') ? at : undefined;
+  return !Number.isNaN(at.getTime()) && at.toISOString().startsWith(text.slice(0, -1)) ? at : undefined;
 }
 
 /**
@@ -313,16 +315,17 @@ function auditExportAsked(words: readonly string[], fromFile: boolean): Request 
   if (!shaped) return problem(`the request file holds ${AUDIT_EXPORT_USAGE} as a JSON list, and nothing else`);
   const from = requestTime(fromText);
   const to = requestTime(toText);
-  const span = from !== undefined && to !== undefined ? to.getTime() - from.getTime() : undefined;
+  const span = (to?.getTime() ?? Number.NaN) - (from?.getTime() ?? Number.NaN);
   const problems = [
     ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
     ...(UUID_V7.test(id) ? [] : ["the export's ID must be a UUIDv7, in lower case"]),
-    ...(from !== undefined && to !== undefined
-      ? []
-      : ['--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z']),
-    ...(span === undefined || (span > 0 && span <= MOST_EXPORT_DAYS * DAY_MS)
-      ? []
-      : [`the range starts before it ends, ${String(MOST_EXPORT_DAYS)} days at most`]),
+    ...(from === undefined || to === undefined
+      ? ['--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z']
+      : []),
+    // As an admin's download: the same days, the same rule (audit-log-exports.ts).
+    ...(span <= 0 || span > MOST_EXPORT_DAYS * DAY_MS
+      ? [`the range starts before it ends, ${String(MOST_EXPORT_DAYS)} days at most`]
+      : []),
     ...(CASE_REFERENCE.test(String(caseRef))
       ? []
       : ['the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
@@ -391,16 +394,21 @@ async function run(
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
-  if (request.command === 'audit-export' && config.evidence.directory === null) {
-    logger.error('operator.refused', {
-      problems: ['no store for an audit export is set: AGENTX_EVIDENCE_DIR, in development and test'],
-    });
-    return 1;
+  if (request.command === 'audit-export') {
+    const directory = config.evidence.directory;
+    if (directory === null) {
+      logger.error('operator.refused', {
+        problems: ['no store for an audit export is set: AGENTX_EVIDENCE_DIR, in development and test'],
+      });
+      return 1;
+    }
+    const exporting = await connect(config, logger);
+    if (exporting === undefined) return 1;
+    return auditExport(config, keys, request, folderStore(directory), exporting, logger);
   }
   const database = await connect(config, logger);
   if (database === undefined) return 1;
   if (request.command === 'invite-first-admin') return inviteFirst(config, keys, request, database, logger);
-  if (request.command === 'audit-export') return auditExport(config, keys, request, database, logger);
   // The request file's, or made here, by the server: known before the work, so a failure can name it.
   const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
@@ -482,18 +490,18 @@ async function auditExport(
   config: OperatorConfig,
   keys: KeyProvider,
   request: Extract<Request, { command: 'audit-export' }>,
+  store: EvidenceStore,
   database: Database<CommandTables>,
   logger: Logger,
 ): Promise<number> {
   try {
     if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
-    return await exportAuditLog(
-      database,
-      { keys, ids: uuidV7Ids, logger },
-      // Checked before the run connected.
-      folderStore(String(config.evidence.directory)),
-      { ...request, exportId: request.id, release: config.release, run: config.run },
-    );
+    return await exportAuditLog(database, { keys, ids: uuidV7Ids, logger }, store, {
+      ...request,
+      exportId: request.id,
+      release: config.release,
+      run: config.run,
+    });
   } finally {
     await database.destroy();
   }

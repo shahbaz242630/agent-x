@@ -576,6 +576,9 @@ describe('E10c an audit export for a case, only ever from a file', () => {
 
   it.each([
     ['a day that isn’t one', { from: '2026-02-30T00:00:00Z' }, '--from and --to must each be a UTC time'],
+    ['a month that isn’t one', { from: '2026-13-01T00:00:00Z' }, '--from and --to must each be a UTC time'],
+    ['an hour that isn’t one', { to: '2026-11-01T25:00:00Z' }, '--from and --to must each be a UTC time'],
+    ['a minute that isn’t one', { to: '2026-11-01T00:60:00.000Z' }, '--from and --to must each be a UTC time'],
     ['a time with an offset', { to: '2026-11-01T04:00:00+04:00' }, '--from and --to must each be a UTC time'],
     ['a range that ends where it starts', { to: FROM }, 'the range starts before it ends, 366 days at most'],
     ['a range that ends first', { from: TO, to: FROM }, 'the range starts before it ends, 366 days at most'],

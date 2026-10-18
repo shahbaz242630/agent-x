@@ -29,7 +29,17 @@ import {
   eventsInRange,
   type LogEvent,
 } from '@agentx/core/modules/audit';
-import { type ActorName, createActorNamer, eventShown, factsShown, ndjsonLine } from '@agentx/core/modules/evidence';
+import {
+  type ActorName,
+  AUDIT_LOG_EXPORTED,
+  createActorNamer,
+  eventShown,
+  EXPORT_BATCH,
+  factsShown,
+  MOST_EXPORT_DAYS,
+  MOST_EXPORTED_EVENTS,
+  ndjsonLine,
+} from '@agentx/core/modules/evidence';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { actionProblems, type Clock, DAY_MS, HOUR_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, holdTransactionLock, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
@@ -48,23 +58,11 @@ import { createUseCaseWork, type Member } from './use-case-work.ts';
 
 export const EXPORT_OPERATION = 'audit-log.export';
 
-/** The action a download records about the log. */
-export const AUDIT_LOG_EXPORTED = 'audit_log.exported';
-
-/** The most events one download holds (partner, S121): a longer range is downloaded in parts. */
-const MOST_EXPORTED_EVENTS = 10_000;
-
-/** The longest range one download covers (decision 24: 12 months, a leap year's included). */
-const MOST_EXPORT_DAYS = 366;
-
 /** The most downloads one admin makes in an hour. */
 const MOST_EXPORTS_AN_HOUR = 5;
 
 /** The advisory lock an admin's downloads count their hourly budget under (ADR-006 §6, 2b). */
 export const EXPORTS_LOCK = 'audit-log-exports';
-
-/** How many events one read of the download takes. */
-const EXPORT_BATCH = 500;
 
 const EXPORT_FORMATS = ['csv', 'ndjson'] as const;
 type ExportFormat = (typeof EXPORT_FORMATS)[number];
