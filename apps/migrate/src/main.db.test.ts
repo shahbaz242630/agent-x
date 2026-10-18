@@ -87,7 +87,7 @@ describe(`the migration job (Postgres ${server.version})`, () => {
     expect(capture.lines()[0]).toEqual(
       expect.objectContaining({ service: 'migrate', event: 'migrate.starting', role: 'agentx_owner' }),
     );
-    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'migrate.done', applied: files }));
+    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'migrate.done', applied: files.length }));
 
     const ledger = await database
       .as('owner')
@@ -98,7 +98,7 @@ describe(`the migration job (Postgres ${server.version})`, () => {
   it('applies nothing the second time, and still exits 0: the database is current', async () => {
     const { code, capture } = await run(envFor(database));
     expect(code).toBe(0);
-    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'migrate.done', applied: [] }));
+    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'migrate.done', applied: 0 }));
   });
 
   it('reports a wrong login without the login, and exits 1', async () => {
