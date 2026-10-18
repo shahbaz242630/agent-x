@@ -450,6 +450,10 @@ function problemsSaid(line: Readonly<Record<string, unknown>> | undefined): stri
 const refusedFor = (refused: Readonly<Record<string, unknown>> | undefined, problem: string): boolean =>
   Array.isArray(refused?.problems) && refused.problems.includes(problem);
 
+/** Whether a refusal line is about this request's ID, read from its own field. */
+const refusedAbout = (refused: Readonly<Record<string, unknown>> | undefined, field: string, id: string): boolean =>
+  Array.isArray(refused?.problems) && refused[field] === id;
+
 /** Said when the run found no request: Azure hadn't put it in place when the run started. */
 const noRequestFound = (id: string): string =>
   `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again with --id ${id}.`;
@@ -522,7 +526,7 @@ function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], asked: 
     steps.say(noRequestFound(id));
     return 1;
   }
-  if (Array.isArray(refused?.problems) && refused[field] === id) {
+  if (refusedAbout(refused, field, id)) {
     steps.say(`The operator's command refused it, and nothing changed: ${String(problemsSaid(refused))}.`);
     return 1;
   }
@@ -654,8 +658,8 @@ function auditExportOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine
   }
   const unwritten = about('operator.export_unwritten');
   if (unwritten !== undefined) {
-    const said = problemsSaid(unwritten);
-    const why = said === undefined ? '' : ': ' + said;
+    const problems = problemsSaid(unwritten);
+    const why = problems === undefined ? '' : ': ' + problems;
     steps.say(
       `The export ${id} is recorded on both chains and the organisation's admins were told, but its file wasn't written${why}. Run the same command again with --id ${id}: it records nothing twice, and writes the file once.`,
     );
@@ -672,7 +676,7 @@ function auditExportOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine
     );
     return 1;
   }
-  if (Array.isArray(refused?.problems) && refused.exportId === id) {
+  if (refusedAbout(refused, 'exportId', id)) {
     steps.say(`The operator's command refused it, and nothing was recorded: ${String(problemsSaid(refused))}.`);
     return 1;
   }

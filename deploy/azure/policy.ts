@@ -1691,6 +1691,9 @@ function evidenceAccessProblems(
 /** How the operator's job is told where to write an audit export (apps.bicep `evidenceSettings`). */
 const EVIDENCE_SETTING_PREFIX = 'AGENTX_EVIDENCE_';
 
+/** The two settings the operator's job takes, sorted, so a sorted list of its names is compared with them whole. */
+const EVIDENCE_SETTINGS = ['AGENTX_EVIDENCE_CLIENT_ID', 'AGENTX_EVIDENCE_CONTAINER_URL'] as const;
+
 /** The store's address as apps.bicep writes it: the account, Azure's own storage suffix, then the container. */
 const EVIDENCE_URL =
   /^\[format\('https:\/\/\{0\}\.blob\.\{1\}\/\{2\}', '([^']+)', environment\(\)\.suffixes\.storage, '([^']+)'\)\]$/;
@@ -1724,17 +1727,11 @@ function evidenceSettingsProblems(
         }
         continue;
       }
-      const valueOf = (name: string): string =>
-        text(
-          at(
-            settings.find((entry) => at(entry, 'name') === name),
-            'value',
-          ),
-        );
-      const url = EVIDENCE_URL.exec(valueOf('AGENTX_EVIDENCE_CONTAINER_URL'));
-      const client = CLIENT_ID_OF.exec(valueOf('AGENTX_EVIDENCE_CLIENT_ID'));
+      const values = new Map(settings.map((entry) => [text(at(entry, 'name')), text(at(entry, 'value'))] as const));
+      const url = EVIDENCE_URL.exec(values.get('AGENTX_EVIDENCE_CONTAINER_URL') ?? '');
+      const client = CLIENT_ID_OF.exec(values.get('AGENTX_EVIDENCE_CLIENT_ID') ?? '');
       const sound =
-        names.toSorted().join() === 'AGENTX_EVIDENCE_CLIENT_ID,AGENTX_EVIDENCE_CONTAINER_URL' &&
+        names.toSorted().join() === EVIDENCE_SETTINGS.join() &&
         accounts.length === 1 &&
         url !== null &&
         url[1] === accounts[0]?.name &&
