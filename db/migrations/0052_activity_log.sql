@@ -38,7 +38,7 @@ CREATE TABLE access.requests (
   recorded_at timestamptz NOT NULL,
   actor_type text NOT NULL CHECK (actor_type IN ('user', 'agent')),
   actor_id uuid NOT NULL,
-  method text NOT NULL CHECK (method IN ('GET', 'POST', 'PUT', 'PATCH', 'DELETE')),
+  method text NOT NULL CHECK (method IN ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE')),
   route text NOT NULL CHECK (route ~ '^/[A-Za-z0-9/:_.-]{0,200}$'),
   path_ids uuid[] NOT NULL CHECK (pg_catalog.cardinality(path_ids) <= 4),
   status smallint NOT NULL CHECK (status BETWEEN 100 AND 599),
@@ -75,7 +75,7 @@ CREATE TABLE access.person_requests (
   -- The organisation the request's header named, when the person wasn't
   -- verified in it: a claim, never shown to that organisation.
   claimed_org uuid,
-  method text NOT NULL CHECK (method IN ('GET', 'POST', 'PUT', 'PATCH', 'DELETE')),
+  method text NOT NULL CHECK (method IN ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE')),
   route text NOT NULL CHECK (route ~ '^/[A-Za-z0-9/:_.-]{0,200}$'),
   path_ids uuid[] NOT NULL CHECK (pg_catalog.cardinality(path_ids) <= 4),
   status smallint NOT NULL CHECK (status BETWEEN 100 AND 599),
