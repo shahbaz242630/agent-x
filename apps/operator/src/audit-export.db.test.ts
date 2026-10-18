@@ -274,6 +274,32 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
     expect(await eventsOf(orgId)).toHaveLength(2);
   });
 
+  it.each([
+    ['another action', { type: 'system', id: 'operator' }, 'probe.noted'],
+    ['another of Agent X’s parts', { type: 'system', id: 'api' }, 'audit_log.exported'],
+  ] as const)(
+    'refuses an export ID whose record names the same case and range but %s, recording nothing',
+    async (_what, actor, action) => {
+      const orgId = await organization();
+      const request = requestFor(orgId);
+      // A record of the export's ID with every fact the export's would hold, but not the export's own.
+      await withTenant(app, orgId, (tx) =>
+        createAuditTrail({ keys, ids: { next: () => request.exportId } }).record(tx, orgId, {
+          actor,
+          action,
+          subject: { type: 'audit_log', id: orgId, version: 1 },
+          details: { caseRef: CASE, from: request.from.toISOString(), to: request.to.toISOString(), events: 2 },
+        }),
+      );
+
+      const { code, line } = await exported(request);
+
+      expect(code).toBe(1);
+      expect(line('operator.refused')?.problems).toEqual(['the export ID names another record: write a new request']);
+      expect(await noticesOf(orgId)).toEqual([]);
+    },
+  );
+
   it('refuses an export ID another organisation’s export has, recording and telling nothing', async () => {
     const first = requestFor(await organization());
     await exported(first);
