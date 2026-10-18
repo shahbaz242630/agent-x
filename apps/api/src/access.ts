@@ -386,13 +386,13 @@ export function registerAccess(
         void unauthenticated(request, reply, access);
         return;
       }
+      // Known from here, whatever comes of the checks below: refused, let through, or failed (the activity log, decision 26).
+      request.person = session;
       /** The signed-in person refused: counted as them, though from many addresses (the S68 audit). */
       const refuse = (send: () => void) => {
-        request.person = session;
         refusedAfter(counters.person, send);
       };
       if (access.includes('person')) {
-        request.person = session;
         done();
       } else if (!namesRole(access)) {
         // Agents' and operators' routes: a person is neither.
@@ -412,7 +412,6 @@ export function registerAccess(
               refuse(() => void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id));
             } else {
               const through = () => {
-                request.person = session;
                 request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
                 done();
               };

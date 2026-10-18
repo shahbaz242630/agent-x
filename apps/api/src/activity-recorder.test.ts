@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import { type ActivitySink, pathIdsOf, reasonIn } from './activity-recorder.ts';
 import type { AuditLog } from './audit-log.ts';
+import type { ServerOptions } from './server.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -46,17 +47,28 @@ const LOG: AuditLog = { page: () => Promise.resolve({ outcome: 'page', events: [
 
 afterEach(closeServers);
 
-/** A server whose activity rows land in `rows`; `failing` makes every write fail. */
+/**
+ * A server whose activity rows land in `rows`: `failing` makes every write
+ * fail, `held` keeps each write going until it settles, and any route given
+ * replaces the server's own.
+ */
 async function recording({
   role = 'admin',
   live = LIVE,
   failing = false,
-}: { readonly role?: Role; readonly live?: LiveSession; readonly failing?: boolean } = {}) {
+  held,
+  ...routes
+}: {
+  readonly role?: Role;
+  readonly live?: LiveSession;
+  readonly failing?: boolean;
+  readonly held?: Promise<void>;
+} & Partial<ServerOptions> = {}) {
   const rows: (OrganisationRequest | PersonRequest)[] = [];
-  const write = (row: OrganisationRequest | PersonRequest) => {
-    if (failing) return Promise.reject(new Error('the database is gone: 203.0.113.7'));
+  const write = async (row: OrganisationRequest | PersonRequest) => {
+    if (failing) throw new Error('the database is gone: 203.0.113.7');
+    await held;
     rows.push(row);
-    return Promise.resolve();
   };
   const sink: ActivitySink = { forOrganisation: write, forPerson: write };
   const capture = new LogCapture();
@@ -74,6 +86,7 @@ async function recording({
     logger: createLogger({ service: 'api', config, destination: capture }),
     checkAgentKey: (text) =>
       Promise.resolve(text === KEY ? { outcome: 'accepted', key: KEY_ACCEPTED } : { outcome: 'refused' }),
+    ...routes,
   });
   return { app, rows, capture };
 }
@@ -218,11 +231,75 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
   });
 
   it('waits for a row still being written as the server closes', async () => {
-    const { app, rows } = await recording();
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { app, rows } = await recording({ held });
     await app.inject(asMember(LOG_URL));
-    await app.close();
 
+    let closed = false;
+    const closing = app.close().then(() => {
+      closed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBe(false);
+    release();
+    await closing;
     expect(rows).toHaveLength(1);
+  });
+
+  it('writes a member refused in the days after a second factor was removed to their organisation', async () => {
+    const { app, rows } = await recording({ restrictedUntil: () => Promise.resolve(new Date('2099-01-01')) });
+    const reply = await app.inject(asMember(LOG_URL));
+
+    expect(reply.statusCode).toBe(403);
+    await vi.waitFor(() => {
+      expect(rows).toEqual([expect.objectContaining({ orgId: ORG, reason: 'SECOND_FACTOR_REMOVED' })]);
+    });
+  });
+
+  it('writes a request whose checks failed: the person’s when their membership couldn’t be read', async () => {
+    const { app, rows } = await recording({ findMembership: () => Promise.reject(new Error('the database is gone')) });
+    const reply = await app.inject(asMember(LOG_URL));
+
+    expect(reply.statusCode).toBe(500);
+    await vi.waitFor(() => {
+      expect(rows).toEqual([expect.objectContaining({ userId: LIVE.userId, claimedOrg: ORG, status: 500 })]);
+    });
+  });
+
+  it('writes a request whose checks failed: the organisation’s once the membership was found', async () => {
+    const { app, rows } = await recording({ restrictedUntil: () => Promise.reject(new Error('the database is gone')) });
+    const reply = await app.inject(asMember(LOG_URL));
+
+    expect(reply.statusCode).toBe(500);
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({ orgId: ORG, actor: { type: 'user', id: LIVE.userId }, status: 500 }),
+      ]);
+    });
+  });
+
+  it('writes a person’s request naming no organisation it could read as theirs, with no claim', async () => {
+    const { app, rows } = await recording();
+    const reply = await app.inject(asMember(LOG_URL, 'not-an-organisation'));
+
+    expect(reply.statusCode).toBe(400);
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({ userId: LIVE.userId, claimedOrg: undefined, reason: 'ORGANIZATION_INVALID' }),
+      ]);
+    });
+  });
+
+  it('writes a HEAD request as one', async () => {
+    const { app, rows } = await recording();
+    await app.inject({ ...asMember(LOG_URL), method: 'HEAD' });
+
+    await vi.waitFor(() => {
+      expect(rows).toEqual([expect.objectContaining({ method: 'HEAD', route: '/v1/audit-log', orgId: ORG })]);
+    });
   });
 });
 
