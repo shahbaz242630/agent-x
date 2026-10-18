@@ -13,19 +13,20 @@
 // - Agent X's own parts: a name for each.
 // - Once the login service fails, a namer stops asking it (a download's
 //   twenty batches don't each wait), and logs why, never a name.
-import { agentsNamed, type AgentsTables } from '@agentx/core/modules/agents';
-import type { AuditActor, AuditTables, LogEvent, SignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
+import type { DatabaseTransaction } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
+import type { Logger } from '@agentx/platform/observability';
+
+import { agentsNamed, type AgentsTables } from '../../agents/index.ts';
+import type { AuditActor, AuditTables, LogEvent, SignedStates } from '../../audit/index.ts';
+import type { DirectoryTables } from '../../directory/index.ts';
 import {
   type DirectoryEntry,
   type DirectoryNames,
   type IdentityTables,
   type KeptPerson,
   keptPeopleOf,
-} from '@agentx/core/modules/identity';
-import type { DatabaseTransaction } from '@agentx/platform/db';
-import type { KeyProvider } from '@agentx/platform/keys';
-import type { Logger } from '@agentx/platform/observability';
+} from '../../identity/index.ts';
 
 type NamesTx = DatabaseTransaction<IdentityTables & DirectoryTables & AuditTables & AgentsTables>;
 

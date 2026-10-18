@@ -15,12 +15,20 @@
 //   its key's version are never read out; a signed state's keyed fingerprint
 //   and its key's version are taken out of the details. The hashes stay, so
 //   an admin can see each event's link to the one before.
-// - Each actor is named beside their ID (decision 25, actor-names.ts): a
+// - Each actor is named beside their ID (decision 25, the evidence module): a
 //   person by name and email, from the login service or the copy Agent X
 //   kept; an agent by its name; Agent X's own parts by theirs.
 // Reading a page isn't itself logged (decision 24: a download is, E10b).
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import type { LogEvent, LogPageToRead, SignedStates } from '@agentx/core/modules/audit';
+import {
+  type ActorName,
+  createActorNamer,
+  eventShown,
+  factsShown,
+  heldLogPage as heldPage,
+  SHOWN_FROM,
+} from '@agentx/core/modules/evidence';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { actionProblems, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
@@ -31,7 +39,6 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
-import { type ActorName, actorsHeld, createActorNamer, nameOf, SHOWN_FROM } from './actor-names.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerRefusal } from './idempotent-writes.ts';
 import type { Refused } from './refused.ts';
@@ -42,9 +49,6 @@ export const MOST_LOG_EVENTS_A_PAGE = 100;
 
 /** The most actions one page may be filtered to. */
 export const MOST_ACTIONS_FILTERED = 20;
-
-/** The details a signed state's event carries that are the platform's seal, not the organisation's record. */
-const SEALS_NOT_SHOWN: ReadonlySet<string> = new Set(['stateFingerprint', 'stateKeyVersion']);
 
 export class AuditLogRefused extends UseCaseRefused {}
 
@@ -76,11 +80,9 @@ export async function heldLogPage(
   orgId: string,
   asked: LogPageToRead,
 ) {
-  const page = await states.logPageOf(tx, orgId, asked);
-  if (page.outcome === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-  const held = await actorsHeld(tx, states, keys, orgId, page.events);
-  if (held === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-  return { events: page.events, next: page.next, held };
+  const page = await heldPage(tx, states, keys, orgId, asked);
+  if (page === 'tampered') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+  return page;
 }
 
 export function createAuditLog({
@@ -201,25 +203,6 @@ const PAGE_SCHEMA = {
       .describe('A page of the log, each event checked whole.'),
   },
 };
-
-/** An event's facts as an organisation is shown them, page or download: the platform's own seals left out. */
-export const factsShown = (details: LogEvent['event']['details']) =>
-  Object.entries(details).filter(([name]) => !SEALS_NOT_SHOWN.has(name));
-
-/** An event's own fields as an organisation is shown them, page or download, its actor named, beside its facts in the form each needs. */
-export const eventShown = (
-  { seq, id, recordedAt, event, hash, prevHash }: LogEvent,
-  names: ReadonlyMap<string, ActorName>,
-) => ({
-  seq: seq.toString(),
-  id,
-  recordedAt: recordedAt.toISOString(),
-  actor: { ...event.actor, ...nameOf(names, event.actor) },
-  action: event.action,
-  subject: event.subject,
-  hash,
-  prevHash,
-});
 
 /** An event as the page shows it: its facts as name/value pairs, the platform's own seals left out. */
 const shownOf = (logged: LogEvent, names: ReadonlyMap<string, ActorName>) => ({

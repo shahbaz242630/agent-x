@@ -2,10 +2,11 @@
 // kept copy where it can't answer or no longer has the person, agents and
 // Agent X's own parts by their names, and a namer that stops asking a login
 // service that failed, logging why and never a name.
-import type { AuditActor, LogEvent } from '@agentx/core/modules/audit';
-import { type DirectoryNames, DirectoryUnavailable, type KeptPerson } from '@agentx/core/modules/identity';
 import { LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
+
+import type { AuditActor, LogEvent } from '../../audit/index.ts';
+import { type DirectoryNames, DirectoryUnavailable, type KeptPerson } from '../../identity/index.ts';
 
 import { type ActorsHeld, createActorNamer } from './actor-names.ts';
 

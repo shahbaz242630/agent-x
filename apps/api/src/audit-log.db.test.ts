@@ -1,7 +1,8 @@
 // Phase 3 E10a: the organisation's audit log, read by its admin, composed in
 // the API, on the real migrated schema as the app role: every event of the
 // organisation, newest first, its own alone; and an event that can't be
-// believed refusing the page, the alarm raised and the organisation held.
+// believed, or an agent it names, refusing the page, the alarm raised and the
+// organisation held.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -33,6 +34,17 @@ const { world, quiet } = shared;
 
 const pageOf = (orgId: string) =>
   log.page(orgId, { ...EVER, actions: undefined, beforeSeq: undefined, limit: MOST_LOG_EVENTS_A_PAGE }, CORRELATION);
+
+/** An event by the world's agent, so its name is on the page. */
+const actedByItsAgent = (w: { readonly org: string; readonly agent: string }) =>
+  withTenant(app, w.org, (tx) =>
+    createAuditTrail({ keys, ids }).record(tx, w.org, {
+      actor: { type: 'agent', id: w.agent },
+      action: 'probe.noted',
+      subject: { type: 'probe', id: w.org, version: 1 },
+      details: {},
+    }),
+  );
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -67,15 +79,7 @@ describe('the organisation’s audit log (E10a, decision 24)', () => {
 
   it('names each actor beside their ID: a person from the copy kept, an agent and Agent X’s parts by theirs (decision 25)', async () => {
     const w = await world();
-    const trail = createAuditTrail({ keys, ids });
-    await withTenant(app, w.org, (tx) =>
-      trail.record(tx, w.org, {
-        actor: { type: 'agent', id: w.agent },
-        action: 'probe.noted',
-        subject: { type: 'probe', id: w.org, version: 1 },
-        details: {},
-      }),
-    );
+    await actedByItsAgent(w);
     // As a sign-in keeps it (user-contacts.ts): the name bound to its person and its field.
     const name = keys.encrypt('field-encryption', Buffer.from('Sara Khan'), [
       'identity.user_contacts',
@@ -114,6 +118,22 @@ describe('the organisation’s audit log (E10a, decision 24)', () => {
     } finally {
       await owner.end();
     }
+
+    expect(await pageOf(w.org)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    const hold = await withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
+    expect(hold).toMatchObject({ outcome: 'held' });
+  });
+
+  it('refuses a page naming an agent that can’t be believed: INTEGRITY_FAILED, never a name it doesn’t hold', async () => {
+    const w = await world();
+    await actedByItsAgent(w);
+    await withTenant(app, w.org, (tx) =>
+      tx
+        .updateTable('agents.agents')
+        .set({ scopes: 'requests:read requests:write' })
+        .where('id', '=', w.agent)
+        .execute(),
+    );
 
     expect(await pageOf(w.org)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     const hold = await withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
