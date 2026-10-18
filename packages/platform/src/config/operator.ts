@@ -53,6 +53,15 @@ function runProblems(environment: Environment, run: string | undefined): string[
     : [];
 }
 
+/** The folder an audit export writes to is the local stand-in for the write-once container: deployed, it is refused. */
+function evidenceProblems(environment: Environment, directory: string | undefined): string[] {
+  return directory !== undefined && !LOCAL_ONLY.includes(environment)
+    ? [
+        `AGENTX_EVIDENCE_DIR: is allowed only in ${LOCAL_ONLY.join(' and ')}; ${environment} writes an audit export to its write-once container`,
+      ]
+    : [];
+}
+
 export interface OperatorConfig {
   readonly environment: Environment;
   readonly release: string;
@@ -77,6 +86,8 @@ export interface OperatorConfig {
   };
   /** Where the platform mounts the command's keys, and each one's current version where it isn't 1. */
   readonly keys: KeySettings;
+  /** Where an audit export for a case is written (Phase 3 E10c): a local folder, development and test alone; null where none is set. */
+  readonly evidence: { readonly directory: string | null };
 }
 
 /** Reads and checks the operator's command's settings, or throws a ConfigError listing every problem. */
@@ -92,19 +103,21 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
     keysCurrent: setting(env, 'AGENTX_KEYS_CURRENT'),
     dbHost: location.host,
     drillHost: setting(env, 'AGENTX_DB_DRILL_HOST'),
+    evidenceDirectory: setting(env, 'AGENTX_EVIDENCE_DIR'),
     dbPort: location.port,
     dbName: location.database,
     dbTls: location.tls,
     user: setting(env, 'AGENTX_DB_USER'),
     password: secretSetting(env, 'AGENTX_DB_PASSWORD'),
   };
-  const { environment, release, run, logLevel } = checks;
+  const { environment, release, run, logLevel, evidenceDirectory } = checks;
 
   const problems = [
     ...startProblems(env, 'operator', checks),
     ...(environment.ok && release.ok ? releaseProblems(environment.value, release.value) : []),
     ...(environment.ok && run.ok ? runProblems(environment.value, run.value) : []),
     ...(environment.ok && logLevel.ok ? logLevelProblems(environment.value, logLevel.value) : []),
+    ...(environment.ok && evidenceDirectory.ok ? evidenceProblems(environment.value, evidenceDirectory.value) : []),
     ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
@@ -128,5 +141,6 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
       directory: checks.keysDirectory.value,
       current: Object.freeze(checks.keysCurrent.value ?? {}),
     }),
+    evidence: Object.freeze({ directory: checks.evidenceDirectory.value ?? null }),
   });
 }

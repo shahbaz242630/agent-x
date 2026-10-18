@@ -4,7 +4,7 @@
 // walls, and a failure anywhere leaves nothing behind. What it refuses before
 // it connects is main.test.ts.
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -29,7 +29,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
-import { firstAdminRequest, restoreCheckRequest } from './request.ts';
+import { auditExportRequest, firstAdminRequest, restoreCheckRequest } from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({ create: undefined as Error | undefined, readOnly: [] as boolean[] }));
@@ -580,6 +580,73 @@ describe(`B4-6b the operator invites an organisation's first admin (Postgres ${s
     expect(done.line('operator.refused')).toMatchObject({ problems: ["the organisation's records can't be verified"] });
     const rows = await database.as('backup').query('select 1 from identity.invitations where id = $1', [asked.id]);
     expect(rows).toEqual([]);
+  });
+});
+
+describe(`E10c the operator exports an organisation's audit log for a case, as the job runs it (Postgres ${server.version})`, () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-export-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const store = path.join(folder, 'evidence');
+  const CASE = 'DSP-2026/0417';
+  /** A day either side of now: a range is 366 days at most. */
+  const around = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
+
+  /** A new organisation, made by the command. */
+  async function organization(): Promise<string> {
+    const orgId = uuidV7Ids.next();
+    const created = path.join(folder, `create-${orgId}`);
+    writeFileSync(created, JSON.stringify(['create-organization', '--name', NAME, '--id', orgId]));
+    expect((await run(['--request', created])).code).toBe(0);
+    return orgId;
+  }
+
+  /** The run of a request to export the organisation's log, as the job runs one. */
+  function exportRun(orgId: string): { exportId: string; running: ReturnType<typeof run> } {
+    const exportId = uuidV7Ids.next();
+    const asked = path.join(folder, `export-${exportId}`);
+    writeFileSync(asked, auditExportRequest(orgId, around(-1), around(1), CASE, exportId));
+    return { exportId, running: run(['--request', asked], envFor('app', { AGENTX_EVIDENCE_DIR: store })) };
+  }
+
+  it('writes the file to the evidence store from a request file, checking the schema first, never logging the case', async () => {
+    const orgId = await organization();
+    const { exportId, running } = exportRun(orgId);
+
+    const { code, events, line, text } = await running;
+
+    expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.audit_exported']);
+    expect(code).toBe(0);
+    expect(line('operator.audit_exported')).toMatchObject({ orgId, exportId, events: 2, release: 'r-operator' });
+    const file = readFileSync(path.join(store, orgId, `${exportId}.ndjson`), 'utf8');
+    expect(file.trimEnd().split(String.fromCharCode(10))).toHaveLength(2);
+    expect(text).not.toContain(CASE);
+  });
+
+  it("records on the organisation's chain and writes the notice before it waits on the platform's head (ADR-006 §6)", async () => {
+    // Made first, which also gives the platform chain a head to hold.
+    const orgId = await organization();
+    const head = await holdPlatformHead();
+    try {
+      const { running } = exportRun(orgId);
+      const held = await vi.waitFor(
+        async () => {
+          const locks = await locksWhileWaiting();
+          expect(locks).not.toEqual([]);
+          return locks;
+        },
+        { timeout: 20_000, interval: 100 },
+      );
+
+      expect(held).toEqual(
+        expect.arrayContaining(['audit.heads RowExclusiveLock', 'notifications.outbox RowExclusiveLock']),
+      );
+      await head.release();
+      expect((await within(20_000, running, 'the command')).code).toBe(0);
+    } finally {
+      await head.release().catch(() => undefined);
+    }
   });
 });
 

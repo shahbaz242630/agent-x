@@ -4,7 +4,7 @@
 // here is a decision about authority. The chain itself is checked by the
 // anchor check (A2b): an event planted to make a copy look done, or one
 // deleted, breaks it.
-import { type Kysely, sql } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { PlatformControlsTables } from './tables.ts';
 
@@ -75,9 +75,9 @@ export async function latestPlatformTimeOf(
   return row?.latest ?? undefined;
 }
 
-/** Whether the chain holds an event of `action` whose details hold every one of `facts`. */
+/** Whether the chain holds an event of `action` whose details hold every one of `facts`, read outside a transaction or in one. */
 export async function platformEventWith(
-  db: Kysely<PlatformControlsTables>,
+  db: Kysely<PlatformControlsTables> | Transaction<PlatformControlsTables>,
   action: string,
   facts: Readonly<Record<string, string>>,
 ): Promise<boolean> {

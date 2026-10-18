@@ -25,13 +25,10 @@ import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { systemClock } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 
-import type { OperatorTables } from './create-organization.ts';
+import { OPERATOR, type OperatorTables } from './create-organization.ts';
 
 /** Every table the invitation reaches, the organisation's among them. */
 export type FirstAdminTables = OperatorTables & IdentityTables;
-
-/** Who acts, on both chains: the operator's command. */
-const OPERATOR = Object.freeze({ type: 'system', id: 'operator' } as const);
 
 export interface FirstAdminRequest {
   readonly orgId: string;

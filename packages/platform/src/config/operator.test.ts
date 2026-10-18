@@ -55,6 +55,7 @@ describe("the operator's command's config loads", () => {
         drillHost: null,
       },
       keys: { directory: KEYS_DIR, current: {} },
+      evidence: { directory: null },
     });
   });
 
@@ -74,6 +75,7 @@ describe("the operator's command's config loads", () => {
         AGENTX_DB_TLS: 'disable',
         AGENTX_DB_USER: 'agentx_app_uae',
         AGENTX_DB_PASSWORD: APP_LOGIN,
+        AGENTX_EVIDENCE_DIR: '/var/agentx/evidence',
         [RUN_VARIABLE]: RUN,
       }),
     ).toEqual({
@@ -91,14 +93,17 @@ describe("the operator's command's config loads", () => {
         drillHost: 'psql-agentx-stg-drill.postgres.database.azure.com',
       },
       keys: { directory: '/mnt/other-keys', current: { 'audit-mac': 2 } },
+      evidence: { directory: '/var/agentx/evidence' },
     });
   });
 
   it('returns a config nothing can change afterwards', () => {
     const config = loadOperatorConfig({ ...DEPLOYED, AGENTX_KEYS_CURRENT: 'audit-mac:2' });
     expect(
-      [config, config.log, config.db, config.keys, config.keys.current].map((part) => Object.isFrozen(part)),
-    ).toEqual([true, true, true, true, true]);
+      [config, config.log, config.db, config.keys, config.keys.current, config.evidence].map((part) =>
+        Object.isFrozen(part),
+      ),
+    ).toEqual([true, true, true, true, true, true]);
   });
 
   it("ignores every variable but the AGENTX_ and PG settings and the run's name, Azure's others among them", () => {
@@ -231,6 +236,11 @@ describe("SEC-AV-03 the operator's command refuses to start on a bad config", ()
       /^AGENTX_DB_TLS: disable is allowed only in development and test; production/,
     ],
     ['NODE_DEBUG in production', { ...DEPLOYED, NODE_DEBUG: 'net' }, /^NODE_DEBUG: must be unset in production/],
+    [
+      'a local folder for audit exports in staging (E10c)',
+      { ...DEPLOYED, AGENTX_ENV: 'staging', AGENTX_EVIDENCE_DIR: '/var/agentx/evidence' },
+      /^AGENTX_EVIDENCE_DIR: is allowed only in development and test; staging writes an audit export to its write-once container$/,
+    ],
   ])('applies the rules the app applies: %s', (_what, env, problem) => {
     expect(problemsWith(env)).toEqual([expect.stringMatching(problem)]);
   });

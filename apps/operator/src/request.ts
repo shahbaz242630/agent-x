@@ -37,3 +37,22 @@ export const RESTORE_CHECK = 'restore-check';
 
 /** The request for the restore drill's check, as its file holds it. */
 export const restoreCheckRequest = (): string => JSON.stringify([RESTORE_CHECK]);
+
+/** What a request file holds to export an organisation's audit log for a case (Phase 3 E10c, ADR-005 §6): only ever a file. */
+export const AUDIT_EXPORT_USAGE =
+  'audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> --id <new export ID>';
+
+/**
+ * A case reference, as a dispute's or a regulator's file names one: 3 to 64
+ * letters, digits and `. _ / -`, starting with a letter or digit. No spaces,
+ * so it stays a reference and never becomes a note about the case: it is
+ * sealed on both chains and shown to the organisation's admins.
+ */
+export const CASE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._/-]{2,63}$/;
+
+/** A time as a request file names one: UTC, to the second or the millisecond (2026-10-01T00:00:00Z). */
+export const REQUEST_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+
+/** The request to export an organisation's audit log for a case, as its file holds it. */
+export const auditExportRequest = (orgId: string, from: string, to: string, caseRef: string, id: string): string =>
+  JSON.stringify(['audit-export', '--org', orgId, '--from', from, '--to', to, '--reason', caseRef, '--id', id]);
