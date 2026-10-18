@@ -1275,6 +1275,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (job: Mutable) => (url(job).value = 'https://stagentxother.blob.core.windows.net/audit-exports'),
       (job: Mutable) => (client(job).value = String(client(job).value).replace('-operator', '-api')),
       (job: Mutable) => (client(job).value = '00000000-0000-0000-0000-000000000002'),
+      (job: Mutable) => (url(job).value = String(url(job).value).replace("'https://", "'http://")),
+      (job: Mutable) =>
+        (url(job).value = String(url(job).value).replace('environment().suffixes.storage', "'example.com'")),
+      (job: Mutable) => (client(job).value = String(client(job).value).replace('.clientId]', '.principalId]')),
+      // Each value whole: nothing before or after the expression.
+      (job: Mutable) => (url(job).value = `x${String(url(job).value)}`),
+      (job: Mutable) => (url(job).value = `${String(url(job).value)}x`),
+      (job: Mutable) => (client(job).value = `x${String(client(job).value)}`),
+      (job: Mutable) => (client(job).value = `${String(client(job).value)}x`),
       (job: Mutable) => {
         delete url(job).value;
         url(job).secretRef = 'operator-request';
@@ -1287,6 +1296,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(brokenRules(changed(JOB('operator'), change))).toContain('evidence-store');
     }
+    // An app named as the operator is not its job, so the job's own settings still refuse it.
+    const operatorSettings = evidence(staging.predictedResources.find(JOB('operator')) as unknown as Mutable);
+    expect(
+      brokenRules(
+        changed(APP('api'), (app) => {
+          app.name = 'ca-agentx-stg-operator';
+          settingsOf(app).push(...structuredClone(operatorSettings));
+        }),
+      ),
+    ).toContain('evidence-store');
     // No other workload, job or app, is pointed at the store, or at a folder in its place.
     for (const pick of [APP('api'), JOB('migrate')]) {
       for (const name of ['AGENTX_EVIDENCE_CONTAINER_URL', 'AGENTX_EVIDENCE_DIR']) {
