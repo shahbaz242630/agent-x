@@ -54,6 +54,25 @@ const publicOrigin = text.refine(isCanonicalOrigin, {
     'is not an origin. Write it as scheme://host[:port]: http or https, lowercase, no default port, no path, no user name',
 });
 
+/** A blob container's address: https, a host, one path segment (the container's name, as Azure allows one), nothing else. */
+const blobContainer = text.refine(
+  (entry) => {
+    if (!URL.canParse(entry)) return false;
+    const url = new URL(entry);
+    return (
+      url.protocol === 'https:' &&
+      `${url.origin}${url.pathname}` === entry &&
+      /^\/[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){2,62}$/.test(url.pathname)
+    );
+  },
+  { error: "must be a blob container's address, such as https://<account>.blob.core.windows.net/<container>" },
+);
+
+/** A managed identity's client ID, as Azure gives one: a GUID in lower case. */
+const clientId = text.regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, {
+  error: "must be a managed identity's client ID: a GUID in lower case",
+});
+
 /** A host name is refused: it could resolve to an address nobody meant. */
 const listenAddress = text.pipe(
   z.union([z.ipv4(), z.ipv6()], { error: 'must be an IP address, such as 127.0.0.1 or 0.0.0.0, not a host name' }),
@@ -276,6 +295,9 @@ const SETTINGS = {
   // Where the operator's audit export for a case writes its file in development and test (Phase 3 E10c): a local folder,
   // each file made once. Deployed, the write-once container in the UAE (ADR-005 §6, E10c-3).
   AGENTX_EVIDENCE_DIR: { schema: mountedFolder.optional() },
+  // Deployed, the write-once container in the UAE (E10c-3), written as the operator job's own managed identity.
+  AGENTX_EVIDENCE_CONTAINER_URL: { schema: blobContainer.optional() },
+  AGENTX_EVIDENCE_CLIENT_ID: { schema: clientId.optional() },
   AGENTX_DB_PORT: { schema: wholeNumber({ min: 1, max: 65_535 }), default: '5432' },
   AGENTX_DB_NAME: { schema: identifier, default: 'agentx' },
   AGENTX_DB_TLS: { schema: tlsMode, default: 'verify-full' },
@@ -405,6 +427,8 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       ...LOCATION,
       'AGENTX_DB_DRILL_HOST',
       'AGENTX_EVIDENCE_DIR',
+      'AGENTX_EVIDENCE_CONTAINER_URL',
+      'AGENTX_EVIDENCE_CLIENT_ID',
       'AGENTX_DB_USER',
       'AGENTX_DB_PASSWORD',
       'AGENTX_DB_PASSWORD_FILE',

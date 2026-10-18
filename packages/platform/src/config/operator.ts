@@ -53,13 +53,88 @@ function runProblems(environment: Environment, run: string | undefined): string[
     : [];
 }
 
-/** The folder an audit export writes to is the local stand-in for the write-once container: deployed, it is refused. */
-function evidenceProblems(environment: Environment, directory: string | undefined): string[] {
-  return directory !== undefined && !LOCAL_ONLY.includes(environment)
-    ? [
-        `AGENTX_EVIDENCE_DIR: is allowed only in ${LOCAL_ONLY.join(' and ')}; ${environment} writes an audit export to its write-once container`,
-      ]
-    : [];
+/**
+ * Where Azure tells a container's process how to get its managed identity's
+ * token (Container Apps sets both wherever an identity is given): an
+ * endpoint inside the container, and a secret its requests must carry.
+ */
+const IDENTITY_ENDPOINT = 'IDENTITY_ENDPOINT';
+const IDENTITY_HEADER = 'IDENTITY_HEADER';
+
+/** The hosts Azure's blob service answers on; a test server stands in for it in development and test. */
+const BLOB_HOST = /^[a-z0-9]{3,24}\.blob\.core\.windows\.net$/;
+
+/**
+ * The identity endpoint, if set: plain http only to this container itself
+ * (where Azure serves it), https anywhere; nothing else is a place a token
+ * may be asked of.
+ */
+function identityEndpointProblem(endpoint: string): string | undefined {
+  const url = URL.canParse(endpoint) ? new URL(endpoint) : undefined;
+  const loopback = url?.hostname === 'localhost' || url?.hostname === '127.0.0.1';
+  return url !== undefined && (url.protocol === 'https:' || (url.protocol === 'http:' && loopback))
+    ? undefined
+    : `${IDENTITY_ENDPOINT}: must be the managed identity's endpoint Azure sets: http only to localhost or 127.0.0.1`;
+}
+
+/**
+ * Where an audit export is written (Phase 3 E10c): the local folder (development
+ * and test alone) or the write-once container, never both; the container is
+ * written as the job's managed identity, so its client ID and Azure's
+ * identity endpoint come with it.
+ */
+function evidenceProblems(
+  env: Env,
+  environment: Environment,
+  {
+    directory,
+    container,
+    clientId,
+  }: {
+    readonly directory: string | undefined;
+    readonly container: string | undefined;
+    readonly clientId: string | undefined;
+  },
+): string[] {
+  const local = LOCAL_ONLY.includes(environment);
+  const endpoint = env[IDENTITY_ENDPOINT];
+  const problems = [
+    ...(directory !== undefined && !local
+      ? [
+          `AGENTX_EVIDENCE_DIR: is allowed only in ${LOCAL_ONLY.join(' and ')}; ${environment} writes an audit export to its write-once container`,
+        ]
+      : []),
+    ...(directory !== undefined && container !== undefined
+      ? ['AGENTX_EVIDENCE_DIR and AGENTX_EVIDENCE_CONTAINER_URL: set one, the folder or the container']
+      : []),
+    ...((container === undefined) !== (clientId === undefined)
+      ? ['AGENTX_EVIDENCE_CONTAINER_URL and AGENTX_EVIDENCE_CLIENT_ID: set both, or neither']
+      : []),
+  ];
+  if (container === undefined) return problems;
+  return [
+    ...problems,
+    ...(local || BLOB_HOST.test(new URL(container).hostname)
+      ? []
+      : [
+          `AGENTX_EVIDENCE_CONTAINER_URL: ${environment} writes to Azure's blob service, <account>.blob.core.windows.net`,
+        ]),
+    ...(endpoint === undefined
+      ? [`${IDENTITY_ENDPOINT}: is required with the container (Azure sets it where the job has a managed identity)`]
+      : [identityEndpointProblem(endpoint)].filter((problem) => problem !== undefined)),
+    ...(env[IDENTITY_HEADER] === undefined || env[IDENTITY_HEADER] === ''
+      ? [`${IDENTITY_HEADER}: is required with the container (Azure sets it where the job has a managed identity)`]
+      : []),
+  ];
+}
+
+/** The write-once container an audit export goes to, and how the job asks for its token there. */
+interface EvidenceContainer {
+  readonly url: string;
+  readonly clientId: string;
+  readonly identityEndpoint: string;
+  /** Never logged. */
+  readonly identityHeader: string;
 }
 
 export interface OperatorConfig {
@@ -86,8 +161,23 @@ export interface OperatorConfig {
   };
   /** Where the platform mounts the command's keys, and each one's current version where it isn't 1. */
   readonly keys: KeySettings;
-  /** Where an audit export for a case is written (Phase 3 E10c): a local folder, development and test alone; null where none is set. */
-  readonly evidence: { readonly directory: string | null };
+  /**
+   * Where an audit export for a case is written (Phase 3 E10c): a local
+   * folder, development and test alone, or the write-once container; null
+   * for each not set.
+   */
+  readonly evidence: { readonly directory: string | null; readonly container: EvidenceContainer | null };
+}
+
+/** The container, once its settings are checked: null where none is set. */
+function containerOf(env: Env, url: string | undefined, clientId: string | undefined): EvidenceContainer | null {
+  if (url === undefined || clientId === undefined) return null;
+  return Object.freeze({
+    url,
+    clientId,
+    identityEndpoint: String(env[IDENTITY_ENDPOINT]),
+    identityHeader: String(env[IDENTITY_HEADER]),
+  });
 }
 
 /** Reads and checks the operator's command's settings, or throws a ConfigError listing every problem. */
@@ -104,20 +194,28 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
     dbHost: location.host,
     drillHost: setting(env, 'AGENTX_DB_DRILL_HOST'),
     evidenceDirectory: setting(env, 'AGENTX_EVIDENCE_DIR'),
+    evidenceContainer: setting(env, 'AGENTX_EVIDENCE_CONTAINER_URL'),
+    evidenceClientId: setting(env, 'AGENTX_EVIDENCE_CLIENT_ID'),
     dbPort: location.port,
     dbName: location.database,
     dbTls: location.tls,
     user: setting(env, 'AGENTX_DB_USER'),
     password: secretSetting(env, 'AGENTX_DB_PASSWORD'),
   };
-  const { environment, release, run, logLevel, evidenceDirectory } = checks;
+  const { environment, release, run, logLevel, evidenceDirectory, evidenceContainer, evidenceClientId } = checks;
 
   const problems = [
     ...startProblems(env, 'operator', checks),
     ...(environment.ok && release.ok ? releaseProblems(environment.value, release.value) : []),
     ...(environment.ok && run.ok ? runProblems(environment.value, run.value) : []),
     ...(environment.ok && logLevel.ok ? logLevelProblems(environment.value, logLevel.value) : []),
-    ...(environment.ok && evidenceDirectory.ok ? evidenceProblems(environment.value, evidenceDirectory.value) : []),
+    ...(environment.ok && evidenceDirectory.ok && evidenceContainer.ok && evidenceClientId.ok
+      ? evidenceProblems(env, environment.value, {
+          directory: evidenceDirectory.value,
+          container: evidenceContainer.value,
+          clientId: evidenceClientId.value,
+        })
+      : []),
     ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
@@ -141,6 +239,9 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
       directory: checks.keysDirectory.value,
       current: Object.freeze(checks.keysCurrent.value ?? {}),
     }),
-    evidence: Object.freeze({ directory: checks.evidenceDirectory.value ?? null }),
+    evidence: Object.freeze({
+      directory: checks.evidenceDirectory.value ?? null,
+      container: containerOf(env, checks.evidenceContainer.value, checks.evidenceClientId.value),
+    }),
   });
 }
