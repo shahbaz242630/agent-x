@@ -6,6 +6,8 @@
 // its integrity hold for anything they find tampered with; holdOrganisation
 // does the same for a chain the anchor check finds failing (B1d-3).
 export {
+  actorAsKept,
+  actorProblems,
   type ActorType,
   type AuditActor,
   type AuditDetails,

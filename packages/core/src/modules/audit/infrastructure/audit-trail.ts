@@ -65,7 +65,9 @@ import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import {
+  actorAsKept,
   type ActorType,
+  type AuditActor,
   type AuditEvent,
   AuditEventRefused,
   type AuditSubjectKey,
@@ -166,11 +168,16 @@ export interface LogPageToRead {
   readonly to: Date;
   /** Only these actions, when named. */
   readonly actions?: readonly string[] | undefined;
+  /** Only this actor's, when named (decision 26: per person, one click). */
+  readonly actor?: AuditActor | undefined;
   /** Only events before this one in the chain: the page before's `next`. */
   readonly beforeSeq?: bigint | undefined;
   /** The most events the page holds. */
   readonly limit: number;
 }
+
+/** The log's events by one actor, as kept. */
+const actorIs = ({ type, id }: AuditActor) => sql`e.actor_type = ${type} and e.actor_id = ${id}`;
 
 /** An event of the log as its page shows it: whole, with the hashes that link it into the chain, as hex. */
 export interface LogEvent extends ReadEvent {
@@ -309,9 +316,9 @@ export interface AuditTrail {
   recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck>;
   /**
    * A page of the organisation's whole log for its admins (Phase 3 E10,
-   * decision 24): every event recorded in [from, to), of `actions` when named,
-   * before `beforeSeq`, newest first, in one statement with the chain's head
-   * (0048's indexes). Each believed only whole, as recordedEvents believes
+   * decision 24): every event recorded in [from, to), of `actions` and by
+   * `actor` when named (decision 26), before `beforeSeq`, newest first, in one
+   * statement with the chain's head (0048's and 0051's indexes). Each believed only whole, as recordedEvents believes
    * one: its MAC seals its seq and its link to the event before, so no event
    * on the page can stand anywhere else in the chain. An event deleted is the
    * chain's check's and anchor's to find, as for any read of the log. Only in
@@ -933,7 +940,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       return Object.freeze({ kind: 'recorded', events: Object.freeze(events) });
     },
 
-    async logPage(tx: AuditTransaction, orgId: string, { from, to, actions, beforeSeq, limit }: LogPageToRead) {
+    async logPage(tx: AuditTransaction, orgId: string, { from, to, actions, actor, beforeSeq, limit }: LogPageToRead) {
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
       if (from.getTime() >= to.getTime()) throw new RangeError('The page’s range starts before it ends');
       await assertTenant(tx, orgId);
@@ -942,6 +949,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         [
           sql`e.recorded_at >= ${from} and e.recorded_at < ${to}`,
           ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
+          ...(actor === undefined ? [] : [actorIs(actorAsKept(actor))]),
           ...(beforeSeq === undefined ? [] : [sql`e.seq < ${beforeSeq}`]),
         ],
         sql` and `,

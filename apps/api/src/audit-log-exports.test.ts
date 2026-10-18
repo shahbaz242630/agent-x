@@ -90,9 +90,24 @@ describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {
         from: new Date(BODY.from),
         to: new Date(BODY.to),
         actions: ['mandate.accepted'],
+        actor: undefined,
         format: 'csv',
       },
     ]);
+  });
+
+  it('passes the one actor named (decision 26)', async () => {
+    const { app, asked } = await withExports(EXPORTED);
+    await app.inject(post({ ...BODY, actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }));
+
+    expect(asked).toMatchObject([{ actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }]);
+  });
+
+  it('passes a UUID in capitals as the log keeps it, in lower case', async () => {
+    const { app, asked } = await withExports(EXPORTED);
+    await app.inject(post({ ...BODY, actor: { type: 'user', id: '0199A0F0-0000-7000-8000-00000000A9E1' } }));
+
+    expect(asked).toMatchObject([{ actor: { type: 'user', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }]);
   });
 
   it('passes every action when none are named', async () => {
@@ -109,6 +124,13 @@ describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {
     ['a range past 366 days', { ...BODY, from: '2025-01-01T00:00:00.000Z', to: '2026-01-03T00:00:00.000Z' }],
     ['an empty list of actions', { ...BODY, actions: [] }],
     ['an action that isn’t an event’s name', { ...BODY, actions: ['DROP TABLE'] }],
+    ['an actor with no ID', { ...BODY, actor: { type: 'user' } }],
+    ['an actor type it doesn’t know', { ...BODY, actor: { type: 'bank', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }],
+    ['a person named by something not a UUID', { ...BODY, actor: { type: 'user', id: 'integrity-hold' } }],
+    [
+      'an actor with a field of its own',
+      { ...BODY, actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1', role: 'x' } },
+    ],
     ['a field of its own', { ...BODY, role: 'admin' }],
   ])('refuses %s at the edge, the download never asked', async (_what, body) => {
     const { app, asked } = await withExports(EXPORTED);

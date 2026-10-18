@@ -2,11 +2,11 @@
 // decision 24: admins only, CSV and NDJSON, each download itself logged, up
 // to 12 months a download; at most MOST_EXPORTED_EVENTS events, partner S121).
 //
-// - `POST /v1/audit-log/exports {from, to, actions?, format}`: the range is
+// - `POST /v1/audit-log/exports {from, to, actions?, actor?, format}`: the range is
 //   counted first, refused past MOST_EXPORTED_EVENTS (AUDIT_EXPORT_TOO_LARGE)
 //   with nothing written; an admin's sixth in an hour is AUDIT_EXPORTS_SPENT.
 //   Then the download is recorded, `audit_log.exported` about the log, naming
-//   the range, the actions, the format, how many events and the newest one's
+//   the range, the actions, the actor, the format, how many events and the newest one's
 //   seq, before a byte of it is read: so reading the log out is on the log.
 // - Its answer carries the file whole, in the contract's own JSON (the
 //   contract writes every answer; it sends no stream of a route's own): the
@@ -23,7 +23,9 @@
 //   the evidence module), as at the download: a retry's file holds the same
 //   events, its names as the login service has them then.
 import {
+  actorAsKept,
   actorEventsSince,
+  actorProblems,
   type AuditActor,
   createAuditTrail,
   eventsInRange,
@@ -51,7 +53,15 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { type AuditLogTables, AuditLogRefused, heldLogPage, MOST_ACTIONS_FILTERED, SEQ } from './audit-log.ts';
+import {
+  ACTOR_ASKED_ID,
+  ACTOR_TYPES,
+  type AuditLogTables,
+  AuditLogRefused,
+  heldLogPage,
+  MOST_ACTIONS_FILTERED,
+  SEQ,
+} from './audit-log.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { type Refused, refused } from './refused.ts';
 import { createUseCaseWork, type Member } from './use-case-work.ts';
@@ -75,11 +85,12 @@ const CONTENT_TYPES = { csv: 'text/csv', ndjson: 'application/x-ndjson' } as con
 /** Who may download the log (decision 24). */
 const EXPORTING_ROLES = ['admin'] as const;
 
-/** A download as asked for: its range, its actions (all when none), its format. */
+/** A download as asked for: its range, its actions (all when none), its actor (everyone when none), its format. */
 export interface ExportAsked {
   readonly from: Date;
   readonly to: Date;
   readonly actions: readonly string[] | undefined;
+  readonly actor: AuditActor | undefined;
   readonly format: ExportFormat;
 }
 
@@ -222,6 +233,7 @@ export function createAuditLogExports({
             from: asked.from.toISOString(),
             to: asked.to.toISOString(),
             actions: asked.actions?.join(',') ?? null,
+            actor: asked.actor === undefined ? null : `${asked.actor.type}:${asked.actor.id}`,
             format: asked.format,
             events: range.events,
             upToSeq: range.upToSeq?.toString() ?? null,
@@ -261,6 +273,13 @@ const EXPORT_SCHEMA = {
         .max(MOST_ACTIONS_FILTERED)
         .optional()
         .describe(`Only these actions, at most ${String(MOST_ACTIONS_FILTERED)}; every one when left out.`),
+      actor: z
+        .strictObject({
+          type: z.enum(ACTOR_TYPES).describe('A person, an AI agent, or Agent X itself.'),
+          id: ACTOR_ASKED_ID.describe('Their Agent X ID, or a part of Agent X by name.'),
+        })
+        .optional()
+        .describe('Only events by this actor (decision 26); everyone’s when left out.'),
       format: z
         .enum(EXPORT_FORMATS)
         .describe(
@@ -278,8 +297,11 @@ const EXPORT_SCHEMA = {
       if (!(body.actions ?? []).every((action) => actionProblems(action).length === 0)) {
         context.addIssue({ code: 'custom', message: 'actions are event names' });
       }
+      if (body.actor !== undefined && actorProblems(body.actor).length > 0) {
+        context.addIssue({ code: 'custom', message: 'actor.id is a UUID, or for system a process name' });
+      }
     })
-    .describe('The range to download, its actions, and the format.'),
+    .describe('The range to download, its actions, its actor, and the format.'),
   response: {
     201: z
       .object({
@@ -298,7 +320,7 @@ const EXPORT_SCHEMA = {
   },
 };
 
-/** The most a download's body may be: a range, 20 actions and a format, with room to spare. */
+/** The most a download's body may be: a range, 20 actions, an actor and a format, with room to spare. */
 const EXPORT_BODY_LIMIT = 4096;
 
 /** The download's route. Without `exports` it is still documented, and no one reaches it. */
@@ -318,7 +340,13 @@ export function registerAuditLogExports(app: FastifyInstance, { exports }: { exp
       const written = await need(exports).export(
         member,
         idempotentRequest(request, member.orgId),
-        { from: new Date(body.from), to: new Date(body.to), actions: body.actions, format: body.format },
+        {
+          from: new Date(body.from),
+          to: new Date(body.to),
+          actions: body.actions,
+          actor: body.actor === undefined ? undefined : actorAsKept(body.actor),
+          format: body.format,
+        },
         request.id,
       );
       if (written.outcome !== 'exported') return answerRefusal(written, request, reply);

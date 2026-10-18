@@ -4,7 +4,7 @@
 // platform's seals left out and formula cells made text; a retry answering
 // the same file; the cap, the hourly budget, a member not an admin; and an
 // event that can't be believed refusing the file, the organisation held.
-import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import { type AuditActor, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { AUDIT_LOG_EXPORTED } from '@agentx/core/modules/evidence';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
@@ -52,9 +52,10 @@ let exports: AuditLogExports;
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'audit-log-exports' });
 const { world, quiet, keyed, member } = shared;
 
-const asked = (format: ExportAsked['format'], actions?: readonly string[]): ExportAsked => ({
+const asked = (format: ExportAsked['format'], actions?: readonly string[], actor?: AuditActor): ExportAsked => ({
   ...EVER,
   actions,
+  actor,
   format,
 });
 
@@ -122,8 +123,34 @@ describe('downloading the audit log (E10b, decision 24)', () => {
       event: {
         actor: { type: 'user', id: w.admin.userId },
         action: AUDIT_LOG_EXPORTED,
-        details: { format: 'ndjson', events: lines.length, upToSeq: sealed.seq.toString(), actions: null },
+        details: { format: 'ndjson', events: lines.length, upToSeq: sealed.seq.toString(), actions: null, actor: null },
       },
+    });
+  });
+
+  it('gives one actor’s events alone, counted that way, the actor named in the record (decision 26)', async () => {
+    const w = await world();
+    const sealed = await noted(w, { note: 'by the operator' });
+
+    const file = fileOf(
+      await exports.export(
+        w.admin,
+        keyed(w.admin, EXPORT_OPERATION),
+        asked('ndjson', undefined, OPERATOR),
+        CORRELATION,
+      ),
+    );
+    const lines = file.content
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { actor: { type: string; id: string } });
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.every(({ actor }) => actor.type === OPERATOR.type && actor.id === OPERATOR.id)).toBe(true);
+    expect(file).toMatchObject({ events: lines.length, upToSeq: sealed.seq });
+
+    const recorded = await withTenant(app, w.org, (tx) => trail.recordedEvent(tx, w.org, { eventId: file.id }));
+    expect(recorded).toMatchObject({
+      event: { details: { actor: `system:${OPERATOR.id}`, events: lines.length } },
     });
   });
 

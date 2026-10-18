@@ -2,9 +2,9 @@
 // S119, "nothing on our platform goes without log; logs available for both
 // user and us"; decision 24: admins only).
 //
-// - `GET /v1/audit-log?from&to[&actions][&before][&limit]`: every signed event
-//   of the organisation recorded in [from, to), of the actions named, newest
-//   first, a page at most MOST_LOG_EVENTS_A_PAGE: who (the actor), what (the
+// - `GET /v1/audit-log?from&to[&actions][&actorType&actorId][&before][&limit]`:
+//   every signed event of the organisation recorded in [from, to), of the
+//   actions named, by the one actor named (decision 26), newest first, a page at most MOST_LOG_EVENTS_A_PAGE: who (the actor), what (the
 //   action and its subject) and every fact sealed with it, each choice and
 //   confirm with its statement version and step-up evidence among them.
 //   `next` names the event the next page starts before.
@@ -20,7 +20,14 @@
 //   kept; an agent by its name; Agent X's own parts by theirs.
 // Reading a page isn't itself logged (decision 24: a download is, E10b).
 import type { AgentsTables } from '@agentx/core/modules/agents';
-import type { LogEvent, LogPageToRead, SignedStates } from '@agentx/core/modules/audit';
+import {
+  actorAsKept,
+  actorProblems,
+  type ActorType,
+  type LogEvent,
+  type LogPageToRead,
+  type SignedStates,
+} from '@agentx/core/modules/audit';
 import {
   type ActorName,
   createActorNamer,
@@ -113,6 +120,12 @@ export function createAuditLog({
   };
 }
 
+/** Who the log's events can be by. */
+export const ACTOR_TYPES = ['user', 'agent', 'system'] as const satisfies readonly ActorType[];
+
+/** An actor to filter to, as asked: a person's or an agent's UUID, or a part of Agent X by its process name. */
+export const ACTOR_ASKED_ID = z.string().max(64);
+
 /** A whole number as the log's sequence names it, in text: JSON numbers can't hold every one. */
 export const SEQ = z.string().regex(/^[1-9][0-9]{0,18}$/);
 
@@ -123,7 +136,7 @@ const LOG_EVENT = z
     recordedAt: z.iso.datetime().describe('When it was recorded.'),
     actor: z
       .object({
-        type: z.enum(['user', 'agent', 'system']).describe('A person, an AI agent, or Agent X itself.'),
+        type: z.enum(ACTOR_TYPES).describe('A person, an AI agent, or Agent X itself.'),
         id: z.string().describe('Who, by their Agent X ID (or the system part that acted).'),
         name: z
           .string()
@@ -174,6 +187,10 @@ const PAGE_SCHEMA = {
         .string()
         .optional()
         .describe(`Only these actions, comma-separated, at most ${String(MOST_ACTIONS_FILTERED)}.`),
+      actorType: z.enum(ACTOR_TYPES).optional().describe('Only events by this kind of actor; with `actorId`.'),
+      actorId: ACTOR_ASKED_ID.optional().describe(
+        'Only events by this actor: a person’s or an agent’s Agent X ID, or a part of Agent X by name; with `actorType`.',
+      ),
       before: SEQ.optional().describe('The page starts before this event: the page before’s `next`.'),
       limit: z.coerce
         .number()
@@ -192,6 +209,14 @@ const PAGE_SCHEMA = {
       const actions = query.actions?.split(',') ?? [];
       if (actions.length > MOST_ACTIONS_FILTERED || !actions.every((action) => actionProblems(action).length === 0)) {
         context.addIssue({ code: 'custom', message: 'actions are event names, comma-separated, 20 at most' });
+      }
+      const { actorType, actorId } = query;
+      if ((actorType === undefined) !== (actorId === undefined)) {
+        context.addIssue({ code: 'custom', message: 'an actor is named by actorType and actorId together' });
+      } else if (actorType !== undefined && actorId !== undefined) {
+        if (actorProblems({ type: actorType, id: actorId }).length > 0) {
+          context.addIssue({ code: 'custom', message: 'actorId is a UUID, or for system a process name' });
+        }
       }
     }),
   response: {
@@ -216,13 +241,15 @@ export function registerAuditLog(app: FastifyInstance, { log }: { log: AuditLog 
 
   routes.get('/v1/audit-log', { schema: PAGE_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
     const { orgId } = memberInSessionOf(request);
-    const { from, to, actions, before, limit } = request.query;
+    const { from, to, actions, actorType, actorId, before, limit } = request.query;
     const page = await need(log).page(
       orgId,
       {
         from: new Date(from),
         to: new Date(to),
         actions: actions?.split(','),
+        actor:
+          actorType === undefined || actorId === undefined ? undefined : actorAsKept({ type: actorType, id: actorId }),
         beforeSeq: before === undefined ? undefined : BigInt(before),
         limit: limit ?? MOST_LOG_EVENTS_A_PAGE,
       },
