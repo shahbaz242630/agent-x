@@ -180,7 +180,15 @@ const WHOLE_HASH = /^(?:sha256:)?[0-9a-f]{64}$/;
  * inside other text may be hidden in part, the safe way to be wrong, since an
  * IBAN right after one must still be found.
  */
-const WHOLE_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+const UUID = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}';
+const WHOLE_UUID = new RegExp(`^${UUID}$`);
+
+/**
+ * An audit export's file name on its own, `<organisation ID>/<export ID>.ndjson`
+ * (E10c), as the operator logs it: two IDs and nothing else, let through as one
+ * ID is, so the name it says is the name in the store.
+ */
+const WHOLE_EXPORT_FILE = new RegExp(String.raw`^${UUID}/${UUID}\.ndjson$`);
 
 function trailingPunctuation(text: string): number {
   let length = 0;
@@ -294,7 +302,7 @@ function cleanIpv4(candidate: string): string {
 
 /** Returns the text with every secret, personal detail and payment detail replaced by a label. */
 export function scrub(text: string): string {
-  if (WHOLE_HASH.test(text) || WHOLE_UUID.test(text)) return text;
+  if (WHOLE_HASH.test(text) || WHOLE_UUID.test(text) || WHOLE_EXPORT_FILE.test(text)) return text;
   return (
     text
       // URLs first: their credentials and whole query go, before anything else changes their text.

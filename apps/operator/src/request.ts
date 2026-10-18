@@ -3,7 +3,8 @@
 // deploy/azure/operator.ts, which writes it onto the job before a run
 // (B1c-2b). A JSON list of the command's words and the new organisation's ID,
 // or of the first admin's invitation (B4-6b), at most REQUEST_LIMIT_BYTES of
-// UTF-8. Nothing here logs anything: a name or an address never is.
+// UTF-8. Nothing here logs anything: a name or an address never is, and
+// nothing here imports anything, so the deploy tool reads it as it is.
 
 /** The most a request file may hold: a command and one name, with room to spare. */
 export const REQUEST_LIMIT_BYTES = 4096;
@@ -48,10 +49,79 @@ export const AUDIT_EXPORT_USAGE =
  * so it stays a reference and never becomes a note about the case: it is
  * sealed on both chains and shown to the organisation's admins.
  */
-export const CASE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._/-]{2,63}$/;
+const CASE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._/-]{2,63}$/;
 
 /** A time as a request file names one: UTC, to the second or the millisecond (2026-10-01T00:00:00Z). */
-export const REQUEST_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+const REQUEST_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+
+/** Why an audit export can't run where no store is set for its file, which deploy/azure/operator.ts looks for in the run's log. */
+export const NO_STORE_PROBLEM =
+  'no store for an audit export is set: AGENTX_EVIDENCE_CONTAINER_URL deployed, or AGENTX_EVIDENCE_DIR in development and test';
+
+/**
+ * A request file's time, or undefined for one that isn't REQUEST_TIME or isn't
+ * a real moment: no date at all (month 13, hour 25), or one a date rolls over
+ * (30 February). Without its Z, the text starts the moment's own ISO form,
+ * to the second or the millisecond.
+ */
+function requestTime(text: string | undefined): Date | undefined {
+  if (text === undefined || !REQUEST_TIME.test(text)) return undefined;
+  const at = new Date(text);
+  return !Number.isNaN(at.getTime()) && at.toISOString().startsWith(text.slice(0, -1)) ? at : undefined;
+}
+
+/** An audit export's words, as a request file or the deploy tool's command line gives them. */
+export interface AuditExportWords {
+  readonly orgId: string | undefined;
+  readonly from: string | undefined;
+  readonly to: string | undefined;
+  readonly caseRef: string | undefined;
+  readonly id: string;
+}
+
+/** The audit export asked for, its times read. */
+export interface AuditExportAsked {
+  readonly orgId: string;
+  readonly from: Date;
+  readonly to: Date;
+  readonly caseRef: string;
+  readonly id: string;
+}
+
+/** A day, in milliseconds. */
+const DAY = 86_400_000;
+
+/**
+ * The audit export these words ask for, or the problems, by the rules both
+ * sides hold it to: the operator's command reading its file (main.ts), and
+ * deploy/azure/operator.ts before it writes one. The range is an admin's
+ * download's: at most `mostDays` days (core's MOST_EXPORT_DAYS, which the
+ * caller passes, since nothing here imports anything). The case reference is
+ * repeated in no problem.
+ */
+export function auditExportOf(
+  { orgId, from: fromText, to: toText, caseRef, id }: AuditExportWords,
+  mostDays: number,
+): AuditExportAsked | { readonly problems: readonly string[] } {
+  const from = requestTime(fromText);
+  const to = requestTime(toText);
+  const span = (to?.getTime() ?? Number.NaN) - (from?.getTime() ?? Number.NaN);
+  const problems = [
+    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
+    ...(UUID_V7.test(id) ? [] : ["the export's ID must be a UUIDv7, in lower case"]),
+    ...(from === undefined || to === undefined
+      ? ['--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z']
+      : []),
+    ...(span <= 0 || span > mostDays * DAY
+      ? [`the range starts before it ends, ${String(mostDays)} days at most`]
+      : []),
+    ...(CASE_REFERENCE.test(String(caseRef))
+      ? []
+      : ['the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
+  ];
+  if (problems.length > 0 || from === undefined || to === undefined) return { problems };
+  return { orgId: String(orgId), from, to, caseRef: String(caseRef), id };
+}
 
 /** The request to export an organisation's audit log for a case, as its file holds it. */
 export const auditExportRequest = (orgId: string, from: string, to: string, caseRef: string, id: string): string =>

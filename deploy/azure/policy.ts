@@ -1580,7 +1580,8 @@ function evidenceAccountProblems(
  * subnet keeps the service endpoint its network rule needs. Its one custom
  * role allows adding a new file and nothing else, assignable in the resource
  * group alone, and is given once, on the container, to the operator's
- * identity. Its logs are `resource-logs`'s.
+ * identity, whose job alone is told where the store is
+ * (`evidenceSettingsProblems`). Its logs are `resource-logs`'s.
  */
 const evidenceStore: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
@@ -1604,7 +1605,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       problem(network.name, "must keep its apps subnet's Storage service endpoint, in its own region, for the store");
     }
   }
-  evidenceAccessProblems(snapshot, ofType(snapshot, TYPES.container), problem);
+  const writers = evidenceAccessProblems(snapshot, ofType(snapshot, TYPES.container), problem);
+  evidenceSettingsProblems(snapshot, writers, problem);
 };
 
 /** The store's blob service, its container and no other Storage resource, a part of `evidence-store`. */
@@ -1636,12 +1638,12 @@ function evidencePartsProblems(snapshot: Snapshot, problem: (resource: string, m
   }
 }
 
-/** The store's custom role and its one assignment, a part of `evidence-store`. */
+/** The store's custom role and its one assignment, a part of `evidence-store`: the identities it is given to. */
 function evidenceAccessProblems(
   snapshot: Snapshot,
   containers: readonly PredictedResource[],
   problem: (resource: string, message: string) => void,
-): void {
+): readonly PredictedResource[] {
   const group = groupOf(snapshot);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => role.name === evidenceRoleName(group));
   for (const role of roles) {
@@ -1682,6 +1684,66 @@ function evidenceAccessProblems(
       'the deployment',
       `must give the audit exports' role once, to the operator; it gives it ${String(assignments.length)} times`,
     );
+  }
+  return assignments.flatMap((assignment) => principalOf(snapshot, assignment) ?? []);
+}
+
+/** How the operator's job is told where to write an audit export (apps.bicep `evidenceSettings`). */
+const EVIDENCE_SETTING_PREFIX = 'AGENTX_EVIDENCE_';
+
+/** The two settings the operator's job takes, sorted, so a sorted list of its names is compared with them whole. */
+const EVIDENCE_SETTINGS = ['AGENTX_EVIDENCE_CLIENT_ID', 'AGENTX_EVIDENCE_CONTAINER_URL'] as const;
+
+/** The store's address as apps.bicep writes it: the account, Azure's own storage suffix, then the container. */
+const EVIDENCE_URL =
+  /^\[format\('https:\/\/\{0\}\.blob\.\{1\}\/\{2\}', '([^']+)', environment\(\)\.suffixes\.storage, '([^']+)'\)\]$/;
+
+/** An identity's client ID as apps.bicep reads it at deployment: the identity's id. */
+const CLIENT_ID_OF = /^\[reference\('([^']+)', '[^']+'\)\.clientId\]$/;
+
+/**
+ * Where the operator's job writes, a part of `evidence-store` (E10c-3b-2):
+ * this deployment's one store and its export container, as the identity the
+ * store's role is given to, each said once as a value. No other workload sets
+ * an AGENTX_EVIDENCE_ setting, so nothing else is pointed at the store, nor
+ * at a folder in its place.
+ */
+function evidenceSettingsProblems(
+  snapshot: Snapshot,
+  writers: readonly PredictedResource[],
+  problem: (resource: string, message: string) => void,
+): void {
+  const accounts = ofType(snapshot, TYPES.storage);
+  for (const workload of workloadsIn(snapshot)) {
+    const operator = workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator';
+    for (const container of containersOf(workload)) {
+      const settings = list(at(container, 'env')).filter((entry) =>
+        text(at(entry, 'name')).startsWith(EVIDENCE_SETTING_PREFIX),
+      );
+      const names = settings.map((entry) => text(at(entry, 'name')));
+      if (!operator) {
+        if (names.length > 0) {
+          problem(workload.name, `sets ${names.join(', ')}: only the operator's job writes to the store`);
+        }
+        continue;
+      }
+      const values = new Map(settings.map((entry) => [text(at(entry, 'name')), text(at(entry, 'value'))] as const));
+      const url = EVIDENCE_URL.exec(values.get('AGENTX_EVIDENCE_CONTAINER_URL') ?? '');
+      const client = CLIENT_ID_OF.exec(values.get('AGENTX_EVIDENCE_CLIENT_ID') ?? '');
+      const sound =
+        names.toSorted().join() === EVIDENCE_SETTINGS.join() &&
+        accounts.length === 1 &&
+        url !== null &&
+        url[1] === accounts[0]?.name &&
+        url[2] === EVIDENCE_CONTAINER &&
+        writers.some((writer) => writer.id === client?.[1]);
+      if (!sound) {
+        problem(
+          workload.name,
+          `must set AGENTX_EVIDENCE_CONTAINER_URL to this deployment's store's ${EVIDENCE_CONTAINER} container, and AGENTX_EVIDENCE_CLIENT_ID to the client ID of the identity its role is given to, each once as a value, and no other ${EVIDENCE_SETTING_PREFIX} setting`,
+        );
+      }
+    }
   }
 }
 

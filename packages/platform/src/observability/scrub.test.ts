@@ -353,6 +353,27 @@ describe('scrub: properties that hold for any text', () => {
     );
   });
 
+  it("leaves an audit export's file name on its own as it is, and only that shape (E10c)", () => {
+    // S125: an export ID's middle groups (`0098-7535-9564`) read as a phone number.
+    const file = '01a14ed8-003e-76b9-b88a-967faf994642/01a14ed8-0098-7535-9564-b844fd333854.ndjson';
+    expect(scrub(file)).toBe(file);
+    fc.assert(
+      fc.property(fc.uuid(), fc.uuid(), (org, id) => {
+        expect(scrub(`${org}/${id}.ndjson`)).toBe(`${org}/${id}.ndjson`);
+      }),
+      { ...RUNS, numRuns: 5000 },
+    );
+    for (const other of [
+      `x${file}`,
+      `${file}x`,
+      file.replace('.ndjson', '.json'),
+      file.replace('.ndjson', 'xndjson'),
+      file.replace('/', '-'),
+    ]) {
+      expect(scrub(other)).not.toBe(other);
+    }
+  });
+
   it.each([
     [
       'right after a digit and a dash, as an order number joined to it',
