@@ -1,7 +1,8 @@
 // Phase 3 E10a: the organisation's audit log, read by its admin, composed in
 // the API, on the real migrated schema as the app role: every event of the
 // organisation, newest first, its own alone; and an event that can't be
-// believed refusing the page, the alarm raised and the organisation held.
+// believed, or an agent it names, refusing the page, the alarm raised and the
+// organisation held.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -135,5 +136,7 @@ describe('the organisation’s audit log (E10a, decision 24)', () => {
     );
 
     expect(await pageOf(w.org)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    const hold = await withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
+    expect(hold).toMatchObject({ outcome: 'held' });
   });
 });
