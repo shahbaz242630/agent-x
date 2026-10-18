@@ -178,6 +178,14 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
       const grant = resource.properties as Mutable;
       grant.principalId = String(grant.principalId).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
     }
+    // Production keeps each audit export five years, Locked, in three zones (decision 27).
+    if (resource.type === 'Microsoft.Storage/storageAccounts') {
+      inside(resource, 'sku').name = 'Standard_ZRS';
+      Object.assign(inside(resource, 'properties', 'immutableStorageWithVersioning', 'immutabilityPolicy'), {
+        state: 'Locked',
+        immutabilityPeriodSinceCreationInDays: 1826,
+      });
+    }
     if (subject && resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials') {
       const trust = resource.properties as Mutable;
       trust.subject = String(trust.subject).replace(/:environment:staging$/, ':environment:production');
@@ -241,6 +249,10 @@ const SECRETS = type('Microsoft.KeyVault/vaults/secrets');
 const SECRET = (name: string) => (resource: PredictedResource) =>
   SECRETS(resource) && resource.id.endsWith(`/secrets/${name}`);
 const ASSIGNMENTS = type('Microsoft.Authorization/roleAssignments');
+const ROLE_DEFINITIONS = type('Microsoft.Authorization/roleDefinitions');
+/** CI's custom role, not the audit exports' (modules/evidence.bicep), by the name names.bicep gives it. */
+const RELEASE_ROLE = (resource: PredictedResource) =>
+  ROLE_DEFINITIONS(resource) && String(at(resource.properties, 'roleName')).startsWith('Agent X release ');
 /** The role assignment that lets `who` read `what`, by the description secrets.bicep gives it. */
 const READS = (who: string, what: string) => (resource: PredictedResource) =>
   ASSIGNMENTS(resource) &&
@@ -463,6 +475,18 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
+      expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxstg[a-z0-9]{6}$/),
+      expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxstg[a-z0-9]{6}\/default$/),
+      expect.stringMatching(
+        /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-exports$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -1045,6 +1069,184 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
+  it('evidence-store: an audit-export store anyone else can reach, change, or keep for less (E10c, decisions 27 and 28)', () => {
+    const STORE = type('Microsoft.Storage/storageAccounts');
+    const BLOBS = type('Microsoft.Storage/storageAccounts/blobServices');
+    const CONTAINER = type('Microsoft.Storage/storageAccounts/blobServices/containers');
+    const WRITER_ROLE = (resource: PredictedResource) => ROLE_DEFINITIONS(resource) && !RELEASE_ROLE(resource);
+    const WRITES = (resource: PredictedResource) =>
+      ASSIGNMENTS(resource) && String(at(resource.properties, 'description')).startsWith('operator adds audit exports');
+    const properties = (store: Mutable): Mutable => inside(store, 'properties');
+    const acls = (store: Mutable): Mutable => inside(store, 'properties', 'networkAcls');
+    const policy = (store: Mutable): Mutable =>
+      inside(store, 'properties', 'immutableStorageWithVersioning', 'immutabilityPolicy');
+    const only = (snapshotted: Snapshot, expected = STAGING): RuleId[] => brokenRules(snapshotted, expected);
+    const production: Expectations = { region: 'uaenorth', environment: 'production' };
+    const group = String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id);
+
+    // As staging has it: a few days, Unlocked, one copy.
+    const store = staging.predictedResources.find(STORE);
+    expect(at(store?.properties, 'immutableStorageWithVersioning')).toEqual({
+      enabled: true,
+      immutabilityPolicy: {
+        immutabilityPeriodSinceCreationInDays: 3,
+        state: 'Unlocked',
+        allowProtectedAppendWrites: false,
+      },
+    });
+    for (const change of [
+      (found: Mutable) => (found.kind = 'BlobStorage'),
+      (found: Mutable) => (inside(found, 'sku').name = 'Standard_GRS'),
+      (found: Mutable) => (properties(found).minimumTlsVersion = 'TLS1_0'),
+      (found: Mutable) => (properties(found).supportsHttpsTrafficOnly = false),
+      (found: Mutable) => (properties(found).allowSharedKeyAccess = true),
+      (found: Mutable) => delete properties(found).allowSharedKeyAccess,
+      (found: Mutable) => (properties(found).defaultToOAuthAuthentication = false),
+      (found: Mutable) => (properties(found).allowBlobPublicAccess = true),
+      (found: Mutable) => (properties(found).allowCrossTenantReplication = true),
+      (found: Mutable) => (properties(found).allowedCopyScope = 'PrivateLink'),
+      (found: Mutable) => (properties(found).isHnsEnabled = true),
+      (found: Mutable) => (properties(found).isSftpEnabled = true),
+      (found: Mutable) => (properties(found).isLocalUserEnabled = true),
+      (found: Mutable) => (properties(found).isNfsV3Enabled = true),
+      (found: Mutable) => (acls(found).defaultAction = 'Allow'),
+      (found: Mutable) => (acls(found).bypass = 'AzureServices'),
+      (found: Mutable) => (acls(found).ipRules = [{ value: '203.0.113.7' }]),
+      (found: Mutable) => (acls(found).resourceAccessRules = [{ resourceId: '/subscriptions/x/any' }]),
+      (found: Mutable) => (first(acls(found).virtualNetworkRules).id = '/subscriptions/x/any/subnets/other'),
+      (found: Mutable) =>
+        (acls(found).virtualNetworkRules = [
+          first(acls(found).virtualNetworkRules),
+          { id: '/subscriptions/x/any/subnets/other', action: 'Allow' },
+        ]),
+      (found: Mutable) => (acls(found).virtualNetworkRules = []),
+      (found: Mutable) => (inside(found, 'properties', 'encryption').requireInfrastructureEncryption = false),
+      (found: Mutable) => (inside(found, 'properties', 'immutableStorageWithVersioning').enabled = false),
+      (found: Mutable) => delete properties(found).immutableStorageWithVersioning,
+      (found: Mutable) => (policy(found).allowProtectedAppendWrites = true),
+      // Staging Locked would hold the account, and its resource group, for good.
+      (found: Mutable) => (policy(found).state = 'Locked'),
+      (found: Mutable) => (policy(found).state = 'Disabled'),
+      (found: Mutable) => (policy(found).immutabilityPeriodSinceCreationInDays = 0),
+      (found: Mutable) => (policy(found).immutabilityPeriodSinceCreationInDays = 8),
+    ]) {
+      expect(only(changed(STORE, change))).toEqual(['evidence-store']);
+    }
+    expect(only(changed(STORE, (found) => (policy(found).immutabilityPeriodSinceCreationInDays = 7)))).toEqual([]);
+    // Production: five years exactly, Locked, three zones; anything less is refused.
+    expect(only(productionLike({ subject: true }), production)).toEqual(['database-backup']);
+    for (const change of [
+      (found: Mutable) => (policy(found).state = 'Unlocked'),
+      (found: Mutable) => (policy(found).immutabilityPeriodSinceCreationInDays = 1825),
+      (found: Mutable) => (inside(found, 'sku').name = 'Standard_LRS'),
+    ]) {
+      const weaker = productionLike({ subject: true });
+      change(weaker.predictedResources.find(STORE) as unknown as Mutable);
+      expect(only(weaker, production)).toEqual(['database-backup', 'evidence-store']);
+    }
+
+    // Versioning off, a container open to anyone or named otherwise, a part
+    // that isn't the store's, or any other Storage resource.
+    expect(only(changed(BLOBS, (found) => (properties(found).isVersioningEnabled = false)))).toEqual([
+      'evidence-store',
+    ]);
+    expect(only(changed(CONTAINER, (found) => (properties(found).publicAccess = 'Blob')))).toEqual(['evidence-store']);
+    expect(
+      only(changed(CONTAINER, (found) => (found.id = String(found.id).replace(/audit-exports$/, 'other')))),
+    ).toEqual(['evidence-store']);
+    // A blob service that isn't the account's default; its logs then watch nothing of the store's too.
+    expect(only(changed(BLOBS, (found) => (found.id = String(found.id).replace(/default$/, 'second'))))).toEqual([
+      'evidence-store',
+      'resource-logs',
+    ]);
+    expect(
+      only(
+        withExtra({
+          id: `${String(store?.id)}/managementPolicies/default`,
+          type: 'Microsoft.Storage/storageAccounts/managementPolicies',
+          name: `${String(store?.name)}/default`,
+          apiVersion: '2025-01-01',
+          properties: {},
+        }),
+      ),
+    ).toEqual(['evidence-store']);
+    // None, or a second, of each part.
+    for (const pick of [STORE, BLOBS, CONTAINER]) {
+      const found = staging.predictedResources.find(pick);
+      expect(only(withExtra({ ...structuredClone(found), id: `${String(found?.id)}-second` }))).toContain('required');
+    }
+    // The apps subnet without its Storage endpoint, or with it in another region.
+    const endpoints = (network: Mutable): Mutable[] =>
+      at(subnet(network, 'apps'), 'properties', 'serviceEndpoints') as Mutable[];
+    expect(
+      only(
+        changed(NETWORK, (network) => {
+          inside(subnet(network, 'apps'), 'properties').serviceEndpoints = endpoints(network).filter(
+            (endpoint) => endpoint.service !== 'Microsoft.Storage',
+          );
+        }),
+      ),
+    ).toEqual(['evidence-store']);
+    expect(
+      only(
+        changed(NETWORK, (network) => {
+          nth(endpoints(network), 1).locations = ['westeurope'];
+        }),
+      ),
+    ).toEqual(['evidence-store']);
+
+    // The role: one data action, add a new file; never write, read, delete or any action.
+    expect(at(staging.predictedResources.find(WRITER_ROLE)?.properties, 'permissions')).toEqual([
+      {
+        actions: [],
+        notActions: [],
+        dataActions: ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'],
+        notDataActions: [],
+      },
+    ]);
+    const permissionsOf = (role: Mutable): Mutable => first(at(role, 'properties', 'permissions'));
+    for (const change of [
+      (role: Mutable) =>
+        (at(permissionsOf(role), 'dataActions') as string[]).push(
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write',
+        ),
+      (role: Mutable) =>
+        (permissionsOf(role).dataActions = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read']),
+      (role: Mutable) => (permissionsOf(role).dataActions = ['*']),
+      (role: Mutable) => (permissionsOf(role).dataActions = []),
+      (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+      (role: Mutable) =>
+        (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
+    ]) {
+      expect(only(changed(WRITER_ROLE, change))).toEqual(['evidence-store']);
+    }
+    // Without the role, its one grant names a role that isn't there.
+    expect(only(without(WRITER_ROLE))).toEqual(['evidence-store']);
+    // The grant: on the container alone, to the operator alone, once.
+    const accountScope = (grant: Mutable): void => {
+      grant.id = String(grant.id).replace('/blobServices/default/containers/audit-exports', '');
+    };
+    for (const change of [
+      accountScope,
+      (grant: Mutable) =>
+        (grant.id = String(grant.id).replace(/^.*(?=\/providers\/Microsoft\.Authorization\/)/, group)),
+      (grant: Mutable) =>
+        (inside(grant, 'properties').principalId = String(at(grant, 'properties', 'principalId')).replace(
+          'id-agentx-stg-operator',
+          'id-agentx-stg-api',
+        )),
+      (grant: Mutable) => (inside(grant, 'properties').principalType = 'User'),
+    ]) {
+      expect(only(changed(WRITES, change))).toEqual(['evidence-store']);
+    }
+    expect(only(without(WRITES))).toEqual(['evidence-store']);
+    const twice = structuredClone(staging.predictedResources.find(WRITES)) as unknown as Mutable;
+    twice.id = `${String(twice.id)}-second`;
+    expect(only(withExtra(twice))).toEqual(['evidence-store']);
+    // Its role named as the policy works it out, as Bicep's guid() does.
+    expect(staging.predictedResources.find(WRITER_ROLE)?.name).toBe(bicepGuid(group, 'evidence-writer'));
+  });
+
   it('workspace: another retention, shared keys, or no cap', () => {
     const properties = (workspace: Mutable): Mutable => inside(workspace, 'properties');
     expect(brokenRules(changed(WORKSPACE, (workspace) => (properties(workspace).retentionInDays = 90)))).toEqual([
@@ -1190,10 +1392,21 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
-  it("resource-logs: a vault, server or DNS policy whose logs stay out of this deployment's workspace", () => {
+  it("resource-logs: a vault, server, DNS policy or audit-export store whose logs stay out of this deployment's workspace", () => {
     const elsewhere = '/subscriptions/x/resourceGroups/y/providers/Microsoft.OperationalInsights/workspaces/elsewhere';
     expect(brokenRules(without(named(/^audit-to-workspace$/)))).toEqual(['resource-logs']);
     expect(brokenRules(without(DNS_LOGS))).toEqual(['resource-logs']);
+    // The store's reads, writes and deletes, each of the three.
+    const BLOB_LOGS = named(/^blob-logs-to-workspace$/);
+    expect(brokenRules(without(BLOB_LOGS))).toEqual(['resource-logs']);
+    for (const index of [0, 1, 2]) {
+      expect(
+        brokenRules(changed(BLOB_LOGS, (entry) => (nth(at(entry, 'properties', 'logs'), index).enabled = false))),
+      ).toEqual(['resource-logs']);
+    }
+    expect(
+      brokenRules(changed(BLOB_LOGS, (entry) => (inside(entry, 'properties').logAnalyticsDestinationType = undefined))),
+    ).toEqual(['resource-logs']);
     expect(
       brokenRules(changed(DNS_LOGS, (entry) => (first(at(entry, 'properties', 'logs')).category = 'Other'))),
     ).toEqual(['resource-logs']);
@@ -1533,15 +1746,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra(separateRule(APPS_RULES, 'Inbound', 'VirtualNetwork', '*', '*')))).toEqual([
       'apps-network',
     ]);
-    // No apps subnet at all: the database's rule refuses it too, and the vault
-    // and the environment point at a subnet that isn't there.
+    // No apps subnet at all: the database's rule refuses it too, and the vault,
+    // the audit-export store and the environment point at a subnet that isn't there.
     expect(
       brokenRules(
         changed(NETWORK, (network) => {
           inside(network, 'properties').subnets = [subnet(network, 'database')];
         }),
       ),
-    ).toEqual(['database-network', 'apps-network', 'apps-egress', 'vault', 'apps-environment']);
+    ).toEqual(['database-network', 'apps-network', 'apps-egress', 'vault', 'evidence-store', 'apps-environment']);
   });
 
   it('apps-egress: a door out that nothing needs, one the apps need missing, or the rest not denied after them', () => {
@@ -1594,6 +1807,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (group: Mutable) => {
         dropRule(group, 'allow-out-communication');
       },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-storage');
+      },
+      // The audit exports' door to every region's accounts, or another country's.
+      (group: Mutable) => (out(group, 'storage').destinationAddressPrefix = 'Storage'),
+      (group: Mutable) => (out(group, 'storage').destinationAddressPrefix = 'Storage.westeurope'),
+      (group: Mutable) => (out(group, 'storage').destinationPortRange = '*'),
       // Email's door widened to every Azure address, or to the whole of Front Door's.
       (group: Mutable) => (out(group, 'communication').destinationAddressPrefix = 'AzureCloud'),
       (group: Mutable) => (out(group, 'communication').destinationAddressPrefix = 'AzureFrontDoor'),
@@ -1991,7 +2211,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         .filter((problem) => problem.rule === 'release-identity')
         .map((problem) => `${problem.resource}: ${problem.message}`);
     const TRUST = type('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials');
-    const ROLE = type('Microsoft.Authorization/roleDefinitions');
+    const ROLE = RELEASE_ROLE;
     const RELEASE = named(/^id-agentx-stg-release$/);
     const subject = 'repo:shahbaz242630@205810405/agent-x@1368211207:environment:staging';
     const trust = 'id-agentx-stg-release/github';
@@ -2183,7 +2403,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     };
     const group = idOf(type('Microsoft.Resources/resourceGroups'));
     const subscription = group.slice(0, group.indexOf('/resourceGroups/'));
-    const role = String(staging.predictedResources.find(type('Microsoft.Authorization/roleDefinitions'))?.name);
+    const role = String(staging.predictedResources.find(RELEASE_ROLE)?.name);
     const roleId = `${subscription}/providers/Microsoft.Authorization/roleDefinitions/${role}`;
     const marker = '/providers/Microsoft.Authorization/roleAssignments/';
     const scopeOf = (assignment: PredictedResource): string => assignment.id.slice(0, assignment.id.indexOf(marker));
@@ -2291,7 +2511,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // A built-in role passed off as CI's: the role defined under Owner's id, and given by it.
     const owner = '8e3af657-a8ff-443c-a75c-2fe8c4bcb635';
     const asOwner = changed(
-      (resource) => resource.type === 'Microsoft.Authorization/roleDefinitions' || GIVES_ROLE(resource),
+      (resource) => RELEASE_ROLE(resource) || GIVES_ROLE(resource),
       (resource) => {
         if (resource.type === 'Microsoft.Authorization/roleDefinitions') {
           resource.name = owner;
@@ -2307,7 +2527,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
     expect(brokenRules(asOwner)).toEqual(['release-identity', 'release-access', 'secret-access']);
     // A second custom role, wider, given to CI on the API in place of CI's own.
-    const wider = structuredClone(staging.predictedResources.find(type('Microsoft.Authorization/roleDefinitions')));
+    const wider = structuredClone(staging.predictedResources.find(RELEASE_ROLE));
     const other = bicepGuid(group, 'wider');
     const widened = withExtra({
       ...wider,
@@ -3375,7 +3595,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
           settingsOf(resource).push({ name, value: 'job-agentx-stg-operator-7x2kq9m' });
         }),
       );
-    for (const name of ['CONTAINER_APP_JOB_EXECUTION_NAME', 'CONTAINER_APP_NAME']) {
+    // And where a container gets its identity's token (E10c): one set here could send the operator's request elsewhere.
+    for (const name of [
+      'CONTAINER_APP_JOB_EXECUTION_NAME',
+      'CONTAINER_APP_NAME',
+      'IDENTITY_ENDPOINT',
+      'IDENTITY_HEADER',
+      'MSI_ENDPOINT',
+      'MSI_SECRET',
+    ]) {
       expect({ name, rules: sets(JOB('operator'), name) }).toEqual({ name, rules: ['platform-settings'] });
     }
     // Any container of ours, the apps' as well as the jobs'.
@@ -3397,7 +3625,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         rule: 'platform-settings',
         resource: 'job-agentx-stg-operator',
         message:
-          "sets CONTAINER_APP_JOB_EXECUTION_NAME: Azure sets its CONTAINER_APP_ variables in every container itself, and one set here could stand in for the platform's",
+          "sets CONTAINER_APP_JOB_EXECUTION_NAME: Azure sets its CONTAINER_APP_ and identity variables in every container itself, and one set here could stand in for the platform's",
       },
     ]);
   });

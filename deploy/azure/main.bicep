@@ -22,7 +22,8 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
-import { jobName, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
+import { identityName, jobName, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
+import { evidenceAccountName } from 'modules/evidence.bicep'
 
 targetScope = 'subscription'
 
@@ -80,6 +81,24 @@ param appsZoneRedundant bool
 @description('The apps\' error alert fires above this many error events in 15 minutes (logging standard §5).')
 @minValue(0)
 param appErrorAlertThreshold int
+
+@description('How many days each audit export is kept unchangeable (decision 27: five years live, days on staging).')
+@minValue(1)
+param evidenceRetentionDays int
+
+@description('Unlocked on staging; production is created Unlocked, then Locked by a second run (modules/evidence.bicep).')
+@allowed([
+  'Unlocked'
+  'Locked'
+])
+param evidenceImmutability string
+
+@description('The audit exports\' copies: Standard_LRS on staging, Standard_ZRS live.')
+@allowed([
+  'Standard_LRS'
+  'Standard_ZRS'
+])
+param evidenceRedundancy string
 
 var short = shortName(environment)
 
@@ -224,6 +243,31 @@ module appsEnvironment 'modules/environment.bicep' = {
   dependsOn: [
     network
     monitoring
+  ]
+}
+
+// The write-once store for our team's audit exports (ADR-005 §6, E10c). Its
+// names are written in modules/evidence.bicep, not in names.bicep, so a change
+// to them asks for no secrets or certificates deploy.
+module evidence 'modules/evidence.bicep' = {
+  scope: group
+  params: {
+    location: location
+    name: evidenceAccountName(short, nameSuffix)
+    tags: tags
+    appsSubnetId: ids.appsSubnet
+    workspaceId: ids.workspace
+    writerIdentityName: identityName(environment, 'operator')
+    writerRoleName: 'Agent X evidence writer (${environment} ${nameSuffix})'
+    retentionDays: evidenceRetentionDays
+    immutability: evidenceImmutability
+    redundancy: evidenceRedundancy
+  }
+  // The subnet's Storage endpoint, the workspace and the operator's identity must exist first.
+  dependsOn: [
+    network
+    monitoring
+    appsEnvironment
   ]
 }
 

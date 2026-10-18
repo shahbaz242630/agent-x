@@ -272,6 +272,22 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
         }
       }
       {
+        // The regional tag, as the key vault's: it still covers every account
+        // in this region, not ours alone (PL-43 closes that with a private endpoint).
+        name: 'allow-out-storage'
+        properties: {
+          description: 'The operator\'s audit exports, to the write-once store through the subnet\'s Storage endpoint, in this region only.'
+          priority: 310
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: 'Storage.${location}'
+          destinationPortRange: '443'
+        }
+      }
+      {
         name: 'deny-out-rest'
         properties: {
           description: 'Overrides Azure\'s default rules that let the subnet reach the whole internet: nothing leaves but what is allowed above.'
@@ -368,10 +384,15 @@ resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
               }
             }
           ]
-          // Lets the key vault take requests from this subnet and refuse the rest (keyvault.bicep).
+          // Lets the key vault and the audit-export store take requests from
+          // this subnet and refuse the rest (keyvault.bicep, evidence.bicep).
           serviceEndpoints: [
             {
               service: 'Microsoft.KeyVault'
+              locations: [location]
+            }
+            {
+              service: 'Microsoft.Storage'
               locations: [location]
             }
           ]
