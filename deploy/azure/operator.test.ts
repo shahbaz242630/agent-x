@@ -10,8 +10,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  auditExportRequest,
   createOrganizationRequest,
   NO_REQUEST_PROBLEM,
+  NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
   restoreCheckRequest,
   UUID_V7,
@@ -19,12 +21,14 @@ import {
 import type { Az, AzResult } from './deploy.ts';
 import { jobName, JOBS_API, UsageError } from './jobs.ts';
 import {
+  auditExport,
   createOrganization,
   inviteFirstAdmin,
   main,
   NO_REQUEST,
   OPERATOR_JOB,
   parseArguments,
+  parseAuditExport,
   parseFirstAdmin,
   REQUEST_SECRET,
   restoreCheck,
@@ -155,7 +159,16 @@ type Ending =
   | 'invite-refused'
   | 'copy-holds'
   | 'copy-broken'
-  | 'check-refused';
+  | 'check-refused'
+  | 'exported'
+  | 'exported-there-already'
+  | 'exported-other'
+  | 'export-unwritten'
+  | 'export-refused'
+  | 'no-store';
+
+/** The organisation an audit export is for. */
+const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
 
 /** Another request's ID, as if that request had run in this one's place. */
 const OTHER_ID = '0199a1b2-c3d4-7e5f-8a6b-000000000001';
@@ -231,6 +244,47 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     said({ event: 'operator.refused', problems: ['a connection is not read-only, so nothing was read'] }),
     TERMINATED,
   ],
+  exported: (id) => [
+    said({ event: 'operator.starting' }),
+    said({
+      event: 'operator.audit_exported',
+      exportId: id,
+      events: 42,
+      file: `${EXPORT_ORG}/${id}.ndjson`,
+      write: 'written',
+      bytes: 9001,
+      sha256: 'ab'.repeat(32),
+    }),
+    TERMINATED,
+  ],
+  'exported-there-already': (id) => [
+    said({
+      event: 'operator.audit_exported',
+      exportId: id,
+      events: 42,
+      recordedBefore: true,
+      file: `${EXPORT_ORG}/${id}.ndjson`,
+      write: 'there_already',
+    }),
+    TERMINATED,
+  ],
+  'exported-other': () => [
+    said({ event: 'operator.audit_exported', exportId: OTHER_ID, write: 'written', file: 'x' }),
+    TERMINATED,
+  ],
+  'export-unwritten': (id) => [
+    said({
+      event: 'operator.export_unwritten',
+      exportId: id,
+      problems: ['the blob service answered 503 (ServerBusy)'],
+    }),
+    TERMINATED,
+  ],
+  'export-refused': (id) => [
+    said({ event: 'operator.refused', exportId: id, problems: ["the organisation isn't in the directory"] }),
+    TERMINATED,
+  ],
+  'no-store': () => [said({ event: 'operator.refused', problems: [NO_STORE_PROBLEM] }), TERMINATED],
 };
 
 /** The endings whose command exits 0, so Azure ends the run Succeeded. */
@@ -241,6 +295,9 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'invited',
   'invited-other',
   'copy-holds',
+  'exported',
+  'exported-there-already',
+  'exported-other',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -479,8 +536,9 @@ class FakeAzure implements Az {
   /** The run's lines, for the ID its request named when it started. */
   #log(): unknown {
     const words = JSON.parse(this.heldAtStart ?? '[]') as string[];
-    // The ID a request names: an organisation's fifth word, an invitation's seventh.
-    const id = String(words[0] === 'invite-first-admin' ? words[6] : words[4]);
+    // The ID a request names: an organisation's fifth word, an invitation's seventh, an export's eleventh.
+    const at = { 'invite-first-admin': 6, 'audit-export': 10 }[String(words[0])] ?? 4;
+    const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
     return {
       tables: [
@@ -1324,5 +1382,157 @@ describe('inviting a first admin (B4-6b)', () => {
       new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.'),
     );
     expect(done.az.sent).toEqual([]);
+  });
+});
+
+describe('an audit export for a case (E10c)', () => {
+  const FROM = '2026-10-01T00:00:00Z';
+  const TO = '2026-10-18T00:00:00Z';
+  /** A case reference no test line repeats in a problem. */
+  const CASE = 'DISPUTE-2026/0042';
+  const asked = ['audit-export', '--org', EXPORT_ORG, '--from', FROM, '--to', TO, '--reason', CASE];
+
+  async function exportRun(script: Script = {}, id?: string) {
+    const az = new FakeAzure({ ending: 'exported', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await auditExport(
+      { orgId: EXPORT_ORG, from: FROM, to: TO, caseRef: CASE, id },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    );
+    const words = JSON.parse(az.heldAtStart ?? '[]') as string[];
+    return { status, az, said: lines, id: String(words[10]), words };
+  }
+
+  it('reads the organisation, the range, the case, and an earlier ID when one is given', () => {
+    expect(parseAuditExport(asked)).toEqual({ orgId: EXPORT_ORG, from: FROM, to: TO, caseRef: CASE, id: undefined });
+    expect(parseAuditExport([...asked, '--id', EARLIER_ID]).id).toBe(EARLIER_ID);
+  });
+
+  it("refuses what the operator's command would, before writing anything, never repeating the case", () => {
+    const refused = (argv: readonly string[]): string => {
+      try {
+        parseAuditExport(argv);
+      } catch (error) {
+        expect(error).toBeInstanceOf(UsageError);
+        return (error as Error).message;
+      }
+      return 'read';
+    };
+    const shape =
+      'say audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else';
+    for (const argv of [
+      asked.slice(0, -1),
+      [...asked, '--id'],
+      [...asked, '--id', EARLIER_ID, 'more'],
+      asked.with(3, '--since'),
+      asked.with(7, '--case'),
+    ]) {
+      expect(refused(argv)).toBe(shape);
+    }
+    expect(refused([...asked, '--id', 'not-an-id'])).toBe(
+      '--id takes the ID an earlier run gave: a UUIDv7, in lower case',
+    );
+    expect(refused(asked.with(2, 'ORG'))).toBe("the organisation's ID must be a UUIDv7, in lower case");
+    expect(refused(asked.with(4, '2026-02-30T00:00:00Z'))).toBe(
+      '--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z',
+    );
+    expect(refused(asked.with(6, FROM))).toBe('the range starts before it ends, 366 days at most');
+    expect(refused(asked.with(6, '2027-10-03T00:00:00Z'))).toBe('the range starts before it ends, 366 days at most');
+    const badCase = 'a case with spaces';
+    const said = refused(asked.with(8, badCase));
+    expect(said).toBe(
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+    );
+    expect(said).not.toContain(badCase);
+  });
+
+  it("writes the operator's request, runs it, puts [] back and says the file written, its size and hash", async () => {
+    const done = await exportRun();
+
+    expect(done.status).toBe(0);
+    expect(done.id).toMatch(UUID_V7);
+    expect(done.az.heldAtStart).toBe(auditExportRequest(EXPORT_ORG, FROM, TO, CASE, done.id));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said).toContain(
+      `The export's ID is ${done.id}. If this run's end is unclear, run the same command again with --id ${done.id}: it records nothing twice, and it takes the request off the job at its end.`,
+    );
+    expect(done.said.at(-1)).toBe(
+      `Exported 42 events for the case to the store as ${EXPORT_ORG}/${done.id}.ndjson (9001 bytes, SHA-256 ${'ab'.repeat(32)}). It is recorded on both chains, and the organisation's admins were told.`,
+    );
+  });
+
+  it('writes the ID given for a retry, and calls a file there already done', async () => {
+    const done = await exportRun({ ending: 'exported-there-already' }, EARLIER_ID);
+
+    expect(done.status).toBe(0);
+    expect(done.id).toBe(EARLIER_ID);
+    expect(done.said.at(-1)).toBe(
+      `Already done: ${EXPORT_ORG}/${EARLIER_ID}.ndjson is in the store from an earlier run of this export, and nothing was written again.`,
+    );
+  });
+
+  it('says an export recorded but not written, and how the same ID finishes it', async () => {
+    const done = await exportRun({ ending: 'export-unwritten', states: ['Failed'] });
+
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe(
+      `The export ${done.id} is recorded on both chains and the organisation's admins were told, but its file wasn't written: the blob service answered 503 (ServerBusy). Run the same command again with --id ${done.id}: it records nothing twice, and writes the file once.`,
+    );
+  });
+
+  it('says a refusal, a job with no store, and a run that found no request, each recording nothing', async () => {
+    const refused = await exportRun({ ending: 'export-refused', states: ['Failed'] });
+    expect(refused.status).toBe(1);
+    expect(refused.said.at(-1)).toBe(
+      "The operator's command refused it, and nothing was recorded: the organisation isn't in the directory.",
+    );
+    const storeless = await exportRun({ ending: 'no-store', states: ['Failed'] });
+    expect(storeless.status).toBe(1);
+    expect(storeless.said.at(-1)).toBe(
+      `The job has no store for an audit export set, so nothing was recorded: deploy the apps (deploy.ts apps), then run the same command again with --id ${storeless.id}.`,
+    );
+    const empty = await exportRun({ ending: 'no-request', states: ['Failed'] });
+    expect(empty.status).toBe(1);
+    expect(empty.said.at(-1)).toBe(
+      `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again with --id ${empty.id}.`,
+    );
+  });
+
+  it('never takes a line about another export for this one, nor a run whose lines say nothing', async () => {
+    for (const ending of ['exported-other', 'silent'] as const) {
+      const done = await exportRun({ ending });
+      expect({ ending, status: done.status }).toEqual({ ending, status: 1 });
+      expect(done.said.at(-1)).toBe(
+        `The run succeeded, but its lines don't show the export ${done.id} written: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${done.id}, which records nothing twice.`,
+      );
+    }
+    const stopped = await exportRun({ ending: 'failed', states: ['Failed'] });
+    expect(stopped.status).toBe(1);
+    expect(stopped.said.at(-1)).toBe(
+      `The export may not have been recorded or written: read the lines above. If they leave it unclear, run the same command again with --id ${stopped.id}, which records nothing twice.`,
+    );
+  });
+
+  it('is read by main as its own command, saying how to use it, and ending 2, when asked it wrongly', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['audit-export', '--org', EXPORT_ORG],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([
+      `say audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else\n${USAGE}`,
+    ]);
   });
 });

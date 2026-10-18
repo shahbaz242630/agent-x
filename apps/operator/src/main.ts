@@ -40,7 +40,7 @@ import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
-import { DAY_MS, uuidV7Ids } from '@agentx/core/shared-kernel';
+import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
   assertRuntimeRole,
@@ -67,11 +67,11 @@ import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
 import {
   AUDIT_EXPORT_USAGE,
-  CASE_REFERENCE,
+  auditExportOf,
   FIRST_ADMIN_USAGE,
   NO_REQUEST_PROBLEM,
+  NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
-  REQUEST_TIME,
   REQUEST_USAGE,
   RESTORE_CHECK,
   TOKEN_HASH_HEX,
@@ -288,23 +288,11 @@ function firstAdminRequest(words: readonly string[], fromFile: boolean): Request
 }
 
 /**
- * A request file's time, or undefined for one that isn't REQUEST_TIME or isn't
- * a real moment: no date at all (month 13, hour 25), or one a date rolls over
- * (30 February). Without its Z, the text starts the moment's own ISO form,
- * to the second or the millisecond.
- */
-function requestTime(text: string | undefined): Date | undefined {
-  if (text === undefined || !REQUEST_TIME.test(text)) return undefined;
-  const at = new Date(text);
-  return !Number.isNaN(at.getTime()) && at.toISOString().startsWith(text.slice(0, -1)) ? at : undefined;
-}
-
-/**
  * The audit export a request file asks for (Phase 3 E10c), or the problems;
  * never typed. The case reference is repeated in no problem.
  */
 function auditExportAsked(words: readonly string[], fromFile: boolean): Request | Problems {
-  const [, orgFlag, orgId, fromFlag, fromText, toFlag, toText, reasonFlag, caseRef, idFlag, id, ...more] = words;
+  const [, orgFlag, orgId, fromFlag, from, toFlag, to, reasonFlag, caseRef, idFlag, id, ...more] = words;
   if (!fromFile) return problem(`audit-export runs only from a request file: ${AUDIT_EXPORT_USAGE}`);
   const shaped =
     orgFlag === '--org' &&
@@ -315,25 +303,9 @@ function auditExportAsked(words: readonly string[], fromFile: boolean): Request 
     id !== undefined &&
     more.length === 0;
   if (!shaped) return problem(`the request file holds ${AUDIT_EXPORT_USAGE} as a JSON list, and nothing else`);
-  const from = requestTime(fromText);
-  const to = requestTime(toText);
-  const span = (to?.getTime() ?? Number.NaN) - (from?.getTime() ?? Number.NaN);
-  const problems = [
-    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
-    ...(UUID_V7.test(id) ? [] : ["the export's ID must be a UUIDv7, in lower case"]),
-    ...(from === undefined || to === undefined
-      ? ['--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z']
-      : []),
-    // As an admin's download: the same days, the same rule (audit-log-exports.ts).
-    ...(span <= 0 || span > MOST_EXPORT_DAYS * DAY_MS
-      ? [`the range starts before it ends, ${String(MOST_EXPORT_DAYS)} days at most`]
-      : []),
-    ...(CASE_REFERENCE.test(String(caseRef))
-      ? []
-      : ['the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
-  ];
-  if (problems.length > 0 || from === undefined || to === undefined) return { problems };
-  return { command: 'audit-export', orgId: String(orgId), from, to, caseRef: String(caseRef), id };
+  // As an admin's download: the same days, the same rule (audit-log-exports.ts).
+  const asked = auditExportOf({ orgId, from, to, caseRef, id }, MOST_EXPORT_DAYS);
+  return 'problems' in asked ? asked : { command: 'audit-export', ...asked };
 }
 
 /**
@@ -399,7 +371,7 @@ async function run(
   if (request.command === 'audit-export') {
     const store = evidenceStoreOf(config);
     if (store === undefined) {
-      logger.error('operator.refused', { problems: [NO_STORE] });
+      logger.error('operator.refused', { problems: [NO_STORE_PROBLEM] });
       return 1;
     }
     const exporting = await connect(config, logger);
@@ -484,10 +456,6 @@ async function inviteFirst(
     await database.destroy();
   }
 }
-
-/** Why an audit export can't run where no store is set for its file. */
-const NO_STORE =
-  'no store for an audit export is set: AGENTX_EVIDENCE_CONTAINER_URL deployed, or AGENTX_EVIDENCE_DIR in development and test';
 
 /** Where an audit export's file goes: the write-once container, or the local folder in development and test. */
 function evidenceStoreOf({ evidence: { directory, container } }: OperatorConfig): EvidenceStore | undefined {
