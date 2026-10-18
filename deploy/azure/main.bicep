@@ -247,8 +247,8 @@ module appsEnvironment 'modules/environment.bicep' = {
 }
 
 // The write-once store for our team's audit exports (ADR-005 §6, E10c). Its
-// names are written here, not in names.bicep, so only the foundation and the
-// apps deployment (which builds the container's address) read them.
+// names are written in modules/evidence.bicep, not in names.bicep, so a change
+// to them asks for no secrets or certificates deploy.
 module evidence 'modules/evidence.bicep' = {
   scope: group
   params: {

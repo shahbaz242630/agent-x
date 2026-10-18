@@ -621,6 +621,9 @@ const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'eviden
  * How long each environment keeps an export unchangeable (decision 27):
  * production five years, Locked for good; staging a few days and Unlocked, so
  * a test file never holds the account (and its resource group) for years.
+ * Azure can't create a policy Locked, so production's very first foundation
+ * (the account not there yet) is a one-off hand run with Unlocked, outside
+ * this check, then every run after it is Locked and checked (PL-44).
  */
 const EVIDENCE_KEPT = {
   production: { state: 'Locked', days: (days: number) => days === 1826, sku: 'Standard_ZRS' },

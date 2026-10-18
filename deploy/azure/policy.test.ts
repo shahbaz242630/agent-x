@@ -1114,6 +1114,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (found: Mutable) => (acls(found).ipRules = [{ value: '203.0.113.7' }]),
       (found: Mutable) => (acls(found).resourceAccessRules = [{ resourceId: '/subscriptions/x/any' }]),
       (found: Mutable) => (first(acls(found).virtualNetworkRules).id = '/subscriptions/x/any/subnets/other'),
+      (found: Mutable) =>
+        (acls(found).virtualNetworkRules = [
+          first(acls(found).virtualNetworkRules),
+          { id: '/subscriptions/x/any/subnets/other', action: 'Allow' },
+        ]),
       (found: Mutable) => (acls(found).virtualNetworkRules = []),
       (found: Mutable) => (inside(found, 'properties', 'encryption').requireInfrastructureEncryption = false),
       (found: Mutable) => (inside(found, 'properties', 'immutableStorageWithVersioning').enabled = false),
