@@ -21,6 +21,8 @@
 // - As the API stops, its close waits for the rows still being written.
 import {
   ACTIVITY_METHODS,
+  type ActivityLog,
+  type ActivityTables,
   MOST_PATH_IDS,
   type OrganisationRequest,
   type PersonRequest,
@@ -28,6 +30,7 @@ import {
 import { UUID } from '@agentx/core/shared-kernel';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { Database } from '@agentx/platform/db';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import { writtenText } from './written-answers.ts';
@@ -37,6 +40,12 @@ export interface ActivitySink {
   forOrganisation(request: OrganisationRequest): Promise<void>;
   forPerson(request: PersonRequest): Promise<void>;
 }
+
+/** The activity module's writes, bound to the API's database. */
+export const activitySinkOf = (log: ActivityLog, db: Database<ActivityTables>): ActivitySink => ({
+  forOrganisation: (request) => log.recordForOrganisation(db, request),
+  forPerson: (request) => log.recordForPerson(db, request),
+});
 
 type Method = OrganisationRequest['method'];
 

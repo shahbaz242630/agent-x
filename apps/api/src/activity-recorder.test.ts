@@ -5,16 +5,17 @@
 // nothing for a caller not known. A row that can't be written never fails the
 // answer and is logged at error level. What the rows hold in the database is
 // the activity module's db test.
-import type { OrganisationRequest, PersonRequest } from '@agentx/core/modules/activity';
+import type { ActivityLog, ActivityTables, OrganisationRequest, PersonRequest } from '@agentx/core/modules/activity';
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture } from '@agentx/testing';
 import type { InjectOptions } from 'fastify';
+import type { Database } from '@agentx/platform/db';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import { type ActivitySink, pathIdsOf, reasonIn } from './activity-recorder.ts';
+import { type ActivitySink, activitySinkOf, pathIdsOf, reasonIn } from './activity-recorder.ts';
 import type { AuditLog } from './audit-log.ts';
 import type { ServerOptions } from './server.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
@@ -300,6 +301,32 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
     await vi.waitFor(() => {
       expect(rows).toEqual([expect.objectContaining({ method: 'HEAD', route: '/v1/audit-log', orgId: ORG })]);
     });
+  });
+});
+
+describe('the activity module bound to the database', () => {
+  it('passes each row to its table’s write, with the database', async () => {
+    const db = {} as Database<ActivityTables>;
+    const calls: unknown[][] = [];
+    const log: ActivityLog = {
+      recordForOrganisation: (...args) => {
+        calls.push(['organisation', ...args]);
+        return Promise.resolve();
+      },
+      recordForPerson: (...args) => {
+        calls.push(['person', ...args]);
+        return Promise.resolve();
+      },
+    };
+    const sink = activitySinkOf(log, db);
+    const row = { route: '/v1/profile' } as PersonRequest;
+    await sink.forOrganisation(row as unknown as OrganisationRequest);
+    await sink.forPerson(row);
+
+    expect(calls).toEqual([
+      ['organisation', db, row],
+      ['person', db, row],
+    ]);
   });
 });
 

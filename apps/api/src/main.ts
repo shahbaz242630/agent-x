@@ -120,6 +120,7 @@ import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
+import { activitySinkOf } from './activity-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
 import { contactFillFrom, directoryNamesFrom } from './kept-names.ts';
@@ -426,8 +427,6 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     now: () => systemClock.now().getTime(),
     logger,
   });
-  // Every known caller's request, once answered (decision 26).
-  const activityLog = createActivityLog({ ids: uuidV7Ids });
   // An agent's key, checked before its request goes on (C2-1).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
   // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
@@ -446,10 +445,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
             loginSessions: loginSessionsFrom(config),
           },
     securityEvents: recorder,
-    activity: {
-      forOrganisation: (request) => activityLog.recordForOrganisation(database, request),
-      forPerson: (request) => activityLog.recordForPerson(database, request),
-    },
+    activity: activitySinkOf(createActivityLog({ ids: uuidV7Ids }), database),
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
