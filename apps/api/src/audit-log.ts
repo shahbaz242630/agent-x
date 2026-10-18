@@ -21,6 +21,7 @@
 // Reading a page isn't itself logged (decision 24: a download is, E10b).
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import {
+  actorAsKept,
   actorProblems,
   type ActorType,
   type LogEvent,
@@ -247,7 +248,8 @@ export function registerAuditLog(app: FastifyInstance, { log }: { log: AuditLog 
         from: new Date(from),
         to: new Date(to),
         actions: actions?.split(','),
-        actor: actorType === undefined || actorId === undefined ? undefined : { type: actorType, id: actorId },
+        actor:
+          actorType === undefined || actorId === undefined ? undefined : actorAsKept({ type: actorType, id: actorId }),
         beforeSeq: before === undefined ? undefined : BigInt(before),
         limit: limit ?? MOST_LOG_EVENTS_A_PAGE,
       },

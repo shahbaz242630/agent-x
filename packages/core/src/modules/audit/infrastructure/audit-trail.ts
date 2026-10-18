@@ -65,6 +65,7 @@ import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import {
+  actorAsKept,
   type ActorType,
   type AuditActor,
   type AuditEvent,
@@ -174,6 +175,9 @@ export interface LogPageToRead {
   /** The most events the page holds. */
   readonly limit: number;
 }
+
+/** The log's events by one actor, as kept. */
+const actorIs = ({ type, id }: AuditActor) => sql`e.actor_type = ${type} and e.actor_id = ${id}`;
 
 /** An event of the log as its page shows it: whole, with the hashes that link it into the chain, as hex. */
 export interface LogEvent extends ReadEvent {
@@ -945,7 +949,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         [
           sql`e.recorded_at >= ${from} and e.recorded_at < ${to}`,
           ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
-          ...(actor === undefined ? [] : [sql`e.actor_type = ${actor.type} and e.actor_id = ${actor.id}`]),
+          ...(actor === undefined ? [] : [actorIs(actorAsKept(actor))]),
           ...(beforeSeq === undefined ? [] : [sql`e.seq < ${beforeSeq}`]),
         ],
         sql` and `,

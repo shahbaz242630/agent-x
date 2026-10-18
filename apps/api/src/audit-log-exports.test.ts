@@ -103,6 +103,13 @@ describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {
     expect(asked).toMatchObject([{ actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }]);
   });
 
+  it('passes a UUID in capitals as the log keeps it, in lower case', async () => {
+    const { app, asked } = await withExports(EXPORTED);
+    await app.inject(post({ ...BODY, actor: { type: 'user', id: '0199A0F0-0000-7000-8000-00000000A9E1' } }));
+
+    expect(asked).toMatchObject([{ actor: { type: 'user', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }]);
+  });
+
   it('passes every action when none are named', async () => {
     const { app, asked } = await withExports(EXPORTED);
     await app.inject(post(BODY));

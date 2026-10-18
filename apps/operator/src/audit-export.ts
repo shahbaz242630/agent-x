@@ -103,6 +103,7 @@ const detailsOf = ({ caseRef, from, to }: AuditExportRequest, events: number, up
   from: from.toISOString(),
   to: to.toISOString(),
   actions: null,
+  actor: null,
   format: 'ndjson',
   events,
   upToSeq: upToSeq?.toString() ?? null,

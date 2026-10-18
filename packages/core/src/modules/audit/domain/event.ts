@@ -82,6 +82,10 @@ function snapshotOf(event: AuditEvent): Snapshot {
   };
 }
 
+/** An actor as an event keeps it: a person's or an agent's UUID in lower case, a process name as it is. */
+export const actorAsKept = ({ type, id }: AuditActor): AuditActor =>
+  Object.freeze({ type, id: type === 'system' ? id : id.toLowerCase() });
+
 /** Problems with an actor: a person's or an agent's UUID, or a part of Agent X by its process name. */
 export function actorProblems(actor: AuditActor): string[] {
   if (!ACTOR_TYPES.has(actor.type)) return ['actor.type must be user, agent or system'];
@@ -133,11 +137,10 @@ export function checkedEvent(
   ];
   if (problems.length > 0) throw new AuditEventRefused(problems);
 
-  const lower = (id: string): string => id.toLowerCase();
   return Object.freeze({
-    actor: Object.freeze({ type: actor.type, id: actor.type === 'system' ? actor.id : lower(actor.id) }),
+    actor: actorAsKept(actor),
     action,
-    subject: Object.freeze({ type: subject.type, id: lower(subject.id), version: subject.version }),
+    subject: Object.freeze({ type: subject.type, id: subject.id.toLowerCase(), version: subject.version }),
     details: details.details,
   });
 }

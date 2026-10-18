@@ -23,6 +23,7 @@
 //   the evidence module), as at the download: a retry's file holds the same
 //   events, its names as the login service has them then.
 import {
+  actorAsKept,
   actorEventsSince,
   actorProblems,
   type AuditActor,
@@ -343,7 +344,7 @@ export function registerAuditLogExports(app: FastifyInstance, { exports }: { exp
           from: new Date(body.from),
           to: new Date(body.to),
           actions: body.actions,
-          actor: body.actor,
+          actor: body.actor === undefined ? undefined : actorAsKept(body.actor),
           format: body.format,
         },
         request.id,

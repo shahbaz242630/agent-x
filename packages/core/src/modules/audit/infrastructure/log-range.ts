@@ -5,7 +5,7 @@
 // recorded while it is read. One statement on 0048's and 0051's indexes.
 import { sql, type Transaction } from 'kysely';
 
-import type { AuditActor } from '../domain/event.ts';
+import { actorAsKept, type AuditActor } from '../domain/event.ts';
 import type { AuditTables } from './tables.ts';
 
 /** A range of the log, as a page reads one (LogPageToRead), with no start or limit. */
@@ -29,7 +29,10 @@ export async function eventsInRange(
     .where('recorded_at', '>=', from)
     .where('recorded_at', '<', to);
   if (actions !== undefined) query = query.where('action', 'in', [...actions]);
-  if (actor !== undefined) query = query.where('actor_type', '=', actor.type).where('actor_id', '=', actor.id);
+  if (actor !== undefined) {
+    const kept = actorAsKept(actor);
+    query = query.where('actor_type', '=', kept.type).where('actor_id', '=', kept.id);
+  }
   const row = await query.executeTakeFirstOrThrow();
   return { events: row.events, upToSeq: row.up_to };
 }

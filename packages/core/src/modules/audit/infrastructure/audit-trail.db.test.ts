@@ -1520,6 +1520,7 @@ describe('a page of the whole log, for the organisation’s admins (logPage; Pha
 
     expect(seqsOf(await page({ actor: { type: 'user', id: USER } }))).toEqual([4n, 1n]);
     expect(seqsOf(await page({ actor: { type: 'agent', id: USER } }))).toEqual([2n]);
+    expect(seqsOf(await page({ actor: { type: 'agent', id: USER.toUpperCase() } }))).toEqual([2n]);
     expect(seqsOf(await page({ actor: { type: 'system', id: 'probe-runner' }, actions: ['probe.stepped'] }))).toEqual([
       3n,
     ]);

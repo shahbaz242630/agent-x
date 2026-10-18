@@ -124,6 +124,13 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
     expect(asked).toMatchObject([{ actor: { type, id } }]);
   });
 
+  it('asks for a UUID in capitals as the log keeps it, in lower case', async () => {
+    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
+    await app.inject(get(`${RANGE}&actorType=agent&actorId=0199A0F0-0000-7000-8000-00000000A9E1`));
+
+    expect(asked).toMatchObject([{ actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }]);
+  });
+
   it('asks every action and a whole page when none are named, answering the end as null', async () => {
     const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
     const reply = await app.inject(get(RANGE));

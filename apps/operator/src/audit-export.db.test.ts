@@ -209,6 +209,7 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
           from: '2026-01-01T00:00:00.000Z',
           to: '2100-01-01T00:00:00.000Z',
           actions: null,
+          actor: null,
           format: 'ndjson',
           events: 2,
         },
