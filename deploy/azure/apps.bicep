@@ -58,6 +58,7 @@ import {
   shortName
   uniqueSuffix
 } from 'names.bicep'
+import { evidenceAccountName, evidenceContainerName } from 'modules/evidence.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -456,10 +457,31 @@ var operatorRequest = {
   value: '[]'
 }
 
+// Where the operator writes an audit export (ADR-005 §6, E10c): the store's one
+// container, named as modules/evidence.bicep names it for the foundation, and
+// the operator identity's client ID, which it asks Azure for a token as. Added
+// in the job's own body, as `emailSettings` is in an app's: the client ID is
+// read from Azure at deployment, which a loop's list can't hold.
+resource operatorIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: identityName(environment, 'operator')
+}
+
+var evidenceSettings = [
+  {
+    name: 'AGENTX_EVIDENCE_CONTAINER_URL'
+    value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${evidenceContainerName()}'
+  }
+  {
+    name: 'AGENTX_EVIDENCE_CLIENT_ID'
+    value: operatorIdentity.properties.clientId
+  }
+]
+
 // Every job: the work it does (its identity and its name come from that), the
 // image and command, how long one run may take, what it reads as a mounted file
 // with the setting that names each file, what it holds itself rather than reads
-// from the vault (only the operator's request), and its settings. `secretRef`
+// from the vault (only the operator's request), its settings, and whether it
+// writes to the evidence store (`evidenceSettings`). `secretRef`
 // entries in `settings` name a secret too; `policy.ts` checks that the secrets a
 // job is given are exactly the ones `GRANTS` says it reads, however they reach
 // it, and what it may hold (`HELD`).
@@ -472,6 +494,7 @@ var jobs = [
     command: ['node', 'apps/db-setup/src/main.ts']
     args: []
     timeoutSeconds: 900
+    evidence: false
     files: [
       {
         reads: 'db-admin-password'
@@ -513,6 +536,7 @@ var jobs = [
     command: ['node', 'apps/migrate/src/main.ts']
     args: []
     timeoutSeconds: 900
+    evidence: false
     files: [
       {
         reads: 'db-owner-password'
@@ -529,6 +553,7 @@ var jobs = [
     command: ['/app/zitadel']
     args: ['init', 'zitadel']
     timeoutSeconds: 900
+    evidence: false
     files: []
     held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine)
@@ -547,6 +572,7 @@ var jobs = [
     // Setup writes every step of a new instance, which takes longer than a
     // migration on the smallest server.
     timeoutSeconds: 1800
+    evidence: false
     files: [
       {
         reads: 'zitadel-masterkey'
@@ -566,9 +592,13 @@ var jobs = [
     image: appImage
     command: ['node', 'apps/operator/src/main.ts']
     args: ['--request', '${secretsPath}/${operatorRequest.name}']
-    // One organisation and its two audit events: seconds, with every wait for
-    // a chain's head bounded at 10 s (apps/operator).
-    timeoutSeconds: 300
+    // One organisation and its two audit events take seconds, with every wait
+    // for a chain's head bounded at 10 s (apps/operator); an audit export reads
+    // up to 90 days of one organisation's log and names each actor first, so
+    // it is given 15 minutes.
+    timeoutSeconds: 900
+    // Writes an audit export to the write-once store as its own identity (E10c).
+    evidence: true
     files: concat(
       [
         {
@@ -881,7 +911,8 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
               map(filter(job.files, file => !empty(file.setting)), file => {
                 name: file.setting
                 value: '${secretsPath}/${file.reads}'
-              })
+              }),
+              job.evidence ? evidenceSettings : []
             )
             volumeMounts: empty(concat(job.files, job.held))
               ? []

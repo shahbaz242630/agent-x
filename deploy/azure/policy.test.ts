@@ -1247,6 +1247,67 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(staging.predictedResources.find(WRITER_ROLE)?.name).toBe(bicepGuid(group, 'evidence-writer'));
   });
 
+  it("evidence-store: the operator's job told of another store or identity, or another workload told of the store (E10c-3b-2)", () => {
+    const STORE = type('Microsoft.Storage/storageAccounts');
+    const evidence = (job: Mutable): Mutable[] =>
+      settingsOf(job).filter((entry) => String(entry.name).startsWith('AGENTX_EVIDENCE_'));
+    const named = (job: Mutable, name: string): Mutable => evidence(job).find((entry) => entry.name === name) ?? {};
+    const account = String(staging.predictedResources.find(STORE)?.name);
+    const operatorId = String(
+      staging.predictedResources.find(
+        (resource) =>
+          resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' && resource.name.endsWith('-operator'),
+      )?.id,
+    );
+    // As apps.bicep writes them: this deployment's store and container, as the operator's identity.
+    expect(evidence(staging.predictedResources.find(JOB('operator')) as unknown as Mutable)).toEqual([
+      {
+        name: 'AGENTX_EVIDENCE_CONTAINER_URL',
+        value: `[format('https://{0}.blob.{1}/{2}', '${account}', environment().suffixes.storage, 'audit-exports')]`,
+      },
+      { name: 'AGENTX_EVIDENCE_CLIENT_ID', value: `[reference('${operatorId}', '2024-11-30').clientId]` },
+    ]);
+    const url = (job: Mutable): Mutable => named(job, 'AGENTX_EVIDENCE_CONTAINER_URL');
+    const client = (job: Mutable): Mutable => named(job, 'AGENTX_EVIDENCE_CLIENT_ID');
+    for (const change of [
+      (job: Mutable) => (url(job).value = String(url(job).value).replace(`'${account}'`, "'stagentxother'")),
+      (job: Mutable) => (url(job).value = String(url(job).value).replace("'audit-exports'", "'other'")),
+      (job: Mutable) => (url(job).value = 'https://stagentxother.blob.core.windows.net/audit-exports'),
+      (job: Mutable) => (client(job).value = String(client(job).value).replace('-operator', '-api')),
+      (job: Mutable) => (client(job).value = '00000000-0000-0000-0000-000000000002'),
+      (job: Mutable) => {
+        delete url(job).value;
+        url(job).secretRef = 'operator-request';
+      },
+      (job: Mutable) => {
+        containerOf(job).env = settingsOf(job).filter((entry) => entry.name !== 'AGENTX_EVIDENCE_CLIENT_ID');
+      },
+      (job: Mutable) => settingsOf(job).push(structuredClone(url(job))),
+      (job: Mutable) => settingsOf(job).push({ name: 'AGENTX_EVIDENCE_DIR', value: '/mnt/evidence' }),
+    ]) {
+      expect(brokenRules(changed(JOB('operator'), change))).toContain('evidence-store');
+    }
+    // No other workload, job or app, is pointed at the store, or at a folder in its place.
+    for (const pick of [APP('api'), JOB('migrate')]) {
+      for (const name of ['AGENTX_EVIDENCE_CONTAINER_URL', 'AGENTX_EVIDENCE_DIR']) {
+        const told = changed(pick, (resource) => settingsOf(resource).push({ name, value: 'x' }));
+        expect({ name, rules: brokenRules(told) }).toEqual({ name, rules: ['evidence-store'] });
+      }
+    }
+    expect(
+      policyProblems(
+        changed(APP('api'), (app) => settingsOf(app).push({ name: 'AGENTX_EVIDENCE_DIR', value: '/mnt/evidence' })),
+        STAGING,
+      ),
+    ).toEqual([
+      {
+        rule: 'evidence-store',
+        resource: 'ca-agentx-stg-api',
+        message: "sets AGENTX_EVIDENCE_DIR: only the operator's job writes to the store",
+      },
+    ]);
+  });
+
   it('workspace: another retention, shared keys, or no cap', () => {
     const properties = (workspace: Mutable): Mutable => inside(workspace, 'properties');
     expect(brokenRules(changed(WORKSPACE, (workspace) => (properties(workspace).retentionInDays = 90)))).toEqual([
