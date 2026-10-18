@@ -55,7 +55,7 @@ describe("the operator's command's config loads", () => {
         drillHost: null,
       },
       keys: { directory: KEYS_DIR, current: {} },
-      evidence: { directory: null },
+      evidence: { directory: null, container: null },
     });
   });
 
@@ -93,7 +93,7 @@ describe("the operator's command's config loads", () => {
         drillHost: 'psql-agentx-stg-drill.postgres.database.azure.com',
       },
       keys: { directory: '/mnt/other-keys', current: { 'audit-mac': 2 } },
-      evidence: { directory: '/var/agentx/evidence' },
+      evidence: { directory: '/var/agentx/evidence', container: null },
     });
   });
 
@@ -171,6 +171,102 @@ describe("B1c-2b the operator's config names the job's run, as Azure does", () =
 
   it.each(['development', 'test'])('refuses a malformed run name in %s too', (environment) => {
     expect(problemsWith({ ...LOCAL, AGENTX_ENV: environment, [RUN_VARIABLE]: 'operator' })).toEqual([RUN_RULE]);
+  });
+});
+
+describe("E10c the operator's write-once container for an audit export", () => {
+  const CONTAINER = 'https://stagentxstg01.blob.core.windows.net/audit-exports';
+  const CLIENT_ID = '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b';
+  /** Plain words, so secret scanners ignore it. */
+  const HEADER = 'identity header for these tests';
+  const WITH_CONTAINER: Env = {
+    ...DEPLOYED,
+    AGENTX_EVIDENCE_CONTAINER_URL: CONTAINER,
+    AGENTX_EVIDENCE_CLIENT_ID: CLIENT_ID,
+    IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+    IDENTITY_HEADER: HEADER,
+  };
+
+  it('reads the container, its identity and the endpoint Azure gives the job', () => {
+    expect(loadOperatorConfig(WITH_CONTAINER).evidence).toEqual({
+      directory: null,
+      container: {
+        url: CONTAINER,
+        clientId: CLIENT_ID,
+        identityEndpoint: 'http://localhost:42356/msi/token',
+        identityHeader: HEADER,
+      },
+    });
+  });
+
+  it.each([
+    ['a path past the container', `${CONTAINER}/more`],
+    ['a query', `${CONTAINER}?sv=1`],
+    ['plain http', 'http://stagentxstg01.blob.core.windows.net/audit-exports'],
+    ['a trailing slash', `${CONTAINER}/`],
+    ['a container name in capitals', 'https://stagentxstg01.blob.core.windows.net/Audit-Exports'],
+  ])('refuses a container address with %s', (_what, url) => {
+    expect(problemsWith({ ...WITH_CONTAINER, AGENTX_EVIDENCE_CONTAINER_URL: url })).toEqual([
+      expect.stringMatching(/^AGENTX_EVIDENCE_CONTAINER_URL: must be a blob container's address/),
+    ]);
+  });
+
+  it.each([
+    [
+      'a host other than Azure blob storage, deployed',
+      { AGENTX_EVIDENCE_CONTAINER_URL: 'https://evidence.example.com/audit-exports' },
+      "AGENTX_EVIDENCE_CONTAINER_URL: production writes to Azure's blob service, <account>.blob.core.windows.net",
+    ],
+    [
+      'the container without its identity',
+      { AGENTX_EVIDENCE_CLIENT_ID: undefined },
+      'AGENTX_EVIDENCE_CONTAINER_URL and AGENTX_EVIDENCE_CLIENT_ID: set both, or neither',
+    ],
+    [
+      'an identity without the container',
+      { AGENTX_EVIDENCE_CONTAINER_URL: undefined },
+      'AGENTX_EVIDENCE_CONTAINER_URL and AGENTX_EVIDENCE_CLIENT_ID: set both, or neither',
+    ],
+    [
+      'no endpoint from Azure',
+      { IDENTITY_ENDPOINT: undefined },
+      'IDENTITY_ENDPOINT: is required with the container (Azure sets it where the job has a managed identity)',
+    ],
+    [
+      'an endpoint over plain http to another host',
+      { IDENTITY_ENDPOINT: 'http://identity.example.com/msi/token' },
+      "IDENTITY_ENDPOINT: must be the managed identity's endpoint Azure sets: http only to localhost or 127.0.0.1",
+    ],
+    [
+      'an endpoint that is no address',
+      { IDENTITY_ENDPOINT: 'localhost:42356' },
+      "IDENTITY_ENDPOINT: must be the managed identity's endpoint Azure sets: http only to localhost or 127.0.0.1",
+    ],
+    [
+      'no header from Azure',
+      { IDENTITY_HEADER: '' },
+      'IDENTITY_HEADER: is required with the container (Azure sets it where the job has a managed identity)',
+    ],
+  ])('refuses %s', (_what, overrides, problem) => {
+    expect(problemsWith({ ...WITH_CONTAINER, ...overrides })).toEqual([problem]);
+  });
+
+  it('takes an endpoint over https, and a test server for the container in development and test', () => {
+    expect(problemsWith({ ...WITH_CONTAINER, IDENTITY_ENDPOINT: 'https://identity.example.com/token' })).toEqual([]);
+    expect(
+      problemsWith({
+        ...WITH_CONTAINER,
+        AGENTX_ENV: 'test',
+        AGENTX_EVIDENCE_CONTAINER_URL: 'https://127.0.0.1:10000/audit-exports',
+        IDENTITY_ENDPOINT: 'http://127.0.0.1:42356/msi/token',
+      }),
+    ).toEqual([]);
+  });
+
+  it('refuses the folder and the container together', () => {
+    expect(
+      problemsWith({ ...WITH_CONTAINER, AGENTX_ENV: 'test', AGENTX_EVIDENCE_DIR: '/var/agentx/evidence' }),
+    ).toEqual(['AGENTX_EVIDENCE_DIR and AGENTX_EVIDENCE_CONTAINER_URL: set one, the folder or the container']);
   });
 });
 

@@ -516,12 +516,24 @@ describe('E10c an audit export for a case, only ever from a file', () => {
     expect(text).not.toContain(CASE);
   });
 
+  it('takes the write-once container as its store where one is set, then connects', async () => {
+    const { events } = await run(['--request', asked()], {
+      ...ENV,
+      AGENTX_EVIDENCE_CONTAINER_URL: 'https://127.0.0.1:10000/audit-exports',
+      AGENTX_EVIDENCE_CLIENT_ID: '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+      IDENTITY_ENDPOINT: 'http://127.0.0.1:42356/msi/token',
+      IDENTITY_HEADER: 'identity header for these tests',
+    });
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+  });
+
   it('refuses to connect with no store set for the file', async () => {
     const { events, line } = await run(['--request', asked()]);
 
     expect(events).toEqual(['operator.starting', 'operator.refused']);
     expect(line('operator.refused')?.problems).toEqual([
-      'no store for an audit export is set: AGENTX_EVIDENCE_DIR, in development and test',
+      'no store for an audit export is set: AGENTX_EVIDENCE_CONTAINER_URL deployed, or AGENTX_EVIDENCE_DIR in development and test',
     ]);
   });
 

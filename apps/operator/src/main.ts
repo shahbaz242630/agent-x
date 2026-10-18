@@ -58,8 +58,10 @@ import {
   type LoggerOptions,
   type Output,
 } from '@agentx/platform/observability';
+import { createOutboundFetch } from '@agentx/platform/outbound';
 
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
+import { azureBlobOrigins, azureBlobStore } from './azure-blob-store.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
@@ -395,16 +397,14 @@ async function run(
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
   if (request.command === 'audit-export') {
-    const directory = config.evidence.directory;
-    if (directory === null) {
-      logger.error('operator.refused', {
-        problems: ['no store for an audit export is set: AGENTX_EVIDENCE_DIR, in development and test'],
-      });
+    const store = evidenceStoreOf(config);
+    if (store === undefined) {
+      logger.error('operator.refused', { problems: [NO_STORE] });
       return 1;
     }
     const exporting = await connect(config, logger);
     if (exporting === undefined) return 1;
-    return auditExport(config, keys, request, folderStore(directory), exporting, logger);
+    return auditExport(config, keys, request, store, exporting, logger);
   }
   const database = await connect(config, logger);
   if (database === undefined) return 1;
@@ -483,6 +483,18 @@ async function inviteFirst(
   } finally {
     await database.destroy();
   }
+}
+
+/** Why an audit export can't run where no store is set for its file. */
+const NO_STORE =
+  'no store for an audit export is set: AGENTX_EVIDENCE_CONTAINER_URL deployed, or AGENTX_EVIDENCE_DIR in development and test';
+
+/** Where an audit export's file goes: the write-once container, or the local folder in development and test. */
+function evidenceStoreOf({ evidence: { directory, container } }: OperatorConfig): EvidenceStore | undefined {
+  if (container !== null) {
+    return azureBlobStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
+  }
+  return directory === null ? undefined : folderStore(directory);
 }
 
 /** Exports an organisation's audit log for a case (Phase 3 E10c): the exit code. */
