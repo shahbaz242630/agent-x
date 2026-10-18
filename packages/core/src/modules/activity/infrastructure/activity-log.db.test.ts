@@ -134,6 +134,7 @@ describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () =>
     ['a duration that isn’t whole milliseconds', { durationMs: 1.5 }],
     ['an organisation that isn’t a UUID', { orgId: 'org' }],
     ['an actor that is Agent X itself', { actor: { type: 'system' as never, id: 'api' } }],
+    ['an actor that is Agent X, though by a UUID', { actor: { type: 'system' as never, id: PERSON } }],
     ['an actor by something not a UUID', { actor: { type: 'user' as const, id: 'someone' } }],
   ])('writes nothing for %s', async (_what, change) => {
     const before = await rowsOf(ORG);
