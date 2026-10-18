@@ -112,12 +112,24 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
     ]);
   });
 
+  it.each([
+    ['a person', 'user', '0199a0f0-0000-7000-8000-00000000a9e1'],
+    ['an agent', 'agent', '0199a0f0-0000-7000-8000-00000000a9e1'],
+    ['a part of Agent X', 'system', 'integrity-hold'],
+  ] as const)('asks for one actor’s events when %s is named (decision 26)', async (_who, type, id) => {
+    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
+    const reply = await app.inject(get(`${RANGE}&actorType=${type}&actorId=${id}`));
+
+    expect(reply.statusCode).toBe(200);
+    expect(asked).toMatchObject([{ actor: { type, id } }]);
+  });
+
   it('asks every action and a whole page when none are named, answering the end as null', async () => {
     const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
     const reply = await app.inject(get(RANGE));
 
     expect(reply.json()).toEqual({ events: [], next: null });
-    expect(asked).toMatchObject([{ actions: undefined, beforeSeq: undefined, limit: 100 }]);
+    expect(asked).toMatchObject([{ actions: undefined, actor: undefined, beforeSeq: undefined, limit: 100 }]);
   });
 
   it.each([
@@ -126,6 +138,11 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
     ['an action that isn’t an event’s name', `${RANGE}&actions=DROP TABLE`],
     ['more than 20 actions', `${RANGE}&actions=${TOO_MANY_ACTIONS}`],
     ['a limit past 100', `${RANGE}&limit=101`],
+    ['an actor’s type without its ID', `${RANGE}&actorType=user`],
+    ['an actor’s ID without its type', `${RANGE}&actorId=0199a0f0-0000-7000-8000-00000000a9e1`],
+    ['an actor type it doesn’t know', `${RANGE}&actorType=bank&actorId=0199a0f0-0000-7000-8000-00000000a9e1`],
+    ['a person named by something not a UUID', `${RANGE}&actorType=user&actorId=integrity-hold`],
+    ['a part of Agent X named by something not a process name', `${RANGE}&actorType=system&actorId=Not%20One`],
     ['a start that isn’t a seq', `${RANGE}&before=0`],
     ['a field of its own', `${RANGE}&role=admin`],
   ])('refuses %s at the edge, the log never asked', async (_what, query) => {

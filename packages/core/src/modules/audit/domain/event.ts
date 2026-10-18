@@ -82,7 +82,8 @@ function snapshotOf(event: AuditEvent): Snapshot {
   };
 }
 
-function actorProblems(actor: AuditActor): string[] {
+/** Problems with an actor: a person's or an agent's UUID, or a part of Agent X by its process name. */
+export function actorProblems(actor: AuditActor): string[] {
   if (!ACTOR_TYPES.has(actor.type)) return ['actor.type must be user, agent or system'];
   const pattern = actor.type === 'system' ? PROCESS_NAME : UUID;
   return pattern.test(actor.id)

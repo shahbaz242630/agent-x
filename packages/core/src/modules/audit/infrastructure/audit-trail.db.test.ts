@@ -1513,6 +1513,23 @@ describe('a page of the whole log, for the organisation’s admins (logPage; Pha
     expect(seqsOf(await page({ to: first.recordedAt }))).toEqual([]);
   });
 
+  it('keeps to the one actor named, by type and ID together (decision 26)', async () => {
+    const agentSameId = { ...event(2), actor: { type: 'agent' as const, id: USER } };
+    const system = { ...event(3), actor: { type: 'system' as const, id: 'probe-runner' } };
+    await record(org, event(1), agentSameId, system, event(4));
+
+    expect(seqsOf(await page({ actor: { type: 'user', id: USER } }))).toEqual([4n, 1n]);
+    expect(seqsOf(await page({ actor: { type: 'agent', id: USER } }))).toEqual([2n]);
+    expect(seqsOf(await page({ actor: { type: 'system', id: 'probe-runner' }, actions: ['probe.stepped'] }))).toEqual([
+      3n,
+    ]);
+    expect(seqsOf(await page({ actor: { type: 'system', id: 'someone-else' } }))).toEqual([]);
+    // Paged within the actor's own events.
+    const first = await page({ actor: { type: 'user', id: USER }, limit: 1 });
+    expect(first).toMatchObject({ next: 4n });
+    expect(seqsOf(await page({ actor: { type: 'user', id: USER }, beforeSeq: 4n }))).toEqual([1n]);
+  });
+
   it('is broken for a chain holding an event past its head, even when the page asks only for another', async () => {
     await record(org, event(1));
     const [head] = await attacker.query('select seq, hash, mac, mac_key_version from audit.heads where org_id = $1', [
