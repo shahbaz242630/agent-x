@@ -65,6 +65,7 @@ import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources'
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
+import { type ActivityTables, createActivityLog } from '@agentx/core/modules/activity';
 import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -119,6 +120,7 @@ import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
+import { activitySinkOf } from './activity-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
 import { contactFillFrom, directoryNamesFrom } from './kept-names.ts';
@@ -149,7 +151,8 @@ type ApiTables = PlatformControlsTables &
   AuditTables &
   IdentityTables &
   NotificationsTables &
-  SecurityEventsTables;
+  SecurityEventsTables &
+  ActivityTables;
 
 const SERVICE = 'api';
 
@@ -442,6 +445,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
             loginSessions: loginSessionsFrom(config),
           },
     securityEvents: recorder,
+    activity: activitySinkOf(createActivityLog({ ids: uuidV7Ids }), database),
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),

@@ -105,6 +105,12 @@ declare module 'fastify' {
     person: LiveSession | null;
     /** On a route naming roles, the person's verified membership in the organisation the request names; null otherwise. */
     member: Member | null;
+    /**
+     * The organisation the request names, once the person's membership there is found active: set
+     * before the role, passkey and second-factor checks, so a member refused by them is still known
+     * as that organisation's (the activity log, decision 26); null otherwise. Grants nothing.
+     */
+    verifiedOrg: string | null;
     /** On a route naming `agent`, the agent its key was accepted as; null before, and for anyone else. */
     agent: AcceptedKey | null;
   }
@@ -332,6 +338,7 @@ export function registerAccess(
 ): void {
   app.decorateRequest('person', null);
   app.decorateRequest('member', null);
+  app.decorateRequest('verifiedOrg', null);
   app.decorateRequest('agent', null);
   app.addHook('onRequest', (request, reply, done) => {
     const { access = [], agentScopes = [] } = request.routeOptions.config;
@@ -379,13 +386,13 @@ export function registerAccess(
         void unauthenticated(request, reply, access);
         return;
       }
+      // Known from here, whatever comes of the checks below: refused, let through, or failed (the activity log, decision 26).
+      request.person = session;
       /** The signed-in person refused: counted as them, though from many addresses (the S68 audit). */
       const refuse = (send: () => void) => {
-        request.person = session;
         refusedAfter(counters.person, send);
       };
       if (access.includes('person')) {
-        request.person = session;
         done();
       } else if (!namesRole(access)) {
         // Agents' and operators' routes: a person is neither.
@@ -398,13 +405,13 @@ export function registerAccess(
           refuse(() => void forbidden(request, reply));
         } else {
           findMembership(orgId, session.userId, request.id).then((membership) => {
+            if (membership.outcome === 'active') request.verifiedOrg = orgId.toLowerCase();
             if (membership.outcome !== 'active' || !access.includes(membership.role)) {
               refuse(() => void forbidden(request, reply));
             } else if (passkeyMissing(session.amr, access)) {
               refuse(() => void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id));
             } else {
               const through = () => {
-                request.person = session;
                 request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
                 done();
               };
