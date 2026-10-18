@@ -9,7 +9,8 @@
 //   resource and the job's identity (its client ID). Neither the header nor
 //   the token is ever logged, nor kept past the write.
 // - The write: one Put Blob, whole, never over a blob there already
-//   (`If-None-Match: *`; Azure answers 409 BlobAlreadyExists), the service
+//   (`If-None-Match: *`; Azure answers 403 UnauthorizedBlobOverwrite, as the
+//   writer role may add a blob but never write over one), the service
 //   checking the bytes it took against their MD5, their SHA-256 kept beside
 //   them as metadata. The account's immutability keeps it from being
 //   changed or deleted after.
@@ -35,10 +36,18 @@ const CALL_TIMEOUT_MS = 120_000;
 
 /**
  * Azure's own answers to a write refused because the blob is there already:
- * 409 BlobAlreadyExists, as the service answers `If-None-Match: *` on Put
- * Blob; 412 ConditionNotMet, as its page on conditions describes it.
+ * 403 UnauthorizedBlobOverwrite, as staging answered a second write of one
+ * export (S125: the writer role holds `blobs/add/action` alone, which may
+ * add a blob but never write over one); 409
+ * BlobAlreadyExists, as it answers `If-None-Match: *` for an identity that
+ * may write; 412 ConditionNotMet, as its page on conditions describes it.
+ * Only these codes: any other 403 is a refusal of the identity, a failure.
  */
-const ALREADY_THERE: ReadonlySet<string> = new Set(['409 BlobAlreadyExists', '412 ConditionNotMet']);
+const ALREADY_THERE: ReadonlySet<string> = new Set([
+  '403 UnauthorizedBlobOverwrite',
+  '409 BlobAlreadyExists',
+  '412 ConditionNotMet',
+]);
 
 export interface AzureBlobSettings {
   readonly url: string;
