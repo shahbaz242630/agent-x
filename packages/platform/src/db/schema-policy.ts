@@ -191,6 +191,28 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // key's cascade). A changed address could accept another's invitation.
       appMay: ['SELECT', 'INSERT'],
     },
+    'access.person_requests': {
+      reason:
+        "A signed-in person's request that names no organisation they are verified in (decision 26, ADR-005 §6): no organisation's activity log may hold it, so a header can't write into another's. Append-only (its schema's rule), the IP and location kept in-country as clues",
+      columns: [
+        'id',
+        'recorded_at',
+        'user_id',
+        'claimed_org',
+        'method',
+        'route',
+        'path_ids',
+        'status',
+        'reason',
+        'correlation_id',
+        'duration_ms',
+        'ip',
+        'country',
+        'city',
+        'time_zone',
+        'time_zone_from',
+      ],
+    },
     'identity.user_contacts': {
       reason:
         "A person's name and verified email address, encrypted (decision 25, E10d), for the audit log to name them when the login service can't: a person belongs to no one organisation, and is named the same in each of theirs",
@@ -338,7 +360,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
   },
   // The audit trails' schemas (ADR-004 §4): the app role may only add audit rows and read them (ADR-005 §9).
-  appendOnlySchemas: ['audit', 'platform_controls'],
+  appendOnlySchemas: ['audit', 'platform_controls', 'access'],
   appendOnlyExceptions: {
     'audit.heads':
       "Each organisation's chain head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
