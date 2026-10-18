@@ -30,6 +30,7 @@ const DEPENDENCIES = {
   ],
   'platform-controls': [],
   'security-events': [],
+  activity: [],
   routing: ['funding-sources', 'mandates'],
   instructions: ['suppliers', 'providers'],
   transactions: ['instructions'],

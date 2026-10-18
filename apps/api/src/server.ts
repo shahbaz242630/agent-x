@@ -14,6 +14,8 @@
 //    agent's, against the agent's own (C2-2, SEC-AG-06)
 // 6. a write is refused without a well-formed Idempotency-Key header
 //    (write-operations.ts, B2b-2)
+// 7. once answered, a known caller's request is written to the activity log
+//    (activity-recorder.ts, decision 26)
 // Errors and unknown addresses get a plain body with a reason code (SEC-DATA-04),
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
@@ -39,6 +41,7 @@ import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
+import { type ActivitySink, registerActivityLog } from './activity-recorder.ts';
 import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type AuditLogExports, registerAuditLogExports } from './audit-log-exports.ts';
 import { answerClientError } from './client-errors.ts';
@@ -115,6 +118,8 @@ export interface ServerOptions {
         readonly loginSessions?: LoginSessions | undefined;
       }
     | undefined;
+  /** Where each known caller's request is written once answered (activity-recorder.ts, decision 26); nowhere when not given. */
+  readonly activity?: ActivitySink | undefined;
   /** Where failed sign-ins and rate-limit hits are noted (security-recorder.ts); nowhere when not given. */
   readonly securityEvents?: SecurityEventSink | undefined;
   /** Reads a person's membership of an organisation (access.ts); without it, no one holds a role. */
@@ -334,6 +339,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.addHook('onRequest', agentCounter);
   // After the caller is known and counted, before the body is read.
   registerIdempotencyKeys(app);
+  registerActivityLog(app, { sink: options.activity, logger });
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));

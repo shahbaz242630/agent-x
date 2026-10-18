@@ -65,6 +65,7 @@ import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources'
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
+import { type ActivityTables, createActivityLog } from '@agentx/core/modules/activity';
 import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -149,7 +150,8 @@ type ApiTables = PlatformControlsTables &
   AuditTables &
   IdentityTables &
   NotificationsTables &
-  SecurityEventsTables;
+  SecurityEventsTables &
+  ActivityTables;
 
 const SERVICE = 'api';
 
@@ -424,6 +426,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     now: () => systemClock.now().getTime(),
     logger,
   });
+  // Every known caller's request, once answered (decision 26).
+  const activityLog = createActivityLog({ ids: uuidV7Ids });
   // An agent's key, checked before its request goes on (C2-1).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
   // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
@@ -442,6 +446,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
             loginSessions: loginSessionsFrom(config),
           },
     securityEvents: recorder,
+    activity: {
+      forOrganisation: (request) => activityLog.recordForOrganisation(database, request),
+      forPerson: (request) => activityLog.recordForPerson(database, request),
+    },
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
