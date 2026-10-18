@@ -20,7 +20,7 @@
 //   with `'` (SEC-EVD-04). The platform's own seals are left out of both, as
 //   from a page (factsShown).
 // - Each actor is named beside their ID, as on a page (decision 25,
-//   actor-names.ts), as at the download: a retry's file holds the same
+//   the evidence module), as at the download: a retry's file holds the same
 //   events, its names as the login service has them then.
 import {
   actorEventsSince,
@@ -29,6 +29,7 @@ import {
   eventsInRange,
   type LogEvent,
 } from '@agentx/core/modules/audit';
+import { type ActorName, createActorNamer, eventShown, factsShown, ndjsonLine } from '@agentx/core/modules/evidence';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { actionProblems, type Clock, DAY_MS, HOUR_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, holdTransactionLock, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
@@ -40,16 +41,7 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { type ActorName, createActorNamer } from './actor-names.ts';
-import {
-  type AuditLogTables,
-  AuditLogRefused,
-  eventShown,
-  factsShown,
-  heldLogPage,
-  MOST_ACTIONS_FILTERED,
-  SEQ,
-} from './audit-log.ts';
+import { type AuditLogTables, AuditLogRefused, heldLogPage, MOST_ACTIONS_FILTERED, SEQ } from './audit-log.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { type Refused, refused } from './refused.ts';
 import { createUseCaseWork, type Member } from './use-case-work.ts';
@@ -143,9 +135,9 @@ const CSV_HEADER = [
 
 /** One event as the file holds it, its actor named. */
 const lineOf = (format: ExportFormat, logged: LogEvent, names: ReadonlyMap<string, ActorName>): string => {
+  if (format === 'ndjson') return ndjsonLine(logged, names);
   const shown = eventShown(logged, names);
   const facts = Object.fromEntries(factsShown(logged.event.details));
-  if (format === 'ndjson') return JSON.stringify({ ...shown, details: facts });
   const { actor, subject } = shown;
   return [shown.seq, shown.recordedAt, actor.type, actor.id, actor.name ?? '', actor.email ?? '', actor.shownFrom ?? '']
     .concat([shown.action, subject.type, subject.id])
