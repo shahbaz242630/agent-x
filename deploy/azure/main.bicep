@@ -22,7 +22,7 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
-import { identityName, jobName, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
+import { appName, identityName, jobName, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
 import { evidenceAccountName } from 'modules/evidence.bicep'
 
 targetScope = 'subscription'
@@ -230,6 +230,12 @@ module appsEnvironment 'modules/environment.bicep' = {
     actionGroupId: ids.actionGroup
     errorAlertName: names.appErrors
     errorAlertThreshold: appErrorAlertThreshold
+    ownLogNames: [
+      appName(environment, 'api')
+      jobName(environment, 'db-setup')
+      jobName(environment, 'migrate')
+      jobName(environment, 'operator')
+    ]
     integrityAlertName: names.auditIntegrity
     tokenRefusedAlertName: names.tokenRefused
     denialSurgeAlertName: names.denialSurge
