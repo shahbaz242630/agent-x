@@ -31,6 +31,7 @@ export {
   sealable,
   sealHolds,
   v7Floor,
+  writtenBefore,
 } from './infrastructure/activity-seal.ts';
 export {
   ACTIVITY_ACTOR_TYPES,

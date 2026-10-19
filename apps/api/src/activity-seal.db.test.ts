@@ -355,15 +355,17 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
 });
 
 describe('L6c the seals checked (decision 26, ADR-012 §2)', () => {
-  const checkFor = (w: World, sealsARun = 7) =>
+  // The older seals read from just below the newest, unless a test picks its own point.
+  const checkFor = (w: World, olderARun = 6, pick = (below: bigint) => below) =>
     createActivitySealCheck({
       list: () => Promise.resolve([w.org]),
       database: app,
       keys,
       ids,
       logger: testLogger(capture),
-      sealsARun,
+      olderARun,
       batch: 2,
+      pick,
     });
   const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
   const held = () => capture.lines().some((line) => line.event === 'audit.integrity_hold_set');
@@ -380,11 +382,19 @@ describe('L6c the seals checked (decision 26, ADR-012 §2)', () => {
   };
   const admin = () => database.as('admin');
 
-  it('finds every seal holding, a few a run, back to the oldest and from the newest again', async () => {
+  it('finds every seal holding, the newest and a few older ones each run, whatever point is picked', async () => {
     const w = await sealed();
-    const check = checkFor(w, 2);
 
-    for (let run = 0; run < 4; run += 1) await check.run();
+    for (const pick of [(below: bigint) => below, () => 1n, (below: bigint) => below - 1n]) {
+      await checkFor(w, 1, pick).run();
+    }
+    await createActivitySealCheck({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    }).run();
 
     expect(alarms()).toEqual([]);
     expect(held()).toBe(false);
@@ -430,6 +440,18 @@ describe('L6c the seals checked (decision 26, ADR-012 §2)', () => {
     await checkFor(w).run();
 
     expect(alarms()).toEqual([]);
+  });
+
+  it('holds it for a row written before its first seal’s day, which no seal holds', async () => {
+    const w = await sealed();
+    await written(w, '2026-10-16T09:00:00.000Z');
+
+    await checkFor(w).run();
+
+    expect(capture.lines().filter((line) => line.event === 'access_log_seal_check.broken')).toEqual([
+      expect.objectContaining({ day: '2026-10-17', why: 'before' }),
+    ]);
+    expect(held()).toBe(true);
   });
 
   it('holds it for a seal missing between two others', async () => {

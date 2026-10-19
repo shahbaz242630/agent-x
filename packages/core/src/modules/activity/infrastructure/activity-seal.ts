@@ -196,3 +196,15 @@ export function sealHolds(digest: DayDigest, details: Readonly<Record<string, un
     details.form === SEAL_FORM
   );
 }
+
+/** Whether any row of the organisation's was written before `day`: one no seal from that day on holds. */
+export async function writtenBefore(tx: SealTx, orgId: string, day: string): Promise<boolean> {
+  const found = await tx
+    .selectFrom('access.requests')
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where(sql<boolean>`id < ${idsOfDay(day).from}::uuid`)
+    .limit(1)
+    .executeTakeFirst();
+  return found !== undefined;
+}
