@@ -91,12 +91,13 @@ export const PLAIN_WORDS = {
     next: 'Investigate the tamper alarm before it and record the findings; then an admin can clear the hold.',
   },
   'audit_log.kept_names_unreadable': {
-    happened: 'Some saved names or email addresses of people in an audit log could not be opened.',
+    happened: 'Some saved names or email addresses of people in an audit or activity log could not be opened.',
     broke: 'Those people show without that saved detail on the page or download, unless the login service gave it.',
     next: 'If it repeats, check the database: a saved copy that will not open may have been altered or copied.',
   },
   'audit_log.names_unavailable': {
-    happened: "The login service did not answer when an audit log page or download asked for people's names.",
+    happened:
+      "The login service did not answer when an audit or activity log page or download asked for people's names.",
     broke: "People are named from Agent X's saved copy instead, or shown without a name where there is none.",
     next: 'Check the login service is up. The next page or download asks it again.',
   },

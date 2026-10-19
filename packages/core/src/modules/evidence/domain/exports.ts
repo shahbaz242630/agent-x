@@ -13,3 +13,12 @@ export const MOST_EXPORT_DAYS = 366;
 
 /** How many events one read of a download takes. */
 export const EXPORT_BATCH = 500;
+
+/** The action a download of the activity log records about it, on the organisation's own chain (L5). */
+export const ACTIVITY_LOG_EXPORTED = 'access_log.exported';
+
+/**
+ * The most requests one download of the activity log holds (partner decision
+ * 31, S129): a busy day whole. A longer range is a background download (L5c).
+ */
+export const MOST_EXPORTED_REQUESTS = 50_000;

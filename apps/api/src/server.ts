@@ -42,6 +42,8 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, ty
 
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
 import { type ActivitySink, registerActivityLog } from './activity-recorder.ts';
+import { type ActivityPages, registerActivityPages } from './activity-log.ts';
+import { type ActivityLogExports, registerActivityLogExports } from './activity-log-exports.ts';
 import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type AuditLogExports, registerAuditLogExports } from './audit-log-exports.ts';
 import type { PlaceOf } from './client-clues.ts';
@@ -147,6 +149,10 @@ export interface ServerOptions {
   readonly auditLog?: AuditLog | undefined;
   /** Downloading the organisation's audit log (audit-log-exports.ts, E10b); without it, no one reaches the route. */
   readonly auditLogExports?: AuditLogExports | undefined;
+  /** Reading the organisation's activity log (activity-log.ts, L5); without it, no one reaches the route. */
+  readonly activityPages?: ActivityPages | undefined;
+  /** Downloading the organisation's activity log (activity-log-exports.ts, L5); without it, no one reaches the route. */
+  readonly activityLogExports?: ActivityLogExports | undefined;
   /** Clearing the integrity hold (the identity module's hold-clearing.ts); without it, no one reaches those routes. */
   readonly holdClearings?: HoldClearings | undefined;
   /** Reads an organisation's registered contacts (registered-contacts.ts); without it, no one reaches the list. */
@@ -360,6 +366,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerAuditLog(app, { log: options.auditLog });
   registerAuditLogExports(app, { exports: options.auditLogExports });
+  registerActivityPages(app, { log: options.activityPages });
+  registerActivityLogExports(app, { exports: options.activityLogExports });
   registerOrganization(app, { changes: options.organizationChanges });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });

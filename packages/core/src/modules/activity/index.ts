@@ -15,4 +15,13 @@ export {
   type PersonRequest,
   TIME_ZONE_NAME,
 } from './infrastructure/activity-log.ts';
+export {
+  type ActivityActor,
+  type ActivityCursor,
+  activityInRange,
+  activityPage,
+  type ActivityPageToRead,
+  type ActivityRange,
+  type ActivityRow,
+} from './infrastructure/activity-reads.ts';
 export type { ActivityTables } from './infrastructure/tables.ts';

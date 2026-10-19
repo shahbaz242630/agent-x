@@ -49,6 +49,9 @@ export const eventShown = (
 export const ndjsonLine = (logged: LogEvent, names: ReadonlyMap<string, ActorName>): string =>
   JSON.stringify({ ...eventShown(logged, names), details: Object.fromEntries(factsShown(logged.event.details)) });
 
+/** Who acted in each of `events`, for a namer. */
+export const actorsOf = (events: readonly LogEvent[]) => events.map(({ event }) => event.actor);
+
 /** A batch of the log and what Agent X holds to name its actors. */
 export interface HeldLogPage {
   readonly events: readonly LogEvent[];
@@ -70,7 +73,7 @@ export async function heldLogPage(
 ): Promise<HeldLogPage | 'tampered'> {
   const page = await states.logPageOf(tx, orgId, asked);
   if (page.outcome === 'tampered') return 'tampered';
-  const held = await actorsHeld(tx, states, keys, orgId, page.events);
+  const held = await actorsHeld(tx, states, keys, orgId, actorsOf(page.events));
   if (held === 'tampered') return 'tampered';
   return { events: page.events, next: page.next, held };
 }

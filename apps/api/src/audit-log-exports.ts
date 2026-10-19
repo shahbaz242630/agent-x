@@ -33,6 +33,7 @@ import {
 } from '@agentx/core/modules/audit';
 import {
   type ActorName,
+  actorsOf,
   AUDIT_LOG_EXPORTED,
   createActorNamer,
   eventShown,
@@ -69,21 +70,21 @@ import { createUseCaseWork, type Member } from './use-case-work.ts';
 export const EXPORT_OPERATION = 'audit-log.export';
 
 /** The most downloads one admin makes in an hour. */
-const MOST_EXPORTS_AN_HOUR = 5;
+export const MOST_EXPORTS_AN_HOUR = 5;
 
 /** The advisory lock an admin's downloads count their hourly budget under (ADR-006 §6, 2b). */
 export const EXPORTS_LOCK = 'audit-log-exports';
 
-const EXPORT_FORMATS = ['csv', 'ndjson'] as const;
-type ExportFormat = (typeof EXPORT_FORMATS)[number];
+export const EXPORT_FORMATS = ['csv', 'ndjson'] as const;
+export type ExportFormat = (typeof EXPORT_FORMATS)[number];
 
-const CONTENT_TYPES = { csv: 'text/csv', ndjson: 'application/x-ndjson' } as const satisfies Record<
+export const CONTENT_TYPES = { csv: 'text/csv', ndjson: 'application/x-ndjson' } as const satisfies Record<
   ExportFormat,
   string
 >;
 
 /** Who may download the log (decision 24). */
-const EXPORTING_ROLES = ['admin'] as const;
+export const EXPORTING_ROLES = ['admin'] as const;
 
 /** A download as asked for: its range, its actions (all when none), its actor (everyone when none), its format. */
 export interface ExportAsked {
@@ -156,7 +157,7 @@ const lineOf = (format: ExportFormat, logged: LogEvent, names: ReadonlyMap<strin
 };
 
 /** A day of a range, as the file's name holds it. */
-const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
+export const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
 
 export function createAuditLogExports({
   database,
@@ -197,7 +198,7 @@ export function createAuditLogExports({
       const read = await work.inOrganisation(orgId, correlationId, (tx, states) =>
         heldLogPage(tx, states, keys, orgId, { ...asked, beforeSeq: before, limit: EXPORT_BATCH }),
       );
-      const names = await namer.namesOf(read.events, read.held);
+      const names = await namer.namesOf(actorsOf(read.events), read.held);
       lines.push(...read.events.map((event) => lineOf(asked.format, event, names)));
       beforeSeq = read.next;
     }
@@ -321,7 +322,7 @@ const EXPORT_SCHEMA = {
 };
 
 /** The most a download's body may be: a range, 20 actions, an actor and a format, with room to spare. */
-const EXPORT_BODY_LIMIT = 4096;
+export const EXPORT_BODY_LIMIT = 4096;
 
 /** The download's route. Without `exports` it is still documented, and no one reaches it. */
 export function registerAuditLogExports(app: FastifyInstance, { exports }: { exports: AuditLogExports | undefined }) {
