@@ -186,7 +186,8 @@ describe('downloading the activity log (L5, decision 26)', () => {
         actor: { type: 'user', id: w.admin.userId },
         action: ACTIVITY_LOG_EXPORTED,
         subject: { type: 'access_log', id: w.org, version: 1 },
-        details: { format: 'ndjson', requests: 2, writtenUpTo: lines[0]?.id, actor: null },
+        // The download's own request, sealed in: its activity row and this event link (ADR-011 §7).
+        details: { format: 'ndjson', requests: 2, writtenUpTo: lines[0]?.id, actor: null, correlationId: CORRELATION },
       },
     });
   });

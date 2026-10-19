@@ -187,7 +187,7 @@ export function createContactChanges({
     correlationId: string,
     work: (tx: Transaction<Tables>, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ) => {
-    const services = { keys, ids, logger: logger.child({ correlationId }) };
+    const services = { keys, ids, logger: logger.child({ correlationId }), correlationId };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     try {
       return await withSignedStates(database, admin.orgId, services, (tx, states) =>
@@ -212,7 +212,7 @@ export function createContactChanges({
     const read = await withSignedStates(
       database,
       admin.orgId,
-      { keys, ids, logger: logger.child({ correlationId }) },
+      { keys, ids, logger: logger.child({ correlationId }), correlationId },
       (tx, states) => contactShown(tx, states, keys, admin.orgId, contactId),
     );
     if (read.outcome === 'tampered') return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };

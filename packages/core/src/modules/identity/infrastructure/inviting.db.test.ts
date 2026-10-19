@@ -248,6 +248,8 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
     const [, opened] = await eventsAbout(org, id);
     expect(opened).toMatchObject({ action: 'invitation.opened', actor_id: admin.userId });
     expect(JSON.parse(opened?.details ?? '{}')).toMatchObject({
+      // The request's own, so its activity log row links to this event (ADR-011 §7).
+      correlationId: CORRELATION,
       stepUpChallengeId: challengeId,
       signedInAt: START.toISOString(),
       methods: 'pwd user mfa',

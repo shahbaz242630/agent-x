@@ -272,6 +272,8 @@ describe(`changing a member's role (B4-5a, SEC-HA-10, Postgres ${server.version}
       roleFrom: 'approver',
       roleTo: 'developer',
       signInsEnded: 2,
+      // The request's own, so its activity log row links to this event (ADR-011 §7).
+      correlationId: CORRELATION,
       stepUpChallengeId: challengeId,
       signedInAt: START.toISOString(),
       methods: 'pwd user mfa',

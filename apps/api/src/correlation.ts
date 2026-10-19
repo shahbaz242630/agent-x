@@ -3,7 +3,10 @@
 // A caller's own ID is kept only if it's a UUID, because it goes into the log
 // and back out in a header; anything else is replaced with a new one. A caller
 // can still reuse an ID; from Phase 1, when requests are signed in, the log
-// lines also carry the organisation.
+// lines also carry the organisation. The ID is sealed into the audit events
+// its request records (ADR-011 §7), linking them to its activity log row: a
+// caller reusing one links several of its own requests to them, so the link
+// is read with the actor and time both rows name, not alone.
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import { z } from 'zod';
 
