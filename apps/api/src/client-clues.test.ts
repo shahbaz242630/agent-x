@@ -8,11 +8,20 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { cityName, loadPlaces, PLACE_FILE, placeFinderOf, placeIn, timeZoneSent } from './client-clues.ts';
+import {
+  cityName,
+  loadPlaces,
+  PLACE_FILE,
+  placeFinderOf,
+  placeIn,
+  PLACES_STALE_DAYS,
+  timeZoneSent,
+} from './client-clues.ts';
 import { placeFile } from './place-file.helper.test.ts';
 
 const ABU_DHABI = {
@@ -133,6 +142,22 @@ describe('loading the place file', () => {
         database: 'DBIP-City-Lite',
         built: '2026-10-01T00:00:00.000Z',
       }),
+    );
+  });
+
+  it('warns when the file is past its refresh, and not before', async () => {
+    const path = join(directory, 'aging.mmdb');
+    await writeFile(path, PLACES);
+    const built = Date.parse('2026-10-01T00:00:00.000Z');
+    const fresh = logged();
+    const stale = logged();
+
+    await loadPlaces('staging', fresh.logger, path, new Date(built + PLACES_STALE_DAYS * DAY_MS));
+    await loadPlaces('staging', stale.logger, path, new Date(built + (PLACES_STALE_DAYS + 1) * DAY_MS));
+
+    expect(fresh.capture.lines()).not.toContainEqual(expect.objectContaining({ event: 'activity.places_stale' }));
+    expect(stale.capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'warn', event: 'activity.places_stale', days: PLACES_STALE_DAYS + 1 }),
     );
   });
 

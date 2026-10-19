@@ -1,0 +1,141 @@
+# The place file's monthly refresh (Phase 3 L4b; partner, S127: without it the
+# activity log's countries and cities go out of date). DB-IP publishes its free
+# City Lite on the 1st and keeps only two months; on the 3rd this:
+#   1. check (read-only): downloads the month's file and has the API's own
+#      place finder read it (tooling/places/check.ts): DB-IP City Lite, built
+#      that month, the known addresses in their countries; hands on its SHA-256;
+#   2. publish (writes; no package installed, nothing of ours run but
+#      tooling/places/pin.ts on bare Node): downloads it again, takes it only
+#      with that SHA-256, publishes it as our data release, and opens a draft
+#      PR moving the Dockerfile's pin, on a branch from the commit checked.
+# A PR opened with this workflow's own token starts no CI (GitHub's rule against
+# loops): marking it ready for review, as a person, starts it. A failed run is
+# emailed to the repository's owner; the weekly sweep also fails once the
+# pinned file is over 45 days old (security-weekly.yml, "Place file age").
+name: Place file (monthly)
+
+on:
+  schedule:
+    - cron: '23 5 3 * *' # the 3rd of each month, 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: places-refresh
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check the new month's file
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      month: ${{ steps.due.outputs.month }}
+      sha256: ${{ steps.check.outputs.sha256 }}
+    env:
+      # Corepack must not read a .corepack.env file from the repository.
+      COREPACK_ENV_FILE: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Which month is due
+        id: due
+        run: |
+          month=$(node tooling/places/pin.ts due)
+          echo "month=${month}" >> "$GITHUB_OUTPUT"
+          echo "Due: ${month:-nothing, the Dockerfile already pins this month's file}"
+
+      - name: Enable pnpm through Corepack
+        if: steps.due.outputs.month != ''
+        run: corepack enable pnpm
+
+      - name: Install the API's packages (the place finder reads the file)
+        if: steps.due.outputs.month != ''
+        run: pnpm install --frozen-lockfile --filter "@agentx/api..."
+
+      - name: Download and check the file
+        id: check
+        if: steps.due.outputs.month != ''
+        env:
+          MONTH: ${{ steps.due.outputs.month }}
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --output places.mmdb.gz \
+            "https://download.db-ip.com/free/dbip-city-lite-${MONTH}.mmdb.gz"
+          sha256=$(node tooling/places/check.ts places.mmdb.gz "${MONTH}")
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          echo "DB-IP City Lite ${MONTH} checked: SHA-256 ${sha256}"
+
+  publish:
+    name: Publish it and open the draft PR
+    needs: check
+    if: needs.check.outputs.month != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The data release and the PR's branch.
+      contents: write
+      pull-requests: write
+    env:
+      MONTH: ${{ needs.check.outputs.month }}
+      SHA256: ${{ needs.check.outputs.sha256 }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Download it again, taken only with the checked SHA-256
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --output "dbip-city-lite-${MONTH}.mmdb.gz" \
+            "https://download.db-ip.com/free/dbip-city-lite-${MONTH}.mmdb.gz"
+          echo "${SHA256}  dbip-city-lite-${MONTH}.mmdb.gz" | sha256sum --check --strict -
+
+      # A re-run after a later step failed finds the release already there: the
+      # image build takes its file only by the pinned SHA-256 in any case.
+      - name: Publish our data release
+        run: |
+          if gh release view "geoip-dbip-city-lite-${MONTH}" --repo "${REPO}" > /dev/null 2>&1; then
+            echo "The data release for ${MONTH} is already there."
+            exit 0
+          fi
+          printf '%s\n' \
+            "Our pinned copy of DB-IP's IP to City Lite database, ${MONTH}, exactly as DB-IP published it (https://download.db-ip.com/free/dbip-city-lite-${MONTH}.mmdb.gz), checked by the monthly refresh." \
+            "" \
+            "- SHA-256 of the .gz: \`${SHA256}\`" \
+            "" \
+            "IP Geolocation by DB-IP (https://db-ip.com), licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Unchanged." \
+            > notes.md
+          gh release create "geoip-dbip-city-lite-${MONTH}" "dbip-city-lite-${MONTH}.mmdb.gz" --repo "${REPO}" \
+            --target "${GITHUB_SHA}" --latest=false --notes-file notes.md \
+            --title "Data: DB-IP City Lite ${MONTH} (not a software release)"
+
+      - name: Open the draft PR moving the pin
+        run: |
+          node tooling/places/pin.ts pin "${MONTH}" "${SHA256}"
+          branch="data/places-${MONTH}"
+          gh api "repos/${REPO}/git/refs" -f "ref=refs/heads/${branch}" -f "sha=${GITHUB_SHA}" > /dev/null
+          current=$(gh api "repos/${REPO}/contents/Dockerfile?ref=${branch}" --jq .sha)
+          gh api --method PUT "repos/${REPO}/contents/Dockerfile" -f "branch=${branch}" -f "sha=${current}" \
+            -f "message=Place file: DB-IP City Lite ${MONTH}" -f "content=$(base64 --wrap=0 Dockerfile)" > /dev/null
+          printf '%s\n' \
+            "The monthly refresh (places-refresh.yml): the image takes DB-IP City Lite **${MONTH}** (SHA-256 \`${SHA256}\`), checked by the API's own place finder and published as our data release." \
+            "" \
+            "**Mark this ready for review to start CI** (a PR this workflow opens starts none), then merge when green." \
+            > body.md
+          gh pr create --repo "${REPO}" --draft --base main --head "${branch}" --body-file body.md \
+            --title "Place file: DB-IP City Lite ${MONTH}"

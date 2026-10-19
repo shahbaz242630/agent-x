@@ -35,7 +35,8 @@ RUN corepack enable pnpm \
 # (https://db-ip.com), licensed under CC BY 4.0. DB-IP keeps only its latest
 # two months, so this is our copy of theirs, published as a data release of
 # this repository; the build takes it only with the SHA-256 of DB-IP's own
-# file (whose unzipped SHA-1 matched the one DB-IP lists, S127).
+# file. The monthly refresh (.github/workflows/places-refresh.yml) checks each
+# new month's file and opens a PR moving this pin (tooling/places/pin.ts).
 FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS places
 
 ADD --checksum=sha256:c839d407f85a1e0bddba354cef16b2c398182d1c34ed8d985555dce134b36b14 \
