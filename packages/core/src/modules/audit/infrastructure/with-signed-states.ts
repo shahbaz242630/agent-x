@@ -48,6 +48,8 @@ export interface SignedStatesServices {
   readonly ids: IdGenerator;
   /** The request's or job's logger, a child carrying its correlation ID (Rule Book §8). */
   readonly logger: Logger;
+  /** The request's correlation ID, sealed into every event the work records (ADR-011 §7); none for most jobs. */
+  readonly correlationId?: string | undefined;
 }
 
 /** The first finding for an organisation, with how many there were. */
@@ -88,7 +90,7 @@ async function setHold(
   db: Kysely<AuditTables>,
   held: string,
   { finding, count }: Found,
-  { keys, ids, logger }: SignedStatesServices,
+  { keys, ids, logger, correlationId }: SignedStatesServices,
 ): Promise<void> {
   const log = logger.child({ orgId: held });
   recording.set(held, (recording.get(held) ?? 0) + 1);
@@ -96,7 +98,7 @@ async function setHold(
     // Its own signed states: a hold that can't be believed is set over, right here, not handed on again.
     const holder = createSignedStates({
       keys,
-      trail: createAuditTrail({ keys, ids }),
+      trail: createAuditTrail({ keys, ids, correlationId }),
       logger,
       onTamper: () => undefined,
       // It sets the hold, and reads none: nothing waiting could change what it does.
@@ -170,10 +172,11 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   // Both: the work's transaction has every table the caller's has, the hold's the audit tables.
   db: Kysely<Tables> & Kysely<AuditTables>,
   orgId: string,
-  { keys, ids, logger }: SignedStatesServices,
+  services: SignedStatesServices,
   work: (tx: Transaction<Tables>, states: SignedStates) => Promise<Result>,
 ): Promise<Result> {
-  const trail = createAuditTrail({ keys, ids });
+  const { keys, ids, logger, correlationId } = services;
+  const trail = createAuditTrail({ keys, ids, correlationId });
   const found: TamperFinding[] = [];
   const states = createSignedStates({
     keys,
@@ -206,6 +209,6 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     const own = orgId.toLowerCase();
     const waiting = unrecorded.get(own);
     if (opened.began && waiting !== undefined && !due.has(own) && !recording.has(own)) due.set(own, waiting);
-    for (const [held, one] of due) await setHold(db, held, one, { keys, ids, logger });
+    for (const [held, one] of due) await setHold(db, held, one, services);
   }
 }

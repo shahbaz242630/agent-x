@@ -559,7 +559,7 @@ export function registeredContactsFor(
   | { readonly outcome: 'listed'; readonly contacts: readonly ContactWithAddress[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
-  const services = { keys, ids, logger: logger.child({ correlationId }) };
+  const services = { keys, ids, logger: logger.child({ correlationId }), correlationId };
   return withSignedStates(db, orgId, services, async (tx, states) => {
     const listed = await contactsOf(tx, states, keys, orgId);
     if (listed.outcome === 'tampered') return listed;

@@ -86,7 +86,8 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
     orgId: string,
     correlationId: string,
     work: (tx: Tx, states: SignedStates) => Promise<T>,
-  ): Promise<T> => withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
+  ): Promise<T> =>
+    withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }), correlationId }, work);
 
   /** The work's answer, or its area's refusal as a plain outcome. */
   const orRefused = async <T>(run: () => Promise<T>): Promise<T | Refused> => {

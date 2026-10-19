@@ -208,7 +208,7 @@ export function createActivityLogExports({
       }
       const range = await activityInRange(tx, member.orgId, asked);
       if (range.rows > mostRequests) throw new ActivityLogRefused(409, 'ACTIVITY_EXPORT_TOO_LARGE');
-      const recorded = await trail.record(tx, member.orgId, {
+      const recorded = await createAuditTrail({ keys, ids, correlationId }).record(tx, member.orgId, {
         actor: { type: 'user', id: member.userId },
         action: ACTIVITY_LOG_EXPORTED,
         subject: { type: 'access_log', id: member.orgId, version: 1 },

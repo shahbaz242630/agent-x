@@ -176,7 +176,7 @@ export function createInvitationAcceptance({
       if (listed === undefined) return refused(403, 'INVITATION_INVALID');
       const { orgId, invitationId } = listed;
       const address = await sessionEmailOf(database, keys, person.sessionId);
-      const services = { keys, ids, logger: logger.child({ correlationId }) };
+      const services = { keys, ids, logger: logger.child({ correlationId }), correlationId };
       const idempotency = createIdempotentWrites({ keys, logger: services.logger });
       let done;
       try {

@@ -165,7 +165,7 @@ export function createAgentKeyCheck({
       if (presented === undefined) return answer(refused('malformed'), null);
       const orgId = await listedAgentKey(database, presented.keyId);
       if (orgId === undefined) return answer(refused('unlisted'), presented.keyId);
-      const checked = await withSignedStates(database, orgId, { keys, ids, logger: log }, (tx, states) =>
+      const checked = await withSignedStates(database, orgId, { keys, ids, logger: log, correlationId }, (tx, states) =>
         agentKeyAt(tx, states, { keys, now: clock.now() }, orgId, presented),
       );
       return answer(checked, presented.keyId);

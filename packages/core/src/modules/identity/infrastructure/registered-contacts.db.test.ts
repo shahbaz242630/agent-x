@@ -568,7 +568,7 @@ describe(`the organisation's contacts (B6-1a, Postgres ${server.version})`, () =
     const active = await draft(who, { email: 'owner@example.test' });
     await activate(who, active.id);
 
-    expect(await registeredContactsFor(app, services(), who.org, 'correlation-1')).toEqual({
+    expect(await registeredContactsFor(app, services(), who.org, '0199a0f0-0000-7000-8000-00000000c013')).toEqual({
       outcome: 'listed',
       contacts: [expect.objectContaining({ id: active.id, status: 'ACTIVE', email: 'owner@example.test' })],
     });

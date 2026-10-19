@@ -69,7 +69,10 @@ let org: string;
 const quiet = () => ({ keys, ids, logger: testLogger() });
 
 const check = (text: string) =>
-  createAgentKeyCheck({ database: app, keys, ids, clock, logger: testLogger(capture) }).check(text, 'corr-1');
+  createAgentKeyCheck({ database: app, keys, ids, clock, logger: testLogger(capture) }).check(
+    text,
+    '0199a0f0-0000-7000-8000-00000000c011',
+  );
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
@@ -77,7 +80,7 @@ const lines = (event: string) => capture.lines().filter((line) => line.event ===
 async function refusedFor(text: string, reason: string, keyId: string | null): Promise<void> {
   expect(await check(text)).toEqual({ outcome: 'refused' });
   expect(lines('agent_key.refused')).toEqual([
-    expect.objectContaining({ level: 'info', correlationId: 'corr-1', reason, keyId }),
+    expect.objectContaining({ level: 'info', correlationId: '0199a0f0-0000-7000-8000-00000000c011', reason, keyId }),
   ]);
 }
 
@@ -214,7 +217,7 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
       ids,
       clock,
       logger: testLogger(capture),
-    }).check(text, 'corr-1');
+    }).check(text, '0199a0f0-0000-7000-8000-00000000c011');
 
     expect(checked).toEqual({ outcome: 'refused' });
     expect(lines('agent_key.refused')).toEqual([
@@ -234,7 +237,7 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
       ids,
       clock,
       logger: testLogger(capture),
-    }).check(text, 'corr-1');
+    }).check(text, '0199a0f0-0000-7000-8000-00000000c011');
 
     expect(checked).toMatchObject({ outcome: 'accepted' });
     // The signed states' own reads check the audit trail's MACs through it too.

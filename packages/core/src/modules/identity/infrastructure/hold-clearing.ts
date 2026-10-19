@@ -209,7 +209,7 @@ export function createHoldClearings<Theirs extends object = object>({
     correlationId: string,
     work: (tx: MembershipsTransaction, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ) => {
-    const services = { keys, ids, logger: logger.child({ correlationId }) };
+    const services = { keys, ids, logger: logger.child({ correlationId }), correlationId };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     try {
       return await withSignedStates(ours, admin.orgId, services, (tx, states) =>
@@ -295,7 +295,7 @@ export function createHoldClearings<Theirs extends object = object>({
       const read = await withSignedStates(
         ours,
         admin.orgId,
-        { keys, ids, logger: logger.child({ correlationId }) },
+        { keys, ids, logger: logger.child({ correlationId }), correlationId },
         (tx, states) => states.holdRecord(tx, admin.orgId),
       );
       if (read.outcome === 'tampered') return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };

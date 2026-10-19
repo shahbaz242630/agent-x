@@ -275,11 +275,13 @@ describe(`FX-TAMPER as the owner on a registered contact: denied, and held (Post
     await expect(activeContactsFor(app, services(), org)).rejects.toBeInstanceOf(ContactsTampered);
     // B6-1c: the admins' list is withheld, with the request's correlation ID on the alarm.
     capture = new LogCapture();
-    expect(await registeredContactsFor(app, services(), org, 'correlation-2')).toEqual({
+    expect(await registeredContactsFor(app, services(), org, '0199a0f0-0000-7000-8000-00000000c012')).toEqual({
       outcome: 'tampered',
       sign: 'deleted',
     });
-    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ correlationId: 'correlation-2' })]);
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ correlationId: '0199a0f0-0000-7000-8000-00000000c012' }),
+    ]);
   });
 
   it('B6-1b a contact’s start moved: its address is not given, and a notice to it waits', async () => {

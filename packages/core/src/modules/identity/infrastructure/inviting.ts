@@ -119,7 +119,7 @@ export function createInvitationWrites({
     correlationId: string,
     work: (tx: MembershipsTransaction, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ): Promise<InvitationWrite> => {
-    const services = { keys, ids, logger: logger.child({ correlationId }) };
+    const services = { keys, ids, logger: logger.child({ correlationId }), correlationId };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     let done;
     try {
