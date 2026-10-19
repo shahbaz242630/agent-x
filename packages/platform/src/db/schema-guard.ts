@@ -173,12 +173,12 @@ const TABLE_GUARDS: readonly TableGuard[] = [
   },
   {
     // A background download's month born waiting, moved only along its machine, a try counted by each claim alone,
-    // never changed once ready or failed (0053, L5c).
+    // a lapsed lease lost to its builder, never changed once ready or failed (0053, L5c).
     table: 'activity_exports.files',
     name: 'file_moves',
     function: 'activity_exports.guard_file',
     type: 23,
-    body: '3880c04d0c8696de2ea1cefa834c4f2cc89678274f3602d76eeef004cd2aca06',
+    body: 'f7d33bff47f92142be7a75203fb1b4a40315e3f02625e9f87cc7a8111b1e32e8',
   },
   {
     // spend-requests' rule on a reservation: for a request just decided to hold capacity, exactly what it asked;

@@ -101,6 +101,12 @@ describe("a download and its months, in the organisation's wall (0053)", () => {
             values (${ORG}, ${newId()}, ${ADMIN}, '2026-08-15T00:00Z', '2026-09-15T00:00Z', 'csv')`.execute(tx),
       ),
     ).rejects.toThrow(/row-level security/);
+    await expect(
+      asApp(OTHER_ORG, (tx) =>
+        sql`insert into activity_exports.files (org_id, export_id, month, state, attempts)
+            values (${ORG}, ${id}, '2026-10-01', 'waiting', 0)`.execute(tx),
+      ),
+    ).rejects.toThrow(/row-level security/);
   });
 
   it('refuses a range running backwards or past 366 days, an actor half named, a month not its first day', async () => {
@@ -176,6 +182,34 @@ describe('a month moved only along file_moves (0053)', () => {
     await claim(id);
     expect(await august(id)).toEqual({ state: 'building', attempts: 2 });
     await expect(claim(id)).rejects.toMatchObject(MOVES);
+  });
+
+  it('is lost to a builder whose lease ran out: no renewal, no file made, none given back; a failure still ends it', async () => {
+    const lapsed = async () => {
+      const id = await asked();
+      await claim(id, '1 millisecond');
+      await asApp(ORG, (tx) => sql`select pg_catalog.pg_sleep(0.01)`.execute(tx));
+      return id;
+    };
+    const id = await lapsed();
+
+    await expect(
+      change(id, sql`building_until = pg_catalog.clock_timestamp() + interval '15 minutes'`),
+    ).rejects.toMatchObject(MOVES);
+    await expect(made(id)).rejects.toMatchObject(MOVES);
+    await expect(change(id, sql`state = 'waiting', building_until = null`)).rejects.toMatchObject(MOVES);
+    expect(await august(id)).toEqual({ state: 'building', attempts: 1 });
+
+    const ended = await lapsed();
+    await change(ended, sql`state = 'failed', building_until = null, failure = 'ACTIVITY_EXPORT_FAILED'`);
+    expect(await august(ended)).toEqual({ state: 'failed', attempts: 1 });
+  });
+
+  it('is failed while still waiting, never tried, once its download is given up', async () => {
+    const id = await asked();
+
+    await change(id, sql`state = 'failed', failure = 'ACTIVITY_EXPORT_GIVEN_UP'`);
+    expect(await august(id)).toEqual({ state: 'failed', attempts: 0 });
   });
 
   it('refuses a claim counting no try or two, and a try counted by anything but a claim', async () => {

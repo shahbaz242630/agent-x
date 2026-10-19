@@ -14,8 +14,11 @@
 --   first and last cut to the range). Born `waiting`; a builder claims it,
 --   `building` until `building_until` (a lease it renews as it writes, so a
 --   server stopped mid-file leaves it to the next); `ready` with its count,
---   size and SHA-256, or `failed` after its tries. `file_moves` allows only
---   those moves; a ready or failed file never changes again.
+--   size and SHA-256, or `failed` after its tries (its download's other
+--   months failed with it, waiting ones too). `file_moves` allows only those
+--   moves; a builder whose lease ran out can't renew it or finish the file
+--   (only a claim counting a try takes it on); a ready or failed file never
+--   changes again. The builder also writes only where the lease it set holds.
 --
 -- A download is ready once every file is, failed once one is; it expires 7
 -- days after its last file was ready, worked out from `ready_at`: rows are
@@ -125,9 +128,16 @@ BEGIN
     RAISE EXCEPTION 'a try is counted by a claim alone'
       USING ERRCODE = 'check_violation', CONSTRAINT = 'file_moves';
   END IF;
+  -- A builder whose lease ran out has lost the file: only a claim counting a try takes it on, or a failure ends it.
+  IF OLD.state = 'building' AND OLD.building_until < pg_catalog.clock_timestamp()
+     AND NEW.attempts = OLD.attempts AND NEW.state <> 'failed' THEN
+    RAISE EXCEPTION 'a builder whose lease ran out has lost the file'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'file_moves';
+  END IF;
+  -- Failed from waiting: a month never tried, of a download given up once another of its months failed.
   IF (OLD.state, NEW.state) NOT IN (
     ('waiting', 'building'), ('building', 'building'), ('building', 'waiting'),
-    ('building', 'ready'), ('building', 'failed')
+    ('building', 'ready'), ('building', 'failed'), ('waiting', 'failed')
   ) THEN
     RAISE EXCEPTION 'a file does not move from % to %', OLD.state, NEW.state
       USING ERRCODE = 'check_violation', CONSTRAINT = 'file_moves';
