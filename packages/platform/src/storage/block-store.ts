@@ -10,7 +10,7 @@
 // A token is asked once and kept for a few minutes (Azure's last hours), so a
 // file of a thousand blocks asks the identity endpoint a handful of times.
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { OutboundFetch } from '../outbound/index.ts';
@@ -192,14 +192,8 @@ export function folderBlockStore(directory: string): BlockStore {
 
     async read(name, offset, length) {
       checkedRange(offset, length);
-      const file = await open(pathOf(name), 'r');
-      try {
-        const into = Buffer.alloc(length);
-        const { bytesRead } = await file.read(into, 0, length, offset);
-        return into.subarray(0, bytesRead);
-      } finally {
-        await file.close();
-      }
+      // Read whole: a development or test file is small.
+      return (await readFile(pathOf(name))).subarray(offset, offset + length);
     },
   };
 }
