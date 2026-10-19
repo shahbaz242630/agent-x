@@ -15,6 +15,8 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { type OperatorProcess, runOperator, USAGE } from './main.ts';
 import {
+  ACTIVITY_EXPORT_USAGE,
+  activityExportRequest,
   AUDIT_EXPORT_USAGE,
   auditExportRequest,
   createOrganizationRequest,
@@ -535,6 +537,19 @@ describe('E10c an audit export for a case, only ever from a file', () => {
     expect(line('operator.refused')?.problems).toEqual([
       'no store for an audit export is set: AGENTX_EVIDENCE_CONTAINER_URL deployed, or AGENTX_EVIDENCE_DIR in development and test',
     ]);
+  });
+
+  it('reads an activity log export the same way (L7), and refuses it typed', async () => {
+    const file = requestFile(activityExportRequest(NEW_ID, FROM, TO, CASE, NEW_ID));
+    const read = await run(['--request', file], EXPORTING);
+    const typed = await run(JSON.parse(activityExportRequest(NEW_ID, FROM, TO, CASE, NEW_ID)) as string[], EXPORTING);
+
+    expect(read.events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(read.line('operator.starting')).toMatchObject({ command: 'activity-export' });
+    expect(typed.line('operator.refused')?.problems).toEqual([
+      `activity-export runs only from a request file: ${ACTIVITY_EXPORT_USAGE}`,
+    ]);
+    expect(read.text + typed.text).not.toContain(CASE);
   });
 
   it('refuses it typed', async () => {

@@ -4,12 +4,14 @@
 //   node deploy/azure/operator.ts invite-first-admin --org <organisation ID> --email <address> [--id <ID>]
 //   node deploy/azure/operator.ts restore-check
 //   node deploy/azure/operator.ts audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
+//   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
 //
 // The fourth (Phase 3 E10c, ADR-005 §6) exports an organisation's audit log
-// for a case: the run records it on both chains and tells the organisation's
-// admins, then writes the file to the write-once store, once. Its --id, like
-// an organisation's, repeats an earlier run's export: it records nothing twice
-// and writes a file not yet written.
+// for a case, the fifth (L7) its activity log: the run records it on both
+// chains and tells the organisation's admins, then writes the file to the
+// write-once store, once. Its --id, like an organisation's, repeats an
+// earlier run's export: it records nothing twice and writes a file not yet
+// written.
 //
 // The third (S78) is the restore drill's check: run once the drill's copy of
 // the database is up, it reads the copy and the live server, read-only, and
@@ -56,6 +58,7 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
+  activityExportRequest,
   auditExportOf,
   auditExportRequest,
   createOrganizationRequest,
@@ -139,6 +142,7 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts invite-first-admin --org <organisation ID> --email <address> [--id <ID>]
   node deploy/azure/operator.ts restore-check
   node deploy/azure/operator.ts audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
+  node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation or export. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference is the dispute's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -221,12 +225,12 @@ export interface AuditExportArguments {
  * operator's own rules (request.ts `auditExportOf`), so a request it would
  * refuse is never written. The case reference is never repeated in one.
  */
-export function parseAuditExport(argv: readonly string[]): AuditExportArguments {
+export function parseAuditExport(argv: readonly string[], kind: CaseExportKind = 'audit-export'): AuditExportArguments {
   const [command, orgFlag, orgId, fromFlag, from, toFlag, to, reasonFlag, caseRef, ...rest] = argv;
   const [idFlag, id, ...more] = rest;
   const ided = rest.length === 0 || (idFlag === '--id' && id !== undefined && more.length === 0);
   if (
-    command !== 'audit-export' ||
+    command !== kind ||
     orgFlag !== '--org' ||
     fromFlag !== '--from' ||
     toFlag !== '--to' ||
@@ -238,7 +242,7 @@ export function parseAuditExport(argv: readonly string[]): AuditExportArguments 
     !ided
   ) {
     throw new UsageError(
-      'say audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else',
+      `say ${kind} --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else`,
     );
   }
   if (id !== undefined && !UUID_V7.test(id)) {
@@ -643,15 +647,22 @@ export function restoreCheck(steps: JobSteps): Promise<number> {
  * that recorded the export but couldn't write its file says so, and the same
  * --id writes it without recording it twice.
  */
-function auditExportOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: string): number {
+function auditExportOutcome(
+  steps: JobSteps,
+  run: Ended,
+  lines: readonly LogLine[],
+  id: string,
+  kind: CaseExportKind,
+): number {
   const said = commandLines(lines);
   const about = (event: string): Readonly<Record<string, unknown>> | undefined =>
     said.find((line) => line.event === event && line.exportId === id);
-  const exported = about('operator.audit_exported');
+  const { done, counted } = CASE_EXPORTS[kind];
+  const exported = about(done);
   if (exported !== undefined) {
     steps.say(
       exported.write === 'written'
-        ? `Exported ${String(exported.events)} events for the case to the store as ${String(exported.file)} (${String(exported.bytes)} bytes, SHA-256 ${String(exported.sha256)}). It is recorded on both chains, and the organisation's admins were told.`
+        ? `Exported ${String(exported[counted])} ${counted} for the case to the store as ${String(exported.file)} (${String(exported.bytes)} bytes, SHA-256 ${String(exported.sha256)}). It is recorded on both chains, and the organisation's admins were told.`
         : `Already done: ${String(exported.file)} is in the store from an earlier run of this export, and nothing was written again.`,
     );
     return 0;
@@ -688,15 +699,27 @@ function auditExportOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine
   return 1;
 }
 
-/** Exports an organisation's audit log for a case on the job (E10c): 0 once its file is in the store. */
-export function auditExport(request: AuditExportArguments, steps: JobSteps): Promise<number> {
+/** The exports for a case the job runs: the line a written one ends with, what it counts, and its request. */
+const CASE_EXPORTS = {
+  'audit-export': { done: 'operator.audit_exported', counted: 'events', request: auditExportRequest },
+  'activity-export': { done: 'operator.activity_exported', counted: 'requests', request: activityExportRequest },
+} as const;
+
+type CaseExportKind = keyof typeof CASE_EXPORTS;
+
+/** Exports an organisation's audit log (E10c) or activity log (L7) for a case on the job: 0 once its file is in the store. */
+export function auditExport(
+  request: AuditExportArguments,
+  steps: JobSteps,
+  kind: CaseExportKind = 'audit-export',
+): Promise<number> {
   const id = request.id ?? uuidV7Ids.next();
   return runRequest(steps, () => ({
-    text: auditExportRequest(request.orgId, request.from, request.to, request.caseRef, id),
+    text: CASE_EXPORTS[kind].request(request.orgId, request.from, request.to, request.caseRef, id),
     intro: `The export's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it records nothing twice, and it takes the request off the job at its end.`,
     tryAgain: `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. If the file is in the store, that run ends "Already done"; nothing is recorded twice.`,
     mayStillHold: mayStillHold(id, 'export'),
-    judge: (ended, lines) => auditExportOutcome(steps, ended, lines, id),
+    judge: (ended, lines) => auditExportOutcome(steps, ended, lines, id, kind),
   }));
 }
 
@@ -767,9 +790,10 @@ export function main(
         if (argv.length !== 1) throw new UsageError(`say ${RESTORE_CHECK}, and nothing else`);
         return restoreCheck;
       }
-      if (argv[0] === 'audit-export') {
-        const request = parseAuditExport(argv);
-        return (steps) => auditExport(request, steps);
+      if (argv[0] === 'audit-export' || argv[0] === 'activity-export') {
+        const kind = argv[0];
+        const request = parseAuditExport(argv, kind);
+        return (steps) => auditExport(request, steps, kind);
       }
       if (argv[0] === 'invite-first-admin') {
         const request = parseFirstAdmin(argv);
