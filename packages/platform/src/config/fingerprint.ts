@@ -104,6 +104,18 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     partner: config.partner === undefined ? undefined : { mode: config.partner.mode },
     payees: { coolingOffHours: config.payees.coolingOffHours },
     audit: { anchorSeconds: config.audit.anchorSeconds },
+    // Azure's identity header is left out: it's a secret. Where its token is asked is kept.
+    activityDownloads: {
+      directory: config.activityDownloads.directory,
+      container:
+        config.activityDownloads.container === null
+          ? null
+          : {
+              url: config.activityDownloads.container.url,
+              clientId: config.activityDownloads.container.clientId,
+              identityEndpoint: config.activityDownloads.container.identityEndpoint,
+            },
+    },
     keys: { directory: config.keys.directory, current: config.keys.current },
   };
 }

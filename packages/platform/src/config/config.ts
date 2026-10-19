@@ -8,6 +8,12 @@
 // into the wrong variable can't leak through the error.
 import type { KeySettings } from '../keys/load.ts';
 import {
+  type BlobContainer,
+  blobContainerOf,
+  blobContainerProblems,
+  type BlobContainerSettings,
+} from './blob-container.ts';
+import {
   ConfigError,
   type Env,
   type Environment,
@@ -134,6 +140,12 @@ export interface Config {
   readonly payees: { readonly coolingOffHours: number };
   /** ADR-012 §2: how often each audit chain is checked against its last anchor, and anchored again. */
   readonly audit: { readonly anchorSeconds: number };
+  /**
+   * Where the activity log's background downloads are kept (Phase 3 L5c): a
+   * local folder, development and test alone, or the container in the UAE;
+   * null for each not set, and with neither the downloads are off.
+   */
+  readonly activityDownloads: { readonly directory: string | null; readonly container: BlobContainer | null };
   /** ADR-011 §2: where the platform mounts the app's keys, and each key's current version where it isn't 1. */
   readonly keys: KeySettings;
 }
@@ -395,6 +407,9 @@ function readSettings(env: Env, location: LocationChecks) {
     partnerMode: setting(env, 'AGENTX_PARTNER_MODE'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
+    downloadsDirectory: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_DIR'),
+    downloadsContainer: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_URL'),
+    downloadsClientId: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'),
     keysDirectory: setting(env, 'AGENTX_KEYS_DIR'),
     keysCurrent: setting(env, 'AGENTX_KEYS_CURRENT'),
     dbHost: location.host,
@@ -406,6 +421,15 @@ function readSettings(env: Env, location: LocationChecks) {
     dbPoolMax: setting(env, 'AGENTX_DB_POOL_MAX'),
   };
 }
+
+/** The settings the activity log's background downloads are kept by (Phase 3 L5c). */
+const ACTIVITY_DOWNLOADS: BlobContainerSettings = {
+  directory: 'AGENTX_ACTIVITY_DOWNLOADS_DIR',
+  url: 'AGENTX_ACTIVITY_DOWNLOADS_URL',
+  clientId: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
+  deployedDoes: 'keeps a background download in its container',
+  holder: 'the app',
+};
 
 /** The settings, each checked on its own (readSettings). */
 type Settings = ReturnType<typeof readSettings>;
@@ -504,6 +528,13 @@ export function loadConfig(env: Env = process.env): Config {
     ...(environment.ok && checks.partnerMode.ok
       ? partnerModeProblems(environment.value, checks.partnerMode.value)
       : []),
+    ...(environment.ok && checks.downloadsDirectory.ok && checks.downloadsContainer.ok && checks.downloadsClientId.ok
+      ? blobContainerProblems(env, environment.value, ACTIVITY_DOWNLOADS, {
+          directory: checks.downloadsDirectory.value,
+          container: checks.downloadsContainer.value,
+          clientId: checks.downloadsClientId.value,
+        })
+      : []),
     ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
@@ -555,6 +586,10 @@ export function loadConfig(env: Env = process.env): Config {
     partner: partnerFrom(checks.environment.value, checks.partnerMode.value),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
     audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value }),
+    activityDownloads: Object.freeze({
+      directory: checks.downloadsDirectory.value ?? null,
+      container: blobContainerOf(env, checks.downloadsContainer.value, checks.downloadsClientId.value),
+    }),
     keys: Object.freeze({
       directory: checks.keysDirectory.value,
       current: Object.freeze(checks.keysCurrent.value ?? {}),

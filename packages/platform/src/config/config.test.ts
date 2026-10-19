@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ConfigError } from './common.ts';
 import { loadConfig, partnerName } from './config.ts';
+import { fingerprintedSettings } from './fingerprint.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -76,6 +77,7 @@ describe('config: a correct config loads', () => {
       securityEvents: { retentionDays: 90 },
       payees: { coolingOffHours: 24 },
       audit: { anchorSeconds: 300 },
+      activityDownloads: { directory: null, container: null },
       keys: { directory: KEYS_DIR, current: {} },
     });
   });
@@ -159,6 +161,7 @@ describe('config: a correct config loads', () => {
       partner: { mode: 'fake' },
       payees: { coolingOffHours: 48 },
       audit: { anchorSeconds: 600 },
+      activityDownloads: { directory: null, container: null },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
     });
     // In the keys' own order, whatever order they were set in, so the fingerprint doesn't depend on it.
@@ -1287,5 +1290,73 @@ describe('config: sign-in (ADR-003 §5, §7)', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_SESSION_IDLE_MINUTES: '61', AGENTX_SESSION_ABSOLUTE_HOURS: '1' })).toEqual(
       ['AGENTX_SESSION_IDLE_MINUTES: must be no longer than AGENTX_SESSION_ABSOLUTE_HOURS'],
     );
+  });
+});
+
+describe('L5c where the activity log’s background downloads are kept', () => {
+  const CONTAINER = 'https://stagentxdlstg01.blob.core.windows.net/activity-downloads';
+  const CLIENT_ID = '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b';
+  /** Plain words, so secret scanners ignore it. */
+  const HEADER = 'identity header for these tests';
+  const WITH_CONTAINER: Env = {
+    ...MINIMAL,
+    AGENTX_ACTIVITY_DOWNLOADS_URL: CONTAINER,
+    AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID: CLIENT_ID,
+    IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+    IDENTITY_HEADER: HEADER,
+  };
+
+  it('reads the container, its identity and the endpoint Azure gives the app', () => {
+    expect(loadConfig(WITH_CONTAINER).activityDownloads).toEqual({
+      directory: null,
+      container: {
+        url: CONTAINER,
+        clientId: CLIENT_ID,
+        identityEndpoint: 'http://localhost:42356/msi/token',
+        identityHeader: HEADER,
+      },
+    });
+  });
+
+  it('reads the local folder in development and test', () => {
+    const env = { ...LOCAL, AGENTX_ENV: 'test', AGENTX_ACTIVITY_DOWNLOADS_DIR: '/tmp/downloads' };
+
+    expect(loadConfig(env).activityDownloads).toEqual({ directory: '/tmp/downloads', container: null });
+  });
+
+  it.each([
+    [
+      'the folder, deployed',
+      {
+        AGENTX_ACTIVITY_DOWNLOADS_URL: undefined,
+        AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID: undefined,
+        AGENTX_ACTIVITY_DOWNLOADS_DIR: '/tmp/d',
+      },
+      'AGENTX_ACTIVITY_DOWNLOADS_DIR: is allowed only in development and test; production keeps a background download in its container',
+    ],
+    [
+      'the container without its identity',
+      { AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID: undefined },
+      'AGENTX_ACTIVITY_DOWNLOADS_URL and AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID: set both, or neither',
+    ],
+    [
+      'a host other than Azure blob storage, deployed',
+      { AGENTX_ACTIVITY_DOWNLOADS_URL: 'https://downloads.example.com/activity-downloads' },
+      "AGENTX_ACTIVITY_DOWNLOADS_URL: production writes to Azure's blob service, <account>.blob.core.windows.net",
+    ],
+    [
+      'no header from Azure',
+      { IDENTITY_HEADER: undefined },
+      'IDENTITY_HEADER: is required with the container (Azure sets it where the app has a managed identity)',
+    ],
+  ])('refuses %s', (_what, change, problem) => {
+    expect(problemsWith({ ...WITH_CONTAINER, ...change })).toEqual([problem]);
+  });
+
+  it('keeps where the token is asked in the fingerprint, never Azure’s header', () => {
+    const settings = JSON.stringify(fingerprintedSettings(loadConfig(WITH_CONTAINER)));
+
+    expect(settings).toContain(CONTAINER);
+    expect(settings).not.toContain(HEADER);
   });
 });
