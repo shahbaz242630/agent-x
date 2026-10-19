@@ -180,3 +180,19 @@ export async function firstDayOf(tx: SealTx, orgId: string): Promise<string | un
     .executeTakeFirst();
   return first === undefined ? undefined : dayOfId(first.id);
 }
+
+/**
+ * Whether a seal's details hold the day's digest as it is read now: its day,
+ * count, digest, first and last IDs and form. Anything else, a row changed,
+ * deleted or slipped in since, or a seal rewritten, is a mismatch.
+ */
+export function sealHolds(digest: DayDigest, details: Readonly<Record<string, unknown>>): boolean {
+  return (
+    details.day === digest.day &&
+    details.requests === digest.requests &&
+    details.digest === digest.digest &&
+    details.idFrom === digest.idFrom &&
+    details.idTo === digest.idTo &&
+    details.form === SEAL_FORM
+  );
+}

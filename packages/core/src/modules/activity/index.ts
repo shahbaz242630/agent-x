@@ -29,6 +29,7 @@ export {
   SEAL_FORM,
   SEAL_GRACE_MS,
   sealable,
+  sealHolds,
   v7Floor,
 } from './infrastructure/activity-seal.ts';
 export {

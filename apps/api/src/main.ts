@@ -97,6 +97,7 @@ import { createAgentRegistrations } from './agent-registering.ts';
 import { createActivityPages } from './activity-log.ts';
 import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
 import { createActivityLogExports } from './activity-log-exports.ts';
+import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAuditLog } from './audit-log.ts';
 import { createAuditLogExports } from './audit-log-exports.ts';
@@ -923,6 +924,11 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // The activity log's background downloads built, a month a file (Phase 3 L5c), on a timer of their own.
   const downloadBuilding = scheduleRunsIfAny(downloads.builder, ACTIVITY_EXPORTS_EVERY_MS);
   logger.info('api.background_downloads', { building: downloadBuilding.running });
+  // Each sealed day digested again and held to its seal, a few a run (Phase 3 L6c), on a timer of its own.
+  const sealChecking = scheduleRuns(
+    createActivitySealCheck({ list: () => listedOrganizations(database), database, keys, ids: uuidV7Ids, logger }),
+    ACTIVITY_SEAL_CHECK_EVERY_MS,
+  );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -949,6 +955,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           requestVoiding.stop(),
           activitySealing.stop(),
           downloadBuilding.stop(),
+          sealChecking.stop(),
           recording.stop(),
         ]);
       },

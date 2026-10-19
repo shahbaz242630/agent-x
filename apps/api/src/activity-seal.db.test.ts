@@ -20,6 +20,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_LOCK, createActivitySeal } from './activity-seal.ts';
 import { keys, mandateWorld, type MandateWorldTables, type World } from './mandate-world.helper.test.ts';
 
@@ -350,5 +351,147 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     expect(capture.lines().filter((line) => line.event === 'access_log_seal.run_failed')).toEqual([
       expect.objectContaining({ level: 'error' }),
     ]);
+  });
+});
+
+describe('L6c the seals checked (decision 26, ADR-012 §2)', () => {
+  const checkFor = (w: World, sealsARun = 7) =>
+    createActivitySealCheck({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+      sealsARun,
+      batch: 2,
+    });
+  const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
+  const held = () => capture.lines().some((line) => line.event === 'audit.integrity_hold_set');
+
+  /** Three days sealed, the 17th to the 19th, two rows on the 18th: the world and their rows' IDs. */
+  const sealed = async () => {
+    const w = await world();
+    await written(w, '2026-10-17T09:00:00.000Z');
+    await written(w, '2026-10-18T09:00:00.000Z');
+    await written(w, '2026-10-18T10:00:00.000Z');
+    await sealFor(w).run();
+    capture = new LogCapture();
+    return w;
+  };
+  const admin = () => database.as('admin');
+
+  it('finds every seal holding, a few a run, back to the oldest and from the newest again', async () => {
+    const w = await sealed();
+    const check = checkFor(w, 2);
+
+    for (let run = 0; run < 4; run += 1) await check.run();
+
+    expect(alarms()).toEqual([]);
+    expect(held()).toBe(false);
+  });
+
+  it('holds the organisation for a row of a sealed day changed past the app', async () => {
+    const w = await sealed();
+    await admin().query(
+      "update access.requests set status = 403 where org_id = $1 and recorded_at = '2026-10-18T09:00:00Z'",
+      [w.org],
+    );
+
+    await checkFor(w).run();
+
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', reason: 'holding', subjectType: 'access_log', objectId: w.org }),
+    ]);
+    expect(held()).toBe(true);
+    expect(capture.lines().filter((line) => line.event === 'access_log_seal_check.broken')).toEqual([
+      expect.objectContaining({ day: '2026-10-18', why: 'digest' }),
+    ]);
+  });
+
+  it('holds it for a row deleted from a sealed day, and for one slipped into a sealed day', async () => {
+    const deleted = await sealed();
+    await admin().query("delete from access.requests where org_id = $1 and recorded_at = '2026-10-17T09:00:00Z'", [
+      deleted.org,
+    ]);
+    await checkFor(deleted).run();
+    expect(alarms()).toHaveLength(1);
+
+    const slipped = await sealed();
+    capture = new LogCapture();
+    await written(slipped, '2026-10-19T08:00:00.000Z');
+    await checkFor(slipped).run();
+    expect(alarms()).toEqual([expect.objectContaining({ objectId: slipped.org })]);
+  });
+
+  it('finds a seal holding with its rows’ IP addresses and places blanked, as a lawful erasure may', async () => {
+    const w = await sealed();
+    await admin().query('update access.requests set ip = null, country = null, city = null where org_id = $1', [w.org]);
+
+    await checkFor(w).run();
+
+    expect(alarms()).toEqual([]);
+  });
+
+  it('holds it for a seal missing between two others', async () => {
+    const w = await sealed();
+    await admin().query("delete from audit.events where org_id = $1 and action = $2 and details like '%2026-10-18%'", [
+      w.org,
+      ACTIVITY_SEALED,
+    ]);
+
+    await checkFor(w).run();
+
+    expect(capture.lines().filter((line) => line.event === 'access_log_seal_check.broken')).toEqual([
+      expect.objectContaining({ day: '2026-10-17', why: 'gap' }),
+    ]);
+    expect(held()).toBe(true);
+  });
+
+  it('holds it for a seal rewritten past the app: its own seal can’t be believed', async () => {
+    const w = await sealed();
+    await admin().query(
+      'update audit.events set details = replace(details, \'"requests":2\', \'"requests":1\') where org_id = $1 and action = $2',
+      [w.org, ACTIVITY_SEALED],
+    );
+
+    await checkFor(w).run();
+
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'log' })]);
+    expect(held()).toBe(true);
+  });
+
+  it('logs an organisation it can’t check, going on, and a run whose list fails', async () => {
+    const w = await sealed();
+    const both = createActivitySealCheck({
+      list: () => Promise.resolve(['not-an-organisation', w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    });
+    await both.run();
+    expect(capture.lines().filter((line) => line.event === 'access_log_seal_check.failed')).toHaveLength(1);
+    expect(alarms()).toEqual([]);
+
+    const none = createActivitySealCheck({
+      list: () => Promise.reject(new Error('the directory is down')),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    });
+    await none.run();
+    expect(capture.lines().filter((line) => line.event === 'access_log_seal_check.run_failed')).toHaveLength(1);
+  });
+
+  it('checks nothing once stopped', async () => {
+    const w = await sealed();
+    await admin().query('update access.requests set status = 500 where org_id = $1', [w.org]);
+    const stopping = new AbortController();
+    stopping.abort();
+
+    await checkFor(w).run(stopping.signal);
+
+    expect(alarms()).toEqual([]);
   });
 });
