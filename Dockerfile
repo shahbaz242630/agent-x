@@ -11,7 +11,7 @@
 # dependencies of the apps are installed; test helpers and test files never
 # ship (.dockerignore).
 
-FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS dependencies
+FROM node:24.21.0-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS dependencies
 
 # Corepack must not read a .corepack.env file, which could turn off its
 # signature checks or point it at another registry (the same rule as CI).
@@ -37,7 +37,7 @@ RUN corepack enable pnpm \
 # this repository; the build takes it only with the SHA-256 of DB-IP's own
 # file. The monthly refresh (.github/workflows/places-refresh.yml) checks each
 # new month's file and opens a PR moving this pin (tooling/places/pin.ts).
-FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS places
+FROM node:24.21.0-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS places
 
 ADD --checksum=sha256:c839d407f85a1e0bddba354cef16b2c398182d1c34ed8d985555dce134b36b14 \
   https://github.com/shahbaz242630/agent-x/releases/download/geoip-dbip-city-lite-2026-10/dbip-city-lite-2026-10.mmdb.gz \
@@ -45,7 +45,7 @@ ADD --checksum=sha256:c839d407f85a1e0bddba354cef16b2c398182d1c34ed8d985555dce134
 # Read-only to all: a download is root's alone (0600), and the API runs as node.
 RUN gzip --decompress /places/dbip-city-lite.mmdb.gz && chmod 0444 /places/dbip-city-lite.mmdb
 
-FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe
+FROM node:24.21.0-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66
 
 ARG AGENTX_RELEASE=local
 LABEL org.opencontainers.image.source="https://github.com/shahbaz242630/agent-x" \
