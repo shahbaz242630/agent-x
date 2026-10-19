@@ -9,4 +9,5 @@ export {
   type LogMethod,
 } from './logger.ts';
 export { guardOutputs, type Output } from './output-guard.ts';
+export type { ProblemEvent } from './plain-words.ts';
 export { hidesField } from './redact.ts';

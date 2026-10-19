@@ -267,6 +267,15 @@ describe('AV-8 a line over the byte limit is shortened in steps, always keeping 
     expect(result.err).toMatchObject({ type: 'AggregateError', code: 'ECONNRESET' });
   });
 
+  it('keeps a warning’s plain words when the caller’s fields are dropped or too many', () => {
+    const says = 'A payment failed. Nothing was sent. It is tried again later.';
+    const bulky = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}`, 'z '.repeat(1000)]));
+    const cut = redacted({ event: 'payment.failed', ...bulky, err: bigError, says }) as Record<string, unknown>;
+    expect(cut).toMatchObject({ says, lineCut: true });
+    const many = Object.fromEntries(Array.from({ length: LIMITS.fieldsPerObject + 10 }, (_, i) => [`f${i}`, i]));
+    expect(redacted({ event: 'payment.failed', ...many, says })).toMatchObject({ says });
+  });
+
   it('last shortens the logger’s own fields too, so even a line of Arabic text always fits', () => {
     // Arabic letters take two bytes each, so ten own fields of 1,024 letters are over the limit.
     const long = 'ع '.repeat(1000);

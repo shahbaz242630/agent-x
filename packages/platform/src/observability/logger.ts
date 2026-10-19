@@ -12,6 +12,7 @@ import pino from 'pino';
 
 import { type Config, DEFAULT_LOG, type LogLevel } from '../config/index.ts';
 import { toLoggable } from './loggable.ts';
+import { type ProblemEvent, saysFor } from './plain-words.ts';
 import { redactJson, redactLine } from './redact.ts';
 import { createVolumeGuard, MINUTE_MS } from './volume-guard.ts';
 
@@ -40,6 +41,7 @@ const RESERVED = new Set([
   'orgId',
   'actor',
   'module',
+  'says',
   'invalidEvent',
   'suppressedEvent',
   'suppressedCount',
@@ -61,6 +63,7 @@ export type LogFields = Readonly<Record<string, unknown>> & {
   readonly orgId?: never;
   readonly actor?: never;
   readonly module?: never;
+  readonly says?: never;
 };
 
 /** What a child logger adds to each of its lines, e.g. per request. */
@@ -74,10 +77,12 @@ export interface LogBindings {
 const BINDING_NAMES = ['correlationId', 'orgId', 'actor', 'module'] as const;
 
 export type LogMethod = (event: EventName, fields?: LogFields) => void;
+/** Warnings and errors take only events with plain words (decision 29), so a new failure can't ship without them. */
+type ProblemMethod = (event: ProblemEvent, fields?: LogFields) => void;
 
 export interface Logger {
-  readonly error: LogMethod;
-  readonly warn: LogMethod;
+  readonly error: ProblemMethod;
+  readonly warn: ProblemMethod;
   readonly info: LogMethod;
   readonly debug: LogMethod;
   child(bindings: LogBindings): Logger;
@@ -138,13 +143,19 @@ function bindingsOf(bindings: LogBindings): Record<string, string> {
   );
 }
 
+/** A warning or error line says what happened, what broke and what next, in plain English (decision 29). */
+function wordsAt(level: LogLevel, event: string): { says?: string } {
+  return level === 'warn' || level === 'error' ? { says: saysFor(event) } : {};
+}
+
 function wrap(instance: pino.Logger, writeSuppressed: (includeCurrentMinute?: boolean) => void): Logger {
   const at =
     (level: LogLevel): LogMethod =>
     (event, fields = {}) => {
       const valid = EVENT_NAME.test(event) && !event.startsWith(LOGGER_EVENTS);
       const invalid = valid ? {} : { invalidEvent: redactJson(event) };
-      instance[level]({ ...prepared(fields), ...invalid }, valid ? event : INVALID_EVENT);
+      const name = valid ? event : INVALID_EVENT;
+      instance[level]({ ...prepared(fields), ...invalid, ...wordsAt(level, name) }, name);
     };
   return {
     error: at('error'),
@@ -203,6 +214,7 @@ function build(options: Omit<LoggerOptions, 'config'>, context: LogContext): Log
             suppressedCount: count,
             suppressedFrom: iso(minuteStart),
             suppressedTo: iso(minuteStart + MINUTE_MS),
+            ...wordsAt(levelName(level), SUPPRESSED_EVENT),
           },
           SUPPRESSED_EVENT,
         );

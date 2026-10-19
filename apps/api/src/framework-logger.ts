@@ -8,10 +8,10 @@
 // headers must never be logged (ADR-011 §7). Some of its messages quote the
 // address as sent, so paths are taken out of the message, and its own errors
 // keep their code but not their message.
-import type { EventName, Logger, LogFields } from '@agentx/platform/observability';
+import type { Logger, LogFields, ProblemEvent } from '@agentx/platform/observability';
 import type { FastifyBaseLogger } from 'fastify';
 
-export const FRAMEWORK_EVENT: EventName = 'http.framework_log';
+export const FRAMEWORK_EVENT: ProblemEvent = 'http.framework_log';
 
 /** The binding Fastify gives each request's logger. It's the server's `requestIdLogLabel`. */
 export const REQUEST_ID_BINDING = 'correlationId';
