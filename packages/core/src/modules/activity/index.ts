@@ -14,8 +14,10 @@ export {
   type OrganisationRequest,
   type PersonRequest,
   TIME_ZONE_NAME,
+  TIME_ZONE_SOURCES,
 } from './infrastructure/activity-log.ts';
 export {
+  ACTIVITY_ACTOR_TYPES,
   type ActivityActor,
   type ActivityCursor,
   activityInRange,

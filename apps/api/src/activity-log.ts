@@ -15,9 +15,16 @@
 // - An agent on the page whose signed state can't be believed is 503
 //   INTEGRITY_FAILED, the alarm raised, as on the audit log.
 // Reading a page is itself a row of the log (the activity recorder, L3).
-import type { ActivityCursor, ActivityPageToRead, ActivityRow, ActivityTables } from '@agentx/core/modules/activity';
+import {
+  ACTIVITY_ACTOR_TYPES,
+  type ActivityCursor,
+  type ActivityPageToRead,
+  type ActivityRow,
+  TIME_ZONE_SOURCES,
+} from '@agentx/core/modules/activity';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import {
+  activityActorsOf,
   type ActivityReadTables,
   type ActorName,
   activityShown,
@@ -48,7 +55,7 @@ const MOST_ACTIVITY_A_PAGE = 100;
 export class ActivityLogRefused extends UseCaseRefused {}
 
 /** The tables a page of the activity log reads: its rows, and what names their actors. */
-export type ActivityLogTables = AuditLogTables & ActivityTables & ActivityReadTables;
+export type ActivityLogTables = AuditLogTables & ActivityReadTables;
 
 export type ActivityPageAnswer =
   | {
@@ -105,17 +112,11 @@ export function createActivityPages({
       const namer = createActorNamer({ directory, logger: logger.child({ correlationId }) });
       return {
         ...read,
-        names: await namer.namesOf(
-          read.rows.map((row) => row.actor),
-          read.held,
-        ),
+        names: await namer.namesOf(activityActorsOf(read.rows), read.held),
       };
     },
   };
 }
-
-/** Who the activity log's rows can be by: a verified member or agent. */
-export const ACTIVITY_ACTOR_TYPES = ['user', 'agent'] as const;
 
 /** Where a page starts before, as `next` names it: a row's time and ID, `2026-10-19T13:39:12.123Z_<uuid>`. */
 const CURSOR =
@@ -177,7 +178,7 @@ const ACTIVITY_ROW = z
           .object({
             name: z.string().describe('The time zone, such as `Asia/Dubai`.'),
             from: z
-              .enum(['browser', 'organisation'])
+              .enum(TIME_ZONE_SOURCES)
               .describe('`browser`: the browser reported it; `organisation`: the organisation’s own, as none was.'),
           })
           .nullable()

@@ -3,6 +3,7 @@
 // API's pages and downloads and the operator's export for a case (ADR-005 §6). It only
 // reports: it reads other modules' public queries, and no module imports it.
 export {
+  activityActorsOf,
   activityNdjsonLine,
   type ActivityReadTables,
   activityShown,

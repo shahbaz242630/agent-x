@@ -70,7 +70,7 @@ import { createUseCaseWork, type Member } from './use-case-work.ts';
 export const EXPORT_OPERATION = 'audit-log.export';
 
 /** The most downloads one admin makes in an hour. */
-export const MOST_EXPORTS_AN_HOUR = 5;
+const MOST_EXPORTS_AN_HOUR = 5;
 
 /** The advisory lock an admin's downloads count their hourly budget under (ADR-006 §6, 2b). */
 export const EXPORTS_LOCK = 'audit-log-exports';
@@ -149,15 +149,51 @@ const lineOf = (format: ExportFormat, logged: LogEvent, names: ReadonlyMap<strin
   const shown = eventShown(logged, names);
   const facts = Object.fromEntries(factsShown(logged.event.details));
   const { actor, subject } = shown;
-  return [shown.seq, shown.recordedAt, actor.type, actor.id, actor.name ?? '', actor.email ?? '', actor.shownFrom ?? '']
-    .concat([shown.action, subject.type, subject.id])
-    .concat([String(subject.version), JSON.stringify(facts), shown.hash, shown.prevHash])
-    .map(csvCell)
-    .join(',');
+  return csvRow(
+    [shown.seq, shown.recordedAt, actor.type, actor.id, actor.name ?? '', actor.email ?? '', actor.shownFrom ?? '']
+      .concat([shown.action, subject.type, subject.id])
+      .concat([String(subject.version), JSON.stringify(facts), shown.hash, shown.prevHash]),
+  );
 };
 
+/** A CSV row: each cell made safe (csvCell). */
+export const csvRow = (cells: readonly string[]): string => cells.map(csvCell).join(',');
+
 /** A day of a range, as the file's name holds it. */
-export const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
+const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
+
+/** A download's file of `lines` (each log's own), named for its log and range, a CSV header first. */
+export const exportFile = (
+  log: 'audit' | 'activity',
+  asked: { readonly from: Date; readonly to: Date; readonly format: ExportFormat },
+  csvHeader: readonly string[],
+  lines: string[],
+) => {
+  // The header goes in front in place and the text is joined once: a large download is never copied twice over.
+  if (asked.format === 'csv') lines.unshift(csvRow(csvHeader));
+  return {
+    fileName: `${log}-log-${dayOf(asked.from)}-to-${dayOf(asked.to)}.${asked.format}`,
+    contentType: CONTENT_TYPES[asked.format],
+    content: `${lines.join('\n')}\n`,
+  };
+};
+
+/**
+ * Whether an admin has made as many downloads of a log as they may in the
+ * hour, counted under their own lock for that log (ADR-006 §6, 2b), so their
+ * other download in flight commits or rolls back before this counts.
+ */
+export async function exportsSpent(
+  tx: Parameters<typeof actorEventsSince>[0],
+  clock: Clock,
+  member: Member,
+  { lock, action }: { readonly lock: string; readonly action: string },
+): Promise<boolean> {
+  await holdTransactionLock(tx, lock, member.orgId, member.userId);
+  const since = new Date(clock.now().getTime() - HOUR_MS);
+  const made = await actorEventsSince(tx, member.orgId, { type: 'user', id: member.userId }, action, since);
+  return made >= MOST_EXPORTS_AN_HOUR;
+}
 
 export function createAuditLogExports({
   database,
@@ -202,15 +238,8 @@ export function createAuditLogExports({
       lines.push(...read.events.map((event) => lineOf(asked.format, event, names)));
       beforeSeq = read.next;
     }
-    const header = asked.format === 'csv' ? [CSV_HEADER.map(csvCell).join(',')] : [];
-    return {
-      id,
-      fileName: `audit-log-${dayOf(asked.from)}-to-${dayOf(asked.to)}.${asked.format}`,
-      contentType: CONTENT_TYPES[asked.format],
-      content: `${[...header, ...lines].join('\n')}\n`,
-      events: lines.length,
-      upToSeq,
-    };
+    const events = lines.length;
+    return { id, ...exportFile('audit', asked, CSV_HEADER, lines), events, upToSeq };
   };
 
   return {
@@ -218,10 +247,7 @@ export function createAuditLogExports({
       const actor: AuditActor = { type: 'user', id: member.userId };
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        // Under the admin's own download lock (ADR-006 §6, 2b), so their other download in flight commits or rolls back before this counts.
-        await holdTransactionLock(tx, EXPORTS_LOCK, member.orgId, member.userId);
-        const since = new Date(clock.now().getTime() - HOUR_MS);
-        if ((await actorEventsSince(tx, member.orgId, actor, AUDIT_LOG_EXPORTED, since)) >= MOST_EXPORTS_AN_HOUR) {
+        if (await exportsSpent(tx, clock, member, { lock: EXPORTS_LOCK, action: AUDIT_LOG_EXPORTED })) {
           throw new AuditLogRefused(409, 'AUDIT_EXPORTS_SPENT');
         }
         const range = await eventsInRange(tx, member.orgId, asked);

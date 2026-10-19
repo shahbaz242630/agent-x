@@ -11,7 +11,13 @@
 import type { DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 
-import { activityPage, type ActivityPageToRead, type ActivityRow, type ActivityTables } from '../../activity/index.ts';
+import {
+  type ActivityCursor,
+  activityPage,
+  type ActivityPageToRead,
+  type ActivityRow,
+  type ActivityTables,
+} from '../../activity/index.ts';
 import type { SignedStates } from '../../audit/index.ts';
 
 import { type ActorName, type ActorsHeld, actorsHeld, nameOf } from './actor-names.ts';
@@ -23,14 +29,14 @@ export const PLACES_BY = { by: 'IP Geolocation by DB-IP', link: 'https://db-ip.c
 /** The tables a batch of the activity log reads: its rows, and what names their actors. */
 export type ActivityReadTables = ActivityTables & LogReadTables;
 
-/**
- * `at` as the clock read in `timeZone`, with its offset: `2026-10-19T17:39:12.123+04:00`;
- * null for a zone this runtime doesn't know (0052 checks only a zone's form).
- */
-export function localTimeOf(at: Date, timeZone: string): string | null {
-  let parts: Intl.DateTimeFormatPart[];
+/** One formatter a zone, made once: a download's 50,000 rows would otherwise make one each. Null for a zone Intl doesn't know. */
+const FORMATS = new Map<string, Intl.DateTimeFormat | null>();
+
+const formatOf = (timeZone: string): Intl.DateTimeFormat | null => {
+  if (FORMATS.has(timeZone)) return FORMATS.get(timeZone) ?? null;
+  let format: Intl.DateTimeFormat | null;
   try {
-    parts = new Intl.DateTimeFormat('en-GB', {
+    format = new Intl.DateTimeFormat('en-GB', {
       timeZone,
       year: 'numeric',
       month: '2-digit',
@@ -40,11 +46,23 @@ export function localTimeOf(at: Date, timeZone: string): string | null {
       second: '2-digit',
       hourCycle: 'h23',
       timeZoneName: 'longOffset',
-    }).formatToParts(at);
+    });
   } catch {
     // Intl refuses only a zone it doesn't know: the row is shown without its local time, never another zone's.
-    return null;
+    format = null;
   }
+  FORMATS.set(timeZone, format);
+  return format;
+};
+
+/**
+ * `at` as the clock read in `timeZone`, with its offset: `2026-10-19T17:39:12.123+04:00`;
+ * null for a zone this runtime doesn't know (0052 checks only a zone's form).
+ */
+export function localTimeOf(at: Date, timeZone: string): string | null {
+  const format = formatOf(timeZone);
+  if (format === null) return null;
+  const parts = format.formatToParts(at);
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((each) => each.type === type)?.value ?? '';
   // `GMT+04:00`, or `GMT` alone for no offset.
   const offset = part('timeZoneName').slice('GMT'.length) || '+00:00';
@@ -73,7 +91,7 @@ export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, Actor
         place === undefined
           ? null
           : { country: place.country, city: place.city ?? null, approximate: true as const, ...PLACES_BY },
-      timeZone: timeZone === undefined ? null : { name: timeZone.name, from: timeZone.from },
+      timeZone: timeZone ?? null,
     },
   };
 };
@@ -82,10 +100,13 @@ export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, Actor
 export const activityNdjsonLine = (row: ActivityRow, names: ReadonlyMap<string, ActorName>): string =>
   JSON.stringify(activityShown(row, names));
 
+/** Who made each of `rows`, for a namer. */
+export const activityActorsOf = (rows: readonly ActivityRow[]) => rows.map((row) => row.actor);
+
 /** A batch of the activity log and what Agent X holds to name its actors. */
 export interface HeldActivityPage {
   readonly rows: readonly ActivityRow[];
-  readonly next: Awaited<ReturnType<typeof activityPage>>['next'];
+  readonly next: ActivityCursor | null;
   readonly held: ActorsHeld;
 }
 
@@ -101,13 +122,7 @@ export async function heldActivityPage(
   asked: ActivityPageToRead,
 ): Promise<HeldActivityPage | 'tampered'> {
   const page = await activityPage(tx, orgId, asked);
-  const held = await actorsHeld(
-    tx,
-    states,
-    keys,
-    orgId,
-    page.rows.map((row) => row.actor),
-  );
+  const held = await actorsHeld(tx, states, keys, orgId, activityActorsOf(page.rows));
   if (held === 'tampered') return 'tampered';
   return { ...page, held };
 }

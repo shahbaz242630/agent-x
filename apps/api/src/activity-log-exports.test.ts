@@ -105,6 +105,7 @@ describe('POST /v1/access-log/exports (L5, decision 26)', () => {
   it.each([
     [{ outcome: 'refused', status: 409, code: 'ACTIVITY_EXPORT_TOO_LARGE' } as const, 409, 'ACTIVITY_EXPORT_TOO_LARGE'],
     [{ outcome: 'refused', status: 409, code: 'ACTIVITY_EXPORTS_SPENT' } as const, 409, 'ACTIVITY_EXPORTS_SPENT'],
+    [{ outcome: 'refused', status: 503, code: 'ACTIVITY_EXPORTS_BUSY' } as const, 503, 'ACTIVITY_EXPORTS_BUSY'],
     [{ outcome: 'conflict' } as const, 409, 'IDEMPOTENCY_KEY_REUSED'],
   ])('answers the use case’s %o as %i %s', async (answer, status, code) => {
     const { app } = await withExports(answer);

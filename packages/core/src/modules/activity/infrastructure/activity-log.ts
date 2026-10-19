@@ -38,7 +38,7 @@ export const TIME_ZONE_NAME = /^[A-Za-z][A-Za-z0-9_+/-]{0,63}$/;
 export const MOST_CITY_LENGTH = 120;
 
 /** Where a row's time zone came from. */
-const TIME_ZONE_SOURCES = ['browser', 'organisation'] as const;
+export const TIME_ZONE_SOURCES = ['browser', 'organisation'] as const;
 
 /** The approximate place a client's address is registered to. */
 export interface ClientPlace {

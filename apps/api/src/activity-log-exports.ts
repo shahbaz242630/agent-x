@@ -6,18 +6,29 @@
 //   (ACTIVITY_EXPORT_TOO_LARGE) with nothing written; an admin's sixth in an
 //   hour is ACTIVITY_EXPORTS_SPENT. Then the download is recorded,
 //   `access_log.exported` on the organisation's audit chain, naming the
-//   range, the actor, the format, how many requests and the newest of them,
-//   before a row is read: so reading the activity log out is on the audit log.
-// - Its answer carries the file whole: the requests up to that newest one,
-//   newest first, read in batches of EXPORT_BATCH. A retry with its key reads
-//   again up to the same row; a request still being answered as the download
-//   was recorded, its row written after, can be in a retry's file and not the first's.
+//   range, the actor, the format, how many requests and the last of them
+//   written, before a row is read: so reading the activity log out is on the
+//   audit log.
+// - Its answer carries the file whole: the requests written by the count
+//   (activityInRange), newest first, read in batches of EXPORT_BATCH; a retry
+//   with its key reads the same ones again.
+// - One download of the activity log is built at a time on a server
+//   (MOST_BUILDING): 50,000 requests take some 200 MB while their file is
+//   made. Another asked meanwhile is ACTIVITY_EXPORTS_BUSY, nothing logged.
+//   A longer range is a background download (decision 31, L5c).
 // - NDJSON: one request a line, as a page shows it. CSV: one row a request,
 //   every cell a spreadsheet would read as a formula made text (SEC-EVD-04).
 //   Both credit DB-IP beside every place (CC BY 4.0).
-import { type ActivityActor, type ActivityCursor, activityInRange } from '@agentx/core/modules/activity';
-import { actorEventsSince, createAuditTrail } from '@agentx/core/modules/audit';
 import {
+  ACTIVITY_ACTOR_TYPES,
+  type ActivityActor,
+  type ActivityCursor,
+  activityInRange,
+  type ActivityRow,
+} from '@agentx/core/modules/activity';
+import { createAuditTrail } from '@agentx/core/modules/audit';
+import {
+  activityActorsOf,
   ACTIVITY_LOG_EXPORTED,
   activityNdjsonLine,
   activityShown,
@@ -29,8 +40,8 @@ import {
   MOST_EXPORTED_REQUESTS,
 } from '@agentx/core/modules/evidence';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
-import { type Clock, DAY_MS, HOUR_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, holdTransactionLock, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
@@ -38,17 +49,17 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
-import { ACTIVITY_ACTOR_TYPES, ActivityLogRefused, type ActivityLogTables, heldActivity } from './activity-log.ts';
+import { ActivityLogRefused, type ActivityLogTables, heldActivity } from './activity-log.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import {
   CONTENT_TYPES,
-  csvCell,
-  dayOf,
+  csvRow,
   EXPORT_BODY_LIMIT,
   EXPORT_FORMATS,
+  exportFile,
   type ExportFormat,
   EXPORTING_ROLES,
-  MOST_EXPORTS_AN_HOUR,
+  exportsSpent,
 } from './audit-log-exports.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { type Refused, refused } from './refused.ts';
@@ -58,6 +69,9 @@ export const ACTIVITY_EXPORT_OPERATION = 'access-log.export';
 
 /** The advisory lock an admin's activity log downloads count their hourly budget under (ADR-006 §6, 2b). */
 export const ACTIVITY_EXPORTS_LOCK = 'access-log-exports';
+
+/** How many activity log downloads one server builds at once: each holds its whole file in memory. */
+const MOST_BUILDING = 1;
 
 /** A download as asked for: its range, its actor (everyone when none), its format. */
 export interface ActivityExportAsked {
@@ -115,27 +129,20 @@ const CSV_HEADER = [
   'timeZoneFrom',
 ];
 
-/** Where a download's batch starts: at its newest request, then before the last batch's oldest. */
-type BatchStart = { readonly upTo: ActivityCursor } | { readonly before: ActivityCursor };
-
 /** One request as the file holds it, its actor named. */
-const lineOf = (
-  format: ExportFormat,
-  row: Parameters<typeof activityShown>[0],
-  names: ReadonlyMap<string, ActorName>,
-): string => {
+const lineOf = (format: ExportFormat, row: ActivityRow, names: ReadonlyMap<string, ActorName>): string => {
   if (format === 'ndjson') return activityNdjsonLine(row, names);
   const shown = activityShown(row, names);
   const { actor, client } = shown;
   const { place } = client;
-  return [shown.id, shown.recordedAt, shown.localTime ?? '', actor.type, actor.id, actor.name ?? '']
-    .concat([actor.email ?? '', actor.shownFrom ?? '', shown.method, shown.route, shown.pathIds.join(' ')])
-    .concat([String(shown.status), shown.reason ?? '', shown.correlationId, String(shown.durationMs)])
-    .concat([client.ip ?? '', place?.country ?? '', place?.city ?? ''])
-    .concat([place === null ? '' : `${place.by} (${place.link})`])
-    .concat([client.timeZone?.name ?? '', client.timeZone?.from ?? ''])
-    .map(csvCell)
-    .join(',');
+  return csvRow(
+    [shown.id, shown.recordedAt, shown.localTime ?? '', actor.type, actor.id, actor.name ?? '']
+      .concat([actor.email ?? '', actor.shownFrom ?? '', shown.method, shown.route, shown.pathIds.join(' ')])
+      .concat([String(shown.status), shown.reason ?? '', shown.correlationId, String(shown.durationMs)])
+      .concat([client.ip ?? '', place?.country ?? '', place?.city ?? ''])
+      .concat([place === null ? '' : `${place.by} (${place.link})`])
+      .concat([client.timeZone?.name ?? '', client.timeZone?.from ?? '']),
+  );
 };
 
 export function createActivityLogExports({
@@ -154,92 +161,94 @@ export function createActivityLogExports({
   readonly logger: Logger;
   /** The login service's names; undefined when none is set up, and people are named from the kept copy. */
   readonly directory: DirectoryNames | undefined;
-  /** The cap, MOST_EXPORTED_REQUESTS unless a test sets it lower: ten thousand requests are too many to record in one. */
+  /** The cap, MOST_EXPORTED_REQUESTS unless a test sets it lower: 50,000 requests are too many to write in a test. */
   readonly mostRequests?: number;
 }): ActivityLogExports {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: ActivityLogRefused });
   const trail = createAuditTrail({ keys, ids });
+  let building = 0;
 
-  /** The download's file: its requests up to `upTo`, newest first, a batch to a transaction. */
+  /** The download's file: its requests written up to `writtenUpTo`, newest first, a batch to a transaction. */
   const fileOf = async (
     orgId: string,
     id: string,
     asked: ActivityExportAsked,
-    upTo: ActivityCursor | null,
+    writtenUpTo: string | null,
     correlationId: string,
   ) => {
     const lines: string[] = [];
     // One namer for the whole download: once the login service fails, no later batch waits on it.
     const namer = createActorNamer({ directory, logger: logger.child({ correlationId }) });
-    let start: BatchStart | null = upTo === null ? null : { upTo };
-    while (start !== null) {
-      const from: BatchStart = start;
+    // undefined: the first batch, from the newest; null: none left.
+    let before: ActivityCursor | null | undefined = undefined;
+    while (writtenUpTo !== null && before !== null) {
+      const start = before;
       const read: HeldActivityPage = await work.inOrganisation(orgId, correlationId, (tx, states) =>
-        heldActivity(tx, states, keys, orgId, { ...asked, ...from, limit: EXPORT_BATCH }),
+        heldActivity(tx, states, keys, orgId, { ...asked, before: start, writtenUpTo, limit: EXPORT_BATCH }),
       );
-      const names = await namer.namesOf(
-        read.rows.map((row) => row.actor),
-        read.held,
-      );
-      lines.push(...read.rows.map((row) => lineOf(asked.format, row, names)));
-      start = read.next === null ? null : { before: read.next };
+      const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
+      for (const row of read.rows) lines.push(lineOf(asked.format, row, names));
+      before = read.next;
     }
-    const header = asked.format === 'csv' ? [CSV_HEADER.map(csvCell).join(',')] : [];
-    return {
-      id,
-      fileName: `activity-log-${dayOf(asked.from)}-to-${dayOf(asked.to)}.${asked.format}`,
-      contentType: CONTENT_TYPES[asked.format],
-      content: `${[...header, ...lines].join('\n')}\n`,
-      requests: lines.length,
-    };
+    const requests = lines.length;
+    return { id, ...exportFile('activity', asked, CSV_HEADER, lines), requests };
+  };
+
+  /** The download, recorded on the audit log first, then its file. */
+  const exported = async (
+    member: Member,
+    idempotent: IdempotentRequest,
+    asked: ActivityExportAsked,
+    correlationId: string,
+  ): Promise<ActivityExportWrite> => {
+    const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      await work.memberIn(tx, states, member, EXPORTING_ROLES);
+      if (await exportsSpent(tx, clock, member, { lock: ACTIVITY_EXPORTS_LOCK, action: ACTIVITY_LOG_EXPORTED })) {
+        throw new ActivityLogRefused(409, 'ACTIVITY_EXPORTS_SPENT');
+      }
+      const range = await activityInRange(tx, member.orgId, asked);
+      if (range.rows > mostRequests) throw new ActivityLogRefused(409, 'ACTIVITY_EXPORT_TOO_LARGE');
+      const recorded = await trail.record(tx, member.orgId, {
+        actor: { type: 'user', id: member.userId },
+        action: ACTIVITY_LOG_EXPORTED,
+        subject: { type: 'access_log', id: member.orgId, version: 1 },
+        details: {
+          from: asked.from.toISOString(),
+          to: asked.to.toISOString(),
+          actor: asked.actor === undefined ? null : `${asked.actor.type}:${asked.actor.id}`,
+          format: asked.format,
+          requests: range.rows,
+          writtenUpTo: range.writtenUpTo,
+        },
+      });
+      return { status: 201, resourceId: recorded.id };
+    });
+    if (isUnwritten(done)) return done;
+    // A retry reads its own record for the last row it was made to, so it answers the same requests.
+    const id = done.result.resourceId;
+    const made = await work.answered(member.orgId, correlationId, async (tx) => {
+      const found = await trail.recordedEvent(tx, member.orgId, { eventId: id });
+      if (found.kind !== 'recorded') throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
+      const { writtenUpTo } = found.event.details;
+      return { writtenUpTo: typeof writtenUpTo === 'string' ? writtenUpTo : null };
+    });
+    if ('outcome' in made) return made;
+    try {
+      return { outcome: 'exported', file: await fileOf(member.orgId, id, asked, made.writtenUpTo, correlationId) };
+    } catch (error) {
+      if (error instanceof ActivityLogRefused) return refused(error.status, error.code);
+      throw error;
+    }
   };
 
   return {
     async export(member, idempotent, asked, correlationId) {
-      const actor = { type: 'user', id: member.userId } as const;
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        // Under the admin's own download lock (ADR-006 §6, 2b), so their other download in flight commits or rolls back before this counts.
-        await holdTransactionLock(tx, ACTIVITY_EXPORTS_LOCK, member.orgId, member.userId);
-        const since = new Date(clock.now().getTime() - HOUR_MS);
-        if ((await actorEventsSince(tx, member.orgId, actor, ACTIVITY_LOG_EXPORTED, since)) >= MOST_EXPORTS_AN_HOUR) {
-          throw new ActivityLogRefused(409, 'ACTIVITY_EXPORTS_SPENT');
-        }
-        const range = await activityInRange(tx, member.orgId, asked);
-        if (range.rows > mostRequests) throw new ActivityLogRefused(409, 'ACTIVITY_EXPORT_TOO_LARGE');
-        const recorded = await trail.record(tx, member.orgId, {
-          actor,
-          action: ACTIVITY_LOG_EXPORTED,
-          subject: { type: 'access_log', id: member.orgId, version: 1 },
-          details: {
-            from: asked.from.toISOString(),
-            to: asked.to.toISOString(),
-            actor: asked.actor === undefined ? null : `${asked.actor.type}:${asked.actor.id}`,
-            format: asked.format,
-            requests: range.rows,
-            upToAt: range.newest?.at.toISOString() ?? null,
-            upToId: range.newest?.id ?? null,
-          },
-        });
-        return { status: 201, resourceId: recorded.id };
-      });
-      if (isUnwritten(done)) return done;
-      // A retry reads its own record for the row it was made to, so it answers the same requests.
-      const id = done.result.resourceId;
-      const made = await work.answered(member.orgId, correlationId, async (tx) => {
-        const found = await trail.recordedEvent(tx, member.orgId, { eventId: id });
-        if (found.kind !== 'recorded') throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
-        const { upToAt, upToId } = found.event.details;
-        return {
-          upTo: typeof upToAt === 'string' && typeof upToId === 'string' ? { at: new Date(upToAt), id: upToId } : null,
-        };
-      });
-      if ('outcome' in made) return made;
+      if (building >= MOST_BUILDING) return refused(503, 'ACTIVITY_EXPORTS_BUSY');
+      building += 1;
       try {
-        return { outcome: 'exported', file: await fileOf(member.orgId, id, asked, made.upTo, correlationId) };
-      } catch (error) {
-        if (error instanceof ActivityLogRefused) return refused(error.status, error.code);
-        throw error;
+        return await exported(member, idempotent, asked, correlationId);
+      } finally {
+        building -= 1;
       }
     },
   };

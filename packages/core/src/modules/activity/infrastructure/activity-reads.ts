@@ -6,17 +6,24 @@
 // - A page is the rows recorded in [from, to), by one person or agent when
 //   one is named, newest first by (time, ID), on 0052's two indexes; `next`
 //   names the last row's time and ID, where the next page starts before.
-// - A range is counted, and its newest row named, in two statements: a
-//   download is refused past its cap before it is recorded, then reads up to
-//   that row (`upTo`), however many are written while it is read.
+// - A range is counted, and its last-written row's ID named, in one
+//   statement: a download is refused past its cap before it is recorded,
+//   then reads only the rows written by then (`writtenUpTo`). A row's time is
+//   when its request arrived but its ID is made as it is written (UUIDv7),
+//   so a slow request answered during the download stays out of it (but for
+//   one written in the very moment of the count, or under a server's clock
+//   a little behind another's).
 import { sql, type Transaction } from 'kysely';
 
-import type { ClientClues } from './activity-log.ts';
+import { type ClientClues, TIME_ZONE_SOURCES } from './activity-log.ts';
 import type { ActivityTables } from './tables.ts';
 
-/** Who a row is by: a verified member or agent of the organisation. */
+/** Who the log's rows can be by: a verified member or agent of the organisation. */
+export const ACTIVITY_ACTOR_TYPES = ['user', 'agent'] as const;
+
+/** Who a row is by. */
 export interface ActivityActor {
-  readonly type: 'user' | 'agent';
+  readonly type: (typeof ACTIVITY_ACTOR_TYPES)[number];
   readonly id: string;
 }
 
@@ -33,11 +40,11 @@ export interface ActivityRange {
   readonly actor?: ActivityActor | undefined;
 }
 
-/** A page of the log to read: a range, where it starts before or at (newest when neither), and how many at most. */
+/** A page of the log to read: a range, where it starts before (newest when not named), and how many at most. */
 export interface ActivityPageToRead extends ActivityRange {
   readonly before?: ActivityCursor | undefined;
-  /** A download's first batch: from this row on, itself included. */
-  readonly upTo?: ActivityCursor | undefined;
+  /** A download's rows alone: those written by the time it was counted (activityInRange). */
+  readonly writtenUpTo?: string | undefined;
   readonly limit: number;
 }
 
@@ -58,14 +65,11 @@ export interface ActivityRow {
 
 type ActivityTx = Transaction<ActivityTables>;
 
-const actorType = (type: string): ActivityActor['type'] => {
-  if (type === 'user' || type === 'agent') return type;
-  throw new RangeError(`an activity log row is by an actor of no known type: ${type}`);
-};
-
-const timeZoneFrom = (from: string): 'browser' | 'organisation' => {
-  if (from === 'browser' || from === 'organisation') return from;
-  throw new RangeError(`an activity log row's time zone came from nowhere known: ${from}`);
+/** `value` as one of `known`, or RangeError: 0052 checks each, so another is a bug. */
+const oneOf = <Known extends string>(known: readonly Known[], value: string, what: string): Known => {
+  const found = known.find((each) => each === value);
+  if (found === undefined) throw new RangeError(`an activity log row has ${what} it doesn't know: ${value}`);
+  return found;
 };
 
 /** The rows of `orgId` in its range: its own, by its actor when one is named. */
@@ -86,9 +90,9 @@ export async function activityPage(
   asked: ActivityPageToRead,
 ): Promise<{ readonly rows: readonly ActivityRow[]; readonly next: ActivityCursor | null }> {
   let query = rowsIn(tx, orgId, asked).selectAll();
-  const { before, upTo } = asked;
+  const { before, writtenUpTo } = asked;
   if (before !== undefined) query = query.where(sql<boolean>`(recorded_at, id) < (${before.at}, ${before.id}::uuid)`);
-  if (upTo !== undefined) query = query.where(sql<boolean>`(recorded_at, id) <= (${upTo.at}, ${upTo.id}::uuid)`);
+  if (writtenUpTo !== undefined) query = query.where(sql<boolean>`id <= ${writtenUpTo}::uuid`);
   // One more than the page, to know whether another follows.
   const found = await query
     .orderBy('recorded_at', 'desc')
@@ -98,7 +102,7 @@ export async function activityPage(
   const rows = found.slice(0, asked.limit).map((row): ActivityRow => ({
     id: row.id,
     recordedAt: row.recorded_at,
-    actor: { type: actorType(row.actor_type), id: row.actor_id },
+    actor: { type: oneOf(ACTIVITY_ACTOR_TYPES, row.actor_type, 'an actor type'), id: row.actor_id },
     method: row.method,
     route: row.route,
     pathIds: row.path_ids,
@@ -112,7 +116,7 @@ export async function activityPage(
       timeZone:
         row.time_zone === null || row.time_zone_from === null
           ? undefined
-          : { name: row.time_zone, from: timeZoneFrom(row.time_zone_from) },
+          : { name: row.time_zone, from: oneOf(TIME_ZONE_SOURCES, row.time_zone_from, 'a time zone source') },
     },
   }));
   const last = rows.at(-1);
@@ -122,21 +126,18 @@ export async function activityPage(
   };
 }
 
-/** How many rows a range holds, and its newest (null for none). */
+/** How many rows a range holds, and the ID of its last written (null for none), in one statement. */
 export async function activityInRange(
   tx: ActivityTx,
   orgId: string,
   range: ActivityRange,
-): Promise<{ readonly rows: number; readonly newest: ActivityCursor | null }> {
+): Promise<{ readonly rows: number; readonly writtenUpTo: string | null }> {
+  // A UUID's text in lower case sorts as the UUID does; Postgres has no max() of uuid itself.
   const counted = await rowsIn(tx, orgId, range)
-    .select(sql<number>`pg_catalog.count(*)::int`.as('rows'))
+    .select([
+      sql<number>`pg_catalog.count(*)::int`.as('rows'),
+      sql<string | null>`pg_catalog.max(id::text)`.as('written_up_to'),
+    ])
     .executeTakeFirstOrThrow();
-  if (counted.rows === 0) return { rows: 0, newest: null };
-  const newest = await rowsIn(tx, orgId, range)
-    .select(['recorded_at', 'id'])
-    .orderBy('recorded_at', 'desc')
-    .orderBy('id', 'desc')
-    .limit(1)
-    .executeTakeFirstOrThrow();
-  return { rows: counted.rows, newest: { at: newest.recorded_at, id: newest.id } };
+  return { rows: counted.rows, writtenUpTo: counted.written_up_to };
 }

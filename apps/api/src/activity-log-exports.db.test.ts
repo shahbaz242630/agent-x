@@ -186,7 +186,7 @@ describe('downloading the activity log (L5, decision 26)', () => {
         actor: { type: 'user', id: w.admin.userId },
         action: ACTIVITY_LOG_EXPORTED,
         subject: { type: 'access_log', id: w.org, version: 1 },
-        details: { format: 'ndjson', requests: 2, upToAt: '2026-10-19T10:00:00.000Z', actor: null },
+        details: { format: 'ndjson', requests: 2, writtenUpTo: lines[0]?.id, actor: null },
       },
     });
   });
@@ -243,14 +243,39 @@ describe('downloading the activity log (L5, decision 26)', () => {
     expect(new Set(seen).size).toBe(EXPORT_BATCH + 1);
   });
 
-  it('answers a retry with its key with the same file, requests recorded since left out', async () => {
+  it('answers a retry with its key with the same file, requests written since left out, a slow one older than the newest too', async () => {
     const w = await world();
     await requested(w, '2026-10-19T09:00:00.000Z');
     const key = keyed(w.admin, ACTIVITY_EXPORT_OPERATION);
     const first = fileOf(await exports.export(w.admin, key, asked('csv'), CORRELATION));
     await requested(w, '2026-10-19T10:00:00.000Z');
+    // A slow request: it arrived before the newest counted, its row written only after the count.
+    await requested(w, '2026-10-19T08:00:00.000Z');
 
+    expect(first.requests).toBe(1);
     expect(fileOf(await exports.export(w.admin, key, asked('csv'), CORRELATION))).toEqual(first);
+  });
+
+  it('builds one download at a time: another asked meanwhile is ACTIVITY_EXPORTS_BUSY, nothing logged', async () => {
+    const w = await world();
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The admin's own download lock held elsewhere, so the first download waits mid-way.
+    const holder = withTenant(app, w.org, async (tx) => {
+      await holdTransactionLock(tx, ACTIVITY_EXPORTS_LOCK, w.org, w.admin.userId);
+      holding(undefined);
+      await gate;
+    });
+    await held;
+    const first = within(20_000, exported(w, asked('csv')), 'the first');
+    await waitUntilQueued(database.as('admin'), 1);
+
+    const other = await world();
+    expect(await exported(other, asked('csv'))).toEqual(refused(503, 'ACTIVITY_EXPORTS_BUSY'));
+    open(undefined);
+    await holder;
+    expect(await first).toMatchObject({ outcome: 'exported' });
+    expect(await exported(other, asked('csv'))).toMatchObject({ outcome: 'exported', file: { requests: 0 } });
   });
 
   it('refuses a range past the cap with nothing logged, an admin’s sixth in an hour, and a member not an admin', async () => {

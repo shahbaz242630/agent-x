@@ -12,6 +12,8 @@
  *   evidence depend on it. Add new codes in alphabetical order.
  */
 export const REASON_CODES = {
+  ACTIVITY_EXPORTS_BUSY:
+    'Agent X is making another large download of an activity log right now, so this one was not made or logged. Try again in a minute.',
   ACTIVITY_EXPORTS_SPENT:
     'You have downloaded the activity log as many times as you may in an hour (5), so this one was not made. Try again later.',
   ACTIVITY_EXPORT_TOO_LARGE:
