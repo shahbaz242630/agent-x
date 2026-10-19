@@ -7,7 +7,8 @@
 // written when it was asked, each file's facts on the audit chain, ready and
 // the asker told; a month that keeps failing given up, the asker told; one
 // stopped given back.
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
+import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -158,11 +159,11 @@ afterAll(async () => {
   await database.drop();
 });
 
-beforeEach(async () => {
+beforeEach(() => {
   // The audit log's own clock times its events: the budget's hour is read against it.
   clock = new FixedClock(new Date('2026-10-19T12:00:00.000Z'));
   capture = new LogCapture();
-  folder = await mkdtemp(join(tmpdir(), 'agentx-downloads-'));
+  folder = mkdtempSync(join(tmpdir(), 'agentx-downloads-'));
   downloads = createBackgroundExports({ database: app, keys, ids, clock, logger: testLogger(capture) });
 });
 

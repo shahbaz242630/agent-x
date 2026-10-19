@@ -3,7 +3,8 @@
 // earlier one, read back a part at a time, a token asked only every few
 // minutes, and every failure named by its call, status and Azure's code alone.
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
+import { readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -140,8 +141,8 @@ describe('L5c the download store on Azure', () => {
 describe('L5c the download store on a local folder', () => {
   let folder: string;
 
-  beforeEach(async () => {
-    folder = await mkdtemp(join(tmpdir(), 'agentx-blocks-'));
+  beforeEach(() => {
+    folder = mkdtempSync(join(tmpdir(), 'agentx-blocks-'));
   });
 
   afterEach(async () => {
