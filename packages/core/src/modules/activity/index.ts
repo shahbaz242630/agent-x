@@ -17,6 +17,20 @@ export {
   TIME_ZONE_SOURCES,
 } from './infrastructure/activity-log.ts';
 export {
+  ACTIVITY_SEALED,
+  dayCount,
+  type DayDigest,
+  dayOfId,
+  digestOfDay,
+  firstDayOf,
+  idsOfDay,
+  nextDay,
+  SEAL_FORM,
+  SEAL_GRACE_MS,
+  sealable,
+  v7Floor,
+} from './infrastructure/activity-seal.ts';
+export {
   ACTIVITY_ACTOR_TYPES,
   type ActivityActor,
   type ActivityCursor,

@@ -23,6 +23,22 @@ export const PLAIN_WORDS = {
     broke: "That one request is missing from its organisation's activity log; the request itself went through.",
     next: 'Nothing to do if it is rare. If it repeats, the database is failing: check its health.',
   },
+  'access_log_seal.failed': {
+    happened: "An organisation's activity log day could not be sealed this run.",
+    broke: 'That day stays unsealed for now, so a change to it would not yet be caught; nothing else is affected.',
+    next: 'Nothing to do if it is rare: the next run, 15 minutes later, tries again. If it repeats, check the audit chain and the database.',
+  },
+  'access_log_seal.moved': {
+    happened: "An organisation's activity log day changed while it was being sealed.",
+    broke:
+      'That day was not sealed this run. A closed day should never change, so this can mean a server clock is far off, or tampering.',
+    next: "If it repeats, check the servers' clocks and the database for changes made outside the app.",
+  },
+  'access_log_seal.run_failed': {
+    happened: 'A run of the daily activity log seal stopped early on an error.',
+    broke: 'Days waiting to be sealed stay unsealed until the next run, 15 minutes later.',
+    next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
+  },
   'agent_key.refused': {
     happened:
       "An agent's key was turned away because the server no longer holds the security key version it was made with.",
