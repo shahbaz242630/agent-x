@@ -17,7 +17,9 @@ export const REASON_CODES = {
   ACTIVITY_EXPORTS_SPENT:
     'You have downloaded the activity log as many times as you may in an hour (5), so this one was not made. Try again later.',
   ACTIVITY_EXPORT_TOO_LARGE:
-    'The range holds more requests than one download may (50,000), so nothing was downloaded or logged. Download it in shorter ranges, or for one person or agent.',
+    'The range holds more requests than one download may (50,000), so nothing was downloaded or logged. Ask for it as a background download, or download it in shorter ranges.',
+  ACTIVITY_EXPORT_UNDER_WAY:
+    "Another background download of the organisation's activity log is still being made, so this one wasn't asked for. Wait until it is ready or has failed, then ask again.",
   ADMIN_APPROVAL_ONLY:
     "The request is above its mandate's own per-order or monthly limit, so only an admin of the organisation may approve it. Ask an admin to approve it, or reject it. Nothing was changed.",
   AGENT_ADDS_SPENT:

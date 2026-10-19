@@ -43,6 +43,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, ty
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
 import { type ActivitySink, registerActivityLog } from './activity-recorder.ts';
 import { type ActivityPages, registerActivityPages } from './activity-log.ts';
+import { type BackgroundExports, registerBackgroundExports } from './activity-background-exports.ts';
 import { type ActivityLogExports, registerActivityLogExports } from './activity-log-exports.ts';
 import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type AuditLogExports, registerAuditLogExports } from './audit-log-exports.ts';
@@ -153,6 +154,8 @@ export interface ServerOptions {
   readonly activityPages?: ActivityPages | undefined;
   /** Downloading the organisation's activity log (activity-log-exports.ts, L5); without it, no one reaches the route. */
   readonly activityLogExports?: ActivityLogExports | undefined;
+  /** The activity log's background downloads (activity-background-exports.ts, L5c); without them, the routes answer NOT_FOUND. */
+  readonly backgroundExports?: BackgroundExports | undefined;
   /** Clearing the integrity hold (the identity module's hold-clearing.ts); without it, no one reaches those routes. */
   readonly holdClearings?: HoldClearings | undefined;
   /** Reads an organisation's registered contacts (registered-contacts.ts); without it, no one reaches the list. */
@@ -368,6 +371,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerAuditLogExports(app, { exports: options.auditLogExports });
   registerActivityPages(app, { log: options.activityPages });
   registerActivityLogExports(app, { exports: options.activityLogExports });
+  registerBackgroundExports(app, { downloads: options.backgroundExports });
   registerOrganization(app, { changes: options.organizationChanges });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });

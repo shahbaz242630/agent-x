@@ -24,15 +24,12 @@ import {
   type ActivityActor,
   type ActivityCursor,
   activityInRange,
-  type ActivityRow,
 } from '@agentx/core/modules/activity';
 import { createAuditTrail } from '@agentx/core/modules/audit';
 import {
   activityActorsOf,
+  ACTIVITY_EXPORT_REQUESTED,
   ACTIVITY_LOG_EXPORTED,
-  activityNdjsonLine,
-  activityShown,
-  type ActorName,
   createActorNamer,
   EXPORT_BATCH,
   type HeldActivityPage,
@@ -49,11 +46,11 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
+import { ACTIVITY_CSV_HEADER, activityLineOf } from './activity-lines.ts';
 import { ActivityLogRefused, type ActivityLogTables, heldActivity } from './activity-log.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import {
   CONTENT_TYPES,
-  csvRow,
   EXPORT_BODY_LIMIT,
   EXPORT_FORMATS,
   exportFile,
@@ -69,6 +66,9 @@ export const ACTIVITY_EXPORT_OPERATION = 'access-log.export';
 
 /** The advisory lock an admin's activity log downloads count their hourly budget under (ADR-006 §6, 2b). */
 export const ACTIVITY_EXPORTS_LOCK = 'access-log-exports';
+
+/** The downloads of the activity log an admin's hourly budget counts: instant and background alike (decision 31). */
+export const ACTIVITY_DOWNLOAD_ACTIONS = [ACTIVITY_LOG_EXPORTED, ACTIVITY_EXPORT_REQUESTED];
 
 /** How many activity log downloads one server builds at once: each holds its whole file in memory. */
 const MOST_BUILDING = 1;
@@ -104,46 +104,6 @@ export interface ActivityLogExports {
     correlationId: string,
   ): Promise<ActivityExportWrite>;
 }
-
-const CSV_HEADER = [
-  'id',
-  'recordedAt',
-  'localTime',
-  'actorType',
-  'actorId',
-  'actorName',
-  'actorEmail',
-  'actorNameFrom',
-  'method',
-  'route',
-  'pathIds',
-  'status',
-  'reason',
-  'correlationId',
-  'durationMs',
-  'ip',
-  'approximateCountry',
-  'approximateCity',
-  'placeBy',
-  'timeZone',
-  'timeZoneFrom',
-];
-
-/** One request as the file holds it, its actor named. */
-const lineOf = (format: ExportFormat, row: ActivityRow, names: ReadonlyMap<string, ActorName>): string => {
-  if (format === 'ndjson') return activityNdjsonLine(row, names);
-  const shown = activityShown(row, names);
-  const { actor, client } = shown;
-  const { place } = client;
-  return csvRow(
-    [shown.id, shown.recordedAt, shown.localTime ?? '', actor.type, actor.id, actor.name ?? '']
-      .concat([actor.email ?? '', actor.shownFrom ?? '', shown.method, shown.route, shown.pathIds.join(' ')])
-      .concat([String(shown.status), shown.reason ?? '', shown.correlationId, String(shown.durationMs)])
-      .concat([client.ip ?? '', place?.country ?? '', place?.city ?? ''])
-      .concat([place === null ? '' : `${place.by} (${place.link})`])
-      .concat([client.timeZone?.name ?? '', client.timeZone?.from ?? '']),
-  );
-};
 
 export function createActivityLogExports({
   database,
@@ -187,11 +147,11 @@ export function createActivityLogExports({
         heldActivity(tx, states, keys, orgId, { ...asked, before: start, writtenUpTo, limit: EXPORT_BATCH }),
       );
       const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
-      for (const row of read.rows) lines.push(lineOf(asked.format, row, names));
+      for (const row of read.rows) lines.push(activityLineOf(asked.format, row, names));
       before = read.next;
     }
     const requests = lines.length;
-    return { id, ...exportFile('activity', asked, CSV_HEADER, lines), requests };
+    return { id, ...exportFile('activity', asked, ACTIVITY_CSV_HEADER, lines), requests };
   };
 
   /** The download, recorded on the audit log first, then its file. */
@@ -203,7 +163,7 @@ export function createActivityLogExports({
   ): Promise<ActivityExportWrite> => {
     const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
       await work.memberIn(tx, states, member, EXPORTING_ROLES);
-      if (await exportsSpent(tx, clock, member, { lock: ACTIVITY_EXPORTS_LOCK, action: ACTIVITY_LOG_EXPORTED })) {
+      if (await exportsSpent(tx, clock, member, { lock: ACTIVITY_EXPORTS_LOCK, actions: ACTIVITY_DOWNLOAD_ACTIONS })) {
         throw new ActivityLogRefused(409, 'ACTIVITY_EXPORTS_SPENT');
       }
       const range = await activityInRange(tx, member.orgId, asked);

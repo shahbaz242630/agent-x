@@ -187,11 +187,14 @@ export async function exportsSpent(
   tx: Parameters<typeof actorEventsSince>[0],
   clock: Clock,
   member: Member,
-  { lock, action }: { readonly lock: string; readonly action: string },
+  { lock, actions }: { readonly lock: string; readonly actions: readonly string[] },
 ): Promise<boolean> {
   await holdTransactionLock(tx, lock, member.orgId, member.userId);
   const since = new Date(clock.now().getTime() - HOUR_MS);
-  const made = await actorEventsSince(tx, member.orgId, { type: 'user', id: member.userId }, action, since);
+  let made = 0;
+  for (const action of actions) {
+    made += await actorEventsSince(tx, member.orgId, { type: 'user', id: member.userId }, action, since);
+  }
   return made >= MOST_EXPORTS_AN_HOUR;
 }
 
@@ -247,7 +250,7 @@ export function createAuditLogExports({
       const actor: AuditActor = { type: 'user', id: member.userId };
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        if (await exportsSpent(tx, clock, member, { lock: EXPORTS_LOCK, action: AUDIT_LOG_EXPORTED })) {
+        if (await exportsSpent(tx, clock, member, { lock: EXPORTS_LOCK, actions: [AUDIT_LOG_EXPORTED] })) {
           throw new AuditLogRefused(409, 'AUDIT_EXPORTS_SPENT');
         }
         const range = await eventsInRange(tx, member.orgId, asked);

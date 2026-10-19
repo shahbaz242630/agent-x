@@ -110,6 +110,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /health',
       'GET /test/items/{ref}',
       'GET /v1/access-log',
+      'GET /v1/access-log/background-exports',
+      'GET /v1/access-log/background-exports/{id}',
       'GET /v1/agent',
       'GET /v1/agent/funding-sources',
       'GET /v1/agent/mandate',
@@ -141,6 +143,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /health',
       'HEAD /test/items/{ref}',
       'HEAD /v1/access-log',
+      'HEAD /v1/access-log/background-exports',
+      'HEAD /v1/access-log/background-exports/{id}',
       'HEAD /v1/agent',
       'HEAD /v1/agent/funding-sources',
       'HEAD /v1/agent/mandate',
@@ -170,6 +174,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/suppliers',
       'HEAD /v1/suppliers/{id}',
       'POST /test/both',
+      'POST /v1/access-log/background-exports',
       'POST /v1/access-log/exports',
       'POST /v1/agent/spend-requests/{id}/cancel',
       'POST /v1/agents',
@@ -1237,8 +1242,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), with each GET's HEAD.
-    expect(answers).toHaveLength(149);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read (L5c), with each GET's HEAD.
+    expect(answers).toHaveLength(154);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1246,6 +1251,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     }
     // The one error body, and the answers that are named objects of their own: the session (B2-4b), the members (B4-2b), the invitations (B4-3b, B4-4c, B4-4d).
     expect(Object.keys(document.components.schemas).sort()).toEqual([
+      'ActivityLogBackgroundExport',
       'ActivityLogExport',
       'ActivityLogRow',
       'Agent',

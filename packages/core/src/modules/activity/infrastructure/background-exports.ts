@@ -30,6 +30,9 @@ type FilesAsF = ActivityExportTables & ActivityTables & { f: ActivityExportTable
 /** How long a background download is kept once ready (decision 31). */
 export const DOWNLOAD_KEPT_DAYS = 7;
 
+/** How long a download is kept, as Postgres's interval reads it. */
+const KEPT_INTERVAL = `${String(DOWNLOAD_KEPT_DAYS)} days`;
+
 /** A background download's formats, as an instant download's. */
 export const DOWNLOAD_FORMATS = ['csv', 'ndjson'] as const;
 export type DownloadFormat = (typeof DOWNLOAD_FORMATS)[number];
@@ -221,7 +224,7 @@ const downloadsWhere = (tx: ExportTx, orgId: string) =>
           'month', f.month::text, 'state', f.state, 'attempts', f.attempts, 'requests', f.requests, 'bytes', f.bytes::text,
           'sha256', f.sha256, 'ready_at', f.ready_at) order by f.month)
         from activity_exports.files f where f.org_id = e.org_id and f.export_id = e.id)`.as('files'),
-      sql<boolean>`pg_catalog.clock_timestamp() >= (select pg_catalog.max(f.ready_at) + ${`${String(DOWNLOAD_KEPT_DAYS)} days`}::interval
+      sql<boolean>`pg_catalog.clock_timestamp() >= (select pg_catalog.max(f.ready_at) + ${KEPT_INTERVAL}::interval
         from activity_exports.files f where f.org_id = e.org_id and f.export_id = e.id)`.as('past_kept'),
     ])
     .where('e.org_id', '=', orgId);
