@@ -467,6 +467,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-what-broke',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-daily-words',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-audit-integrity',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-token-refused',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-denials-by-agent',
@@ -1419,7 +1420,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
       query('ContainerAppConsoleLogs |', 'ContainerAppConsoleLogs | extend ContainerAppName = "ca-agentx-stg-api" |'),
       query('by Says', 'by Says, OrgId = tostring(parse_json(Log).orgId)'),
-      query('"An error with no plain words', '"An error with no plain words " + Log + "'),
+      query('"A warning or error with no plain words', '"A warning or error with no plain words " + Log + "'),
       (alert: Mutable) =>
         (criterion(alert).dimensions = [
           { name: 'Says', operator: 'Include', values: ['*'] },
@@ -2032,6 +2033,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       expect(brokenRules(changed(ERRORS_ALERT, change))).toEqual(['alert-counts-only', 'app-errors-alert']);
     }
     for (const change of [
+      // Warnings too: still our own words, but the error alert would then page on every warning.
+      query(levels, 'in~ ("warn", "warning", "error", "fatal", "panic")'),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (criterion(alert).threshold = -1),
       (alert: Mutable) => delete criterion(alert).threshold,
@@ -2045,6 +2048,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
     // A higher threshold is a choice, not a break.
     expect(brokenRules(changed(ERRORS_ALERT, (alert) => (criterion(alert).threshold = 5)))).toEqual([]);
+  });
+
+  it("daily-words-alert: no daily alert on the warnings and errors, or one that can't notify each day", () => {
+    const DAILY = named(/-daily-words$/);
+    const query = (from: string, to: string) => (alert: Mutable) =>
+      (criterion(alert).query = String(criterion(alert).query).replace(from, to));
+    expect(brokenRules(without(DAILY))).toEqual(['daily-words-alert']);
+    for (const change of [
+      // Errors alone would leave out every warning.
+      query('("warn", "warning", "error", "fatal", "panic")', '("error", "fatal", "panic")'),
+    ]) {
+      expect(brokenRules(changed(DAILY, change))).toEqual(['daily-words-alert']);
+    }
+    for (const change of [
+      (alert: Mutable) => (inside(alert, 'properties').evaluationFrequency = 'PT1H'),
+      (alert: Mutable) => (inside(alert, 'properties').windowSize = 'PT1H'),
+      // Hourly, both together: every window watched, but not the daily email.
+      (alert: Mutable) =>
+        Object.assign(inside(alert, 'properties'), { evaluationFrequency: 'PT1H', windowSize: 'PT1H' }),
+      // Stateful, it would notify once and stay quiet while the same warning went on day after day.
+      (alert: Mutable) => (inside(alert, 'properties').autoMitigate = true),
+      (alert: Mutable) => (criterion(alert).threshold = 5),
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      // One number for the day, counts only: allowed for any alert, but it wouldn't name each kind.
+      (alert: Mutable) =>
+        Object.assign(criterion(alert), {
+          query: String(criterion(alert).query).replace('count() by Says', 'count()'),
+          dimensions: [],
+        }),
+      (alert: Mutable) =>
+        (criterion(alert).failingPeriods = { numberOfEvaluationPeriods: 2, minFailingPeriodsToAlert: 2 }),
+    ]) {
+      expect(brokenRules(changed(DAILY, change))).toEqual(['daily-words-alert']);
+    }
   });
 
   it("audit-integrity-alert: no alert on the integrity alarm, or one that can't fire, or fires too late or too quietly", () => {

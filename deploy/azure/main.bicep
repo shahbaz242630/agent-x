@@ -244,6 +244,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     integrityRunsAlertName: 'alert-agentx-${short}-integrity-runs'
     agentCancelsAlertName: 'alert-agentx-${short}-agent-cancels'
     agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
+    dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [
