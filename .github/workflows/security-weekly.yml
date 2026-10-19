@@ -57,6 +57,25 @@ jobs:
       - name: Audit the lockfile
         run: pnpm audit
 
+  # L4b: fails, in plain words, once the image's place file is over 45 days
+  # old, so a monthly refresh that didn't happen is seen within a week.
+  places-age:
+    name: Place file age
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: How old the place file is
+        run: node tooling/places/pin.ts age
+
   workflow-audit:
     name: Workflow security audit (zizmor)
     runs-on: ubuntu-latest

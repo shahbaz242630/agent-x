@@ -15,7 +15,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { type ClientPlace, COUNTRY_CODE, MOST_CITY_LENGTH, TIME_ZONE_NAME } from '@agentx/core/modules/activity';
-import { isIpAddress, plainLine, timeZoneOf } from '@agentx/core/shared-kernel';
+import { DAY_MS, isIpAddress, plainLine, timeZoneOf } from '@agentx/core/shared-kernel';
 import { type Environment, LOCAL_ONLY } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
 import { Reader } from 'mmdb-lib';
@@ -25,6 +25,9 @@ export const PLACE_FILE = fileURLToPath(new URL('../../../geo/dbip-city-lite.mmd
 
 /** The only kind of file the place finder reads: another's records could mean something else. */
 const PLACE_DATABASE_TYPE = 'DBIP-City-Lite';
+
+/** DB-IP publishes monthly; a file this many days past its build is stale (L4b: the monthly refresh moves it). */
+export const PLACES_STALE_DAYS = 45;
 
 /** The header a browser names its time zone in. */
 export const TIME_ZONE_HEADER = 'x-time-zone';
@@ -81,6 +84,7 @@ export async function loadPlaces(
   environment: Environment,
   logger: Logger,
   path: string = PLACE_FILE,
+  now: Date = new Date(),
 ): Promise<PlaceOf | undefined> {
   let file: Buffer;
   try {
@@ -92,6 +96,8 @@ export async function loadPlaces(
   }
   const { placeOf, built } = placeFinderOf(file);
   logger.info('activity.places_loaded', { database: PLACE_DATABASE_TYPE, built: built.toISOString() });
+  const days = Math.floor((now.getTime() - built.getTime()) / DAY_MS);
+  if (days > PLACES_STALE_DAYS) logger.warn('activity.places_stale', { built: built.toISOString(), days });
   return placeOf;
 }
 
