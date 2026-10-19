@@ -368,6 +368,16 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
   },
   fillInTables: {
+    'activity_exports.exports': {
+      reason:
+        "An admin's background download of the activity log (0053, decision 31): added once with its audit event, never changed. One changed would build another range, actor or format than the event records; one deleted would hide a download asked for",
+      columns: [],
+    },
+    'activity_exports.files': {
+      reason:
+        'A month of a background download (0053): the app moves its state along `file_moves` and fills in its count, size and SHA-256 once ready. One deleted, or its export or month changed, would drop requests from the download unseen',
+      columns: ['state', 'attempts', 'building_until', 'requests', 'bytes', 'sha256', 'ready_at', 'failure'],
+    },
     'idempotency.keys': {
       reason:
         "Each write's idempotency key (ADR-007 §4): the app adds the key and fills in the write's result. A key deleted before its retention, or its namespace or hash changed, would let a retry do the write again",
