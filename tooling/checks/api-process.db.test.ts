@@ -112,6 +112,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
           'api.idp_events',
           'api.contact_fill',
           'api.factor_resets',
+          'api.background_downloads',
         ]);
       },
       { timeout: 10_000, interval: 50 },
