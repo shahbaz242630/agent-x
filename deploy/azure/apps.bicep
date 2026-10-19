@@ -723,9 +723,13 @@ var apps = [
       // ingress's (ADR-011 §4). Microsoft: Envoy appends the client to
       // X-Forwarded-For and "only the rightmost IP is provided by Azure
       // Container Apps", so what is trusted is the subnet the ingress sits in.
+      // And the loopback address: the replica's own Envoy connects from
+      // 127.0.0.1 (S129, every activity log row on staging read 127.0.0.1, a
+      // GitHub runner's requests among them), and only something inside the
+      // replica can connect from there.
       {
         name: 'AGENTX_TRUSTED_PROXIES'
-        value: appsPrefix(networkAddressSpace)
+        value: '127.0.0.1,${appsPrefix(networkAddressSpace)}'
       }
       // Ten of the server's 35 user connections, leaving Zitadel's ten, one for
       // each job, and room for the worker (ADR-002 Amendment G1).
