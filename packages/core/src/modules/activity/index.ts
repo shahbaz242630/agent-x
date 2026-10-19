@@ -1,7 +1,8 @@
 // The activity module (ADR-004; partner decision 26; ADR-005 §6, ADR-011 §7):
 // every request a known caller made, one row each, reads and refusals too,
 // in the append-only `access` schema (0052). L3 writes the rows, L4 their
-// client's clues; L5 reads them for an organisation's admins, L7 for a case.
+// client's clues; L5 reads them for an organisation's admins, L7 for a case;
+// L5c builds a long range of them in the background (0053).
 export {
   ACTIVITY_METHODS,
   type ActivityLog,
@@ -40,4 +41,28 @@ export {
   type ActivityRange,
   type ActivityRow,
 } from './infrastructure/activity-reads.ts';
-export type { ActivityTables } from './infrastructure/tables.ts';
+export {
+  addBackgroundExport,
+  type BackgroundExport,
+  type BackgroundExportAsked,
+  type BackgroundExportFile,
+  backgroundExportOf,
+  backgroundExportsOf,
+  type BackgroundExportState,
+  type Claim,
+  claimFile,
+  type ClaimedFile,
+  DOWNLOAD_FORMATS,
+  DOWNLOAD_KEPT_DAYS,
+  type DownloadFormat,
+  downloadUnderWay,
+  fileFailed,
+  fileReady,
+  giveBack,
+  monthsOf,
+  newestWritten,
+  rangeInMonth,
+  renewLease,
+  storedName,
+} from './infrastructure/background-exports.ts';
+export type { ActivityExportTables, ActivityTables } from './infrastructure/tables.ts';
