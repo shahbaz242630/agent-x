@@ -35,6 +35,16 @@ describe('ADR-013 the output guard cleans whatever else reaches stdout and stder
     );
   });
 
+  it('drops plain words from a line that did not come from the logger, as an alert email could carry them', () => {
+    expect(cleanOutput('{"level":"error","event":"x.y","says":"Jane Doe of Acme","kept":1}', NOW)).toBe(
+      '{"level":"error","event":"x.y","kept":1}',
+    );
+    expect(cleanOutput('{"says":"a","says":"b"}', NOW)).toBe('{}');
+    expect(cleanOutput('{"level":"error","note":{"says":"nested"}}', NOW)).toBe(
+      '{"level":"error","note":{"says":"nested"}}',
+    );
+  });
+
   it('scrubs a line that only looks like JSON', () => {
     expect(cleanOutput(`{ not json ${SAMPLES.email}`, NOW)).toBe('{ not json [email]');
   });

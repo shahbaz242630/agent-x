@@ -30,6 +30,8 @@ param workspaceId string
 param actionGroupId string
 param errorAlertName string
 param errorAlertThreshold int
+@description('The containers our own logger writes for (the API and its three jobs): only their plain words reach an alert email (decision 30).')
+param ownLogNames array
 param integrityAlertName string
 param tokenRefusedAlertName string
 param denialSurgeAlertName string
@@ -109,6 +111,13 @@ resource identities 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30
 // as nothing here.
 var errorLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic")'
 
+// Each error line's plain words (decision 29), for the alert to split by.
+// Notifications leave the UAE (ADR-013 rule 3), so only our own logger's
+// words go: fixed text from plain-words.ts, public in the repo, cut to 300
+// characters. Zitadel's and its login pages' lines get the fallback.
+var ownLogList = join(map(ownLogNames, logName => '"${logName}"'), ', ')
+var saysStages = 'extend Says = iff(coalesce(ContainerAppName, JobName) in (${ownLogList}), substring(tostring(parse_json(Log).says), 0, 300), "") | extend Says = iff(isempty(Says), "An error with no plain words, from the login service or another part: open the saved query What broke, in plain words.", Says)'
+
 resource workspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' existing = {
   name: workspaceName
 }
@@ -131,6 +140,21 @@ resource errorsByType 'Microsoft.OperationalInsights/workspaces/savedSearches@20
   }
 }
 
+// What broke, in plain words (decision 29): every warning and error line,
+// each kind with its words, how often, and which organisations and requests,
+// for the alert email's reader to look up in the country. Lines without words
+// (Zitadel's, its login pages') show their own event or message.
+resource whatBroke 'Microsoft.OperationalInsights/workspaces/savedSearches@2025-07-01' = {
+  parent: workspace
+  name: 'agentx-what-broke'
+  properties: {
+    category: 'Agent X'
+    displayName: 'What broke, in plain words'
+    query: 'ContainerAppConsoleLogs | extend Line = parse_json(Log) | extend Level = tolower(tostring(Line.level)), Event = coalesce(tostring(Line.event), tostring(Line.msg), tostring(Line.message)), OrgId = tostring(Line.orgId), Request = tostring(Line.correlationId) | where Level in ("warn", "warning", "error", "fatal", "panic") | extend Says = coalesce(tostring(Line.says), strcat("No plain words: ", Event)) | summarize Times = count(), Latest = max(TimeGenerated), Organisations = dcountif(OrgId, isnotempty(OrgId)), OrgIds = make_set_if(OrgId, isnotempty(OrgId), 20), Requests = make_set_if(Request, isnotempty(Request), 5) by Level, Service = coalesce(tostring(Line.service), ContainerAppName, JobName), Event, Says | order by Latest desc'
+    version: 2
+  }
+}
+
 // The error spike alert (logging standard §5), as a count (ADR-013 rule 3).
 resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: errorAlertName
@@ -139,7 +163,7 @@ resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   kind: 'LogAlert'
   properties: {
     displayName: 'Apps: error events'
-    description: 'SEV-2. The apps wrote more than ${errorAlertThreshold} error events in 15 minutes; the saved query Errors by type shows which. Runbook: Incident-Response-Playbook.md section A.'
+    description: 'SEV-2. The apps wrote more than ${errorAlertThreshold} error events of one kind in 15 minutes; the email names the kind in plain words, and the saved query What broke, in plain words shows which organisations and requests. Runbook: Incident-Response-Playbook.md section A.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -150,7 +174,15 @@ resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: '${errorLines} | summarize Errors = count()'
+          query: '${errorLines} | ${saysStages} | summarize Errors = count() by Says'
+          // One email a kind of error, naming it in plain words.
+          dimensions: [
+            {
+              name: 'Says'
+              operator: 'Include'
+              values: ['*']
+            }
+          ]
           timeAggregation: 'Total'
           metricMeasureColumn: 'Errors'
           operator: 'GreaterThan'

@@ -26,12 +26,26 @@ function isJson(line: string): boolean {
   }
 }
 
-/** Each JSON line is redacted like a log line; any other text is scrubbed. Line breaks are kept. */
+/**
+ * Plain words are the logger's alone (decision 29): it writes straight to the
+ * file, never through here. Words on a line that came this way are someone
+ * else's free text, and an alert email, which leaves the UAE, would carry them
+ * (ADR-013 rule 3), so they go.
+ */
+function withoutWords(line: string): string {
+  const value: unknown = JSON.parse(line);
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || !Object.hasOwn(value, 'says')) {
+    return line;
+  }
+  return JSON.stringify(Object.fromEntries(Object.entries(value).filter(([name]) => name !== 'says')));
+}
+
+/** Each JSON line is redacted like a log line, without plain words; any other text is scrubbed. Line breaks are kept. */
 export function cleanOutput(text: string, now: () => number): string {
   return text
     .split('\n')
     .map((line) =>
-      line.trimStart().startsWith('{') && isJson(line) ? redactLine(line, now).slice(0, -1) : scrub(line),
+      line.trimStart().startsWith('{') && isJson(line) ? redactLine(withoutWords(line), now).slice(0, -1) : scrub(line),
     )
     .join('\n');
 }

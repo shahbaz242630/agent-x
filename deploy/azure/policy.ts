@@ -211,6 +211,21 @@ const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: 'PT1H' } as const;
 const ERROR_LINES = 'where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic")';
 
 /**
+ * The one column an alert may split by (ADR-013 rule 3 as amended, decision
+ * 30): a line's plain words, fixed text from plain-words.ts, public in the
+ * repo. Read only from our own logger's containers, never Zitadel's or its
+ * login pages', cut to 300 characters; any other line gets the fallback.
+ */
+const SAYS_FROM_OWN =
+  /^extend Says = iff\(coalesce\(ContainerAppName, JobName\) in \(((?:"[a-z0-9-]+", )*"[a-z0-9-]+")\), substring\(tostring\(parse_json\(Log\)\.says\), 0, 300\), ""\)$/;
+/** Our logger's containers: the API and the three jobs built on it. */
+const OWN_CONTAINER = /^"(?:ca-agentx-(?:stg|prd)-api|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator))"$/;
+const NO_WORDS =
+  'An error with no plain words, from the login service or another part: open the saved query What broke, in plain words.';
+const SAYS_FALLBACK = `extend Says = iff(isempty(Says), "${NO_WORDS}", Says)`;
+const SAYS_DIMENSIONS = [{ name: 'Says', operator: 'Include', values: ['*'] }];
+
+/**
  * The integrity alarm's events (ADR-012 §2): an audit chain that failed its
  * check, and a check that broke. Our logger writes each event name exactly, so
  * the match keeps its case.
@@ -758,6 +773,29 @@ export function singleSummaryColumn(query: string): string | undefined {
   );
   if (outside.includes(',') || /\bby\b/i.test(outside)) return undefined;
   return summarize[1];
+}
+
+/**
+ * The column a criterion counts when it splits by plain words and nothing
+ * else, with Says its only dimension: exactly `ContainerAppConsoleLogs |
+ * <error lines> | extend Says = <ours> | extend Says = <fallback> | summarize
+ * Name = count() by Says`. No other stage, so nothing can rewrite `Log` or a
+ * container's name before the words are read. Undefined for any other shape.
+ */
+function saysCountColumn(criterion: unknown): string | undefined {
+  const stages = kqlStages(String(at(criterion, 'query')));
+  const own = SAYS_FROM_OWN.exec(stages.at(-3) ?? '');
+  const counted = /^summarize ([A-Za-z_][A-Za-z0-9_]*) = count\(\) by Says$/.exec(stages.at(-1) ?? '');
+  const containers = own?.[1]?.split(', ') ?? [];
+  return stages.length === 5 &&
+    stages[0] === 'ContainerAppConsoleLogs' &&
+    stages[1] === ERROR_LINES &&
+    own !== null &&
+    containers.every((container) => OWN_CONTAINER.test(container)) &&
+    stages.at(-2) === SAYS_FALLBACK &&
+    JSON.stringify(at(criterion, 'dimensions')) === JSON.stringify(SAYS_DIMENSIONS)
+    ? counted?.[1]
+    : undefined;
 }
 
 /**
@@ -1803,10 +1841,10 @@ const alertRules: Check = (snapshot, _expected, add) => {
       criteria.length > 0 &&
       criteria.every((criterion) => {
         const column = singleSummaryColumn(String(at(criterion, 'query')));
+        const bySays = saysCountColumn(criterion);
         return (
-          column !== undefined &&
-          at(criterion, 'metricMeasureColumn') === column &&
-          list(at(criterion, 'dimensions')).length === 0 &&
+          ((column !== undefined && list(at(criterion, 'dimensions')).length === 0) || bySays !== undefined) &&
+          at(criterion, 'metricMeasureColumn') === (column ?? bySays) &&
           at(criterion, 'resourceIdColumn') === undefined
         );
       }) &&
@@ -1816,7 +1854,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
         rule: 'alert-counts-only',
         resource: alert.name,
         message:
-          'must end in one summarize with no `by`, measured on that column, with no dimensions or custom properties: notifications leave the UAE (ADR-013 rule 3)',
+          'must end in one summarize with no `by` (or `count() by Says`, our own plain words alone), measured on that column, with no other dimensions or custom properties: notifications leave the UAE (ADR-013 rule 3)',
       });
     }
     const severity = at(alert.properties, 'severity');
@@ -2062,13 +2100,16 @@ const appsLogs: Check = (snapshot, _expected, add) => {
   }
 };
 
-/** An enabled alert on the workspace counts the apps' error events (logging standard §5, "Error spike"). */
+/**
+ * An enabled alert on the workspace counts the apps' error events (logging
+ * standard §5, "Error spike"), each kind by its plain words (decision 29).
+ */
 const appErrorsAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
     const alerted = workspaceAlerted(snapshot, 'any', (criterion) => {
       const threshold = at(criterion, 'threshold');
       return (
-        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [ERROR_LINES], 'count()') &&
+        saysCountColumn(criterion) !== undefined &&
         at(criterion, 'operator') === 'GreaterThan' &&
         typeof threshold === 'number' &&
         threshold >= 0
