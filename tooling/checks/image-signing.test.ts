@@ -223,7 +223,7 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       'pushed=false\nfor attempt in 1 2 3; do\n  if docker push --quiet "${IMAGE}:${COMMIT}"; then\n    pushed=true\n    break\n  fi\n',
     );
     expect(run).toContain(
-      'if [ "${pushed}" != true ]; then\n  echo "::error::Pushing ${IMAGE}:${COMMIT} failed 3 times."\n  exit 1\nfi\n',
+      `if [ "\${pushed}" != true ]; then\n  echo "::error::The image \${IMAGE}:\${COMMIT} could not be pushed to GitHub's registry in 3 tries. Nothing was released; staging is unchanged. Re-run this job; if it fails again, check GitHub's status page."\n  exit 1\nfi\n`,
     );
     expect(run.indexOf('docker push ')).toBeLessThan(run.indexOf('docker image inspect'));
   });
