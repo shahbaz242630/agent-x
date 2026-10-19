@@ -49,6 +49,7 @@ export type RuleId =
   | 'dns-allow'
   | 'apps-logs'
   | 'app-errors-alert'
+  | 'daily-words-alert'
   | 'audit-integrity-alert'
   | 'token-refused-alert'
   | 'denial-surge-alert'
@@ -209,6 +210,8 @@ const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: 'PT1H' } as const;
  * any case, since Zitadel's newer lines write "ERROR" (`in~` ignores case).
  */
 const ERROR_LINES = 'where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic")';
+/** Warnings too, Zitadel's spellings included: the daily email's lines (decision 29, P4). */
+const PROBLEM_LINES = 'where tostring(parse_json(Log).level) in~ ("warn", "warning", "error", "fatal", "panic")';
 
 /**
  * The one column an alert may split by (ADR-013 rule 3 as amended, decision
@@ -221,7 +224,7 @@ const SAYS_FROM_OWN =
 /** Our logger's containers: the API and the three jobs built on it. */
 const OWN_CONTAINER = /^"(?:ca-agentx-(?:stg|prd)-api|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator))"$/;
 const NO_WORDS =
-  'An error with no plain words, from the login service or another part: open the saved query What broke, in plain words.';
+  'A warning or error with no plain words, from the login service or another part: open the saved query What broke, in plain words.';
 const SAYS_FALLBACK = `extend Says = iff(isempty(Says), "${NO_WORDS}", Says)`;
 const SAYS_DIMENSIONS = [{ name: 'Says', operator: 'Include', values: ['*'] }];
 
@@ -778,7 +781,7 @@ export function singleSummaryColumn(query: string): string | undefined {
 /**
  * The column a criterion counts when it splits by plain words and nothing
  * else, with Says its only dimension: exactly `ContainerAppConsoleLogs |
- * <error lines> | extend Says = <ours> | extend Says = <fallback> | summarize
+ * <error lines, or warning and error lines> | extend Says = <ours> | extend Says = <fallback> | summarize
  * Name = count() by Says`. No other stage, so nothing can rewrite `Log` or a
  * container's name before the words are read. Undefined for any other shape.
  */
@@ -789,7 +792,7 @@ function saysCountColumn(criterion: unknown): string | undefined {
   const containers = own?.[1]?.split(', ') ?? [];
   return stages.length === 5 &&
     stages[0] === 'ContainerAppConsoleLogs' &&
-    stages[1] === ERROR_LINES &&
+    (stages[1] === ERROR_LINES || stages[1] === PROBLEM_LINES) &&
     own !== null &&
     containers.every((container) => OWN_CONTAINER.test(container)) &&
     stages.at(-2) === SAYS_FALLBACK &&
@@ -2110,6 +2113,7 @@ const appErrorsAlert: Check = (snapshot, _expected, add) => {
       const threshold = at(criterion, 'threshold');
       return (
         saysCountColumn(criterion) !== undefined &&
+        kqlStages(String(at(criterion, 'query')))[1] === ERROR_LINES &&
         at(criterion, 'operator') === 'GreaterThan' &&
         typeof threshold === 'number' &&
         threshold >= 0
@@ -2120,6 +2124,37 @@ const appErrorsAlert: Check = (snapshot, _expected, add) => {
         rule: 'app-errors-alert',
         resource: environment.name,
         message: "needs an enabled alert on this deployment's workspace that counts the apps' error events",
+      });
+    }
+  }
+};
+
+/**
+ * The daily email (decision 29, P4; partner, S128: one email a kind): an
+ * enabled alert reads the last day's warnings and errors once a day and
+ * notifies each kind by its plain words, every day it saw one (stateless).
+ */
+const dailyWordsAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        saysCountColumn(criterion) !== undefined &&
+        kqlStages(String(at(criterion, 'query')))[1] === PROBLEM_LINES &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        totals(criterion) &&
+        watchesEveryWindow(alert, criterion) &&
+        at(alert.properties, 'evaluationFrequency') === 'P1D' &&
+        at(alert.properties, 'autoMitigate') === false,
+    );
+    if (!alerted) {
+      add({
+        rule: 'daily-words-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled, stateless alert on this deployment's workspace that reads each day's warnings and errors and notifies each kind by its plain words",
       });
     }
   }
@@ -3256,6 +3291,7 @@ const CHECKS: readonly Check[] = [
   appsEnvironment,
   appsLogs,
   appErrorsAlert,
+  dailyWordsAlert,
   auditIntegrityAlert,
   tokenRefusedAlert,
   denialSurgeAlert,

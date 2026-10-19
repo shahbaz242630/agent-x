@@ -39,6 +39,7 @@ param holdingsCheckAlertName string
 param integrityRunsAlertName string
 param agentCancelsAlertName string
 param agentCancelCapAlertName string
+param dailyWordsAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -116,7 +117,7 @@ var errorLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).level
 // words go: fixed text from plain-words.ts, public in the repo, cut to 300
 // characters. Zitadel's and its login pages' lines get the fallback.
 var ownLogList = join(map(ownLogNames, logName => '"${logName}"'), ', ')
-var saysStages = 'extend Says = iff(coalesce(ContainerAppName, JobName) in (${ownLogList}), substring(tostring(parse_json(Log).says), 0, 300), "") | extend Says = iff(isempty(Says), "An error with no plain words, from the login service or another part: open the saved query What broke, in plain words.", Says)'
+var saysStages = 'extend Says = iff(coalesce(ContainerAppName, JobName) in (${ownLogList}), substring(tostring(parse_json(Log).says), 0, 300), "") | extend Says = iff(isempty(Says), "A warning or error with no plain words, from the login service or another part: open the saved query What broke, in plain words.", Says)'
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' existing = {
   name: workspaceName
@@ -197,6 +198,54 @@ resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     // Stateful: it fires once and resolves after a quiet window, rather than
     // notifying every 15 minutes through a long incident.
     autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The daily email (decision 29, P4; partner, S128: one email a kind): once a
+// day, each kind of warning or error the last day held, by its plain words and
+// how many. Stateless, so it notifies every day it sees one; a clean day sends
+// nothing. Azure runs it a day apart from when it was created.
+resource dailyWords 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: dailyWordsAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Apps: warnings and errors of the last day'
+    description: 'SEV-2. The daily summary: the apps wrote this kind of warning or error in the last 24 hours, named in plain words, with how many times; the saved query What broke, in plain words shows which organisations and requests. Runbook: Incident-Response-Playbook.md section A.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'P1D'
+    windowSize: 'P1D'
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in~ ("warn", "warning", "error", "fatal", "panic") | ${saysStages} | summarize Times = count() by Says'
+          dimensions: [
+            {
+              name: 'Says'
+              operator: 'Include'
+              values: ['*']
+            }
+          ]
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Times'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: false
     actions: {
       actionGroups: [actionGroupId]
     }
