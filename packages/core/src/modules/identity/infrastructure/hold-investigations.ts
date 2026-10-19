@@ -95,7 +95,12 @@ export function createHoldInvestigations({
     correlationId: string,
     work: (tx: MembershipsTransaction, states: SignedStates) => Promise<T>,
   ): Promise<T> =>
-    withSignedStates(database, admin.orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
+    withSignedStates(
+      database,
+      admin.orgId,
+      { keys, ids, logger: logger.child({ correlationId }), correlationId },
+      work,
+    );
 
   /** As inTransaction, a refusal answered. */
   const inOrganisation = async <T>(

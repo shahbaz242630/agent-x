@@ -88,7 +88,7 @@ export function createContactConfirmations({
       const link = resetLinkToken(token);
       if (link === undefined) return { outcome: 'refused', status: 404, code: 'NOT_FOUND' };
       const { orgId, resetId, contactId } = link;
-      const services = { keys, ids, logger: logger.child({ correlationId }) };
+      const services = { keys, ids, logger: logger.child({ correlationId }), correlationId };
       try {
         const coolingOffUntil = await withSignedStates(database, orgId, services, async (tx, states) => {
           const matched = await confirmationMatches(tx, keys, link);

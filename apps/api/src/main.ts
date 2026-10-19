@@ -451,10 +451,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     activity: activitySinkOf(createActivityLog({ ids: uuidV7Ids }), database),
     placeOf: await loadPlaces(config.environment, logger),
     findMembership: (orgId, userId, correlationId) =>
-      membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
+      membershipFor(
+        database,
+        { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId },
+        orgId,
+        userId,
+      ),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
     listMembers: (orgId, correlationId) =>
-      membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId),
+      membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId }, orgId),
     acceptanceConfirmations: createAcceptanceConfirmations({
       database,
       keys,

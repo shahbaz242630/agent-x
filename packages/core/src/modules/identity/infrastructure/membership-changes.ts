@@ -195,7 +195,7 @@ export function createMembershipChanges({
     correlationId: string,
     work: (tx: Transaction<Tables>, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ) => {
-    const services = { keys, ids, logger: logger.child({ correlationId }) };
+    const services = { keys, ids, logger: logger.child({ correlationId }), correlationId };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     try {
       const done = await withSignedStates(database, admin.orgId, services, (tx, states) =>

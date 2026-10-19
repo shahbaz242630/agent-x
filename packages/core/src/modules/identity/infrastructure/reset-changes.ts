@@ -179,6 +179,7 @@ export function createResetChanges({
     keys,
     ids,
     logger: logger.child({ correlationId }),
+    correlationId,
   });
 
   /**
