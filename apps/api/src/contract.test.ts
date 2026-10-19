@@ -112,6 +112,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/access-log',
       'GET /v1/access-log/background-exports',
       'GET /v1/access-log/background-exports/{id}',
+      'GET /v1/access-log/background-exports/{id}/downloads/{downloadId}/parts/{index}',
       'GET /v1/agent',
       'GET /v1/agent/funding-sources',
       'GET /v1/agent/mandate',
@@ -145,6 +146,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/access-log',
       'HEAD /v1/access-log/background-exports',
       'HEAD /v1/access-log/background-exports/{id}',
+      'HEAD /v1/access-log/background-exports/{id}/downloads/{downloadId}/parts/{index}',
       'HEAD /v1/agent',
       'HEAD /v1/agent/funding-sources',
       'HEAD /v1/agent/mandate',
@@ -175,6 +177,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/suppliers/{id}',
       'POST /test/both',
       'POST /v1/access-log/background-exports',
+      'POST /v1/access-log/background-exports/{id}/files/{month}/downloads',
       'POST /v1/access-log/exports',
       'POST /v1/agent/spend-requests/{id}/cancel',
       'POST /v1/agents',
@@ -1242,8 +1245,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read (L5c), with each GET's HEAD.
-    expect(answers).toHaveLength(154);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), with each GET's HEAD.
+    expect(answers).toHaveLength(157);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1253,6 +1256,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     expect(Object.keys(document.components.schemas).sort()).toEqual([
       'ActivityLogBackgroundExport',
       'ActivityLogExport',
+      'ActivityLogFileDownload',
       'ActivityLogRow',
       'Agent',
       'AgentFundingSource',

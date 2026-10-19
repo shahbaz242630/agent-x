@@ -49,6 +49,11 @@ export const PLAIN_WORDS = {
     broke: 'That download will not be made; the admin was told by email to ask again.',
     next: 'Check the download store and the database are healthy, then let the admin ask again.',
   },
+  'access_log.export_read_failed': {
+    happened: "A part of an admin's background activity log download could not be read from the download store.",
+    broke: 'That part was not sent; the admin was asked to try again. The file itself is unchanged.',
+    next: 'Nothing to do if it is rare. If it repeats, check the download store is up and the API may read it.',
+  },
   'access_log.export_run_failed': {
     happened: 'A run of the background activity log downloads stopped early on an error.',
     broke: 'Downloads waiting to be made are held up until the next run, a minute later.',

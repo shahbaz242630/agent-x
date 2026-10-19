@@ -533,6 +533,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger, directory }),
     activityPages: createActivityPages({ database, keys, ids: uuidV7Ids, logger, directory }),
     backgroundExports: downloads.exports,
+    downloadFiles: downloads.files,
     activityLogExports: createActivityLogExports({
       database,
       keys,
