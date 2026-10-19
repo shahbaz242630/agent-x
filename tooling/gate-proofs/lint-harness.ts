@@ -111,12 +111,14 @@ export function proveLintRules(
 
   const results = new Map<string, Linter.LintMessage[]>();
 
+  // The largest set (the authority registry's) takes ~60 s alone and past the
+  // project's 120 s beside the other proofs on a busy machine (S128, twice).
   beforeAll(async () => {
     for (const { name, filePath, code } of [...rejected, ...allowed]) {
       const [result] = await eslint.lintText(code, { filePath });
       results.set(name, result?.messages ?? []);
     }
-  });
+  }, 300_000);
 
   /** Every message this rule gave the snippet. */
   const reported = (testCase: LintCase): Linter.LintMessage[] =>
