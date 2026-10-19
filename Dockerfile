@@ -1,7 +1,8 @@
 # The one image for the API, the migration job, the database set-up job, the
 # operator's command and, later, the worker (ADR-001): the same files, different start commands. Node
 # 24 runs the TypeScript source itself (type stripping), so there is no build
-# step and the image holds exactly the files the repository holds.
+# step and the image holds exactly the files the repository holds, and one
+# data file beside them: DB-IP's place file (below).
 #
 # Everything that goes in is pinned: the base image by digest (SEC-SC-02), pnpm
 # by the sha512 in package.json (Corepack checks it), every dependency by the
@@ -29,6 +30,20 @@ COPY packages/platform/package.json packages/platform/
 RUN corepack enable pnpm \
   && pnpm install --frozen-lockfile --prod --filter "@agentx/api..." --filter "@agentx/migrate..." --filter "@agentx/db-setup..." --filter "@agentx/operator..."
 
+# The activity log's place file (Phase 3 L4, client-clues.ts): DB-IP's IP to
+# City Lite, October 2026, unchanged. IP Geolocation by DB-IP
+# (https://db-ip.com), licensed under CC BY 4.0. DB-IP keeps only its latest
+# two months, so this is our copy of theirs, published as a data release of
+# this repository; the build takes it only with the SHA-256 of DB-IP's own
+# file (whose unzipped SHA-1 matched the one DB-IP lists, S127).
+FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS places
+
+ADD --checksum=sha256:c839d407f85a1e0bddba354cef16b2c398182d1c34ed8d985555dce134b36b14 \
+  https://github.com/shahbaz242630/agent-x/releases/download/geoip-dbip-city-lite-2026-10/dbip-city-lite-2026-10.mmdb.gz \
+  /places/dbip-city-lite.mmdb.gz
+# Read-only to all: a download is root's alone (0600), and the API runs as node.
+RUN gzip --decompress /places/dbip-city-lite.mmdb.gz && chmod 0444 /places/dbip-city-lite.mmdb
+
 FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe
 
 ARG AGENTX_RELEASE=local
@@ -54,6 +69,8 @@ COPY apps/operator apps/operator
 COPY packages/core packages/core
 COPY packages/platform packages/platform
 COPY db db
+# The file keeps its mode; COPY's --chmod would set the new geo folder's too, and nothing could open it.
+COPY --from=places /places/dbip-city-lite.mmdb geo/dbip-city-lite.mmdb
 
 # Every AGENTX_ setting but the release comes from the deployment (compose,
 # Azure): each job refuses the others' settings, so the image sets none.

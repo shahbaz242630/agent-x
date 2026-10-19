@@ -12,6 +12,11 @@
 // - What: the route's pattern and the UUIDs in its path, never the URL as
 //   sent, a query, a header or a body; the status and, for a refusal or
 //   failure, the reason code the contract wrote; the correlation ID; the time.
+// - Where, as clues (L4): the client's address as the trusted proxies' rule
+//   reads it (the rate limit's), the place it is registered to, and the
+//   browser's time zone; else, on an organisation's row, the organisation's
+//   (Asia/Dubai, as every lineage's default). An agent is no browser: its row
+//   always takes the organisation's zone.
 // - When: in `onResponse`, one row a request, awaited, never batched. The
 //   contract lets no hook run between an answer's check and its leaving
 //   (onSend), so this is the nearest point: only a crash in the milliseconds
@@ -23,16 +28,19 @@ import {
   ACTIVITY_METHODS,
   type ActivityLog,
   type ActivityTables,
+  type ClientClues,
   MOST_PATH_IDS,
   type OrganisationRequest,
   type PersonRequest,
 } from '@agentx/core/modules/activity';
-import { UUID } from '@agentx/core/shared-kernel';
+import { DEFAULT_TIME_ZONE, UUID } from '@agentx/core/shared-kernel';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Database } from '@agentx/platform/db';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { type PlaceOf, TIME_ZONE_HEADER, timeZoneSent } from './client-clues.ts';
+import { clientAddress, type ProxyTrust, rawClientIp } from './rate-limit.ts';
 import { writtenText } from './written-answers.ts';
 
 /** Where the recorder writes each row: the activity module's writes, bound to the API's database. */
@@ -78,6 +86,31 @@ export function pathIdsOf(params: unknown): string[] {
 const claimedOrgOf = (header: string | string[] | undefined): string | undefined =>
   typeof header === 'string' && UUID.test(header) ? header.toLowerCase() : undefined;
 
+/** How the recorder reads a request's clues. */
+interface ClueReading {
+  readonly trust: ProxyTrust;
+  readonly placeOf: PlaceOf | undefined;
+}
+
+/** Whose row it is: a member's or an agent's in their organisation, or a person's own. */
+type Caller = 'member' | 'agent' | 'person';
+
+const ORGANISATION_ZONE = { name: DEFAULT_TIME_ZONE, from: 'organisation' } as const;
+
+/** An agent's zone is the organisation's; a member's the browser's, else the organisation's; a person's the browser's, else none. */
+function zoneOf(request: FastifyRequest, caller: Caller): ClientClues['timeZone'] {
+  if (caller === 'agent') return ORGANISATION_ZONE;
+  const sent = timeZoneSent(request.headers[TIME_ZONE_HEADER]);
+  if (sent !== undefined) return { name: sent, from: 'browser' };
+  return caller === 'member' ? ORGANISATION_ZONE : undefined;
+}
+
+/** Where the request's client may be: clues, never proof. */
+function cluesOf(request: FastifyRequest, { trust, placeOf }: ClueReading, caller: Caller): ClientClues {
+  const ip = clientAddress(rawClientIp(request, trust));
+  return { ip, place: ip === undefined ? undefined : placeOf?.(ip), timeZone: zoneOf(request, caller) };
+}
+
 /** What every row says of the request; undefined for one that isn't a route's, or on a method no route is served on. */
 function factsOf(request: FastifyRequest, reply: FastifyReply) {
   const route = request.routeOptions.url;
@@ -96,29 +129,52 @@ function factsOf(request: FastifyRequest, reply: FastifyReply) {
 }
 
 /** Writes the request's row, if its caller is known: the organisation's, or the person's. */
-function rowFor(request: FastifyRequest, reply: FastifyReply, sink: ActivitySink): Promise<void> | undefined {
+function rowFor(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  sink: ActivitySink,
+  reading: ClueReading,
+): Promise<void> | undefined {
   const { person, member, verifiedOrg, agent } = request;
   const facts = factsOf(request, reply);
   if (facts === undefined) return undefined;
   if (agent !== null) {
-    return sink.forOrganisation({ ...facts, orgId: agent.orgId, actor: { type: 'agent', id: agent.agentId } });
+    return sink.forOrganisation({
+      ...facts,
+      client: cluesOf(request, reading, 'agent'),
+      orgId: agent.orgId,
+      actor: { type: 'agent', id: agent.agentId },
+    });
   }
   if (person === null) return undefined;
   const orgId = member?.orgId ?? verifiedOrg;
-  if (orgId !== null) return sink.forOrganisation({ ...facts, orgId, actor: { type: 'user', id: person.userId } });
+  if (orgId !== null) {
+    return sink.forOrganisation({
+      ...facts,
+      client: cluesOf(request, reading, 'member'),
+      orgId,
+      actor: { type: 'user', id: person.userId },
+    });
+  }
   const claimedOrg = claimedOrgOf(request.headers[ORGANIZATION_HEADER]);
-  return sink.forPerson({ ...facts, userId: person.userId, claimedOrg });
+  return sink.forPerson({
+    ...facts,
+    client: cluesOf(request, reading, 'person'),
+    userId: person.userId,
+    claimedOrg,
+  });
 }
 
 /** Records every known caller's request, when there is somewhere to write it. */
 export function registerActivityLog(
   app: FastifyInstance,
-  { sink, logger }: { readonly sink: ActivitySink | undefined; readonly logger: Logger },
+  { sink, logger, ...reading }: { readonly sink: ActivitySink | undefined; readonly logger: Logger } & ClueReading,
 ): void {
   if (sink === undefined) return;
   const writing = new Set<Promise<void>>();
   app.addHook('onResponse', async (request, reply) => {
-    const written = rowFor(request, reply, sink)?.catch((error: unknown) => {
+    // Inside an async call, so a clue that throws is a write failure like any other, logged.
+    const written = (async () => rowFor(request, reply, sink, reading))().catch((error: unknown) => {
       // Never the error's text: a database's may quote the row. Its kind and where are enough to look.
       logger.child({ correlationId: request.id }).error('access_log.write_failed', {
         route: request.routeOptions.url,
@@ -126,7 +182,6 @@ export function registerActivityLog(
         malformed: error instanceof RangeError,
       });
     });
-    if (written === undefined) return;
     writing.add(written);
     try {
       await written;

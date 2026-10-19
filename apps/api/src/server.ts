@@ -44,6 +44,7 @@ import { type CheckAgentKey, type FindMembership, registerAccess } from './acces
 import { type ActivitySink, registerActivityLog } from './activity-recorder.ts';
 import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type AuditLogExports, registerAuditLogExports } from './audit-log-exports.ts';
+import type { PlaceOf } from './client-clues.ts';
 import { answerClientError } from './client-errors.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
@@ -120,6 +121,8 @@ export interface ServerOptions {
     | undefined;
   /** Where each known caller's request is written once answered (activity-recorder.ts, decision 26); nowhere when not given. */
   readonly activity?: ActivitySink | undefined;
+  /** The place an activity row's client address is registered to (client-clues.ts, L4); none when not given. */
+  readonly placeOf?: PlaceOf | undefined;
   /** Where failed sign-ins and rate-limit hits are noted (security-recorder.ts); nowhere when not given. */
   readonly securityEvents?: SecurityEventSink | undefined;
   /** Reads a person's membership of an organisation (access.ts); without it, no one holds a role. */
@@ -339,7 +342,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.addHook('onRequest', agentCounter);
   // After the caller is known and counted, before the body is read.
   registerIdempotencyKeys(app);
-  registerActivityLog(app, { sink: options.activity, logger });
+  registerActivityLog(app, { sink: options.activity, logger, trust, placeOf: options.placeOf });
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));

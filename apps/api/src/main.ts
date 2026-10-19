@@ -121,6 +121,7 @@ import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { activitySinkOf } from './activity-recorder.ts';
+import { loadPlaces } from './client-clues.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
 import { contactFillFrom, directoryNamesFrom } from './kept-names.ts';
@@ -446,6 +447,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           },
     securityEvents: recorder,
     activity: activitySinkOf(createActivityLog({ ids: uuidV7Ids }), database),
+    placeOf: await loadPlaces(config.environment, logger),
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
