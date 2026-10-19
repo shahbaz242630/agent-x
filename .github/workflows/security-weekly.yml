@@ -117,7 +117,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           sha=$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci.yml --branch main --event push --status success --limit 1 --json headSha --jq '.[0].headSha')
-          if ! [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]; then echo '::error::No green CI run on main was found.'; exit 1; fi
+          if ! [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]; then echo '::error::No green CI run on main was found, so there is no published image to scan. The image scan did not run this week. Get CI on main green, then re-run this workflow.'; exit 1; fi
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Scan main's image (Grype)
