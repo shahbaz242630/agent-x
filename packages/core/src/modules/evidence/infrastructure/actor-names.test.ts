@@ -5,7 +5,7 @@
 import { LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import type { AuditActor, LogEvent } from '../../audit/index.ts';
+import type { AuditActor } from '../../audit/index.ts';
 import { type DirectoryNames, DirectoryUnavailable, type KeptPerson } from '../../identity/index.ts';
 
 import { type ActorsHeld, createActorNamer } from './actor-names.ts';
@@ -14,15 +14,6 @@ const ISSUER = 'https://auth.example.test';
 const SARA = '0199a0f0-0000-7000-8000-00000000a001';
 const OMAR = '0199a0f0-0000-7000-8000-00000000a002';
 const AGENT = '0199a0f0-0000-7000-8000-00000000a003';
-
-const by = (actor: AuditActor): LogEvent => ({
-  id: '0199a0f0-0000-7000-8000-00000000e001',
-  seq: 1n,
-  recordedAt: new Date('2026-10-17T08:00:00Z'),
-  event: { actor, action: 'probe.noted', subject: { type: 'probe', id: 'p', version: 1 }, details: {} },
-  hash: 'c'.repeat(64),
-  prevHash: 'd'.repeat(64),
-});
 
 const person = (subject: string, kept: Partial<KeptPerson> = {}): KeptPerson => ({
   issuer: ISSUER,
@@ -61,10 +52,13 @@ describe('the audit log’s actors, by name (decision 25)', () => {
   it('names a person from the login service, filling only what it lacks from the kept copy', async () => {
     const { directory, asked } = directoryOf({ '101': { name: 'Sara Khan' } });
     const namer = createActorNamer({ directory, logger: testLogger() });
-    const events = [by({ type: 'user', id: SARA }), by({ type: 'user', id: SARA })];
+    const actors: AuditActor[] = [
+      { type: 'user', id: SARA },
+      { type: 'user', id: SARA },
+    ];
 
     const names = await namer.namesOf(
-      events,
+      actors,
       held({ [SARA]: person('101', { name: 'Old', email: 's@example.test' }) }),
     );
 
@@ -81,8 +75,14 @@ describe('the audit log’s actors, by name (decision 25)', () => {
     const namer = createActorNamer({ directory, logger: testLogger() });
     const page = held({ [SARA]: person('101'), [OMAR]: person('102') });
 
-    await namer.namesOf([by({ type: 'user', id: SARA })], held({ [SARA]: person('101') }));
-    const names = await namer.namesOf([by({ type: 'user', id: SARA }), by({ type: 'user', id: OMAR })], page);
+    await namer.namesOf([{ type: 'user', id: SARA }], held({ [SARA]: person('101') }));
+    const names = await namer.namesOf(
+      [
+        { type: 'user', id: SARA },
+        { type: 'user', id: OMAR },
+      ],
+      page,
+    );
 
     expect(names.get(`user:${SARA}`)).toMatchObject({ name: 'Sara Khan', shownFrom: 'login_service' });
     expect(asked).toEqual([['101'], ['102']]);
@@ -91,10 +91,13 @@ describe('the audit log’s actors, by name (decision 25)', () => {
   it('names from the kept copy one the login service no longer has, and the ID alone with neither', async () => {
     const { directory } = directoryOf({});
     const namer = createActorNamer({ directory, logger: testLogger() });
-    const events = [by({ type: 'user', id: SARA }), by({ type: 'user', id: OMAR })];
+    const actors: AuditActor[] = [
+      { type: 'user', id: SARA },
+      { type: 'user', id: OMAR },
+    ];
 
     const names = await namer.namesOf(
-      events,
+      actors,
       held({ [SARA]: person('101', { name: 'Sara Khan', email: 's@example.test' }), [OMAR]: person('102') }),
     );
 
@@ -107,7 +110,7 @@ describe('the audit log’s actors, by name (decision 25)', () => {
     const namer = createActorNamer({ directory, logger: testLogger() });
 
     const names = await namer.namesOf(
-      [by({ type: 'user', id: SARA })],
+      [{ type: 'user', id: SARA }],
       held({ [SARA]: person('101', { issuer: 'https://other.example.test', name: 'Sara Khan' }) }),
     );
 
@@ -128,11 +131,11 @@ describe('the audit log’s actors, by name (decision 25)', () => {
     const namer = createActorNamer({ directory, logger: testLogger(capture) });
     const page = held({ [SARA]: person('101', { name: 'Sara Khan' }) });
 
-    expect((await namer.namesOf([by({ type: 'user', id: SARA })], page)).get(`user:${SARA}`)).toMatchObject({
+    expect((await namer.namesOf([{ type: 'user', id: SARA }], page)).get(`user:${SARA}`)).toMatchObject({
       name: 'Sara Khan',
       shownFrom: 'kept_copy',
     });
-    await namer.namesOf([by({ type: 'user', id: SARA })], page);
+    await namer.namesOf([{ type: 'user', id: SARA }], page);
 
     expect(calls).toBe(1);
     expect(capture.lines()).toEqual([expect.objectContaining({ event: 'audit_log.names_unavailable' })]);
@@ -144,7 +147,10 @@ describe('the audit log’s actors, by name (decision 25)', () => {
     const namer = createActorNamer({ directory: undefined, logger: testLogger(capture) });
 
     const names = await namer.namesOf(
-      [by({ type: 'user', id: SARA }), by({ type: 'user', id: OMAR })],
+      [
+        { type: 'user', id: SARA },
+        { type: 'user', id: OMAR },
+      ],
       held({ [SARA]: person('101', { email: 's@example.test' }), [OMAR]: person('102', { unreadable: true }) }),
     );
 
@@ -158,12 +164,12 @@ describe('the audit log’s actors, by name (decision 25)', () => {
 
     const names = await namer.namesOf(
       [
-        by({ type: 'agent', id: AGENT }),
-        by({ type: 'agent', id: OMAR }),
-        by({ type: 'system', id: 'api' }),
-        by({ type: 'system', id: 'operator' }),
-        by({ type: 'system', id: 'integrity-hold' }),
-        by({ type: 'system', id: 'anchor-check' }),
+        { type: 'agent', id: AGENT },
+        { type: 'agent', id: OMAR },
+        { type: 'system', id: 'api' },
+        { type: 'system', id: 'operator' },
+        { type: 'system', id: 'integrity-hold' },
+        { type: 'system', id: 'anchor-check' },
       ],
       held({}, { [AGENT]: 'Invoice bot' }),
     );

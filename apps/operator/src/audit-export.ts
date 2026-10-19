@@ -37,6 +37,7 @@ import {
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import {
+  actorsOf,
   AUDIT_LOG_EXPORTED,
   createActorNamer,
   EXPORT_BATCH,
@@ -195,7 +196,7 @@ async function fileOf(
     if (read === 'tampered') {
       throw new AuditExportRefused("an event in the range, or an agent it names, can't be verified");
     }
-    const names = await namer.namesOf(read.events, read.held);
+    const names = await namer.namesOf(actorsOf(read.events), read.held);
     lines.push(...read.events.map((event) => ndjsonLine(event, names)));
     beforeSeq = read.next;
   }

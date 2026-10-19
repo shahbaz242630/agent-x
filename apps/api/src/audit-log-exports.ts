@@ -33,6 +33,7 @@ import {
 } from '@agentx/core/modules/audit';
 import {
   type ActorName,
+  actorsOf,
   AUDIT_LOG_EXPORTED,
   createActorNamer,
   eventShown,
@@ -74,16 +75,16 @@ const MOST_EXPORTS_AN_HOUR = 5;
 /** The advisory lock an admin's downloads count their hourly budget under (ADR-006 §6, 2b). */
 export const EXPORTS_LOCK = 'audit-log-exports';
 
-const EXPORT_FORMATS = ['csv', 'ndjson'] as const;
-type ExportFormat = (typeof EXPORT_FORMATS)[number];
+export const EXPORT_FORMATS = ['csv', 'ndjson'] as const;
+export type ExportFormat = (typeof EXPORT_FORMATS)[number];
 
-const CONTENT_TYPES = { csv: 'text/csv', ndjson: 'application/x-ndjson' } as const satisfies Record<
+export const CONTENT_TYPES = { csv: 'text/csv', ndjson: 'application/x-ndjson' } as const satisfies Record<
   ExportFormat,
   string
 >;
 
 /** Who may download the log (decision 24). */
-const EXPORTING_ROLES = ['admin'] as const;
+export const EXPORTING_ROLES = ['admin'] as const;
 
 /** A download as asked for: its range, its actions (all when none), its actor (everyone when none), its format. */
 export interface ExportAsked {
@@ -148,15 +149,51 @@ const lineOf = (format: ExportFormat, logged: LogEvent, names: ReadonlyMap<strin
   const shown = eventShown(logged, names);
   const facts = Object.fromEntries(factsShown(logged.event.details));
   const { actor, subject } = shown;
-  return [shown.seq, shown.recordedAt, actor.type, actor.id, actor.name ?? '', actor.email ?? '', actor.shownFrom ?? '']
-    .concat([shown.action, subject.type, subject.id])
-    .concat([String(subject.version), JSON.stringify(facts), shown.hash, shown.prevHash])
-    .map(csvCell)
-    .join(',');
+  return csvRow(
+    [shown.seq, shown.recordedAt, actor.type, actor.id, actor.name ?? '', actor.email ?? '', actor.shownFrom ?? '']
+      .concat([shown.action, subject.type, subject.id])
+      .concat([String(subject.version), JSON.stringify(facts), shown.hash, shown.prevHash]),
+  );
 };
+
+/** A CSV row: each cell made safe (csvCell). */
+export const csvRow = (cells: readonly string[]): string => cells.map(csvCell).join(',');
 
 /** A day of a range, as the file's name holds it. */
 const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
+
+/** A download's file of `lines` (each log's own), named for its log and range, a CSV header first. */
+export const exportFile = (
+  log: 'audit' | 'activity',
+  asked: { readonly from: Date; readonly to: Date; readonly format: ExportFormat },
+  csvHeader: readonly string[],
+  lines: string[],
+) => {
+  // The header goes in front in place and the text is joined once: a large download is never copied twice over.
+  if (asked.format === 'csv') lines.unshift(csvRow(csvHeader));
+  return {
+    fileName: `${log}-log-${dayOf(asked.from)}-to-${dayOf(asked.to)}.${asked.format}`,
+    contentType: CONTENT_TYPES[asked.format],
+    content: `${lines.join('\n')}\n`,
+  };
+};
+
+/**
+ * Whether an admin has made as many downloads of a log as they may in the
+ * hour, counted under their own lock for that log (ADR-006 §6, 2b), so their
+ * other download in flight commits or rolls back before this counts.
+ */
+export async function exportsSpent(
+  tx: Parameters<typeof actorEventsSince>[0],
+  clock: Clock,
+  member: Member,
+  { lock, action }: { readonly lock: string; readonly action: string },
+): Promise<boolean> {
+  await holdTransactionLock(tx, lock, member.orgId, member.userId);
+  const since = new Date(clock.now().getTime() - HOUR_MS);
+  const made = await actorEventsSince(tx, member.orgId, { type: 'user', id: member.userId }, action, since);
+  return made >= MOST_EXPORTS_AN_HOUR;
+}
 
 export function createAuditLogExports({
   database,
@@ -197,19 +234,12 @@ export function createAuditLogExports({
       const read = await work.inOrganisation(orgId, correlationId, (tx, states) =>
         heldLogPage(tx, states, keys, orgId, { ...asked, beforeSeq: before, limit: EXPORT_BATCH }),
       );
-      const names = await namer.namesOf(read.events, read.held);
+      const names = await namer.namesOf(actorsOf(read.events), read.held);
       lines.push(...read.events.map((event) => lineOf(asked.format, event, names)));
       beforeSeq = read.next;
     }
-    const header = asked.format === 'csv' ? [CSV_HEADER.map(csvCell).join(',')] : [];
-    return {
-      id,
-      fileName: `audit-log-${dayOf(asked.from)}-to-${dayOf(asked.to)}.${asked.format}`,
-      contentType: CONTENT_TYPES[asked.format],
-      content: `${[...header, ...lines].join('\n')}\n`,
-      events: lines.length,
-      upToSeq,
-    };
+    const events = lines.length;
+    return { id, ...exportFile('audit', asked, CSV_HEADER, lines), events, upToSeq };
   };
 
   return {
@@ -217,10 +247,7 @@ export function createAuditLogExports({
       const actor: AuditActor = { type: 'user', id: member.userId };
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        // Under the admin's own download lock (ADR-006 §6, 2b), so their other download in flight commits or rolls back before this counts.
-        await holdTransactionLock(tx, EXPORTS_LOCK, member.orgId, member.userId);
-        const since = new Date(clock.now().getTime() - HOUR_MS);
-        if ((await actorEventsSince(tx, member.orgId, actor, AUDIT_LOG_EXPORTED, since)) >= MOST_EXPORTS_AN_HOUR) {
+        if (await exportsSpent(tx, clock, member, { lock: EXPORTS_LOCK, action: AUDIT_LOG_EXPORTED })) {
           throw new AuditLogRefused(409, 'AUDIT_EXPORTS_SPENT');
         }
         const range = await eventsInRange(tx, member.orgId, asked);
@@ -321,7 +348,7 @@ const EXPORT_SCHEMA = {
 };
 
 /** The most a download's body may be: a range, 20 actions, an actor and a format, with room to spare. */
-const EXPORT_BODY_LIMIT = 4096;
+export const EXPORT_BODY_LIMIT = 4096;
 
 /** The download's route. Without `exports` it is still documented, and no one reaches it. */
 export function registerAuditLogExports(app: FastifyInstance, { exports }: { exports: AuditLogExports | undefined }) {

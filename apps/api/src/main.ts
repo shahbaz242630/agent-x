@@ -94,6 +94,8 @@ import type { FastifyInstance } from 'fastify';
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
+import { createActivityPages } from './activity-log.ts';
+import { createActivityLogExports } from './activity-log-exports.ts';
 import { createAuditLog } from './audit-log.ts';
 import { createAuditLogExports } from './audit-log-exports.ts';
 import { createFundingSourceChanges } from './funding-source-changes.ts';
@@ -509,6 +511,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
     auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger, directory }),
     auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger, directory }),
+    activityPages: createActivityPages({ database, keys, ids: uuidV7Ids, logger, directory }),
+    activityLogExports: createActivityLogExports({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+      directory,
+    }),
     holdClearings: createHoldClearings({
       database,
       keys,

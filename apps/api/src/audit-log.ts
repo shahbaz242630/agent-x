@@ -30,6 +30,7 @@ import {
 } from '@agentx/core/modules/audit';
 import {
   type ActorName,
+  actorsOf,
   createActorNamer,
   eventShown,
   factsShown,
@@ -115,7 +116,7 @@ export function createAuditLog({
       }));
       if (read.outcome === 'refused') return read;
       const namer = createActorNamer({ directory, logger: logger.child({ correlationId }) });
-      return { ...read, names: await namer.namesOf(read.events, read.held) };
+      return { ...read, names: await namer.namesOf(actorsOf(read.events), read.held) };
     },
   };
 }

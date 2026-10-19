@@ -1,6 +1,7 @@
 // Who each actor of the audit log is, by name (partner's catch S121, decision
 // 25: "the whole idea of the log is to know who did what"): shown beside
 // their Agent X ID on a page and in a download, never sealed into an event.
+// The activity log's actors are named the same way (L5).
 //
 // - A person: their name and verified email as the login service has them
 //   now, asked once for everyone on the page (directory-names.ts), after the
@@ -18,7 +19,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { agentsNamed, type AgentsTables } from '../../agents/index.ts';
-import type { AuditActor, AuditTables, LogEvent, SignedStates } from '../../audit/index.ts';
+import type { AuditActor, AuditTables, SignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import {
   type DirectoryEntry,
@@ -68,10 +69,10 @@ export async function actorsHeld(
   states: SignedStates,
   keys: KeyProvider,
   orgId: string,
-  events: readonly LogEvent[],
+  actors: readonly AuditActor[],
 ): Promise<ActorsHeld | 'tampered'> {
   const idsOf = (type: AuditActor['type']) => [
-    ...new Set(events.filter(({ event }) => event.actor.type === type).map(({ event }) => event.actor.id)),
+    ...new Set(actors.filter((actor) => actor.type === type).map((actor) => actor.id)),
   ];
   const agentIds = idsOf('agent');
   const agents = agentIds.length === 0 ? undefined : await agentsNamed(tx, states, orgId, agentIds);
@@ -83,8 +84,8 @@ export async function actorsHeld(
 }
 
 export interface ActorNamer {
-  /** Each actor of `events` by name, the login service asked once for all the people. */
-  namesOf(events: readonly LogEvent[], held: ActorsHeld): Promise<ReadonlyMap<string, ActorName>>;
+  /** Each of `actors` by name, the login service asked once for all the people. */
+  namesOf(actors: readonly AuditActor[], held: ActorsHeld): Promise<ReadonlyMap<string, ActorName>>;
 }
 
 /** A namer for one page or download. Without `directory` (no login service set up), people are named from the kept copy. */
@@ -137,13 +138,12 @@ export function createActorNamer({
   };
 
   return {
-    async namesOf(events, held) {
+    async namesOf(actors, held) {
       const unreadable = [...held.people.values()].filter((person) => person.unreadable).length;
       if (unreadable > 0) logger.warn('audit_log.kept_names_unreadable', { count: unreadable });
       const now = await fromDirectory(held.people);
       const names = new Map<string, ActorName>();
-      for (const { event } of events) {
-        const { actor } = event;
+      for (const actor of actors) {
         const key = actorKey(actor);
         if (names.has(key)) continue;
         if (actor.type === 'user') {
