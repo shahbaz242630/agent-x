@@ -323,7 +323,7 @@ jobs:
             if [ "${attempt}" -lt 3 ]; then sleep 15; fi
           done
           if [ "${pushed}" != true ]; then
-            echo "::error::Pushing ${IMAGE}:${COMMIT} failed 3 times."
+            echo "::error::The image ${IMAGE}:${COMMIT} could not be pushed to GitHub's registry in 3 tries. Nothing was released; staging is unchanged. Re-run this job; if it fails again, check GitHub's status page."
             exit 1
           fi
           digests=()
@@ -334,7 +334,7 @@ jobs:
             fi
           done
           if [ "${#digests[@]}" -ne 1 ]; then
-            echo "::error::Expected one pushed digest for ${IMAGE}, found ${#digests[@]}."
+            echo "::error::The registry named ${#digests[@]} versions of ${IMAGE} where one was expected, so there is no one image to sign. Nothing was released. Re-run this job; if it repeats, read the push step above."
             exit 1
           fi
           digest="${digests[0]}"
@@ -351,7 +351,7 @@ jobs:
           status=0
           node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}" || status=$?
           if [ "${status}" -ne "${EXPECTED_EXIT}" ]; then
-            echo "::error::The deploy check exited ${status}; this proof expects ${EXPECTED_EXIT}."
+            echo "::error::The deploy check answered ${status} where this proof needs ${EXPECTED_EXIT}, so it may let an unsafe image through. Nothing was released. Read the check's lines above and fix it before merging."
             exit 1
           fi
 
@@ -369,7 +369,7 @@ jobs:
           status=0
           node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}" || status=$?
           if [ "${status}" -ne "${EXPECTED_EXIT}" ]; then
-            echo "::error::The deploy check exited ${status}; this proof expects ${EXPECTED_EXIT}."
+            echo "::error::The deploy check answered ${status} where this proof needs ${EXPECTED_EXIT}, so it may let an unsafe image through. Nothing was released. Read the check's lines above and fix it before merging."
             exit 1
           fi
 
@@ -495,7 +495,7 @@ jobs:
         run: |
           mapfile -t files < <(find sbom -type f -name '*.json')
           if [ "${#files[@]}" -ne 1 ]; then
-            echo "::error::Expected one SBOM file, found ${#files[@]}."
+            echo "::error::The build left ${#files[@]} lists of the image's contents (SBOM) where one was expected, so none was attached. Nothing was released. Re-run the workflow; if it repeats, read the SBOM step's upload."
             exit 1
           fi
           cosign attest --yes --type cyclonedx --predicate "${files[0]}" "${IMAGE}@${DIGEST}"
@@ -515,7 +515,7 @@ jobs:
           status=0
           node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}" || status=$?
           if [ "${status}" -ne "${EXPECTED_EXIT}" ]; then
-            echo "::error::The deploy check exited ${status}; this proof expects ${EXPECTED_EXIT}."
+            echo "::error::The deploy check answered ${status} where this proof needs ${EXPECTED_EXIT}, so it may let an unsafe image through. Nothing was released. Read the check's lines above and fix it before merging."
             exit 1
           fi
 
@@ -578,7 +578,7 @@ jobs:
         run: |
           for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
             if [ -z "${id}" ]; then
-              echo "::error::The staging environment is missing one of its three Azure IDs."
+              echo "::error::One of staging's three Azure IDs (client, tenant, subscription) is not set. Nothing was deployed. Set it in GitHub: Settings, Environments, staging, Variables; then re-run this job."
               exit 1
             fi
             echo "::add-mask::${id}"
