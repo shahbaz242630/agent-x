@@ -1412,6 +1412,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
       query(', 0, 300)', ', 0, 3000)'),
       query('parse_json(Log).says', 'parse_json(Log).orgId'),
       query('in (', '!in ('),
+      // A stage before the words could rewrite the line they are read from, or the container's name.
+      query(
+        'ContainerAppConsoleLogs |',
+        'ContainerAppConsoleLogs | extend Log = strcat("{\\"says\\": \\"", tostring(parse_json(Log).orgId), "\\"}") |',
+      ),
+      query('ContainerAppConsoleLogs |', 'ContainerAppConsoleLogs | extend ContainerAppName = "ca-agentx-stg-api" |'),
       query('by Says', 'by Says, OrgId = tostring(parse_json(Log).orgId)'),
       query('"An error with no plain words', '"An error with no plain words " + Log + "'),
       (alert: Mutable) =>
@@ -1424,6 +1430,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(brokenRules(changed(ERRORS_ALERT, change))).toContain('alert-counts-only');
     }
+    // Another alert can't borrow the split for a table of its own.
+    const errors = criterion(
+      staging.predictedResources.find((resource) => ERRORS_ALERT(resource)) as unknown as Mutable,
+    );
+    const borrowed = (alert: Mutable) =>
+      Object.assign(criterion(alert), {
+        query: String(errors.query).replace('ContainerAppConsoleLogs', '_LogOperation'),
+        dimensions: errors.dimensions,
+        metricMeasureColumn: errors.metricMeasureColumn,
+      });
+    expect(brokenRules(changed(CAP_ALERT, borrowed))).toContain('alert-counts-only');
   });
 
   it("alert-runbook: no runbook, or a SEV its severity doesn't match", () => {
@@ -2004,12 +2021,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (criterion(alert).query = String(criterion(alert).query).replace(from, to));
     expect(brokenRules(without(ERRORS_ALERT))).toEqual(['app-errors-alert']);
     const levels = 'in~ ("error", "fatal", "panic")';
+    // Its query is the one shape a split by plain words may take, so a changed one breaks both rules.
     for (const change of [
       query(levels, '== "error"'),
       // Case-sensitive: it would miss Zitadel's "ERROR" lines (code review, S14).
       query(levels, 'in ("error", "fatal", "panic")'),
       query('ContainerAppConsoleLogs', 'ContainerAppSystemLogs'),
       query(levels, `${levels} | where ContainerAppName == "ca-agentx-stg-api"`),
+    ]) {
+      expect(brokenRules(changed(ERRORS_ALERT, change))).toEqual(['alert-counts-only', 'app-errors-alert']);
+    }
+    for (const change of [
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (criterion(alert).threshold = -1),
       (alert: Mutable) => delete criterion(alert).threshold,

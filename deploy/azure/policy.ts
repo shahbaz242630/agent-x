@@ -777,15 +777,20 @@ export function singleSummaryColumn(query: string): string | undefined {
 
 /**
  * The column a criterion counts when it splits by plain words and nothing
- * else: `… | extend Says = <ours> | extend Says = <fallback> | summarize Name =
- * count() by Says`, with Says its only dimension. Undefined for any other shape.
+ * else, with Says its only dimension: exactly `ContainerAppConsoleLogs |
+ * <error lines> | extend Says = <ours> | extend Says = <fallback> | summarize
+ * Name = count() by Says`. No other stage, so nothing can rewrite `Log` or a
+ * container's name before the words are read. Undefined for any other shape.
  */
 function saysCountColumn(criterion: unknown): string | undefined {
   const stages = kqlStages(String(at(criterion, 'query')));
   const own = SAYS_FROM_OWN.exec(stages.at(-3) ?? '');
   const counted = /^summarize ([A-Za-z_][A-Za-z0-9_]*) = count\(\) by Says$/.exec(stages.at(-1) ?? '');
   const containers = own?.[1]?.split(', ') ?? [];
-  return own !== null &&
+  return stages.length === 5 &&
+    stages[0] === 'ContainerAppConsoleLogs' &&
+    stages[1] === ERROR_LINES &&
+    own !== null &&
     containers.every((container) => OWN_CONTAINER.test(container)) &&
     stages.at(-2) === SAYS_FALLBACK &&
     JSON.stringify(at(criterion, 'dimensions')) === JSON.stringify(SAYS_DIMENSIONS)
@@ -2103,11 +2108,7 @@ const appErrorsAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
     const alerted = workspaceAlerted(snapshot, 'any', (criterion) => {
       const threshold = at(criterion, 'threshold');
-      const stages = kqlStages(String(at(criterion, 'query')));
       return (
-        stages.length === 5 &&
-        stages[0] === 'ContainerAppConsoleLogs' &&
-        stages[1] === ERROR_LINES &&
         saysCountColumn(criterion) !== undefined &&
         at(criterion, 'operator') === 'GreaterThan' &&
         typeof threshold === 'number' &&
