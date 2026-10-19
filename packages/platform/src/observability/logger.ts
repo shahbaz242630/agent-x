@@ -144,8 +144,9 @@ function bindingsOf(bindings: LogBindings): Record<string, string> {
 }
 
 /** A warning or error line says what happened, what broke and what next, in plain English (decision 29). */
-const wordsAt = (level: LogLevel, event: string): { says?: string } =>
-  level === 'warn' || level === 'error' ? { says: saysFor(event) } : {};
+function wordsAt(level: LogLevel, event: string): { says?: string } {
+  return level === 'warn' || level === 'error' ? { says: saysFor(event) } : {};
+}
 
 function wrap(instance: pino.Logger, writeSuppressed: (includeCurrentMinute?: boolean) => void): Logger {
   const at =

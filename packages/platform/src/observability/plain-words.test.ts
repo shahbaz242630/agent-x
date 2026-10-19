@@ -17,12 +17,12 @@ describe('decision 29: every warning and error has plain words', () => {
     expect(PLAIN_WORDS).toHaveProperty(['log.invalid_event']);
   });
 
-  it.each(ENTRIES)('%s: three short whole sentences, with no code in them', (_event, words) => {
+  it.each(ENTRIES)('%s: three short whole sentences, with no code in them', (event, words) => {
     for (const part of [words.happened, words.broke, words.next]) {
       expect(part).toMatch(SENTENCES);
       expect(part).not.toMatch(CODE_LIKE);
     }
-    expect(saysFor(_event).length).toBeLessThan(MOST_CHARACTERS);
+    expect(saysFor(event).length).toBeLessThan(MOST_CHARACTERS);
   });
 
   it.each(ENTRIES)('%s: the redaction leaves the words whole', (event) => {

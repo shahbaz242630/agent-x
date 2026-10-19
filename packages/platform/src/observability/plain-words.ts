@@ -70,10 +70,9 @@ export const PLAIN_WORDS = {
     next: 'It runs again at the next check, a few minutes later. If it repeats, a developer should look at it.',
   },
   'audit.anchor_check_failed': {
-    happened:
-      'The regular tamper check of the audit history could not finish, usually as the database was slow or away.',
-    broke: 'One audit history went unchecked this time.',
-    next: 'It is tried again at the next check. If it fails three times in a row, the integrity alarm is raised.',
+    happened: 'The regular tamper check of the audit history could not finish, usually as the database was slow.',
+    broke: 'One audit history went unchecked this time, or all of them if the list could not be read.',
+    next: 'It is tried again at the next check. Three misses in a row raise the integrity alarm.',
   },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',
@@ -81,7 +80,8 @@ export const PLAIN_WORDS = {
     next: 'Nothing to do if it is rare. If it repeats for the same record, look into why its history is piling up.',
   },
   'audit.integrity_failed': {
-    happened: 'A tamper check failed: records, the audit trail or the database set-up do not match what Agent X wrote.',
+    happened:
+      'A tamper check found records, the audit trail or the database set-up changed, or could not check them for too long.',
     broke: 'Whatever met it was refused or stopped, and an organisation found tampered with is put on hold.',
     next: 'Treat it as a possible break-in and follow the incident runbook straight away.',
   },
@@ -455,9 +455,8 @@ export const PLAIN_WORDS = {
   },
   'operator.failed': {
     happened: 'An operator job stopped on an unexpected error.',
-    broke:
-      'What it was asked to do most likely did not happen, though a connection lost at the very end may have saved it.',
-    next: 'Check the database is healthy, then run the job again from the same request file. It will say if the work was done already.',
+    broke: 'Its work most likely did not happen, though a connection lost at the very end may have saved it.',
+    next: 'Check the database, then re-run the same request file: it says if it was done. Check a new organisation was not made before typing it again.',
   },
   'operator.refused': {
     happened: 'An operator job refused the request it was given.',
@@ -491,14 +490,15 @@ export const PLAIN_WORDS = {
     next: 'It is tried again at the next run, about 5 minutes later. If it keeps failing, check the database.',
   },
   'request_void.failed': {
-    happened: 'A pending spend request whose approval no longer stands could not be cancelled.',
+    happened:
+      'A pending spend request could not be cancelled after its organisation, agent, mandate, bank account or supplier was stopped.',
     broke: "It stays pending for now, still holding part of the agent's budget.",
-    next: 'It is tried again at the next run, about 5 minutes later. If it keeps failing, check the database and the integrity alarms.',
+    next: 'It is tried again in about 5 minutes. If it keeps failing, check the database and the integrity alarms.',
   },
   'request_void.run_failed': {
     happened:
       'The list of organisations could not be read, so the cancelling of spend requests no longer allowed was skipped.',
-    broke: 'No such request was cancelled this run.',
+    broke: 'No such request was cancelled, and no ended bank consent was recorded, this run.',
     next: 'It is tried again at the next run, about 5 minutes later. If it keeps failing, check the database.',
   },
   'request_void.unreadable': {
@@ -548,7 +548,7 @@ export const PLAIN_WORDS = {
   },
   'suppliers.contacts_unreadable': {
     happened: "A supplier's saved contact details could not be opened.",
-    broke: 'The supplier could not be shown, and the person was told its record cannot be trusted.',
+    broke: 'The supplier could not be shown or changed, and the person was told its record cannot be trusted.',
     next: 'Check the encryption keys and the integrity alarms; see the runbook.',
   },
   'suppliers.fingerprint_unavailable': {

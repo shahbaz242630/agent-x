@@ -45,6 +45,8 @@ const OWN_FIELDS = new Set([
   'orgId',
   'actor',
   'module',
+  // Decision 29: a warning's plain words are kept on the lines that most need them, the long ones.
+  'says',
 ]);
 
 /** Own fields checked where they're set (the time, the level, and validated config), so they're written as they are. */

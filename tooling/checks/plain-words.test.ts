@@ -9,8 +9,6 @@ import { describe, expect, it } from 'vitest';
 import { PLAIN_WORDS } from '../../packages/platform/src/observability/plain-words.ts';
 
 const SKIPPED = new Set(['node_modules', 'dist', 'coverage']);
-/** The logger writes these itself. */
-const LOGGER_OWN = new Set(['log.suppressed', 'log.invalid_event']);
 /** The row sweeps name their event from the rows they sweep (apps/api/src/row-sweep.ts). */
 const SWEEP_FAILED = '_sweep_failed';
 
@@ -25,7 +23,6 @@ function sourceUnder(dir: string): string[] {
 /** Catalogued events no product code names, as a quoted literal. */
 function leftOver(events: readonly string[], code: string): string[] {
   return events.filter((event) => {
-    if (LOGGER_OWN.has(event)) return false;
     const named = event.endsWith(SWEEP_FAILED) ? event.slice(0, -SWEEP_FAILED.length) : event;
     return !code.includes(`'${named}'`);
   });
@@ -43,8 +40,6 @@ describe('decision 29: no plain words are left over', () => {
 
   it('the check finds a left-over entry, and reads a sweep by its rows', () => {
     const code = "log.warn('kept.event'); const rows = 'identity.flow';";
-    expect(leftOver(['kept.event', 'gone.event', 'identity.flow_sweep_failed', 'log.suppressed'], code)).toEqual([
-      'gone.event',
-    ]);
+    expect(leftOver(['kept.event', 'gone.event', 'identity.flow_sweep_failed'], code)).toEqual(['gone.event']);
   });
 });

@@ -15,9 +15,9 @@ import {
 } from './logger.ts';
 import { type ProblemEvent, saysFor } from './plain-words.ts';
 
-/** A marker value that must never come out. Plain words, so secret scanners ignore it. */
 /** A catalogued problem, for tests of warnings and errors in general. */
 const PROBLEM = 'db.transaction_retried';
+/** A marker value that must never come out. Plain words, so secret scanners ignore it. */
 const PLANTED = 'planted value that must not appear';
 const START = Date.UTC(2026, 8, 14, 10, 0, 0);
 const RUNS = { numRuns: 200, seed: 20_260_914 };
