@@ -15,6 +15,7 @@ import { gunzipSync } from 'node:zlib';
 import {
   type ActivityExportTables,
   type ActivityTables,
+  addBackgroundExport,
   createActivityLog as createActivityRecorder,
   storedName,
 } from '@agentx/core/modules/activity';
@@ -25,7 +26,7 @@ import {
   ACTIVITY_EXPORT_REQUESTED,
 } from '@agentx/core/modules/evidence';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
 import { type BlockStore, folderBlockStore } from '@agentx/platform/storage';
 import {
   createTestDatabase,
@@ -34,11 +35,14 @@ import {
   SequentialIds,
   type TestDatabase,
   testLogger,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
   BACKGROUND_EXPORT_OPERATION,
+  BACKGROUND_EXPORTS_LOCK,
   type BackgroundExportAskedFor,
   type BackgroundExports,
   type BackgroundExportWrite,
@@ -247,6 +251,36 @@ describe('L5c a background download asked for (decision 31)', () => {
     expect(await downloads.ask(approver, keyed(approver, BACKGROUND_EXPORT_OPERATION), ASKED, CORRELATION)).toEqual(
       refused(403, 'FORBIDDEN'),
     );
+  });
+
+  it('FX-RACE two admins asking at once: the second waits on the organisation’s lock, then finds one under way (ADR-006 §6, 2c)', async () => {
+    const w = await world();
+    const other = await member(w.org, 'admin');
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The first admin's download, its lock taken and its rows added, held open before it commits.
+    const first = withTenant(app, w.org, async (tx) => {
+      await holdTransactionLock(tx, BACKGROUND_EXPORTS_LOCK, w.org);
+      await addBackgroundExport(tx, w.org, {
+        ...ASKED,
+        id: ids.next(),
+        requestedBy: w.admin.userId,
+        writtenUpTo: null,
+      });
+      holding(undefined);
+      await gate;
+    });
+    await held;
+    const second = within(
+      20_000,
+      downloads.ask(other, keyed(other, BACKGROUND_EXPORT_OPERATION), ASKED, CORRELATION),
+      'the second admin',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+
+    await first;
+    expect(await second).toEqual(refused(409, 'ACTIVITY_EXPORT_UNDER_WAY'));
   });
 
   it('is unknown to another organisation, and to an ID it never had', async () => {

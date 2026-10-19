@@ -4,7 +4,7 @@
 // month tried too often failing its download, and a download listed as
 // building, ready, expired or failed.
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
-import { createTestDatabase, type TestDatabase, testLogger } from '@agentx/testing';
+import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued, within } from '@agentx/testing';
 import { type Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -238,6 +238,35 @@ describe('L5c a month built under its lease', () => {
 
     expect(await inOrg(org, (tx) => giveBack(tx, heldOf(org, file)))).toBe(true);
     expect(await claimed(org)).toMatchObject({ month: file.month, attempt: 2 });
+  });
+});
+
+describe('L5c a download’s last months finished at once (ADR-006 §6, 2c)', () => {
+  it('FX-RACE two builders finishing its last two months: the second waits on the download’s lock, and sees it ready', async () => {
+    const org = newId();
+    await asked(org, { from: new Date('2026-08-15T00:00:00Z'), to: new Date('2026-09-15T00:00:00Z') });
+    const august = await claimed(org);
+    const september = await claimed(org);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // August made ready, its transaction held open before it commits.
+    const first = inOrg(org, async (tx) => {
+      const done = await fileReady(tx, heldOf(org, august), FACTS);
+      holding(undefined);
+      await gate;
+      return done;
+    });
+    await held;
+    const second = within(
+      20_000,
+      inOrg(org, (tx) => fileReady(tx, heldOf(org, september), FACTS)),
+      'September',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+
+    expect(await first).toBe('more');
+    expect(await second).toBe('ready');
   });
 });
 

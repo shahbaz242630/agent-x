@@ -35,7 +35,7 @@ import {
 import { createAuditTrail } from '@agentx/core/modules/audit';
 import { ACTIVITY_EXPORT_REQUESTED, MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { type Database, holdTransactionLock, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
@@ -52,6 +52,9 @@ import { type Refused, refused } from './refused.ts';
 import { createUseCaseWork, type Member } from './use-case-work.ts';
 
 export const BACKGROUND_EXPORT_OPERATION = 'access-log.background-export';
+
+/** The advisory lock an organisation's background downloads are asked under, one under way at a time. */
+export const BACKGROUND_EXPORTS_LOCK = 'access-log-background-exports';
 
 /** The most downloads a page of the list holds. */
 const MOST_A_PAGE = 20;
@@ -122,6 +125,9 @@ export function createBackgroundExports({
         ) {
           throw new ActivityLogRefused(409, 'ACTIVITY_EXPORTS_SPENT');
         }
+        // The organisation's own lock (ADR-006 §6, 2c), after the admin's: two admins asking at once can't both
+        // find none under way.
+        await holdTransactionLock(tx, BACKGROUND_EXPORTS_LOCK, member.orgId);
         if (await downloadUnderWay(tx, member.orgId)) throw new ActivityLogRefused(409, 'ACTIVITY_EXPORT_UNDER_WAY');
         const writtenUpTo = await newestWritten(tx, member.orgId);
         const recorded = await createAuditTrail({ keys, ids, correlationId }).record(tx, member.orgId, {

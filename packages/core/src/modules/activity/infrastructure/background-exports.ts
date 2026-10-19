@@ -17,6 +17,7 @@
 //
 // Every read and write is in the organisation's transaction, so its
 // row-level security holds them too.
+import { holdTransactionLock, lockName } from '@agentx/platform/db';
 import { type ExpressionBuilder, sql, type Transaction } from 'kysely';
 
 import { ACTIVITY_ACTOR_TYPES, type ActivityActor, type ActivityRange } from './activity-reads.ts';
@@ -26,6 +27,14 @@ type ExportTx = Transaction<ActivityExportTables & ActivityTables>;
 
 /** The months table as `f`, as the claim and the under-way check read it. */
 type FilesAsF = ActivityExportTables & ActivityTables & { f: ActivityExportTables['activity_exports.files'] };
+
+/**
+ * The lock a download's ends are taken under (ADR-006 §6, 2c): a month made
+ * ready or failed, so the last two months finished at once by two servers
+ * see each other, and one of them tells the asker; taken before any of the
+ * download's rows is changed.
+ */
+const DOWNLOAD_LOCK = 'activity-export-files';
 
 /** How long a background download is kept once ready (decision 31). */
 export const DOWNLOAD_KEPT_DAYS = 7;
@@ -336,6 +345,11 @@ export async function claimFile(
   if (found === undefined) return { outcome: 'none' };
   const key = { orgId, exportId: found.export_id, month: found.month };
   if (found.attempts >= mostTries) {
+    // The month's row is locked already: the download's lock is only tried, never waited on, as a builder
+    // holding it may be about to fail this very row. Taken or not, the month waits for the next run.
+    const { rows } = await sql<{ got: boolean }>`select pg_catalog.pg_try_advisory_xact_lock(
+        pg_catalog.hashtextextended(${lockName(DOWNLOAD_LOCK, orgId, found.export_id)}, 0)) as got`.execute(tx);
+    if (rows[0]?.got !== true) return { outcome: 'none' };
     await failDownload(tx, key, 'ACTIVITY_EXPORT_FAILED');
     const download = await backgroundExportOf(tx, orgId, found.export_id);
     return {
@@ -419,6 +433,7 @@ export async function fileReady(
   file: HeldFile,
   facts: { readonly requests: number; readonly bytes: number; readonly sha256: string },
 ): Promise<'lost' | 'given_up' | 'more' | 'ready'> {
+  await holdTransactionLock(tx, DOWNLOAD_LOCK, file.orgId, file.exportId);
   if (await downloadFailed(tx, file))
     return (await fileFailed(tx, file, 'ACTIVITY_EXPORT_GIVEN_UP')) ? 'given_up' : 'lost';
   const made = await held(tx, file)
@@ -480,6 +495,8 @@ async function failDownload(
 
 /** Fails the held month, and its download with it: whether the builder still held it. */
 export async function fileFailed(tx: ExportTx, file: HeldFile, failure: string): Promise<boolean> {
+  // fileReady holds it already when it fails a month of a download given up; taken again, it is held once.
+  await holdTransactionLock(tx, DOWNLOAD_LOCK, file.orgId, file.exportId);
   const still = await tx
     .selectFrom('activity_exports.files')
     .select('month')

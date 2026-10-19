@@ -269,19 +269,28 @@ export function createActivityExportBuilder({
     const held = () => ({ orgId, exportId: file.exportId, month: file.month, lease: holding.lease });
     try {
       const facts = await written(orgId, file, holding, correlationId, signal);
-      await inOrg(orgId, correlationId, async (tx) => {
-        const ready = await fileReady(tx, held(), facts);
-        // Lost to another builder, or its download given up meanwhile (fileReady failed it): nothing to tell.
-        if (ready === 'lost' || ready === 'given_up') return;
+      const ready = await inOrg(orgId, correlationId, async (tx) => {
+        const done = await fileReady(tx, held(), facts);
+        // Lost to another builder, or its download given up meanwhile (fileReady failed it): nothing to record.
+        if (done === 'lost' || done === 'given_up') return done;
         await record(tx, orgId, correlationId, ACTIVITY_EXPORT_FILE_MADE, {
           exportId: file.exportId,
           month: file.month.slice(0, 7),
           attempt: file.attempt,
           ...facts,
         });
-        if (ready === 'ready')
+        if (done === 'ready')
           await tell(tx, orgId, 'access_log_export_ready', file.exportId, file.download.requestedBy);
+        return done;
       });
+      if (ready === 'lost') {
+        log.info('access_log.export_lease_lost', about);
+        return false;
+      }
+      if (ready === 'given_up') {
+        log.info('access_log.export_given_up', about);
+        return false;
+      }
       log.info('access_log.export_file_made', { ...about, requests: facts.requests, bytes: facts.bytes });
       return true;
     } catch (error) {
