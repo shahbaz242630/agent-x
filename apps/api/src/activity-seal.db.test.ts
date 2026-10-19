@@ -158,6 +158,25 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     ]);
   });
 
+  it('reads only seals as seals: another event about the activity log after them seals nothing again', async () => {
+    const w = await world();
+    await written(w, '2026-10-19T09:00:00.000Z');
+    await sealFor(w).run();
+    // A download of the log, recorded about it after its seal.
+    await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'user', id: w.admin.userId },
+        action: 'access_log.exported',
+        subject: { type: 'access_log', id: w.org, version: 1 },
+        details: { format: 'csv' },
+      }),
+    );
+
+    await sealFor(w).run();
+
+    expect((await sealsOf(w)).map((seal) => seal.day)).toEqual(['2026-10-19']);
+  });
+
   it('seals nothing for an organisation with no rows', async () => {
     const w = await world();
 
@@ -239,6 +258,33 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     expect((await sealsOf(w)).map((seal) => [seal.day, seal.requests])).toEqual([
       ['2026-10-19', 2],
       ['2026-10-20', 0],
+    ]);
+  });
+
+  it('FX-RACE a row replaced in the day while it was digested, the count the same: its last ID shows it moved', async () => {
+    const w = await world();
+    await written(w, '2026-10-20T09:00:00.000Z');
+    clock.advanceBy(60_000);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const other = withTenant(app, w.org, async (tx) => {
+      await holdTransactionLock(tx, ACTIVITY_SEAL_LOCK, w.org);
+      holding(undefined);
+      await gate;
+    });
+    await held;
+    const run = within(20_000, sealFor(w).run(), 'the run');
+    await waitUntilQueued(database.as('admin'), 1);
+    // Past the app: its one row deleted and another written later the same day.
+    await database.as('admin').query('delete from access.requests where org_id = $1', [w.org]);
+    await written(w, '2026-10-20T10:00:00.000Z');
+    open(undefined);
+
+    await other;
+    await run;
+    expect(await sealsOf(w)).toEqual([]);
+    expect(capture.lines().filter((line) => line.event === 'access_log_seal.moved')).toEqual([
+      expect.objectContaining({ day: '2026-10-20', digested: 1, counted: 1 }),
     ]);
   });
 
