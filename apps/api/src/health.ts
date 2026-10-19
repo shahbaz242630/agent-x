@@ -4,7 +4,7 @@
 // the build or which check failed. The failure goes to the log. Each condition
 // the API needs to be up is a HealthCheck; the first is the worker's heartbeat,
 // added with the worker (Phase 4).
-import type { EventName, Logger } from '@agentx/platform/observability';
+import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { API_SCHEMAS } from './api-schemas.ts';
 
 const HEALTH_PATH = '/health';
-export const CHECK_FAILED: EventName = 'health.check_failed';
+export const CHECK_FAILED: ProblemEvent = 'health.check_failed';
 
 export interface HealthCheck {
   /** Names the check in the log, e.g. `worker_heartbeat`. */

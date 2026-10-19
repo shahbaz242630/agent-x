@@ -13,8 +13,11 @@ import {
   type LogFields,
   SUPPRESSED_EVENT,
 } from './logger.ts';
+import { type ProblemEvent, saysFor } from './plain-words.ts';
 
 /** A marker value that must never come out. Plain words, so secret scanners ignore it. */
+/** A catalogued problem, for tests of warnings and errors in general. */
+const PROBLEM = 'db.transaction_retried';
 const PLANTED = 'planted value that must not appear';
 const START = Date.UTC(2026, 8, 14, 10, 0, 0);
 const RUNS = { numRuns: 200, seed: 20_260_914 };
@@ -75,22 +78,23 @@ describe('logging standard §2: one JSON line per event, with the standard field
         event: 'api.start_refused',
         problems: ['AGENTX_ENV: is required'],
         note: '[email]',
+        says: saysFor('api.start_refused'),
       },
     ]);
   });
 
   it.each(['error', 'warn', 'info', 'debug'] as const)('writes at %s', (level) => {
     const { logger, lines } = setup({ level: 'debug' });
-    logger[level]('test.event');
-    expect(lines()).toEqual([expect.objectContaining({ level, event: 'test.event' })]);
+    logger[level](PROBLEM);
+    expect(lines()).toEqual([expect.objectContaining({ level, event: PROBLEM })]);
   });
 
   it('leaves out lines below the configured level', () => {
     const { logger, lines } = setup({ level: 'warn' });
     logger.info('test.info');
     logger.debug('test.debug');
-    logger.warn('test.warn');
-    expect(lines().map((line) => line.event)).toEqual(['test.warn']);
+    logger.warn(PROBLEM);
+    expect(lines().map((line) => line.event)).toEqual([PROBLEM]);
   });
 
   it("adds a child logger's fields to each of its lines", () => {
@@ -201,7 +205,7 @@ describe('SEC-DATA-01, SEC-DATA-05: nothing sensitive reaches the output, from a
     const child = logger.child({ correlationId: SAMPLES.email, actor: SAMPLES.agentKey });
     for (const [kind, sample] of Object.entries(SAMPLES)) {
       child.info('test.sample', { kind, note: `seen ${sample} here`, nested: { list: [sample] } });
-      child.warn(`test.${kind.toLowerCase()}` as EventName, { [`${kind}Detail`]: sample });
+      child.warn(`test.${kind.toLowerCase()}` as ProblemEvent, { [`${kind}Detail`]: sample });
     }
     expect(capture.lines()).toHaveLength(Object.keys(SAMPLES).length * 2);
     expect(findLeaks(capture.text, Object.values(SAMPLES))).toEqual([]);
@@ -275,7 +279,7 @@ describe('SEC-DATA-02: an error is logged as a fixed set of cleaned facts, under
   it('logs the type, cleaned message, safe code and stack, and nothing else from the error', () => {
     const { logger, lines } = setup();
     const error = Object.assign(new Error(`declined for ${SAMPLES.email}`), { code: 'ECONNRESET', detail: PLANTED });
-    logger.error('payment.failed', { err: error });
+    logger.error(PROBLEM, { err: error });
     const [line] = lines();
     expect(line?.err).toEqual({
       type: 'Error',
@@ -294,7 +298,7 @@ describe('SEC-DATA-02: an error is logged as a fixed set of cleaned facts, under
   ])('logs an error %s the same way, leaving out a database driver’s row values', (_where, fields) => {
     const { logger, capture } = setup();
     const driverError = Object.assign(new Error('duplicate key'), { code: '23505', detail: PLANTED, table: 'payees' });
-    logger.error('payee.create_failed', fields(driverError));
+    logger.error(PROBLEM, fields(driverError));
     expect(capture.text).toContain('"code":"23505"');
     expect(findLeaks(capture.text, [PLANTED, 'payees'])).toEqual([]);
   });
@@ -302,24 +306,78 @@ describe('SEC-DATA-02: an error is logged as a fixed set of cleaned facts, under
   it('cleans every message in the cause chain', () => {
     const { logger, capture } = setup();
     const error = new Error('outer', { cause: new Error(`inner ${SAMPLES.uaeIban} ${SAMPLES.bearer}`) });
-    logger.error('payment.failed', { err: error });
+    logger.error(PROBLEM, { err: error });
     expect(findLeaks(capture.text)).toEqual([]);
     expect(capture.text).toContain('inner [iban] Bearer [redacted]');
   });
 
   it('logs something thrown that is not an Error', () => {
     const { logger, lines } = setup();
-    logger.error('job.failed', { err: `rejected ${SAMPLES.ipv4}` });
+    logger.error(PROBLEM, { err: `rejected ${SAMPLES.ipv4}` });
     expect(lines()[0]?.err).toBe('rejected [ip]');
+  });
+});
+
+describe('decision 29: a warning or error says what happened in plain words', () => {
+  it.each(['warn', 'error'] as const)('adds the words to a %s line, after the fields', (level) => {
+    const { logger, lines } = setup();
+    logger[level]('db.transaction_retried', { try: 2 });
+    expect(lines()[0]).toMatchObject({
+      event: 'db.transaction_retried',
+      try: 2,
+      says: saysFor('db.transaction_retried'),
+    });
+  });
+
+  it('adds no words to info or debug lines', () => {
+    const { logger, lines } = setup({ level: 'debug' });
+    logger.info('test.event');
+    logger.debug('test.event');
+    expect(lines().filter((line) => 'says' in line)).toEqual([]);
+  });
+
+  it('never lets a caller set the words', () => {
+    const { logger, lines } = setup();
+    logger.warn('db.transaction_retried', { says: 'forged' } as unknown as LogFields);
+    expect(lines()[0]?.says).toBe(saysFor('db.transaction_retried'));
+  });
+
+  it('gives an invalid name, and a held-back count, the logger’s own words', () => {
+    const { logger, lines, advance } = setup({ cap: 1 });
+    logger.error('Bad.Event' as ProblemEvent);
+    logger.warn('db.transaction_retried');
+    logger.warn('db.transaction_retried');
+    advance(60_000);
+    logger.flush();
+    expect(lines()[0]).toMatchObject({ event: INVALID_EVENT, says: saysFor(INVALID_EVENT) });
+    expect(lines().at(-1)).toMatchObject({ event: SUPPRESSED_EVENT, says: saysFor(SUPPRESSED_EVENT) });
+  });
+
+  it('adds no words to a held-back count of info lines', () => {
+    const { logger, lines } = setup({ cap: 1 });
+    logger.info('busy.event');
+    logger.info('busy.event');
+    logger.flush();
+    expect(lines().at(-1)).not.toHaveProperty('says');
+  });
+
+  it('takes only catalogued events as warnings and errors', () => {
+    const { logger } = setup();
+    // @ts-expect-error: an event with no plain words can't be a warning.
+    logger.warn('not.catalogued');
+    // @ts-expect-error: nor an error.
+    logger.error('not.catalogued');
+    // @ts-expect-error: the logger's own events aren't a caller's.
+    logger.warn('log.suppressed');
   });
 });
 
 describe('SEC-AV-09: a flood of one event is capped, and the count is always written', () => {
   it('writes up to the cap each minute, then one summary line with the exact count and its minute', () => {
     const { logger, lines, advance } = setup({ cap: 3 });
-    for (let i = 0; i < 8; i++) logger.warn('auth.failed');
+    for (let i = 0; i < 8; i++) logger.warn(PROBLEM);
     logger.info('other.event');
-    expect(lines().map((line) => line.event)).toEqual(['auth.failed', 'auth.failed', 'auth.failed', 'other.event']);
+    expect(lines().map((line) => line.event)).toEqual([PROBLEM, PROBLEM, PROBLEM, 'other.event']);
 
     advance(60_000);
     logger.info('next.minute');
@@ -327,7 +385,7 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
       expect.objectContaining({
         level: 'warn',
         event: SUPPRESSED_EVENT,
-        suppressedEvent: 'auth.failed',
+        suppressedEvent: PROBLEM,
         suppressedCount: 5,
         suppressedFrom: '2026-09-14T10:00:00.000Z',
         suppressedTo: '2026-09-14T10:01:00.000Z',
@@ -351,8 +409,8 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
     'writes the summary of %s lines at that level, so the level filter that let them through lets it through',
     (level) => {
       const { logger, lines, advance } = setup({ level, cap: 1 });
-      logger[level]('db.failed');
-      logger[level]('db.failed');
+      logger[level](PROBLEM);
+      logger[level](PROBLEM);
       advance(60_000);
       logger.flush();
       expect(lines()).toContainEqual(expect.objectContaining({ level, event: SUPPRESSED_EVENT, suppressedCount: 1 }));
@@ -372,7 +430,7 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
 
   it('caps a caller that tries to pass off its own lines as summaries', () => {
     const { logger, lines } = setup({ cap: 2 });
-    for (let i = 0; i < 10; i++) logger.warn('log.suppressed', { note: 'forged' });
+    for (let i = 0; i < 10; i++) logger.warn('log.suppressed' as ProblemEvent, { note: 'forged' });
     expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
     expect(lines().filter((line) => line.event === INVALID_EVENT)).toHaveLength(2);
   });

@@ -10,15 +10,15 @@
 // minute separately (SEC-AV-09), so a flood that is rate-limited, or that hangs
 // up, can't crowd out the lines of the requests that were answered.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
-import type { EventName, Logger } from '@agentx/platform/observability';
+import type { EventName, Logger, ProblemEvent } from '@agentx/platform/observability';
 import { type FastifyReply, type FastifyRequest, LogController } from 'fastify';
 
 import { REQUEST_ID_BINDING } from './framework-logger.ts';
 
 /** A request that was answered. */
-export const REQUEST_COMPLETED: EventName = 'http.request_completed';
+export const REQUEST_COMPLETED: ProblemEvent = 'http.request_completed';
 /** A request refused by the rate limit, written apart from the others. */
-export const REQUEST_RATE_LIMITED: EventName = 'http.request_rate_limited';
+export const REQUEST_RATE_LIMITED: ProblemEvent = 'http.request_rate_limited';
 /**
  * A request that ended without a complete answer: the client hung up, a streamed
  * answer failed partway (Fastify's own line says why), or Node's request timeout
@@ -26,7 +26,7 @@ export const REQUEST_RATE_LIMITED: EventName = 'http.request_rate_limited';
  */
 export const REQUEST_ABORTED: EventName = 'http.request_aborted';
 /** A failure on our side, written with its scrubbed error besides the request's line. */
-export const REQUEST_FAILED: EventName = 'http.request_failed';
+export const REQUEST_FAILED: ProblemEvent = 'http.request_failed';
 
 const TOO_MANY_REQUESTS = 429;
 
