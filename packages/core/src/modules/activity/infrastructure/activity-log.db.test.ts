@@ -1,7 +1,8 @@
 // L3: the activity log (0052) on the real migrated schema, as the app role: an
 // organisation's row written inside its own wall and seen by no other, a
 // person's row with the organisation they only claimed, nothing written for a
-// line malformed, and no row ever changed or deleted by the app.
+// line malformed, and no row ever changed or deleted by the app; L4: the
+// client's clues written beside them, or left empty, and none malformed.
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { sql } from 'kysely';
@@ -32,7 +33,14 @@ const facts = {
   reason: 'PASSKEY_REQUIRED',
   correlationId: '0199A0F0-0000-7000-8000-00000000AC05',
   durationMs: 12,
+  client: {
+    ip: '2001:db8::7',
+    place: { country: 'AE', city: 'Abu Dhabi' },
+    timeZone: { name: 'Asia/Dubai', from: 'organisation' },
+  },
 } as const;
+
+const NO_CLUES = { ip: undefined, place: undefined, timeZone: undefined };
 
 const forOrganisation = (change: Partial<OrganisationRequest> = {}): OrganisationRequest => ({
   ...facts,
@@ -68,7 +76,7 @@ afterAll(async () => {
 });
 
 describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () => {
-  it('writes an organisation’s row inside its own wall, IDs in lower case, the clues left for L4', async () => {
+  it('writes an organisation’s row inside its own wall, IDs in lower case, with its client’s clues', async () => {
     await log.recordForOrganisation(app, forOrganisation());
 
     expect(await rowsOf(ORG)).toEqual([
@@ -84,11 +92,11 @@ describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () =>
         reason: 'PASSKEY_REQUIRED',
         correlation_id: facts.correlationId.toLowerCase(),
         duration_ms: 12,
-        ip: null,
-        country: null,
-        city: null,
-        time_zone: null,
-        time_zone_from: null,
+        ip: '2001:db8::7',
+        country: 'AE',
+        city: 'Abu Dhabi',
+        time_zone: 'Asia/Dubai',
+        time_zone_from: 'organisation',
       }),
     ]);
     expect(await rowsOf(OTHER_ORG)).toEqual([]);
@@ -99,30 +107,69 @@ describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () =>
   it('writes an agent’s row, and a success with no reason', async () => {
     await log.recordForOrganisation(
       app,
-      forOrganisation({ orgId: OTHER_ORG, actor: { type: 'agent', id: AGENT }, status: 200, reason: undefined }),
+      forOrganisation({
+        orgId: OTHER_ORG,
+        actor: { type: 'agent', id: AGENT },
+        status: 200,
+        reason: undefined,
+        client: { ip: '203.0.113.7', place: { country: 'US', city: undefined }, timeZone: undefined },
+      }),
     );
 
     expect(await rowsOf(OTHER_ORG)).toEqual([
-      expect.objectContaining({ actor_type: 'agent', actor_id: AGENT, status: 200, reason: null }),
+      expect.objectContaining({
+        actor_type: 'agent',
+        actor_id: AGENT,
+        status: 200,
+        reason: null,
+        ip: '203.0.113.7',
+        country: 'US',
+        city: null,
+        time_zone: null,
+        time_zone_from: null,
+      }),
     ]);
   });
 
   it('writes a person’s row apart, the organisation they only claimed kept as a claim', async () => {
-    await log.recordForPerson(app, forPerson());
+    await log.recordForPerson(app, forPerson({ client: NO_CLUES }));
     await log.recordForPerson(
       app,
-      forPerson({ claimedOrg: OTHER_ORG.toUpperCase(), status: 403, reason: 'FORBIDDEN' }),
+      forPerson({
+        claimedOrg: OTHER_ORG.toUpperCase(),
+        status: 403,
+        reason: 'FORBIDDEN',
+        client: { ...NO_CLUES, timeZone: { name: 'Europe/London', from: 'browser' } },
+      }),
     );
 
     expect(await personRows()).toEqual([
-      expect.objectContaining({ user_id: PERSON, claimed_org: null, route: '/v1/profile', path_ids: [], reason: null }),
-      expect.objectContaining({ user_id: PERSON, claimed_org: OTHER_ORG, status: 403, reason: 'FORBIDDEN' }),
+      expect.objectContaining({
+        user_id: PERSON,
+        claimed_org: null,
+        route: '/v1/profile',
+        path_ids: [],
+        reason: null,
+        ip: null,
+        country: null,
+        city: null,
+        time_zone: null,
+        time_zone_from: null,
+      }),
+      expect.objectContaining({
+        user_id: PERSON,
+        claimed_org: OTHER_ORG,
+        status: 403,
+        reason: 'FORBIDDEN',
+        time_zone: 'Europe/London',
+        time_zone_from: 'browser',
+      }),
     ]);
     // Never in the organisation it named.
     expect(await rowsOf(OTHER_ORG)).toHaveLength(1);
   });
 
-  it.each([
+  it.each<[string, Partial<OrganisationRequest>]>([
     ['a time that isn’t one', { at: new Date(Number.NaN) }],
     ['a method no route is served on', { method: 'TRACE' as never }],
     ['a URL rather than a pattern', { route: '/v1/agents?x=1' }],
@@ -136,6 +183,13 @@ describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () =>
     ['an actor that is Agent X itself', { actor: { type: 'system' as never, id: 'api' } }],
     ['an actor that is Agent X, though by a UUID', { actor: { type: 'system' as never, id: PERSON } }],
     ['an actor by something not a UUID', { actor: { type: 'user' as const, id: 'someone' } }],
+    ['a client address that isn’t an IP address', { client: { ...NO_CLUES, ip: '::1]/x' } }],
+    ['a country that isn’t a code', { client: { ...NO_CLUES, place: { country: 'ae', city: undefined } } }],
+    ['an empty city', { client: { ...NO_CLUES, place: { country: 'AE', city: '' } } }],
+    ['a city too long', { client: { ...NO_CLUES, place: { country: 'AE', city: 'ق'.repeat(121) } } }],
+    ['a city that reorders its line', { client: { ...NO_CLUES, place: { country: 'AE', city: 'Dubai\u202e' } } }],
+    ['a time zone that isn’t a name', { client: { ...NO_CLUES, timeZone: { name: '+04:00', from: 'browser' } } }],
+    ['a time zone from nowhere', { client: { ...NO_CLUES, timeZone: { name: 'Asia/Dubai', from: 'agent' as never } } }],
   ])('writes nothing for %s', async (_what, change) => {
     const before = await rowsOf(ORG);
 

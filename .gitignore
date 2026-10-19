@@ -46,3 +46,6 @@ deploy/azure/*.snapshot.json
 .claude/worktrees/
 .playwright-mcp/
 dast-results/
+
+# DB-IP City Lite, which the image fetches (Dockerfile); a developer may keep a copy here.
+/geo/

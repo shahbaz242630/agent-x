@@ -1,13 +1,17 @@
 // The activity module (ADR-004; partner decision 26; ADR-005 §6, ADR-011 §7):
 // every request a known caller made, one row each, reads and refusals too,
-// in the append-only `access` schema (0052). L3 writes the rows; L5 reads
-// them for an organisation's admins, L7 for a case.
+// in the append-only `access` schema (0052). L3 writes the rows, L4 their
+// client's clues; L5 reads them for an organisation's admins, L7 for a case.
 export {
   ACTIVITY_METHODS,
   type ActivityLog,
+  type ClientClues,
   createActivityLog,
+  MOST_CITY_LENGTH,
   MOST_PATH_IDS,
   type OrganisationRequest,
   type PersonRequest,
+  TIME_ZONE_NAME,
+  TIME_ZONE_SOURCES,
 } from './infrastructure/activity-log.ts';
 export type { ActivityTables } from './infrastructure/tables.ts';

@@ -11,12 +11,14 @@
 // - One row a call, in a transaction of its own (the request's own is rolled
 //   back on a refusal), each statement limited to 10 seconds.
 // - What the API decides must be well formed, or nothing is written and it
-//   throws RangeError: a bug, never a row half true. The client's address and
-//   its place and time zone are L4's; until then they are left empty.
+//   throws RangeError: a bug, never a row half true.
+// - The client's clues (L4): its IP address, the approximate country and city
+//   that address is registered to, and a time zone, the browser's own report
+//   or the organisation's. Each may be missing; none is proof of anything.
 import { limitStatements, withTenant } from '@agentx/platform/db';
 import type { Kysely } from 'kysely';
 
-import { type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
+import { type IdGenerator, isIpAddress, UUID } from '../../../shared-kernel/index.ts';
 import type { ActivityTables } from './tables.ts';
 
 /** The methods a route is served on. */
@@ -28,6 +30,26 @@ export const MOST_PATH_IDS = 4;
 
 const ROUTE = /^\/[A-Za-z0-9/:_.-]{0,200}$/;
 const REASON = /^[A-Z][A-Z0-9_]{0,63}$/;
+const COUNTRY = /^[A-Z]{2}$/;
+/** A time zone's name as 0052 checks it; the API takes only a zone Intl knows (`timeZoneOf`) and this allows. */
+export const TIME_ZONE_NAME = /^[A-Za-z][A-Za-z0-9_+/-]{0,63}$/;
+/** The longest city kept, in UTF-16 units: never more characters than 0052 allows. */
+export const MOST_CITY_LENGTH = 120;
+/** Control characters and bidi controls, which could hide or reorder the line a city stands in. */
+const NOT_TEXT = /[\p{Cc}\p{Bidi_Control}]/u;
+
+/** Where a row's time zone came from. */
+export const TIME_ZONE_SOURCES = ['browser', 'organisation'] as const;
+
+/** What a request says of where its client may be: clues, never proof (decision 26). */
+export interface ClientClues {
+  /** Its IP address, as the trusted proxies' rule reads it; undefined when it couldn't be read. */
+  readonly ip: string | undefined;
+  /** The approximate place that address is registered to; undefined when none is known. */
+  readonly place: { readonly country: string; readonly city: string | undefined } | undefined;
+  /** The browser's own time zone, or else the organisation's; undefined for a person's row with none sent. */
+  readonly timeZone: { readonly name: string; readonly from: (typeof TIME_ZONE_SOURCES)[number] } | undefined;
+}
 
 /** What every row says of its request, whoever made it. */
 interface RequestFacts {
@@ -44,6 +66,7 @@ interface RequestFacts {
   readonly correlationId: string;
   /** How long it took to answer, in whole milliseconds. */
   readonly durationMs: number;
+  readonly client: ClientClues;
 }
 
 /** A request of a verified member or agent of one organisation. */
@@ -66,6 +89,22 @@ export interface ActivityLog {
   recordForPerson(db: Kysely<ActivityTables>, request: PersonRequest): Promise<void>;
 }
 
+/** Why a request's clues can't be written, if they can't. */
+function clueProblem({ ip, place, timeZone }: ClientClues): string | undefined {
+  if (ip !== undefined && !isIpAddress(ip)) return 'its client address is not an IP address';
+  if (place !== undefined) {
+    if (!COUNTRY.test(place.country)) return 'its country is not a two-letter code';
+    const { city } = place;
+    if (city !== undefined && (city.length === 0 || city.length > MOST_CITY_LENGTH || NOT_TEXT.test(city))) {
+      return `its city is not 1 to ${String(MOST_CITY_LENGTH)} characters of text`;
+    }
+  }
+  if (timeZone !== undefined && (!TIME_ZONE_NAME.test(timeZone.name) || !TIME_ZONE_SOURCES.includes(timeZone.from))) {
+    return 'its time zone is not a zone with where it came from';
+  }
+  return undefined;
+}
+
 /** Why a request's facts can't be written, if they can't. */
 function problemWith(facts: RequestFacts): string | undefined {
   if (!(facts.at instanceof Date) || Number.isNaN(facts.at.getTime())) return 'it has no time';
@@ -78,7 +117,7 @@ function problemWith(facts: RequestFacts): string | undefined {
   if (facts.reason !== undefined && !REASON.test(facts.reason)) return 'its reason is not a reason code';
   if (!UUID.test(facts.correlationId)) return 'its correlation ID is not a UUID';
   if (!Number.isSafeInteger(facts.durationMs) || facts.durationMs < 0) return 'its duration is not whole milliseconds';
-  return undefined;
+  return clueProblem(facts.client);
 }
 
 /** The columns both tables share, from facts already checked. */
@@ -92,11 +131,11 @@ const columnsOf = (id: string, facts: RequestFacts) => ({
   reason: facts.reason ?? null,
   correlation_id: facts.correlationId.toLowerCase(),
   duration_ms: facts.durationMs,
-  ip: null,
-  country: null,
-  city: null,
-  time_zone: null,
-  time_zone_from: null,
+  ip: facts.client.ip ?? null,
+  country: facts.client.place?.country ?? null,
+  city: facts.client.place?.city ?? null,
+  time_zone: facts.client.timeZone?.name ?? null,
+  time_zone_from: facts.client.timeZone?.from ?? null,
 });
 
 const refuse = (problem: string): never => {

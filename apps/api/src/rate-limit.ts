@@ -55,7 +55,7 @@ export function clientKey(ip: string | undefined): string {
 }
 
 /** The client's address as the trust rule reads it from the connection and its proxies' headers. */
-function rawClientIp(request: FastifyRequest, trust: ProxyTrust): string | undefined {
+export function rawClientIp(request: FastifyRequest, trust: ProxyTrust): string | undefined {
   // eslint-disable-next-line no-restricted-properties -- the connection's address, read and never written to
   return proxyAddr(request.raw, trust);
 }

@@ -56,7 +56,7 @@ const OUR_IMAGE = 'agentx-app:local';
 describe('SEC-SC-02 container images are pinned by digest', () => {
   it('finds the images (so the checks below are not vacuous)', () => {
     expect(Object.keys(compose).length).toBeGreaterThanOrEqual(5);
-    expect(dockerfile).toHaveLength(2);
+    expect(dockerfile).toHaveLength(3);
   });
 
   it('pins every third-party image in the compose stack', () => {
@@ -70,9 +70,17 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(imageProblems(Object.values(SCANNER_IMAGES))).toEqual([]);
   });
 
-  it('pins the base image of both Dockerfile stages, and uses the same one twice', () => {
+  it('pins the base image of every Dockerfile stage, and uses the same one for all', () => {
     expect(imageProblems(dockerfile)).toEqual([]);
     expect(new Set(dockerfile).size).toBe(1);
+  });
+
+  it('takes a file from the internet only by its SHA-256 (L4: the place file)', () => {
+    // Each instruction on one line: its continued lines joined.
+    const text = readFileSync(DOCKERFILE, 'utf8').replaceAll('\r\n', '\n').replaceAll('\\\n', ' ');
+    const downloads = text.split('\n').filter((line) => /^ADD\s/.test(line) && /https?:\/\//.test(line));
+    expect(downloads).not.toEqual([]);
+    for (const line of downloads) expect(line).toMatch(/^ADD\s+--checksum=sha256:[0-9a-f]{64}\s/);
   });
 
   it("ships no package manager, and the base image's Debian security updates, in the image that runs", () => {

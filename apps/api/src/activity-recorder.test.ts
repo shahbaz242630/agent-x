@@ -3,8 +3,10 @@
 // organisation (refused by role or passkey too), an agent's to its own, a
 // person's naming no organisation they are verified in to the person's, and
 // nothing for a caller not known. A row that can't be written never fails the
-// answer and is logged at error level. What the rows hold in the database is
-// the activity module's db test.
+// answer and is logged at error level. L4: each row's clues, the client's
+// address, its place and a time zone, the browser's or else the
+// organisation's (never the browser's for an agent). What the rows hold in
+// the database is the activity module's db test.
 import type { ActivityLog, ActivityTables, OrganisationRequest, PersonRequest } from '@agentx/core/modules/activity';
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
@@ -17,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import { type ActivitySink, activitySinkOf, pathIdsOf, reasonIn } from './activity-recorder.ts';
 import type { AuditLog } from './audit-log.ts';
+import { type PlaceOf, TIME_ZONE_HEADER } from './client-clues.ts';
 import type { ServerOptions } from './server.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
@@ -43,6 +46,12 @@ const KEY_ACCEPTED: AcceptedKey = {
   scopes: ['requests:read'],
   expiresAt: new Date('2099-12-28T09:00:00.000Z'),
 };
+
+/** Every address in 94.200.0.0/16 is Abu Dhabi's; no other has a place. */
+const PLACE_OF: PlaceOf = (address) =>
+  address.startsWith('94.200.') ? { country: 'AE', city: 'Abu Dhabi' } : undefined;
+
+const ORGANISATION_ZONE = { name: 'Asia/Dubai', from: 'organisation' } as const;
 
 const LOG: AuditLog = { page: () => Promise.resolve({ outcome: 'page', events: [], next: null, names: new Map() }) };
 
@@ -87,6 +96,7 @@ async function recording({
     logger: createLogger({ service: 'api', config, destination: capture }),
     checkAgentKey: (text) =>
       Promise.resolve(text === KEY ? { outcome: 'accepted', key: KEY_ACCEPTED } : { outcome: 'refused' }),
+    placeOf: PLACE_OF,
     ...routes,
   });
   return { app, rows, capture };
@@ -119,6 +129,8 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
       reason: undefined,
       correlationId: reply.headers['x-correlation-id'],
       durationMs: expect.any(Number) as number,
+      // The inject's own address, which has no place.
+      client: { ip: '127.0.0.1', place: undefined, timeZone: ORGANISATION_ZONE },
       orgId: ORG,
       actor: { type: 'user', id: LIVE.userId },
     });
@@ -300,6 +312,104 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
 
     await vi.waitFor(() => {
       expect(rows).toEqual([expect.objectContaining({ method: 'HEAD', route: '/v1/audit-log', orgId: ORG })]);
+    });
+  });
+});
+
+describe('the clues the recorder writes (L4)', () => {
+  it('writes a member’s address, its place and their browser’s zone', async () => {
+    const { app, rows } = await recording();
+    const request = asMember(LOG_URL);
+    await app.inject({
+      ...request,
+      remoteAddress: '94.200.12.34',
+      headers: { ...request.headers, [TIME_ZONE_HEADER]: 'europe/london' },
+    });
+
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({
+          orgId: ORG,
+          client: {
+            ip: '94.200.12.34',
+            place: { country: 'AE', city: 'Abu Dhabi' },
+            timeZone: { name: 'Europe/London', from: 'browser' },
+          },
+        }),
+      ]);
+    });
+  });
+
+  it('writes the organisation’s zone for a zone Intl doesn’t know', async () => {
+    const { app, rows } = await recording();
+    const request = asMember(LOG_URL);
+    await app.inject({ ...request, headers: { ...request.headers, [TIME_ZONE_HEADER]: 'Mars/Olympus_Mons' } });
+
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({ client: expect.objectContaining({ timeZone: ORGANISATION_ZONE }) as object }),
+      ]);
+    });
+  });
+
+  it('writes an agent’s row in the organisation’s zone, whatever it sends', async () => {
+    const { app, rows } = await recording();
+    await app.inject({
+      method: 'GET',
+      url: '/v1/agent',
+      remoteAddress: '94.200.1.1',
+      headers: { authorization: `Bearer ${KEY}`, [TIME_ZONE_HEADER]: 'Europe/London' },
+    });
+
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({
+          actor: { type: 'agent', id: AGENT_ID },
+          client: { ip: '94.200.1.1', place: { country: 'AE', city: 'Abu Dhabi' }, timeZone: ORGANISATION_ZONE },
+        }),
+      ]);
+    });
+  });
+
+  it('writes a person’s row with their browser’s zone, or none: it has no organisation’s', async () => {
+    const { app, rows } = await recording();
+    const session = {
+      method: 'GET',
+      url: '/v1/auth/session',
+      headers: { cookie: `${SESSION_COOKIE}=${COOKIE}` },
+    } as const;
+    await app.inject(session);
+    await app.inject({ ...session, headers: { ...session.headers, [TIME_ZONE_HEADER]: 'Asia/Karachi' } });
+
+    await vi.waitFor(() => {
+      expect(rows).toHaveLength(2);
+    });
+    expect(rows.map((row) => row.client.timeZone)).toEqual(
+      expect.arrayContaining([undefined, { name: 'Asia/Karachi', from: 'browser' }]),
+    );
+  });
+
+  it('writes no address and no place for an address that can’t be read as one', async () => {
+    const { app, rows } = await recording();
+    await app.inject({ ...asMember(LOG_URL), remoteAddress: '94.200.12.34.5' });
+
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({ client: expect.objectContaining({ ip: undefined, place: undefined }) as object }),
+      ]);
+    });
+  });
+
+  it('writes no place when the server has no place finder', async () => {
+    const { app, rows } = await recording({ placeOf: undefined });
+    await app.inject({ ...asMember(LOG_URL), remoteAddress: '94.200.12.34' });
+
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({
+          client: expect.objectContaining({ ip: '94.200.12.34', place: undefined }) as object,
+        }),
+      ]);
     });
   });
 });
