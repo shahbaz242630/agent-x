@@ -2072,6 +2072,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (alert: Mutable) => (criterion(alert).threshold = 5),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      // One number for the day, counts only: allowed for any alert, but it wouldn't name each kind.
+      (alert: Mutable) =>
+        Object.assign(criterion(alert), {
+          query: String(criterion(alert).query).replace('count() by Says', 'count()'),
+          dimensions: [],
+        }),
       (alert: Mutable) =>
         (criterion(alert).failingPeriods = { numberOfEvaluationPeriods: 2, minFailingPeriodsToAlert: 2 }),
     ]) {
