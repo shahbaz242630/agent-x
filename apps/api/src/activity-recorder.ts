@@ -92,30 +92,23 @@ interface ClueReading {
   readonly placeOf: PlaceOf | undefined;
 }
 
-/** Whose zone a row falls back to, and whether its caller may name its own. */
-interface ZoneRule {
-  readonly browser: boolean;
-  readonly organisation: boolean;
+/** Whose row it is: a member's or an agent's in their organisation, or a person's own. */
+type Caller = 'member' | 'agent' | 'person';
+
+const ORGANISATION_ZONE = { name: DEFAULT_TIME_ZONE, from: 'organisation' } as const;
+
+/** An agent's zone is the organisation's; a member's the browser's, else the organisation's; a person's the browser's, else none. */
+function zoneOf(request: FastifyRequest, caller: Caller): ClientClues['timeZone'] {
+  if (caller === 'agent') return ORGANISATION_ZONE;
+  const sent = timeZoneSent(request.headers[TIME_ZONE_HEADER]);
+  if (sent !== undefined) return { name: sent, from: 'browser' };
+  return caller === 'member' ? ORGANISATION_ZONE : undefined;
 }
 
-const MEMBER_ZONE: ZoneRule = { browser: true, organisation: true };
-const AGENT_ZONE: ZoneRule = { browser: false, organisation: true };
-const PERSON_ZONE: ZoneRule = { browser: true, organisation: false };
-
 /** Where the request's client may be: clues, never proof. */
-function cluesOf(request: FastifyRequest, { trust, placeOf }: ClueReading, zone: ZoneRule): ClientClues {
+function cluesOf(request: FastifyRequest, { trust, placeOf }: ClueReading, caller: Caller): ClientClues {
   const ip = clientAddress(rawClientIp(request, trust));
-  const sent = zone.browser ? timeZoneSent(request.headers[TIME_ZONE_HEADER]) : undefined;
-  return {
-    ip,
-    place: ip === undefined ? undefined : placeOf?.(ip),
-    timeZone:
-      sent !== undefined
-        ? { name: sent, from: 'browser' }
-        : zone.organisation
-          ? { name: DEFAULT_TIME_ZONE, from: 'organisation' }
-          : undefined,
-  };
+  return { ip, place: ip === undefined ? undefined : placeOf?.(ip), timeZone: zoneOf(request, caller) };
 }
 
 /** What every row says of the request; undefined for one that isn't a route's, or on a method no route is served on. */
@@ -148,7 +141,7 @@ function rowFor(
   if (agent !== null) {
     return sink.forOrganisation({
       ...facts,
-      client: cluesOf(request, reading, AGENT_ZONE),
+      client: cluesOf(request, reading, 'agent'),
       orgId: agent.orgId,
       actor: { type: 'agent', id: agent.agentId },
     });
@@ -158,7 +151,7 @@ function rowFor(
   if (orgId !== null) {
     return sink.forOrganisation({
       ...facts,
-      client: cluesOf(request, reading, MEMBER_ZONE),
+      client: cluesOf(request, reading, 'member'),
       orgId,
       actor: { type: 'user', id: person.userId },
     });
@@ -166,7 +159,7 @@ function rowFor(
   const claimedOrg = claimedOrgOf(request.headers[ORGANIZATION_HEADER]);
   return sink.forPerson({
     ...facts,
-    client: cluesOf(request, reading, PERSON_ZONE),
+    client: cluesOf(request, reading, 'person'),
     userId: person.userId,
     claimedOrg,
   });
@@ -180,7 +173,8 @@ export function registerActivityLog(
   if (sink === undefined) return;
   const writing = new Set<Promise<void>>();
   app.addHook('onResponse', async (request, reply) => {
-    const written = rowFor(request, reply, sink, reading)?.catch((error: unknown) => {
+    // Inside an async call, so a clue that throws is a write failure like any other, logged.
+    const written = (async () => rowFor(request, reply, sink, reading))().catch((error: unknown) => {
       // Never the error's text: a database's may quote the row. Its kind and where are enough to look.
       logger.child({ correlationId: request.id }).error('access_log.write_failed', {
         route: request.routeOptions.url,
@@ -188,7 +182,6 @@ export function registerActivityLog(
         malformed: error instanceof RangeError,
       });
     });
-    if (written === undefined) return;
     writing.add(written);
     try {
       await written;

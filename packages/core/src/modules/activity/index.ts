@@ -6,12 +6,13 @@ export {
   ACTIVITY_METHODS,
   type ActivityLog,
   type ClientClues,
+  type ClientPlace,
+  COUNTRY_CODE,
   createActivityLog,
   MOST_CITY_LENGTH,
   MOST_PATH_IDS,
   type OrganisationRequest,
   type PersonRequest,
   TIME_ZONE_NAME,
-  TIME_ZONE_SOURCES,
 } from './infrastructure/activity-log.ts';
 export type { ActivityTables } from './infrastructure/tables.ts';

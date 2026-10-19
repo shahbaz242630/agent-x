@@ -68,7 +68,8 @@ COPY apps/operator apps/operator
 COPY packages/core packages/core
 COPY packages/platform packages/platform
 COPY db db
-COPY --from=places /places/dbip-city-lite.mmdb geo/dbip-city-lite.mmdb
+# Read-only to all: a downloaded file is root's alone (0600), and the API runs as node.
+COPY --from=places --chmod=0444 /places/dbip-city-lite.mmdb geo/dbip-city-lite.mmdb
 
 # Every AGENTX_ setting but the release comes from the deployment (compose,
 # Azure): each job refuses the others' settings, so the image sets none.

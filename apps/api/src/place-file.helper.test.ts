@@ -13,15 +13,11 @@ export interface PlaceNetwork {
 type DataType = 'map' | 'string' | 'uint32' | 'uint64' | 'array' | 'boolean';
 const TYPE_NUMBER: Record<DataType, number> = { string: 2, uint32: 6, map: 7, uint64: 9, array: 11, boolean: 14 };
 
-/** A field's control bytes: its type, then its size in the format's own variable length. */
+/** A field's control bytes: its type and its size, which the tests keep under 29 (one byte). */
 function control(type: DataType, size: number): Buffer {
+  if (size >= 29) throw new RangeError('the place file holds fields of under 29 bytes or entries');
   const number = TYPE_NUMBER[type];
-  const typeBits = number <= 7 ? number << 5 : 0;
-  const extended = number <= 7 ? [] : [number - 7];
-  if (size < 29) return Buffer.from([typeBits | size, ...extended]);
-  if (size < 285) return Buffer.from([typeBits | 29, ...extended, size - 29]);
-  const rest = size - 285;
-  return Buffer.from([typeBits | 30, ...extended, rest >> 8, rest & 0xff]);
+  return number <= 7 ? Buffer.from([(number << 5) | size]) : Buffer.from([size, number - 7]);
 }
 
 /** A whole number in as few big-endian bytes as it takes: a bigint as uint64, a number as uint32. */
@@ -56,11 +52,8 @@ function bitsOf(network: string): { readonly bits: boolean[]; readonly prefix: n
   if (address.includes(':')) {
     const [head = '', tail = ''] = address.split('::');
     const groups = (part: string) => (part === '' ? [] : part.split(':').map((group) => Number.parseInt(group, 16)));
-    const written = [
-      ...groups(head),
-      ...Array<number>(8 - groups(head).length - groups(tail).length).fill(0),
-      ...groups(tail),
-    ];
+    const [first, last] = [groups(head), groups(tail)];
+    const written = [...first, ...Array<number>(8 - first.length - last.length).fill(0), ...last];
     written.forEach((group, index) => {
       bytes[index * 2] = group >> 8;
       bytes[index * 2 + 1] = group & 0xff;
@@ -102,8 +95,12 @@ export function placeFile(networks: readonly PlaceNetwork[], databaseType = 'DBI
     dataLength += bytes.length;
   }
   const nodeCount = tree.length;
-  const value = (branch: Branch) =>
-    branch === undefined ? nodeCount : 'node' in branch ? branch.node : nodeCount + 16 + branch.data;
+  /** A record's number: a node's, the count for nothing, past the count and the separator for a record. */
+  const value = (branch: Branch): number => {
+    if (branch === undefined) return nodeCount;
+    if ('node' in branch) return branch.node;
+    return nodeCount + 16 + branch.data;
+  };
   const search = Buffer.alloc(nodeCount * 6);
   tree.forEach(([left, right], index) => {
     search.writeUIntBE(value(left), index * 6, 3);

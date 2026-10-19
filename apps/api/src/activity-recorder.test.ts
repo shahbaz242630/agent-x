@@ -400,6 +400,22 @@ describe('the clues the recorder writes (L4)', () => {
     });
   });
 
+  it('logs a row whose place couldn’t be found as one that couldn’t be written', async () => {
+    const { app, capture } = await recording({
+      placeOf: () => {
+        throw new Error('a broken record');
+      },
+    });
+    const reply = await app.inject(asMember(LOG_URL));
+
+    expect(reply.statusCode).toBe(200);
+    await vi.waitFor(() => {
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({ level: 'error', event: 'access_log.write_failed', malformed: false }),
+      );
+    });
+  });
+
   it('writes no place when the server has no place finder', async () => {
     const { app, rows } = await recording({ placeOf: undefined });
     await app.inject({ ...asMember(LOG_URL), remoteAddress: '94.200.12.34' });

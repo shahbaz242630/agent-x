@@ -83,6 +83,12 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     for (const line of downloads) expect(line).toMatch(/^ADD\s+--checksum=sha256:[0-9a-f]{64}\s/);
   });
 
+  it('copies the place file into the image readable by the API’s user (L4: a download is root’s alone)', () => {
+    const text = readFileSync(DOCKERFILE, 'utf8');
+    expect(text).toMatch(/^COPY --from=places --chmod=0444 \S+ geo\/dbip-city-lite\.mmdb$/m);
+    expect(text).toMatch(/^USER node$/m);
+  });
+
   it("ships no package manager, and the base image's Debian security updates, in the image that runs", () => {
     const text = readFileSync(DOCKERFILE, 'utf8').replaceAll('\r\n', '\n');
     const runtime = text.slice(text.lastIndexOf('\nFROM '));

@@ -14,8 +14,8 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { MOST_CITY_LENGTH, TIME_ZONE_NAME } from '@agentx/core/modules/activity';
-import { isIpAddress, timeZoneOf } from '@agentx/core/shared-kernel';
+import { type ClientPlace, COUNTRY_CODE, MOST_CITY_LENGTH, TIME_ZONE_NAME } from '@agentx/core/modules/activity';
+import { isIpAddress, plainLine, timeZoneOf } from '@agentx/core/shared-kernel';
 import { type Environment, LOCAL_ONLY } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
 import { Reader } from 'mmdb-lib';
@@ -29,20 +29,11 @@ const PLACE_DATABASE_TYPE = 'DBIP-City-Lite';
 /** The header a browser names its time zone in. */
 export const TIME_ZONE_HEADER = 'x-time-zone';
 
-/** The approximate place an address is registered to. */
-export interface Place {
-  readonly country: string;
-  readonly city: string | undefined;
-}
-
 /** The place an IP address is registered to, or undefined when none is known. */
-export type PlaceOf = (address: string) => Place | undefined;
+export type PlaceOf = (address: string) => ClientPlace | undefined;
 
-const COUNTRY = /^[A-Z]{2}$/;
 /** DB-IP's code for a country not known. */
 const NO_COUNTRY = 'ZZ';
-/** Control characters and bidi controls: a city can't hide or reorder the line it stands in. */
-const NOT_TEXT = /[\p{Cc}\p{Bidi_Control}]/gu;
 
 /** The text at a path through a record, if there is text there. */
 function textAt(record: unknown, ...path: readonly string[]): string | undefined {
@@ -55,16 +46,12 @@ function textAt(record: unknown, ...path: readonly string[]): string | undefined
 }
 
 /** A city's English name as one line of plain text, or undefined for none, or one too long to keep. */
-export function cityName(value: string | undefined): string | undefined {
-  if (value?.isWellFormed() !== true) return undefined;
-  const name = value.replace(NOT_TEXT, ' ').replace(/\s+/g, ' ').trim();
-  return name.length === 0 || name.length > MOST_CITY_LENGTH ? undefined : name;
-}
+export const cityName = (value: unknown): string | undefined => plainLine(value, MOST_CITY_LENGTH);
 
 /** The place a record names: its country by ISO code, and its city when it names one. */
-export function placeIn(record: unknown): Place | undefined {
+export function placeIn(record: unknown): ClientPlace | undefined {
   const country = textAt(record, 'country', 'iso_code');
-  if (country === undefined || !COUNTRY.test(country) || country === NO_COUNTRY) return undefined;
+  if (country === undefined || !COUNTRY_CODE.test(country) || country === NO_COUNTRY) return undefined;
   return { country, city: cityName(textAt(record, 'city', 'names', 'en')) };
 }
 
@@ -110,6 +97,7 @@ export async function loadPlaces(
 
 /** The time zone a request's browser named, as Intl names it, or undefined for none or one it doesn't know. */
 export function timeZoneSent(header: string | string[] | undefined): string | undefined {
+  // TIME_ZONE_NAME's own limit, before Intl is handed any amount of text.
   if (typeof header !== 'string' || header.length > 64) return undefined;
   const zone = timeZoneOf(header);
   return zone !== undefined && TIME_ZONE_NAME.test(zone) ? zone : undefined;

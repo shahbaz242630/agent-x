@@ -18,7 +18,7 @@
 import { limitStatements, withTenant } from '@agentx/platform/db';
 import type { Kysely } from 'kysely';
 
-import { type IdGenerator, isIpAddress, UUID } from '../../../shared-kernel/index.ts';
+import { type IdGenerator, isIpAddress, plainLine, UUID } from '../../../shared-kernel/index.ts';
 import type { ActivityTables } from './tables.ts';
 
 /** The methods a route is served on. */
@@ -30,23 +30,28 @@ export const MOST_PATH_IDS = 4;
 
 const ROUTE = /^\/[A-Za-z0-9/:_.-]{0,200}$/;
 const REASON = /^[A-Z][A-Z0-9_]{0,63}$/;
-const COUNTRY = /^[A-Z]{2}$/;
+/** A country by its ISO 3166 code. */
+export const COUNTRY_CODE = /^[A-Z]{2}$/;
 /** A time zone's name as 0052 checks it; the API takes only a zone Intl knows (`timeZoneOf`) and this allows. */
 export const TIME_ZONE_NAME = /^[A-Za-z][A-Za-z0-9_+/-]{0,63}$/;
 /** The longest city kept, in UTF-16 units: never more characters than 0052 allows. */
 export const MOST_CITY_LENGTH = 120;
-/** Control characters and bidi controls, which could hide or reorder the line a city stands in. */
-const NOT_TEXT = /[\p{Cc}\p{Bidi_Control}]/u;
 
 /** Where a row's time zone came from. */
-export const TIME_ZONE_SOURCES = ['browser', 'organisation'] as const;
+const TIME_ZONE_SOURCES = ['browser', 'organisation'] as const;
+
+/** The approximate place a client's address is registered to. */
+export interface ClientPlace {
+  readonly country: string;
+  readonly city: string | undefined;
+}
 
 /** What a request says of where its client may be: clues, never proof (decision 26). */
 export interface ClientClues {
   /** Its IP address, as the trusted proxies' rule reads it; undefined when it couldn't be read. */
   readonly ip: string | undefined;
   /** The approximate place that address is registered to; undefined when none is known. */
-  readonly place: { readonly country: string; readonly city: string | undefined } | undefined;
+  readonly place: ClientPlace | undefined;
   /** The browser's own time zone, or else the organisation's; undefined for a person's row with none sent. */
   readonly timeZone: { readonly name: string; readonly from: (typeof TIME_ZONE_SOURCES)[number] } | undefined;
 }
@@ -93,9 +98,9 @@ export interface ActivityLog {
 function clueProblem({ ip, place, timeZone }: ClientClues): string | undefined {
   if (ip !== undefined && !isIpAddress(ip)) return 'its client address is not an IP address';
   if (place !== undefined) {
-    if (!COUNTRY.test(place.country)) return 'its country is not a two-letter code';
+    if (!COUNTRY_CODE.test(place.country)) return 'its country is not a two-letter code';
     const { city } = place;
-    if (city !== undefined && (city.length === 0 || city.length > MOST_CITY_LENGTH || NOT_TEXT.test(city))) {
+    if (city !== undefined && plainLine(city, MOST_CITY_LENGTH) !== city) {
       return `its city is not 1 to ${String(MOST_CITY_LENGTH)} characters of text`;
     }
   }
