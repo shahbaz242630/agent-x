@@ -674,7 +674,7 @@ export async function lockChainHead(tx: AuditTransaction, orgId: string): Promis
  * ID, sealed with it, so the activity log's row for the request and the events
  * it wrote link (ADR-011 §7). Only the trail adds it, never a caller.
  */
-export const CORRELATION_DETAIL = 'correlationId';
+const CORRELATION_DETAIL = 'correlationId';
 
 export function createAuditTrail({
   keys,
