@@ -41,7 +41,8 @@ FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584
 ADD --checksum=sha256:c839d407f85a1e0bddba354cef16b2c398182d1c34ed8d985555dce134b36b14 \
   https://github.com/shahbaz242630/agent-x/releases/download/geoip-dbip-city-lite-2026-10/dbip-city-lite-2026-10.mmdb.gz \
   /places/dbip-city-lite.mmdb.gz
-RUN gzip --decompress /places/dbip-city-lite.mmdb.gz
+# Read-only to all: a download is root's alone (0600), and the API runs as node.
+RUN gzip --decompress /places/dbip-city-lite.mmdb.gz && chmod 0444 /places/dbip-city-lite.mmdb
 
 FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe
 
@@ -68,8 +69,8 @@ COPY apps/operator apps/operator
 COPY packages/core packages/core
 COPY packages/platform packages/platform
 COPY db db
-# Read-only to all: a downloaded file is root's alone (0600), and the API runs as node.
-COPY --from=places --chmod=0444 /places/dbip-city-lite.mmdb geo/dbip-city-lite.mmdb
+# The file keeps its mode; COPY's --chmod would set the new geo folder's too, and nothing could open it.
+COPY --from=places /places/dbip-city-lite.mmdb geo/dbip-city-lite.mmdb
 
 # Every AGENTX_ setting but the release comes from the deployment (compose,
 # Azure): each job refuses the others' settings, so the image sets none.

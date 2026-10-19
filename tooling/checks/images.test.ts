@@ -85,7 +85,9 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
 
   it('copies the place file into the image readable by the API’s user (L4: a download is root’s alone)', () => {
     const text = readFileSync(DOCKERFILE, 'utf8');
-    expect(text).toMatch(/^COPY --from=places --chmod=0444 \S+ geo\/dbip-city-lite\.mmdb$/m);
+    expect(text).toMatch(/^RUN gzip --decompress \S+ && chmod 0444 \/places\/dbip-city-lite\.mmdb$/m);
+    // --chmod would also close the folder it makes (S127, tried in a local build).
+    expect(text).toMatch(/^COPY --from=places \/places\/dbip-city-lite\.mmdb geo\/dbip-city-lite\.mmdb$/m);
     expect(text).toMatch(/^USER node$/m);
   });
 
