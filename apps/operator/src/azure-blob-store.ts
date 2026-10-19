@@ -4,10 +4,8 @@
 // as the operator job's own managed identity. Shared keys are off on the
 // account, so a token is the only way in.
 //
-// - The token: asked of the identity endpoint Azure serves inside the
-//   container, with the header Azure gives the process, for the storage
-//   resource and the job's identity (its client ID). Neither the header nor
-//   the token is ever logged, nor kept past the write.
+// - The token: the job's identity's, asked as every store on the blob
+//   service asks it (@agentx/platform/storage), never logged or kept.
 // - The write: one Put Blob, whole, never over a blob there already
 //   (`If-None-Match: *`; Azure answers 403 UnauthorizedBlobOverwrite, as the
 //   writer role may add a blob but never write over one), the service
@@ -19,17 +17,18 @@
 import { createHash } from 'node:crypto';
 
 import type { OutboundFetch } from '@agentx/platform/outbound';
+import {
+  BLOB_API_VERSION,
+  blobErrorCode,
+  blobServiceToken,
+  BlobStoreFailed,
+  type AzureBlobSettings,
+} from '@agentx/platform/storage';
 
 import type { EvidenceStore } from './evidence-store.ts';
 
-/** The resource a token for Azure's blob service is asked for. */
-const STORAGE_RESOURCE = 'https://storage.azure.com/';
-
-/** The identity endpoint's API version in Container Apps (Microsoft). */
-const IDENTITY_API_VERSION = '2019-08-01';
-
-/** The blob service's API version every write names. */
-const BLOB_API_VERSION = '2024-11-04';
+/** What a failure names: this store. */
+const STORE = 'evidence store';
 
 /** How long one call may take: a file of 10,000 events is about 20 MB. */
 const CALL_TIMEOUT_MS = 120_000;
@@ -49,40 +48,6 @@ const ALREADY_THERE: ReadonlySet<string> = new Set([
   '412 ConditionNotMet',
 ]);
 
-export interface AzureBlobSettings {
-  readonly url: string;
-  readonly clientId: string;
-  readonly identityEndpoint: string;
-  /** Never logged. */
-  readonly identityHeader: string;
-}
-
-/** A call to the identity endpoint or the blob service that didn't do what was asked: its status and Azure's code. */
-class EvidenceStoreFailed extends Error {
-  constructor(what: string) {
-    super(`The evidence store failed: ${what}`);
-    this.name = 'EvidenceStoreFailed';
-  }
-}
-
-/** Azure's error code from an answer's header, if it is a plain constant. */
-const errorCodeOf = (response: Response): string => {
-  const code = response.headers.get('x-ms-error-code') ?? '';
-  return /^[A-Za-z]{1,64}$/.test(code) ? code : 'no code';
-};
-
-/** The token's value in the identity endpoint's answer, or undefined for an answer that has none. */
-const tokenIn = (body: unknown): string | undefined =>
-  typeof body === 'object' && body !== null && 'access_token' in body && typeof body.access_token === 'string'
-    ? body.access_token
-    : undefined;
-
-/** The origins the store calls, for its outbound allowlist: the identity endpoint's and the container's. */
-export const azureBlobOrigins = ({ url, identityEndpoint }: AzureBlobSettings): readonly string[] => [
-  new URL(identityEndpoint).origin,
-  new URL(url).origin,
-];
-
 export function azureBlobStore({
   settings,
   fetch,
@@ -90,32 +55,10 @@ export function azureBlobStore({
   readonly settings: AzureBlobSettings;
   readonly fetch: OutboundFetch;
 }): EvidenceStore {
-  const { url, clientId, identityEndpoint, identityHeader } = settings;
-
-  /** A token for the blob service, as the job's managed identity. */
-  const token = async (): Promise<string> => {
-    const asked = new URL(identityEndpoint);
-    asked.searchParams.set('api-version', IDENTITY_API_VERSION);
-    asked.searchParams.set('resource', STORAGE_RESOURCE);
-    asked.searchParams.set('client_id', clientId);
-    const response = await fetch(asked, {
-      headers: { 'x-identity-header': identityHeader },
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new EvidenceStoreFailed(`the identity endpoint answered ${String(response.status)}`);
-    }
-    // An answer that isn't JSON is one without a token: the parser's error would quote it.
-    const found = tokenIn(await response.json().catch(() => undefined));
-    if (found === undefined) throw new EvidenceStoreFailed("the identity endpoint's answer holds no token");
-    return found;
-  };
-
   return {
     async put(name, content) {
-      const bearer = await token();
-      const response = await fetch(`${url}/${name}`, {
+      const bearer = await blobServiceToken(settings, fetch, { store: STORE, timeoutMs: CALL_TIMEOUT_MS });
+      const response = await fetch(`${settings.url}/${name}`, {
         method: 'PUT',
         headers: {
           authorization: `Bearer ${bearer}`,
@@ -133,9 +76,9 @@ export function azureBlobStore({
       // Nothing of the answer is read but its status and code.
       await response.body?.cancel();
       if (response.status === 201) return 'written';
-      const code = errorCodeOf(response);
+      const code = blobErrorCode(response);
       if (ALREADY_THERE.has(`${String(response.status)} ${code}`)) return 'there_already';
-      throw new EvidenceStoreFailed(`the blob service answered ${String(response.status)} (${code})`);
+      throw new BlobStoreFailed(STORE, `the blob service answered ${String(response.status)} (${code})`);
     },
   };
 }

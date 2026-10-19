@@ -9,7 +9,8 @@
     "./db": "./src/db/index.ts",
     "./keys": "./src/keys/index.ts",
     "./observability": "./src/observability/index.ts",
-    "./outbound": "./src/outbound/index.ts"
+    "./outbound": "./src/outbound/index.ts",
+    "./storage": "./src/storage/index.ts"
   },
   "dependencies": {
     "kysely": "0.29.6",

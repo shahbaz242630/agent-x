@@ -59,9 +59,10 @@ import {
   type Output,
 } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
+import { azureBlobOrigins } from '@agentx/platform/storage';
 
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
-import { azureBlobOrigins, azureBlobStore } from './azure-blob-store.ts';
+import { azureBlobStore } from './azure-blob-store.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';

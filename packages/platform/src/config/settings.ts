@@ -298,6 +298,11 @@ const SETTINGS = {
   // Deployed, the write-once container in the UAE (E10c-3), written as the operator job's own managed identity.
   AGENTX_EVIDENCE_CONTAINER_URL: { schema: blobContainer.optional() },
   AGENTX_EVIDENCE_CLIENT_ID: { schema: clientId.optional() },
+  // Where the activity log's background downloads are kept (Phase 3 L5c, partner decision 31): a local folder in
+  // development and test; deployed, a container in the UAE written and read as the API's own managed identity.
+  AGENTX_ACTIVITY_DOWNLOADS_DIR: { schema: mountedFolder.optional() },
+  AGENTX_ACTIVITY_DOWNLOADS_URL: { schema: blobContainer.optional() },
+  AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID: { schema: clientId.optional() },
   AGENTX_DB_PORT: { schema: wholeNumber({ min: 1, max: 65_535 }), default: '5432' },
   AGENTX_DB_NAME: { schema: identifier, default: 'agentx' },
   AGENTX_DB_TLS: { schema: tlsMode, default: 'verify-full' },
@@ -377,6 +382,9 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_PARTNER_MODE',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
       'AGENTX_AUDIT_ANCHOR_SECONDS',
+      'AGENTX_ACTIVITY_DOWNLOADS_DIR',
+      'AGENTX_ACTIVITY_DOWNLOADS_URL',
+      'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
       'AGENTX_KEYS_DIR',
       'AGENTX_KEYS_CURRENT',
       ...LOCATION,

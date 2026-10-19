@@ -6,7 +6,9 @@ import { createHash } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { azureBlobOrigins, azureBlobStore, type AzureBlobSettings } from './azure-blob-store.ts';
+import { azureBlobOrigins, type AzureBlobSettings } from '@agentx/platform/storage';
+
+import { azureBlobStore } from './azure-blob-store.ts';
 
 /** Plain words, so secret scanners ignore them. */
 const HEADER = 'identity header for these tests';
@@ -114,7 +116,7 @@ describe('E10c-3 the write-once container', () => {
 
     const failure = await store.put(NAME, CONTENT).catch((error: unknown) => error);
 
-    expect(failure).toMatchObject({ name: 'EvidenceStoreFailed', message: `The evidence store failed: ${said}` });
+    expect(failure).toMatchObject({ name: 'BlobStoreFailed', message: `The evidence store failed: ${said}` });
     expect(String(failure)).not.toContain(ISSUED);
     expect(String(failure)).not.toContain(NAME);
   });
