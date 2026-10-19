@@ -249,6 +249,48 @@ describe('recording audit events (ADR-011 §3)', () => {
   });
 });
 
+describe("the request's correlation ID, sealed into its events (ADR-011 §7)", () => {
+  const CORRELATION = '0199a0f0-0000-7000-8000-00000000c0de';
+
+  it('seals it in lower case into the details of every event the trail records, and the chain checks out', async () => {
+    const linked = createAuditTrail({ keys, ids, correlationId: CORRELATION.toUpperCase() });
+    await withTenant(app, org, async (tx) => {
+      await linked.record(tx, org, event(1));
+      await linked.record(tx, org, { ...event(2), details: { zeta: 'z' } });
+    });
+    const rows = await attacker.query('select details from audit.events where org_id = $1 order by seq', [org]);
+
+    expect(rows).toEqual([
+      { details: `{"correlationId":"${CORRELATION}","step":1}` },
+      { details: `{"correlationId":"${CORRELATION}","zeta":"z"}` },
+    ]);
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 2n });
+  });
+
+  it('adds nothing for a trail made without one', async () => {
+    await record(org, event(1));
+    const [row] = await attacker.query('select details from audit.events where org_id = $1', [org]);
+
+    expect(row).toEqual({ details: '{"step":1}' });
+  });
+
+  it('refuses a correlation ID from a caller, with the trail’s own or without, and writes nothing', async () => {
+    const forged = { ...event(1), details: { correlationId: CORRELATION } };
+    const refusal = new AuditEventRefused(["details.correlationId is the request's own, added by the trail alone"]);
+    const linked = createAuditTrail({ keys, ids, correlationId: CORRELATION });
+
+    await expect(record(org, forged)).rejects.toThrow(refusal);
+    await expect(withTenant(app, org, (tx) => linked.record(tx, org, forged))).rejects.toThrow(refusal);
+    expect(await attacker.query('select 1 from audit.events where org_id = $1', [org])).toEqual([]);
+  });
+
+  it('refuses to make a trail sealing a correlation ID that is not a UUID', () => {
+    expect(() => createAuditTrail({ keys, ids, correlationId: 'request-1' })).toThrow(
+      new TypeError('A correlation ID sealed into the audit log must be a UUID'),
+    );
+  });
+});
+
 describe('the tenant walls (SEC-TEN-01 on the audit tables)', () => {
   it("keeps one organisation's chain out of another's sight", async () => {
     await record(org, event(1), event(2));

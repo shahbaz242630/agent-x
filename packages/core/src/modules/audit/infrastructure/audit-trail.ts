@@ -669,7 +669,28 @@ export async function lockChainHead(tx: AuditTransaction, orgId: string): Promis
   await tx.selectFrom('audit.heads').select('seq').where('org_id', '=', chain.orgId).forNoKeyUpdate().execute();
 }
 
-export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; readonly ids: IdGenerator }): AuditTrail {
+/**
+ * The detail every event a request records carries: the request's correlation
+ * ID, sealed with it, so the activity log's row for the request and the events
+ * it wrote link (ADR-011 §7). Only the trail adds it, never a caller.
+ */
+export const CORRELATION_DETAIL = 'correlationId';
+
+export function createAuditTrail({
+  keys,
+  ids,
+  correlationId,
+}: {
+  readonly keys: KeyProvider;
+  readonly ids: IdGenerator;
+  /** The request's or job's correlation ID (a UUID), sealed into each event's details; none when left out. */
+  readonly correlationId?: string | undefined;
+}): AuditTrail {
+  if (correlationId !== undefined && !UUID.test(correlationId)) {
+    throw new TypeError('A correlation ID sealed into the audit log must be a UUID');
+  }
+  const sealedCorrelation = correlationId?.toLowerCase();
+
   /** Records the event, which must be about the integrity hold when `hold` says so, and otherwise must not. */
   const recordAs = async (
     hold: boolean,
@@ -678,6 +699,9 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     input: AuditEvent,
   ): Promise<RecordedAuditEvent> => {
     const event = checkedEvent(input, hidesField);
+    if (Object.hasOwn(event.details, CORRELATION_DETAIL)) {
+      throw new AuditEventRefused([`details.${CORRELATION_DETAIL} is the request's own, added by the trail alone`]);
+    }
     if (HOLD_SUBJECTS.has(event.subject.type) !== hold) {
       throw new AuditEventRefused([
         hold
@@ -691,7 +715,9 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       ]);
     }
     const chain = chainOf(orgId);
-    const details = canonicalDetails(event.details);
+    const details = canonicalDetails(
+      sealedCorrelation === undefined ? event.details : { ...event.details, [CORRELATION_DETAIL]: sealedCorrelation },
+    );
     const sealed = await appendEvent(keys, chain, writerFor(tx, chain.orgId, event, details), {
       nextId: () => ids.next(),
       content: eventContent(event, details),

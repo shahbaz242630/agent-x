@@ -200,6 +200,34 @@ describe(`withSignedStates: the integrity hold follows every tamper sign (B1b, P
     expect(lines('audit.integrity_hold_set')).toEqual([]);
   });
 
+  it("seals the request's correlation ID into the work's events, and into a hold it sets (ADR-011 §7)", async () => {
+    const correlationId = '0199a0f0-0000-7000-8000-00000000c0d1';
+    const linked = { ...services(), correlationId };
+    await newAgent();
+    const id = newId();
+    await withSignedStates(app, org, linked, (tx, states) => insertAgent(tx, states, id));
+    await flip(id);
+    await withSignedStates(app, org, linked, (tx, states) =>
+      states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change'),
+    );
+    const rows = await attacker.query<{ action: string; details: string }>(
+      'select action, details from audit.events where org_id = $1 order by seq',
+      [org],
+    );
+    const linkedTo = rows.map(({ action, details }) => [
+      action,
+      (JSON.parse(details) as Record<string, unknown>).correlationId,
+    ]);
+
+    expect(linkedTo).toEqual([
+      ['agent.created', undefined],
+      ['integrity_hold.created', undefined],
+      ['agent.created', undefined],
+      ['agent.created', correlationId],
+      ['integrity_hold.set', correlationId],
+    ]);
+  });
+
   it('limits each of the work’s statements to the request’s time, as a hung read must give its connection back', async () => {
     const limit = await inOrg(async (tx) => {
       const { rows } = await sql<{

@@ -252,7 +252,7 @@ export function createAuditLogExports({
         }
         const range = await eventsInRange(tx, member.orgId, asked);
         if (range.events > mostEvents) throw new AuditLogRefused(409, 'AUDIT_EXPORT_TOO_LARGE');
-        const recorded = await trail.record(tx, member.orgId, {
+        const recorded = await createAuditTrail({ keys, ids, correlationId }).record(tx, member.orgId, {
           actor,
           action: AUDIT_LOG_EXPORTED,
           subject: { type: 'audit_log', id: member.orgId, version: 1 },

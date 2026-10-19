@@ -319,7 +319,7 @@ export function mandateWorld({
         w.admin,
         keyed(w.admin, DRAFT_OPERATION),
         { agentId: w.agent, timeZone: 'Asia/Dubai', splitWindowHours: 24, terms: termsOf(w, overrides), overLimit },
-        'test-correlation',
+        '0199a0f0-0000-7000-8000-00000000c0aa',
       ),
     );
     return { id: write.mandate.id, versionId: write.pending?.version.id ?? '' };
