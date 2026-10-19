@@ -210,9 +210,10 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     expect((await sealsOf(w)).map((seal) => seal.day)).toEqual(['2026-10-20']);
   });
 
-  it('FX-RACE a day that moved while it was digested: left unsealed this run, warned in plain words', async () => {
+  it('FX-RACE a day that moved while it was digested: left unsealed, and the run stops there, no day skipped', async () => {
     const w = await world();
-    await written(w, '2026-10-20T09:00:00.000Z');
+    await written(w, '2026-10-19T09:00:00.000Z');
+    // The 20th is closed too: a run that went on past the 19th would seal it, and never the 19th.
     clock.advanceBy(60_000);
     const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
     const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
@@ -225,17 +226,20 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     await held;
     const run = within(20_000, sealFor(w).run(), 'the run');
     await waitUntilQueued(database.as('admin'), 1);
-    await written(w, '2026-10-20T10:00:00.000Z');
+    await written(w, '2026-10-19T10:00:00.000Z');
     open(undefined);
 
     await other;
     await run;
     expect(await sealsOf(w)).toEqual([]);
     expect(capture.lines().filter((line) => line.event === 'access_log_seal.moved')).toEqual([
-      expect.objectContaining({ level: 'warn', day: '2026-10-20', digested: 1, counted: 2 }),
+      expect.objectContaining({ level: 'warn', day: '2026-10-19', digested: 1, counted: 2 }),
     ]);
     await sealFor(w).run();
-    expect((await sealsOf(w)).map((seal) => [seal.day, seal.requests])).toEqual([['2026-10-20', 2]]);
+    expect((await sealsOf(w)).map((seal) => [seal.day, seal.requests])).toEqual([
+      ['2026-10-19', 2],
+      ['2026-10-20', 0],
+    ]);
   });
 
   it('seals nothing once stopped, and logs an organisation that fails, going on to the next', async () => {
@@ -262,7 +266,7 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     expect((await sealsOf(w)).map((seal) => seal.day)).toEqual(['2026-10-19']);
   });
 
-  it('seals nothing past a newest seal tampered with: its chain can’t be believed, the failure logged', async () => {
+  it('seals nothing past a newest seal tampered with: the alarm raised and the organisation held', async () => {
     const w = await world();
     await written(w, '2026-10-18T09:00:00.000Z');
     await sealFor(w).run();
@@ -278,9 +282,9 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     await sealFor(w).run();
 
     expect(await sealsOf(w)).toHaveLength(2);
-    expect(capture.lines().filter((line) => line.event === 'access_log_seal.failed')).toEqual([
-      expect.objectContaining({ level: 'error', reason: 'chain_unreadable' }),
-    ]);
+    expect(capture.lines().map((line) => line.event)).toEqual(
+      expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
+    );
   });
 
   it('logs a run whose list fails', async () => {

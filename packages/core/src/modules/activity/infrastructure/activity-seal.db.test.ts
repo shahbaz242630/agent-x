@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, type TestDatabase, testLogger } from '@agentx/testing';
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 import { v7 } from 'uuid';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -95,6 +95,20 @@ describe('L6 a day’s digest (decision 26, ADR-011 §7)', () => {
       idTo: second,
     });
     expect(await digestOfDay(inOrg(org), org, '2026-10-19', 1)).toEqual(digest);
+  });
+
+  it('is the same whatever time zone the session reads times in', async () => {
+    const org = newOrg();
+    await row(org, '2026-10-19T22:30:00.000Z');
+    const inDubai = <T>(work: (tx: Transaction<ActivityTables>) => Promise<T>) =>
+      inOrg(org)(async (tx) => {
+        await sql`set local time zone 'Asia/Dubai'`.execute(tx);
+        return work(tx);
+      });
+
+    expect(await digestOfDay(inDubai, org, '2026-10-19', 100)).toEqual(
+      await digestOfDay(inOrg(org), org, '2026-10-19', 100),
+    );
   });
 
   it('is the empty text’s for a quiet day, with no first or last ID', async () => {

@@ -26,7 +26,7 @@ import {
   SEAL_FORM,
   sealable,
 } from '@agentx/core/modules/activity';
-import { type AuditTables, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import { type AuditTables, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -54,20 +54,25 @@ export interface ActivitySeal {
   run(signal?: AbortSignal): Promise<void>;
 }
 
-/** The day the organisation's newest seal names, believed whole; undefined for none. */
+/**
+ * The day the organisation's newest seal names, believed whole; undefined for
+ * none. Read through the signed states, so a log that can't be believed
+ * raises the alarm and puts the organisation on its hold (ADR-012 §2), as
+ * every read of a history does; then `tampered`, and nothing is sealed.
+ */
 async function newestSealed(
   tx: SealTx,
-  trail: ReturnType<typeof createAuditTrail>,
+  states: SignedStates,
   orgId: string,
-): Promise<{ readonly day: string | undefined } | 'broken'> {
-  const found = await trail.recordedEvents(tx, orgId, {
+): Promise<{ readonly day: string | undefined } | 'tampered'> {
+  const found = await states.historyOf(tx, orgId, {
     subjectTypes: ['access_log'],
     subjectId: orgId,
     actions: [ACTIVITY_SEALED],
     limit: 1,
     newest: true,
   });
-  if (found.kind === 'broken') return 'broken';
+  if (found.outcome !== 'read') return 'tampered';
   const day = found.events.at(-1)?.event.details.day;
   return { day: typeof day === 'string' ? day : undefined };
 }
@@ -93,26 +98,24 @@ export function createActivitySeal({
 }): ActivitySeal {
   /** The organisation's next day to seal: the one after its newest seal, or its first row's; undefined for none. */
   const firstToSeal = async (orgId: string, correlationId: string) =>
-    withSignedStates(database, orgId, { keys, ids, logger, correlationId }, async (tx) => {
-      const newest = await newestSealed(tx, createAuditTrail({ keys, ids }), orgId);
-      if (newest === 'broken') return 'broken' as const;
+    withSignedStates(database, orgId, { keys, ids, logger, correlationId }, async (tx, states) => {
+      const newest = await newestSealed(tx, states, orgId);
+      if (newest === 'tampered') return newest;
       return newest.day === undefined ? firstDayOf(tx, orgId) : nextDay(newest.day);
     });
 
   /** Seals `day` if nothing moved meanwhile: whether it was sealed (or found sealed already). */
   const seal = async (orgId: string, day: string, correlationId: string): Promise<boolean> => {
-    const inOrg = <T>(work: (tx: SealTx) => Promise<T>) =>
-      withSignedStates(database, orgId, { keys, ids, logger, correlationId }, (tx) => work(tx));
-    const digest = await digestOfDay(inOrg, orgId, day, batch);
+    const inOrg = <T>(work: (tx: SealTx, states: SignedStates) => Promise<T>) =>
+      withSignedStates(database, orgId, { keys, ids, logger, correlationId }, work);
+    const digest = await digestOfDay((work) => inOrg((tx) => work(tx)), orgId, day, batch);
     const log = logger.child({ correlationId, orgId });
-    return inOrg(async (tx) => {
+    return inOrg(async (tx, states) => {
       await holdTransactionLock(tx, ACTIVITY_SEAL_LOCK, orgId);
+      const newest = await newestSealed(tx, states, orgId);
+      // The alarm raised and the hold set already.
+      if (newest === 'tampered') return false;
       const trail = createAuditTrail({ keys, ids, correlationId });
-      const newest = await newestSealed(tx, trail, orgId);
-      if (newest === 'broken') {
-        log.error('access_log_seal.failed', { reason: 'chain_unreadable' });
-        return false;
-      }
       // Sealed by another server meanwhile.
       if (newest.day !== undefined && newest.day >= day) return true;
       const now = await dayCount(tx, orgId, day);
@@ -142,10 +145,8 @@ export function createActivitySeal({
   const sealFor = async (orgId: string, signal: AbortSignal | undefined) => {
     const correlationId = ids.next();
     let day = await firstToSeal(orgId, correlationId);
-    if (day === 'broken') {
-      logger.child({ correlationId, orgId }).error('access_log_seal.failed', { reason: 'chain_unreadable' });
-      return;
-    }
+    // The alarm raised and the hold set already.
+    if (day === 'tampered') return;
     for (let sealed = 0; day !== undefined && sealed < MOST_DAYS_A_RUN; sealed += 1) {
       if (signal?.aborted === true || !sealable(day, clock.now())) return;
       if (!(await seal(orgId, day, correlationId))) return;
