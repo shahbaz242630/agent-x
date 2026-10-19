@@ -96,6 +96,7 @@ import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
 import { createActivityPages } from './activity-log.ts';
 import { createActivityLogExports } from './activity-log-exports.ts';
+import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAuditLog } from './audit-log.ts';
 import { createAuditLogExports } from './audit-log-exports.ts';
 import { createFundingSourceChanges } from './funding-source-changes.ts';
@@ -891,6 +892,18 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     REQUEST_VOIDS_EVERY_MS,
   );
+  // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6), on a timer of its own.
+  const activitySealing = scheduleRuns(
+    createActivitySeal({
+      list: () => listedOrganizations(database),
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    }),
+    ACTIVITY_SEAL_EVERY_MS,
+  );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -915,6 +928,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           holdingsChecking.stop(),
           requestExpiring.stop(),
           requestVoiding.stop(),
+          activitySealing.stop(),
           recording.stop(),
         ]);
       },
