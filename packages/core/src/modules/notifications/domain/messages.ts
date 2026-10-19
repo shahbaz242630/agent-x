@@ -322,6 +322,28 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       "Sign in to Agent X and open the audit log to see this entry: its case reference, the dates it covers and how many events it held. If you didn't expect it, tell the organisation's other admins.",
   },
+  // About an admin's background download of the activity log (0053, decision 31): to the admin who asked, in words
+  // alone, never a range, a count or a file (decision 30).
+  access_log_export_ready: {
+    subject: () => 'Agent X: your activity log download is ready',
+    firstLine: () =>
+      'The activity log download you asked for in one of your Agent X organisations is ready. It is kept for 7 days, then deleted.',
+    check: "Sign in to Agent X as an admin to save it. If you didn't ask for it, tell the organisation's other admins.",
+  },
+  access_log_export_failed: {
+    subject: () => "Agent X: your activity log download couldn't be made",
+    firstLine: () =>
+      "The activity log download you asked for in one of your Agent X organisations couldn't be made, after several tries. Nothing was changed.",
+    check: 'Sign in to Agent X to ask for it again. If it fails again, tell us the entry named below.',
+  },
+  // About an activity log entry (0053, L7): Agent X's own team read the activity log for a case, to every admin.
+  access_log_exported: {
+    subject: () => "Agent X: our team exported your organisation's activity log",
+    firstLine: () =>
+      "Agent X's own team exported the activity log of one of your Agent X organisations for a case: a dispute, or a regulator's request. The export only reads the log; it changed nothing.",
+    check:
+      "Sign in to Agent X and open the audit log to see this entry: its case reference, the dates it covers and how many requests it held. If you didn't expect it, tell the organisation's other admins.",
+  },
 };
 
 const NEWLINE = '\n';
