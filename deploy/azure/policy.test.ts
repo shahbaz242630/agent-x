@@ -2033,6 +2033,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       expect(brokenRules(changed(ERRORS_ALERT, change))).toEqual(['alert-counts-only', 'app-errors-alert']);
     }
     for (const change of [
+      // Warnings too: still our own words, but the error alert would then page on every warning.
+      query(levels, 'in~ ("warn", "warning", "error", "fatal", "panic")'),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (criterion(alert).threshold = -1),
       (alert: Mutable) => delete criterion(alert).threshold,
@@ -2062,6 +2064,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const change of [
       (alert: Mutable) => (inside(alert, 'properties').evaluationFrequency = 'PT1H'),
       (alert: Mutable) => (inside(alert, 'properties').windowSize = 'PT1H'),
+      // Hourly, both together: every window watched, but not the daily email.
+      (alert: Mutable) =>
+        Object.assign(inside(alert, 'properties'), { evaluationFrequency: 'PT1H', windowSize: 'PT1H' }),
       // Stateful, it would notify once and stay quiet while the same warning went on day after day.
       (alert: Mutable) => (inside(alert, 'properties').autoMitigate = true),
       (alert: Mutable) => (criterion(alert).threshold = 5),
