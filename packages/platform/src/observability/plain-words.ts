@@ -23,6 +23,17 @@ export const PLAIN_WORDS = {
     broke: "That one request is missing from its organisation's activity log; the request itself went through.",
     next: 'Nothing to do if it is rare. If it repeats, the database is failing: check its health.',
   },
+  'access_log_seal_check.failed': {
+    happened: "An organisation's activity log seals could not be checked this run.",
+    broke:
+      'A change to its sealed days would not be caught until the next run, 30 minutes later; nothing else is affected.',
+    next: 'Nothing to do if it is rare. If it repeats, check the database and the audit chain.',
+  },
+  'access_log_seal_check.run_failed': {
+    happened: 'A run of the activity log seal check stopped early on an error.',
+    broke: 'Sealed days are not checked until the next run, 30 minutes later.',
+    next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
+  },
   'access_log_seal.failed': {
     happened: "An organisation's activity log day could not be sealed this run.",
     broke: 'That day stays unsealed for now, so a change to it would not yet be caught; nothing else is affected.',

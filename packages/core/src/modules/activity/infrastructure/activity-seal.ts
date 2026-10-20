@@ -180,3 +180,31 @@ export async function firstDayOf(tx: SealTx, orgId: string): Promise<string | un
     .executeTakeFirst();
   return first === undefined ? undefined : dayOfId(first.id);
 }
+
+/**
+ * Whether a seal's details hold the day's digest as it is read now: its day,
+ * count, digest, first and last IDs and form. Anything else, a row changed,
+ * deleted or slipped in since, or a seal rewritten, is a mismatch.
+ */
+export function sealHolds(digest: DayDigest, details: Readonly<Record<string, unknown>>): boolean {
+  return (
+    details.day === digest.day &&
+    details.requests === digest.requests &&
+    details.digest === digest.digest &&
+    details.idFrom === digest.idFrom &&
+    details.idTo === digest.idTo &&
+    details.form === SEAL_FORM
+  );
+}
+
+/** Whether any row of the organisation's was written before `day`: one no seal from that day on holds. */
+export async function writtenBefore(tx: SealTx, orgId: string, day: string): Promise<boolean> {
+  const found = await tx
+    .selectFrom('access.requests')
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where(sql<boolean>`id < ${idsOfDay(day).from}::uuid`)
+    .limit(1)
+    .executeTakeFirst();
+  return found !== undefined;
+}

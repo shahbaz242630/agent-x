@@ -29,7 +29,9 @@ export {
   SEAL_FORM,
   SEAL_GRACE_MS,
   sealable,
+  sealHolds,
   v7Floor,
+  writtenBefore,
 } from './infrastructure/activity-seal.ts';
 export {
   ACTIVITY_ACTOR_TYPES,
