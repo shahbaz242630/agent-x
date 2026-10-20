@@ -262,26 +262,35 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await database.as('admin').query('update audit.heads set seq = seq + 5 where org_id = $1', [broken]);
 
     const run = await start(envFor('app'));
-    await vi.waitFor(() => {
-      expect(run.capture.lines().find((line) => line.event === 'audit.anchor_check_done')).toBeDefined();
-    });
-    const lines = run.capture.lines();
-    expect(lines.find((line) => line.event === 'audit.anchored' && line.orgId === kept)).toEqual(
-      expect.objectContaining({ level: 'info', chain: 'organisation', seq: '1' }),
-    );
-    expect(lines.find((line) => line.event === 'audit.integrity_failed' && line.orgId === broken)).toEqual(
-      expect.objectContaining({ level: 'error', chain: 'organisation', check: 'anchor', reason: 'head' }),
-    );
-    // B1d-3: its hold is tried at once, and here can't be recorded on a chain that refuses new events.
-    expect(lines.filter((line) => line.check === 'hold')).toEqual([
-      expect.objectContaining({
-        level: 'error',
-        event: 'audit.integrity_failed',
-        reason: 'not_recorded',
-        orgId: broken,
-      }),
-    ]);
-    await stop(run);
+    try {
+      await vi.waitFor(() => {
+        expect(run.capture.lines().find((line) => line.event === 'audit.anchor_check_done')).toBeDefined();
+      });
+      const lines = run.capture.lines();
+      expect(lines.find((line) => line.event === 'audit.anchored' && line.orgId === kept)).toEqual(
+        expect.objectContaining({ level: 'info', chain: 'organisation', seq: '1' }),
+      );
+      expect(lines.find((line) => line.event === 'audit.integrity_failed' && line.orgId === broken)).toEqual(
+        expect.objectContaining({ level: 'error', chain: 'organisation', check: 'anchor', reason: 'head' }),
+      );
+      // B1d-3: its hold is tried at once, and here can't be recorded on a chain that refuses new events. A job
+      // reaching the organisation meanwhile tries it again (withSignedStates' unrecorded holds), so once or more,
+      // each the same.
+      const holds = lines.filter((line) => line.check === 'hold');
+      expect(holds.length).toBeGreaterThan(0);
+      for (const hold of holds) {
+        expect(hold).toEqual(
+          expect.objectContaining({
+            level: 'error',
+            event: 'audit.integrity_failed',
+            reason: 'not_recorded',
+            orgId: broken,
+          }),
+        );
+      }
+    } finally {
+      await stop(run);
+    }
   });
 
   it("sweeps each listed organisation's idempotency keys past their 30 days once it listens (B1e-3)", async () => {
