@@ -168,7 +168,8 @@ async function sealsHold(
       const { day } = event.details;
       if (typeof day !== 'string' || day < first || day > last) continue;
       const digest = await digestOfDay((work) => inOrg((tx) => work(tx)), orgId, day, DIGEST_BATCH);
-      if (!sealHolds(digest, event.details)) {
+      // A day whose digest differs, or one holding a row written past the app (F1, G3).
+      if (!sealHolds(digest, event.details) || digest.misdated !== null) {
         await inOrg((_tx, states) => {
           states.mismatch('access_log', { orgId, id: orgId });
           return Promise.resolve();

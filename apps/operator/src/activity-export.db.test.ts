@@ -274,6 +274,20 @@ describe('L7 the operator exports an activity log for a case (ADR-005 §6)', () 
     expect(() => fileOf(request)).toThrow();
   });
 
+  it('F1 G3 writes no file for a sealed day holding a row written past the app, its digest whole, and holds the organisation', async () => {
+    const orgId = await organization();
+    await requested(orgId, '2026-10-19T09:00:00.000Z');
+    await database
+      .as('admin')
+      .query("update access.requests set recorded_at = '2026-10-18T09:00:00Z' where org_id = $1", [orgId]);
+    await seal(orgId, '2026-10-19');
+
+    const run = await exported(requestFor(orgId));
+
+    expect(run.code).toBe(1);
+    expect(run.events).toEqual(expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']));
+  });
+
   it('checks only the seals of the days the range touches, and the day after its last', async () => {
     const orgId = await organization();
     await requested(orgId, '2026-10-15T09:00:00.000Z');

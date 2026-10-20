@@ -42,8 +42,8 @@ export const PLAIN_WORDS = {
   'access_log_seal.moved': {
     happened: "An organisation's activity log day changed while it was being sealed.",
     broke:
-      'That day was not sealed this run. A closed day should never change, so this can mean a server clock is far off, or tampering.',
-    next: "If it repeats, check the servers' clocks and the database for changes made outside the app.",
+      'That day and every later one stay unsealed. A closed day never changes: a server clock is far off, or this is tampering.',
+    next: "Check the servers' clocks and the database for changes made outside the app.",
   },
   'access_log_seal.run_failed': {
     happened: 'A run of the daily activity log seal stopped early on an error.',
