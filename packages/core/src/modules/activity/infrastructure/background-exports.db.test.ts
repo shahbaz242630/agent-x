@@ -306,6 +306,8 @@ describe('L5c a download given up', () => {
 
     expect(download?.state).toBe('failed');
     expect(download?.files.map((file) => file.state)).toEqual(['failed', 'building', 'failed']);
+    // Failed, it is no longer under way, though a month is still being built: the admin may ask again.
+    expect(await inOrg(org, (tx) => downloadUnderWay(tx, org))).toBe(false);
     // The one being built finds its download given up once it would be ready, and fails with it.
     expect(await inOrg(org, (tx) => claimFile(tx, org, LEASE))).toEqual({ outcome: 'none' });
     expect(await inOrg(org, (tx) => fileReady(tx, heldOf(org, september), FACTS))).toBe('given_up');
