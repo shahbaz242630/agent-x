@@ -93,8 +93,22 @@ describe('L6 a day’s digest (decision 26, ADR-011 §7)', () => {
       digest: sha256(lineOf(first, '2026-10-18T23:59:58.000000Z') + lineOf(second, '2026-10-19T23:59:59.999000Z')),
       idFrom: first,
       idTo: second,
+      misdated: null,
     });
     expect(await digestOfDay(inOrg(org), org, '2026-10-19', 1)).toEqual(digest);
+  });
+
+  it.each([
+    ['five hours after its answer: a server clock stepped back, still believed', '2026-10-19T05:00:00.000Z', false],
+    ['given a time months old: a fresh ID passing as an old row', '2026-07-01T10:00:00.000Z', true],
+    ['made before its own answer', '2026-10-19T10:00:10.000Z', true],
+  ])('F1 G3 names a row whose ID was made %s', async (_what, at, misdated) => {
+    const org = newOrg();
+    await row(org, '2026-10-19T10:00:00.000Z', at);
+
+    const digest = await digestOfDay(inOrg(org), org, '2026-10-19', 100);
+
+    expect(digest.misdated).toBe(misdated ? digest.idFrom : null);
   });
 
   it('is the same whatever time zone the session reads times in', async () => {
@@ -120,6 +134,7 @@ describe('L6 a day’s digest (decision 26, ADR-011 §7)', () => {
       digest: sha256(''),
       idFrom: null,
       idTo: null,
+      misdated: null,
     });
   });
 
