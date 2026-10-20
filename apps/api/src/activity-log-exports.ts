@@ -147,7 +147,7 @@ export function createActivityLogExports({
         heldActivity(tx, states, keys, orgId, { ...asked, before: start, writtenUpTo, limit: EXPORT_BATCH }),
       );
       const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
-      for (const row of read.rows) lines.push(activityLineOf(asked.format, row, names));
+      for (const row of read.rows) lines.push(activityLineOf(asked.format, row, names, read.sealedDay));
       before = read.next;
     }
     const requests = lines.length;

@@ -10,6 +10,7 @@ export {
   heldActivityPage,
   type HeldActivityPage,
   localTimeOf,
+  newestSealedDay,
   PLACES_BY,
 } from './infrastructure/activity-shown.ts';
 export {

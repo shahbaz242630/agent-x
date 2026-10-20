@@ -200,9 +200,10 @@ async function fileOf(
     const read: HeldActivityPage | 'tampered' = await withSignedStates(database, orgId, services, (tx, states) =>
       heldActivityPage(tx, states, services.keys, orgId, { from, to, before: start, writtenUpTo, limit: EXPORT_BATCH }),
     );
-    if (read === 'tampered') throw new CaseExportRefused("an agent the range names can't be verified");
+    if (read === 'tampered')
+      throw new CaseExportRefused("an agent the range names, or its newest seal, can't be verified");
     const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
-    lines.push(...read.rows.map((row) => activityNdjsonLine(row, names)));
+    lines.push(...read.rows.map((row) => activityNdjsonLine(row, names, read.sealedDay)));
     before = read.next;
   }
   return Buffer.from(`${lines.join('\n')}\n`);

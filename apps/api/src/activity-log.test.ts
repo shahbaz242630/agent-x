@@ -2,7 +2,7 @@
 // outcome of the use case, its query checked at the edge, each row's clues
 // labelled and its place credited to DB-IP. What the read does in the
 // database is activity-log.db.test.ts; who reaches it, role-matrix.test.ts.
-import type { ActivityPageToRead, ActivityRow } from '@agentx/core/modules/activity';
+import { type ActivityPageToRead, type ActivityRow, dayOfId } from '@agentx/core/modules/activity';
 import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -70,7 +70,7 @@ async function withLog(answer: ActivityPageAnswer, role: Role = 'admin') {
   return { app, asked };
 }
 
-const EMPTY: ActivityPageAnswer = { outcome: 'page', rows: [], next: null, names: new Map() };
+const EMPTY: ActivityPageAnswer = { outcome: 'page', rows: [], next: null, names: new Map(), sealedDay: null };
 
 const get = (query: string): InjectOptions => ({
   method: 'GET',
@@ -91,6 +91,7 @@ describe('GET /v1/access-log (L5, decision 26)', () => {
       rows: [ROW, BARE],
       next: { at: BARE.recordedAt, id: BARE.id },
       names,
+      sealedDay: dayOfId(ROW_ID),
     });
     const reply = await app.inject(get(`${RANGE}&before=${NEXT}&limit=2`));
 
@@ -115,6 +116,7 @@ describe('GET /v1/access-log (L5, decision 26)', () => {
           reason: 'AGENT_NOT_ACTIVE',
           correlationId: ROW.correlationId,
           durationMs: 42,
+          sealed: true,
           client: {
             ip: '94.200.1.7',
             place: {
@@ -132,10 +134,12 @@ describe('GET /v1/access-log (L5, decision 26)', () => {
           localTime: null,
           actor: { type: 'agent', id: AGENT, name: null, email: null, shownFrom: null },
           reason: null,
+          sealed: true,
           client: { ip: null, place: null, timeZone: null },
         }),
       ],
       next: `2026-10-19T13:39:12.123Z_${BARE.id}`,
+      sealedThrough: dayOfId(ROW_ID),
     });
     expect(asked).toEqual([
       {
@@ -146,6 +150,15 @@ describe('GET /v1/access-log (L5, decision 26)', () => {
         limit: 2,
       },
     ]);
+  });
+
+  it('marks a row written after the newest day sealed unsealed, and names no day while none is sealed (L6)', async () => {
+    const { app } = await withLog({ ...EMPTY, rows: [ROW], sealedDay: '2020-01-01' });
+    const reply = await app.inject(get(RANGE));
+
+    expect(reply.json()).toMatchObject({ rows: [{ id: ROW_ID, sealed: false }], sealedThrough: '2020-01-01' });
+    const none = await (await withLog({ ...EMPTY, rows: [ROW] })).app.inject(get(RANGE));
+    expect(none.json()).toMatchObject({ rows: [{ sealed: false }], sealedThrough: null });
   });
 
   it.each(['user', 'agent'] as const)('asks for one %s’s rows, a UUID in capitals in lower case', async (type) => {
@@ -167,7 +180,7 @@ describe('GET /v1/access-log (L5, decision 26)', () => {
     const { app, asked } = await withLog(EMPTY);
     const reply = await app.inject(get(RANGE));
 
-    expect(reply.json()).toEqual({ rows: [], next: null });
+    expect(reply.json()).toEqual({ rows: [], next: null, sealedThrough: null });
     expect(asked).toMatchObject([{ actor: undefined, before: undefined, limit: 100 }]);
   });
 

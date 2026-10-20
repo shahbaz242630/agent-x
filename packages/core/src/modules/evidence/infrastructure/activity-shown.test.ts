@@ -1,9 +1,9 @@
 // The activity log's rows as an organisation is shown them (L5, decision 26):
 // the clock where each was made, with its offset, and nothing made up for a
-// zone this runtime doesn't know.
+// zone this runtime doesn't know; each sealed by the day it was written (L6).
 import { describe, expect, it } from 'vitest';
 
-import type { ActivityRow } from '../../activity/index.ts';
+import { type ActivityRow, v7Floor } from '../../activity/index.ts';
 
 import { activityShown, localTimeOf } from './activity-shown.ts';
 
@@ -43,18 +43,19 @@ describe('localTimeOf (decision 26: each row in its person’s own time)', () =>
 
 describe('activityShown (decision 26: clues labelled, the place credited)', () => {
   it('shows a country with no city, credited to DB-IP, and no local time without a zone', () => {
-    expect(activityShown(ROW, new Map()).client).toEqual({
+    expect(activityShown(ROW, new Map(), null).client).toEqual({
       ip: '94.200.1.7',
       place: { country: 'AE', city: null, approximate: true, by: 'IP Geolocation by DB-IP', link: 'https://db-ip.com' },
       timeZone: null,
     });
-    expect(activityShown(ROW, new Map()).localTime).toBeNull();
+    expect(activityShown(ROW, new Map(), null).localTime).toBeNull();
   });
 
   it('shows the time in the row’s own zone, its actor named', () => {
     const shown = activityShown(
       { ...ROW, client: { ip: undefined, place: undefined, timeZone: { name: 'Asia/Dubai', from: 'browser' } } },
       new Map([[`user:${ROW.actor.id}`, { name: 'Sara Khan', email: null, shownFrom: 'kept_copy' as const }]]),
+      null,
     );
 
     expect(shown).toMatchObject({
@@ -62,5 +63,26 @@ describe('activityShown (decision 26: clues labelled, the place credited)', () =
       actor: { ...ROW.actor, name: 'Sara Khan', shownFrom: 'kept_copy' },
       client: { ip: null, place: null, timeZone: { name: 'Asia/Dubai', from: 'browser' } },
     });
+  });
+});
+
+describe('activityShown: sealed (L6, a day is the UTC day a row was written, by its UUIDv7)', () => {
+  const at = (iso: string) => `${v7Floor(Date.parse(iso)).slice(0, 23)}7000-8000-0000000a15a1`;
+  const sealed = (id: string, sealedDay: string | null) => activityShown({ ...ROW, id }, new Map(), sealedDay).sealed;
+
+  it('is sealed when written on or before the newest day sealed, to its last millisecond', () => {
+    expect(sealed(at('2026-10-19T23:59:59.999Z'), '2026-10-19')).toBe(true);
+    expect(sealed(at('2026-10-01T00:00:00.000Z'), '2026-10-19')).toBe(true);
+  });
+
+  it('is not sealed when written after it, from the next day’s first millisecond, or with none sealed', () => {
+    expect(sealed(at('2026-10-20T00:00:00.000Z'), '2026-10-19')).toBe(false);
+    expect(sealed(at('2026-10-19T12:00:00.000Z'), '2026-10-18')).toBe(false);
+    expect(sealed(at('2026-10-19T12:00:00.000Z'), null)).toBe(false);
+  });
+
+  it('reads an ID in capitals as the database lists it, in lower case', () => {
+    expect(sealed(at('2026-10-19T23:59:59.999Z').toUpperCase(), '2026-10-19')).toBe(true);
+    expect(sealed(at('2026-10-20T10:00:00.000Z').toUpperCase(), '2026-10-19')).toBe(false);
   });
 });

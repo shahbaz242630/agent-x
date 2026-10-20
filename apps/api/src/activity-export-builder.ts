@@ -250,7 +250,9 @@ export function createActivityExportBuilder({
       );
       const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
       if (read.rows.length > 0) {
-        await out.add(`${read.rows.map((row) => activityLineOf(download.format, row, names)).join('\n')}\n`);
+        await out.add(
+          `${read.rows.map((row) => activityLineOf(download.format, row, names, read.sealedDay)).join('\n')}\n`,
+        );
       }
       requests += read.rows.length;
       before = read.next;
