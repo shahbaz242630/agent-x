@@ -103,8 +103,8 @@ resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@20
 }
 
 // Every file deleted 14 days after it is made (decisions 31, 32e). A download
-// reads ready 7 days from its last file and builds for under 7 days, so its
-// first file may be nearly 14 days old when the API stops offering it; the
+// reads ready 7 days from its last file and is given up past 6 days building,
+// so its first file may be 13 days old when the API stops offering it; the
 // API refuses every read past its 7 days, and this deletes what it no longer
 // reads. Azure runs the rule about once a day, so a file goes within a day
 // after.
