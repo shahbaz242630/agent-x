@@ -15,7 +15,7 @@
 //   record says so, to be run again.
 import { createHash } from 'node:crypto';
 
-import type { AuditTrail, ReadEvent, SignedStates } from '@agentx/core/modules/audit';
+import type { ReadEvent, SignedStates } from '@agentx/core/modules/audit';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { platformEventWith } from '@agentx/core/modules/platform-controls';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
@@ -64,7 +64,6 @@ export const theExportId = (exportId: string): IdGenerator => ({ next: () => exp
 export async function earlierRecord(
   tx: DatabaseTransaction<OperatorTables>,
   states: SignedStates,
-  trail: AuditTrail,
   request: CaseExportRequest,
   { action, platformAction }: { readonly action: string; readonly platformAction: string },
 ): Promise<ReadEvent['event']['details'] | undefined> {
@@ -72,10 +71,11 @@ export async function earlierRecord(
   const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
   if (organization.outcome === 'missing') throw new CaseExportRefused('no organisation has this ID');
   if (organization.outcome === 'tampered') throw new CaseExportRefused("the organisation's records can't be verified");
-  const found = await trail.recordedEvent(tx, orgId, { eventId: exportId });
-  if (found.kind === 'broken') throw new CaseExportRefused("the organisation's audit log can't be verified");
-  if (found.kind === 'recorded') {
-    const { event } = found;
+  // Through the signed states: a record that can't be believed raises the alarm and the hold (F1, G2).
+  const found = await states.eventOf(tx, orgId, { eventId: exportId });
+  if (found.outcome === 'tampered') throw new CaseExportRefused("the organisation's audit log can't be verified");
+  if (found.event !== undefined) {
+    const { event } = found.event;
     const same =
       event.action === action &&
       event.actor.type === OPERATOR.type &&

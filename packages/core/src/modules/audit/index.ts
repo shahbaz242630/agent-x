@@ -35,6 +35,7 @@ export {
   type CheckedTable,
   type ClearingStepUp,
   type HistoryBatch,
+  type EventRead,
   type HistoryCheck,
   type HistoryCheckRecord,
   type HoldClearing,

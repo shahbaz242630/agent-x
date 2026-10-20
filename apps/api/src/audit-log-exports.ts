@@ -218,7 +218,6 @@ export function createAuditLogExports({
   readonly mostEvents?: number;
 }): AuditLogExports {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: AuditLogRefused });
-  const trail = createAuditTrail({ keys, ids });
 
   /** The download's file: its events up to `upToSeq`, newest first, a batch to a transaction. */
   const fileOf = async (
@@ -274,10 +273,11 @@ export function createAuditLogExports({
       if (isUnwritten(done)) return done;
       // A retry reads its own record for the seq it was made to, so it answers the same file.
       const id = done.result.resourceId;
-      const made = await work.answered(member.orgId, correlationId, async (tx) => {
-        const found = await trail.recordedEvent(tx, member.orgId, { eventId: id });
-        if (found.kind !== 'recorded') throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
-        const upTo = found.event.details.upToSeq;
+      const made = await work.answered(member.orgId, correlationId, async (tx, states) => {
+        // Through the signed states: a record tampered with raises the alarm and the hold (F1, G2).
+        const found = await states.eventOf(tx, member.orgId, { eventId: id });
+        if (found.outcome !== 'read' || found.event === undefined) throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+        const upTo = found.event.event.details.upToSeq;
         return { upToSeq: typeof upTo === 'string' ? BigInt(upTo) : null };
       });
       if ('outcome' in made) return made;
