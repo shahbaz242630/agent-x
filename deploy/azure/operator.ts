@@ -641,7 +641,7 @@ export function restoreCheck(steps: JobSteps): Promise<number> {
 }
 
 /**
- * What an audit export's run did (E10c), from the command's own lines about
+ * What an export's run did (E10c's audit log, L7's activity log), from the command's own lines about
  * this export's ID: 0 once its file is in the store, written now or by an
  * earlier run of the same export; 1 otherwise, saying what to do next. A run
  * that recorded the export but couldn't write its file says so, and the same
@@ -683,7 +683,7 @@ function auditExportOutcome(
   }
   if (refusedFor(refused, NO_STORE_PROBLEM)) {
     steps.say(
-      `The job has no store for an audit export set, so nothing was recorded: deploy the apps (deploy.ts apps), then run the same command again with --id ${id}.`,
+      `The job has no store for an export set, so nothing was recorded: deploy the apps (deploy.ts apps), then run the same command again with --id ${id}.`,
     );
     return 1;
   }

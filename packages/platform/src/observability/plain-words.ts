@@ -497,7 +497,8 @@ export const PLAIN_WORDS = {
     next: 'Nothing to fix. Make sure the finished request is not left on the job to run again.',
   },
   'operator.export_unwritten': {
-    happened: 'An audit log export was recorded, but its file was not saved to storage.',
+    happened:
+      "An export of an organisation's audit log or activity log for a case was recorded, but its file was not saved to storage.",
     broke: "The export is on record and the organisation's admins are told of it, but there is no file yet.",
     next: "Run the job again with the same request file. If it fails again because records can't be verified, treat it as a security issue.",
   },

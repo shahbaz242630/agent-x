@@ -1550,7 +1550,7 @@ describe('an audit export for a case (E10c)', () => {
     const storeless = await exportRun({ ending: 'no-store', states: ['Failed'] });
     expect(storeless.status).toBe(1);
     expect(storeless.said.at(-1)).toBe(
-      `The job has no store for an audit export set, so nothing was recorded: deploy the apps (deploy.ts apps), then run the same command again with --id ${storeless.id}.`,
+      `The job has no store for an export set, so nothing was recorded: deploy the apps (deploy.ts apps), then run the same command again with --id ${storeless.id}.`,
     );
     const empty = await exportRun({ ending: 'no-request', states: ['Failed'] });
     expect(empty.status).toBe(1);
