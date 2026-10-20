@@ -18,8 +18,8 @@
 //   A day with no rows digests the empty text: a quiet day is sealed too, so
 //   a day emptied after shows.
 // - A row's ID is made as it is written, just after its request was
-//   answered: its ID's time is its `recorded_at` plus its duration, within a
-//   few moments. One further off was written past the app (a fresh ID with
+//   answered: its ID's time is its `recorded_at` plus its duration, from
+//   moments before to hours after (ID_LATE_MS). One further off was written past the app (a fresh ID with
 //   an old time, to pass as an old row once sealed): the digest names it
 //   (`misdated`), and neither the seal nor its check believes the day (F1, G3).
 // - Read in batches, each in the organisation's transaction (its row-level
@@ -88,8 +88,15 @@ export interface DayDigest {
 /** How long before its answer a row's ID may be made: two clocks on one server, read a moment apart. */
 const ID_EARLY_MS = 5_000;
 
-/** How long after its answer: the row is written then, awaited, so only a wait for a connection lies between. */
-const ID_LATE_MS = 5 * 60_000;
+/**
+ * How long after its answer. The row is written then, awaited, so only a
+ * wait for a connection lies between; but an ID's clock never goes back
+ * (uuid v7 keeps its highest time), so a server clock stepped back makes its
+ * IDs late by the step until the clock catches up. Hours, then: a fresh ID
+ * given an old time to pass as an old row is days off, and an honest clock
+ * fault never holds an organisation (F1 G3's review).
+ */
+const ID_LATE_MS = 6 * 60 * 60_000;
 
 /** The instant a UUIDv7 was made, in milliseconds. */
 const msOfId = (id: string): number => Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16);
