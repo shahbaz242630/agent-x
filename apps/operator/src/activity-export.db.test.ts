@@ -122,7 +122,7 @@ const requestFor = (orgId: string, overrides: Partial<CaseExportRequest> = {}): 
 });
 
 /** Runs the export, its log captured. */
-async function exported(request: CaseExportRequest, mostRequests?: number) {
+async function exported(request: CaseExportRequest, mostRequests?: number, batch?: number) {
   const capture = new LogCapture();
   const code = await exportActivityLog(
     app,
@@ -130,6 +130,7 @@ async function exported(request: CaseExportRequest, mostRequests?: number) {
     folderStore(folder),
     request,
     mostRequests,
+    batch,
   );
   const lines = capture.lines();
   return {
@@ -162,7 +163,7 @@ const fileOf = (request: CaseExportRequest) =>
     .trimEnd()
     .split('\n')
     .filter((line) => line !== '')
-    .map((line) => JSON.parse(line) as { recordedAt: string; client: { ip: string } });
+    .map((line) => JSON.parse(line) as { recordedAt: string; sealed: boolean; client: { ip: string } });
 
 describe('L7 the operator exports an activity log for a case (ADR-005 §6)', () => {
   it('records it on both chains and tells the admins, then writes the range’s requests, newest first', async () => {
@@ -210,6 +211,20 @@ describe('L7 the operator exports an activity log for a case (ADR-005 §6)', () 
         `select details from platform_controls.audit_events where action = 'operator.access_log_exported'`,
       );
     expect(platform.filter((row) => row.details.includes(request.exportId))).toHaveLength(1);
+  });
+
+  it('L6c-2 marks each request sealed or not, every batch against the seal the first one read', async () => {
+    const orgId = await organization();
+    await requested(orgId, '2026-10-18T09:00:00.000Z');
+    await requested(orgId, '2026-10-19T09:00:00.000Z');
+    await seal(orgId, '2026-10-18');
+    const request = requestFor(orgId);
+
+    expect((await exported(request, undefined, 1)).code).toBe(0);
+    expect(fileOf(request).map((line) => [line.recordedAt, line.sealed])).toEqual([
+      ['2026-10-19T09:00:00.000Z', false],
+      ['2026-10-18T09:00:00.000Z', true],
+    ]);
   });
 
   it('holds the range’s first day to its seal too', async () => {
