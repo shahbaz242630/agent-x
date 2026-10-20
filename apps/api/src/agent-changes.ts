@@ -51,8 +51,9 @@
 //
 // Lock order (ADR-006 §6): the idempotency key, the issue lock (a handover's
 // confirm), the members' memberships (2a, in order of ID), the agent (3), its
-// keys (3a, in order of ID), a suspend's pending requests (8) and their
-// holdings (11), the step-up challenge, the chain head last.
+// keys (3a, in order of ID), a suspend's or a reactivation's pending
+// requests (8) and their holdings (11), the step-up challenge (a
+// reactivation's held first, 0b), the chain head last.
 import {
   AGENT_KEYS,
   agentKeysOf,
@@ -88,7 +89,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
-import { choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
+import { cancelledInForce, choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Suspending an agent: the kill switch. */
@@ -327,6 +328,11 @@ export function createAgentChanges({
           { action: REACTIVATE_OPERATION, changeHash: reactivationHash(member.orgId, agent.suspendedBy) },
           { passkeyRequired: true },
         );
+        // Its suspension cancelled them: those its brake left are voided first, the job any past this batch (F1 G1).
+        if (await cancelledInForce(tx, states, member.orgId, 'agent', agent.id)) {
+          const braked = { agentId: agent.id };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'AGENT_SUSPENDED', clock.now());
+        }
         movedAsRead(
           await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: agent.id }, 'reactivate', {
             actor: { type: 'user', id: member.userId },

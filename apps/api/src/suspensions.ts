@@ -43,6 +43,12 @@
 // names the version it follows, so the walk back from the current version
 // through changes chosen to pause finds the versions they were decided
 // under.
+//
+// A stop chosen to cancel voids for good (decision 32a, F1 G1): a request
+// decided before any of CANCEL_BRAKES about its organisation, agent,
+// mandate, source or supplier is void, whatever they are now
+// (cancelledSinceOf), so one its brake's batch left can't stand again once
+// what was stopped is reactivated before the request-voids job reaches it.
 import { AGENTS } from '@agentx/core/modules/agents';
 import type {
   AuditActor,
@@ -58,6 +64,9 @@ import { type Pausable, PENDING_CHOICES, type PendingChoice } from '@agentx/core
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { SignedStateTable } from '@agentx/platform/db';
 import { z } from 'zod';
+
+import { CONSENT_EXPIRY_CHOSEN } from './consent-expiry-choice.ts';
+import { CONSENT_LAPSED } from './consent-lapses.ts';
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
 const STATEMENTS = {
@@ -375,6 +384,109 @@ export const PAUSE_EVENTS: Readonly<Record<Pausable, Readonly<Record<string, Pau
 };
 
 /**
+ * The events about each that cancel its pending requests (F1 G1): `cancels`
+ * unless they chose to pause (one from before the choice names none, so
+ * cancels); `cancelsIfChosen` only when they chose to cancel (a fresh start;
+ * a consent's lapse under a cancel, decision 21); `cancelsPastEnd` only when
+ * chosen to cancel once the consent had run out (`lapsedConsentId`, a hold
+ * made a cancel): one chosen before the end cancels nothing until its lapse.
+ */
+export const CANCEL_BRAKES: Readonly<
+  Record<
+    Pausable,
+    {
+      readonly type: string;
+      readonly cancels: readonly string[];
+      readonly cancelsIfChosen: readonly string[];
+      readonly cancelsPastEnd: readonly string[];
+    }
+  >
+> = {
+  organization: {
+    type: ORGANIZATIONS.subject,
+    cancels: [SUSPENDS.organization.action],
+    cancelsIfChosen: ['organization.unfreeze'],
+    cancelsPastEnd: [],
+  },
+  agent: { type: AGENTS.subject, cancels: [SUSPENDS.agent.action], cancelsIfChosen: [], cancelsPastEnd: [] },
+  mandate: { type: MANDATES.subject, cancels: [SUSPENDS.mandate.action], cancelsIfChosen: [], cancelsPastEnd: [] },
+  source: {
+    type: SOURCES.subject,
+    cancels: [SUSPENDS.source.action],
+    cancelsIfChosen: [CONSENT_LAPSED],
+    cancelsPastEnd: [CONSENT_EXPIRY_CHOSEN],
+  },
+  supplier: {
+    type: SUPPLIERS.subject,
+    cancels: [SUSPENDS.supplier.action, 'supplier.unverify', PAYEE_CANCEL],
+    cancelsIfChosen: ['supplier.reactivate', 'supplier.reactivate_verified'],
+    cancelsPastEnd: [],
+  },
+};
+
+/** Where a choice made once the consent had run out names that consent (CANCEL_BRAKES' `cancelsPastEnd`). */
+export const LAPSED_CONSENT_KEY = 'lapsedConsentId';
+
+/** How many stops one read of a request's takes: the next page is read only when none of these cancels. */
+const BRAKES_A_PAGE = 20;
+
+/** Whether an event of CANCEL_BRAKES[which] cancels, as its details keep the choice. */
+const cancels = (which: Pausable, action: string, details: AuditDetails): boolean => {
+  const brakes = CANCEL_BRAKES[which];
+  if (brakes.cancels.includes(action)) return choiceIn(details) === 'cancel';
+  const chosen = details.pendingRequests === 'cancel';
+  if (brakes.cancelsPastEnd.includes(action)) return chosen && typeof details[LAPSED_CONSENT_KEY] === 'string';
+  return chosen && brakes.cancelsIfChosen.includes(action);
+};
+
+/**
+ * Those of a request's organisation, agent, mandate, source and supplier
+ * (`ids`) stopped by a stop chosen to cancel after its decided event
+ * (`decidedSeq`), read from the log oldest first, a page at a time until one
+ * holds a cancel or the stops run out, each event believed only whole; one it
+ * doesn't name (null) is left out. Every stop read is a person's (each lift
+ * stepped up with a passkey), so the pages are few. Throws for a history
+ * that can't be believed (its alarm already raised): `unbelieved`'s error, a
+ * plain one when not given (a use case passes its INTEGRITY_FAILED refusal).
+ */
+export async function cancelledSinceOf(
+  tx: AuditTransaction,
+  states: SignedStates,
+  orgId: string,
+  decidedSeq: bigint,
+  ids: Readonly<Record<Pausable, string | null>>,
+  unbelieved: () => Error = () => new Error(`A spend request's stops can't be believed: ${orgId}`),
+): Promise<ReadonlySet<Pausable>> {
+  const kinds = (Object.keys(CANCEL_BRAKES) as Pausable[]).filter((which) => ids[which] !== null);
+  const whichOf = ({ type, id }: { readonly type: string; readonly id: string }) =>
+    kinds.find((kind) => CANCEL_BRAKES[kind].type === type && ids[kind]?.toLowerCase() === id.toLowerCase());
+  const cancelledBy = new Set<Pausable>();
+  let afterSeq = decidedSeq;
+  let more = true;
+  while (more && cancelledBy.size === 0) {
+    const history = await states.historyOf(tx, orgId, {
+      subjectTypes: kinds.map((which) => CANCEL_BRAKES[which].type),
+      subjectIds: kinds.map((which) => String(ids[which])),
+      actions: kinds.flatMap((which) => {
+        const { cancels: always, cancelsIfChosen, cancelsPastEnd } = CANCEL_BRAKES[which];
+        return [...always, ...cancelsIfChosen, ...cancelsPastEnd];
+      }),
+      afterSeq,
+      limit: BRAKES_A_PAGE,
+      oldest: true,
+    });
+    if (history.outcome !== 'read') throw unbelieved();
+    for (const { event } of history.events) {
+      const which = whichOf(event.subject);
+      if (which !== undefined && cancels(which, event.action, event.details)) cancelledBy.add(which);
+    }
+    afterSeq = history.events.at(-1)?.seq ?? afterSeq;
+    more = history.events.length === BRAKES_A_PAGE;
+  }
+  return cancelledBy;
+}
+
+/**
  * Of those stopped (each with its ID and status), the ones whose stop in
  * force paused its requests (PAUSE_EVENTS), read from the log, each event
  * believed only whole. Throws for a history that can't be believed (its
@@ -402,6 +514,21 @@ export async function pausedOf(
   }
   return paused;
 }
+
+/**
+ * Whether the stop in force on one SUSPENDED (an organisation: FROZEN)
+ * cancelled its requests (pausedOf): its reactivation voids those its brake
+ * left first, in its own transaction (F1 G1), the request-voids job any past
+ * that batch.
+ */
+export const cancelledInForce = async (
+  tx: AuditTransaction,
+  states: SignedStates,
+  orgId: string,
+  which: Pausable,
+  id: string,
+): Promise<boolean> =>
+  !(await pausedOf(tx, states, orgId, [[which, id, which === 'organization' ? 'FROZEN' : 'SUSPENDED']])).has(which);
 
 /**
  * Suspends again one SUSPENDED already (an organisation: FROZEN), read for

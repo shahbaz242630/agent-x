@@ -13,8 +13,7 @@
 //   required (decision 14): 202 with the step-up, then 200 with the
 //   organisation, ACTIVE. 409 ORG_NOT_FROZEN otherwise; 409
 //   PENDING_REQUESTS_CANCELLED for an un-pause when its freeze cancelled
-//   them; 409 PENDING_REQUESTS_TOO_MANY for a fresh start past what one move
-//   ends at once. An admin's.
+//   them. An admin's.
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';

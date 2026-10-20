@@ -33,6 +33,11 @@
 // row tampered back to ACTIVE does; nothing can be approved or handed off
 // under a suspension meanwhile.
 //
+// Any stop chosen to cancel since a request's decision voids it too, whatever
+// what it stopped is now (decision 32a, F1 G1: CANCEL_BRAKES, read in the
+// query unverified, then judged by cancelledSinceOf), so those a brake left
+// past its batch are voided even once what it stopped is reactivated.
+//
 // Before any of that, each consent run out by time on a source not ended has
 // its lapse logged once (E7c, consent-lapses.ts), so what the run then voids
 // usually follows the record of why (a lapse that fails, or past a run's
@@ -43,6 +48,7 @@
 import { agentOf, type AgentsTables } from '@agentx/core/modules/agents';
 import {
   type AuditTables,
+  cancelledSince,
   movedOtherwiseSince,
   newestDetail,
   type SignedStates,
@@ -56,6 +62,7 @@ import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/or
 import { mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
 import {
   type AuthorityNow,
+  decisionOf,
   type Pausable,
   PENDING_STATUSES,
   SPEND_REQUESTS,
@@ -73,6 +80,9 @@ import { eachOrganisation, expireInPages } from './expiry-pages.ts';
 import { CONSENT_EXPIRY_EVENTS, holdsOverExpiry } from './consent-expiry-choice.ts';
 import { CONSENT_LAPSED, lapsedBy, lapseRecorded } from './consent-lapses.ts';
 import {
+  CANCEL_BRAKES,
+  cancelledSinceOf,
+  LAPSED_CONSENT_KEY,
   DETAILS_CHANGED,
   MOST_CARRIED_CHANGES,
   PAUSE_EVENTS,
@@ -164,7 +174,21 @@ async function stoppedByTheirRows(
             ),
           ),
         ]);
+      /** A stop chosen to cancel since the request's decision (CANCEL_BRAKES), unverified. */
+      const cancelledLooks = (which: Pausable, idColumn: string) =>
+        cancelledSince({
+          ...CANCEL_BRAKES[which],
+          markedBy: LAPSED_CONSENT_KEY,
+          idColumn,
+          orgColumn: 'r.org_id',
+          since: { type: SPEND_REQUESTS.subject, idColumn: 'r.id' },
+        });
       return where.or([
+        cancelledLooks('organization', 'r.org_id'),
+        cancelledLooks('agent', 'r.agent_id'),
+        cancelledLooks('mandate', 'r.mandate_id'),
+        cancelledLooks('source', 'r.funding_source_id'),
+        cancelledLooks('supplier', 'r.supplier_id'),
         looksStopped('o.status', 'ACTIVE', 'organization', 'o.id'),
         looksStopped('a.status', 'ACTIVE', 'agent', 'a.id'),
         looksStopped('m.status', 'ACTIVE', 'mandate', 'm.id'),
@@ -314,6 +338,16 @@ export function createRequestVoids({
     ) {
       throw new Error(`What a pending request names can't be believed: ${key.id}`);
     }
+    // Pending, it was decided (signRequest); none is a history that can't be believed (its alarm raised) or a bug.
+    const decision = await decisionOf(tx, states, key);
+    if (decision === null) throw new Error(`A pending request has no decision to read: ${key.id}`);
+    const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, {
+      organization: orgId,
+      agent: named.agentId,
+      mandate: named.mandateId,
+      source: named.fundingSourceId,
+      supplier: named.supplierId,
+    });
     const organizationStatus = String(organization.fields.get('status'));
     const stopped = (
       [
@@ -342,6 +376,7 @@ export function createRequestVoids({
         orgId,
         stopped.map(([which, { id, status }]) => [which, id, status] as const),
       ),
+      cancelledBy,
     };
     return voidRequest(tx, states, keys, key, { named, authority }, now);
   };

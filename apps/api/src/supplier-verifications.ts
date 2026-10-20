@@ -24,8 +24,8 @@
 // Verified again, its pending requests stand again, so those its stop
 // cancelled and the request-voids job hasn't reached yet are DENIED first
 // (cancelledByItsStop; the E3 review: a payee change chosen to cancel, then
-// withdrawn), refused at the ask and the confirm (PENDING_REQUESTS_TOO_MANY)
-// past what one brake voids: wait for the job, then verify.
+// withdrawn), up to a brake's batch: the job voids any past it, as that
+// stop's event still cancels them (decision 32a, F1 G1).
 //
 // Lock order (ADR-006 §6): the idempotency key, the memberships (2a: the
 // verifier's, then every member's for the rule, all `share`), the supplier

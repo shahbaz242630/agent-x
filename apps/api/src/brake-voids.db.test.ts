@@ -28,7 +28,14 @@
 // the supplier's status; pause carries them to the new details, standing
 // once the supplier is verified again (a waiting one not approved under the
 // old details, decision 16, but re-checked by its approver, E5a), until a new
-// payee or a change chosen to cancel.
+// payee or a change chosen to cancel. F1 G1 (decision 32a): a stop chosen to
+// cancel voids for good: once lifted (the agent, mandate or source
+// reactivated, the organisation unfrozen, the supplier reactivated or
+// verified again), its lift voids a batch more and the request-voids job the
+// rest; one asked since stands; a pause in force since holds none of them;
+// a pause lifted voids nothing; approving one left is REQUEST_CHANGED, and
+// INTEGRITY_FAILED once the cancel is edited to read as a pause; a cancel
+// past a page of pauses is still found.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createSessions, createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -63,10 +70,18 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AgentChanges, createAgentChanges, SUSPEND_OPERATION } from './agent-changes.ts';
+import {
+  type AgentChanges,
+  createAgentChanges,
+  REACTIVATE_CONFIRM_OPERATION as AGENT_REACTIVATE_CONFIRM,
+  REACTIVATE_OPERATION as AGENT_REACTIVATE,
+  SUSPEND_OPERATION,
+} from './agent-changes.ts';
 import {
   createFundingSourceChanges,
   CONSENT_EXPIRY_OPERATION,
+  REACTIVATE_CONFIRM_OPERATION as SOURCE_REACTIVATE_CONFIRM,
+  REACTIVATE_OPERATION as SOURCE_REACTIVATE,
   REFRESH_OPERATION,
   SUSPEND_OPERATION as SOURCE_SUSPEND,
 } from './funding-source-changes.ts';
@@ -114,7 +129,7 @@ import {
   UNFREEZE_OPERATION,
 } from './organization-changes.ts';
 import { createSupplierPayees, PAYEE_CHECK_OPERATION, PAYEE_START_OPERATION } from './supplier-payees.ts';
-import { pausedOf } from './suspensions.ts';
+import { cancelledSinceOf, pausedOf } from './suspensions.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -283,6 +298,17 @@ const supplierSuspended = (w: World, choice: PendingChoice) =>
 
 /** The world's first supplier: the one the supplier brakes stop. */
 const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
+
+/** The approvals use case, with the test's clock and log. */
+const approvals = () =>
+  createSpendRequestApprovals({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: createStepUpChallenges({ ids, clock }),
+    logger: logger(),
+  });
 
 /** The request-voids job, over the world's organisation alone. */
 const job = (w: World) =>
@@ -861,18 +887,13 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 
-  it('a suspend to pause over a supplier unverified to cancel, more left than one brake voids: PENDING_REQUESTS_TOO_MANY; to cancel, the brake holds at once', async () => {
+  it('a suspend to pause over a supplier unverified to cancel, more left than one brake voids: it holds, the job ends the rest under the pause (F1 G1)', async () => {
     // 41: the check's batch of 20 voids, and 21 are left, past the suspend's own.
     const { w, many } = await unverifiedToCancel(41);
 
-    expect(await supplierSuspended(w, 'pause')).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'PENDING_REQUESTS_TOO_MANY',
-    });
+    expect(await supplierSuspended(w, 'pause')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
     expect(await statusOf(w, many.at(-1)?.id ?? '')).toBe('APPROVED');
-    // The brake itself is never refused: chosen to cancel, it holds, the job ending those past its batch.
-    expect(await supplierSuspended(w, 'cancel')).toMatchObject({ supplier: { status: 'SUSPENDED' } });
+    // The unverify chose cancel: the pause after it holds none of those decided before it.
     await job(w).run();
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   }, 60_000);
@@ -943,14 +964,13 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 
-  it('verified again after a cancel withdrawn, more left than one brake voids: PENDING_REQUESTS_TOO_MANY; once the job ends them, it goes through', async () => {
+  it('verified again after a cancel withdrawn, more left than one brake voids: it goes through, the job ends the rest once VERIFIED (F1 G1)', async () => {
     // 41: the check's batch of 20 voids, and 21 are left, past the verification's own.
     const { w, many } = await payeeWithdrawnAfter(41, 'cancel');
 
-    await expect(verifiedAgain(w)).rejects.toThrow('PENDING_REQUESTS_TOO_MANY');
+    expect(await verifiedAgain(w)).toMatchObject({ supplier: { status: 'VERIFIED' } });
     expect(await statusOf(w, many.at(-1)?.id ?? '')).toBe('APPROVED');
     await job(w).run();
-    expect(await verifiedAgain(w)).toMatchObject({ supplier: { status: 'VERIFIED' } });
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   }, 60_000);
 
@@ -1176,21 +1196,15 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 
-  it('cancel, more left than one brake voids: a pause refused PENDING_REQUESTS_TOO_MANY; the job ends them', async () => {
+  it('cancel, more left than one brake voids: a pause after it goes through, carrying none of them; the job ends them (F1 G1)', async () => {
     const { w, acting } = await ready();
     const many = [];
     for (let each = 0; each < 41; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
     await changedDetails(w, 'cancel');
 
-    expect(
-      await createSupplierDetailsChanges(services()).change(
-        w.admin,
-        keyed(w.admin, DETAILS_OPERATION),
-        supplierOfWorld(w),
-        { details: CHANGED_AGAIN, pendingRequests: 'pause' },
-        CORRELATION,
-      ),
-    ).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' });
+    expect(await changedDetails(w, 'pause', 'Gulf Office Supplies Trading Co')).toMatchObject({
+      supplier: { status: 'UNVERIFIED' },
+    });
     await shared.verified(w, supplierOfWorld(w));
     await job(w).run();
 
@@ -1242,15 +1256,6 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
   });
 
   describe('a waiting request carried to the new details: its approver re-checks it (decisions 16, 18; E5a)', () => {
-    const approvals = () =>
-      createSpendRequestApprovals({
-        database: app,
-        keys,
-        ids,
-        clock,
-        challenges: createStepUpChallenges({ ids, clock }),
-        logger: logger(),
-      });
     /** The admin's ask to approve, with or without a re-check, under `key` if given. */
     const asking = (w: World, id: string, recheck: boolean, key = keyed(w.admin, APPROVE_OPERATION)) =>
       approvals().ask(w.admin, key, id, recheck, CORRELATION);
@@ -1531,16 +1536,15 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
     expect((await freshStartAsked(w)).outcome).toBe('asked');
   });
 
-  it('refuses a fresh start past what one brake cancels at once: PENDING_REQUESTS_TOO_MANY; suspended to cancel, then it goes through', async () => {
+  it('a fresh start past what one brake cancels at once goes through back VERIFIED: the batch now, the job the rest (F1 G1)', async () => {
     const { w, many } = await pendingAndSuspended(21);
 
-    expect(await freshStartAsked(w)).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' });
-    for (const request of many) expect(await statusOf(w, request.id)).toBe('APPROVED');
-
-    // Its pause made a cancel: the brake's batch now, the job the rest; then the fresh start goes through.
-    await supplierSuspended(w, 'cancel');
-    await job(w).run();
     expect(await reactivated(w, 'cancel')).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    const left = many.at(-1);
+    expect(await statusOf(w, left?.id ?? '')).toBe('APPROVED');
+    await job(w).run();
+
+    expect(lines('request_void.voided').map(({ requestId }) => requestId)).toEqual([left?.id]);
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 });
@@ -1701,18 +1705,26 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     expect((await unfreezeEvent(w))?.action).toBe('organization.freeze');
   });
 
-  it('refuses a fresh start after a pause past what one brake cancels at once: PENDING_REQUESTS_TOO_MANY; an un-pause still goes', async () => {
+  it('a fresh start after a pause past what one brake cancels at once goes through: the batch now, the job the rest (F1 G1)', async () => {
     const { w, acting } = await ready();
     const many = [];
     for (let each = 0; each < 21; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
     await frozen(w, 'pause');
 
-    expect(await unfreezeAsked(w, 'All clear', 'cancel')).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'PENDING_REQUESTS_TOO_MANY',
-    });
+    expect(await unfrozen(w, 'All clear', 'cancel')).toMatchObject({ organization: { status: 'ACTIVE' } });
+    expect(await statusOf(w, many.at(-1)?.id ?? '')).toBe('APPROVED');
+    await job(w).run();
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 60_000);
+
+  it('an un-pause past what one brake cancels at once voids nothing: they stand, through the job', async () => {
+    const { w, acting } = await ready();
+    const many = [];
+    for (let each = 0; each < 21; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    await frozen(w, 'pause');
+
     expect(await unfrozen(w, 'All clear', 'pause')).toMatchObject({ organization: { status: 'ACTIVE' } });
+    await job(w).run();
     for (const request of many) expect(await statusOf(w, request.id)).toBe('APPROVED');
   }, 60_000);
 
@@ -1738,18 +1750,21 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     });
   });
 
-  it('a freeze to cancel with more left than one batch: the unfreeze refused PENDING_REQUESTS_TOO_MANY, still frozen; once the job ends them, it goes through', async () => {
+  it('a freeze to cancel with more left than two batches: the unfreeze goes through, ACTIVE; the job ends the rest (F1 G1)', async () => {
     const { w, acting } = await ready();
-    // 41: the freeze's batch of 20 voids, and 21 are left, past the unfreeze's own.
+    // 41: the freeze's batch of 20 voids, the unfreeze's 20, and 1 is left for the job.
     const many = [];
     for (let each = 0; each < 41; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
     await frozen(w, 'cancel');
-    const tooMany = { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' };
 
-    expect(await unfreezeAsked(w, 'All clear', 'cancel')).toEqual(tooMany);
-    expect(await freezes(w)).toHaveLength(1);
-    await job(w).run();
     expect(await unfrozen(w, 'All clear', 'cancel')).toMatchObject({ organization: { status: 'ACTIVE' } });
+    const left = many.at(-1);
+    expect(await statusOf(w, left?.id ?? '')).toBe('APPROVED');
+    await job(w).run();
+    expect((await shared.eventsAbout(w.org, left?.id ?? '', SPEND_REQUESTS.subject)).at(-1)).toMatchObject({
+      action: 'spend_request.voided',
+      details: { causes: 'ORG_FROZEN' },
+    });
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   }, 60_000);
 
@@ -1774,6 +1789,187 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     );
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
+});
+
+describe('a stop chosen to cancel voids for good: those past its batches never stand again once lifted (F1 G1, decision 32a)', () => {
+  /** The world's agent reactivated by its admin, stepped up with a passkey. */
+  const agentReactivated = async (w: World) => {
+    const challengeId = askedFor(
+      await agents.reactivate(w.admin, keyed(w.admin, AGENT_REACTIVATE), w.agent, CORRELATION),
+    );
+    await stepUp(w.admin, challengeId);
+    return agents.reactivateConfirm(
+      w.admin,
+      keyed(w.admin, AGENT_REACTIVATE_CONFIRM),
+      w.agent,
+      challengeId,
+      CORRELATION,
+    );
+  };
+  /** The world's source reactivated by its admin, stepped up with a passkey. */
+  const sourceReactivated = async (w: World) => {
+    const changes = createFundingSourceChanges({ ...services(), rail: undefined });
+    const challengeId = askedFor(
+      await changes.reactivate(w.admin, keyed(w.admin, SOURCE_REACTIVATE), w.source, CORRELATION),
+    );
+    await stepUp(w.admin, challengeId);
+    return changes.reactivateConfirm(
+      w.admin,
+      keyed(w.admin, SOURCE_REACTIVATE_CONFIRM),
+      w.source,
+      challengeId,
+      CORRELATION,
+    );
+  };
+  /** Each stop that is lifted with no choice: how it stops, how it is lifted, and its cause. */
+  const LIFTS = {
+    agent: {
+      cause: 'AGENT_SUSPENDED',
+      stop: (w: World, _mandateId: string, choice: PendingChoice) => suspended(w, choice),
+      lift: (w: World) => agentReactivated(w),
+    },
+    mandate: {
+      cause: 'MANDATE_NOT_IN_FORCE',
+      stop: async (w: World, mandateId: string, choice: PendingChoice) =>
+        (await moving(w, mandateId, 'suspend', choice))(),
+      lift: async (w: World, mandateId: string) => (await moving(w, mandateId, 'resume'))(),
+    },
+    source: {
+      cause: 'SOURCE_NOT_USABLE',
+      stop: (w: World, _mandateId: string, choice: PendingChoice) => sourceSuspended(w, choice),
+      lift: (w: World) => sourceReactivated(w),
+    },
+  } as const;
+  /** `count` approved requests of the world's agent, in order of ID. */
+  const approvedMany = async (acting: Awaited<ReturnType<typeof shared.agentKey>>, w: World, count: number) => {
+    const many = [];
+    for (let each = 0; each < count; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    return many;
+  };
+  /** The request's newest event: its void with `cause`. */
+  const voidedWith = async (w: World, id: string, cause: string) => {
+    expect((await shared.eventsAbout(w.org, id, SPEND_REQUESTS.subject)).at(-1)).toMatchObject({
+      action: 'spend_request.voided',
+      details: { statusTo: 'DENIED', causes: cause },
+    });
+  };
+
+  it.each(Object.keys(LIFTS) as (keyof typeof LIFTS)[])(
+    'the %s stopped to cancel past two batches, lifted: the last voided by the job though it stands again; one asked since stands',
+    async (what) => {
+      const { w, acting } = await ready();
+      const mandateId = await mandateIdOf(w);
+      const lift = LIFTS[what];
+      // 41: the stop's batch of 20 voids, the lift's 20, and 1 is left for the job.
+      const many = await approvedMany(acting, w, 41);
+
+      expect(PRESSED).toContain((await lift.stop(w, mandateId, 'cancel')).outcome);
+      expect(PRESSED).toContain((await lift.lift(w, mandateId)).outcome);
+      const left = many.at(-1)?.id ?? '';
+      expect(await statusOf(w, left)).toBe('APPROVED');
+      const since = await ask(acting, w, { amount: AED(1_000n) });
+      await job(w).run();
+
+      await voidedWith(w, left, lift.cause);
+      expect(await holdingsOf(w, left)).toEqual({ reservation: 'RELEASED', released: true });
+      for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+      expect([since.status, await statusOf(w, since.id)]).toEqual(['APPROVED', 'APPROVED']);
+    },
+    90_000,
+  );
+
+  it('cancel, lifted, then a pause: the pause in force holds none decided before the cancel', async () => {
+    const { w, acting } = await ready();
+    const many = await approvedMany(acting, w, 41);
+    await suspended(w, 'cancel');
+    await agentReactivated(w);
+    await suspended(w, 'pause');
+
+    await job(w).run();
+
+    await voidedWith(w, many.at(-1)?.id ?? '', 'AGENT_SUSPENDED');
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 90_000);
+
+  it('a pause lifted voids nothing: they stand, through the job', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await suspended(w, 'pause');
+
+    expect((await agentReactivated(w)).outcome).toBe('changed');
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
+  /** 40 approved, then one waiting (the last by ID, so left by both batches); the agent stopped to cancel, then reactivated. */
+  const waitingLeft = async () => {
+    const { w, acting } = await ready();
+    await approvedMany(acting, w, 40);
+    const waiting = await ask(acting, w, { orderReference: 'INV-W' });
+    expect(waiting.status).toBe('APPROVAL_REQUIRED');
+    await suspended(w, 'cancel');
+    await agentReactivated(w);
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    return { w, waiting };
+  };
+
+  it('approving one left: REQUEST_CHANGED, nothing approved; the job voids it', async () => {
+    const { w, waiting } = await waitingLeft();
+
+    expect(await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION)).toEqual(
+      refused(409, 'REQUEST_CHANGED'),
+    );
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    await job(w).run();
+    await voidedWith(w, waiting.id, 'AGENT_SUSPENDED');
+  }, 90_000);
+
+  it('approving one left once its cancel is edited past the app to read as a pause: INTEGRITY_FAILED (FX-TAMPER)', async () => {
+    const { w, waiting } = await waitingLeft();
+    const owner = await database.connect('owner');
+    try {
+      // Past the app: the owner, in the organisation, as the tenant wall holds even it.
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+      await owner.query(
+        `update audit.events set details = replace(details, '"pendingRequests":"cancel"', '"pendingRequests":"pause"')
+         where org_id = $1 and action = 'agent.suspended'`,
+        [w.org],
+      );
+    } finally {
+      await owner.end();
+    }
+
+    expect(await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION)).toEqual(
+      refused(503, 'INTEGRITY_FAILED'),
+    );
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+  }, 90_000);
+
+  it('reads past a page of pauses to the cancel after them; none after the cancel', async () => {
+    const { w, acting } = await ready();
+    const mandateId = await mandateIdOf(w);
+    const waiting = await ask(acting, w, { orderReference: 'INV-W' });
+    const decided = await newestSeq(w, SPEND_REQUESTS.subject, waiting.id);
+    // 21 pauses: past the first page of 20 stops read.
+    for (let each = 0; each < 21; each += 1) {
+      await suspended(w, 'pause');
+      await agentReactivated(w);
+    }
+    await suspended(w, 'cancel');
+    const cancelled = await newestSeq(w, 'agent', w.agent);
+    const ids = {
+      organization: w.org,
+      agent: w.agent,
+      mandate: mandateId,
+      source: w.source,
+      supplier: supplierOfWorld(w),
+    };
+    const since = (seq: bigint) => signed(w, (tx, states) => cancelledSinceOf(tx, states, w.org, seq, ids));
+
+    expect(await since(decided)).toEqual(new Set(['agent']));
+    expect(await since(cancelled)).toEqual(new Set());
+  }, 90_000);
 });
 
 describe('a brake queued behind an approval holding the request (forced)', () => {
@@ -1958,8 +2154,14 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
     );
     expect(chosen.map(({ details }) => details)).toEqual([
       expect.objectContaining({ pendingRequests: 'pause', pendingStatementVersion: 1 }),
-      expect.objectContaining({ pendingRequests: 'cancel', pendingStatementVersion: 1 }),
+      // Past the end it names the consent that ran out, so it cancels for good (F1 G1).
+      expect.objectContaining({
+        pendingRequests: 'cancel',
+        pendingStatementVersion: 1,
+        lapsedConsentId: w.state.accountConsentId,
+      }),
     ]);
+    expect(chosen[0]?.details.lapsedConsentId).toBeUndefined();
     expect(chosen.map(({ actorType }) => actorType)).toEqual(['user', 'user']);
     expect((await consentChosen(w, 'cancel')).outcome).toBe('changed');
     expect(
@@ -1983,6 +2185,41 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
         expect(await statusOf(w, request.id)).toBe(choice === 'pause' ? request.status : 'DENIED');
       }
     }
+  });
+
+  it('run out by its end under a cancel, renewed before the job: its lapse cancels them for good; one asked since stands (F1 G1)', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await consentChosen(w, 'cancel');
+    // The partner's word: the consent ends in a minute; then it runs out, and is renewed before the job runs.
+    await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+    clock.advanceBy(2 * 60_000);
+    await answeredWith(w, (now) => ({
+      availability: 'ACTIVE',
+      consentStatus: 'Authorized',
+      accountConsentId: 'renewed-consent',
+      replacesConsentId: w.state.accountConsentId,
+      consentExpiresAt: new Date(now.getTime() + 365 * DAY_MS),
+      statusChangedAt: now,
+    }));
+    const since = await ask(acting, w, { amount: AED(1_000n), orderReference: 'INV-SINCE' });
+
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+    // Pending (the supplier's split total sends it for approval), and still standing after the job.
+    expect(['APPROVED', 'APPROVAL_REQUIRED']).toContain(since.status);
+    expect(await statusOf(w, since.id)).toBe(since.status);
+  });
+
+  it('a cancel chosen before its end voids nothing while the consent holds', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+
+    expect(await consentChosen(w, 'cancel')).toMatchObject({ outcome: 'changed', consentExpiry: 'cancel' });
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
   });
 
   it('the job, voiding a held request for another stop, names that stop alone: its consent is held (review, 82)', async () => {

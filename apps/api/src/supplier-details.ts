@@ -25,9 +25,8 @@
 // the new version (pausedFromOf), so they stand again once a second person
 // verifies the supplier, a waiting one still re-checked by its approver
 // (decision 16, E5). A pause over an UNVERIFIED supplier whose stop cancels
-// voids those the job hasn't reached first, refused at the ask and the
-// confirm (PENDING_REQUESTS_TOO_MANY) past what one brake voids, so it never
-// carries what that stop cancelled (as C3e's suspend).
+// voids those the job hasn't reached first, the job any past the batch, as
+// that stop's event still cancels them (as C3e's suspend; F1 G1).
 //
 // Every version is kept for good, so the organisation may enter at most 200
 // changes of its suppliers a day: payee registrations (100 a day of their

@@ -11,18 +11,14 @@
 // - `POST /v1/suppliers/:id/suspend`: the brake, at once and with no step-up,
 //   with `pendingRequests`, `cancel` or `pause`, required (Phase 3 decision
 //   7): 200 with the supplier, SUSPENDED; one suspended already is answered
-//   as it is. 409 PENDING_REQUESTS_TOO_MANY for a pause over an unverified
-//   supplier whose requests are still being cancelled past what one brake
-//   cancels at once. Admins and finance approvers.
+//   as it is. Admins and finance approvers.
 // - `POST /v1/suppliers/:id/reactivate`, then `…/reactivate/confirm` with the
 //   step-up's ID once signed in again (a passkey), each with
 //   `pendingRequests`, `cancel` (a fresh start) or `pause` (an un-pause),
 //   required (Phase 3 decision 9): 202 with the step-up, then 200 with the
 //   supplier, VERIFIED again only if nothing changed while it was suspended.
 //   409 SUPPLIER_NOT_SUSPENDED otherwise; 409 PENDING_REQUESTS_CANCELLED for
-//   an un-pause when its suspension cancelled them; 409
-//   PENDING_REQUESTS_TOO_MANY for a fresh start past what one brake cancels at
-//   once (suspend it again to cancel, then reactivate). Admins.
+//   an un-pause when its suspension cancelled them. Admins.
 // - `POST /v1/suppliers/:id/payee-registrations`: starts registering the
 //   supplier's bank details with the payment partner, through the partner's
 //   own form: 201 with the registration and the form to send the admin to.

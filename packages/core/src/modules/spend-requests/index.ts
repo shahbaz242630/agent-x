@@ -56,7 +56,6 @@ export {
   expireRequest,
   type Rejection,
   denialOf,
-  pendingPastABrake,
   type RejectionShown,
   rejectRequest,
   requestsWaitingSince,

@@ -4,7 +4,8 @@
 // with no version to compare; a suspension that pauses voids nothing, and
 // pauses only a suspension; the bank's own suspension never voids, consent
 // it ended always does; new details a pause carries it through void nothing
-// for themselves (E3).
+// for themselves (E3); a stop chosen to cancel since its decision voids for
+// good, whatever it is now, a pause in force too (decision 32a, F1 G1).
 import { describe, expect, it } from 'vitest';
 
 import { type AuthorityNow, type DecidedUnder, type Pausable, voidCauses } from './voids.ts';
@@ -18,6 +19,7 @@ const STANDING: AuthorityNow = {
   source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false, consentHeld: false },
   supplier: { status: 'VERIFIED', currentVersionId: 'sv1', pausedFrom: [] },
   paused: new Set(),
+  cancelledBy: new Set(),
 };
 
 const EVERY_PAUSED: ReadonlySet<Pausable> = new Set(['organization', 'agent', 'mandate', 'source', 'supplier']);
@@ -74,6 +76,22 @@ describe('voidCauses', () => {
     expect(voidCauses(DECIDED, { ...STANDING, ...change })).toEqual([cause]);
   });
 
+  it.each([
+    ['organization', 'ORG_FROZEN'],
+    ['agent', 'AGENT_SUSPENDED'],
+    ['mandate', 'MANDATE_NOT_IN_FORCE'],
+    ['source', 'SOURCE_NOT_USABLE'],
+    ['supplier', 'SUPPLIER_NOT_VERIFIED'],
+  ] as const)('finds the %s cancelled since its decision, standing again now: %s (F1 G1)', (which, cause) => {
+    expect(voidCauses(DECIDED, { ...STANDING, cancelledBy: new Set([which]) })).toEqual([cause]);
+  });
+
+  it('finds one cancelled since its decision though a pause is in force now (F1 G1)', () => {
+    const frozen = { ...STANDING, organizationStatus: 'FROZEN', paused: EVERY_PAUSED };
+    expect(voidCauses(DECIDED, frozen)).toEqual([]);
+    expect(voidCauses(DECIDED, { ...frozen, cancelledBy: new Set(['organization'] as const) })).toEqual(['ORG_FROZEN']);
+  });
+
   it('finds one decided under no mandate never in force', () => {
     expect(voidCauses({ ...DECIDED, mandateId: null }, STANDING)).toEqual(['MANDATE_NOT_IN_FORCE']);
   });
@@ -87,6 +105,7 @@ describe('voidCauses', () => {
         source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false, consentHeld: false },
         supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2', pausedFrom: [] },
         paused: new Set(),
+        cancelledBy: new Set(),
       }),
     ).toEqual([
       'ORG_FROZEN',

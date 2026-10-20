@@ -12,8 +12,8 @@
 //   pressed again too, so a pause made a cancel voids them; the
 //   request-voids job takes any past the batch. A pause over an UNVERIFIED
 //   supplier whose stop cancels voids those the job hasn't reached first,
-//   refused (PENDING_REQUESTS_TOO_MANY) past the batch, so it never holds
-//   what that stop cancelled (C3c's suspend over a cancel). One suspended already is
+//   the job any past the batch, as that stop's event still cancels them
+//   (C3c's suspend over a cancel; decision 32a, F1 G1). One suspended already is
 //   answered as it is: a brake pressed twice is not an error. A suspended
 //   supplier is shown to no agent.
 // - `reactivate` (`suppliers.reactivate`): gives the supplier its place back,
@@ -26,9 +26,8 @@
 //   to the event that suspended it and to the choice, so it lifts exactly
 //   that suspension that way. The confirm, with the challenge and the same
 //   choice: the same reads, the challenge consumed; on a fresh start every
-//   pending request DENIED, refused at the ask and the confirm
-//   (PENDING_REQUESTS_TOO_MANY) past what one brake voids, as one coming back
-//   VERIFIED is never looked at by the request-voids job; then back VERIFIED only if
+//   pending request DENIED up to a brake's batch, the request-voids job the
+//   rest by the reactivation's event (decision 32a, F1 G1); then back VERIFIED only if
 //   nothing changed while it was suspended (the suppliers module's
 //   reactivateSupplier), otherwise UNVERIFIED with its verification cleared,
 //   its requests held while it is if un-paused, the step-up's evidence and
@@ -46,7 +45,7 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { reactivateSupplier, SUPPLIERS, suspendSupplier } from '@agentx/core/modules/suppliers';
 import type { Outbox } from '@agentx/core/modules/notifications';
-import { pendingPastABrake, type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -135,9 +134,7 @@ export function createSupplierChanges({
   /**
    * A suspended supplier, read for change, and the event that suspended it:
    * SUPPLIER_NOT_SUSPENDED otherwise; PENDING_REQUESTS_CANCELLED for an
-   * un-pause when its suspension in force cancelled them; for a fresh start,
-   * PENDING_REQUESTS_TOO_MANY past what one brake voids, as back VERIFIED
-   * the request-voids job would never look at those left (decision 9).
+   * un-pause when its suspension in force cancelled them (decision 9).
    */
   const suspended = async (
     tx: SupplierTx,
@@ -151,8 +148,6 @@ export function createSupplierChanges({
     if (choice === 'pause') {
       const paused = await pausedOf(tx, states, orgId, [['supplier', supplierId, 'SUSPENDED']]);
       if (!paused.has('supplier')) throw new SupplierRefused(409, 'PENDING_REQUESTS_CANCELLED');
-    } else if (await pendingPastABrake(tx, orgId, { supplierId })) {
-      throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
     }
     return { found, suspendedBy: found.state.eventId };
   };
@@ -217,7 +212,7 @@ export function createSupplierChanges({
           { passkeyRequired: true },
         );
         if (pendingRequests === 'cancel') {
-          // Every one, as `suspended` found no more than one brake voids (one tampered with is left, inert).
+          // A brake's batch; the request-voids job the rest, by this reactivation's event (F1 G1).
           const braked = { supplierId: found.supplier.id };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
         }

@@ -178,7 +178,7 @@ export const REASON_CODES = {
   PENDING_REQUESTS_CANCELLED:
     "It is already suspended or frozen with its pending requests cancelled, or its bank consent ran out with them set to be cancelled, which can't be undone, so they can't be paused, kept or held now. Nothing was changed.",
   PENDING_REQUESTS_TOO_MANY:
-    'More pending requests are left to cancel than one move cancels at once, so nothing was changed. Wait a few minutes while they are cancelled, then try again; if its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel first.',
+    'No longer returned: a move now cancels what it can at once and the rest within minutes (kept so the list of codes stays stable).',
   PENDING_REQUESTS_TOO_MANY_TO_CARRY:
     'More requests are pending under the version in force than can be checked again at once (20), so nothing was changed. Choose cancel, or approve, reject or cancel some first, then try again.',
   POLICY_CHANGES_SPENT:
