@@ -67,6 +67,8 @@ export interface BackgroundExportFile {
   readonly requests: number | null;
   readonly bytes: number | null;
   readonly sha256: string | null;
+  /** When it was made ready: its signed `access_log.export_file_made` was recorded in the same transaction. */
+  readonly readyAt: Date | null;
 }
 
 /** A download as its organisation's admins see it. */
@@ -248,6 +250,7 @@ function downloadOf(row: DownloadRow): BackgroundExport {
     requests: file.requests,
     bytes: file.bytes === null ? null : Number(file.bytes),
     sha256: file.sha256,
+    readyAt: file.ready_at === null ? null : new Date(file.ready_at),
   }));
   const ready = files.every((file) => file.state === 'ready');
   const lastReady = row.files.reduce<number>(

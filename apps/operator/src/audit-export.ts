@@ -93,7 +93,7 @@ function record(
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   return withSignedStates(database, orgId, services, async (tx, states) => {
-    const before = await earlierRecord(tx, states, trail, request, {
+    const before = await earlierRecord(tx, states, request, {
       action: AUDIT_LOG_EXPORTED,
       platformAction: PLATFORM_EXPORTED,
     });

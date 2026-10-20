@@ -13,6 +13,10 @@
 //   is kept; read from the store exactly where the record says, so every
 //   part is of the one file whose SHA-256 the record names. Each part read
 //   is a row of the activity log too.
+// - The file's try, size and SHA-256 are the ones its signed
+//   `access_log.export_file_made` holds (F1, G4): its row, outside the
+//   chain, is believed only when it agrees, and one that doesn't raises the
+//   alarm and holds the organisation.
 //
 // The store is reached from the API alone: the container refuses every
 // network but the apps' (decision 28), so no link to it is handed out.
@@ -22,8 +26,8 @@ import {
   type BackgroundExportFile,
   storedName,
 } from '@agentx/core/modules/activity';
-import { createAuditTrail } from '@agentx/core/modules/audit';
-import { ACTIVITY_EXPORT_DOWNLOADED } from '@agentx/core/modules/evidence';
+import { createAuditTrail, type SignedStates } from '@agentx/core/modules/audit';
+import { ACTIVITY_EXPORT_DOWNLOADED, ACTIVITY_EXPORT_FILE_MADE } from '@agentx/core/modules/evidence';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -99,6 +103,53 @@ const RECORDED = z.object({
 const dayOf = (at: Date) => at.toISOString().slice(0, 10);
 
 /** The month's file of a ready download, or why it can't be downloaded. */
+/** How far from a file's `readyAt` its signed `export_file_made` is looked for: the same transaction recorded both. */
+const MADE_WITHIN_MS = 5 * 60_000;
+
+/** How many events a page of that search reads; it pages on until the window is read. */
+const MADE_A_PAGE = 50;
+
+/**
+ * The ready file as its signed `access_log.export_file_made` holds it (F1,
+ * G4): that event's try, size and SHA-256, the row's believed only when they
+ * agree. None found, or one that differs, is a row changed past the app:
+ * the alarm raised and the organisation held, and 503 INTEGRITY_FAILED.
+ */
+async function signedFile(
+  tx: Parameters<SignedStates['logPageOf']>[0],
+  states: SignedStates,
+  orgId: string,
+  exportId: string,
+  file: ReturnType<typeof readyFile>,
+) {
+  const at = file.readyAt?.getTime() ?? 0;
+  const window = { from: new Date(at - MADE_WITHIN_MS), to: new Date(at + MADE_WITHIN_MS) };
+  let beforeSeq: bigint | undefined;
+  for (;;) {
+    const page = await states.logPageOf(tx, orgId, {
+      ...window,
+      actions: [ACTIVITY_EXPORT_FILE_MADE],
+      beforeSeq,
+      limit: MADE_A_PAGE,
+    });
+    if (page.outcome === 'tampered') throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
+    const made = page.events.find(
+      ({ event }) =>
+        event.details.exportId === exportId &&
+        event.details.month === file.month &&
+        event.details.attempt === file.attempts,
+    )?.event.details;
+    if (made !== undefined) {
+      if (made.bytes !== file.bytes || made.sha256 !== file.sha256 || made.requests !== file.requests) break;
+      return file;
+    }
+    if (page.next === null) break;
+    beforeSeq = page.next;
+  }
+  states.mismatch('access_log', { orgId, id: orgId });
+  throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
+}
+
 function readyFile(
   download: { readonly state: string; readonly files: readonly BackgroundExportFile[] },
   month: string,
@@ -129,17 +180,18 @@ export function createDownloadFiles({
   readonly partBytes?: number;
 }): DownloadFiles {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: ActivityLogRefused });
-  const trail = createAuditTrail({ keys, ids });
+  type DownloadTx = Parameters<SignedStates['eventOf']>[0];
 
-  /** The download's record, whole and this admin's, with what it holds of its file. */
+  /** The download's record, whole and this admin's, with what it holds of its file; one that can't be believed raises the alarm (G2). */
   const recordOf = async (
-    tx: Parameters<typeof trail.recordedEvent>[0],
+    tx: DownloadTx,
+    states: SignedStates,
     member: Member,
     downloadId: string,
   ): Promise<z.infer<typeof RECORDED>> => {
-    const found = await trail.recordedEvent(tx, member.orgId, { eventId: downloadId });
-    if (found.kind === 'broken') throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
-    const { event } = found.kind === 'recorded' ? found : { event: undefined };
+    const found = await states.eventOf(tx, member.orgId, { eventId: downloadId });
+    if (found.outcome === 'tampered') throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
+    const event = found.event?.event;
     const recorded = RECORDED.safeParse(event?.details);
     if (
       event?.action !== ACTIVITY_EXPORT_DOWNLOADED ||
@@ -158,7 +210,7 @@ export function createDownloadFiles({
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
         const download = await backgroundExportOf(tx, member.orgId, exportId);
         if (download === undefined) throw new ActivityLogRefused(404, 'NOT_FOUND');
-        const file = readyFile(download, month);
+        const file = await signedFile(tx, states, member.orgId, exportId, readyFile(download, month));
         const recorded = await createAuditTrail({ keys, ids, correlationId }).record(tx, member.orgId, {
           actor: { type: 'user', id: member.userId },
           action: ACTIVITY_EXPORT_DOWNLOADED,
@@ -179,8 +231,8 @@ export function createDownloadFiles({
       if (isUnwritten(done)) return done;
       // Answered from the record, so a retry with its key answers the same download.
       const id = done.result.resourceId;
-      const read = await work.answered(member.orgId, correlationId, async (tx) => ({
-        recorded: await recordOf(tx, member, id),
+      const read = await work.answered(member.orgId, correlationId, async (tx, states) => ({
+        recorded: await recordOf(tx, states, member, id),
       }));
       if ('outcome' in read) return read;
       const { attempt: _attempt, ...shown } = read.recorded;
@@ -190,7 +242,7 @@ export function createDownloadFiles({
     async part(member, { exportId, downloadId, index }, correlationId) {
       const read = await work.answered(member.orgId, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        const recorded = await recordOf(tx, member, downloadId);
+        const recorded = await recordOf(tx, states, member, downloadId);
         if (recorded.exportId !== exportId || index >= recorded.parts) throw new ActivityLogRefused(404, 'NOT_FOUND');
         // Still kept: a download started before its file expired reads nothing after.
         const download = await backgroundExportOf(tx, member.orgId, exportId);

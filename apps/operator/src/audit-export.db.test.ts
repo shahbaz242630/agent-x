@@ -390,7 +390,7 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
     expect(await noticesOf(orgId)).toEqual([]);
   });
 
-  it('refuses an export ID whose record can’t be verified, recording nothing', async () => {
+  it('refuses an export ID whose record can’t be verified, recording nothing but the integrity hold (F1, G2)', async () => {
     const orgId = await organization(1);
     await tamperEvent(orgId, 2);
     const [, tampered] = await eventsOf(orgId);
@@ -399,7 +399,9 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
 
     expect(code).toBe(1);
     expect(line('operator.refused')?.problems).toEqual(["the organisation's audit log can't be verified"]);
-    expect(await eventsOf(orgId)).toHaveLength(3);
+    const events = await eventsOf(orgId);
+    expect(events).toHaveLength(4);
+    expect(events.at(-1)?.action).toBe('integrity_hold.set');
   });
 
   it('says a failure that is no refusal failed, naming the export', async () => {

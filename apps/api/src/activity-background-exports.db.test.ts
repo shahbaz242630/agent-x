@@ -594,6 +594,46 @@ describe('L5c a background download’s file downloaded (decision 31: each downl
     expect(await part(0)).toEqual(refused(410, 'ACTIVITY_EXPORT_EXPIRED'));
   });
 
+  it('F1 G4 believes a file’s row only as its signed export_file_made holds it: one changed past the app raises the alarm and the hold', async () => {
+    const w = await world();
+    const download = await built(w);
+    const admin = database.as('admin');
+    await admin.query('alter table activity_exports.files disable trigger file_moves');
+    await admin.query('update activity_exports.files set bytes = bytes + 1 where export_id = $1', [download.id]);
+    await admin.query('alter table activity_exports.files enable trigger file_moves');
+
+    expect(
+      await filesWith().start(
+        w.admin,
+        keyed(w.admin, FILE_DOWNLOAD_OPERATION),
+        { exportId: download.id, month: '2026-08' },
+        CORRELATION,
+      ),
+    ).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await eventsOf(w, ACTIVITY_EXPORT_DOWNLOADED)).toEqual([]);
+    expect(capture.lines().map((line) => line.event)).toEqual(
+      expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
+    );
+  });
+
+  it('F1 G2 refuses a part of a download whose record was changed past the app, raising the alarm and the hold', async () => {
+    const w = await world();
+    const download = await built(w);
+    const file = await started(w, download.id);
+    await database
+      .as('admin')
+      .query('update audit.events set details = replace(details, \'"attempt":1\', \'"attempt":2\') where id = $1', [
+        file.id,
+      ]);
+
+    expect(
+      await filesWith().part(w.admin, { exportId: download.id, downloadId: file.id, index: 0 }, CORRELATION),
+    ).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(capture.lines().map((line) => line.event)).toEqual(
+      expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
+    );
+  });
+
   it('answers ACTIVITY_EXPORT_UNREADABLE when the store fails or answers short, warning in plain words', async () => {
     const w = await world();
     const download = await built(w);

@@ -125,7 +125,6 @@ export function createActivityLogExports({
   readonly mostRequests?: number;
 }): ActivityLogExports {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: ActivityLogRefused });
-  const trail = createAuditTrail({ keys, ids });
   let building = 0;
 
   /** The download's file: its requests written up to `writtenUpTo`, newest first, a batch to a transaction. */
@@ -189,10 +188,11 @@ export function createActivityLogExports({
     if (isUnwritten(done)) return done;
     // A retry reads its own record for the last row it was made to, so it answers the same requests.
     const id = done.result.resourceId;
-    const made = await work.answered(member.orgId, correlationId, async (tx) => {
-      const found = await trail.recordedEvent(tx, member.orgId, { eventId: id });
-      if (found.kind !== 'recorded') throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
-      const { writtenUpTo } = found.event.details;
+    const made = await work.answered(member.orgId, correlationId, async (tx, states) => {
+      // Through the signed states: a record that can't be believed raises the alarm and the hold (F1, G2).
+      const found = await states.eventOf(tx, member.orgId, { eventId: id });
+      if (found.outcome !== 'read' || found.event === undefined) throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
+      const { writtenUpTo } = found.event.event.details;
       return { writtenUpTo: typeof writtenUpTo === 'string' ? writtenUpTo : null };
     });
     if ('outcome' in made) return made;

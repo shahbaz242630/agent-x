@@ -133,7 +133,7 @@ interface BackloggedRead {
 const BACKLOGGED: BackloggedRead = Object.freeze({ kind: 'backlog' });
 
 /** An event to find: by its own ID, or as the one event about an object recorded once. */
-type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
+export type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
 
 /** An event read back whole: its ID, its place in the chain, when it was recorded and what it says. */
 export interface ReadEvent {

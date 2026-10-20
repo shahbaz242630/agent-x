@@ -71,6 +71,7 @@ import {
 import {
   type AuditTrail,
   type AuditTransaction,
+  type EventToFind,
   type HistoryToRead,
   type LogEvent,
   type LogPageToRead,
@@ -305,6 +306,11 @@ export type HistoryCheck =
   | { readonly outcome: 'read'; readonly events: readonly ReadEvent[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
+/** One event read from the log (eventOf): whole, or none found; or tampered with, with the alarm raised. */
+export type EventRead =
+  | { readonly outcome: 'read'; readonly event: ReadEvent | undefined }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
 /** A page of the whole log (logPageOf): its events newest first and the next page's start; or tampered with, the alarm raised. */
 export type LogPage =
   | { readonly outcome: 'read'; readonly events: readonly LogEvent[]; readonly next: bigint | null }
@@ -518,6 +524,13 @@ export interface SignedStates {
    * TooManyEventsToRead.
    */
   historyOf(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<HistoryCheck>;
+  /**
+   * One event of the organisation's log, by its ID or its object (the trail's
+   * recordedEvent), believed only whole: a record an answer rests on, such as
+   * an export's or a download's (Phase 3 F1, G2). One that isn't whole raises
+   * the alarm and holds the organisation, as historyOf's.
+   */
+  eventOf(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<EventRead>;
   /**
    * A page of the organisation's whole log for its admins (E10; the trail's
    * logPage), any event that can't be believed raising the alarm and the
@@ -1051,6 +1064,13 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'read', events: read.events });
   };
 
+  const eventOf = async (tx: AuditTransaction, orgId: string, find: EventToFind): Promise<EventRead> => {
+    const found = await trail.recordedEvent(tx, orgId, find);
+    // As historyOf: the organisation's own log, so the alarm names it.
+    if (found.kind === 'broken') return alarm('organisation', { orgId, id: orgId }, 'log', found.seq);
+    return Object.freeze({ outcome: 'read', event: found.kind === 'recorded' ? found : undefined });
+  };
+
   const logPageOf = async (tx: AuditTransaction, orgId: string, find: LogPageToRead): Promise<LogPage> => {
     const read = await trail.logPage(tx, orgId, find);
     // As historyOf: the organisation's own log, so the alarm names it.
@@ -1311,6 +1331,7 @@ export function createSignedStates({
     holdInvestigation,
 
     historyOf,
+    eventOf,
     logPageOf,
 
     async clearIntegrityHold(
