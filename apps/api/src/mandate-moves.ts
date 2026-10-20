@@ -69,7 +69,7 @@ import {
 } from './mandate-reads.ts';
 import { OVER_LIMIT_CHOSEN, overLimitDetails } from './over-limit-choice.ts';
 import type { Refused } from './refused.ts';
-import { choiceDetails, pausedOf, SUSPENDS } from './suspensions.ts';
+import { cancelledInForce, choiceDetails, pausedOf, SUSPENDS } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** The moves, by the state machine's events (MANDATE). */
@@ -293,7 +293,9 @@ export function createMandateMoves({
           { passkeyRequired: true },
         );
         const { id } = read.mandate;
-        if (cancels(chosen)) {
+        // A resume after a suspension that cancelled them voids those its brake left first, the job the rest (F1 G1).
+        const left = move === 'resume' && (await cancelledInForce(tx, states, member.orgId, 'mandate', id));
+        if (cancels(chosen) || left) {
           await voidPendingOf(tx, states, keys, member.orgId, { mandateId: id }, 'MANDATE_NOT_IN_FORCE', clock.now());
         }
         const change = {

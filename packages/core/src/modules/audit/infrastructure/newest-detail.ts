@@ -66,3 +66,35 @@ export const movedOtherwiseSince = ({
       and e.seq > (select pg_catalog.min(f.seq) from audit.events f
         where f.org_id = ${sql.ref(orgColumn)} and f.subject_type = ${since.type}
           and f.subject_id = ${sql.ref(since.idColumn)}))`;
+
+/**
+ * Whether, of the events about the object of `type` whose ID is the column
+ * `idColumn`, in the organisation the column `orgColumn` names, any recorded
+ * after the first event about the object of `since.type` whose ID is the
+ * column `since.idColumn` cancels (F1 G1): one of `cancels` whose
+ * `pendingRequests` isn't `pause` (a missing choice cancels), or one of
+ * `cancelsIfChosen` whose `pendingRequests` is `cancel`.
+ */
+export const cancelledSince = ({
+  type,
+  idColumn,
+  orgColumn,
+  cancels,
+  cancelsIfChosen,
+  since,
+}: {
+  readonly type: string;
+  readonly idColumn: string;
+  readonly orgColumn: string;
+  readonly cancels: readonly string[];
+  readonly cancelsIfChosen: readonly string[];
+  readonly since: { readonly type: string; readonly idColumn: string };
+}): RawBuilder<boolean> =>
+  sql<boolean>`exists (select 1 from audit.events e
+    where e.org_id = ${sql.ref(orgColumn)} and e.subject_type = ${type} and e.subject_id = ${sql.ref(idColumn)}
+      and ((e.action = any(${cancels}::text[])
+          and ((e.details::jsonb) ->> 'pendingRequests') is distinct from 'pause')
+        or (e.action = any(${cancelsIfChosen}::text[]) and ((e.details::jsonb) ->> 'pendingRequests') = 'cancel'))
+      and e.seq > (select pg_catalog.min(f.seq) from audit.events f
+        where f.org_id = ${sql.ref(orgColumn)} and f.subject_type = ${since.type}
+          and f.subject_id = ${sql.ref(since.idColumn)}))`;

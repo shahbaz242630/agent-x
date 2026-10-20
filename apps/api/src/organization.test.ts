@@ -187,7 +187,6 @@ describe('POST /v1/organization/unfreeze, then /confirm: a passkey, a reason and
   it.each([
     [409, 'ORG_NOT_FROZEN'],
     [409, 'PENDING_REQUESTS_CANCELLED'],
-    [409, 'PENDING_REQUESTS_TOO_MANY'],
     [403, 'STEP_UP_FAILED'],
   ] as const)('answers %i %s as the use case refuses', async (status, code) => {
     const { app } = await withChanges({ outcome: 'refused', status, code });

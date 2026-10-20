@@ -539,7 +539,7 @@ export const PLAIN_WORDS = {
   },
   'request_void.failed': {
     happened:
-      'A pending spend request could not be cancelled after its organisation, agent, mandate, bank account or supplier was stopped.',
+      'A pending spend request could not be cancelled after something it uses was stopped with its requests cancelled.',
     broke: "It stays pending for now, still holding part of the agent's budget.",
     next: 'It is tried again in about 5 minutes. If it keeps failing, check the database and the integrity alarms.',
   },

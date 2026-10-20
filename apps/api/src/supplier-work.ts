@@ -8,7 +8,7 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
-import { pendingPastABrake, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   contactsOf,
   type NameCheck,
@@ -98,9 +98,9 @@ export const toldEveryone = (
 
 /**
  * Whether the supplier is UNVERIFIED by a stop that cancels its requests,
- * so a move that would let them stand again must void those the
- * request-voids job hasn't reached yet first, by the caller with its own
- * cause; refused (PENDING_REQUESTS_TOO_MANY) past what one brake voids. The
+ * so a move that would let them stand again voids those the request-voids
+ * job hasn't reached yet first, by the caller with its own cause, the job
+ * any past that batch (its stop's event still cancels them, F1 G1). The
  * moves: a pause over it (C3c's suspend over a cancel; E3's details change)
  * and verifying it again (the E3 review: a payee change chosen to cancel,
  * then withdrawn, comes back VERIFIED on the version its requests were
@@ -112,13 +112,10 @@ export async function cancelledByItsStop(
   orgId: string,
   supplier: { readonly id: string; readonly status: string },
 ): Promise<boolean> {
-  const cancelled =
+  return (
     supplier.status === 'UNVERIFIED' &&
-    !(await pausedOf(tx, states, orgId, [['supplier', supplier.id, 'UNVERIFIED']])).has('supplier');
-  if (cancelled && (await pendingPastABrake(tx, orgId, { supplierId: supplier.id }))) {
-    throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
-  }
-  return cancelled;
+    !(await pausedOf(tx, states, orgId, [['supplier', supplier.id, 'UNVERIFIED']])).has('supplier')
+  );
 }
 
 /** A supplier read for a decision or a change: its record, and the state a change records from. */

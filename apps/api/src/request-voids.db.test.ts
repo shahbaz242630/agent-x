@@ -89,7 +89,8 @@ type Voiding = Exclude<keyof typeof STOPS, 'the source suspended by the partner'
 const CAUSES: Readonly<Record<Voiding, string>> = {
   'the mandate superseded': 'MANDATE_NOT_IN_FORCE',
   'the mandate suspended': 'MANDATE_NOT_IN_FORCE',
-  'the supplier’s details changed': 'SUPPLIER_CHANGED',
+  // Its unverify names no choice, so cancels: a stop chosen to cancel since the decision (F1 G1).
+  'the supplier’s details changed': 'SUPPLIER_NOT_VERIFIED,SUPPLIER_CHANGED',
   'the supplier suspended': 'SUPPLIER_NOT_VERIFIED',
   'the source suspended by the organisation': 'SOURCE_NOT_USABLE',
   'the agent suspended': 'AGENT_SUSPENDED',
@@ -578,6 +579,7 @@ describe('pending spend requests voided once their authority no longer stands (C
         source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false, consentHeld: false },
         supplier: { status: 'VERIFIED', currentVersionId: row.supplier_version_id ?? '', pausedFrom: [] },
         paused: new Set(),
+        cancelledBy: new Set(),
       } satisfies AuthorityNow;
     });
     const voiding = (id: string, under = named) =>

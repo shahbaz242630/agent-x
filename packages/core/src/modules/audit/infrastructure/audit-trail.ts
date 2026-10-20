@@ -344,6 +344,14 @@ export interface HistoryToRead {
    * the suspension a subject is under now (Phase 3 decision 7).
    */
   readonly newest?: true;
+  /**
+   * Only the oldest `limit` events, never TooManyEventsToRead: for a read
+   * that pages forward, or stops at the first that counts (a cancel since a
+   * request's decision, F1 G1). Never with `newest`.
+   */
+  readonly oldest?: true;
+  /** Only events recorded after this seq: those since another event (F1 G1). */
+  readonly afterSeq?: bigint;
 }
 
 /**
@@ -936,9 +944,10 @@ export function createAuditTrail({
     },
 
     async recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck> {
-      const { subjectTypes, actions, limit, newest = false } = find;
+      const { subjectTypes, actions, limit, newest = false, oldest = false, afterSeq } = find;
       const objects = objectsToRead(find);
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+      if (newest && oldest) throw new RangeError('The newest events or the oldest, not both');
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const which = sql.join(
@@ -946,11 +955,13 @@ export function createAuditTrail({
           sql`e.subject_type = any(${[...subjectTypes]}::text[])`,
           ...(objects === undefined ? [] : [sql`e.subject_id = any(${[...objects]}::uuid[])`]),
           ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
+          ...(afterSeq === undefined ? [] : [sql`e.seq > ${afterSeq}`]),
         ],
         sql` and `,
       );
-      // One past the limit tells a history cut short; the newest alone are never more than asked.
-      const rows = await eventsWithHead(tx, chain, which, newest ? limit : limit + 1, undefined, newest);
+      // One past the limit tells a history cut short; the newest or oldest alone are never more than asked.
+      const cut = newest || oldest;
+      const rows = await eventsWithHead(tx, chain, which, cut ? limit : limit + 1, undefined, newest);
       const [first] = rows;
       const past = first?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);

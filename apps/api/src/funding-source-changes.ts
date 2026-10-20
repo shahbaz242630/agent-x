@@ -78,7 +78,7 @@ import {
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
 import type { Refused } from './refused.ts';
-import { choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
+import { cancelledInForce, choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** Asking the partner how a source stands now. */
@@ -395,6 +395,11 @@ export function createFundingSourceChanges({
           { action: REACTIVATE_OPERATION, changeHash: reactivationHash(source.suspendedBy) },
           { passkeyRequired: true },
         );
+        // Its suspension cancelled them: those its brake left are voided first, the job any past this batch (F1 G1).
+        if (await cancelledInForce(tx, states, member.orgId, 'source', source.id)) {
+          const braked = { fundingSourceId: source.id };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
+        }
         movedAsRead(
           await states.changeStatus(tx, SOURCES, { orgId: member.orgId, id: source.id }, 'reactivate', {
             actor: { type: 'user', id: member.userId },

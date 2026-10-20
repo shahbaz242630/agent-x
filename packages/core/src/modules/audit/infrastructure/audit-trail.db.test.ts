@@ -35,7 +35,7 @@ import {
   TooManyEventsAboutObject,
   TooManyEventsToRead,
 } from './audit-trail.ts';
-import { movedOtherwiseSince, newestDetail } from './newest-detail.ts';
+import { cancelledSince, movedOtherwiseSince, newestDetail } from './newest-detail.ts';
 import type { AuditTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -1380,6 +1380,84 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
     expect(await newest(5)).toMatchObject({ kind: 'recorded', events: [{ seq: 1n }, { seq: 2n }, { seq: 4n }] });
     await tamper(`update audit.events set details = '{"step":9}' where org_id = $1 and seq = 4`);
     expect(await newest(1)).toEqual({ kind: 'broken', seq: 4n });
+  });
+
+  it('reads the oldest alone after a seq when asked, never throwing past its limit, never with the newest (F1 G1)', async () => {
+    await record(org, about('membership', 1), about('membership', 2), about('probe', 3), about('membership', 4));
+    const oldest = (limit: number, afterSeq?: bigint) =>
+      withTenant(app, org, (tx) =>
+        trail.recordedEvents(tx, org, {
+          subjectTypes: ['membership'],
+          limit,
+          oldest: true,
+          ...(afterSeq === undefined ? {} : { afterSeq }),
+        }),
+      );
+
+    expect(await oldest(1)).toMatchObject({ kind: 'recorded', events: [{ seq: 1n }] });
+    expect(await oldest(2, 1n)).toMatchObject({ kind: 'recorded', events: [{ seq: 2n }, { seq: 4n }] });
+    expect(await oldest(5, 2n)).toMatchObject({ kind: 'recorded', events: [{ seq: 4n }] });
+    expect(await oldest(5, 4n)).toEqual({ kind: 'recorded', events: [] });
+    await expect(
+      withTenant(app, org, (tx) =>
+        trail.recordedEvents(tx, org, { subjectTypes: ['membership'], limit: 1, newest: true, oldest: true }),
+      ),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it('tells a query whether an object was stopped to cancel since another’s first event, unverified (cancelledSince, F1 G1)', async () => {
+    const cancelled = () =>
+      withTenant(app, org, async (tx) => {
+        const { rows } = await sql<{ cancelled: boolean }>`select ${cancelledSince({
+          type: 'agent',
+          idColumn: 'o.id',
+          orgColumn: 'o.org_id',
+          cancels: ['agent.suspended'],
+          cancelsIfChosen: ['agent.reactivated'],
+          since: { type: 'spend_request', idColumn: 'o.id' },
+        })} as cancelled from (values (${org}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx);
+        return rows[0]?.cancelled;
+      });
+    const stop = (step: number, action: string, details: Record<string, string>) => ({
+      ...about('agent', step),
+      action,
+      details,
+    });
+
+    // A cancel before the request counts for nothing; none at all is no cancel.
+    await record(org, stop(1, 'agent.suspended', { pendingRequests: 'cancel' }), {
+      ...about('spend_request', 2),
+      action: 'spend_request.decided',
+    });
+    expect(await cancelled()).toBe(false);
+    // A pause, and a lift naming no cancel, cancel nothing.
+    await record(org, stop(3, 'agent.suspended', { pendingRequests: 'pause' }), stop(4, 'agent.reactivated', {}));
+    expect(await cancelled()).toBe(false);
+    // Another action of the object's is no stop, whatever its details say.
+    await record(org, stop(5, 'agent.renamed', { pendingRequests: 'cancel' }));
+    expect(await cancelled()).toBe(false);
+    // A lift chosen to cancel cancels.
+    await record(org, stop(6, 'agent.reactivated', { pendingRequests: 'cancel' }));
+    expect(await cancelled()).toBe(true);
+  });
+
+  it('tells a query a stop naming no choice cancelled (cancelledSince, F1 G1)', async () => {
+    await record(
+      org,
+      { ...about('spend_request', 1), action: 'spend_request.decided' },
+      { ...about('agent', 2), action: 'agent.suspended' },
+    );
+    const { rows } = await withTenant(app, org, (tx) =>
+      sql<{ cancelled: boolean }>`select ${cancelledSince({
+        type: 'agent',
+        idColumn: 'o.id',
+        orgColumn: 'o.org_id',
+        cancels: ['agent.suspended'],
+        cancelsIfChosen: [],
+        since: { type: 'spend_request', idColumn: 'o.id' },
+      })} as cancelled from (values (${org}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx),
+    );
+    expect(rows).toEqual([{ cancelled: true }]);
   });
 
   it('gives an object’s newest detail of the actions named to a query, unverified, null for none (newestDetail, C2a, C3b)', async () => {

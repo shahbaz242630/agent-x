@@ -100,6 +100,8 @@ async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[
  */
 export interface Decided extends ApprovalClock {
   readonly held: HeldSealed | null;
+  /** Its decided event's place in the chain: a stop chosen to cancel after it voids the request (F1 G1). */
+  readonly seq: bigint;
 }
 
 /**
@@ -123,10 +125,10 @@ export async function decisionsOf(
   });
   if (history.outcome !== 'read') return new Map();
   const decided = history.events.map(
-    ({ event, recordedAt }) =>
+    ({ event, recordedAt, seq }) =>
       [
         event.subject.id.toLowerCase(),
-        { held: heldOf(event.details), decidedAt: recordedAt, waitHours: approvalWaitOf(event.details) },
+        { held: heldOf(event.details), decidedAt: recordedAt, waitHours: approvalWaitOf(event.details), seq },
       ] as const,
   );
   // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.

@@ -23,9 +23,9 @@
 //   (pause), both kept on its event. The ask: the key claimed first; the
 //   organisation, FROZEN (ORG_NOT_FROZEN otherwise); the admin read again;
 //   an un-pause refused (PENDING_REQUESTS_CANCELLED) when the freeze in
-//   force cancelled them; a fresh start refused (PENDING_REQUESTS_TOO_MANY)
-//   with more pending than one brake voids, as once ACTIVE the request-voids
-//   job never looks at those left; a challenge bound to the organisation,
+//   force cancelled them (a fresh start voids up to a brake's batch, the
+//   request-voids job the rest by its event, decision 32a, F1 G1); a
+//   challenge bound to the organisation,
 //   the event that froze it, the reason and the choice. The confirm, with
 //   the challenge, the same reason and choice: the same reads, the challenge
 //   consumed; a fresh start voids every pending request first; then
@@ -44,12 +44,7 @@ import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import {
-  pendingPastABrake,
-  type PendingChoice,
-  type SpendRequestsTables,
-  voidPendingOf,
-} from '@agentx/core/modules/spend-requests';
+import { type PendingChoice, type SpendRequestsTables, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import { type Clock, type IdGenerator, keptNote } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -175,8 +170,7 @@ export function createOrganizationChanges({
   /**
    * The organisation, FROZEN (ORG_NOT_FROZEN otherwise), and the admin, for
    * an unfreeze with `choice`: an un-pause refused PENDING_REQUESTS_CANCELLED
-   * when its freeze cancelled them; a fresh start PENDING_REQUESTS_TOO_MANY
-   * past what one brake voids (decision 14).
+   * when its freeze cancelled them (decision 14).
    */
   const unfreezable = async (
     tx: OrganizationTx,
@@ -190,8 +184,6 @@ export function createOrganizationChanges({
     if (choice === 'pause') {
       const paused = await pausedOf(tx, states, member.orgId, [['organization', member.orgId, 'FROZEN']]);
       if (!paused.has('organization')) throw new OrganizationRefused(409, 'PENDING_REQUESTS_CANCELLED');
-    } else if (await pendingPastABrake(tx, member.orgId, { organizationId: member.orgId })) {
-      throw new OrganizationRefused(409, 'PENDING_REQUESTS_TOO_MANY');
     }
     return organization;
   };
@@ -273,7 +265,7 @@ export function createOrganizationChanges({
           { passkeyRequired: true },
         );
         if (asked.pendingRequests === 'cancel') {
-          // Every one, as `unfreezable` found no more than one brake voids: once ACTIVE, the job never would.
+          // A brake's batch; the request-voids job the rest, by this unfreeze's event (F1 G1).
           const braked = { organizationId: member.orgId };
           await voidPendingOf(tx, states, keys, member.orgId, braked, 'ORG_FROZEN', clock.now());
         }

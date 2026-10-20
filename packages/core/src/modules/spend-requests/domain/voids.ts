@@ -23,6 +23,11 @@
 // carries from stands once the supplier is verified again; its status is
 // judged as ever meanwhile.
 //
+// A stop chosen to cancel voids for good (decision 32a, F1 G1): a request
+// decided before it stays void once what was stopped stands again, its brake
+// having voided only a batch, the request-voids job the rest. A pause, or a
+// reactivation that names no cancel, never does.
+//
 // Each cause found is kept with the void, in the order the engine checks
 // them; none and the request stands.
 import type { ReasonCode } from '../../../shared-kernel/index.ts';
@@ -93,13 +98,16 @@ export interface AuthorityNow {
   } | null;
   /** Those stopped with their requests paused, as the freeze, suspension (or a supplier's unverify) in force chose. */
   readonly paused: ReadonlySet<Pausable>;
+  /** Those stopped since the request's decision by a stop chosen to cancel, whatever they are now (F1 G1). */
+  readonly cancelledBy: ReadonlySet<Pausable>;
 }
 
 /** Why the request is void, the engine's order; empty while its authority stands. */
 export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly ReasonCode[] {
-  // Stopped: not as it must be, unless stopped with its requests paused.
+  // Stopped: cancelled since its decision, or not as it must be unless stopped with its requests paused.
   const stopped = (status: string, standing: string, which: Pausable) =>
-    status !== standing && !((PAUSED_IN[which] as readonly string[]).includes(status) && now.paused.has(which));
+    now.cancelledBy.has(which) ||
+    (status !== standing && !((PAUSED_IN[which] as readonly string[]).includes(status) && now.paused.has(which)));
   const causes: ReasonCode[] = [];
   if (stopped(now.organizationStatus, 'ACTIVE', 'organization')) causes.push('ORG_FROZEN');
   if (stopped(now.agentStatus, 'ACTIVE', 'agent')) causes.push('AGENT_SUSPENDED');

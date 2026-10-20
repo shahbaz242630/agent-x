@@ -457,7 +457,7 @@
                   {
                     "type": "string",
                     "const": "PENDING_REQUESTS_TOO_MANY",
-                    "description": "More pending requests are left to cancel than one move cancels at once, so nothing was changed. Wait a few minutes while they are cancelled, then try again; if its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel first."
+                    "description": "No longer returned: a move now cancels what it can at once and the rest within minutes (kept so the list of codes stays stable)."
                   },
                   {
                     "type": "string",
