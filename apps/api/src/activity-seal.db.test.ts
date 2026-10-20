@@ -51,15 +51,15 @@ const idAt = (at: string) => {
 /** The SHA-256 of the empty text: a quiet day's digest. */
 const NOTHING = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
-/** A request of the world's admin written at `written`. */
-const written = (w: World, at: string) =>
+/** A request of the world's admin written at `at`, its time `recordedAt` (`at` but for a row written past the app). */
+const written = (w: World, at: string, recordedAt = at) =>
   withTenant(app, w.org, (tx) =>
     tx
       .insertInto('access.requests')
       .values({
         org_id: w.org,
         id: idAt(at),
-        recorded_at: new Date(at),
+        recorded_at: new Date(recordedAt),
         actor_type: 'user',
         actor_id: w.admin.userId,
         method: 'GET',
@@ -255,7 +255,7 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     await run;
     expect(await sealsOf(w)).toEqual([]);
     expect(capture.lines().filter((line) => line.event === 'access_log_seal.moved')).toEqual([
-      expect.objectContaining({ level: 'warn', day: '2026-10-19', digested: 1, counted: 2 }),
+      expect.objectContaining({ level: 'error', day: '2026-10-19', digested: 1, counted: 2 }),
     ]);
     await sealFor(w).run();
     expect((await sealsOf(w)).map((seal) => [seal.day, seal.requests])).toEqual([
@@ -380,6 +380,19 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     expect(capture.lines().map((line) => line.event)).toEqual(expect.arrayContaining(['audit.integrity_failed']));
   });
 
+  it('F1 G3 never seals a day holding a row written past the app (a fresh ID, an old time): the alarm and the hold', async () => {
+    const w = await world();
+    await written(w, '2026-10-18T09:00:00.000Z');
+    await written(w, '2026-10-19T09:00:00.000Z', '2026-07-01T09:00:00.000Z');
+
+    await sealFor(w).run();
+
+    expect((await sealsOf(w)).map((seal) => seal.day)).toEqual(['2026-10-18']);
+    expect(capture.lines().map((line) => line.event)).toEqual(
+      expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
+    );
+  });
+
   it('logs a run whose list fails', async () => {
     const w = await world();
     const seal = createActivitySeal({
@@ -444,6 +457,34 @@ describe('L6c the seals checked (decision 26, ADR-012 §2)', () => {
 
     expect(alarms()).toEqual([]);
     expect(held()).toBe(false);
+  });
+
+  it('F1 G3 holds the organisation for a sealed day holding a row written past the app, its digest whole', async () => {
+    const w = await world();
+    await written(w, '2026-10-19T09:00:00.000Z', '2026-07-01T09:00:00.000Z');
+    const digest = await digestOfDay((work) => withTenant(app, w.org, work), w.org, '2026-10-19', 10);
+    await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'system', id: 'api' },
+        action: ACTIVITY_SEALED,
+        subject: { type: 'access_log', id: w.org, version: 1 },
+        details: {
+          day: '2026-10-19',
+          requests: digest.requests,
+          digest: digest.digest,
+          idFrom: digest.idFrom,
+          idTo: digest.idTo,
+          form: 1,
+        },
+      }),
+    );
+
+    await checkFor(w).run();
+
+    expect(capture.lines().filter((line) => line.event === 'access_log_seal_check.broken')).toEqual([
+      expect.objectContaining({ day: '2026-10-19', why: 'misdated' }),
+    ]);
+    expect(held()).toBe(true);
   });
 
   it('holds the organisation for a row of a sealed day changed past the app', async () => {

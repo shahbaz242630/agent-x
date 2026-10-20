@@ -12,7 +12,11 @@
 // transaction under the organisation's seal lock (ADR-006 §6, 11b): the
 // newest seal read again (another server may have sealed the day), the day
 // counted again with its last ID, and the event recorded only when both still
-// stand; a day that moved is left for the next run, warned.
+// stand; a day that moved is left for the next run, an error (it emails,
+// as every error does: one row slipped in before each run would otherwise
+// stop sealing unseen, F1 G3). A day holding a row written past the app
+// (its ID's time far from its own: `misdated`) is never sealed: the alarm
+// raised and the organisation held.
 //
 // A run never throws: each failure is logged, naming the organisation, and
 // the run goes on to the next.
@@ -89,6 +93,14 @@ export function createActivitySeal({
       withSignedStates(database, orgId, { keys, ids, logger, correlationId }, work);
     const digest = await digestOfDay((work) => inOrg((tx) => work(tx)), orgId, day, batch);
     const log = logger.child({ correlationId, orgId });
+    if (digest.misdated !== null) {
+      // A row written past the app (F1, G3): the day is never sealed with it; the alarm raised and the hold set.
+      await inOrg((_tx, states) => {
+        states.mismatch('access_log', { orgId, id: orgId });
+        return Promise.resolve();
+      });
+      return false;
+    }
     return inOrg(async (tx, states) => {
       await holdTransactionLock(tx, ACTIVITY_SEAL_LOCK, orgId);
       const newest = await newestSealedDay(tx, states, orgId);
@@ -99,7 +111,7 @@ export function createActivitySeal({
       if (newest.day !== null && newest.day >= day) return true;
       const now = await dayCount(tx, orgId, day);
       if (now.requests !== digest.requests || now.idTo !== digest.idTo) {
-        log.warn('access_log_seal.moved', { day, digested: digest.requests, counted: now.requests });
+        log.error('access_log_seal.moved', { day, digested: digest.requests, counted: now.requests });
         return false;
       }
       await trail.record(tx, orgId, {

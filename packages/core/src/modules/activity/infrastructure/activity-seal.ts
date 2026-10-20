@@ -17,6 +17,11 @@
 //   it (ADR-011 §7): clues a lawful erasure may blank, the seal standing.
 //   A day with no rows digests the empty text: a quiet day is sealed too, so
 //   a day emptied after shows.
+// - A row's ID is made as it is written, just after its request was
+//   answered: its ID's time is its `recorded_at` plus its duration, from
+//   moments before to hours after (ID_LATE_MS). One further off was written past the app (a fresh ID with
+//   an old time, to pass as an old row once sealed): the digest names it
+//   (`misdated`), and neither the seal nor its check believes the day (F1, G3).
 // - Read in batches, each in the organisation's transaction (its row-level
 //   security holds the read); recorded in one more, after counting the day
 //   again with its last ID: a day that moved meanwhile is left for the next
@@ -70,14 +75,31 @@ export const idsOfDay = (day: string): { readonly from: string; readonly to: str
 /** Whether `day` has been closed long enough, at `now`, to be sealed. */
 export const sealable = (day: string, now: Date): boolean => now.getTime() >= startOf(day) + DAY_MS + SEAL_GRACE_MS;
 
-/** A day's digest, its count and its first and last IDs (null when it holds none). */
+/** A day's digest, its count, its first and last IDs (null when it holds none), and its first row misdated (null for none). */
 export interface DayDigest {
   readonly day: string;
   readonly requests: number;
   readonly digest: string;
   readonly idFrom: string | null;
   readonly idTo: string | null;
+  readonly misdated: string | null;
 }
+
+/** How long before its answer a row's ID may be made: two clocks on one server, read a moment apart. */
+const ID_EARLY_MS = 5_000;
+
+/**
+ * How long after its answer. The row is written then, awaited, so only a
+ * wait for a connection lies between; but an ID's clock never goes back
+ * (uuid v7 keeps its highest time), so a server clock stepped back makes its
+ * IDs late by the step until the clock catches up. Hours, then: a fresh ID
+ * given an old time to pass as an old row is days off, and an honest clock
+ * fault never holds an organisation (F1 G3's review).
+ */
+const ID_LATE_MS = 6 * 60 * 60_000;
+
+/** The instant a UUIDv7 was made, in milliseconds. */
+const msOfId = (id: string): number => Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16);
 
 /** The sealed columns of a batch of the day's rows, by ID, after `after` when named. */
 const sealedRows = (tx: SealTx, orgId: string, day: string, after: string | undefined, limit: number) => {
@@ -106,6 +128,13 @@ const sealedRows = (tx: SealTx, orgId: string, day: string, after: string | unde
 };
 
 type SealedRow = Awaited<ReturnType<typeof sealedRows>>[number];
+
+/** Whether the row's ID was made where its time and duration say it was answered, give or take the bounds above. */
+const dated = (row: SealedRow): boolean => {
+  const answered = Date.parse(row.at) + row.duration_ms;
+  const made = msOfId(row.id);
+  return made >= answered - ID_EARLY_MS && made <= answered + ID_LATE_MS;
+};
 
 /** One row's line in the digest. */
 const lineOf = (row: SealedRow): string =>
@@ -137,16 +166,20 @@ export async function digestOfDay(
   let requests = 0;
   let idFrom: string | null = null;
   let idTo: string | null = null;
+  let misdated: string | null = null;
   for (;;) {
     const after: string | undefined = idTo ?? undefined;
     const rows: SealedRow[] = await inOrg((tx) => sealedRows(tx, orgId, day, after, batch));
-    for (const row of rows) hash.update(lineOf(row));
+    for (const row of rows) {
+      hash.update(lineOf(row));
+      if (misdated === null && !dated(row)) misdated = row.id;
+    }
     requests += rows.length;
     idFrom ??= rows[0]?.id ?? null;
     idTo = rows.at(-1)?.id ?? idTo;
     if (rows.length < batch) break;
   }
-  return { day, requests, digest: hash.digest('hex'), idFrom, idTo };
+  return { day, requests, digest: hash.digest('hex'), idFrom, idTo, misdated };
 }
 
 /** The day's count and last ID, read in one statement, to check a digest still stands before it is sealed. */
