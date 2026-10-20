@@ -280,7 +280,14 @@ describe('L5c a download given up', () => {
     }
 
     const claim = await inOrg(org, (tx) => claimFile(tx, org, LEASE));
-    expect(claim).toEqual({ outcome: 'given_up', exportId: id, month: '2026-08-01', requestedBy: ADMIN });
+    expect(claim).toEqual({
+      outcome: 'given_up',
+      exportId: id,
+      month: '2026-08-01',
+      requestedBy: ADMIN,
+      why: 'tries',
+      attempts: LEASE.mostTries,
+    });
     const download = await inOrg(org, (tx) => backgroundExportOf(tx, org, id));
     expect(download?.state).toBe('failed');
     expect(download?.files.map((file) => file.state)).toEqual(['failed', 'failed', 'failed']);
