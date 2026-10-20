@@ -28,9 +28,14 @@ describe('L5c the background downloads, as the config sets them up', () => {
   it('are on with a store, the routes and the builder both, and off without one', () => {
     const services = {} as Parameters<typeof backgroundDownloadsFrom>[1];
 
-    expect(backgroundDownloadsFrom(undefined, services)).toEqual({ exports: undefined, builder: undefined });
+    expect(backgroundDownloadsFrom(undefined, services)).toEqual({
+      exports: undefined,
+      files: undefined,
+      builder: undefined,
+    });
     const on = backgroundDownloadsFrom(folderBlockStore('/tmp/downloads'), services);
     expect(typeof on.exports?.ask).toBe('function');
+    expect(typeof on.files?.part).toBe('function');
     expect(typeof on.builder?.run).toBe('function');
   });
 });

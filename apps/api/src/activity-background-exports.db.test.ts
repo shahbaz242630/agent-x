@@ -7,6 +7,7 @@
 // written when it was asked, each file's facts on the audit chain, ready and
 // the asker told; a month that keeps failing given up, the asker told; one
 // stopped given back.
+import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -22,6 +23,7 @@ import {
 } from '@agentx/core/modules/activity';
 import { createAuditTrail } from '@agentx/core/modules/audit';
 import {
+  ACTIVITY_EXPORT_DOWNLOADED,
   ACTIVITY_EXPORT_FAILED,
   ACTIVITY_EXPORT_FILE_MADE,
   ACTIVITY_EXPORT_REQUESTED,
@@ -49,6 +51,7 @@ import {
   type BackgroundExportWrite,
   createBackgroundExports,
 } from './activity-background-exports.ts';
+import { createDownloadFiles, FILE_DOWNLOAD_OPERATION } from './activity-download-files.ts';
 import { createActivityExportBuilder } from './activity-export-builder.ts';
 import { ACTIVITY_EXPORT_OPERATION, createActivityLogExports } from './activity-log-exports.ts';
 import { keys, mandateWorld, type MandateWorldTables, refused, type World } from './mandate-world.helper.test.ts';
@@ -460,6 +463,151 @@ describe('L5c a background download built (decision 31)', () => {
 
     expect(capture.lines().filter((line) => line.event === 'access_log.export_run_failed')).toEqual([
       expect.objectContaining({ level: 'error' }),
+    ]);
+  });
+});
+
+describe('L5c a background download’s file downloaded (decision 31: each download logged)', () => {
+  /** A download of August built whole. */
+  const built = async (w: World) => {
+    for (let day = 1; day <= 12; day += 1) await requested(w, `2026-08-${String(day).padStart(2, '0')}T09:00:00.000Z`);
+    const download = downloadOf(
+      await ask(w, { from: new Date('2026-08-01T00:00:00.000Z'), to: new Date('2026-09-01T00:00:00.000Z') }),
+    );
+    await builderFor(w).run();
+    return download;
+  };
+  /** The downloads, read from `store` (the test's folder unless named) in parts of 100 bytes. */
+  const filesWith = (store: BlockStore = folderBlockStore(folder)) =>
+    createDownloadFiles({ database: app, keys, ids, store, logger: testLogger(capture), partBytes: 100 });
+  const started = async (w: World, exportId: string) => {
+    const start = await filesWith().start(
+      w.admin,
+      keyed(w.admin, FILE_DOWNLOAD_OPERATION),
+      { exportId, month: '2026-08' },
+      CORRELATION,
+    );
+    if (start.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(start)}`);
+    return start.download;
+  };
+  /** Seven days on: file_moves never lets a ready file change, so its time is moved with its trigger off. */
+  const expire = async (exportId: string) => {
+    const admin = database.as('admin');
+    await admin.query('alter table activity_exports.files disable trigger file_moves');
+    await admin.query(
+      "update activity_exports.files set ready_at = ready_at - interval '7 days' where export_id = $1",
+      [exportId],
+    );
+    await admin.query('alter table activity_exports.files enable trigger file_moves');
+  };
+
+  it('records each download on the audit log, then gives the file a part at a time, the parts its SHA-256 whole', async () => {
+    const w = await world();
+    const download = await built(w);
+    const files = filesWith();
+
+    const file = await started(w, download.id);
+    const ready = (await oneOf(w, download.id))?.files[0];
+
+    expect(file).toEqual({
+      id: file.id,
+      exportId: download.id,
+      month: '2026-08',
+      fileName: 'activity-log-2026-08-01-to-2026-09-01-2026-08.ndjson.gz',
+      contentType: 'application/gzip',
+      bytes: ready?.bytes,
+      sha256: ready?.sha256,
+      parts: Math.ceil((ready?.bytes ?? 0) / 100),
+      partBytes: 100,
+    });
+    const parts: Buffer[] = [];
+    for (let index = 0; index < file.parts; index += 1) {
+      const part = await files.part(w.admin, { exportId: download.id, downloadId: file.id, index }, CORRELATION);
+      if (part.outcome !== 'part') throw new Error(`no part ${String(index)}`);
+      parts.push(part.content);
+    }
+    const whole = Buffer.concat(parts);
+    expect(createHash('sha256').update(whole).digest('hex')).toBe(file.sha256);
+    expect(gunzipSync(whole).toString().trimEnd().split('\n')).toHaveLength(12);
+    expect(await eventsOf(w, ACTIVITY_EXPORT_DOWNLOADED)).toEqual([
+      {
+        actor: `user:${w.admin.userId}`,
+        details: expect.objectContaining({
+          exportId: download.id,
+          month: '2026-08',
+          attempt: 1,
+          sha256: file.sha256,
+          correlationId: CORRELATION,
+        }) as unknown,
+      },
+    ]);
+  });
+
+  it('answers a retry with its key from the same record; a second download is recorded on its own', async () => {
+    const w = await world();
+    const download = await built(w);
+    const files = filesWith();
+    const file = { exportId: download.id, month: '2026-08' };
+    const key = keyed(w.admin, FILE_DOWNLOAD_OPERATION);
+
+    const first = await files.start(w.admin, key, file, CORRELATION);
+    const again = await files.start(w.admin, key, file, CORRELATION);
+    await files.start(w.admin, keyed(w.admin, FILE_DOWNLOAD_OPERATION), file, CORRELATION);
+
+    expect(again).toEqual(first);
+    expect(await eventsOf(w, ACTIVITY_EXPORT_DOWNLOADED)).toHaveLength(2);
+  });
+
+  it('refuses a file not ready, a month it doesn’t hold, a download it doesn’t have, one expired, and a member not an admin', async () => {
+    const w = await world();
+    const download = downloadOf(await ask(w, { to: new Date('2026-09-01T00:00:00.000Z') }));
+    const files = filesWith();
+    const start = (exportId: string, month: string, who = w.admin) =>
+      files.start(who, keyed(who, FILE_DOWNLOAD_OPERATION), { exportId, month }, CORRELATION);
+
+    expect(await start(download.id, '2026-08')).toEqual(refused(409, 'ACTIVITY_EXPORT_NOT_READY'));
+    await builderFor(w).run();
+    expect(await start(download.id, '2026-10')).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await start(w.org, '2026-08')).toEqual(refused(404, 'NOT_FOUND'));
+    const approver = await member(w.org, 'approver');
+    expect(await start(download.id, '2026-08', approver)).toEqual(refused(403, 'FORBIDDEN'));
+    await expire(download.id);
+    expect(await start(download.id, '2026-08')).toEqual(refused(410, 'ACTIVITY_EXPORT_EXPIRED'));
+    expect(await eventsOf(w, ACTIVITY_EXPORT_DOWNLOADED)).toEqual([]);
+  });
+
+  it('gives parts to the admin whose download it is alone, within its file, and none once it has expired', async () => {
+    const w = await world();
+    const download = await built(w);
+    const files = filesWith();
+    const file = await started(w, download.id);
+    const part = (index: number, who = w.admin, exportId = download.id, downloadId = file.id) =>
+      files.part(who, { exportId, downloadId, index }, CORRELATION);
+    const other = await member(w.org, 'admin');
+
+    expect(await part(file.parts)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await part(0, other)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await part(0, w.admin, w.org)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await part(0, w.admin, download.id, download.id)).toEqual(refused(404, 'NOT_FOUND'));
+    expect((await part(file.parts - 1)).outcome).toBe('part');
+    await expire(download.id);
+    expect(await part(0)).toEqual(refused(410, 'ACTIVITY_EXPORT_EXPIRED'));
+  });
+
+  it('answers ACTIVITY_EXPORT_UNREADABLE when the store fails or answers short, warning in plain words', async () => {
+    const w = await world();
+    const download = await built(w);
+    const file = await started(w, download.id);
+    const store = folderBlockStore(folder);
+    const asked = { exportId: download.id, downloadId: file.id, index: 0 };
+
+    const down = filesWith({ ...store, read: () => Promise.reject(new Error('the store is down')) });
+    expect(await down.part(w.admin, asked, CORRELATION)).toEqual(refused(503, 'ACTIVITY_EXPORT_UNREADABLE'));
+    const short = filesWith({ ...store, read: () => Promise.resolve(Buffer.from('x')) });
+    expect(await short.part(w.admin, asked, CORRELATION)).toEqual(refused(503, 'ACTIVITY_EXPORT_UNREADABLE'));
+    expect(capture.lines().filter((line) => line.event === 'access_log.export_read_failed')).toEqual([
+      expect.objectContaining({ level: 'warn', exportId: download.id, month: '2026-08', index: 0 }),
+      expect.objectContaining({ level: 'warn' }),
     ]);
   });
 });

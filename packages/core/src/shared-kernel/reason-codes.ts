@@ -16,10 +16,16 @@ export const REASON_CODES = {
     'Agent X is making another large download of an activity log right now, so this one was not made or logged. Try again in a minute.',
   ACTIVITY_EXPORTS_SPENT:
     'You have downloaded the activity log as many times as you may in an hour (5), so this one was not made. Try again later.',
+  ACTIVITY_EXPORT_EXPIRED:
+    "The background download was kept for 7 days and has been deleted, so it can't be downloaded. Ask for it again.",
+  ACTIVITY_EXPORT_NOT_READY:
+    "The background download isn't ready, or couldn't be made, so its file can't be downloaded yet. Check its state: wait while it is building, or ask again if it failed.",
   ACTIVITY_EXPORT_TOO_LARGE:
     'The range holds more requests than one download may (50,000), so nothing was downloaded or logged. Ask for it as a background download, or download it in shorter ranges.',
   ACTIVITY_EXPORT_UNDER_WAY:
     "Another background download of the organisation's activity log is still being made, so this one wasn't asked for. Wait until it is ready or has failed, then ask again.",
+  ACTIVITY_EXPORT_UNREADABLE:
+    "Agent X couldn't read that part of the file from its store just now, so nothing was sent. Try again in a minute.",
   ADMIN_APPROVAL_ONLY:
     "The request is above its mandate's own per-order or monthly limit, so only an admin of the organisation may approve it. Ask an admin to approve it, or reject it. Nothing was changed.",
   AGENT_ADDS_SPENT:

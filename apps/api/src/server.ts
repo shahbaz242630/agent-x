@@ -44,6 +44,7 @@ import { type CheckAgentKey, type FindMembership, registerAccess } from './acces
 import { type ActivitySink, registerActivityLog } from './activity-recorder.ts';
 import { type ActivityPages, registerActivityPages } from './activity-log.ts';
 import { type BackgroundExports, registerBackgroundExports } from './activity-background-exports.ts';
+import { type DownloadFiles, registerDownloadFiles } from './activity-download-files.ts';
 import { type ActivityLogExports, registerActivityLogExports } from './activity-log-exports.ts';
 import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type AuditLogExports, registerAuditLogExports } from './audit-log-exports.ts';
@@ -156,6 +157,8 @@ export interface ServerOptions {
   readonly activityLogExports?: ActivityLogExports | undefined;
   /** The activity log's background downloads (activity-background-exports.ts, L5c); without them, the routes answer NOT_FOUND. */
   readonly backgroundExports?: BackgroundExports | undefined;
+  /** Downloading a background download's files (activity-download-files.ts, L5c); without it, the routes answer NOT_FOUND. */
+  readonly downloadFiles?: DownloadFiles | undefined;
   /** Clearing the integrity hold (the identity module's hold-clearing.ts); without it, no one reaches those routes. */
   readonly holdClearings?: HoldClearings | undefined;
   /** Reads an organisation's registered contacts (registered-contacts.ts); without it, no one reaches the list. */
@@ -372,6 +375,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerActivityPages(app, { log: options.activityPages });
   registerActivityLogExports(app, { exports: options.activityLogExports });
   registerBackgroundExports(app, { downloads: options.backgroundExports });
+  registerDownloadFiles(app, { files: options.downloadFiles });
   registerOrganization(app, { changes: options.organizationChanges });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
