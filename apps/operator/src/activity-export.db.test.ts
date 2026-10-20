@@ -212,6 +212,35 @@ describe('L7 the operator exports an activity log for a case (ADR-005 §6)', () 
     expect(platform.filter((row) => row.details.includes(request.exportId))).toHaveLength(1);
   });
 
+  it('holds the range’s first day to its seal too', async () => {
+    const orgId = await organization();
+    await requested(orgId, '2026-10-18T09:00:00.000Z');
+    await seal(orgId, '2026-10-18');
+    await database.as('admin').query('update access.requests set status = 500 where org_id = $1', [orgId]);
+
+    expect((await exported(requestFor(orgId))).code).toBe(1);
+  });
+
+  it('writes, when run again, only the requests written by the time it was recorded', async () => {
+    const orgId = await organization();
+    await requested(orgId, '2026-10-18T09:00:00.000Z');
+    const request = requestFor(orgId);
+    const failing = await exportActivityLog(
+      app,
+      { keys, ids: uuidV7Ids, logger: testLogger() },
+      { put: () => Promise.reject(new Error('the store is down')) },
+      request,
+    );
+    expect(failing).toBe(1);
+    // Written after the export was recorded: in its range, but not in its file.
+    await requested(orgId, '2026-10-19T09:00:00.000Z');
+
+    const again = await exported(request);
+
+    expect(again.line('operator.activity_exported')).toMatchObject({ recordedBefore: true, requests: 1 });
+    expect(fileOf(request).map((line) => line.recordedAt)).toEqual(['2026-10-18T09:00:00.000Z']);
+  });
+
   it('writes no file for a range with a sealed day tampered with, and holds the organisation', async () => {
     const orgId = await organization();
     await requested(orgId, '2026-10-19T09:00:00.000Z');
