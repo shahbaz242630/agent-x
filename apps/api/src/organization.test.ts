@@ -199,3 +199,34 @@ describe('POST /v1/organization/unfreeze, then /confirm: a passkey, a reason and
     expect(response.json()).toMatchObject({ error: { code } });
   });
 });
+
+describe('the freeze and unfreeze routes, each keyed (SEC-DP-07, SEC-DP-08, SEC-DP-09)', () => {
+  const ROUTES = [
+    ['/freeze', { pendingRequests: 'cancel', confirmed: true }],
+    ['/unfreeze', { reason: 'All clear', pendingRequests: 'cancel' }],
+    ['/unfreeze/confirm', { reason: 'All clear', pendingRequests: 'cancel', stepUpChallengeId: CHALLENGE }],
+  ] as const;
+
+  it.each(ROUTES)('%s refuses a write with no idempotency key before the use case runs', async (path, body) => {
+    const { app, asked } = await withChanges(FROZEN);
+
+    const response = await app.inject({ method: 'POST', url: `/v1/organization${path}`, headers, payload: body });
+
+    expect(response.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_INVALID' } });
+    expect(asked).toEqual([]);
+  });
+
+  it.each(ROUTES)(
+    '%s answers a key used for another write, and one still being done, as the store says',
+    async (path, body) => {
+      const reused = await withChanges({ outcome: 'conflict' });
+      expect((await reused.app.inject(post(path, body))).json()).toMatchObject({
+        error: { code: 'IDEMPOTENCY_KEY_REUSED' },
+      });
+      const busy = await withChanges({ outcome: 'busy' });
+      const response = await busy.app.inject(post(path, body));
+      expect(response.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_BUSY' } });
+      expect(response.headers['retry-after']).toBe('5');
+    },
+  );
+});

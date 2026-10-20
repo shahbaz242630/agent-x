@@ -143,6 +143,7 @@ describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {
     [{ outcome: 'refused', status: 409, code: 'AUDIT_EXPORT_TOO_LARGE' } as const, 409, 'AUDIT_EXPORT_TOO_LARGE'],
     [{ outcome: 'refused', status: 409, code: 'AUDIT_EXPORTS_SPENT' } as const, 409, 'AUDIT_EXPORTS_SPENT'],
     [{ outcome: 'conflict' } as const, 409, 'IDEMPOTENCY_KEY_REUSED'],
+    [{ outcome: 'busy' } as const, 409, 'IDEMPOTENCY_KEY_BUSY'],
   ])('answers the use case’s %o as %i %s', async (answer, status, code) => {
     const { app } = await withExports(answer);
     const reply = await app.inject(post(BODY));

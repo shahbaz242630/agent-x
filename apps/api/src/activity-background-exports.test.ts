@@ -176,6 +176,7 @@ describe('POST /v1/access-log/background-exports (L5c, decision 31)', () => {
     [{ outcome: 'refused', status: 409, code: 'ACTIVITY_EXPORT_UNDER_WAY' } as const, 409, 'ACTIVITY_EXPORT_UNDER_WAY'],
     [{ outcome: 'refused', status: 409, code: 'ACTIVITY_EXPORTS_SPENT' } as const, 409, 'ACTIVITY_EXPORTS_SPENT'],
     [{ outcome: 'conflict' } as const, 409, 'IDEMPOTENCY_KEY_REUSED'],
+    [{ outcome: 'busy' } as const, 409, 'IDEMPOTENCY_KEY_BUSY'],
   ])('answers the use case’s %o as %i %s', async (answer, status, code) => {
     const { app } = await withDownloads({ ask: answer });
     const reply = await app.inject(post(BODY));

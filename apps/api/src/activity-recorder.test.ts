@@ -204,6 +204,54 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
     );
   });
 
+  it('writes an agent’s spend request refused while its organisation is frozen: the refusal kept, nothing made (SEC-AV-08)', async () => {
+    const writing = `axk_${'d'.repeat(32)}_${'e'.repeat(43)}`;
+    let asked = 0;
+    const { app, rows } = await recording({
+      checkAgentKey: (text) =>
+        Promise.resolve(
+          text === writing
+            ? { outcome: 'accepted', key: { ...KEY_ACCEPTED, scopes: ['requests:write'] } }
+            : { outcome: 'refused' },
+        ),
+      spendRequestDecisions: {
+        decideAndReserve: () => {
+          asked += 1;
+          return Promise.resolve({ outcome: 'refused', status: 409, code: 'ORG_FROZEN' });
+        },
+      },
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/spend-requests',
+      headers: { authorization: `Bearer ${writing}`, 'idempotency-key': 'ask-1' },
+      payload: {
+        amountMinor: 125_050,
+        currency: 'AED',
+        supplierId: '0199a0f0-0000-7000-8000-0000000000c1',
+        fundingSourceId: '0199a0f0-0000-7000-8000-0000000000c2',
+        orderReference: 'INV-1',
+        purpose: 'Office supplies',
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(asked).toBe(1);
+    await vi.waitFor(() => {
+      expect(rows).toHaveLength(1);
+    });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        orgId: ORG,
+        actor: { type: 'agent', id: AGENT_ID },
+        route: '/v1/spend-requests',
+        status: 409,
+        reason: 'ORG_FROZEN',
+      }),
+    ]);
+  });
+
   it('writes nothing for a caller not known: signed out, or a key refused', async () => {
     const { app, rows } = await recording();
     const signedOut = await app.inject({ method: 'GET', url: LOG_URL, headers: { [ORGANIZATION_HEADER]: ORG } });

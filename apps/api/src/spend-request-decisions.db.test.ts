@@ -340,7 +340,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(await waitingNotices(w.org)).toEqual([]);
   });
 
-  it('sends one over the approval threshold for approval, its capacity held while it waits', async () => {
+  it('sends one over the approval threshold for approval, its capacity held while it waits (SEC-LIM-09)', async () => {
     const { w, acting } = await ready({ terms: { approvalThreshold: AED(500_000n) } });
 
     const request = decidedOf(await ask(acting, asking(w)));

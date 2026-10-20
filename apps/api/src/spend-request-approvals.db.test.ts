@@ -28,7 +28,14 @@
 import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
-import { MANDATES, policyOf, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
+import {
+  acceptDraft,
+  MANDATES,
+  mandateOf as mandateRead,
+  policyOf,
+  type PolicyRules,
+  setPolicy,
+} from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
@@ -60,7 +67,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
+import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { AED, askedFor, keys, type Member, OPERATOR, refused, type World } from './mandate-world.helper.test.ts';
 import { capChoiceDetails } from './monthly-cap-choice.ts';
 import {
@@ -734,6 +741,36 @@ describe('approving while a brake holds the request or its mandate (forced)', ()
       return states.changeStatus(tx, MANDATES, { orgId: w.org, id: mandateId }, 'revoke', {
         actor: OPERATOR,
         action: 'mandate.revoke',
+        details: {},
+      });
+    });
+
+    expect(racing).toEqual(refused(409, 'REQUEST_CHANGED'));
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('waits for a new version accepted holding its mandate, then finds it changed (supersede-during-approval)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const mandateId = await mandateOf(w);
+    const redrafted = await registry.redraft(
+      w.admin,
+      shared.keyed(w.admin, REDRAFT_OPERATION),
+      mandateId,
+      { terms: shared.termsOf(w, { purpose: 'Office supplies, renewed' }), overLimit: 'refuse' },
+      CORRELATION,
+    );
+    expect(redrafted.outcome).toBe('drafted');
+    const { racing } = await whileHeld(w, waiting.id, async (tx, states, gate) => {
+      const read = await mandateRead(tx, states, { orgId: w.org, id: mandateId }, 'change');
+      if (read.outcome !== 'found' || read.mandate.pendingVersionId === null) throw new Error('no draft waiting');
+      await gate();
+      await acceptDraft(tx, states, read, {
+        orgId: w.org,
+        versionId: read.mandate.pendingVersionId,
+        acceptedBy: w.admin.membershipId,
+        acceptedAt: clock.now(),
+        actor: OPERATOR,
         details: {},
       });
     });
