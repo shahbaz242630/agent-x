@@ -2207,7 +2207,9 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
     await job(w).run();
 
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
-    expect([since.status, await statusOf(w, since.id)]).toEqual(['APPROVED', 'APPROVED']);
+    // Pending (the supplier's split total sends it for approval), and still standing after the job.
+    expect(['APPROVED', 'APPROVAL_REQUIRED']).toContain(since.status);
+    expect(await statusOf(w, since.id)).toBe(since.status);
   });
 
   it('a cancel chosen before its end voids nothing while the consent holds', async () => {
