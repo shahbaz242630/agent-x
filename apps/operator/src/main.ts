@@ -61,12 +61,14 @@ import {
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import { azureBlobOrigins } from '@agentx/platform/storage';
 
+import { type ActivityExportTables, exportActivityLog } from './activity-export.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
 import {
+  ACTIVITY_EXPORT_USAGE,
   AUDIT_EXPORT_USAGE,
   auditExportOf,
   FIRST_ADMIN_USAGE,
@@ -81,7 +83,7 @@ import {
 import { checkRestoredCopy } from './restore-check.ts';
 
 /** Every table the commands reach. */
-type CommandTables = FirstAdminTables & AuditExportTables;
+type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables;
 
 const SERVICE = 'operator';
 
@@ -133,6 +135,16 @@ type Request =
     }
   | {
       readonly command: 'audit-export';
+      readonly orgId: string;
+      readonly from: Date;
+      readonly to: Date;
+      /** Sealed on both chains; never logged, nor repeated in a problem. */
+      readonly caseRef: string;
+      /** The export's ID: its record's on the organisation's chain. */
+      readonly id: string;
+    }
+  | {
+      readonly command: 'activity-export';
       readonly orgId: string;
       readonly from: Date;
       readonly to: Date;
@@ -215,7 +227,8 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
 /** The commands read by a shape of their own, by their first word: create-organization is the rest. */
 const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boolean) => Request | Problems> = new Map([
   ['invite-first-admin', firstAdminRequest],
-  ['audit-export', auditExportAsked],
+  ['audit-export', (words, fromFile) => caseExportAsked('audit-export', AUDIT_EXPORT_USAGE, words, fromFile)],
+  ['activity-export', (words, fromFile) => caseExportAsked('activity-export', ACTIVITY_EXPORT_USAGE, words, fromFile)],
   [RESTORE_CHECK, restoreCheckAsked],
 ]);
 
@@ -289,12 +302,18 @@ function firstAdminRequest(words: readonly string[], fromFile: boolean): Request
 }
 
 /**
- * The audit export a request file asks for (Phase 3 E10c), or the problems;
- * never typed. The case reference is repeated in no problem.
+ * The export for a case a request file asks for, of the audit log (Phase 3
+ * E10c) or the activity log (L7), or the problems; never typed. The case
+ * reference is repeated in no problem.
  */
-function auditExportAsked(words: readonly string[], fromFile: boolean): Request | Problems {
+function caseExportAsked(
+  command: 'audit-export' | 'activity-export',
+  usage: string,
+  words: readonly string[],
+  fromFile: boolean,
+): Request | Problems {
   const [, orgFlag, orgId, fromFlag, from, toFlag, to, reasonFlag, caseRef, idFlag, id, ...more] = words;
-  if (!fromFile) return problem(`audit-export runs only from a request file: ${AUDIT_EXPORT_USAGE}`);
+  if (!fromFile) return problem(`${command} runs only from a request file: ${usage}`);
   const shaped =
     orgFlag === '--org' &&
     fromFlag === '--from' &&
@@ -303,10 +322,10 @@ function auditExportAsked(words: readonly string[], fromFile: boolean): Request 
     idFlag === '--id' &&
     id !== undefined &&
     more.length === 0;
-  if (!shaped) return problem(`the request file holds ${AUDIT_EXPORT_USAGE} as a JSON list, and nothing else`);
+  if (!shaped) return problem(`the request file holds ${usage} as a JSON list, and nothing else`);
   // As an admin's download: the same days, the same rule (audit-log-exports.ts).
   const asked = auditExportOf({ orgId, from, to, caseRef, id }, MOST_EXPORT_DAYS);
-  return 'problems' in asked ? asked : { command: 'audit-export', ...asked };
+  return 'problems' in asked ? asked : { command, ...asked };
 }
 
 /**
@@ -369,7 +388,7 @@ async function run(
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
-  if (request.command === 'audit-export') {
+  if (request.command === 'audit-export' || request.command === 'activity-export') {
     const store = evidenceStoreOf(config);
     if (store === undefined) {
       logger.error('operator.refused', { problems: [NO_STORE_PROBLEM] });
@@ -466,23 +485,22 @@ function evidenceStoreOf({ evidence: { directory, container } }: OperatorConfig)
   return directory === null ? undefined : folderStore(directory);
 }
 
-/** Exports an organisation's audit log for a case (Phase 3 E10c): the exit code. */
+/** Exports an organisation's audit log (Phase 3 E10c) or its activity log (L7) for a case: the exit code. */
 async function auditExport(
   config: OperatorConfig,
   keys: KeyProvider,
-  request: Extract<Request, { command: 'audit-export' }>,
+  request: Extract<Request, { command: 'audit-export' | 'activity-export' }>,
   store: EvidenceStore,
   database: Database<CommandTables>,
   logger: Logger,
 ): Promise<number> {
   try {
     if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
-    return await exportAuditLog(database, { keys, ids: uuidV7Ids, logger }, store, {
-      ...request,
-      exportId: request.id,
-      release: config.release,
-      run: config.run,
-    });
+    const asked = { ...request, exportId: request.id, release: config.release, run: config.run };
+    const services = { keys, ids: uuidV7Ids, logger };
+    return request.command === 'audit-export'
+      ? await exportAuditLog(database, services, store, asked)
+      : await exportActivityLog(database, services, store, asked);
   } finally {
     await database.destroy();
   }

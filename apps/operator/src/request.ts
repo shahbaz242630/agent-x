@@ -43,6 +43,10 @@ export const restoreCheckRequest = (): string => JSON.stringify([RESTORE_CHECK])
 export const AUDIT_EXPORT_USAGE =
   'audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> --id <new export ID>';
 
+/** What a request file holds to export an organisation's activity log for a case (Phase 3 L7): as an audit export's. */
+export const ACTIVITY_EXPORT_USAGE =
+  'activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> --id <new export ID>';
+
 /**
  * A case reference, as a dispute's or a regulator's file names one: 3 to 64
  * letters, digits and `. _ / -`, starting with a letter or digit. No spaces,
@@ -126,3 +130,7 @@ export function auditExportOf(
 /** The request to export an organisation's audit log for a case, as its file holds it. */
 export const auditExportRequest = (orgId: string, from: string, to: string, caseRef: string, id: string): string =>
   JSON.stringify(['audit-export', '--org', orgId, '--from', from, '--to', to, '--reason', caseRef, '--id', id]);
+
+/** The request to export an organisation's activity log for a case, as its file holds it (Phase 3 L7). */
+export const activityExportRequest = (orgId: string, from: string, to: string, caseRef: string, id: string): string =>
+  JSON.stringify(['activity-export', '--org', orgId, '--from', from, '--to', to, '--reason', caseRef, '--id', id]);

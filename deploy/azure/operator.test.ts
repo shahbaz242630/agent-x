@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  activityExportRequest,
   auditExportRequest,
   createOrganizationRequest,
   NO_REQUEST_PROBLEM,
@@ -145,6 +146,7 @@ const said = (fields: Readonly<Record<string, unknown>>): Row => [
 /** How a run ends, and what its lines say, for the ID its request names. */
 type Ending =
   | 'created'
+  | 'activity-exported'
   | 'done-before'
   | 'no-request'
   | 'refused'
@@ -254,6 +256,18 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
       write: 'written',
       bytes: 9001,
       sha256: 'ab'.repeat(32),
+    }),
+    TERMINATED,
+  ],
+  'activity-exported': (id) => [
+    said({
+      event: 'operator.activity_exported',
+      exportId: id,
+      requests: 7,
+      file: `${EXPORT_ORG}/activity-${id}.ndjson`,
+      write: 'written',
+      bytes: 512,
+      sha256: 'cd'.repeat(32),
     }),
     TERMINATED,
   ],
@@ -537,7 +551,7 @@ class FakeAzure implements Az {
   #log(): unknown {
     const words = JSON.parse(this.heldAtStart ?? '[]') as string[];
     // The ID a request names: an organisation's fifth word, an invitation's seventh, an export's eleventh.
-    const at = { 'invite-first-admin': 6, 'audit-export': 10 }[String(words[0])] ?? 4;
+    const at = { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10 }[String(words[0])] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
     return {
@@ -1455,6 +1469,44 @@ describe('an audit export for a case (E10c)', () => {
     expect(said).not.toContain(badCase);
   });
 
+  it('reads an activity log export as an audit log one, refusing the one for the other', () => {
+    const activity = asked.with(0, 'activity-export');
+
+    expect(parseAuditExport(activity, 'activity-export')).toEqual({
+      orgId: EXPORT_ORG,
+      from: FROM,
+      to: TO,
+      caseRef: CASE,
+      id: undefined,
+    });
+    expect(() => parseAuditExport(activity)).toThrow(UsageError);
+  });
+
+  it('runs an activity log export, saying the requests written to its own file', async () => {
+    const az = new FakeAzure({ ending: 'activity-exported' });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await auditExport(
+      { orgId: EXPORT_ORG, from: FROM, to: TO, caseRef: CASE, id: EARLIER_ID },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+      'activity-export',
+    );
+
+    expect(status).toBe(0);
+    expect(az.heldAtStart).toBe(activityExportRequest(EXPORT_ORG, FROM, TO, CASE, EARLIER_ID));
+    expect(lines.at(-1)).toBe(
+      `Exported 7 requests for the case to the store as ${EXPORT_ORG}/activity-${EARLIER_ID}.ndjson (512 bytes, SHA-256 ${'cd'.repeat(32)}). It is recorded on both chains, and the organisation's admins were told.`,
+    );
+  });
+
   it("writes the operator's request, runs it, puts [] back and says the file written, its size and hash", async () => {
     const done = await exportRun();
 
@@ -1498,7 +1550,7 @@ describe('an audit export for a case (E10c)', () => {
     const storeless = await exportRun({ ending: 'no-store', states: ['Failed'] });
     expect(storeless.status).toBe(1);
     expect(storeless.said.at(-1)).toBe(
-      `The job has no store for an audit export set, so nothing was recorded: deploy the apps (deploy.ts apps), then run the same command again with --id ${storeless.id}.`,
+      `The job has no store for an export set, so nothing was recorded: deploy the apps (deploy.ts apps), then run the same command again with --id ${storeless.id}.`,
     );
     const empty = await exportRun({ ending: 'no-request', states: ['Failed'] });
     expect(empty.status).toBe(1);
