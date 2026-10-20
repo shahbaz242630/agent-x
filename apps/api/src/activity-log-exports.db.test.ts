@@ -201,10 +201,10 @@ describe('downloading the activity log (L5, decision 26)', () => {
 
     expect(file).toMatchObject({ contentType: 'text/csv', requests: 1 });
     expect(header).toBe(
-      '"id","recordedAt","localTime","actorType","actorId","actorName","actorEmail","actorNameFrom","method","route","pathIds","status","reason","correlationId","durationMs","ip","approximateCountry","approximateCity","placeBy","timeZone","timeZoneFrom"',
+      '"id","recordedAt","localTime","actorType","actorId","actorName","actorEmail","actorNameFrom","method","route","pathIds","status","reason","correlationId","durationMs","sealed","ip","approximateCountry","approximateCity","placeBy","timeZone","timeZoneFrom"',
     );
     expect(row).toContain(
-      `"GET","/v1/agents/:id","${w.agent}","200","","${CORRELATION}","7","94.200.1.7","AE","'=HYPERLINK(""x"")","IP Geolocation by DB-IP (https://db-ip.com)","Asia/Dubai","organisation"`,
+      `"GET","/v1/agents/:id","${w.agent}","200","","${CORRELATION}","7","false","94.200.1.7","AE","'=HYPERLINK(""x"")","IP Geolocation by DB-IP (https://db-ip.com)","Asia/Dubai","organisation"`,
     );
   });
 
@@ -215,7 +215,7 @@ describe('downloading the activity log (L5, decision 26)', () => {
     const [, row] = fileOf(await exported(w, asked('csv')))
       .content.trimEnd()
       .split('\n');
-    expect(row).toMatch(/"1","","","","","",""$/);
+    expect(row).toMatch(/"1","false","","","","","",""$/);
   });
 
   it('gives one person’s or agent’s requests alone, the actor named in the record', async () => {

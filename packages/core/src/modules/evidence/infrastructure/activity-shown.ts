@@ -8,15 +8,19 @@
 // - Its client's clues labelled as clues: the IP address, and the place it
 //   is registered to marked approximate, with the credit DB-IP's licence asks
 //   for (CC BY 4.0) wherever a place is shown.
+// - Whether its day is sealed on the audit chain (L6): written before the end
+//   of the organisation's newest sealed day.
 import type { DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 
 import {
+  ACTIVITY_SEALED,
   type ActivityCursor,
   activityPage,
   type ActivityPageToRead,
   type ActivityRow,
   type ActivityTables,
+  idsOfDay,
 } from '../../activity/index.ts';
 import type { SignedStates } from '../../audit/index.ts';
 
@@ -70,8 +74,17 @@ export function localTimeOf(at: Date, timeZone: string): string | null {
   return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}:${part('second')}.${ms}${offset}`;
 }
 
-/** A row as an organisation is shown it, page or download, its actor named. */
-export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, ActorName>) => {
+/**
+ * Whether `id` was written in a sealed day: before the end of `sealedDay`, the
+ * newest sealed; never with none sealed. A row slipped in before the first
+ * seal's day reads sealed though no seal holds it, until the seal check's next
+ * run finds it and holds the organisation (L6c-1, `why: before`).
+ */
+const sealedRow = (id: string, sealedDay: string | null): boolean =>
+  sealedDay !== null && id.toLowerCase() < idsOfDay(sealedDay).to;
+
+/** A row as an organisation is shown it, page or download, its actor named, sealed or not by `sealedDay`. */
+export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, ActorName>, sealedDay: string | null) => {
   const { ip, place, timeZone } = row.client;
   return {
     id: row.id,
@@ -85,6 +98,7 @@ export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, Actor
     reason: row.reason,
     correlationId: row.correlationId,
     durationMs: row.durationMs,
+    sealed: sealedRow(row.id, sealedDay),
     client: {
       ip: ip ?? null,
       place:
@@ -97,22 +111,50 @@ export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, Actor
 };
 
 /** A row as an NDJSON download holds it: one line. */
-export const activityNdjsonLine = (row: ActivityRow, names: ReadonlyMap<string, ActorName>): string =>
-  JSON.stringify(activityShown(row, names));
+export const activityNdjsonLine = (
+  row: ActivityRow,
+  names: ReadonlyMap<string, ActorName>,
+  sealedDay: string | null,
+): string => JSON.stringify(activityShown(row, names, sealedDay));
 
 /** Who made each of `rows`, for a namer. */
 export const activityActorsOf = (rows: readonly ActivityRow[]) => rows.map((row) => row.actor);
 
-/** A batch of the activity log and what Agent X holds to name its actors. */
+/** A batch of the activity log, what Agent X holds to name its actors, and the newest day sealed (null for none). */
 export interface HeldActivityPage {
   readonly rows: readonly ActivityRow[];
   readonly next: ActivityCursor | null;
   readonly held: ActorsHeld;
+  readonly sealedDay: string | null;
 }
 
 /**
- * A batch of the activity log and what Agent X holds to name its actors, in
- * the organisation's transaction; `tampered` for an agent that can't be believed.
+ * The day the organisation's newest seal names (L6), `day` null for none. Read
+ * through the signed states, so a log that can't be believed raises the alarm
+ * and puts the organisation on its hold (ADR-012 §2), as every read of a
+ * history does; then `tampered`.
+ */
+export async function newestSealedDay(
+  tx: DatabaseTransaction<ActivityReadTables>,
+  states: SignedStates,
+  orgId: string,
+): Promise<{ readonly day: string | null } | 'tampered'> {
+  const found = await states.historyOf(tx, orgId, {
+    subjectTypes: ['access_log'],
+    subjectId: orgId,
+    actions: [ACTIVITY_SEALED],
+    limit: 1,
+    newest: true,
+  });
+  if (found.outcome !== 'read') return 'tampered';
+  const day = found.events.at(-1)?.event.details.day;
+  return { day: typeof day === 'string' ? day : null };
+}
+
+/**
+ * A batch of the activity log, what Agent X holds to name its actors and the
+ * newest day sealed, in the organisation's transaction; `tampered` for an
+ * agent or a seal that can't be believed.
  */
 export async function heldActivityPage(
   tx: DatabaseTransaction<ActivityReadTables>,
@@ -124,5 +166,7 @@ export async function heldActivityPage(
   const page = await activityPage(tx, orgId, asked);
   const held = await actorsHeld(tx, states, keys, orgId, activityActorsOf(page.rows));
   if (held === 'tampered') return 'tampered';
-  return { ...page, held };
+  const sealed = await newestSealedDay(tx, states, orgId);
+  if (sealed === 'tampered') return 'tampered';
+  return { ...page, held, sealedDay: sealed.day };
 }

@@ -189,20 +189,26 @@ async function fileOf(
   { orgId, from, to }: CaseExportRequest,
   writtenUpTo: string | null,
   logger: Logger,
+  batch: number,
 ): Promise<Buffer> {
   const lines: string[] = [];
   // No login service here: people are named from the copy Agent X keeps (decision 27).
   const namer = createActorNamer({ directory: undefined, logger });
+  // Every row marked against the seal the first batch read: one landing mid-file would show a day half sealed.
+  let sealedDay: string | null | undefined;
   // undefined: the first batch, from the newest; null: none left.
   let before: ActivityCursor | null | undefined = writtenUpTo === null ? null : undefined;
   while (before !== null && writtenUpTo !== null) {
     const start: ActivityCursor | undefined = before;
     const read: HeldActivityPage | 'tampered' = await withSignedStates(database, orgId, services, (tx, states) =>
-      heldActivityPage(tx, states, services.keys, orgId, { from, to, before: start, writtenUpTo, limit: EXPORT_BATCH }),
+      heldActivityPage(tx, states, services.keys, orgId, { from, to, before: start, writtenUpTo, limit: batch }),
     );
-    if (read === 'tampered') throw new CaseExportRefused("an agent the range names can't be verified");
+    if (read === 'tampered')
+      throw new CaseExportRefused("an agent the range names, or the organisation's newest seal, can't be verified");
     const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
-    lines.push(...read.rows.map((row) => activityNdjsonLine(row, names)));
+    if (sealedDay === undefined) sealedDay = read.sealedDay;
+    const marked = sealedDay;
+    lines.push(...read.rows.map((row) => activityNdjsonLine(row, names, marked)));
     before = read.next;
   }
   return Buffer.from(`${lines.join('\n')}\n`);
@@ -215,6 +221,8 @@ export function exportActivityLog(
   store: EvidenceStore,
   request: CaseExportRequest,
   mostRequests = MOST_EXPORTED_REQUESTS,
+  /** EXPORT_BATCH, but for the tests. */
+  batch = EXPORT_BATCH,
 ): Promise<number> {
   const log = services.logger.child({ orgId: request.orgId });
   return runCaseExport(store, request, log, {
@@ -225,7 +233,7 @@ export function exportActivityLog(
     shown: (made) => ({ requests: made.requests, writtenUpTo: made.writtenUpTo, recordedBefore: made.recordedBefore }),
     content: async (made) => {
       await sealsHold(database, services, request);
-      return fileOf(database, services, request, made.writtenUpTo, log);
+      return fileOf(database, services, request, made.writtenUpTo, log, batch);
     },
   });
 }

@@ -4,9 +4,10 @@
 // after midnight left; nothing sealed twice, by a second run or by a server
 // that sealed the day meanwhile (its lock forced, ADR-006 §6, 11b); a day
 // that moved while it was digested left for the next run; at most 31 days a
-// run.
+// run. And the activity log's page showing what is sealed (L6c-2).
 import { ACTIVITY_SEALED, type ActivityTables, digestOfDay, v7Floor } from '@agentx/core/modules/activity';
 import { createAuditTrail } from '@agentx/core/modules/audit';
+import { activityShown } from '@agentx/core/modules/evidence';
 import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -20,6 +21,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { createActivityPages } from './activity-log.ts';
 import { createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_LOCK, createActivitySeal } from './activity-seal.ts';
 import { keys, mandateWorld, type MandateWorldTables, type World } from './mandate-world.helper.test.ts';
@@ -332,6 +334,50 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     expect(capture.lines().map((line) => line.event)).toEqual(
       expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
     );
+  });
+
+  it('L6c-2 shows the page sealed through the newest seal: its rows sealed, the day after not; a tampered seal refuses the page', async () => {
+    const w = await world();
+    await written(w, '2026-10-19T09:00:00.000Z');
+    await written(w, '2026-10-20T09:00:00.000Z');
+    const pages = createActivityPages({
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+      directory: undefined,
+    });
+    const page = (orgId: string) =>
+      pages.page(
+        orgId,
+        { from: new Date('2026-10-01T00:00:00.000Z'), to: new Date('2026-10-31T00:00:00.000Z'), limit: 100 },
+        CORRELATION,
+      );
+
+    expect(await page(w.org)).toMatchObject({ outcome: 'page', sealedDay: null });
+    await sealFor(w).run();
+
+    const sealed = await page(w.org);
+    if (sealed.outcome !== 'page') throw new Error('no page');
+    expect(sealed.sealedDay).toBe('2026-10-19');
+    expect(
+      sealed.rows.map((row) => [
+        row.recordedAt.toISOString(),
+        activityShown(row, sealed.names, sealed.sealedDay).sealed,
+      ]),
+    ).toEqual([
+      ['2026-10-20T09:00:00.000Z', false],
+      ['2026-10-19T09:00:00.000Z', true],
+    ]);
+
+    await database
+      .as('admin')
+      .query(
+        "update audit.events set details = replace(details, '2026-10-19', '2026-10-29') where action = $1 and org_id = $2",
+        [ACTIVITY_SEALED, w.org],
+      );
+    expect(await page(w.org)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(capture.lines().map((line) => line.event)).toEqual(expect.arrayContaining(['audit.integrity_failed']));
   });
 
   it('logs a run whose list fails', async () => {

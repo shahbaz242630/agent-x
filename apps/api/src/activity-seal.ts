@@ -27,6 +27,7 @@ import {
   sealable,
 } from '@agentx/core/modules/activity';
 import { type AuditTables, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import { newestSealedDay } from '@agentx/core/modules/evidence';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -54,29 +55,6 @@ export interface ActivitySeal {
   run(signal?: AbortSignal): Promise<void>;
 }
 
-/**
- * The day the organisation's newest seal names, believed whole; undefined for
- * none. Read through the signed states, so a log that can't be believed
- * raises the alarm and puts the organisation on its hold (ADR-012 §2), as
- * every read of a history does; then `tampered`, and nothing is sealed.
- */
-async function newestSealed(
-  tx: SealTx,
-  states: SignedStates,
-  orgId: string,
-): Promise<{ readonly day: string | undefined } | 'tampered'> {
-  const found = await states.historyOf(tx, orgId, {
-    subjectTypes: ['access_log'],
-    subjectId: orgId,
-    actions: [ACTIVITY_SEALED],
-    limit: 1,
-    newest: true,
-  });
-  if (found.outcome !== 'read') return 'tampered';
-  const day = found.events.at(-1)?.event.details.day;
-  return { day: typeof day === 'string' ? day : undefined };
-}
-
 export function createActivitySeal({
   list,
   database,
@@ -99,9 +77,10 @@ export function createActivitySeal({
   /** The organisation's next day to seal: the one after its newest seal, or its first row's; undefined for none. */
   const firstToSeal = async (orgId: string, correlationId: string) =>
     withSignedStates(database, orgId, { keys, ids, logger, correlationId }, async (tx, states) => {
-      const newest = await newestSealed(tx, states, orgId);
+      // The alarm raised and the hold set already: nothing is sealed.
+      const newest = await newestSealedDay(tx, states, orgId);
       if (newest === 'tampered') return newest;
-      return newest.day === undefined ? firstDayOf(tx, orgId) : nextDay(newest.day);
+      return newest.day === null ? firstDayOf(tx, orgId) : nextDay(newest.day);
     });
 
   /** Seals `day` if nothing moved meanwhile: whether it was sealed (or found sealed already). */
@@ -112,12 +91,12 @@ export function createActivitySeal({
     const log = logger.child({ correlationId, orgId });
     return inOrg(async (tx, states) => {
       await holdTransactionLock(tx, ACTIVITY_SEAL_LOCK, orgId);
-      const newest = await newestSealed(tx, states, orgId);
+      const newest = await newestSealedDay(tx, states, orgId);
       // The alarm raised and the hold set already.
       if (newest === 'tampered') return false;
       const trail = createAuditTrail({ keys, ids, correlationId });
       // Sealed by another server meanwhile.
-      if (newest.day !== undefined && newest.day >= day) return true;
+      if (newest.day !== null && newest.day >= day) return true;
       const now = await dayCount(tx, orgId, day);
       if (now.requests !== digest.requests || now.idTo !== digest.idTo) {
         log.warn('access_log_seal.moved', { day, digested: digest.requests, counted: now.requests });

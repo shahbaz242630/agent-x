@@ -11,9 +11,11 @@
 //   the IDs in its path, status and reason code), its correlation ID (on the
 //   audit events it wrote), and its client's clues: the IP address, the place
 //   it is registered to (approximate, credited to DB-IP), the time zone and
-//   where it came from. Clues, never proof (decision 26).
-// - An agent on the page whose signed state can't be believed is 503
-//   INTEGRITY_FAILED, the alarm raised, as on the audit log.
+//   where it came from. Clues, never proof (decision 26). And whether it is
+//   sealed (L6): its day closed and sealed on the audit chain, as
+//   `sealedThrough`, the newest day sealed, says.
+// - An agent on the page whose signed state can't be believed, or a seal, is
+//   503 INTEGRITY_FAILED, the alarm raised, as on the audit log.
 // Reading a page is itself a row of the log (the activity recorder, L3).
 import {
   ACTIVITY_ACTOR_TYPES,
@@ -63,6 +65,7 @@ export type ActivityPageAnswer =
       readonly rows: readonly ActivityRow[];
       readonly next: ActivityCursor | null;
       readonly names: ReadonlyMap<string, ActorName>;
+      readonly sealedDay: string | null;
     }
   | Refused;
 
@@ -71,9 +74,10 @@ export interface ActivityPages {
 }
 
 /**
- * A batch of the activity log and what Agent X holds to name its actors, in
- * the organisation's transaction, a page or a download's alike; an agent that
- * can't be believed is ActivityLogRefused INTEGRITY_FAILED.
+ * A batch of the activity log, what Agent X holds to name its actors and the
+ * newest day sealed, in the organisation's transaction, a page or a
+ * download's alike; an agent or a seal that can't be believed is
+ * ActivityLogRefused INTEGRITY_FAILED.
  */
 export async function heldActivity(
   tx: DatabaseTransaction<ActivityLogTables>,
@@ -159,6 +163,11 @@ const ACTIVITY_ROW = z
     reason: z.string().nullable().describe('The reason code of a refusal or failure; null for neither.'),
     correlationId: z.uuid().describe('The request’s correlation ID: the same on the audit events it recorded.'),
     durationMs: z.int().min(0).describe('How long it took to answer, in milliseconds.'),
+    sealed: z
+      .boolean()
+      .describe(
+        'Whether its day is sealed on the audit chain: written on or before `sealedThrough` (a day is the UTC day a row was written).',
+      ),
     client: z
       .object({
         ip: z.string().nullable().describe('The IP address it came from; null when it couldn’t be read.'),
@@ -226,6 +235,12 @@ const PAGE_SCHEMA = {
       .object({
         rows: z.array(ACTIVITY_ROW).describe('The requests, newest first.'),
         next: z.string().nullable().describe('Where the next page starts before (`before`); null at the end.'),
+        sealedThrough: z.iso
+          .date()
+          .nullable()
+          .describe(
+            'The newest day sealed, UTC: every request written on or before it is sealed. Null while none is (a day is sealed after it closes).',
+          ),
       })
       .describe('A page of the activity log.'),
   },
@@ -252,8 +267,9 @@ export function registerActivityPages(app: FastifyInstance, { log }: { log: Acti
     );
     if (page.outcome === 'refused') return answerRefusal(page, request, reply);
     return {
-      rows: page.rows.map((row) => activityShown(row, page.names)),
+      rows: page.rows.map((row) => activityShown(row, page.names, page.sealedDay)),
       next: page.next === null ? null : cursorText(page.next),
+      sealedThrough: page.sealedDay,
     };
   });
 }

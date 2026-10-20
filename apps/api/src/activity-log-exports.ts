@@ -139,6 +139,8 @@ export function createActivityLogExports({
     const lines: string[] = [];
     // One namer for the whole download: once the login service fails, no later batch waits on it.
     const namer = createActorNamer({ directory, logger: logger.child({ correlationId }) });
+    // Every row marked against the seal the first batch read: one landing mid-file would show a day half sealed.
+    let sealedDay: string | null | undefined;
     // undefined: the first batch, from the newest; null: none left.
     let before: ActivityCursor | null | undefined = undefined;
     while (writtenUpTo !== null && before !== null) {
@@ -147,7 +149,8 @@ export function createActivityLogExports({
         heldActivity(tx, states, keys, orgId, { ...asked, before: start, writtenUpTo, limit: EXPORT_BATCH }),
       );
       const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
-      for (const row of read.rows) lines.push(activityLineOf(asked.format, row, names));
+      if (sealedDay === undefined) sealedDay = read.sealedDay;
+      for (const row of read.rows) lines.push(activityLineOf(asked.format, row, names, sealedDay));
       before = read.next;
     }
     const requests = lines.length;
