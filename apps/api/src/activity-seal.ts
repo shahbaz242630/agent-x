@@ -77,7 +77,7 @@ export function createActivitySeal({
   /** The organisation's next day to seal: the one after its newest seal, or its first row's; undefined for none. */
   const firstToSeal = async (orgId: string, correlationId: string) =>
     withSignedStates(database, orgId, { keys, ids, logger, correlationId }, async (tx, states) => {
-      // A seal that can't be believed has raised the alarm and set the hold: nothing is sealed.
+      // The alarm raised and the hold set already: nothing is sealed.
       const newest = await newestSealedDay(tx, states, orgId);
       if (newest === 'tampered') return newest;
       return newest.day === null ? firstDayOf(tx, orgId) : nextDay(newest.day);

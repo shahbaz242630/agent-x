@@ -67,7 +67,7 @@ describe('activityShown (decision 26: clues labelled, the place credited)', () =
 });
 
 describe('activityShown: sealed (L6, a day is the UTC day a row was written, by its UUIDv7)', () => {
-  const at = (iso: string) => `${v7Floor(Date.parse(iso)).slice(0, 23)}7000-8000-0000000a15a1`;
+  const at = (iso: string) => `${v7Floor(Date.parse(iso)).slice(0, 14)}7000-8000-0000000a15a1`;
   const sealed = (id: string, sealedDay: string | null) => activityShown({ ...ROW, id }, new Map(), sealedDay).sealed;
 
   it('is sealed when written on or before the newest day sealed, to its last millisecond', () => {

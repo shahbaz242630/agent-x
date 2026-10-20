@@ -240,6 +240,8 @@ export function createActivityExportBuilder({
     const range = { ...rangeInMonth(download, file.month), actor: download.actor ?? undefined };
     const { writtenUpTo } = download;
     let requests = 0;
+    // Every row marked against the seal the first batch read: one landing mid-file would show a day half sealed.
+    let sealedDay: string | null | undefined;
     // undefined: the first batch, from the newest; null: none left.
     let before: ActivityCursor | null | undefined = writtenUpTo === null ? null : undefined;
     while (before !== null && writtenUpTo !== null) {
@@ -249,10 +251,10 @@ export function createActivityExportBuilder({
         heldActivity(tx, states, keys, orgId, { ...range, before: start, writtenUpTo, limit: batch }),
       );
       const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
+      if (sealedDay === undefined) sealedDay = read.sealedDay;
+      const marked = sealedDay;
       if (read.rows.length > 0) {
-        await out.add(
-          `${read.rows.map((row) => activityLineOf(download.format, row, names, read.sealedDay)).join('\n')}\n`,
-        );
+        await out.add(`${read.rows.map((row) => activityLineOf(download.format, row, names, marked)).join('\n')}\n`);
       }
       requests += read.rows.length;
       before = read.next;

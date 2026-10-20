@@ -74,7 +74,12 @@ export function localTimeOf(at: Date, timeZone: string): string | null {
   return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}:${part('second')}.${ms}${offset}`;
 }
 
-/** Whether `id` was written in a sealed day: before the end of `sealedDay`, the newest sealed; never with none sealed. */
+/**
+ * Whether `id` was written in a sealed day: before the end of `sealedDay`, the
+ * newest sealed; never with none sealed. A row slipped in before the first
+ * seal's day reads sealed though no seal holds it, until the seal check's next
+ * run finds it and holds the organisation (L6c-1, `why: before`).
+ */
 const sealedRow = (id: string, sealedDay: string | null): boolean =>
   sealedDay !== null && id.toLowerCase() < idsOfDay(sealedDay).to;
 

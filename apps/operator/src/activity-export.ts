@@ -193,6 +193,8 @@ async function fileOf(
   const lines: string[] = [];
   // No login service here: people are named from the copy Agent X keeps (decision 27).
   const namer = createActorNamer({ directory: undefined, logger });
+  // Every row marked against the seal the first batch read: one landing mid-file would show a day half sealed.
+  let sealedDay: string | null | undefined;
   // undefined: the first batch, from the newest; null: none left.
   let before: ActivityCursor | null | undefined = writtenUpTo === null ? null : undefined;
   while (before !== null && writtenUpTo !== null) {
@@ -201,9 +203,11 @@ async function fileOf(
       heldActivityPage(tx, states, services.keys, orgId, { from, to, before: start, writtenUpTo, limit: EXPORT_BATCH }),
     );
     if (read === 'tampered')
-      throw new CaseExportRefused("an agent the range names, or its newest seal, can't be verified");
+      throw new CaseExportRefused("an agent the range names, or the organisation's newest seal, can't be verified");
     const names = await namer.namesOf(activityActorsOf(read.rows), read.held);
-    lines.push(...read.rows.map((row) => activityNdjsonLine(row, names, read.sealedDay)));
+    if (sealedDay === undefined) sealedDay = read.sealedDay;
+    const marked = sealedDay;
+    lines.push(...read.rows.map((row) => activityNdjsonLine(row, names, marked)));
     before = read.next;
   }
   return Buffer.from(`${lines.join('\n')}\n`);
