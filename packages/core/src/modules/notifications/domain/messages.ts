@@ -333,7 +333,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   access_log_export_failed: {
     subject: () => "Agent X: your activity log download couldn't be made",
     firstLine: () =>
-      "The activity log download you asked for in one of your Agent X organisations couldn't be made, after several tries. Nothing was changed.",
+      "The activity log download you asked for in one of your Agent X organisations couldn't be made: it failed several times, or was still not made six days after you asked. Nothing was changed.",
     check: 'Sign in to Agent X to ask for it again. If it fails again, tell us the entry named below.',
   },
   // About an activity log entry (0053, L7): Agent X's own team read the activity log for a case, to every admin.

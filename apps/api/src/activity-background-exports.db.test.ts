@@ -433,26 +433,41 @@ describe('L5c a background download built (decision 31)', () => {
     });
   });
 
-  it('F1 G5 gives up a download still building 7 days after it was asked, the asker told (decision 32e)', async () => {
+  it('F1 G5 gives up a download still building six days after it was asked, the asker told; five days on it builds (decision 32e)', async () => {
     const w = await world();
-    const download = downloadOf(await ask(w));
-    await database
-      .as('admin')
-      .query("update activity_exports.exports set requested_at = requested_at - interval '8 days' where id = $1", [
-        download.id,
-      ]);
+    const backdated = async (id: string, days: number) =>
+      database
+        .as('admin')
+        .query(
+          "update activity_exports.exports set requested_at = requested_at - $2 * interval '1 day' where id = $1",
+          [id, days],
+        );
+    const slow = downloadOf(await ask(w));
+    await backdated(slow.id, 6);
 
     await builderFor(w).run();
 
-    expect(await oneOf(w, download.id)).toMatchObject({ state: 'failed' });
+    expect(await oneOf(w, slow.id)).toMatchObject({ state: 'failed' });
     expect(await eventsOf(w, ACTIVITY_EXPORT_FAILED)).toEqual([
-      expect.objectContaining({ details: expect.objectContaining({ exportId: download.id }) as unknown }),
+      expect.objectContaining({
+        details: expect.objectContaining({ exportId: slow.id, reason: 'ACTIVITY_EXPORT_OVERDUE' }) as unknown,
+      }),
     ]);
+    expect(capture.lines().filter((line) => line.event === 'access_log.export_overdue')).toEqual([
+      expect.objectContaining({ level: 'error', exportId: slow.id, tries: 0 }),
+    ]);
+    expect(capture.lines().some((line) => line.event === 'access_log.export_failed')).toBe(false);
     expect(await noticesOf(w.org)).toContainEqual({
       kind: 'access_log_export_failed',
-      about_id: download.id,
+      about_id: slow.id,
       recipient_user_id: w.admin.userId,
     });
+
+    const other = await world();
+    const inTime = downloadOf(await ask(other));
+    await backdated(inTime.id, 5);
+    await builderFor(other).run();
+    expect(await oneOf(other, inTime.id)).toMatchObject({ state: 'ready' });
   });
 
   it('gives a month back at a stop, no failure logged, and the next run builds it', async () => {
