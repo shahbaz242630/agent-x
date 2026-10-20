@@ -318,10 +318,19 @@ const leaseFor = (leaseMs: number) =>
   sql<Date>`pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp() + ${leaseMs} * interval '1 millisecond')`;
 
 /**
+ * How long after it was asked a download may still be building: its files
+ * then lie at most this far apart, each kept DOWNLOAD_KEPT_DAYS from the
+ * last one ready, within the store's own deletion of each file 14 days
+ * after it is made (F1 G5, partner decision 32e).
+ */
+const MOST_BUILDING_DAYS = DOWNLOAD_KEPT_DAYS;
+
+/**
  * Claims the organisation's next month to build: a waiting one, or one whose
  * builder's lease ran out, of a download none of whose months failed, the
- * oldest download's first. A month tried `mostTries` times already is failed
- * instead, and its download's waiting months with it.
+ * oldest download's first. A month tried `mostTries` times already, or of a
+ * download asked more than MOST_BUILDING_DAYS ago, is failed instead, and its
+ * download's waiting months with it.
  */
 export async function claimFile(
   tx: ExportTx,
@@ -331,6 +340,10 @@ export async function claimFile(
   const found = await tx
     .selectFrom('activity_exports.files as f')
     .select(['f.export_id', sql<string>`f.month::text`.as('month'), 'f.attempts'])
+    .select(
+      sql<boolean>`(select e.requested_at < pg_catalog.clock_timestamp() - ${MOST_BUILDING_DAYS} * interval '1 day'
+        from activity_exports.exports e where e.org_id = f.org_id and e.id = f.export_id)`.as('overdue'),
+    )
     .where('f.org_id', '=', orgId)
     .where((eb) =>
       eb.or([
@@ -347,7 +360,7 @@ export async function claimFile(
     .executeTakeFirst();
   if (found === undefined) return { outcome: 'none' };
   const key = { orgId, exportId: found.export_id, month: found.month };
-  if (found.attempts >= mostTries) {
+  if (found.attempts >= mostTries || found.overdue) {
     // The month's row is locked already: the download's lock is only tried, never waited on, as a builder
     // holding it may be about to fail this very row. Taken or not, the month waits for the next run.
     const { rows } = await sql<{ got: boolean }>`select pg_catalog.pg_try_advisory_xact_lock(
