@@ -65,7 +65,7 @@ import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources'
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
-import { type ActivityTables, createActivityLog } from '@agentx/core/modules/activity';
+import { type ActivityExportTables, type ActivityTables, createActivityLog } from '@agentx/core/modules/activity';
 import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -95,6 +95,7 @@ import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
 import { createActivityPages } from './activity-log.ts';
+import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
 import { createActivityLogExports } from './activity-log-exports.ts';
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAuditLog } from './audit-log.ts';
@@ -103,6 +104,7 @@ import { createFundingSourceChanges } from './funding-source-changes.ts';
 import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
+import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createAgentMandates } from './agent-mandate.ts';
 import { createPolicySimulations } from './policy-simulations.ts';
@@ -156,7 +158,8 @@ type ApiTables = PlatformControlsTables &
   IdentityTables &
   NotificationsTables &
   SecurityEventsTables &
-  ActivityTables;
+  ActivityTables &
+  ActivityExportTables;
 
 const SERVICE = 'api';
 
@@ -421,6 +424,17 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
   const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
+  // The activity log's background downloads (L5c): on where the config names a store for them.
+  const downloads = backgroundDownloadsFrom(downloadStoreOf(config), {
+    list: () => listedOrganizations(database),
+    database,
+    keys,
+    ids: uuidV7Ids,
+    clock: systemClock,
+    outbox,
+    directory,
+    logger,
+  });
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
@@ -518,6 +532,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger, directory }),
     auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger, directory }),
     activityPages: createActivityPages({ database, keys, ids: uuidV7Ids, logger, directory }),
+    backgroundExports: downloads.exports,
     activityLogExports: createActivityLogExports({
       database,
       keys,
@@ -904,6 +919,9 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     ACTIVITY_SEAL_EVERY_MS,
   );
+  // The activity log's background downloads built, a month a file (Phase 3 L5c), on a timer of their own.
+  const downloadBuilding = scheduleRunsIfAny(downloads.builder, ACTIVITY_EXPORTS_EVERY_MS);
+  logger.info('api.background_downloads', { building: downloadBuilding.running });
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -929,6 +947,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           requestExpiring.stop(),
           requestVoiding.stop(),
           activitySealing.stop(),
+          downloadBuilding.stop(),
           recording.stop(),
         ]);
       },

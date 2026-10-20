@@ -39,6 +39,21 @@ export const PLAIN_WORDS = {
     broke: 'Days waiting to be sealed stay unsealed until the next run, 15 minutes later.',
     next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
   },
+  'access_log.export_build_failed': {
+    happened: "One month of an admin's background activity log download could not be made this time.",
+    broke: 'That download is not ready yet; nothing else is affected.',
+    next: 'Nothing to do: it is tried again within minutes, up to three times. If it keeps failing, check the download store.',
+  },
+  'access_log.export_failed': {
+    happened: "An admin's background activity log download was given up after a month failed three times.",
+    broke: 'That download will not be made; the admin was told by email to ask again.',
+    next: 'Check the download store and the database are healthy, then let the admin ask again.',
+  },
+  'access_log.export_run_failed': {
+    happened: 'A run of the background activity log downloads stopped early on an error.',
+    broke: 'Downloads waiting to be made are held up until the next run, a minute later.',
+    next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
+  },
   'agent_key.refused': {
     happened:
       "An agent's key was turned away because the server no longer holds the security key version it was made with.",

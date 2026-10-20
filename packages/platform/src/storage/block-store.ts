@@ -10,7 +10,7 @@
 // A token is asked once and kept for a few minutes (Azure's last hours), so a
 // file of a thousand blocks asks the identity endpoint a handful of times.
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { OutboundFetch } from '../outbound/index.ts';
@@ -157,6 +157,10 @@ export function azureBlockStore({
   };
 }
 
+/** A file the folder store writes, and a folder it makes: the process's own alone. */
+const OWNER_ONLY = 0o600;
+const OWNER_ONLY_FOLDER = 0o700;
+
 /** The local folder standing in for the container (development and test alone). */
 export function folderBlockStore(directory: string): BlockStore {
   const pathOf = (name: string) => join(directory, checkedName(name));
@@ -165,8 +169,8 @@ export function folderBlockStore(directory: string): BlockStore {
   return {
     async putBlock(name, index, bytes) {
       checkedBlocks(index);
-      await mkdir(blocksOf(name), { recursive: true });
-      await writeFile(join(blocksOf(name), String(index)), bytes);
+      await mkdir(blocksOf(name), { recursive: true, mode: OWNER_ONLY_FOLDER });
+      await writeFile(join(blocksOf(name), String(index)), bytes, { mode: OWNER_ONLY });
     },
 
     async commit(name, blocks, { sha256 }) {
@@ -179,8 +183,8 @@ export function folderBlockStore(directory: string): BlockStore {
       }
       const path = pathOf(name);
       const made = `${path}.${randomUUID()}.part`;
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(made, whole, { flag: 'wx' });
+      await mkdir(dirname(path), { recursive: true, mode: OWNER_ONLY_FOLDER });
+      await writeFile(made, whole, { flag: 'wx', mode: OWNER_ONLY });
       await rename(made, path);
       // Its blocks go with it, as Azure drops a blob's uncommitted blocks once it is committed.
       await rm(blocksOf(name), { recursive: true, force: true });
@@ -188,14 +192,8 @@ export function folderBlockStore(directory: string): BlockStore {
 
     async read(name, offset, length) {
       checkedRange(offset, length);
-      const file = await open(pathOf(name), 'r');
-      try {
-        const into = Buffer.alloc(length);
-        const { bytesRead } = await file.read(into, 0, length, offset);
-        return into.subarray(0, bytesRead);
-      } finally {
-        await file.close();
-      }
+      // Read whole: a development or test file is small.
+      return (await readFile(pathOf(name))).subarray(offset, offset + length);
     },
   };
 }

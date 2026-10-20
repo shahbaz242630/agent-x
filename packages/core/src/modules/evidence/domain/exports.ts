@@ -22,3 +22,12 @@ export const ACTIVITY_LOG_EXPORTED = 'access_log.exported';
  * 31, S129): a busy day whole. A longer range is a background download (L5c).
  */
 export const MOST_EXPORTED_REQUESTS = 50_000;
+
+/** The actions of a background download of the activity log (L5c), on the organisation's own chain. */
+export const ACTIVITY_EXPORT_REQUESTED = 'access_log.export_requested';
+/** One month's file made: its count, size and SHA-256, so the file a download is given can be checked. */
+export const ACTIVITY_EXPORT_FILE_MADE = 'access_log.export_file_made';
+/** The download given up, after a month failed too often. */
+export const ACTIVITY_EXPORT_FAILED = 'access_log.export_failed';
+/** A month's file downloaded (L5c-4): each one on the audit log. */
+export const ACTIVITY_EXPORT_DOWNLOADED = 'access_log.export_downloaded';

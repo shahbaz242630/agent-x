@@ -131,6 +131,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       'api.idp_events',
       'api.contact_fill',
       'api.factor_resets',
+      'api.background_downloads',
     ]);
     expect((await api?.inject('/health'))?.json()).toEqual({ status: 'ok' });
     // The role check opened at least one connection, named for Postgres's own views, as the app role.
