@@ -179,7 +179,7 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
       grant.principalId = String(grant.principalId).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
     }
     // Production keeps each audit export five years, Locked, in three zones (decision 27).
-    if (resource.type === 'Microsoft.Storage/storageAccounts') {
+    if (EVIDENCE_STORE(resource as unknown as PredictedResource)) {
       inside(resource, 'sku').name = 'Standard_ZRS';
       Object.assign(inside(resource, 'properties', 'immutableStorageWithVersioning', 'immutabilityPolicy'), {
         state: 'Locked',
@@ -202,6 +202,41 @@ const brokenRules = (snapshotted: Snapshot, expected = STAGING): RuleId[] => [
 const inside = (value: unknown, ...keys: readonly string[]): Mutable => at(value, ...keys) as Mutable;
 const nth = (value: unknown, index: number): Mutable => (value as readonly Mutable[]).at(index) ?? {};
 const first = (value: unknown): Mutable => nth(value, 0);
+
+const accountProperties = (found: Mutable): Mutable => inside(found, 'properties');
+const accountAcls = (found: Mutable): Mutable => inside(found, 'properties', 'networkAcls');
+/**
+ * Each way either Storage account could be opened (evidence-store, activity-downloads):
+ * another kind, older TLS, shared keys, public blobs or copies from another tenant,
+ * another way in, a wider network, no second layer of encryption.
+ */
+const OPENED_ACCOUNT: readonly ((found: Mutable) => unknown)[] = [
+  (found: Mutable) => (found.kind = 'BlobStorage'),
+  (found: Mutable) => (accountProperties(found).minimumTlsVersion = 'TLS1_0'),
+  (found: Mutable) => (accountProperties(found).supportsHttpsTrafficOnly = false),
+  (found: Mutable) => (accountProperties(found).allowSharedKeyAccess = true),
+  (found: Mutable) => delete accountProperties(found).allowSharedKeyAccess,
+  (found: Mutable) => (accountProperties(found).defaultToOAuthAuthentication = false),
+  (found: Mutable) => (accountProperties(found).allowBlobPublicAccess = true),
+  (found: Mutable) => (accountProperties(found).allowCrossTenantReplication = true),
+  (found: Mutable) => (accountProperties(found).allowedCopyScope = 'PrivateLink'),
+  (found: Mutable) => (accountProperties(found).isHnsEnabled = true),
+  (found: Mutable) => (accountProperties(found).isSftpEnabled = true),
+  (found: Mutable) => (accountProperties(found).isLocalUserEnabled = true),
+  (found: Mutable) => (accountProperties(found).isNfsV3Enabled = true),
+  (found: Mutable) => (accountAcls(found).defaultAction = 'Allow'),
+  (found: Mutable) => (accountAcls(found).bypass = 'AzureServices'),
+  (found: Mutable) => (accountAcls(found).ipRules = [{ value: '203.0.113.7' }]),
+  (found: Mutable) => (accountAcls(found).resourceAccessRules = [{ resourceId: '/subscriptions/x/any' }]),
+  (found: Mutable) => (first(accountAcls(found).virtualNetworkRules).id = '/subscriptions/x/any/subnets/other'),
+  (found: Mutable) =>
+    (accountAcls(found).virtualNetworkRules = [
+      first(accountAcls(found).virtualNetworkRules),
+      { id: '/subscriptions/x/any/subnets/other', action: 'Allow' },
+    ]),
+  (found: Mutable) => (accountAcls(found).virtualNetworkRules = []),
+  (found: Mutable) => (inside(found, 'properties', 'encryption').requireInfrastructureEncryption = false),
+];
 
 const type = (wanted: string) => (resource: PredictedResource) => resource.type === wanted;
 const named = (pattern: RegExp) => (resource: PredictedResource) => pattern.test(resource.name);
@@ -249,6 +284,15 @@ const SECRETS = type('Microsoft.KeyVault/vaults/secrets');
 const SECRET = (name: string) => (resource: PredictedResource) =>
   SECRETS(resource) && resource.id.endsWith(`/secrets/${name}`);
 const ASSIGNMENTS = type('Microsoft.Authorization/roleAssignments');
+/** The two Storage accounts and their parts, by the names their modules give them. */
+const EVIDENCE_STORE = (resource: PredictedResource) =>
+  resource.type === 'Microsoft.Storage/storageAccounts' && /^stagentx(?:stg|prd)/.test(resource.name);
+const DOWNLOADS_STORE = (resource: PredictedResource) =>
+  resource.type === 'Microsoft.Storage/storageAccounts' && resource.name.startsWith('stagentxdl');
+const IN_EVIDENCE_STORE = (wanted: string) => (resource: PredictedResource) =>
+  resource.type === wanted && /^stagentx(?:stg|prd)/.test(resource.name);
+const IN_DOWNLOADS_STORE = (wanted: string) => (resource: PredictedResource) =>
+  resource.type === wanted && resource.name.startsWith('stagentxdl');
 const ROLE_DEFINITIONS = type('Microsoft.Authorization/roleDefinitions');
 /** CI's custom role, not the audit exports' (modules/evidence.bicep), by the name names.bicep gives it. */
 const RELEASE_ROLE = (resource: PredictedResource) =>
@@ -481,6 +525,21 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxstg[a-z0-9]{6}\/default$/),
       expect.stringMatching(
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-exports$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
+      expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxdlstg[a-z0-9]{6}$/),
+      expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxdlstg[a-z0-9]{6}\/default$/),
+      expect.stringMatching(
+        /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxdlstg[a-z0-9]{6}\/default\/activity-downloads$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Storage\/storageAccounts\/managementPolicies stagentxdlstg[a-z0-9]{6}\/default$/,
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -1072,19 +1131,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
   });
 
   it('evidence-store: an audit-export store anyone else can reach, change, or keep for less (E10c, decisions 27 and 28)', () => {
-    const STORE = type('Microsoft.Storage/storageAccounts');
-    const BLOBS = type('Microsoft.Storage/storageAccounts/blobServices');
-    const CONTAINER = type('Microsoft.Storage/storageAccounts/blobServices/containers');
-    const WRITER_ROLE = (resource: PredictedResource) => ROLE_DEFINITIONS(resource) && !RELEASE_ROLE(resource);
+    const STORE = EVIDENCE_STORE;
+    const BLOBS = IN_EVIDENCE_STORE('Microsoft.Storage/storageAccounts/blobServices');
+    const CONTAINER = IN_EVIDENCE_STORE('Microsoft.Storage/storageAccounts/blobServices/containers');
+    const group = String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id);
+    const WRITER_ROLE = (resource: PredictedResource) =>
+      ROLE_DEFINITIONS(resource) && resource.name === bicepGuid(group, 'evidence-writer');
     const WRITES = (resource: PredictedResource) =>
       ASSIGNMENTS(resource) && String(at(resource.properties, 'description')).startsWith('operator adds audit exports');
     const properties = (store: Mutable): Mutable => inside(store, 'properties');
-    const acls = (store: Mutable): Mutable => inside(store, 'properties', 'networkAcls');
     const policy = (store: Mutable): Mutable =>
       inside(store, 'properties', 'immutableStorageWithVersioning', 'immutabilityPolicy');
     const only = (snapshotted: Snapshot, expected = STAGING): RuleId[] => brokenRules(snapshotted, expected);
     const production: Expectations = { region: 'uaenorth', environment: 'production' };
-    const group = String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id);
 
     // As staging has it: a few days, Unlocked, one copy.
     const store = staging.predictedResources.find(STORE);
@@ -1097,32 +1156,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       },
     });
     for (const change of [
-      (found: Mutable) => (found.kind = 'BlobStorage'),
+      ...OPENED_ACCOUNT,
       (found: Mutable) => (inside(found, 'sku').name = 'Standard_GRS'),
-      (found: Mutable) => (properties(found).minimumTlsVersion = 'TLS1_0'),
-      (found: Mutable) => (properties(found).supportsHttpsTrafficOnly = false),
-      (found: Mutable) => (properties(found).allowSharedKeyAccess = true),
-      (found: Mutable) => delete properties(found).allowSharedKeyAccess,
-      (found: Mutable) => (properties(found).defaultToOAuthAuthentication = false),
-      (found: Mutable) => (properties(found).allowBlobPublicAccess = true),
-      (found: Mutable) => (properties(found).allowCrossTenantReplication = true),
-      (found: Mutable) => (properties(found).allowedCopyScope = 'PrivateLink'),
-      (found: Mutable) => (properties(found).isHnsEnabled = true),
-      (found: Mutable) => (properties(found).isSftpEnabled = true),
-      (found: Mutable) => (properties(found).isLocalUserEnabled = true),
-      (found: Mutable) => (properties(found).isNfsV3Enabled = true),
-      (found: Mutable) => (acls(found).defaultAction = 'Allow'),
-      (found: Mutable) => (acls(found).bypass = 'AzureServices'),
-      (found: Mutable) => (acls(found).ipRules = [{ value: '203.0.113.7' }]),
-      (found: Mutable) => (acls(found).resourceAccessRules = [{ resourceId: '/subscriptions/x/any' }]),
-      (found: Mutable) => (first(acls(found).virtualNetworkRules).id = '/subscriptions/x/any/subnets/other'),
-      (found: Mutable) =>
-        (acls(found).virtualNetworkRules = [
-          first(acls(found).virtualNetworkRules),
-          { id: '/subscriptions/x/any/subnets/other', action: 'Allow' },
-        ]),
-      (found: Mutable) => (acls(found).virtualNetworkRules = []),
-      (found: Mutable) => (inside(found, 'properties', 'encryption').requireInfrastructureEncryption = false),
       (found: Mutable) => (inside(found, 'properties', 'immutableStorageWithVersioning').enabled = false),
       (found: Mutable) => delete properties(found).immutableStorageWithVersioning,
       (found: Mutable) => (policy(found).allowProtectedAppendWrites = true),
@@ -1250,7 +1285,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
   });
 
   it("evidence-store: the operator's job told of another store or identity, or another workload told of the store (E10c-3b-2)", () => {
-    const STORE = type('Microsoft.Storage/storageAccounts');
+    const STORE = EVIDENCE_STORE;
     const evidence = (job: Mutable): Mutable[] =>
       settingsOf(job).filter((entry) => String(entry.name).startsWith('AGENTX_EVIDENCE_'));
     const named = (job: Mutable, name: string): Mutable => evidence(job).find((entry) => entry.name === name) ?? {};
@@ -1325,6 +1360,273 @@ describe('SEC-OPS-09 each rule can fail', () => {
         rule: 'evidence-store',
         resource: 'ca-agentx-stg-api',
         message: "sets AGENTX_EVIDENCE_DIR: only the operator's job writes to the store",
+      },
+    ]);
+  });
+
+  it('activity-downloads: a downloads store anyone else can reach, that keeps a file past its week, or that another identity uses (L5c, decision 31)', () => {
+    const BLOBS = IN_DOWNLOADS_STORE('Microsoft.Storage/storageAccounts/blobServices');
+    const CONTAINER = IN_DOWNLOADS_STORE('Microsoft.Storage/storageAccounts/blobServices/containers');
+    const LIFECYCLE = IN_DOWNLOADS_STORE('Microsoft.Storage/storageAccounts/managementPolicies');
+    const group = String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id);
+    const ROLE = (resource: PredictedResource) =>
+      ROLE_DEFINITIONS(resource) && resource.name === bicepGuid(group, 'activity-downloads');
+    const KEEPS = (resource: PredictedResource) =>
+      ASSIGNMENTS(resource) &&
+      String(at(resource.properties, 'description')).startsWith('api keeps activity downloads');
+    const properties = (found: Mutable): Mutable => inside(found, 'properties');
+    const only = (snapshotted: Snapshot): RuleId[] => brokenRules(snapshotted);
+
+    // As the module makes it: within Azure's 24 characters, one copy, not write-once.
+    const store = staging.predictedResources.find(DOWNLOADS_STORE);
+    expect(store?.name).toMatch(/^stagentxdlstg[a-z0-9]{6}$/);
+    expect(String(store?.name).length).toBeLessThanOrEqual(24);
+    expect(at(store?.properties, 'immutableStorageWithVersioning')).toBeUndefined();
+    for (const change of [
+      ...OPENED_ACCOUNT,
+      (found: Mutable) => (inside(found, 'sku').name = 'Standard_ZRS'),
+      // Write-once would refuse a month built again over its own name, and keep it past its week.
+      (found: Mutable) =>
+        (properties(found).immutableStorageWithVersioning = {
+          enabled: true,
+          immutabilityPolicy: { immutabilityPeriodSinceCreationInDays: 1, state: 'Unlocked' },
+        }),
+      (found: Mutable) =>
+        (properties(found).immutableStorageWithVersioning = {
+          immutabilityPolicy: { immutabilityPeriodSinceCreationInDays: 1, state: 'Unlocked' },
+        }),
+    ]) {
+      expect(only(changed(DOWNLOADS_STORE, change))).toEqual(['activity-downloads']);
+    }
+
+    // Versions or soft delete kept, a container open to anyone or named otherwise, or a blob service not the default.
+    for (const change of [
+      (found: Mutable) => (properties(found).isVersioningEnabled = true),
+      (found: Mutable) => delete properties(found).isVersioningEnabled,
+      (found: Mutable) => (properties(found).deleteRetentionPolicy = { enabled: true, days: 7 }),
+      (found: Mutable) => delete properties(found).deleteRetentionPolicy,
+    ]) {
+      expect(only(changed(BLOBS, change))).toEqual(['activity-downloads']);
+    }
+    expect(only(changed(CONTAINER, (found) => (properties(found).publicAccess = 'Blob')))).toEqual([
+      'activity-downloads',
+    ]);
+    expect(
+      only(changed(CONTAINER, (found) => (found.id = String(found.id).replace(/activity-downloads$/, 'other')))),
+    ).toEqual(['activity-downloads']);
+    expect(only(changed(BLOBS, (found) => (found.id = String(found.id).replace(/default$/, 'second'))))).toEqual([
+      'activity-downloads',
+      'resource-logs',
+    ]);
+
+    // The lifecycle rule: every file in the container, deleted within eight days of its making.
+    expect(at(staging.predictedResources.find(LIFECYCLE)?.properties, 'policy', 'rules')).toEqual([
+      {
+        name: 'delete-after-a-week',
+        enabled: true,
+        type: 'Lifecycle',
+        definition: {
+          filters: { blobTypes: ['blockBlob'], prefixMatch: ['activity-downloads/'] },
+          actions: { baseBlob: { delete: { daysAfterCreationGreaterThan: 8 } } },
+        },
+      },
+    ]);
+    const rule = (found: Mutable): Mutable => first(at(found, 'properties', 'policy', 'rules'));
+    const filters = (found: Mutable): Mutable => inside(rule(found), 'definition', 'filters');
+    const deletion = (found: Mutable): Mutable => inside(rule(found), 'definition', 'actions', 'baseBlob', 'delete');
+    expect(only(without(LIFECYCLE))).toEqual(['activity-downloads']);
+    for (const change of [
+      (found: Mutable) => (rule(found).enabled = false),
+      (found: Mutable) => (rule(found).type = 'Other'),
+      (found: Mutable) => (filters(found).blobTypes = ['appendBlob']),
+      (found: Mutable) => (filters(found).prefixMatch = ['other/']),
+      (found: Mutable) => (filters(found).prefixMatch = ['activity-downloads/', 'activity-downloads/x']),
+      (found: Mutable) => (filters(found).blobIndexMatch = [{ name: 'keep', op: '==', value: 'yes' }]),
+      (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = 9),
+      (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = 30),
+      (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = '8'),
+      (found: Mutable) => {
+        delete deletion(found).daysAfterCreationGreaterThan;
+        deletion(found).daysAfterModificationGreaterThan = 8;
+      },
+      (found: Mutable) => (inside(found, 'properties', 'policy').rules = []),
+      (found: Mutable) => (found.id = String(found.id).replace(/default$/, 'second')),
+    ]) {
+      expect(only(changed(LIFECYCLE, change))).toEqual(['activity-downloads']);
+    }
+    // Sooner, or every file in the account, is no weaker.
+    expect(only(changed(LIFECYCLE, (found) => (deletion(found).daysAfterCreationGreaterThan = 7)))).toEqual([]);
+    expect(only(changed(LIFECYCLE, (found) => delete filters(found).prefixMatch))).toEqual([]);
+    // A second rule, or any other Storage resource in the store.
+    const lifecycle = staging.predictedResources.find(LIFECYCLE);
+    expect(only(withExtra({ ...structuredClone(lifecycle), id: `${String(lifecycle?.id)}-second` }))).toEqual([
+      'activity-downloads',
+    ]);
+    expect(
+      only(
+        withExtra({
+          id: `${String(store?.id)}/fileServices/default`,
+          type: 'Microsoft.Storage/storageAccounts/fileServices',
+          name: `${String(store?.name)}/default`,
+          apiVersion: '2025-01-01',
+          properties: {},
+        }),
+      ),
+    ).toEqual(['activity-downloads']);
+    // A second store, or a Storage account named as neither.
+    expect(only(withExtra({ ...structuredClone(store), id: `${String(store?.id)}-second` }))).toEqual([
+      'required',
+      'activity-downloads',
+    ]);
+    expect(
+      only(
+        withExtra({
+          ...structuredClone(store),
+          id: String(store?.id).replace(/stagentxdl/, 'stagentxother'),
+          name: String(store?.name).replace(/stagentxdl/, 'stagentxother'),
+        }),
+      ),
+    ).toEqual(['required', 'evidence-store']);
+    expect(only(without(DOWNLOADS_STORE))).toContain('activity-downloads');
+
+    // The role: read and write a file, nothing more; never delete, list keys or any action.
+    expect(at(staging.predictedResources.find(ROLE)?.properties, 'permissions')).toEqual([
+      {
+        actions: [],
+        notActions: [],
+        dataActions: [
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read',
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write',
+        ],
+        notDataActions: [],
+      },
+    ]);
+    const permissionsOf = (role: Mutable): Mutable => first(at(role, 'properties', 'permissions'));
+    for (const change of [
+      (role: Mutable) =>
+        (at(permissionsOf(role), 'dataActions') as string[]).push(
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete',
+        ),
+      (role: Mutable) =>
+        (permissionsOf(role).dataActions = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read']),
+      (role: Mutable) => (permissionsOf(role).dataActions = ['*']),
+      (role: Mutable) => (permissionsOf(role).dataActions = []),
+      (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+      (role: Mutable) =>
+        (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
+    ]) {
+      expect(only(changed(ROLE, change))).toEqual(['activity-downloads']);
+    }
+    expect(only(without(ROLE))).toEqual(['activity-downloads']);
+    expect(staging.predictedResources.find(ROLE)?.name).toBe(bicepGuid(group, 'activity-downloads'));
+
+    // The grant: on the container alone, to the API alone, once.
+    for (const change of [
+      (grant: Mutable) =>
+        (grant.id = String(grant.id).replace('/blobServices/default/containers/activity-downloads', '')),
+      (grant: Mutable) =>
+        (grant.id = String(grant.id).replace(/^.*(?=\/providers\/Microsoft\.Authorization\/)/, group)),
+      (grant: Mutable) =>
+        (inside(grant, 'properties').principalId = String(at(grant, 'properties', 'principalId')).replace(
+          'id-agentx-stg-api',
+          'id-agentx-stg-operator',
+        )),
+      (grant: Mutable) => (inside(grant, 'properties').principalType = 'User'),
+    ]) {
+      expect(only(changed(KEEPS, change))).toEqual(['activity-downloads']);
+    }
+    expect(only(without(KEEPS))).toEqual(['activity-downloads']);
+    const twice = structuredClone(staging.predictedResources.find(KEEPS)) as unknown as Mutable;
+    twice.id = `${String(twice.id)}-second`;
+    expect(only(withExtra(twice))).toEqual(['activity-downloads']);
+    // Nor is the audit exports' role given on the downloads container.
+    const exports = String(
+      staging.predictedResources.find(IN_EVIDENCE_STORE('Microsoft.Storage/storageAccounts/blobServices/containers'))
+        ?.id,
+    );
+    const downloads = String(staging.predictedResources.find(CONTAINER)?.id);
+    expect(
+      only(
+        changed(
+          (resource) =>
+            ASSIGNMENTS(resource) &&
+            String(at(resource.properties, 'description')).startsWith('operator adds audit exports'),
+          (grant) => (grant.id = String(grant.id).replace(exports, downloads)),
+        ),
+      ),
+    ).toEqual(['evidence-store']);
+  });
+
+  it('activity-downloads: the API told of another store or identity, or another workload told of the store (L5c)', () => {
+    const downloads = (workload: Mutable): Mutable[] =>
+      settingsOf(workload).filter((entry) => String(entry.name).startsWith('AGENTX_ACTIVITY_DOWNLOADS_'));
+    const named = (workload: Mutable, name: string): Mutable =>
+      downloads(workload).find((entry) => entry.name === name) ?? {};
+    const account = String(staging.predictedResources.find(DOWNLOADS_STORE)?.name);
+    const exports = String(staging.predictedResources.find(EVIDENCE_STORE)?.name);
+    const apiId = String(
+      staging.predictedResources.find((resource) => IDENTITIES(resource) && resource.name.endsWith('-api'))?.id,
+    );
+    // As apps.bicep writes them: this deployment's downloads store and container, as the API's identity.
+    expect(downloads(staging.predictedResources.find(APP('api')) as unknown as Mutable)).toEqual([
+      {
+        name: 'AGENTX_ACTIVITY_DOWNLOADS_URL',
+        value: `[format('https://{0}.blob.{1}/{2}', '${account}', environment().suffixes.storage, 'activity-downloads')]`,
+      },
+      { name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID', value: `[reference('${apiId}', '2024-11-30').clientId]` },
+    ]);
+    const url = (app: Mutable): Mutable => named(app, 'AGENTX_ACTIVITY_DOWNLOADS_URL');
+    const client = (app: Mutable): Mutable => named(app, 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID');
+    for (const change of [
+      // The audit exports' store, which the API's role isn't given on.
+      (app: Mutable) => (url(app).value = String(url(app).value).replace(`'${account}'`, `'${exports}'`)),
+      (app: Mutable) => (url(app).value = String(url(app).value).replace("'activity-downloads'", "'audit-exports'")),
+      (app: Mutable) => (url(app).value = 'https://stagentxother.blob.core.windows.net/activity-downloads'),
+      (app: Mutable) => (client(app).value = String(client(app).value).replace('-api', '-operator')),
+      (app: Mutable) => (client(app).value = '00000000-0000-0000-0000-000000000002'),
+      (app: Mutable) =>
+        (url(app).value = String(url(app).value).replace('environment().suffixes.storage', "'example.com'")),
+      (app: Mutable) => (client(app).value = String(client(app).value).replace('.clientId]', '.principalId]')),
+      (app: Mutable) => (url(app).value = `${String(url(app).value)}x`),
+      (app: Mutable) => (client(app).value = `x${String(client(app).value)}`),
+      (app: Mutable) => {
+        containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== 'AGENTX_ACTIVITY_DOWNLOADS_URL');
+      },
+      (app: Mutable) => settingsOf(app).push(structuredClone(client(app))),
+      // Deployed, never a folder in the store's place.
+      (app: Mutable) => settingsOf(app).push({ name: 'AGENTX_ACTIVITY_DOWNLOADS_DIR', value: '/mnt/downloads' }),
+    ]) {
+      expect(brokenRules(changed(APP('api'), change))).toEqual(['activity-downloads']);
+    }
+    // A job named as the API is not the app, so its settings are still refused.
+    const apiSettings = downloads(staging.predictedResources.find(APP('api')) as unknown as Mutable);
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          job.name = 'job-agentx-stg-api';
+          settingsOf(job).push(...structuredClone(apiSettings));
+        }),
+      ),
+    ).toContain('activity-downloads');
+    // No other workload, job or app, is pointed at the store.
+    for (const pick of [JOB('operator'), JOB('migrate'), APP('zitadel')]) {
+      const told = changed(pick, (resource) =>
+        settingsOf(resource).push({ name: 'AGENTX_ACTIVITY_DOWNLOADS_URL', value: 'x' }),
+      );
+      expect(brokenRules(told)).toEqual(['activity-downloads']);
+    }
+    expect(
+      policyProblems(
+        changed(JOB('operator'), (job) =>
+          settingsOf(job).push({ name: 'AGENTX_ACTIVITY_DOWNLOADS_DIR', value: '/mnt/downloads' }),
+        ),
+        STAGING,
+      ),
+    ).toEqual([
+      {
+        rule: 'activity-downloads',
+        resource: 'job-agentx-stg-operator',
+        message: 'sets AGENTX_ACTIVITY_DOWNLOADS_DIR: only the API keeps the activity downloads',
       },
     ]);
   });
@@ -1877,7 +2179,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
           inside(network, 'properties').subnets = [subnet(network, 'database')];
         }),
       ),
-    ).toEqual(['database-network', 'apps-network', 'apps-egress', 'vault', 'evidence-store', 'apps-environment']);
+    ).toEqual([
+      'database-network',
+      'apps-network',
+      'apps-egress',
+      'vault',
+      'evidence-store',
+      'activity-downloads',
+      'apps-environment',
+    ]);
   });
 
   it('apps-egress: a door out that nothing needs, one the apps need missing, or the rest not denied after them', () => {
@@ -2327,9 +2637,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (alert: Mutable) =>
         (criterion(alert).query =
           `${table} | where tostring(parse_json(Log).event) in (${events}) | summarize Events = count()`);
-    const JOBS = ['hold_history', 'holdings_check', 'mandate_expiry', 'request_expiry', 'request_void'].map(
-      (job) => `"${job}.run_failed"`,
-    );
+    const JOBS = [
+      'access_log_seal',
+      'access_log_seal_check',
+      'hold_history',
+      'holdings_check',
+      'mandate_expiry',
+      'request_expiry',
+      'request_void',
+    ].map((job) => `"${job}.run_failed"`);
     const EVERY_JOB = JOBS.join(', ');
     expect(brokenRules(without(INTEGRITY_RUNS_ALERT))).toEqual(['integrity-runs-alert']);
     for (const change of [

@@ -24,6 +24,7 @@
 //   file reads them from the shell that deploys (Rule Book §7)
 import { appName, identityName, jobName, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
 import { evidenceAccountName } from 'modules/evidence.bicep'
+import { activityDownloadsAccountName } from 'modules/activity-downloads.bicep'
 
 targetScope = 'subscription'
 
@@ -271,6 +272,29 @@ module evidence 'modules/evidence.bicep' = {
     redundancy: evidenceRedundancy
   }
   // The subnet's Storage endpoint, the workspace and the operator's identity must exist first.
+  dependsOn: [
+    network
+    monitoring
+    appsEnvironment
+  ]
+}
+
+// Where the activity log's background downloads are kept a week (Phase 3 L5c,
+// decision 31), read and written by the API alone. Named in its module, as
+// the evidence store is, so a change to it asks for no secrets or
+// certificates deploy.
+module activityDownloads 'modules/activity-downloads.bicep' = {
+  scope: group
+  params: {
+    location: location
+    name: activityDownloadsAccountName(short, nameSuffix)
+    tags: tags
+    appsSubnetId: ids.appsSubnet
+    workspaceId: ids.workspace
+    apiIdentityName: identityName(environment, 'api')
+    roleName: 'Agent X activity downloads (${environment} ${nameSuffix})'
+  }
+  // The subnet's Storage endpoint, the workspace and the API's identity must exist first.
   dependsOn: [
     network
     monitoring

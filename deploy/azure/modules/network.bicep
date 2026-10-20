@@ -276,7 +276,7 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
         // in this region, not ours alone (PL-43 closes that with a private endpoint).
         name: 'allow-out-storage'
         properties: {
-          description: 'The operator\'s audit exports, to the write-once store through the subnet\'s Storage endpoint, in this region only.'
+          description: 'Audit exports and activity downloads, to their stores through the subnet\'s Storage endpoint, in this region only.'
           priority: 310
           direction: 'Outbound'
           access: 'Allow'
