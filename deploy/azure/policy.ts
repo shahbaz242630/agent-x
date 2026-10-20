@@ -280,11 +280,11 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 
 /**
  * An integrity job that skipped a whole run, its organisation list unread
- * (Phase 2 E2c), or a run of the activity log's daily seal that stopped early
- * (Phase 3 L6b): nothing checked, expired or sealed that run.
+ * (Phase 2 E2c), or a run of the activity log's daily seal (Phase 3 L6b) or
+ * its seal check (L6c) that stopped early: nothing checked, expired or sealed that run.
  */
 const INTEGRITY_RUN_FAILED_LINES =
-  'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed")';
+  'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage

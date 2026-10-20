@@ -2639,6 +2639,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           `${table} | where tostring(parse_json(Log).event) in (${events}) | summarize Events = count()`);
     const JOBS = [
       'access_log_seal',
+      'access_log_seal_check',
       'hold_history',
       'holdings_check',
       'mandate_expiry',
