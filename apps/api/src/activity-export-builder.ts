@@ -20,7 +20,10 @@
 //
 // A month that fails is given back for another try (each claim counts one);
 // one tried three times fails its download, recorded as
-// `access_log.export_failed`, the admin told. A builder that finds it lost
+// `access_log.export_failed`, the admin told; so does a download still
+// building six days after it was asked (ACTIVITY_EXPORT_OVERDUE, logged as
+// `access_log.export_overdue`: no file outlives its time, F1 G5, decision
+// 32e). A builder that finds it lost
 // its lease (a stop, a long pause) leaves the month to the one that took it.
 // A run never throws: each failure is logged, naming the organisation and
 // download, and the run goes on to the next.
@@ -321,7 +324,7 @@ export function createActivityExportBuilder({
           await record(tx, orgId, correlationId, ACTIVITY_EXPORT_FAILED, {
             exportId: found.exportId,
             month: found.month.slice(0, 7),
-            reason: 'ACTIVITY_EXPORT_FAILED',
+            reason: found.why === 'tries' ? 'ACTIVITY_EXPORT_FAILED' : 'ACTIVITY_EXPORT_OVERDUE',
           });
           await tell(tx, orgId, 'access_log_export_failed', found.exportId, found.requestedBy);
         }
@@ -329,11 +332,10 @@ export function createActivityExportBuilder({
       });
       if (claim.outcome === 'none') return;
       if (claim.outcome === 'given_up') {
-        logger.child({ correlationId, orgId }).error('access_log.export_failed', {
-          exportId: claim.exportId,
-          month: claim.month.slice(0, 7),
-          tries: mostTries,
-        });
+        const about = { exportId: claim.exportId, month: claim.month.slice(0, 7), tries: claim.attempts };
+        const log = logger.child({ correlationId, orgId });
+        if (claim.why === 'tries') log.error('access_log.export_failed', about);
+        else log.error('access_log.export_overdue', about);
         continue;
       }
       // A month that failed, or was lost, waits for the next run, so its tries are spread over minutes, not spent at once.

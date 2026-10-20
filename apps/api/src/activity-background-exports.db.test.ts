@@ -433,6 +433,43 @@ describe('L5c a background download built (decision 31)', () => {
     });
   });
 
+  it('F1 G5 gives up a download still building six days after it was asked, the asker told; five days on it builds (decision 32e)', async () => {
+    const w = await world();
+    const backdated = async (id: string, days: number) =>
+      database
+        .as('admin')
+        .query(
+          "update activity_exports.exports set requested_at = requested_at - $2 * interval '1 day' where id = $1",
+          [id, days],
+        );
+    const slow = downloadOf(await ask(w));
+    await backdated(slow.id, 6);
+
+    await builderFor(w).run();
+
+    expect(await oneOf(w, slow.id)).toMatchObject({ state: 'failed' });
+    expect(await eventsOf(w, ACTIVITY_EXPORT_FAILED)).toEqual([
+      expect.objectContaining({
+        details: expect.objectContaining({ exportId: slow.id, reason: 'ACTIVITY_EXPORT_OVERDUE' }) as unknown,
+      }),
+    ]);
+    expect(capture.lines().filter((line) => line.event === 'access_log.export_overdue')).toEqual([
+      expect.objectContaining({ level: 'error', exportId: slow.id, tries: 0 }),
+    ]);
+    expect(capture.lines().some((line) => line.event === 'access_log.export_failed')).toBe(false);
+    expect(await noticesOf(w.org)).toContainEqual({
+      kind: 'access_log_export_failed',
+      about_id: slow.id,
+      recipient_user_id: w.admin.userId,
+    });
+
+    const other = await world();
+    const inTime = downloadOf(await ask(other));
+    await backdated(inTime.id, 5);
+    await builderFor(other).run();
+    expect(await oneOf(other, inTime.id)).toMatchObject({ state: 'ready' });
+  });
+
   it('gives a month back at a stop, no failure logged, and the next run builds it', async () => {
     const w = await world();
     await requested(w, '2026-08-20T09:00:00.000Z');
@@ -654,6 +691,38 @@ describe('L5c a background download’s file downloaded (decision 31: each downl
     expect(capture.lines().map((line) => line.event)).toEqual(
       expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
     );
+  });
+
+  it('F1 G6 reads four parts at once at most: a fifth meanwhile is ACTIVITY_EXPORTS_BUSY, and reads again once one ends', async () => {
+    const w = await world();
+    const download = await built(w);
+    const file = await started(w, download.id);
+    const store = folderBlockStore(folder);
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    let waiting = 0;
+    const held = filesWith({
+      ...store,
+      read: async (...args) => {
+        waiting += 1;
+        await gate;
+        return store.read(...args);
+      },
+    });
+    const asked = { exportId: download.id, downloadId: file.id, index: 0 };
+
+    const first = [1, 2, 3, 4].map(() => held.part(w.admin, asked, CORRELATION));
+    await within(
+      20_000,
+      (async () => {
+        while (waiting < 4) await new Promise((done) => setTimeout(done, 20));
+      })(),
+      'four reads',
+    );
+    expect(await held.part(w.admin, asked, CORRELATION)).toEqual(refused(503, 'ACTIVITY_EXPORTS_BUSY'));
+    open(undefined);
+
+    expect((await Promise.all(first)).map((part) => part.outcome)).toEqual(['part', 'part', 'part', 'part']);
+    expect((await held.part(w.admin, asked, CORRELATION)).outcome).toBe('part');
   });
 
   it('answers ACTIVITY_EXPORT_UNREADABLE when the store fails or answers short, warning in plain words', async () => {

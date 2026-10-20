@@ -102,6 +102,9 @@ const RECORDED = z.object({
 
 const dayOf = (at: Date) => at.toISOString().slice(0, 10);
 
+/** How many part reads one server answers at once; another meanwhile is ACTIVITY_EXPORTS_BUSY. */
+const MOST_PARTS_READING = 4;
+
 /** How far from a file's `readyAt` its signed `export_file_made` is looked for: the same transaction recorded both. */
 const MADE_WITHIN_MS = 5 * 60_000;
 
@@ -180,6 +183,7 @@ export function createDownloadFiles({
   readonly partBytes?: number;
 }): DownloadFiles {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: ActivityLogRefused });
+  let reading = 0;
   type DownloadTx = Parameters<SignedStates['eventOf']>[0];
 
   /** The download's record, whole and this admin's, with what it holds of its file; one that can't be believed raises the alarm (G2). */
@@ -239,39 +243,55 @@ export function createDownloadFiles({
       return { outcome: 'started', download: { id, ...shown, contentType: 'application/gzip' } };
     },
 
-    async part(member, { exportId, downloadId, index }, correlationId) {
-      const read = await work.answered(member.orgId, correlationId, async (tx, states) => {
-        await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        const recorded = await recordOf(tx, states, member, downloadId);
-        if (recorded.exportId !== exportId || index >= recorded.parts) throw new ActivityLogRefused(404, 'NOT_FOUND');
-        // Still kept: a download started before its file expired reads nothing after.
-        const download = await backgroundExportOf(tx, member.orgId, exportId);
-        if (download === undefined) throw new ActivityLogRefused(404, 'NOT_FOUND');
-        readyFile(download, recorded.month);
-        return { recorded, format: download.format };
-      });
-      if ('outcome' in read) return read;
-      const { recorded, format } = read;
-      const offset = index * recorded.partBytes;
-      const length = Math.min(recorded.partBytes, recorded.bytes - offset);
-      const name = storedName(member.orgId, {
-        exportId,
-        month: `${recorded.month}-01`,
-        attempt: recorded.attempt,
-        format,
-      });
+    async part(member, asked, correlationId) {
+      // Each part read holds some 15 MB (its bytes, their base64, the answer's JSON): a few at once, as the instant
+      // download builds one at a time, so a script asking for every part together can't take the API down (F1 G6).
+      if (reading >= MOST_PARTS_READING) return refused(503, 'ACTIVITY_EXPORTS_BUSY');
+      reading += 1;
       try {
-        const content = await store.read(name, offset, length);
-        if (content.length !== length) throw new RangeError('the store answered another length than its file holds');
-        return { outcome: 'part', index, content };
-      } catch (error) {
-        logger
-          .child({ correlationId, orgId: member.orgId })
-          .warn('access_log.export_read_failed', { exportId, month: recorded.month, index, err: error });
-        return refused(503, 'ACTIVITY_EXPORT_UNREADABLE');
+        return await partOf(member, asked, correlationId);
+      } finally {
+        reading -= 1;
       }
     },
   };
+
+  async function partOf(
+    member: Member,
+    { exportId, downloadId, index }: Parameters<DownloadFiles['part']>[1],
+    correlationId: string,
+  ): ReturnType<DownloadFiles['part']> {
+    const read = await work.answered(member.orgId, correlationId, async (tx, states) => {
+      await work.memberIn(tx, states, member, EXPORTING_ROLES);
+      const recorded = await recordOf(tx, states, member, downloadId);
+      if (recorded.exportId !== exportId || index >= recorded.parts) throw new ActivityLogRefused(404, 'NOT_FOUND');
+      // Still kept: a download started before its file expired reads nothing after.
+      const download = await backgroundExportOf(tx, member.orgId, exportId);
+      if (download === undefined) throw new ActivityLogRefused(404, 'NOT_FOUND');
+      readyFile(download, recorded.month);
+      return { recorded, format: download.format };
+    });
+    if ('outcome' in read) return read;
+    const { recorded, format } = read;
+    const offset = index * recorded.partBytes;
+    const length = Math.min(recorded.partBytes, recorded.bytes - offset);
+    const name = storedName(member.orgId, {
+      exportId,
+      month: `${recorded.month}-01`,
+      attempt: recorded.attempt,
+      format,
+    });
+    try {
+      const content = await store.read(name, offset, length);
+      if (content.length !== length) throw new RangeError('the store answered another length than its file holds');
+      return { outcome: 'part', index, content };
+    } catch (error) {
+      logger
+        .child({ correlationId, orgId: member.orgId })
+        .warn('access_log.export_read_failed', { exportId, month: recorded.month, index, err: error });
+      return refused(503, 'ACTIVITY_EXPORT_UNREADABLE');
+    }
+  }
 }
 
 const DOWNLOAD = z
