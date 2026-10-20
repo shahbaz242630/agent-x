@@ -65,6 +65,9 @@ import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { SignedStateTable } from '@agentx/platform/db';
 import { z } from 'zod';
 
+import { CONSENT_EXPIRY_CHOSEN } from './consent-expiry-choice.ts';
+import { CONSENT_LAPSED } from './consent-lapses.ts';
+
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
 const STATEMENTS = {
   cancel:
@@ -383,37 +386,58 @@ export const PAUSE_EVENTS: Readonly<Record<Pausable, Readonly<Record<string, Pau
 /**
  * The events about each that cancel its pending requests (F1 G1): `cancels`
  * unless they chose to pause (one from before the choice names none, so
- * cancels); `cancelsIfChosen` only when they chose to cancel (a fresh start).
+ * cancels); `cancelsIfChosen` only when they chose to cancel (a fresh start;
+ * a consent's lapse under a cancel, decision 21); `cancelsPastEnd` only when
+ * chosen to cancel once the consent had run out (`lapsedConsentId`, a hold
+ * made a cancel): one chosen before the end cancels nothing until its lapse.
  */
 export const CANCEL_BRAKES: Readonly<
   Record<
     Pausable,
-    { readonly type: string; readonly cancels: readonly string[]; readonly cancelsIfChosen: readonly string[] }
+    {
+      readonly type: string;
+      readonly cancels: readonly string[];
+      readonly cancelsIfChosen: readonly string[];
+      readonly cancelsPastEnd: readonly string[];
+    }
   >
 > = {
   organization: {
     type: ORGANIZATIONS.subject,
     cancels: [SUSPENDS.organization.action],
     cancelsIfChosen: ['organization.unfreeze'],
+    cancelsPastEnd: [],
   },
-  agent: { type: AGENTS.subject, cancels: [SUSPENDS.agent.action], cancelsIfChosen: [] },
-  mandate: { type: MANDATES.subject, cancels: [SUSPENDS.mandate.action], cancelsIfChosen: [] },
-  source: { type: SOURCES.subject, cancels: [SUSPENDS.source.action], cancelsIfChosen: [] },
+  agent: { type: AGENTS.subject, cancels: [SUSPENDS.agent.action], cancelsIfChosen: [], cancelsPastEnd: [] },
+  mandate: { type: MANDATES.subject, cancels: [SUSPENDS.mandate.action], cancelsIfChosen: [], cancelsPastEnd: [] },
+  source: {
+    type: SOURCES.subject,
+    cancels: [SUSPENDS.source.action],
+    cancelsIfChosen: [CONSENT_LAPSED],
+    cancelsPastEnd: [CONSENT_EXPIRY_CHOSEN],
+  },
   supplier: {
     type: SUPPLIERS.subject,
     cancels: [SUSPENDS.supplier.action, 'supplier.unverify', PAYEE_CANCEL],
     cancelsIfChosen: ['supplier.reactivate', 'supplier.reactivate_verified'],
+    cancelsPastEnd: [],
   },
 };
+
+/** Where a choice made once the consent had run out names that consent (CANCEL_BRAKES' `cancelsPastEnd`). */
+export const LAPSED_CONSENT_KEY = 'lapsedConsentId';
 
 /** How many stops one read of a request's takes: the next page is read only when none of these cancels. */
 const BRAKES_A_PAGE = 20;
 
 /** Whether an event of CANCEL_BRAKES[which] cancels, as its details keep the choice. */
-const cancels = (which: Pausable, action: string, details: AuditDetails): boolean =>
-  CANCEL_BRAKES[which].cancels.includes(action)
-    ? choiceIn(details) === 'cancel'
-    : CANCEL_BRAKES[which].cancelsIfChosen.includes(action) && details.pendingRequests === 'cancel';
+const cancels = (which: Pausable, action: string, details: AuditDetails): boolean => {
+  const brakes = CANCEL_BRAKES[which];
+  if (brakes.cancels.includes(action)) return choiceIn(details) === 'cancel';
+  const chosen = details.pendingRequests === 'cancel';
+  if (brakes.cancelsPastEnd.includes(action)) return chosen && typeof details[LAPSED_CONSENT_KEY] === 'string';
+  return chosen && brakes.cancelsIfChosen.includes(action);
+};
 
 /**
  * Those of a request's organisation, agent, mandate, source and supplier
@@ -443,7 +467,10 @@ export async function cancelledSinceOf(
     const history = await states.historyOf(tx, orgId, {
       subjectTypes: kinds.map((which) => CANCEL_BRAKES[which].type),
       subjectIds: kinds.map((which) => String(ids[which])),
-      actions: kinds.flatMap((which) => [...CANCEL_BRAKES[which].cancels, ...CANCEL_BRAKES[which].cancelsIfChosen]),
+      actions: kinds.flatMap((which) => {
+        const { cancels: always, cancelsIfChosen, cancelsPastEnd } = CANCEL_BRAKES[which];
+        return [...always, ...cancelsIfChosen, ...cancelsPastEnd];
+      }),
       afterSeq,
       limit: BRAKES_A_PAGE,
       oldest: true,

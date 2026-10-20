@@ -1414,6 +1414,8 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
           orgColumn: 'o.org_id',
           cancels: ['agent.suspended'],
           cancelsIfChosen: ['agent.reactivated'],
+          cancelsPastEnd: ['agent.chosen'],
+          markedBy: 'lapsedConsentId',
           since: { type: 'spend_request', idColumn: 'o.id' },
         })} as cancelled from (values (${org}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx);
         return rows[0]?.cancelled;
@@ -1436,9 +1438,33 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
     // Another action of the object's is no stop, whatever its details say.
     await record(org, stop(5, 'agent.renamed', { pendingRequests: 'cancel' }));
     expect(await cancelled()).toBe(false);
-    // A lift chosen to cancel cancels.
-    await record(org, stop(6, 'agent.reactivated', { pendingRequests: 'cancel' }));
+    // A cancel chosen before the end, unmarked, cancels nothing.
+    await record(org, stop(6, 'agent.chosen', { pendingRequests: 'cancel' }));
+    expect(await cancelled()).toBe(false);
+    // Marked as chosen past the end, it cancels.
+    await record(org, stop(7, 'agent.chosen', { pendingRequests: 'cancel', lapsedConsentId: 'c-1' }));
     expect(await cancelled()).toBe(true);
+  });
+
+  it('tells a query a lift chosen to cancel cancelled (cancelledSince, F1 G1)', async () => {
+    await record(
+      org,
+      { ...about('spend_request', 1), action: 'spend_request.decided' },
+      { ...about('agent', 2), action: 'agent.reactivated', details: { pendingRequests: 'cancel' } },
+    );
+    const { rows } = await withTenant(app, org, (tx) =>
+      sql<{ cancelled: boolean }>`select ${cancelledSince({
+        type: 'agent',
+        idColumn: 'o.id',
+        orgColumn: 'o.org_id',
+        cancels: [],
+        cancelsIfChosen: ['agent.reactivated'],
+        cancelsPastEnd: [],
+        markedBy: 'lapsedConsentId',
+        since: { type: 'spend_request', idColumn: 'o.id' },
+      })} as cancelled from (values (${org}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx),
+    );
+    expect(rows).toEqual([{ cancelled: true }]);
   });
 
   it('tells a query a stop naming no choice cancelled (cancelledSince, F1 G1)', async () => {
@@ -1454,6 +1480,8 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
         orgColumn: 'o.org_id',
         cancels: ['agent.suspended'],
         cancelsIfChosen: [],
+        cancelsPastEnd: [],
+        markedBy: 'lapsedConsentId',
         since: { type: 'spend_request', idColumn: 'o.id' },
       })} as cancelled from (values (${org}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx),
     );

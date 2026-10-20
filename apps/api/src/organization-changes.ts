@@ -28,8 +28,8 @@
 //   challenge bound to the organisation,
 //   the event that froze it, the reason and the choice. The confirm, with
 //   the challenge, the same reason and choice: the same reads, the challenge
-//   consumed; a fresh start voids every pending request first; then
-//   FROZEN > ACTIVE.
+//   consumed; a fresh start voids a brake's batch of pending requests
+//   first, the request-voids job the rest; then FROZEN > ACTIVE.
 // Each is told to every admin and approver (`organization_frozen`,
 // `organization_unfrozen`; 0045), in the same transaction; a brake pressed
 // twice tells no one twice.

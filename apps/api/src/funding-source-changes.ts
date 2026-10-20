@@ -43,8 +43,8 @@
 //
 // Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
 // the source (5), a suspend's or an end's pending requests (8) and their
-// holdings (11),
-// the step-up challenge, the chain head last.
+// holdings (11), the step-up challenge (a reactivation's held first, 0b,
+// before its requests), the chain head last.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import {
   endUnknownToPartner,
@@ -78,7 +78,7 @@ import {
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
 import type { Refused } from './refused.ts';
-import { cancelledInForce, choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
+import { cancelledInForce, choiceDetails, chosenAgain, LAPSED_CONSENT_KEY, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** Asking the partner how a source stands now. */
@@ -361,7 +361,11 @@ export function createFundingSourceChanges({
           {
             actor: { type: 'user', id: member.userId },
             action: CONSENT_EXPIRY_CHOSEN,
-            details: consentExpiryDetails(consentExpiry),
+            // Past the end, it names the consent that ran out: a cancel then voids for good (F1 G1).
+            details: {
+              ...consentExpiryDetails(consentExpiry),
+              ...(lapsed === undefined ? {} : { [LAPSED_CONSENT_KEY]: lapsed.id }),
+            },
           },
         );
         return { status: 200, resourceId: source.id };

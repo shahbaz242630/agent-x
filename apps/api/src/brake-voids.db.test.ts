@@ -299,6 +299,17 @@ const supplierSuspended = (w: World, choice: PendingChoice) =>
 /** The world's first supplier: the one the supplier brakes stop. */
 const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
 
+/** The approvals use case, with the test's clock and log. */
+const approvals = () =>
+  createSpendRequestApprovals({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: createStepUpChallenges({ ids, clock }),
+    logger: logger(),
+  });
+
 /** The request-voids job, over the world's organisation alone. */
 const job = (w: World) =>
   createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
@@ -1245,15 +1256,6 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
   });
 
   describe('a waiting request carried to the new details: its approver re-checks it (decisions 16, 18; E5a)', () => {
-    const approvals = () =>
-      createSpendRequestApprovals({
-        database: app,
-        keys,
-        ids,
-        clock,
-        challenges: createStepUpChallenges({ ids, clock }),
-        logger: logger(),
-      });
     /** The admin's ask to approve, with or without a re-check, under `key` if given. */
     const asking = (w: World, id: string, recheck: boolean, key = keyed(w.admin, APPROVE_OPERATION)) =>
       approvals().ask(w.admin, key, id, recheck, CORRELATION);
@@ -1844,15 +1846,6 @@ describe('a stop chosen to cancel voids for good: those past its batches never s
     for (let each = 0; each < count; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
     return many;
   };
-  const approvals = () =>
-    createSpendRequestApprovals({
-      database: app,
-      keys,
-      ids,
-      clock,
-      challenges: createStepUpChallenges({ ids, clock }),
-      logger: logger(),
-    });
   /** The request's newest event: its void with `cause`. */
   const voidedWith = async (w: World, id: string, cause: string) => {
     expect((await shared.eventsAbout(w.org, id, SPEND_REQUESTS.subject)).at(-1)).toMatchObject({
@@ -2161,8 +2154,14 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
     );
     expect(chosen.map(({ details }) => details)).toEqual([
       expect.objectContaining({ pendingRequests: 'pause', pendingStatementVersion: 1 }),
-      expect.objectContaining({ pendingRequests: 'cancel', pendingStatementVersion: 1 }),
+      // Past the end it names the consent that ran out, so it cancels for good (F1 G1).
+      expect.objectContaining({
+        pendingRequests: 'cancel',
+        pendingStatementVersion: 1,
+        lapsedConsentId: w.state.accountConsentId,
+      }),
     ]);
+    expect(chosen[0]?.details.lapsedConsentId).toBeUndefined();
     expect(chosen.map(({ actorType }) => actorType)).toEqual(['user', 'user']);
     expect((await consentChosen(w, 'cancel')).outcome).toBe('changed');
     expect(
@@ -2186,6 +2185,39 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
         expect(await statusOf(w, request.id)).toBe(choice === 'pause' ? request.status : 'DENIED');
       }
     }
+  });
+
+  it('run out by its end under a cancel, renewed before the job: its lapse cancels them for good; one asked since stands (F1 G1)', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await consentChosen(w, 'cancel');
+    // The partner's word: the consent ends in a minute; then it runs out, and is renewed before the job runs.
+    await answeredWith(w, (now) => ({ consentExpiresAt: new Date(now.getTime() + 60_000), statusChangedAt: now }));
+    clock.advanceBy(2 * 60_000);
+    await answeredWith(w, (now) => ({
+      availability: 'ACTIVE',
+      consentStatus: 'Authorized',
+      accountConsentId: 'renewed-consent',
+      replacesConsentId: w.state.accountConsentId,
+      consentExpiresAt: new Date(now.getTime() + 365 * DAY_MS),
+      statusChangedAt: now,
+    }));
+    const since = await ask(acting, w, { amount: AED(1_000n), orderReference: 'INV-SINCE' });
+
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect([since.status, await statusOf(w, since.id)]).toEqual(['APPROVED', 'APPROVED']);
+  });
+
+  it('a cancel chosen before its end voids nothing while the consent holds', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+
+    expect(await consentChosen(w, 'cancel')).toMatchObject({ outcome: 'changed', consentExpiry: 'cancel' });
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
   });
 
   it('the job, voiding a held request for another stop, names that stop alone: its consent is held (review, 82)', async () => {

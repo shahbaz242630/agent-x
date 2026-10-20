@@ -68,6 +68,7 @@ import { lockAgentPeriod } from '@agentx/core/modules/limit-reservations';
 import { decide, type Decision } from '@agentx/core/modules/policies';
 import {
   approveRequest,
+  type Decided,
   decidedAgainst,
   expireRequest,
   decisionOf,
@@ -234,6 +235,32 @@ type SupplierMove =
   /** Moved otherwise, or no supplier: it can't be approved. */
   | { readonly move: 'moved' };
 
+/**
+ * Refused REQUEST_EXPIRED past its wait by `now` (E6); REQUEST_CHANGED when
+ * anything the request names was stopped to cancel since its decision,
+ * whatever it is now (decision 32a, F1 G1): the request-voids job voids it.
+ * INTEGRITY_FAILED for a log that can't be believed.
+ */
+async function notEndedSince(
+  tx: ApproveTx,
+  states: SignedStates,
+  orgId: string,
+  { decision, now }: { readonly decision: Decided; readonly now: Date },
+  request: SpendRequestRecord,
+): Promise<void> {
+  if (waitedOut(decision, now)) throw new MandateRefused(409, 'REQUEST_EXPIRED');
+  const ids = {
+    organization: orgId,
+    agent: request.agentId,
+    mandate: request.mandateId,
+    source: request.fundingSourceId,
+    supplier: request.supplierId,
+  };
+  const unbelieved = () => new MandateRefused(503, 'INTEGRITY_FAILED');
+  const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, ids, unbelieved);
+  if (cancelledBy.size > 0) throw new MandateRefused(409, 'REQUEST_CHANGED');
+}
+
 async function supplierMoveOf(
   tx: ApproveTx,
   states: SignedStates,
@@ -344,19 +371,7 @@ export function createSpendRequestApprovals({
     if (request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
     // Its wait runs from its decision as sealed, never a later event such as a carry (E4; as expireRequest's).
     // With no decision it holds nothing sealed, so the check below refuses it.
-    if (decision !== null && waitedOut(decision, now)) throw new MandateRefused(409, 'REQUEST_EXPIRED');
-    if (decision !== null) {
-      const ids = {
-        organization: orgId,
-        agent: request.agentId,
-        mandate: request.mandateId,
-        source: request.fundingSourceId,
-        supplier: request.supplierId,
-      };
-      const unbelieved = () => new MandateRefused(503, 'INTEGRITY_FAILED');
-      const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, ids, unbelieved);
-      if (cancelledBy.size > 0) throw new MandateRefused(409, 'REQUEST_CHANGED');
-    }
+    if (decision !== null) await notEndedSince(tx, states, orgId, { decision, now }, request);
     const against = decidedAgainst(read.state);
     // A waiting request holds capacity, sealed with its decision; and its row names what its signed state does.
     if (

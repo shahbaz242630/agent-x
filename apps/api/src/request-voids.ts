@@ -82,6 +82,7 @@ import { CONSENT_LAPSED, lapsedBy, lapseRecorded } from './consent-lapses.ts';
 import {
   CANCEL_BRAKES,
   cancelledSinceOf,
+  LAPSED_CONSENT_KEY,
   DETAILS_CHANGED,
   MOST_CARRIED_CHANGES,
   PAUSE_EVENTS,
@@ -177,6 +178,7 @@ async function stoppedByTheirRows(
       const cancelledLooks = (which: Pausable, idColumn: string) =>
         cancelledSince({
           ...CANCEL_BRAKES[which],
+          markedBy: LAPSED_CONSENT_KEY,
           idColumn,
           orgColumn: 'r.org_id',
           since: { type: SPEND_REQUESTS.subject, idColumn: 'r.id' },

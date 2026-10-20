@@ -51,8 +51,9 @@
 //
 // Lock order (ADR-006 §6): the idempotency key, the issue lock (a handover's
 // confirm), the members' memberships (2a, in order of ID), the agent (3), its
-// keys (3a, in order of ID), a suspend's pending requests (8) and their
-// holdings (11), the step-up challenge, the chain head last.
+// keys (3a, in order of ID), a suspend's or a reactivation's pending
+// requests (8) and their holdings (11), the step-up challenge (a
+// reactivation's held first, 0b), the chain head last.
 import {
   AGENT_KEYS,
   agentKeysOf,
