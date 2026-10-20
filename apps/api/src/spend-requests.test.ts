@@ -263,6 +263,22 @@ describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
   });
 
   it.each([
+    ['an IBAN', { iban: 'AE070331234567890123456' }],
+    ['an account number', { accountNumber: '1234567890123456' }],
+    ['a beneficiary', { beneficiary: { name: 'Gulf Office Supplies', iban: 'AE070331234567890123456' } }],
+  ])(
+    'refuses bank details sent with the request (%s) before the use case runs: 400 (SEC-PAY-01)',
+    async (_what, extra) => {
+      const { app, asked } = await withDecisions();
+      const response = await app.inject(asAgent({ ...BODY, ...extra }));
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: { code: 'BAD_REQUEST' } });
+      expect(asked).toEqual([]);
+    },
+  );
+
+  it.each([
     [422, 'CURRENCY_NOT_ALLOWED'],
     [409, 'ORG_FROZEN'],
     [401, 'UNAUTHENTICATED'],

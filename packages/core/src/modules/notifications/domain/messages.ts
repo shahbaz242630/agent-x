@@ -296,7 +296,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   organization_frozen: {
     subject: () => 'Agent X: the organisation was frozen',
     firstLine: () =>
-      "An admin of one of your Agent X organisations froze it: its AI agents can't make new spend requests, and none waiting can be approved, until it is unfrozen.",
+      "An admin or approver of one of your Agent X organisations froze it: its AI agents can't make new spend requests, and none waiting can be approved, until an admin unfreezes it.",
     check: FREEZE_CHECK,
   },
   organization_unfrozen: {
@@ -310,7 +310,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   spend_request_waiting: {
     subject: () => "Agent X: an AI agent's spend request is waiting for approval",
     firstLine: () =>
-      "An AI agent of one of your Agent X organisations asked to pay a supplier, and its organisation's rules need a person to approve it. Nothing is paid unless an admin or approver approves it in Agent X, signing in again with a passkey; it expires at the time shown below.",
+      "An AI agent of one of your Agent X organisations asked to pay a supplier, and its organisation's rules need a person to approve it. Nothing is paid unless an admin or approver approves it in Agent X, signing in again with a passkey (only an admin, when it is over its mandate's own limits); it expires at the time shown below.",
     check:
       "Sign in to Agent X to see the request in full and approve or reject it. If you didn't expect it, reject it and tell the organisation's admins.",
   },

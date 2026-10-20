@@ -215,7 +215,7 @@ describe('GET /v1/approvals: the requests waiting, oldest first (Phase 3 B3)', (
 });
 
 describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
-  it('shows it to any member with the agent’s own words apart, exactly as written', async () => {
+  it('shows it to any member with the agent’s own words apart, labelled, exactly as written (SEC-AG-10)', async () => {
     const { app, asked } = await withReads(
       { found: { outcome: 'found', shown: SHOWN, rejection: null, voiding: null } },
       'viewer',

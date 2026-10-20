@@ -1865,6 +1865,9 @@ describe('a stop chosen to cancel voids for good: those past its batches never s
 
       expect(PRESSED).toContain((await lift.stop(w, mandateId, 'cancel')).outcome);
       expect(PRESSED).toContain((await lift.lift(w, mandateId)).outcome);
+      // The lift voided its own batch at once, money freed before the job: 40 of 41 (the mutation pass).
+      const statuses = await Promise.all(many.map(({ id }) => statusOf(w, id)));
+      expect(statuses.filter((status) => status === 'DENIED')).toHaveLength(40);
       const left = many.at(-1)?.id ?? '';
       expect(await statusOf(w, left)).toBe('APPROVED');
       const since = await ask(acting, w, { amount: AED(1_000n) });
@@ -1891,7 +1894,7 @@ describe('a stop chosen to cancel voids for good: those past its batches never s
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   }, 90_000);
 
-  it('a pause lifted voids nothing: they stand, through the job', async () => {
+  it('a pause lifted voids nothing: they stand, through the job, and the waiting one may be approved', async () => {
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
     await suspended(w, 'pause');
@@ -1900,6 +1903,9 @@ describe('a stop chosen to cancel voids for good: those past its batches never s
     await job(w).run();
 
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+    // The approval reads the pause as no cancel (the mutation pass: a guard reading it as one went unseen).
+    const asked = await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION);
+    expect(asked.outcome).toBe('asked');
   });
 
   /** 40 approved, then one waiting (the last by ID, so left by both batches); the agent stopped to cancel, then reactivated. */
@@ -1911,18 +1917,24 @@ describe('a stop chosen to cancel voids for good: those past its batches never s
     await suspended(w, 'cancel');
     await agentReactivated(w);
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
-    return { w, waiting };
+    return { w, acting, waiting };
   };
 
-  it('approving one left: REQUEST_CHANGED, nothing approved; the job voids it', async () => {
-    const { w, waiting } = await waitingLeft();
+  it('approving one left: REQUEST_CHANGED, nothing approved; the job voids it; one asked since may be approved', async () => {
+    const { w, acting, waiting } = await waitingLeft();
+    const since = await ask(acting, w, { orderReference: 'INV-SINCE' });
+    expect(since.status).toBe('APPROVAL_REQUIRED');
 
     expect(await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION)).toEqual(
       refused(409, 'REQUEST_CHANGED'),
     );
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    // Decided after the cancel and the lift: only stops since its own decision count (the mutation pass).
+    const asked = await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), since.id, false, CORRELATION);
+    expect(asked.outcome).toBe('asked');
     await job(w).run();
     await voidedWith(w, waiting.id, 'AGENT_SUSPENDED');
+    expect(await statusOf(w, since.id)).toBe('APPROVAL_REQUIRED');
   }, 90_000);
 
   it('approving one left once its cancel is edited past the app to read as a pause: INTEGRITY_FAILED (FX-TAMPER)', async () => {
@@ -2220,6 +2232,9 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
     await job(w).run();
 
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+    // Nor at an approval: a cancel chosen before the end isn't one past it (the mutation pass).
+    const asked = await approvals().ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION);
+    expect(asked.outcome).toBe('asked');
   });
 
   it('the job, voiding a held request for another stop, names that stop alone: its consent is held (review, 82)', async () => {

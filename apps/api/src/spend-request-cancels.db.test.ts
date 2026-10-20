@@ -13,6 +13,7 @@
 // the request (forced) finds it expired.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
   cancelRequest,
   checkHoldings,
@@ -48,6 +49,7 @@ import {
   createSpendRequestDecisions,
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
+import { createSpendRequestReads } from './spend-request-reads.ts';
 import { changedPastTheApp, spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 
 const server = inject('postgres');
@@ -178,6 +180,26 @@ describe('cancelling a spend request before hand-off (D8)', () => {
     expect(await holdingsOf(w, allowed.id)).toEqual({ reservation: 'RELEASED', released: true });
   });
 
+  it('a person and the agent each cancel while the organisation is frozen: a freeze stops new requests, never a brake (decision 3)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const allowed = await ask(acting, w, { amount: AED(50_000n), supplierId: w.suppliers[1] ?? '' });
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.changeStatus(tx, ORGANIZATIONS, { orgId: w.org, id: w.org }, 'freeze', {
+        actor: { type: 'user', id: w.admin.userId },
+        action: 'organization.freeze',
+        details: { pendingRequests: 'pause' },
+      }),
+    );
+
+    expect(await byMember(w.admin, waiting.id)).toMatchObject({ outcome: 'cancelled' });
+    expect(await byAgent(acting, allowed.id)).toMatchObject({ outcome: 'cancelled' });
+    for (const { id } of [waiting, allowed]) {
+      expect(await statusOf(w, id)).toBe('CANCELLED');
+      expect(await holdingsOf(w, id)).toEqual({ reservation: 'RELEASED', released: true });
+    }
+  });
+
   it.each(['developer', 'viewer'] as const)('refuses a %s, and changes nothing', async (role) => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);
@@ -186,7 +208,7 @@ describe('cancelling a spend request before hand-off (D8)', () => {
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 
-  it('the agent cancels its own, as its own; another agent’s is NOT_FOUND and untouched', async () => {
+  it('the agent cancels its own, as its own; another agent’s is NOT_FOUND and untouched (SEC-AG-08)', async () => {
     const { w, acting } = await ready();
     const mine = await ask(acting, w);
     const other = await shared.secondAgent(registry, w, { approvalThreshold: AED(100_000n) });
@@ -194,6 +216,10 @@ describe('cancelling a spend request before hand-off (D8)', () => {
 
     expect(await byAgent(acting, theirs.id)).toEqual(refused(404, 'NOT_FOUND'));
     expect(await statusOf(w, theirs.id)).toBe('APPROVAL_REQUIRED');
+    // Nor reads it: another agent's request is none to it.
+    const reads = createSpendRequestReads({ database: app, keys, ids, logger: testLogger(new LogCapture()) });
+    expect(await reads.ofAgent(w.org, acting.agentId, theirs.id, CORRELATION)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await reads.ofAgent(w.org, acting.agentId, mine.id, CORRELATION)).toMatchObject({ outcome: 'found' });
     expect(await byAgent(acting, mine.id)).toMatchObject({ outcome: 'cancelled', request: { status: 'CANCELLED' } });
     expect((await eventsOf(w, mine.id)).at(-1)).toMatchObject({
       action: 'spend_request.cancelled',
