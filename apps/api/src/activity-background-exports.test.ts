@@ -82,7 +82,6 @@ const SHOWN = {
       requests: 12,
       bytes: 900,
       sha256: 'a'.repeat(64),
-      readyAt: new Date('2026-10-19T09:30:00.000Z'),
     },
     {
       month: '2026-09',
@@ -90,7 +89,6 @@ const SHOWN = {
       requests: 0,
       bytes: 20,
       sha256: 'b'.repeat(64),
-      readyAt: new Date('2026-10-19T09:30:00.000Z'),
     },
   ],
 };
