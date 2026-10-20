@@ -60,6 +60,11 @@ export const PLAIN_WORDS = {
     broke: 'That download will not be made; the admin was told by email to ask again.',
     next: 'Check the download store and the database are healthy, then let the admin ask again.',
   },
+  'access_log.export_overdue': {
+    happened: "An admin's background activity log download was still not made six days after it was asked.",
+    broke: 'That download was given up so no file outlives its time; the admin was told by email to ask again.',
+    next: 'Check the API ran its downloads (it may have been stopped or asleep), then let the admin ask again.',
+  },
   'access_log.export_read_failed': {
     happened: "A part of an admin's background activity log download could not be read from the download store.",
     broke: 'That part was not sent; the admin was asked to try again. The file itself is unchanged.',

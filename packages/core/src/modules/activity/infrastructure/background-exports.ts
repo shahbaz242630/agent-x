@@ -112,7 +112,16 @@ export const storedName = (
 /** What a claim found: a month to build, a month given up (tried too often), or nothing to build. */
 export type Claim =
   | { readonly outcome: 'claimed'; readonly file: ClaimedFile }
-  | { readonly outcome: 'given_up'; readonly exportId: string; readonly month: string; readonly requestedBy: string }
+  | {
+      readonly outcome: 'given_up';
+      readonly exportId: string;
+      readonly month: string;
+      readonly requestedBy: string;
+      /** Why: a month past its tries, or the download still building MOST_BUILDING_DAYS after it was asked. */
+      readonly why: 'tries' | 'overdue';
+      /** How many times the month was tried. */
+      readonly attempts: number;
+    }
   | { readonly outcome: 'none' };
 
 /** The UTC months [from, to) touches, each by its first day (YYYY-MM-DD), oldest first. */
@@ -318,10 +327,20 @@ const leaseFor = (leaseMs: number) =>
   sql<Date>`pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp() + ${leaseMs} * interval '1 millisecond')`;
 
 /**
+ * How long after it was asked a download may still be building: its files
+ * then lie under a week apart, each kept DOWNLOAD_KEPT_DAYS from the last
+ * one ready, within the store's own deletion of each file 14 days after it
+ * is made (F1 G5, partner decision 32e). A day short of a week: a month
+ * claimed just before then still finishes, under its lease.
+ */
+const MOST_BUILDING_DAYS = DOWNLOAD_KEPT_DAYS - 1;
+
+/**
  * Claims the organisation's next month to build: a waiting one, or one whose
  * builder's lease ran out, of a download none of whose months failed, the
- * oldest download's first. A month tried `mostTries` times already is failed
- * instead, and its download's waiting months with it.
+ * oldest download's first. A month tried `mostTries` times already, or of a
+ * download asked more than MOST_BUILDING_DAYS ago, is failed instead, and its
+ * download's waiting months with it.
  */
 export async function claimFile(
   tx: ExportTx,
@@ -331,6 +350,10 @@ export async function claimFile(
   const found = await tx
     .selectFrom('activity_exports.files as f')
     .select(['f.export_id', sql<string>`f.month::text`.as('month'), 'f.attempts'])
+    .select(
+      sql<boolean>`(select e.requested_at < pg_catalog.clock_timestamp() - ${MOST_BUILDING_DAYS} * interval '1 day'
+        from activity_exports.exports e where e.org_id = f.org_id and e.id = f.export_id)`.as('overdue'),
+    )
     .where('f.org_id', '=', orgId)
     .where((eb) =>
       eb.or([
@@ -347,19 +370,22 @@ export async function claimFile(
     .executeTakeFirst();
   if (found === undefined) return { outcome: 'none' };
   const key = { orgId, exportId: found.export_id, month: found.month };
-  if (found.attempts >= mostTries) {
+  if (found.attempts >= mostTries || found.overdue) {
     // The month's row is locked already: the download's lock is only tried, never waited on, as a builder
     // holding it may be about to fail this very row. Taken or not, the month waits for the next run.
     const { rows } = await sql<{ got: boolean }>`select pg_catalog.pg_try_advisory_xact_lock(
         pg_catalog.hashtextextended(${lockName(DOWNLOAD_LOCK, orgId, found.export_id)}, 0)) as got`.execute(tx);
     if (rows[0]?.got !== true) return { outcome: 'none' };
-    await failDownload(tx, key, 'ACTIVITY_EXPORT_FAILED');
+    const why = found.attempts >= mostTries ? 'tries' : 'overdue';
+    await failDownload(tx, key, why === 'tries' ? 'ACTIVITY_EXPORT_FAILED' : 'ACTIVITY_EXPORT_OVERDUE');
     const download = await backgroundExportOf(tx, orgId, found.export_id);
     return {
       outcome: 'given_up',
       exportId: found.export_id,
       month: found.month,
       requestedBy: download?.requestedBy ?? '',
+      why,
+      attempts: found.attempts,
     };
   }
   const claimed = await tx
