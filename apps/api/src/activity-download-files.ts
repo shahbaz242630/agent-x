@@ -102,7 +102,6 @@ const RECORDED = z.object({
 
 const dayOf = (at: Date) => at.toISOString().slice(0, 10);
 
-/** The month's file of a ready download, or why it can't be downloaded. */
 /** How far from a file's `readyAt` its signed `export_file_made` is looked for: the same transaction recorded both. */
 const MADE_WITHIN_MS = 5 * 60_000;
 
@@ -150,6 +149,7 @@ async function signedFile(
   throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
 }
 
+/** The month's file of a ready download, or why it can't be downloaded. */
 function readyFile(
   download: { readonly state: string; readonly files: readonly BackgroundExportFile[] },
   month: string,

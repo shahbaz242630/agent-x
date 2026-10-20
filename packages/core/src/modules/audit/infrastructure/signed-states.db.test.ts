@@ -1157,3 +1157,29 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
     expect(alarms()).toEqual([]);
   });
 });
+
+describe('eventOf (Phase 3 F1, G2): one recorded event, believed only whole', () => {
+  const read = (eventId: string) => withTenant(app, org, (tx) => states.eventOf(tx, org, { eventId }));
+
+  it('reads an event by its ID whole, none for an ID it never had, and tampered with the alarm for one edited', async () => {
+    const id = await newAgent();
+    const [created] = await eventsAbout(id);
+    const eventId = String(created?.id);
+
+    expect(await read(eventId)).toMatchObject({
+      outcome: 'read',
+      event: { id: eventId, event: { action: 'agent.created' } },
+    });
+    expect(await read(newId())).toEqual({ outcome: 'read', event: undefined });
+    expect(alarms()).toEqual([]);
+
+    await tamper(
+      `update audit.events set details = pg_catalog.replace(details, '"reason":"test"', '"reason":"tost"') where org_id = $1 and subject_id = $2`,
+      id,
+    );
+
+    expect(await read(eventId)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toHaveLength(1);
+    expect(found).toEqual([expect.objectContaining({ orgId: org, subjectType: 'organisation', sign: 'log' })]);
+  });
+});

@@ -616,6 +616,28 @@ describe('L5c a background download’s file downloaded (decision 31: each downl
     );
   });
 
+  it('F1 G4 finds no signed export_file_made for a row whose try was changed past the app: the alarm and the hold', async () => {
+    const w = await world();
+    const download = await built(w);
+    const admin = database.as('admin');
+    await admin.query('alter table activity_exports.files disable trigger file_moves');
+    await admin.query('update activity_exports.files set attempts = attempts + 1 where export_id = $1', [download.id]);
+    await admin.query('alter table activity_exports.files enable trigger file_moves');
+
+    expect(
+      await filesWith().start(
+        w.admin,
+        keyed(w.admin, FILE_DOWNLOAD_OPERATION),
+        { exportId: download.id, month: '2026-08' },
+        CORRELATION,
+      ),
+    ).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await eventsOf(w, ACTIVITY_EXPORT_DOWNLOADED)).toEqual([]);
+    expect(capture.lines().map((line) => line.event)).toEqual(
+      expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
+    );
+  });
+
   it('F1 G2 refuses a part of a download whose record was changed past the app, raising the alarm and the hold', async () => {
     const w = await world();
     const download = await built(w);

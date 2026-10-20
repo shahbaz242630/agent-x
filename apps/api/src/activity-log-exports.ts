@@ -189,7 +189,7 @@ export function createActivityLogExports({
     // A retry reads its own record for the last row it was made to, so it answers the same requests.
     const id = done.result.resourceId;
     const made = await work.answered(member.orgId, correlationId, async (tx, states) => {
-      // Through the signed states: a record that can't be believed raises the alarm and the hold (F1, G2).
+      // Through the signed states: a record tampered with raises the alarm and the hold (F1, G2).
       const found = await states.eventOf(tx, member.orgId, { eventId: id });
       if (found.outcome !== 'read' || found.event === undefined) throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
       const { writtenUpTo } = found.event.event.details;

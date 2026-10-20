@@ -257,6 +257,33 @@ describe('downloading the activity log (L5, decision 26)', () => {
     expect(fileOf(await exports.export(w.admin, key, asked('csv'), CORRELATION))).toEqual(first);
   });
 
+  it('F1 G2 refuses a retry whose record was changed past the app, raising the alarm and the hold', async () => {
+    const w = await world();
+    await requested(w, '2026-10-19T09:00:00.000Z');
+    const capture = new LogCapture();
+    const watched = createActivityLogExports({
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      directory: undefined,
+    });
+    const key = keyed(w.admin, ACTIVITY_EXPORT_OPERATION);
+    fileOf(await watched.export(w.admin, key, asked('csv'), CORRELATION));
+    await database
+      .as('admin')
+      .query(
+        "update audit.events set details = replace(details, '\"requests\":1', '\"requests\":2') where org_id = $1 and action = 'access_log.exported'",
+        [w.org],
+      );
+
+    expect(await watched.export(w.admin, key, asked('csv'), CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(capture.lines().map((line) => line.event)).toEqual(
+      expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
+    );
+  });
+
   it('builds one download at a time: another asked meanwhile is ACTIVITY_EXPORTS_BUSY, nothing logged', async () => {
     const w = await world();
     const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
