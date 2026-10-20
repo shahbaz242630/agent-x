@@ -795,6 +795,7 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/dns-allowed.json': ['foundation'],
       'deploy/azure/github-ranges.json': ['foundation'],
       'deploy/azure/main.bicep': ['foundation'],
+      'deploy/azure/modules/activity-downloads.bicep': ['foundation', 'apps'],
       'deploy/azure/modules/communication.bicep': ['foundation'],
       'deploy/azure/modules/dns-policy.bicep': ['foundation'],
       'deploy/azure/modules/environment.bicep': ['foundation'],

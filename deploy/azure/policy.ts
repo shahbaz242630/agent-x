@@ -32,6 +32,7 @@ export type RuleId =
   | 'database-backup'
   | 'vault'
   | 'evidence-store'
+  | 'activity-downloads'
   | 'workspace'
   | 'log-quota-alerts'
   | 'alert-counts-only'
@@ -115,6 +116,7 @@ const TYPES = {
   storage: 'Microsoft.Storage/storageAccounts',
   blobService: 'Microsoft.Storage/storageAccounts/blobServices',
   container: 'Microsoft.Storage/storageAccounts/blobServices/containers',
+  lifecycle: 'Microsoft.Storage/storageAccounts/managementPolicies',
   vault: 'Microsoft.KeyVault/vaults',
   vaultSecret: 'Microsoft.KeyVault/vaults/secrets',
   workspace: 'Microsoft.OperationalInsights/workspaces',
@@ -276,9 +278,13 @@ const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
 
-/** An integrity job that skipped a whole run, its organisation list unread (Phase 2 E2c): nothing checked or expired that run. */
+/**
+ * An integrity job that skipped a whole run, its organisation list unread
+ * (Phase 2 E2c), or a run of the activity log's daily seal that stopped early
+ * (Phase 3 L6b): nothing checked, expired or sealed that run.
+ */
 const INTEGRITY_RUN_FAILED_LINES =
-  'where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed")';
+  'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -648,6 +654,35 @@ const EVIDENCE_KEPT = {
   staging: { state: 'Unlocked', days: (days: number) => days >= 1 && days <= 7, sku: 'Standard_LRS' },
 } as const;
 
+/**
+ * The two Storage accounts, told apart by name: `stagentx` then the
+ * environment's three letters and the suffix for the audit exports
+ * (modules/evidence.bicep), with `dl` before the letters for the activity
+ * downloads (modules/activity-downloads.bicep). Azure gives an account lower
+ * case letters and digits alone, so neither name can be read as the other.
+ */
+const EVIDENCE_ACCOUNT = /^stagentx(?:stg|prd)[a-z0-9]{4,6}$/;
+const DOWNLOADS_ACCOUNT = /^stagentxdl(?:stg|prd)[a-z0-9]{4,6}$/;
+
+/** The one container the activity downloads are kept in (modules/activity-downloads.bicep). */
+const DOWNLOADS_CONTAINER = 'activity-downloads';
+
+/**
+ * The downloads' role's two data actions: Get Blob (a part of a file), and
+ * Put Block and Put Block List (a file written over its own name). Never
+ * delete: the lifecycle rule does that.
+ */
+const DOWNLOADS_ACTIONS = [
+  'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read',
+  'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write',
+] as const;
+
+/** The activity downloads' custom role as a role assignment names it, without case (modules/activity-downloads.bicep). */
+const downloadsRoleName = (groupId: string): string => bicepGuid(groupId, 'activity-downloads');
+
+/** The most days a download may be kept (decision 31: a week, and a day over, since Azure runs the rule daily). */
+const DOWNLOADS_KEPT_DAYS = 8;
+
 /** Key Vault Secrets User, by its id: reads a secret's value and nothing else (Microsoft's built-in role). */
 const VAULT_READER_ROLE = '4633458b-17de-408a-b874-0445c86b69e6';
 
@@ -898,17 +933,19 @@ const required: Check = (snapshot, _expected, add) => {
     ['the key vault', TYPES.vault, 1, Infinity],
     ['the Postgres server', TYPES.server, 1, Infinity],
     ['the Container Apps environment', TYPES.environment, 1, 1],
-    ['the audit-export store', TYPES.storage, 1, 1],
-    ["the audit-export store's blob service", TYPES.blobService, 1, 1],
-    ["the audit-export store's container", TYPES.container, 1, 1],
+    // The audit exports' store and the activity downloads', each with its own blob service and container.
+    ["Storage accounts, the audit exports' and the activity downloads'", TYPES.storage, 2, 2],
+    ['blob services, one in each Storage account', TYPES.blobService, 2, 2],
+    ['containers, one in each Storage account', TYPES.container, 2, 2],
   ];
   for (const [what, type, least, most] of counts) {
     const found = ofType(snapshot, type).length;
     if (found < least || found > most) {
+      const exactly = `exactly ${least === 1 ? 'one' : String(least)}`;
       add({
         rule: 'required',
         resource: 'the deployment',
-        message: `needs ${least === most ? 'exactly one' : 'at least one'} ${what} (${type}); the snapshot has ${String(found)}`,
+        message: `needs ${least === most ? exactly : 'at least one'} ${what} (${type}); the snapshot has ${String(found)}`,
       });
     }
   }
@@ -1353,7 +1390,8 @@ const doorOf = (rule: unknown): string =>
  * which Azure keeps current; then GitHub's published addresses, two sets,
  * which nothing keeps current but the refresher (github-ranges.ts); and two
  * more service tags for the apps' own outbound calls: email (B5) and the
- * audit exports' store (E10c), in this region alone.
+ * stores of the audit exports (E10c) and the activity downloads (L5c), in
+ * this region alone.
  */
 const egressDoors = (region: string, apps: string, database: string): readonly (readonly [string, string])[] => [
   [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
@@ -1375,7 +1413,7 @@ const egressDoors = (region: string, apps: string, database: string): readonly (
   // Broad, every Front Door site: the API's list of exact origins is the real limit.
   ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
   // Every account in the region, not ours alone: the store's own network rule is the limit until PL-43.
-  [`Tcp to Storage.${region} on 443`, "the operator's audit exports, to the write-once store"],
+  [`Tcp to Storage.${region} on 443`, "the operator's audit exports and the API's activity downloads, to their stores"],
 ];
 
 /**
@@ -1557,19 +1595,20 @@ const vault: Check = (snapshot, _expected, add) => {
   }
 };
 
-/** What the audit-export store's account must be, each a line a problem names; `kept` is its environment's. */
-function evidenceAccountProblems(
+/**
+ * What either store's account must be, each a line a problem names: shut to
+ * everyone but Entra sign-ins from this deployment's apps subnet. Its copies
+ * and whether it is write-once are each store's own.
+ */
+function storeAccountLines(
   account: PredictedResource,
-  kept: (typeof EVIDENCE_KEPT)[keyof typeof EVIDENCE_KEPT],
   appsSubnets: ReadonlySet<unknown>,
-): string[] {
+): (readonly [string, boolean])[] {
   const properties = account.properties;
   const acls = at(properties, 'networkAcls');
   const subnetRules = list(at(acls, 'virtualNetworkRules'));
-  const policy = at(properties, 'immutableStorageWithVersioning', 'immutabilityPolicy');
-  const required: readonly (readonly [string, boolean])[] = [
+  return [
     ['kind StorageV2', account.kind === 'StorageV2'],
-    [`${kept.sku} copies`, at(account, 'sku', 'name') === kept.sku],
     [
       'TLS 1.2 or later, HTTPS only',
       at(properties, 'minimumTlsVersion') === 'TLS1_2' && at(properties, 'supportsHttpsTrafficOnly') === true,
@@ -1602,6 +1641,20 @@ function evidenceAccountProblems(
       subnetRules.length === 1 && appsSubnets.has(at(subnetRules[0], 'id')),
     ],
     ['infrastructure encryption', at(properties, 'encryption', 'requireInfrastructureEncryption') === true],
+  ];
+}
+
+/** What the audit-export store's account must be, each a line a problem names; `kept` is its environment's. */
+function evidenceAccountProblems(
+  account: PredictedResource,
+  kept: (typeof EVIDENCE_KEPT)[keyof typeof EVIDENCE_KEPT],
+  appsSubnets: ReadonlySet<unknown>,
+): string[] {
+  const properties = account.properties;
+  const policy = at(properties, 'immutableStorageWithVersioning', 'immutabilityPolicy');
+  const required: readonly (readonly [string, boolean])[] = [
+    ...storeAccountLines(account, appsSubnets),
+    [`${kept.sku} copies`, at(account, 'sku', 'name') === kept.sku],
     [
       `version-level immutability, ${kept.state}, for this environment's days, with no appends to a kept file`,
       at(properties, 'immutableStorageWithVersioning', 'enabled') === true &&
@@ -1613,28 +1666,46 @@ function evidenceAccountProblems(
   return required.filter(([, holds]) => !holds).map(([what]) => what);
 }
 
+/** Whether a resource is a part of an activity downloads' account (`activity-downloads`'s, not `evidence-store`'s). */
+const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): boolean =>
+  ofType(snapshot, TYPES.storage)
+    .filter((account) => DOWNLOADS_ACCOUNT.test(account.name))
+    .some((account) => resource.id.toLowerCase().startsWith(`${account.id}/`.toLowerCase()));
+
 /**
  * The write-once store for our team's audit exports (ADR-005 §6, E10c;
- * decisions 27 and 28): one account, as `evidenceAccountProblems` says, with
- * versioning on its one blob service and one private container; no other
- * Storage resource (a lifecycle rule, a file share, a local user); the apps
- * subnet keeps the service endpoint its network rule needs. Its one custom
- * role allows adding a new file and nothing else, assignable in the resource
- * group alone, and is given once, on the container, to the operator's
- * identity, whose job alone is told where the store is
- * (`evidenceSettingsProblems`). Its logs are `resource-logs`'s.
+ * decisions 27 and 28): one account, named as modules/evidence.bicep names
+ * it and as `evidenceAccountProblems` says, with versioning on its one blob
+ * service and one private container; no other Storage resource (a lifecycle
+ * rule, a file share, a local user) but the activity downloads' store's,
+ * which is `activity-downloads`'s; the apps subnet keeps the service endpoint
+ * its network rule needs. Its one custom role allows adding a new file and
+ * nothing else, assignable in the resource group alone, and is given once, on
+ * the container, to the operator's identity, whose job alone is told where
+ * the store is (`storeSettingsProblems`). Its logs are `resource-logs`'s.
  */
 const evidenceStore: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
     add({ rule: 'evidence-store', resource, message });
   };
   const appsSubnets = appsSubnetIds(snapshot);
+  const accounts = ofType(snapshot, TYPES.storage).filter((account) => EVIDENCE_ACCOUNT.test(account.name));
   for (const account of ofType(snapshot, TYPES.storage)) {
-    for (const what of evidenceAccountProblems(account, EVIDENCE_KEPT[expected.environment], appsSubnets)) {
-      problem(account.name, `must have ${what}`);
+    if (EVIDENCE_ACCOUNT.test(account.name)) {
+      for (const what of evidenceAccountProblems(account, EVIDENCE_KEPT[expected.environment], appsSubnets)) {
+        problem(account.name, `must have ${what}`);
+      }
+    } else if (!DOWNLOADS_ACCOUNT.test(account.name)) {
+      problem(
+        account.name,
+        "is a Storage account named as neither store: the deployment has the audit exports' and the activity downloads' alone",
+      );
     }
   }
-  evidencePartsProblems(snapshot, problem);
+  if (accounts.length !== 1) {
+    problem('the deployment', `needs one audit-export store; the snapshot has ${String(accounts.length)}`);
+  }
+  evidencePartsProblems(snapshot, accounts, problem);
   for (const network of ofType(snapshot, TYPES.network)) {
     const endpoints = list(at(appsSubnetOf(network), 'properties', 'serviceEndpoints'));
     const kept = endpoints.some(
@@ -1646,14 +1717,46 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       problem(network.name, "must keep its apps subnet's Storage service endpoint, in its own region, for the store");
     }
   }
-  const writers = evidenceAccessProblems(snapshot, ofType(snapshot, TYPES.container), problem);
-  evidenceSettingsProblems(snapshot, writers, problem);
+  const writers = storeRoleProblems(
+    snapshot,
+    {
+      name: evidenceRoleName(groupOf(snapshot)),
+      dataActions: [EVIDENCE_WRITE],
+      containers: ofType(snapshot, TYPES.container).filter((container) => !inDownloadsStore(snapshot, container)),
+      workload: 'operator',
+      called: "the audit exports' role",
+      on: 'the export container',
+    },
+    problem,
+  );
+  storeSettingsProblems(
+    snapshot,
+    {
+      prefix: EVIDENCE_SETTING_PREFIX,
+      url: 'AGENTX_EVIDENCE_CONTAINER_URL',
+      clientId: 'AGENTX_EVIDENCE_CLIENT_ID',
+      accounts,
+      container: EVIDENCE_CONTAINER,
+      holds: (workload) => workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator',
+      holder: "the operator's job writes to the store",
+      store: 'store',
+    },
+    writers,
+    problem,
+  );
 };
 
-/** The store's blob service, its container and no other Storage resource, a part of `evidence-store`. */
-function evidencePartsProblems(snapshot: Snapshot, problem: (resource: string, message: string) => void): void {
-  const accounts = ofType(snapshot, TYPES.storage);
-  const blobServices = ofType(snapshot, TYPES.blobService);
+/**
+ * The store's blob service, its container and no other Storage resource, a
+ * part of `evidence-store`: every one but the activity downloads' store's.
+ */
+function evidencePartsProblems(
+  snapshot: Snapshot,
+  accounts: readonly PredictedResource[],
+  problem: (resource: string, message: string) => void,
+): void {
+  const ours = (resource: PredictedResource): boolean => !inDownloadsStore(snapshot, resource);
+  const blobServices = ofType(snapshot, TYPES.blobService).filter(ours);
   for (const service of blobServices) {
     if (!accounts.some((account) => service.id === `${account.id}/blobServices/default`)) {
       problem(service.name, "must be the default blob service of this deployment's store");
@@ -1662,8 +1765,7 @@ function evidencePartsProblems(snapshot: Snapshot, problem: (resource: string, m
       problem(service.name, 'must keep versions: version-level immutability keeps every one');
     }
   }
-  const containers = ofType(snapshot, TYPES.container);
-  for (const container of containers) {
+  for (const container of ofType(snapshot, TYPES.container).filter(ours)) {
     if (
       !blobServices.some((service) => container.id === `${service.id}/containers/${EVIDENCE_CONTAINER}`) ||
       at(container.properties, 'publicAccess') !== 'None'
@@ -1672,21 +1774,40 @@ function evidencePartsProblems(snapshot: Snapshot, problem: (resource: string, m
     }
   }
   const known: readonly string[] = [TYPES.storage, TYPES.blobService, TYPES.container];
-  for (const resource of snapshot.predictedResources) {
+  for (const resource of snapshot.predictedResources.filter(ours)) {
     if (resource.type.toLowerCase().startsWith('microsoft.storage/') && !known.includes(resource.type)) {
       problem(resource.name, `is a ${resource.type}: the store holds one container and nothing else`);
     }
   }
 }
 
-/** The store's custom role and its one assignment, a part of `evidence-store`: the identities it is given to. */
-function evidenceAccessProblems(
+/** A store's custom role, by what it allows, where it is given, and to whom (modules/evidence.bicep, modules/activity-downloads.bicep). */
+interface StoreRole {
+  /** Its name as the module makes it, a GUID from the resource group and a fixed word. */
+  readonly name: string;
+  readonly dataActions: readonly string[];
+  /** The containers it may be given on. */
+  readonly containers: readonly PredictedResource[];
+  /** The one app or job whose identity it is given to. */
+  readonly workload: string;
+  /** What a problem calls it, and the container it is given on. */
+  readonly called: string;
+  readonly on: string;
+}
+
+/**
+ * A store's custom role and its one assignment, a part of `evidence-store` and
+ * `activity-downloads`: exactly its data actions, no action, assignable in the
+ * resource group alone, given once on the container to its workload's
+ * identity. Returns the identities it is given to.
+ */
+function storeRoleProblems(
   snapshot: Snapshot,
-  containers: readonly PredictedResource[],
+  wanted: StoreRole,
   problem: (resource: string, message: string) => void,
 ): readonly PredictedResource[] {
   const group = groupOf(snapshot);
-  const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => role.name === evidenceRoleName(group));
+  const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => role.name === wanted.name);
   for (const role of roles) {
     const scopes = list(at(role.properties, 'assignableScopes'));
     const permissions = list(at(role.properties, 'permissions'));
@@ -1694,36 +1815,36 @@ function evidenceAccessProblems(
       scopes.length !== 1 ||
       scopes[0] !== group ||
       permissions.flatMap((entry) => list(at(entry, 'actions'))).length > 0 ||
-      actionSet(permissions.flatMap((entry) => list(at(entry, 'dataActions')))) !== actionSet([EVIDENCE_WRITE])
+      actionSet(permissions.flatMap((entry) => list(at(entry, 'dataActions')))) !== actionSet(wanted.dataActions)
     ) {
       problem(
         role.name,
-        `must allow ${EVIDENCE_WRITE} alone, no action, and be assignable in this deployment's resource group alone`,
+        `must allow ${wanted.dataActions.join(' and ')} alone, no action, and be assignable in this deployment's resource group alone`,
       );
     }
   }
   if (roles.length !== 1) {
-    problem('the deployment', `needs one custom role for the audit exports; the snapshot has ${String(roles.length)}`);
+    problem('the deployment', `needs one custom role for ${wanted.called}; the snapshot has ${String(roles.length)}`);
   }
-  const role = customRoleId(group, evidenceRoleName(group));
+  const role = customRoleId(group, wanted.name);
   const assignments = ofType(snapshot, TYPES.roleAssignment).filter((assignment) => roleOf(assignment) === role);
   for (const assignment of assignments) {
     const identity = principalOf(snapshot, assignment);
     if (
-      !containers.some((container) => container.id === scopeOf(assignment)) ||
+      !wanted.containers.some((container) => container.id === scopeOf(assignment)) ||
       identity === undefined ||
-      workloadOf(identity.name) !== 'operator'
+      workloadOf(identity.name) !== wanted.workload
     ) {
       problem(
         assignment.name,
-        "must give the audit exports' role on the export container alone, to the operator's identity (principalType ServicePrincipal)",
+        `must give ${wanted.called} on ${wanted.on} alone, to the ${wanted.workload}'s identity (principalType ServicePrincipal)`,
       );
     }
   }
   if (assignments.length !== 1) {
     problem(
       'the deployment',
-      `must give the audit exports' role once, to the operator; it gives it ${String(assignments.length)} times`,
+      `must give ${wanted.called} once, to the ${wanted.workload}; it gives it ${String(assignments.length)} times`,
     );
   }
   return assignments.flatMap((assignment) => principalOf(snapshot, assignment) ?? []);
@@ -1732,61 +1853,220 @@ function evidenceAccessProblems(
 /** How the operator's job is told where to write an audit export (apps.bicep `evidenceSettings`). */
 const EVIDENCE_SETTING_PREFIX = 'AGENTX_EVIDENCE_';
 
-/** The two settings the operator's job takes, sorted, so a sorted list of its names is compared with them whole. */
-const EVIDENCE_SETTINGS = ['AGENTX_EVIDENCE_CLIENT_ID', 'AGENTX_EVIDENCE_CONTAINER_URL'] as const;
+/** How the API is told where to keep the activity downloads (apps.bicep `activityDownloadsSettings`). */
+const DOWNLOADS_SETTING_PREFIX = 'AGENTX_ACTIVITY_DOWNLOADS_';
 
-/** The store's address as apps.bicep writes it: the account, Azure's own storage suffix, then the container. */
-const EVIDENCE_URL =
+/** A store's address as apps.bicep writes it: the account, Azure's own storage suffix, then the container. */
+const STORE_URL =
   /^\[format\('https:\/\/\{0\}\.blob\.\{1\}\/\{2\}', '([^']+)', environment\(\)\.suffixes\.storage, '([^']+)'\)\]$/;
 
 /** An identity's client ID as apps.bicep reads it at deployment: the identity's id. */
 const CLIENT_ID_OF = /^\[reference\('([^']+)', '[^']+'\)\.clientId\]$/;
 
+/** The two settings that point one workload at a store, and who that workload is. */
+interface StoreSettings {
+  /** How every setting of the store's starts: no other workload sets one. */
+  readonly prefix: string;
+  readonly url: string;
+  readonly clientId: string;
+  /** The store's account by name; the URL must name the one there is. */
+  readonly accounts: readonly PredictedResource[];
+  readonly container: string;
+  readonly holds: (workload: PredictedResource) => boolean;
+  /** Who alone is told, and what a problem calls the store. */
+  readonly holder: string;
+  readonly store: string;
+}
+
 /**
- * Where the operator's job writes, a part of `evidence-store` (E10c-3b-2):
- * this deployment's one store and its export container, as the identity the
- * store's role is given to, each said once as a value. No other workload sets
- * an AGENTX_EVIDENCE_ setting, so nothing else is pointed at the store, nor
- * at a folder in its place.
+ * Where a store's one workload reads and writes, a part of `evidence-store`
+ * (E10c-3b-2) and `activity-downloads`: this deployment's one store and its
+ * container, as the identity the store's role is given to, each said once as
+ * a value. No other workload sets a setting with the store's prefix, so
+ * nothing else is pointed at the store, nor at a folder in its place.
  */
-function evidenceSettingsProblems(
+function storeSettingsProblems(
   snapshot: Snapshot,
-  writers: readonly PredictedResource[],
+  wanted: StoreSettings,
+  holders: readonly PredictedResource[],
   problem: (resource: string, message: string) => void,
 ): void {
-  const accounts = ofType(snapshot, TYPES.storage);
   for (const workload of workloadsIn(snapshot)) {
-    const operator = workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator';
     for (const container of containersOf(workload)) {
-      const settings = list(at(container, 'env')).filter((entry) =>
-        text(at(entry, 'name')).startsWith(EVIDENCE_SETTING_PREFIX),
-      );
+      const settings = list(at(container, 'env')).filter((entry) => text(at(entry, 'name')).startsWith(wanted.prefix));
       const names = settings.map((entry) => text(at(entry, 'name')));
-      if (!operator) {
-        if (names.length > 0) {
-          problem(workload.name, `sets ${names.join(', ')}: only the operator's job writes to the store`);
-        }
+      if (!wanted.holds(workload)) {
+        if (names.length > 0) problem(workload.name, `sets ${names.join(', ')}: only ${wanted.holder}`);
         continue;
       }
       const values = new Map(settings.map((entry) => [text(at(entry, 'name')), text(at(entry, 'value'))] as const));
-      const url = EVIDENCE_URL.exec(values.get('AGENTX_EVIDENCE_CONTAINER_URL') ?? '');
-      const client = CLIENT_ID_OF.exec(values.get('AGENTX_EVIDENCE_CLIENT_ID') ?? '');
+      const url = STORE_URL.exec(values.get(wanted.url) ?? '');
+      const client = CLIENT_ID_OF.exec(values.get(wanted.clientId) ?? '');
       const sound =
-        names.toSorted().join() === EVIDENCE_SETTINGS.join() &&
-        accounts.length === 1 &&
+        names.toSorted().join() === [wanted.url, wanted.clientId].toSorted().join() &&
+        wanted.accounts.length === 1 &&
         url !== null &&
-        url[1] === accounts[0]?.name &&
-        url[2] === EVIDENCE_CONTAINER &&
-        writers.some((writer) => writer.id === client?.[1]);
+        url[1] === wanted.accounts[0]?.name &&
+        url[2] === wanted.container &&
+        holders.some((holder) => holder.id === client?.[1]);
       if (!sound) {
         problem(
           workload.name,
-          `must set AGENTX_EVIDENCE_CONTAINER_URL to this deployment's store's ${EVIDENCE_CONTAINER} container, and AGENTX_EVIDENCE_CLIENT_ID to the client ID of the identity its role is given to, each once as a value, and no other ${EVIDENCE_SETTING_PREFIX} setting`,
+          `must set ${wanted.url} to this deployment's ${wanted.store}'s ${wanted.container} container, and ${wanted.clientId} to the client ID of the identity its role is given to, each once as a value, and no other ${wanted.prefix} setting`,
         );
       }
     }
   }
 }
+
+/** What the activity downloads' account must be, each a line a problem names: as the audit exports', but one copy and not write-once. */
+function downloadsAccountProblems(account: PredictedResource, appsSubnets: ReadonlySet<unknown>): string[] {
+  const required: readonly (readonly [string, boolean])[] = [
+    ...storeAccountLines(account, appsSubnets),
+    ['Standard_LRS copies', at(account, 'sku', 'name') === 'Standard_LRS'],
+    // A file is written over its own name, which a write-once account refuses.
+    [
+      'no immutability',
+      at(account.properties, 'immutableStorageWithVersioning', 'enabled') !== true &&
+        isEmpty(at(account.properties, 'immutableStorageWithVersioning', 'immutabilityPolicy')),
+    ],
+  ];
+  return required.filter(([, holds]) => !holds).map(([what]) => what);
+}
+
+/**
+ * Whether a lifecycle rule deletes every file in the downloads container
+ * within DOWNLOADS_KEPT_DAYS of its making: switched on, for block blobs,
+ * narrowed by nothing but the container itself.
+ */
+function deletesWithinAWeek(rule: unknown): boolean {
+  const filters = at(rule, 'definition', 'filters');
+  const prefixes = list(at(filters, 'prefixMatch'));
+  const days = at(rule, 'definition', 'actions', 'baseBlob', 'delete', 'daysAfterCreationGreaterThan');
+  return (
+    at(rule, 'enabled') === true &&
+    at(rule, 'type') === 'Lifecycle' &&
+    list(at(filters, 'blobTypes')).includes('blockBlob') &&
+    Object.keys(filters ?? {}).every((key) => key === 'blobTypes' || key === 'prefixMatch') &&
+    (prefixes.length === 0 || (prefixes.length === 1 && prefixes[0] === `${DOWNLOADS_CONTAINER}/`)) &&
+    typeof days === 'number' &&
+    days >= 0 &&
+    days <= DOWNLOADS_KEPT_DAYS
+  );
+}
+
+/**
+ * The downloads store's parts, a part of `activity-downloads`: its default
+ * blob service with versions and soft delete off, so nothing outlives the
+ * lifecycle rule; one private container; that rule; and no other Storage
+ * resource.
+ */
+function downloadsPartsProblems(
+  snapshot: Snapshot,
+  account: PredictedResource,
+  problem: (resource: string, message: string) => void,
+): void {
+  const service = `${account.id}/blobServices/default`;
+  const parts = snapshot.predictedResources.filter((resource) =>
+    resource.id.toLowerCase().startsWith(`${account.id}/`.toLowerCase()),
+  );
+  const blobServices = parts.filter((resource) => resource.type === TYPES.blobService);
+  for (const found of blobServices) {
+    if (
+      found.id !== service ||
+      at(found.properties, 'isVersioningEnabled') !== false ||
+      at(found.properties, 'deleteRetentionPolicy', 'enabled') !== false
+    ) {
+      problem(
+        found.name,
+        'must be the default blob service, with versioning and soft delete off: either would keep a file past its week',
+      );
+    }
+  }
+  const containers = parts.filter((resource) => resource.type === TYPES.container);
+  for (const found of containers) {
+    if (
+      found.id !== `${service}/containers/${DOWNLOADS_CONTAINER}` ||
+      at(found.properties, 'publicAccess') !== 'None'
+    ) {
+      problem(found.name, `must be ${DOWNLOADS_CONTAINER} in the downloads store, with no public access`);
+    }
+  }
+  const lifecycles = parts.filter((resource) => resource.type === TYPES.lifecycle);
+  const deletes = lifecycles.some(
+    (found) =>
+      found.id === `${account.id}/managementPolicies/default` &&
+      list(at(found.properties, 'policy', 'rules')).some(deletesWithinAWeek),
+  );
+  if (blobServices.length !== 1 || containers.length !== 1 || lifecycles.length !== 1 || !deletes) {
+    problem(
+      account.name,
+      `needs one blob service, one container and one lifecycle rule deleting every file in it within ${String(DOWNLOADS_KEPT_DAYS)} days of its making (decision 31)`,
+    );
+  }
+  const known: readonly string[] = [TYPES.blobService, TYPES.container, TYPES.lifecycle];
+  for (const resource of parts) {
+    if (resource.type.toLowerCase().startsWith('microsoft.storage/') && !known.includes(resource.type)) {
+      problem(resource.name, `is a ${resource.type}: the downloads store holds one container and its lifecycle rule`);
+    }
+  }
+}
+
+/**
+ * Where the activity log's background downloads are kept (Phase 3 L5c,
+ * decision 31): one account, named as modules/activity-downloads.bicep names
+ * it, shut as the audit exports' store is but one copy and not write-once;
+ * its parts as `downloadsPartsProblems` says, every file deleted within a
+ * week and a day. Its one custom role allows reading and writing a file and
+ * nothing else, assignable in the resource group alone, and is given once,
+ * on the container, to the API's identity; the API alone is told where the
+ * store is. Its logs are `resource-logs`'s, and the subnet's Storage endpoint
+ * `evidence-store`'s.
+ */
+const activityDownloads: Check = (snapshot, _expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'activity-downloads', resource, message });
+  };
+  const appsSubnets = appsSubnetIds(snapshot);
+  const accounts = ofType(snapshot, TYPES.storage).filter((account) => DOWNLOADS_ACCOUNT.test(account.name));
+  for (const account of accounts) {
+    for (const what of downloadsAccountProblems(account, appsSubnets)) problem(account.name, `must have ${what}`);
+    downloadsPartsProblems(snapshot, account, problem);
+  }
+  if (accounts.length !== 1) {
+    problem(
+      'the deployment',
+      `needs one store for the activity downloads; the snapshot has ${String(accounts.length)}`,
+    );
+  }
+  const keepers = storeRoleProblems(
+    snapshot,
+    {
+      name: downloadsRoleName(groupOf(snapshot)),
+      dataActions: DOWNLOADS_ACTIONS,
+      containers: ofType(snapshot, TYPES.container).filter((container) => inDownloadsStore(snapshot, container)),
+      workload: 'api',
+      called: "the activity downloads' role",
+      on: 'the downloads container',
+    },
+    problem,
+  );
+  storeSettingsProblems(
+    snapshot,
+    {
+      prefix: DOWNLOADS_SETTING_PREFIX,
+      url: 'AGENTX_ACTIVITY_DOWNLOADS_URL',
+      clientId: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
+      accounts,
+      container: DOWNLOADS_CONTAINER,
+      holds: (workload) => workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api',
+      holder: 'the API keeps the activity downloads',
+      store: 'downloads store',
+    },
+    keepers,
+    problem,
+  );
+};
 
 const workspaceAndQuota: Check = (snapshot, _expected, add) => {
   const alerts = ofType(snapshot, TYPES.alert);
@@ -1901,7 +2181,7 @@ const resourceLogs: Check = (snapshot, _expected, add) => {
     [TYPES.vault, (log) => at(log, 'categoryGroup') === 'audit' || at(log, 'categoryGroup') === 'allLogs'],
     [TYPES.server, (log) => at(log, 'category') === 'PostgreSQLLogs'],
     [TYPES.dnsPolicy, (log) => at(log, 'category') === 'DnsResponse'],
-    // The audit exports' store: every read, write and delete (StorageBlobLogs).
+    // Both stores, the audit exports' and the activity downloads': every read, write and delete (StorageBlobLogs).
     ...['StorageRead', 'StorageWrite', 'StorageDelete'].map(
       (category) => [TYPES.blobService, (log: unknown) => at(log, 'category') === category] as const,
     ),
@@ -2321,8 +2601,9 @@ const holdingsCheckAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
- * An enabled alert on the workspace fires on any run of the four integrity
- * jobs skipped whole (Phase 2 E2c; request expiry, D7): one line is enough, in any window.
+ * An enabled alert on the workspace fires on any run of the integrity jobs
+ * skipped whole (Phase 2 E2c; request expiry, D7), or of the activity log's
+ * daily seal stopped early (L6b): one line is enough, in any window.
  */
 const integrityRunsAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
@@ -2341,7 +2622,7 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
         rule: 'integrity-runs-alert',
         resource: environment.name,
         message:
-          "needs an enabled alert on this deployment's workspace that fires on any run_failed line of the holdings check, the hold-history check, mandate expiry or request expiry, watching every minute and firing on the first window",
+          "needs an enabled alert on this deployment's workspace that fires on any run_failed line of the holdings check, the hold-history check, mandate expiry, request expiry, request voids or the activity log's daily seal, watching every minute and firing on the first window",
       });
     }
   }
@@ -2525,8 +2806,9 @@ const ACCESS_TYPE = /authorization|roleassignment|roledefinition/i;
 
 /**
  * Who reads what (ADR-002 Amendment G2c). Every role assignment in the
- * deployment but CI's role's (`release-access`) and the audit exports'
- * (`evidence-store`) gives Key Vault Secrets User on
+ * deployment but CI's role's (`release-access`), the audit exports'
+ * (`evidence-store`) and the activity downloads' (`activity-downloads`)
+ * gives Key Vault Secrets User on
  * one secret it writes, to an identity it creates, named a service principal:
  * no other role, and nothing at the vault, the resource group or the
  * subscription. Together they are exactly GRANTS, so no identity reads
@@ -2550,10 +2832,11 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const secrets = new Map(ofType(snapshot, TYPES.vaultSecret).map((secret) => [secret.id, secretNameOf(secret)]));
   const release = releaseRoleId(snapshot);
   const evidence = customRoleId(groupOf(snapshot), evidenceRoleName(groupOf(snapshot)));
+  const downloads = customRoleId(groupOf(snapshot), downloadsRoleName(groupOf(snapshot)));
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
-    if (role === release || role === evidence) continue;
+    if (role === release || role === evidence || role === downloads) continue;
     const secret = secrets.get(scopeOf(assignment));
     const identity = principalOf(snapshot, assignment);
     if (
@@ -2598,7 +2881,7 @@ const actionSet = (actions: readonly unknown[]): string =>
  * for GitHub's issuer, this
  * environment's subject and the token exchange: no other identity can be
  * signed in to from outside Azure. And it defines exactly one custom role
- * besides the audit exports' (`evidence-store`), named as `releaseRoleName`
+ * besides the stores' (`evidence-store`, `activity-downloads`), named as `releaseRoleName`
  * names it, which allows RELEASE_ACTIONS and no data
  * action, and can be given in this deployment's resource group only. Where that role is given is the apps
  * deployment's to say (G4-2b), and `release-access`'s to check.
@@ -2649,10 +2932,9 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
 /** CI's custom role, half of `release-identity`: exactly one, named so, given in the resource group alone, allowing RELEASE_ACTIONS and no data action. */
 function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, message: string) => void): void {
   const groups = ofType(snapshot, TYPES.group).map((group) => group.id);
-  // The audit exports' role is `evidence-store`'s, which holds it to one data action.
-  const roles = ofType(snapshot, TYPES.roleDefinition).filter(
-    (role) => role.name !== evidenceRoleName(groupOf(snapshot)),
-  );
+  // The stores' roles are `evidence-store`'s and `activity-downloads`'s, which hold each to its data actions.
+  const stores = new Set([evidenceRoleName(groupOf(snapshot)), downloadsRoleName(groupOf(snapshot))]);
+  const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));
   const roleName = releaseRoleName(groupOf(snapshot));
   for (const role of roles) {
     if (role.name !== roleName) {
@@ -3239,7 +3521,8 @@ const PLATFORM_PREFIX = 'CONTAINER_APP_';
 
 /**
  * Where a container gets its identity's token (Microsoft): one set here could
- * send the operator's token request, and the export, somewhere else (E10c).
+ * send the operator's or the API's token request, and the export or the
+ * download, somewhere else (E10c, L5c).
  */
 const IDENTITY_SETTING = /^(?:IDENTITY_ENDPOINT|IDENTITY_HEADER|MSI_)/;
 
@@ -3281,6 +3564,7 @@ const CHECKS: readonly Check[] = [
   dnsAllow,
   vault,
   evidenceStore,
+  activityDownloads,
   workspaceAndQuota,
   alertRules,
   resourceLogs,

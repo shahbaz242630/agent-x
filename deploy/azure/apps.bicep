@@ -59,6 +59,7 @@ import {
   uniqueSuffix
 } from 'names.bicep'
 import { evidenceAccountName, evidenceContainerName } from 'modules/evidence.bicep'
+import { activityDownloadsAccountName, activityDownloadsContainerName } from 'modules/activity-downloads.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -477,6 +478,26 @@ var evidenceSettings = [
   }
 ]
 
+// Where the API keeps the activity log's background downloads (Phase 3 L5c,
+// decision 31): the store's one container, named as modules/activity-downloads.bicep
+// names it for the foundation, and the API identity's client ID, which it asks
+// Azure for a token as (Azure sets IDENTITY_ENDPOINT in a container with an
+// identity). Added in the app's own body, as `evidenceSettings` is in a job's.
+resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: identityName(environment, 'api')
+}
+
+var activityDownloadsSettings = [
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_URL'
+    value: 'https://${activityDownloadsAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${activityDownloadsContainerName()}'
+  }
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
+    value: apiIdentity.properties.clientId
+  }
+]
+
 // Every job: the work it does (its identity and its name come from that), the
 // image and command, how long one run may take, what it reads as a mounted file
 // with the setting that names each file, what it holds itself rather than reads
@@ -654,6 +675,8 @@ var apps = [
     // may call out to (AGENTX_OUTBOUND_ALLOWED_ORIGINS, `emailSettings`).
     zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN']
     sendsEmail: true
+    // Keeps the activity log's background downloads (`activityDownloadsSettings`).
+    keepsDownloads: true
     // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
     // second replica would give every client two allowances. The worker, which
     // holds no such count, is the part that scales in Phase 4.
@@ -768,6 +791,7 @@ var apps = [
     transport: 'http2'
     zitadelSettings: []
     sendsEmail: false
+    keepsDownloads: false
     // Its projections and its cache are one replica's; a second would also take
     // ten more of the server's connections.
     maxReplicas: 1
@@ -819,6 +843,7 @@ var apps = [
     // list settled before the deployment starts.
     zitadelSettings: ['ZITADEL_API_URL']
     sendsEmail: false
+    keepsDownloads: false
     settings: [
       // The host the browser uses, which Zitadel reads before the Host header
       // (ADR-003 Amendment S10), so the pages need no Host override here.
@@ -1022,7 +1047,8 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
                 name: setting
                 value: zitadelInternalUrl
               }),
-              app.sendsEmail ? emailSettings : []
+              app.sendsEmail ? emailSettings : [],
+              app.keepsDownloads ? activityDownloadsSettings : []
             )
             volumeMounts: empty(app.files)
               ? []
