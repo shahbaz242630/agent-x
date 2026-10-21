@@ -1,7 +1,8 @@
 // The providers module (ADR-004 §8, PRD §6; Phase 1 D1): the payment
 // partner's adapter contract, its fake, and the checks every adapter's
-// answers pass. The only module that knows a partner's API; `funding-sources`,
-// `suppliers` and the hand-off see only its normalised answers.
+// answers pass, and since Phase 4 B2 its payments (payments.ts). The only
+// module that knows a partner's API; `funding-sources`, `suppliers` and the
+// hand-off see only its normalised answers.
 export {
   AccountNumberLeak,
   accountHint,
@@ -10,6 +11,19 @@ export {
   isUaeIban,
   withoutAccountNumbers,
 } from './domain/account-numbers.ts';
+export {
+  type ApprovedPaymentIntent,
+  type ExecutionLookup,
+  PARTNER_IDEMPOTENCY_KEY,
+  type PartnerExecutionRef,
+  type PaymentExecution,
+  type PaymentState,
+  paymentStateOf,
+  PROVIDER_STATUSES,
+  type ProviderStatus,
+  RAIL_PAYMENT_REFERENCE,
+  type SubmissionResult,
+} from './domain/payments.ts';
 export {
   BENEFICIARY_ROUTES,
   type BeneficiaryOutcome,

@@ -21,7 +21,7 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { uuidV7Ids } from '../../../shared-kernel/index.ts';
-import type { LinkOutcome, SourceLookup } from '../domain/rail.ts';
+import { type LinkOutcome, RailUnavailable, type SourceLookup } from '../domain/rail.ts';
 import { createFakeRail, type FakeRailOptions } from './fake-rail.ts';
 import {
   createDatabaseRecords,
@@ -184,6 +184,32 @@ describe(`the fake partner on the database (D2-1, Postgres ${server.version})`, 
     expect(
       sourceOf(await partner().getSourceState({ organizationId: ORG, externalRef: source.externalRef })),
     ).toMatchObject({ accountConsentId: renewed, replacesConsentId: consentId, availability: 'ACTIVE' });
+  });
+
+  it('keeps a payment across processes: one made under a key, its answer lost, found and answered again (B2)', async () => {
+    const linkId = fresh('link');
+    const session = await partner().startSourceLink({ organizationId: ORG, linkId });
+    const consentId = await partner().bank.approve(ORG, session.sessionRef, ACCOUNT);
+    const instructionId = fresh('instruction');
+    const intent = {
+      organizationId: ORG,
+      instructionId,
+      accountConsentId: consentId,
+      beneficiaryRef: 'fake-payee-db',
+      // `.02`: the payment is made, its answer lost (decision 5).
+      amountMinor: 100_002n,
+      currency: 'AED',
+      paymentReference: 'INV-DB-1',
+    };
+
+    await expect(partner().submitApprovedIntent(intent)).rejects.toBeInstanceOf(RailUnavailable);
+    const found = await partner().getExecution({ organizationId: ORG, instructionId });
+    const again = await partner().submitApprovedIntent(intent);
+
+    expect(found).toMatchObject({ kind: 'found', execution: { providerStatus: 'Pending', amountMinor: 100_002n } });
+    if (found.kind !== 'found' || again.kind !== 'accepted') throw new Error('not one payment');
+    expect(again.execution.paymentInstructionRef).toBe(found.execution.paymentInstructionRef);
+    expect(await partner().getExecution({ organizationId: OTHER_ORG, instructionId })).toEqual({ kind: 'not_found' });
   });
 
   it('keeps a payee’s hosted form open across processes, and its registration after', async () => {
