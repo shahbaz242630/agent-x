@@ -1141,6 +1141,8 @@ describe('the job waits in the lock order, never crosswise (forced, F1 G8)', () 
 
     for (const id of made.slice(20)) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
     expect(lines('waiting_rejection.failed')).toEqual([]);
+    // The new version names none: nothing to read, and nothing that couldn't be.
+    expect(lines('waiting_rejection.unreadable')).toEqual([]);
   });
 
   it('waits for a change holding the organisation, then the policy: the version that named them gone, it rejects nothing', async () => {
