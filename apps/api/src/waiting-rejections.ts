@@ -127,10 +127,10 @@ async function leftoversOf(
   }
   const { event } = found.event;
   const requestIds = event.action === 'policy_version.made' ? leftoverOf(event.details) : undefined;
-  if (requestIds === undefined || event.actor.type !== 'user') {
-    throw new Error(`A policy version's leftovers can't be believed: ${versionId}`);
-  }
+  if (requestIds === undefined) throw new Error(`A policy version's leftovers can't be believed: ${versionId}`);
   if (requestIds.length === 0) return undefined;
+  // Leftovers are a person's choice (an admin's confirm): any other actor can't be believed.
+  if (event.actor.type !== 'user') throw new Error(`A policy version's leftovers name no person: ${versionId}`);
   const waiting = await stillWaiting(tx, orgId, requestIds);
   return { policyId, versionId, mandateId: policy.policy.mandateId, userId: event.actor.id, requestIds: waiting };
 }
