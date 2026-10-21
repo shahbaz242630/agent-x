@@ -236,6 +236,13 @@ vi.mock('./request-voids.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./request-voids.ts')>();
   return { ...actual, createRequestVoids: phase2Jobs.tagged('request voids', actual.createRequestVoids) };
 });
+vi.mock('./waiting-rejections.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./waiting-rejections.ts')>();
+  return {
+    ...actual,
+    createWaitingRejections: phase2Jobs.tagged('waiting rejections', actual.createWaitingRejections),
+  };
+});
 
 /** The subjects the hold clearing checks beyond their signed states (G1), as main.ts builds it. */
 const clearingChecks = vi.hoisted(() => ({ subjects: [] as string[][] }));
@@ -553,13 +560,14 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
   it("runs Phase 2's and 3's jobs each on a timer of its own, the hold history check over every authority table", async () => {
     await start();
 
-    // Written out, not the modules' constants, so a changed interval fails here (B4, D1c, E1, D7: partner decision 10; C1).
+    // Written out, not the modules' constants, so a changed interval fails here (B4, D1c, E1, D7: partner decision 10; C1; F1 G8).
     expect(phase2Jobs.scheduled).toEqual([
       ['mandate expiry', 300_000],
       ['hold history check', 30_000],
       ['holdings check', 900_000],
       ['request expiry', 300_000],
       ['request voids', 300_000],
+      ['waiting rejections', 300_000],
     ]);
     expect(phase2Jobs.historyTables).toEqual([AUTHORITY_TABLES]);
     expect(AUTHORITY_TABLES.length).toBeGreaterThan(0);

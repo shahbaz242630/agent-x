@@ -453,7 +453,7 @@ resource holdingsCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
 
 // An integrity job skipping a whole run (Phase 2 E2c, the partner's catch):
 // the holdings check, the hold-history check, mandate expiry and request
-// expiry (D7) each read the organisation list first, and when that read
+// expiry (D7), and request voids and the waiting rejections (F1 G8) each read the organisation list first, and when that read
 // fails, log `<job>.run_failed` and check nothing until the next run; the
 // activity log's daily seal (Phase 3 L6b) and its seal check (L6c) log the
 // same when a run stops early. Any one line tells someone. Stateful,
@@ -465,7 +465,7 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
   kind: 'LogAlert'
   properties: {
     displayName: 'Integrity jobs: a run failed'
-    description: 'SEV-2. The holdings check, the hold-history check, mandate expiry, request expiry or request voids could not read the organisation list and skipped a whole run, or the daily seal of the activity log or its seal check stopped early: nothing was checked, expired or sealed until a run passes. Runbook: Incident-Response-Playbook.md section O.'
+    description: 'SEV-2. The holdings check, the hold-history check, mandate expiry, request expiry, request voids or the waiting rejections could not read the organisation list and skipped a whole run, or the daily seal of the activity log or its seal check stopped early: nothing was checked, expired or sealed until a run passes. Runbook: Incident-Response-Playbook.md section O.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -476,7 +476,7 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

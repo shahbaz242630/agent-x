@@ -106,3 +106,31 @@ export const cancelledSince = ({
       and e.seq > (select pg_catalog.min(f.seq) from audit.events f
         where f.org_id = ${sql.ref(orgColumn)} and f.subject_type = ${since.type}
           and f.subject_id = ${sql.ref(since.idColumn)}))`;
+
+/**
+ * Whether an event of `action` about the object of `type` whose ID is the
+ * column `idColumn`, in the organisation the column `orgColumn` names, lists
+ * the ID in the column `named` in any of the details `keys`, each IDs by
+ * spaces (F1 G8: a policy version's leftovers).
+ */
+export const namedInDetails = ({
+  type,
+  idColumn,
+  orgColumn,
+  action,
+  keys,
+  named,
+}: {
+  readonly type: string;
+  readonly idColumn: string;
+  readonly orgColumn: string;
+  readonly action: string;
+  readonly keys: readonly string[];
+  readonly named: string;
+}): RawBuilder<boolean> =>
+  sql<boolean>`exists (select 1 from audit.events e
+    where e.org_id = ${sql.ref(orgColumn)} and e.subject_type = ${type} and e.subject_id = ${sql.ref(idColumn)}
+      and e.action = ${action}
+      and ${sql.ref(named)}::text = any(pg_catalog.string_to_array(pg_catalog.concat_ws(' ', ${sql.join(
+        keys.map((key) => sql`(e.details::jsonb) ->> ${key}::text`),
+      )}), ' ')))`;

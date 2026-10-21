@@ -302,6 +302,90 @@ function recheckShown(
   };
 }
 
+/**
+ * Levels 3–8 in order, the waiting request weighed again as its approver's
+ * confirm (`decides`) or ask weighs it, after the caller's levels 2 and 2a:
+ * its verified read, the engine's decision under the policies in force, where
+ * its supplier's details stand, whether nothing it was decided against moved
+ * (its key not revoked, its mandate's and supplier's versions), and the rules
+ * the team set it is now refused under (null when it still holds its
+ * capacity, or is refused otherwise). Refused NOT_FOUND, REQUEST_NOT_WAITING,
+ * REQUEST_EXPIRED or REQUEST_CHANGED (a stop chosen to cancel since its
+ * decision); INTEGRITY_FAILED for anything that can't be believed. The
+ * waiting-rejections job weighs each one an admin chose to reject this way
+ * (decision 33b, F1 G8).
+ */
+export async function weighedAgain(
+  tx: ApproveTx,
+  states: SignedStates,
+  {
+    orgId,
+    requestId,
+    now,
+    decides,
+  }: { readonly orgId: string; readonly requestId: string; readonly now: Date; readonly decides: boolean },
+) {
+  const named = await namedBy(tx, orgId, requestId);
+  if (named === undefined) throw new MandateRefused(404, 'NOT_FOUND');
+  const agent = await agentAlone(tx, states, { orgId, agentId: named.agent_id });
+  const key = await agentKeyOf(tx, states, { orgId, id: named.agent_key_id }, 'share');
+  if (key.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  // Its decision as sealed: the month its capacity is held in (none for a request that holds none), and its time.
+  const decision = await decisionOf(tx, states, { orgId, id: requestId });
+  const held = decision?.held ?? null;
+  const asked = {
+    amount: money(BigInt(named.amount_minor), named.currency),
+    supplierId: named.supplier_id,
+    fundingSourceId: named.funding_source_id,
+    orderReference: named.order_reference,
+  };
+  const weighed =
+    held === null
+      ? null
+      : await weigh(tx, states, orgId, agent, asked, {
+          now,
+          decides,
+          except: requestId,
+          monthOf: () =>
+            decides ? lockAgentPeriod(tx, { agentId: agent.id, month: held.month }) : Promise.resolve(held.month),
+        });
+
+  const read = await requestOf(tx, states, { orgId, id: requestId }, decides ? 'change' : 'share');
+  if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  // Its row was found above, and requests are never deleted (0039's grants).
+  if (read.outcome !== 'found') throw new Error(`A spend request found by its row is missing: ${requestId}`);
+  const { request } = read;
+  if (request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
+  // Its wait runs from its decision as sealed, never a later event such as a carry (E4; as expireRequest's).
+  // With no decision it holds nothing sealed, so the check below refuses it.
+  if (decision !== null) await notEndedSince(tx, states, orgId, { decision, now }, request);
+  const against = decidedAgainst(read.state);
+  // A waiting request holds capacity, sealed with its decision; and its row names what its signed state does.
+  if (
+    weighed === null ||
+    request.agentId !== agent.id ||
+    against.agentKeyId !== named.agent_key_id ||
+    request.supplierId !== asked.supplierId ||
+    request.fundingSourceId !== asked.fundingSourceId ||
+    request.amount.minor !== asked.amount.minor ||
+    request.amount.currency !== asked.amount.currency ||
+    request.orderReference !== asked.orderReference
+  ) {
+    throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  }
+
+  const made = decide(weighed.input);
+  const supplierNow = await supplierMoveOf(tx, states, orgId, weighed.supplier, against.supplierVersionId);
+  const unchanged =
+    key.outcome === 'found' &&
+    key.key.status !== 'REVOKED' &&
+    weighed.mandate !== null &&
+    weighed.mandate.versionId === against.mandateVersionId &&
+    supplierNow.move !== 'moved';
+  const rejection = holdsCapacity(made.decision) ? null : rejectedFor(made.decision, made.reasons);
+  return { read, made, supplierNow, unchanged, rejection };
+}
+
 export function createSpendRequestApprovals({
   database,
   keys,
@@ -338,64 +422,13 @@ export function createSpendRequestApprovals({
     const now = clock.now();
     await notFrozen(tx, states, orgId);
     const approver = await work.memberIn(tx, states, member, DECIDING_ROLES);
-    const named = await namedBy(tx, orgId, requestId);
-    if (named === undefined) throw new MandateRefused(404, 'NOT_FOUND');
-    const agent = await agentAlone(tx, states, { orgId, agentId: named.agent_id });
-    const key = await agentKeyOf(tx, states, { orgId, id: named.agent_key_id }, 'share');
-    if (key.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    // Its decision as sealed: the month its capacity is held in (none for a request that holds none), and its time.
-    const decision = await decisionOf(tx, states, { orgId, id: requestId });
-    const held = decision?.held ?? null;
-    const asked = {
-      amount: money(BigInt(named.amount_minor), named.currency),
-      supplierId: named.supplier_id,
-      fundingSourceId: named.funding_source_id,
-      orderReference: named.order_reference,
-    };
-    const weighed =
-      held === null
-        ? null
-        : await weigh(tx, states, orgId, agent, asked, {
-            now,
-            decides,
-            except: requestId,
-            monthOf: () =>
-              decides ? lockAgentPeriod(tx, { agentId: agent.id, month: held.month }) : Promise.resolve(held.month),
-          });
-
-    const read = await requestOf(tx, states, { orgId, id: requestId }, decides ? 'change' : 'share');
-    if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    // Its row was found above, and requests are never deleted (0039's grants).
-    if (read.outcome !== 'found') throw new Error(`A spend request found by its row is missing: ${requestId}`);
+    const { read, made, supplierNow, unchanged, rejection } = await weighedAgain(tx, states, {
+      orgId,
+      requestId,
+      now,
+      decides,
+    });
     const { request } = read;
-    if (request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
-    // Its wait runs from its decision as sealed, never a later event such as a carry (E4; as expireRequest's).
-    // With no decision it holds nothing sealed, so the check below refuses it.
-    if (decision !== null) await notEndedSince(tx, states, orgId, { decision, now }, request);
-    const against = decidedAgainst(read.state);
-    // A waiting request holds capacity, sealed with its decision; and its row names what its signed state does.
-    if (
-      weighed === null ||
-      request.agentId !== agent.id ||
-      against.agentKeyId !== named.agent_key_id ||
-      request.supplierId !== asked.supplierId ||
-      request.fundingSourceId !== asked.fundingSourceId ||
-      request.amount.minor !== asked.amount.minor ||
-      request.amount.currency !== asked.amount.currency ||
-      request.orderReference !== asked.orderReference
-    ) {
-      throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    }
-
-    const made = decide(weighed.input);
-    const supplierNow = await supplierMoveOf(tx, states, orgId, weighed.supplier, against.supplierVersionId);
-    const unchanged =
-      key.outcome === 'found' &&
-      key.key.status !== 'REVOKED' &&
-      weighed.mandate !== null &&
-      weighed.mandate.versionId === against.mandateVersionId &&
-      supplierNow.move !== 'moved';
-    const rejection = holdsCapacity(made.decision) ? null : rejectedFor(made.decision, made.reasons);
     if (!unchanged || (rejection === null && !holdsCapacity(made.decision))) {
       throw new MandateRefused(409, 'REQUEST_CHANGED');
     }

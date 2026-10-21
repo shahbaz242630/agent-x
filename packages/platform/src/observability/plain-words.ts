@@ -542,6 +542,22 @@ export const PLAIN_WORDS = {
     broke: "None of that organisation's overdue requests was expired this run.",
     next: 'It is tried again at the next run, about 5 minutes later. If it keeps failing, check the database.',
   },
+  'waiting_rejection.failed': {
+    happened: 'A waiting request an admin chose to reject with a policy change could not be rejected.',
+    broke: "It stays waiting, still holding part of the agent's budget; its approver can still reject it.",
+    next: 'It is tried again in about 5 minutes. If it keeps failing, check the database and the integrity alarms.',
+  },
+  'waiting_rejection.run_failed': {
+    happened:
+      'The list of organisations could not be read, so rejecting the requests admins chose to reject with a policy change was skipped.',
+    broke: 'Those requests stay waiting a while longer, still holding part of their budgets.',
+    next: 'It is tried again in about 5 minutes. If it keeps failing, check the database connection.',
+  },
+  'waiting_rejection.unreadable': {
+    happened: 'The policies whose changes left requests to reject could not be read for one organisation.',
+    broke: "That organisation's requests stay waiting for now; nothing was rejected on what could not be read.",
+    next: 'It is tried again in about 5 minutes. If it keeps failing, check the integrity alarms for that organisation.',
+  },
   'request_void.failed': {
     happened:
       'A pending spend request could not be cancelled after something it uses was stopped with its requests cancelled.',

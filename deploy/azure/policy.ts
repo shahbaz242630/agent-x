@@ -284,7 +284,7 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
  * its seal check (L6c) that stopped early: nothing checked, expired or sealed that run.
  */
 const INTEGRITY_RUN_FAILED_LINES =
-  'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed")';
+  'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -2627,7 +2627,7 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
         rule: 'integrity-runs-alert',
         resource: environment.name,
         message:
-          "needs an enabled alert on this deployment's workspace that fires on any run_failed line of the holdings check, the hold-history check, mandate expiry, request expiry, request voids or the activity log's daily seal, watching every minute and firing on the first window",
+          "needs an enabled alert on this deployment's workspace that fires on any run_failed line of the holdings check, the hold-history check, mandate expiry, request expiry, request voids, the waiting rejections or the activity log's daily seal, watching every minute and firing on the first window",
       });
     }
   }
