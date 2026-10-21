@@ -18,6 +18,7 @@ import { expiredOnly, SOURCES, type SourceRecord } from '@agentx/core/modules/fu
 import type { FundingSourceState } from '@agentx/core/modules/providers';
 
 import { consentExpiryOf } from './consent-expiry-choice.ts';
+import { IntegrityFailure } from './errors.ts';
 
 /** The action of a consent's lapse: once per consent. */
 export const CONSENT_LAPSED = 'funding_source.consent_lapsed';
@@ -49,7 +50,8 @@ export async function lapseRecorded(
     limit: 1,
     newest: true,
   });
-  if (history.outcome !== 'read') throw new Error(`A source's consent lapses can't be believed: ${sourceId}`);
+  if (history.outcome !== 'read')
+    throw new IntegrityFailure(`A source's consent lapses can't be believed: ${sourceId}`);
   if (history.events.at(-1)?.event.details.consentId === consent.id) return false;
   const choice = await consentExpiryOf(tx, states, orgId, sourceId);
   await states.record(

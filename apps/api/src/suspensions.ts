@@ -67,6 +67,7 @@ import { z } from 'zod';
 
 import { CONSENT_EXPIRY_CHOSEN } from './consent-expiry-choice.ts';
 import { CONSENT_LAPSED } from './consent-lapses.ts';
+import { IntegrityFailure } from './errors.ts';
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
 const STATEMENTS = {
@@ -509,7 +510,7 @@ export async function pausedOf(
       limit: 1,
       newest: true,
     });
-    if (history.outcome !== 'read') throw new Error(`A suspension's history can't be believed: ${id}`);
+    if (history.outcome !== 'read') throw new IntegrityFailure(`A suspension's history can't be believed: ${id}`);
     if (choiceIn(history.events.at(-1)?.event.details) === 'pause') paused.add(which);
   }
   return paused;
