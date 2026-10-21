@@ -1,6 +1,6 @@
 {
   "writtenBy": "node deploy/azure/github-ranges.ts --write",
-  "refreshed": "2026-09-16",
+  "refreshed": "2026-10-21",
   "registry": {
     "what": "The registry API: the pull token and the image manifest.",
     "host": "ghcr.io",
@@ -24,6 +24,7 @@
       "20.207.73.86/32",
       "20.217.135.1/32",
       "20.233.83.147/32",
+      "20.250.119.73/32",
       "20.26.156.211/32",
       "20.27.177.117/32",
       "20.29.134.18/32",
