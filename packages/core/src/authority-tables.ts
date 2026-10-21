@@ -45,8 +45,12 @@ export interface AuthorityTableEntry extends SignedStateTable {
    * those in these statuses alone, the ones that can still act (CheckedTable).
    */
   readonly liveStatuses?: readonly string[];
-  /** The checks over its status with other columns its migration writes, by name, which CI's A3c allows it alone. */
-  readonly statusConditions?: readonly string[];
+  /**
+   * The checks over its status with other columns its migration writes, by
+   * name, each with its definition as Postgres prints it: CI's A3c allows
+   * these alone, so one rewritten under an allowed name fails it too.
+   */
+  readonly statusConditions?: Readonly<Record<string, string>>;
 }
 
 /**

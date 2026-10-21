@@ -1330,6 +1330,10 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
         trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], subjectId: 'x', limit: 2 }),
       ),
     ).rejects.toThrow('subject.id must be a UUID');
+    // One event by an ID that isn't one, as an object's: refused before any SQL.
+    await expect(withTenant(app, org, (tx) => trail.recordedEvent(tx, org, { eventId: 'x' }))).rejects.toThrow(
+      new AuditEventRefused(['eventId must be a UUID']),
+    );
   });
 
   it('gives several objects’ events alone when it names them, and refuses one and several together, or none (E1c)', async () => {

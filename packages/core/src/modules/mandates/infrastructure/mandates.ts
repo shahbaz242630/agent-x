@@ -29,11 +29,14 @@ export const MANDATES = {
   fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
   // Live or ended with a version in force, waiting with one to accept (0035): CI's A3c
   // allows this one check over the status with other columns.
-  statusConditions: ['a_status_on_its_versions'],
+  statusConditions: {
+    a_status_on_its_versions:
+      "CHECK ( CASE status WHEN 'REVOKED'::text THEN true WHEN 'PENDING_ACCEPTANCE'::text THEN ((current_version_id IS NOT NULL) OR (pending_version_id IS NOT NULL)) ELSE (current_version_id IS NOT NULL) END)",
+  },
 } as const satisfies SignedStateTable & {
   readonly rules: typeof MANDATE;
   readonly fixedAtCreation: readonly string[];
-  readonly statusConditions: readonly string[];
+  readonly statusConditions: Readonly<Record<string, string>>;
 };
 
 /** A mandate version's row, as the signed state reads and records it: made once, never moved (0035's `made_once`). */

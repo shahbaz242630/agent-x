@@ -86,7 +86,7 @@ export interface AuthorityTable {
    * when a state is held. Any other such check is refused, since one could
    * forbid a state the machine allows, and with it a brake.
    */
-  readonly statusConditions?: readonly string[];
+  readonly statusConditions?: Readonly<Record<string, string>>;
 }
 
 /** A column name from our migrations: the shape @agentx/platform/db accepts (signed-rows.ts). */
@@ -822,7 +822,7 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
   const reference = facts.references.get(table.table);
   if (reference === undefined) throw new Error(`No reference objects were read for ${table.table}`);
   const checks = facts.checks.filter((check) => check.table === table.table);
-  problems.push(...statusCheckProblems(machine, checks, reference, table.statusConditions ?? []));
+  problems.push(...statusCheckProblems(machine, checks, reference, table.statusConditions ?? {}));
   problems.push(...guardProblems(relation.printed, machine, triggers, reference));
   return problems;
 }
@@ -832,7 +832,8 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
  * machine's states: the values it may hold. A check over the status with
  * other columns (a supplier VERIFIED only on the version verified, 0032) is
  * a condition on when a state is held: allowed only when the registry names
- * it for the table, since an arbitrary one (`status <> 'REVOKED' OR …`)
+ * it for the table with the definition the server prints, since an
+ * arbitrary one, or one rewritten under an allowed name (`status <> 'REVOKED' OR …`),
  * could forbid a state the machine allows. What each named one holds is the
  * table's own tests'.
  */
@@ -840,13 +841,16 @@ function statusCheckProblems(
   machine: AuthorityMachine,
   checks: readonly Check[],
   reference: Reference,
-  conditions: readonly string[],
+  conditions: Readonly<Record<string, string>>,
 ): string[] {
+  // As printed, its runs of white space as one: a server may break a long one across lines.
+  const flat = (definition: string | undefined) => definition?.replace(/\s+/g, ' ').trim();
   const unnamed = checks
-    .filter((check) => check.on_status && !check.alone && !conditions.includes(check.name))
-    .map(
-      (check) =>
-        `the check constraint ${check.name} holds ${STATUS} with other columns, and the registry names no such condition for it: ${check.definition}`,
+    .filter((check) => check.on_status && !check.alone && flat(conditions[check.name]) !== flat(check.definition))
+    .map((check) =>
+      conditions[check.name] === undefined
+        ? `the check constraint ${check.name} holds ${STATUS} with other columns, and the registry names no such condition for it: ${check.definition}`
+        : `the check constraint ${check.name} holds ${STATUS} with other columns as the registry doesn't name it: ${check.definition}, not ${String(conditions[check.name])}`,
     );
   return [...unnamed, ...statusListProblems(machine, checks, reference)];
 }

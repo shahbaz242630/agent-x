@@ -68,10 +68,14 @@ export const BENEFICIARY_REGISTRATIONS = {
   ],
   rules: BENEFICIARY_REGISTRATION,
   // What each end needs (0033): CI's A3c allows these two checks over the status with other columns.
-  statusConditions: ['registered_with_its_reference', 'failed_with_its_reason'],
+  statusConditions: {
+    registered_with_its_reference:
+      "CHECK (((status <> 'REGISTERED'::text) OR ((beneficiary_ref IS NOT NULL) AND (name_check IS NOT NULL) AND (payee_hint IS NOT NULL) AND (registered_at IS NOT NULL))))",
+    failed_with_its_reason: "CHECK (((status <> 'FAILED'::text) OR (failure IS NOT NULL)))",
+  },
 } as const satisfies SignedStateTable & {
   readonly rules: typeof BENEFICIARY_REGISTRATION;
-  readonly statusConditions: readonly string[];
+  readonly statusConditions: Readonly<Record<string, string>>;
 };
 
 /** A transaction on the suppliers' tables, opened by withSignedStates for their organisation. */
