@@ -384,7 +384,18 @@ describe('L5c a background download built (decision 31)', () => {
       await ask(w, { from: new Date('2026-08-01T00:00:00.000Z'), to: new Date('2026-09-01T00:00:00.000Z') }),
     );
 
-    await builderFor(w, { blockBytes: 64, leaseMs: 1 }).run();
+    // It stops at the first block whose lease couldn't be renewed, writing no more (the gate's mutation pass).
+    const store = folderBlockStore(folder);
+    let blocks = 0;
+    const counting: BlockStore = {
+      ...store,
+      putBlock: (name, index, bytes) => {
+        blocks += 1;
+        return store.putBlock(name, index, bytes);
+      },
+    };
+    await builderFor(w, { blockBytes: 64, leaseMs: 1, store: counting }).run();
+    expect(blocks).toBe(1);
     expect(capture.lines().map((line) => line.event)).toContain('access_log.export_lease_lost');
     expect((await oneOf(w, download.id))?.files[0]).toMatchObject({ state: 'building' });
     await builderFor(w).run();

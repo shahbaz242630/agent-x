@@ -70,6 +70,22 @@ describe('the audit log’s actors, by name (decision 25)', () => {
     expect(asked).toEqual([['101']]);
   });
 
+  it('names a person from the login service when it gives their email alone (the gate’s mutation pass)', async () => {
+    const { directory } = directoryOf({ '101': { email: 'sara@example.test' } });
+    const namer = createActorNamer({ directory, logger: testLogger() });
+
+    const names = await namer.namesOf(
+      [{ type: 'user', id: SARA }],
+      held({ [SARA]: person('101', { name: 'Old', email: 's@example.test' }) }),
+    );
+
+    expect(names.get(`user:${SARA}`)).toEqual({
+      name: 'Old',
+      email: 'sara@example.test',
+      shownFrom: 'login_service',
+    });
+  });
+
   it('asks about each person once a namer, however many batches name them', async () => {
     const { directory, asked } = directoryOf({ '101': { name: 'Sara Khan' } });
     const namer = createActorNamer({ directory, logger: testLogger() });

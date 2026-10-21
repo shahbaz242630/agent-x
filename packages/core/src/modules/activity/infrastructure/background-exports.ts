@@ -379,11 +379,13 @@ export async function claimFile(
     const why = found.attempts >= mostTries ? 'tries' : 'overdue';
     await failDownload(tx, key, why === 'tries' ? 'ACTIVITY_EXPORT_FAILED' : 'ACTIVITY_EXPORT_OVERDUE');
     const download = await backgroundExportOf(tx, orgId, found.export_id);
+    // Its month's row was just found and failed with it: no download is a bug, never an asker told by no one.
+    if (download === undefined) throw new RangeError('a background download given up has no row of its own');
     return {
       outcome: 'given_up',
       exportId: found.export_id,
       month: found.month,
-      requestedBy: download?.requestedBy ?? '',
+      requestedBy: download.requestedBy,
       why,
       attempts: found.attempts,
     };
