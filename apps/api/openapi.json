@@ -742,7 +742,7 @@
                   {
                     "type": "string",
                     "const": "WAITING_REQUESTS_TOO_MANY_TO_REJECT",
-                    "description": "These rules would reject more requests waiting for approval than can be rejected at once (20), so nothing was changed. Choose to leave them for their approvers, or have some approved or rejected first, then try again."
+                    "description": "No longer returned: a change now rejects 20 at once and the rest within minutes (kept so the list of codes stays stable)."
                   }
                 ]
               },

@@ -2645,6 +2645,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'mandate_expiry',
       'request_expiry',
       'request_void',
+      'waiting_rejection',
     ].map((job) => `"${job}.run_failed"`);
     const EVERY_JOB = JOBS.join(', ');
     expect(brokenRules(without(INTEGRITY_RUNS_ALERT))).toEqual(['integrity-runs-alert']);

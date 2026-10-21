@@ -123,6 +123,7 @@ import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
+import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
@@ -909,6 +910,18 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     REQUEST_VOIDS_EVERY_MS,
   );
+  // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b), on a timer of its own.
+  const waitingRejecting = scheduleRuns(
+    createWaitingRejections({
+      list: () => listedOrganizations(database),
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    }),
+    WAITING_REJECTIONS_EVERY_MS,
+  );
   // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6), on a timer of its own.
   const activitySealing = scheduleRuns(
     createActivitySeal({
@@ -953,6 +966,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           holdingsChecking.stop(),
           requestExpiring.stop(),
           requestVoiding.stop(),
+          waitingRejecting.stop(),
           activitySealing.stop(),
           downloadBuilding.stop(),
           sealChecking.stop(),

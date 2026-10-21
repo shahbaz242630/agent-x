@@ -32,12 +32,16 @@
 // (decision 18). The plan errs to rejecting fewer, never more.
 //
 // The organisation's change weighs every agent's; a mandate's, that mandate's
-// agent's alone. At most 20 are listed, `more` saying there are others (the
-// partner, S118: the change still saves; only rejecting them all at once is
-// refused). Past 100 waiting the oldest 100 are weighed (their catch, S118:
-// the oldest are still shown), the younger counted as holding what they hold,
-// as `leave`, the only choice then, leaves them: so one listed is one each
-// approver's confirm would reject with them all still waiting.
+// agent's alone. At most 20 are listed and rejected at once, `more` saying
+// there are others (the partner, S118: the change still saves). Rejecting
+// them all no longer stops at 20 (decision 33b, F1 G8): the rest the plan
+// weighed (`leftover`, at most 80) are bound into the step-up and kept on the
+// policy's new version, and the waiting-rejections job rejects each as its
+// approver's confirm would, while that version stays in force. Past 100
+// waiting the oldest 100 are weighed (their catch, S118: the oldest are still
+// shown), the younger counted as holding what they hold and left with their
+// approvers, whatever the choice: so one listed is one each approver's
+// confirm would reject with them all still waiting.
 //
 // Reads (partner, S116: no row-by-row reads): the waiting requests' IDs in
 // one statement, then for each agent with any: the agent (3), its mandate in
@@ -91,7 +95,7 @@ type WaitingTx = DatabaseTransaction<DecisionTables>;
 /** The most waiting requests one change weighs, the oldest: past it the plan says there are more. */
 const MOST_WAITING_WEIGHED = 100;
 
-/** The most a change lists, and rejects at once (as a brake voids, or a carry carries: 20). */
+/** The most a change lists, and rejects at once (as a brake voids, or a carry carries: 20): the job rejects the rest. */
 const MOST_WAITING_REJECTED = 20;
 
 /** One waiting request the change would reject: whose, how much, and the team's rules that would refuse it. */
@@ -102,10 +106,15 @@ interface WaitingRejected {
   readonly reasons: readonly RuleDenial[];
 }
 
-/** The requests the change would reject, oldest first, at most 20; `more`: others not listed. */
+/**
+ * The requests the change would reject, oldest first, at most 20; `more`:
+ * others not listed; `leftover`: the IDs of those weighed past the 20, oldest
+ * first, which the waiting-rejections job rejects after a `reject` (G8).
+ */
 export interface WaitingPlan {
   readonly rejected: readonly WaitingRejected[];
   readonly more: boolean;
+  readonly leftover: readonly string[];
 }
 
 /** What a change weighs: whose, when, which policy (a mandate's by its ID, or null: the organisation's), and its new rules. */
@@ -129,15 +138,17 @@ export type WaitingChoice = (typeof WAITING_CHOICES)[number];
 const WAITING_STATEMENTS = {
   reject:
     'Once you confirm, each request listed is rejected at once and the money held for it freed, with the rules that ' +
-    'refuse it kept on its record; the agent learns only that a person rejected it, and asks again. At most 20 can ' +
-    'be rejected at once.',
+    'refuse it kept on its record; the agent learns only that a person rejected it, and asks again. Up to 20 are ' +
+    'rejected at once; the others these rules would reject, of the oldest 100 waiting, are rejected the same way ' +
+    'within minutes while these rules stay in force, unless an approver settles one first. Any younger than the ' +
+    'oldest 100 stay with their approvers.',
   leave:
     'Once you confirm, the requests listed keep waiting and their money stays held. Each is rejected, with why and ' +
     'what to do, when its approver approves it under the new rules, or it expires when its wait ends.',
 } as const satisfies Record<WaitingChoice, string>;
 
 /** The version of WAITING_STATEMENTS each change names: raised with any change to their words. */
-const WAITING_STATEMENT_VERSION = 2;
+const WAITING_STATEMENT_VERSION = 3;
 
 /** A change's choice, as its bodies name it: only when the change would reject a waiting request. */
 export const WAITING_REQUESTS = z
@@ -150,9 +161,9 @@ export const WAITING_REQUESTS = z
 
 /**
  * The choice checked against the plan: one is needed when the change would
- * reject any (or more than 100 wait, the younger not weighed), and refused otherwise;
- * `reject` only when every one is listed (at most 20, partner S118: `leave`
- * saves the change whatever the count).
+ * reject any (or more than 100 wait, the younger not weighed), and refused
+ * otherwise; either saves the change whatever the count (partner S118;
+ * decision 33b: `reject` past 20, the job rejects the rest).
  */
 export function waitingChosen(plan: WaitingPlan, choice: WaitingChoice | undefined): WaitingChoice | null {
   const offered = plan.rejected.length > 0 || plan.more;
@@ -161,7 +172,6 @@ export function waitingChosen(plan: WaitingPlan, choice: WaitingChoice | undefin
     return null;
   }
   if (choice === undefined) throw new MandateRefused(409, 'WAITING_CHOICE_REQUIRED');
-  if (choice === 'reject' && plan.more) throw new MandateRefused(409, 'WAITING_REQUESTS_TOO_MANY_TO_REJECT');
   return choice;
 }
 
@@ -174,9 +184,63 @@ export const waitingHashParts = (choice: WaitingChoice | null, plan: WaitingPlan
         String(WAITING_STATEMENT_VERSION),
         String(plan.more),
         ...plan.rejected.map(({ id, reasons }) => `${id.toLowerCase()}:${reasons.join(',')}`),
+        ...(choice === 'reject' ? ['leftover', ...plan.leftover.map((id) => id.toLowerCase())] : []),
       ];
 
-/** The choice as the policy's event keeps it, with its words' version and how many were listed. */
+/**
+ * The details of a version's event naming the requests the job rejects (G8):
+ * their IDs in lower case, oldest first, by spaces, 20 a detail (a detail's
+ * text holds 1,024 characters), as many as are needed.
+ */
+export const WAITING_LEFTOVER_KEYS = [
+  'waitingLeftover1',
+  'waitingLeftover2',
+  'waitingLeftover3',
+  'waitingLeftover4',
+] as const;
+
+/** How many IDs one of WAITING_LEFTOVER_KEYS holds: 20 × 37 characters with the spaces. */
+const LEFTOVER_A_DETAIL = 20;
+
+const LEFTOVER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The leftover IDs as a version's event keeps them, one detail per 20. */
+const leftoverDetails = (leftover: readonly string[]): Record<string, string> =>
+  Object.fromEntries(
+    WAITING_LEFTOVER_KEYS.flatMap((key, at) => {
+      const some = leftover.slice(at * LEFTOVER_A_DETAIL, (at + 1) * LEFTOVER_A_DETAIL);
+      return some.length === 0 ? [] : [[key, some.map((id) => id.toLowerCase()).join(' ')]];
+    }),
+  );
+
+/**
+ * The requests a version's event says the job rejects, from its verified
+ * details: none for an event that names none; undefined for details no
+ * `reject` makes (not a `reject` past 20, or IDs that aren't IDs), which
+ * can't be believed.
+ */
+export function leftoverOf(details: Readonly<Record<string, unknown>>): readonly string[] | undefined {
+  const parts = WAITING_LEFTOVER_KEYS.map((key) => details[key]);
+  const given = parts.filter((part) => part !== undefined);
+  if (given.length === 0) return [];
+  if (details.waitingRequests !== 'reject' || details.waitingMore !== true) return undefined;
+  // Filled in order: none missing before the last given.
+  if (parts.slice(0, given.length).includes(undefined)) return undefined;
+  const ids: string[] = [];
+  for (const part of given) {
+    if (typeof part !== 'string') return undefined;
+    const some = part.split(' ');
+    if (some.length > LEFTOVER_A_DETAIL || !some.every((id) => LEFTOVER_ID.test(id))) return undefined;
+    ids.push(...some);
+  }
+  return ids;
+}
+
+/**
+ * The choice as the policy's event keeps it, with its words' version, how
+ * many were listed and, after a `reject` with any past the 20, the requests
+ * the job rejects (WAITING_LEFTOVER_KEYS).
+ */
 export const waitingDetails = (choice: WaitingChoice | null, plan: WaitingPlan) =>
   choice === null
     ? {}
@@ -185,6 +249,7 @@ export const waitingDetails = (choice: WaitingChoice | null, plan: WaitingPlan) 
         waitingStatementVersion: WAITING_STATEMENT_VERSION,
         waitingListed: plan.rejected.length,
         waitingMore: plan.more,
+        ...(choice === 'reject' ? leftoverDetails(plan.leftover) : {}),
       };
 
 /**
@@ -268,6 +333,7 @@ export async function waitingPlan(
   return {
     rejected: rejected.slice(0, MOST_WAITING_REJECTED),
     more: beyond || rejected.length > MOST_WAITING_REJECTED,
+    leftover: rejected.slice(MOST_WAITING_REJECTED).map(({ id }) => id),
   };
 }
 

@@ -287,7 +287,7 @@ export const REASON_CODES = {
   WAITING_CHOICE_REQUIRED:
     'These rules would reject requests waiting for approval (the preview lists them), so choose what happens to them: reject them now, or leave them for their approvers. Nothing was changed.',
   WAITING_REQUESTS_TOO_MANY_TO_REJECT:
-    'These rules would reject more requests waiting for approval than can be rejected at once (20), so nothing was changed. Choose to leave them for their approvers, or have some approved or rejected first, then try again.',
+    'No longer returned: a change now rejects 20 at once and the rest within minutes (kept so the list of codes stays stable).',
 } as const satisfies Readonly<Record<string, string>>;
 
 export type ReasonCode = keyof typeof REASON_CODES;

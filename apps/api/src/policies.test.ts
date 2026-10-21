@@ -23,7 +23,11 @@ const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c1';
 const REQUEST_ID = '0199a0f0-0000-7000-8000-0000000000f1';
 
 /** An ask answered, its change rejecting no waiting request. */
-const ASKED = { outcome: 'asked', stepUpChallengeId: CHALLENGE, waiting: { rejected: [], more: false } } as const;
+const ASKED = {
+  outcome: 'asked',
+  stepUpChallengeId: CHALLENGE,
+  waiting: { rejected: [], more: false, leftover: [] },
+} as const;
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 
 const LIVE: LiveSession = {
@@ -303,6 +307,7 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
         { id: REQUEST_ID, agentId: AGENT_ID, amount: AED(450_000n), reasons: ['POLICY_MONTHLY_CAP' as const] },
       ],
       more: false,
+      leftover: [],
     };
     const { app, calls } = await withPolicies({
       asked: { ...ASKED, waiting },
@@ -342,6 +347,8 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
       outcome: 'previewed' as const,
       rejected: [{ id: REQUEST_ID, agentId: AGENT_ID, amount: AED(450_000n), reasons: ['POLICY_ORDER_CAP' as const] }],
       more: true,
+      // The job's leftovers (G8) are never shown: the answer below lists the 20 and `more` alone.
+      leftover: ['0199a0f0-0000-7000-8000-0000000000f1'],
     };
     const { app, calls } = await withPolicies({ previewed });
     const { 'idempotency-key': _key, ...unkeyed } = post('', {}).headers ?? {};
@@ -376,7 +383,7 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
   });
 
   it('previews none waiting, a preview refused, and refuses one not an admin’s or with rules the ask would refuse', async () => {
-    const none = await withPolicies({ previewed: { outcome: 'previewed', rejected: [], more: false } });
+    const none = await withPolicies({ previewed: { outcome: 'previewed', rejected: [], more: false, leftover: [] } });
     const empty = await none.app.inject(post(`${path}/change/preview`, RULES_SENT));
     expect(empty.statusCode).toBe(200);
     expect(empty.json()).toEqual({ rejected: [], more: false });

@@ -326,8 +326,8 @@ const WAITING_PREVIEW = z
     more: z
       .boolean()
       .describe(
-        'True when there are others not listed: more than 20 would be rejected, or more than 100 are waiting and ' +
-          'none was weighed.',
+        'True when there are others not listed: more than 20 would be rejected (`reject` rejects the rest of the ' +
+          'oldest 100 within minutes), or more than 100 are waiting and the younger weren’t weighed.',
       ),
   })
   .register(API_SCHEMAS, {
