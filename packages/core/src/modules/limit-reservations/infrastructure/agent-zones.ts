@@ -135,6 +135,9 @@ export interface UnsealedZone {
   readonly createdAt: Date;
 }
 
+/** The UUID of all zeros: a page from the start lists the agents after it. */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
 /** The most unsealed zones one call lists. */
 export const MOST_UNSEALED_A_CALL = 200;
 
@@ -154,7 +157,8 @@ export async function unsealedZones(
     .where('org_id', '=', orgId)
     .where('state_event_id', 'is', null)
     .where('state_version', '=', 1)
-    .$if(after !== null, (query) => query.where('agent_id', '>', after ?? ''))
+    // From the start, after the nil UUID, which sorts before every other.
+    .where('agent_id', '>', after ?? NIL_UUID)
     .orderBy('agent_id')
     .limit(MOST_UNSEALED_A_CALL)
     .execute();

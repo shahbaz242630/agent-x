@@ -13,6 +13,7 @@ import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import {
   AGENT_ZONES,
   keptZoneOf,
+  keptZonesOf,
   type LimitReservationsTables,
   MOST_UNSEALED_A_CALL,
   sealKeptZone,
@@ -174,6 +175,11 @@ describe("the agent's month zone, a signed record (PL-40)", () => {
     await decided(acting, w);
 
     expect(await zoneOf(w)).toEqual({ outcome: 'kept', zone: 'Asia/Dubai' });
+    // Many at once, as the holdings check reads them: none asked, none read.
+    const many = (agents: string[]) =>
+      withSignedStates(app, w.org, quiet(), (tx, states) => keptZonesOf(tx, states, w.org, agents));
+    expect(await many([w.agent])).toEqual(new Map([[w.agent, { outcome: 'kept', zone: 'Asia/Dubai' }]]));
+    expect(await many([])).toEqual(new Map());
     expect(await eventsAbout(w.org, w.agent, AGENT_ZONES.subject)).toEqual([
       expect.objectContaining({
         action: 'agent_zone.kept',
