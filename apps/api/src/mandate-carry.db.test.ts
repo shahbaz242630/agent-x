@@ -571,7 +571,46 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     expect(capture.lines().filter(({ event }) => event === 'mandate_carry.carried')).toEqual([]);
   });
 
-  it('leaves the rest to the voids job once the mandate is no longer in force, or another version replaced it', async () => {
+  it('carries a first acceptance’s rest under a second one too: never cancelled unweighed (PL-47)', async () => {
+    const { w, acting, mandateId } = await ready();
+    const pending = await askedInTurn(acting, w, 21);
+    await carried(w, mandateId);
+    // Another version accepted, carrying again, before the job's turn came.
+    const { asked, versionId } = await asking(w, mandateId, { purpose: 'Office supplies, third' }, 'carry');
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    // Every pending request of the mandate is weighed, the first rest among them: the youngest waits again.
+    expect(asked.carryLater).toBe(1);
+    expect(await confirmed(w, mandateId, asked.stepUpChallengeId, 'carry')).toMatchObject({ outcome: 'accepted' });
+
+    await voids(w).run();
+    expect(await statusOf(w, pending[20]?.id ?? '')).toBe('APPROVED');
+    await carryRest(w).run();
+
+    for (const { id } of pending) expect(await versionOf(w, id)).toBe(versionId);
+  });
+
+  it('refuses to approve one waiting its turn: it is weighed under the version in force first', async () => {
+    const { w, acting, mandateId } = await ready();
+    await askedInTurn(acting, w, 20);
+    const waiting = await ask(acting, w, { amount: AED(200_000n), orderReference: 'TURN-LAST' });
+    await carried(w, mandateId);
+    const approvals = createSpendRequestApprovals({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: createStepUpChallenges({ ids, clock }),
+      logger: logger(),
+    });
+
+    expect(await approvals.ask(w.admin, keyed(w.admin, APPROVE_OPERATION), waiting.id, false, CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'REQUEST_CHANGED',
+    });
+  });
+
+  it('leaves the rest to the voids job once the mandate is no longer in force', async () => {
     const { w, acting, mandateId } = await ready();
     const pending = await askedInTurn(acting, w, 21);
     await carried(w, mandateId);

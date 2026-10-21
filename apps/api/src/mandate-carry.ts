@@ -164,12 +164,14 @@ export interface WeighScope {
 /**
  * A carry's: the mandate whose pending requests it weighs, and under which
  * of its versions: the draft waiting (the acceptance), or the version in
- * force (the job), then only the requests still on `fromVersionId`, the one
- * it replaced.
+ * force (the job), then only the requests still on an older version: those
+ * the acceptance left for the job, and any an acceptance before it left and
+ * the job hadn't reached yet (the newer acceptance's plan weighed them all,
+ * and its `carryLater` counted them).
  */
 export interface CarryScope extends WeighScope {
   readonly mandateId: string;
-  readonly under: { readonly version: 'draft' } | { readonly version: 'inForce'; readonly fromVersionId: string };
+  readonly under: { readonly version: 'draft' } | { readonly version: 'inForce'; readonly currentVersionId: string };
 }
 
 /** A carry's plan: the oldest MOST_CARRIED settled now, and how many more wait their turn (the job's). */
@@ -194,7 +196,9 @@ export async function carryPlan(tx: CarryTx, states: SignedStates, scope: CarryS
     .where('org_id', '=', scope.orgId)
     .where('mandate_id', '=', scope.mandateId)
     .where('status', 'in', PENDING_STATUSES)
-    .$if(under.version === 'inForce', (query) => query.where('mandate_version_id', '=', fromVersionOf(under)))
+    .where((where) =>
+      under.version === 'inForce' ? where('mandate_version_id', '<>', under.currentVersionId) : where.lit(true),
+    )
     .orderBy('created_at')
     .orderBy('id')
     .execute();
@@ -204,7 +208,10 @@ export async function carryPlan(tx: CarryTx, states: SignedStates, scope: CarryS
   // 4: the version weighed under, the mandate's policy and the organisation's, once.
   const { mandate, ...policies } = await authorityIn(tx, states, scope.orgId, scope.agentId, under.version);
   const authority = await heldAuthority(tx, states, scope, rows, known(mandate));
-  const requests = (await requestsHeld(tx, states, scope, rows)).map(({ request }) => request);
+  // The job read its rows unlocked: one ended since (voided, cancelled, expired) is left out, not taken for
+  // tampering. The acceptance refuses instead, as its step-up bound the plan with it.
+  const ended = under.version === 'inForce' ? 'left out' : 'refused';
+  const requests = (await requestsHeld(tx, states, scope, rows, ended)).map(({ request }) => request);
   // Those waiting their turn hold capacity too, but are weighed after these: left out of the totals, as these are.
   const outside = await outsideOf(
     tx,
@@ -223,9 +230,6 @@ export async function carryPlan(tx: CarryTx, states: SignedStates, scope: CarryS
   }));
   return { plan, later };
 }
-
-/** The version a job's carry takes its requests from; none for the acceptance's, which takes them all. */
-const fromVersionOf = (under: CarryScope['under']): string => (under.version === 'inForce' ? under.fromVersionId : '');
 
 /** A pending request as its row names it: what the authority is read by, before its signed state is. */
 export interface PendingRow {

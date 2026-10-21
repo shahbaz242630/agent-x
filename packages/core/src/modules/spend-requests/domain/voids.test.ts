@@ -30,7 +30,7 @@ describe('voidCauses', () => {
   });
 
   it('finds none for a request its mandate’s version in force still carries (PL-47), but one with no version', () => {
-    const carrying = { ...STANDING, mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesFrom: 'mv1' } };
+    const carrying = { ...STANDING, mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesRest: true } };
     expect(voidCauses(DECIDED, carrying)).toEqual([]);
     expect(voidCauses({ ...DECIDED, mandateVersionId: null }, carrying)).toEqual(['MANDATE_NOT_IN_FORCE']);
     // Still judged by everything else.
@@ -44,8 +44,8 @@ describe('voidCauses', () => {
     ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate superseded', { mandate: { status: 'ACTIVE', currentVersionId: 'mv2' } }, 'MANDATE_NOT_IN_FORCE'],
     [
-      'the mandate superseded, carrying from another version (PL-47)',
-      { mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesFrom: 'mv0' } },
+      'the mandate superseded, its version in force carrying no rest (PL-47)',
+      { mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesRest: false } },
       'MANDATE_NOT_IN_FORCE',
     ],
     ['the mandate not found', { mandate: null }, 'MANDATE_NOT_IN_FORCE'],

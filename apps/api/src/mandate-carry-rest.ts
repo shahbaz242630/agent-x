@@ -2,8 +2,10 @@
 // decision 6, S135; PL-47): the API's job, on a timer of its own. An admin
 // accepting a new version who chose to carry the pending requests has the
 // oldest 20 settled at the confirm (mandate-carry.ts); the rest stay on the
-// version replaced, and the acceptance's signed event says so (`carryRest`,
-// its `replaced` version). This weighs them as the confirm would have, under
+// version replaced, and the acceptance's signed event says so (`carryRest`).
+// A later acceptance with carry weighs every pending request of the mandate,
+// whatever its version, so its own rest takes in any the job hadn't reached.
+// This weighs them as the confirm would have, under
 // the version now in force, 20 at a time, oldest first, against what the ones
 // carried before them hold, and carries or cancels each (`carryPlan`,
 // `carryOut`, decision 17's outcomes), as the API's, naming the acceptance.
@@ -13,9 +15,10 @@
 // page at a time; then each in a transaction of its own, in ADR-006's lock
 // order: the organisation and agent read through their signed states (2, 3),
 // the mandate (4), then the carry's own reads. Taken only while the version in
-// force is still the acceptance's that carried from theirs (`carriesFromOf`)
-// and the mandate ACTIVE: a later acceptance, a suspension or an ending leaves
-// them to the request-voids job, which judges them as ever. A frozen
+// force is still one whose acceptance left a rest (`carriesRest`) and the
+// mandate ACTIVE: a later acceptance that chose cancel (or carried all), a
+// suspension or an ending leaves them to the request-voids job, which judges
+// them as ever. A frozen
 // organisation, or an agent not ACTIVE, leaves them where they are until it is
 // again (the voids job judges a stop chosen to cancel meanwhile). Until carried,
 // one can't be approved or handed off: both ask for the version in force.
@@ -56,17 +59,17 @@ type CarryRestTx = DatabaseTransaction<CarryRestTables>;
 const ACCEPTED = 'mandate.accepted';
 
 /**
- * The version the mandate's version in force still carries requests from:
- * `replaced` on its newest acceptance when that acceptance made the version
- * in force and left requests for the job (`carryRest`); null otherwise.
- * Throws for a history that can't be believed (its alarm raised).
+ * Whether the mandate's version in force still carries requests from older
+ * versions: its newest acceptance made it the version in force and left
+ * requests for the job (`carryRest`). Throws for a history that can't be
+ * believed (its alarm raised).
  */
-export async function carriesFromOf(
+export async function carriesRest(
   tx: DatabaseTransaction<AuditTables>,
   states: SignedStates,
   orgId: string,
   mandate: { readonly id: string; readonly currentVersionId: string | null },
-): Promise<string | null> {
+): Promise<boolean> {
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [MANDATES.subject],
     subjectId: mandate.id,
@@ -77,18 +80,13 @@ export async function carriesFromOf(
   if (history.outcome !== 'read') throw new Error(`A mandate's acceptances can't be believed: ${mandate.id}`);
   // A version in force came with an acceptance: none read is a history that can't be believed, as one unread.
   const details = history.events.at(-1)?.event.details;
-  const replaced = details?.replaced;
-  if (details?.versionId !== mandate.currentVersionId || details.carryRest !== true || typeof replaced !== 'string') {
-    return null;
-  }
-  return replaced;
+  return details?.versionId === mandate.currentVersionId && details.carryRest === true;
 }
 
 /** A mandate with requests on a version not its own in force, as its rows name them. */
 interface Candidate {
   readonly mandateId: string;
   readonly agentId: string;
-  readonly fromVersionId: string;
 }
 
 /**
@@ -105,22 +103,18 @@ async function candidatesOf(tx: CarryRestTx, orgId: string): Promise<Candidate[]
     .innerJoin('mandates.mandates as m', (join) =>
       join.onRef('m.org_id', '=', 'r.org_id').onRef('m.id', '=', 'r.mandate_id'),
     )
-    .select(['r.mandate_id', 'r.agent_id', 'r.mandate_version_id'])
+    .select(['r.mandate_id', 'r.agent_id'])
     .distinct()
     .where('r.org_id', '=', orgId)
     .where('r.status', 'in', PENDING_STATUSES)
     .where('m.current_version_id', 'is not', null)
     .where('r.mandate_version_id', 'is not', null)
     .whereRef('r.mandate_version_id', '<>', 'm.current_version_id')
-    .$narrowType<{ mandate_id: string; mandate_version_id: string }>()
+    .$narrowType<{ mandate_id: string }>()
     .orderBy('r.mandate_id')
     .limit(MANDATES_A_RUN)
     .execute();
-  return rows.map(({ mandate_id, agent_id, mandate_version_id }) => ({
-    mandateId: mandate_id,
-    agentId: agent_id,
-    fromVersionId: mandate_version_id,
-  }));
+  return rows.map(({ mandate_id, agent_id }) => ({ mandateId: mandate_id, agentId: agent_id }));
 }
 
 /** What one turn came to: carried and cancelled, how many still wait; or left, for the reason given. */
@@ -151,7 +145,7 @@ export function createCarryRest({
 }): CarryRest {
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
-  /** One turn of 20 for the mandate, in lock order, if its version in force still carries from theirs. */
+  /** One turn of 20 for the mandate, in lock order, if its version in force still carries a rest. */
   const turn = async (tx: CarryRestTx, states: SignedStates, orgId: string, candidate: Candidate): Promise<Turn> => {
     const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
     const agent = await agentOf(tx, states, { orgId, id: candidate.agentId }, 'share');
@@ -160,8 +154,11 @@ export function createCarryRest({
       throw new Error(`What a carry names can't be believed: ${candidate.mandateId}`);
     }
     const { currentVersionId } = mandate.mandate;
-    const from = await carriesFromOf(tx, states, orgId, mandate.mandate);
-    if (from !== candidate.fromVersionId || currentVersionId === null || mandate.mandate.status !== 'ACTIVE') {
+    if (
+      currentVersionId === null ||
+      mandate.mandate.status !== 'ACTIVE' ||
+      !(await carriesRest(tx, states, orgId, mandate.mandate))
+    ) {
       return { outcome: 'left', why: 'not_carried' };
     }
     if (organization.fields.get('status') !== 'ACTIVE' || agent.agent.status !== 'ACTIVE') {
@@ -174,12 +171,12 @@ export function createCarryRest({
       mandateId: candidate.mandateId,
       now,
       decides: true,
-      under: { version: 'inForce', fromVersionId: from },
+      under: { version: 'inForce', currentVersionId },
     });
     await carryOut(tx, states, keys, orgId, plan, {
       draftId: currentVersionId,
       actor: { type: 'system', id: 'api' },
-      details: { via: 'carry_rest', fromVersionId: from },
+      details: { via: 'carry_rest' },
       now,
     });
     const carried = plan.filter(({ outcome }) => outcome === 'carry').length;

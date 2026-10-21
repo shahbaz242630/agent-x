@@ -79,7 +79,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
 import { CONSENT_EXPIRY_EVENTS, holdsOverExpiry } from './consent-expiry-choice.ts';
 import { CONSENT_LAPSED, lapsedBy, lapseRecorded } from './consent-lapses.ts';
-import { carriesFromOf } from './mandate-carry-rest.ts';
+import { carriesRest } from './mandate-carry-rest.ts';
 import {
   CANCEL_BRAKES,
   cancelledSinceOf,
@@ -367,7 +367,7 @@ export function createRequestVoids({
       agentStatus: agent.agent.status,
       mandate: {
         ...mandate.mandate,
-        carriesFrom: replaced ? await carriesFromOf(tx, states, orgId, mandate.mandate) : null,
+        carriesRest: replaced && (await carriesRest(tx, states, orgId, mandate.mandate)),
       },
       source: {
         status: source.source.status,

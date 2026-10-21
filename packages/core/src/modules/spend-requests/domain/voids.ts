@@ -75,14 +75,14 @@ export interface AuthorityNow {
   readonly organizationStatus: string;
   readonly agentStatus: string;
   /**
-   * Its status and version in force, and the version that one still carries
-   * requests from (Phase 4 A3, PL-47: an acceptance that carried past 20, its
-   * rest waiting for the carry job), if any.
+   * Its status and version in force, and whether that one still carries
+   * requests from older versions (Phase 4 A3, PL-47: an acceptance that
+   * carried past 20, its rest waiting for the carry job).
    */
   readonly mandate: {
     readonly status: string;
     readonly currentVersionId: string | null;
-    readonly carriesFrom?: string | null;
+    readonly carriesRest?: boolean;
   } | null;
   /**
    * Its own status, the bank's word on it (its availability), whether its
@@ -126,7 +126,7 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly R
     mandate === null ||
     stopped(mandate.status, 'ACTIVE', 'mandate') ||
     (mandate.currentVersionId !== decided.mandateVersionId &&
-      (decided.mandateVersionId === null || mandate.carriesFrom !== decided.mandateVersionId))
+      (decided.mandateVersionId === null || mandate.carriesRest !== true))
   ) {
     causes.push('MANDATE_NOT_IN_FORCE');
   }
