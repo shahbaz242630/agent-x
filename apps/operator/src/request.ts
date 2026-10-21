@@ -2,7 +2,8 @@
 // place both sides take it from: the command that reads it (main.ts) and
 // deploy/azure/operator.ts, which writes it onto the job before a run
 // (B1c-2b). A JSON list of the command's words and the new organisation's ID,
-// or of the first admin's invitation (B4-6b), at most REQUEST_LIMIT_BYTES of
+// or of the first admin's invitation (B4-6b), an export for a case (E10c,
+// L7), or a pause or resume of every hand-off (Phase 4 B1), at most REQUEST_LIMIT_BYTES of
 // UTF-8. Nothing here logs anything: a name or an address never is, and
 // nothing here imports anything, so the deploy tool reads it as it is.
 
@@ -54,6 +55,10 @@ export const ACTIVITY_EXPORT_USAGE =
  * sealed on both chains and shown to the organisation's admins.
  */
 const CASE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._/-]{2,63}$/;
+
+/** Why a case reference is refused, which never repeats it. */
+const CASE_REFERENCE_PROBLEM =
+  'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit';
 
 /** A time as a request file names one: UTC, to the second or the millisecond (2026-10-01T00:00:00Z). */
 const REQUEST_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
@@ -119,9 +124,7 @@ export function auditExportOf(
     ...(span <= 0 || span > mostDays * DAY
       ? [`the range starts before it ends, ${String(mostDays)} days at most`]
       : []),
-    ...(CASE_REFERENCE.test(String(caseRef))
-      ? []
-      : ['the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
+    ...(CASE_REFERENCE.test(String(caseRef)) ? [] : [CASE_REFERENCE_PROBLEM]),
   ];
   if (problems.length > 0 || from === undefined || to === undefined) return { problems };
   return { orgId: String(orgId), from, to, caseRef: String(caseRef), id };
@@ -134,3 +137,41 @@ export const auditExportRequest = (orgId: string, from: string, to: string, case
 /** The request to export an organisation's activity log for a case, as its file holds it (Phase 3 L7). */
 export const activityExportRequest = (orgId: string, from: string, to: string, caseRef: string, id: string): string =>
   JSON.stringify(['activity-export', '--org', orgId, '--from', from, '--to', to, '--reason', caseRef, '--id', id]);
+
+/** The two commands that pause and resume every hand-off to the bank (Phase 4 B1, SEC-OPS-03): only ever a file. */
+export type HandoffCommand = 'handoff-pause' | 'handoff-resume';
+
+/** What a request file holds to pause or resume every hand-off: the reason, and the ID of the platform event it records. */
+export const handoffUsage = (command: HandoffCommand): string => `${command} --reason <reference> --id <new ID>`;
+
+/** A pause or resume asked for: its reason (a case reference) and the ID its platform event takes. */
+export interface HandoffAsked {
+  readonly reason: string;
+  readonly id: string;
+}
+
+/**
+ * The pause or resume these words ask for, or the problems, by the rules both
+ * sides hold it to: the operator's command reading its file (main.ts), and
+ * deploy/azure/operator.ts before it writes one. The reason is a case
+ * reference (an incident's or a regulator's), sealed on the platform chain
+ * and every organisation's, shown to their admins; it is repeated in no problem.
+ */
+export function handoffAskedOf({
+  reason,
+  id,
+}: {
+  readonly reason: string | undefined;
+  readonly id: string;
+}): HandoffAsked | { readonly problems: readonly string[] } {
+  const problems = [
+    // None given is refused, never read as the text `undefined`, which has the shape of a reference.
+    ...(reason !== undefined && CASE_REFERENCE.test(reason) ? [] : [CASE_REFERENCE_PROBLEM]),
+    ...(UUID_V7.test(id) ? [] : ["the pause's ID must be a UUIDv7, in lower case"]),
+  ];
+  return problems.length > 0 || reason === undefined ? { problems } : { reason, id };
+}
+
+/** The request to pause or resume every hand-off, as its file holds it. */
+export const handoffRequest = (command: HandoffCommand, reason: string, id: string): string =>
+  JSON.stringify([command, '--reason', reason, '--id', id]);

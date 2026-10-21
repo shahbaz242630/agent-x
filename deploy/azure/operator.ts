@@ -5,6 +5,14 @@
 //   node deploy/azure/operator.ts restore-check
 //   node deploy/azure/operator.ts audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
+//   node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
+//   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
+//
+// The last two (Phase 4 B1, SEC-OPS-03) pause or resume every hand-off of an
+// approved payment to the bank, for every organisation: the run records it
+// on the platform chain, then tells every organisation on its own chain and
+// its admins. Its --id is the platform event's: the same command with it
+// records nothing twice and tells only the organisations not told yet.
 //
 // The fourth (Phase 3 E10c, ADR-005 §6) exports an organisation's audit log
 // for a case, the fifth (L7) its activity log: the run records it on both
@@ -63,6 +71,9 @@ import {
   auditExportRequest,
   createOrganizationRequest,
   firstAdminRequest,
+  type HandoffCommand,
+  handoffAskedOf,
+  handoffRequest,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
@@ -143,7 +154,9 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts restore-check
   node deploy/azure/operator.ts audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
-The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation or export. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference is the dispute's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
+  node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
+  node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
+The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
 export interface Request {
@@ -251,6 +264,35 @@ export function parseAuditExport(argv: readonly string[], kind: CaseExportKind =
   const asked = auditExportOf({ orgId, from, to, caseRef, id: id ?? SOME_ID }, MOST_EXPORT_DAYS);
   if ('problems' in asked) throw new UsageError(asked.problems.join('; '));
   return { orgId, from, to, caseRef, id };
+}
+
+/** The pause or resume of every hand-off the partner asked for (Phase 4 B1). */
+export interface HandoffArguments {
+  readonly command: HandoffCommand;
+  /** A case reference, never repeated in a problem. */
+  readonly reason: string;
+  /** The ID of an earlier try, if this is one. */
+  readonly id: string | undefined;
+}
+
+/**
+ * What was asked for, or a UsageError saying why it can't be done, by the
+ * operator's own rules (request.ts `handoffAskedOf`), so a request it would
+ * refuse is never written. The reason is never repeated in one.
+ */
+export function parseHandoff(argv: readonly string[]): HandoffArguments {
+  const [command, reasonFlag, reason, ...rest] = argv;
+  const [idFlag, id, ...more] = rest;
+  const ided = rest.length === 0 || (idFlag === '--id' && id !== undefined && more.length === 0);
+  if ((command !== 'handoff-pause' && command !== 'handoff-resume') || reasonFlag !== '--reason' || !ided) {
+    throw new UsageError(`say ${String(command)} --reason <case reference> [--id <ID>], and nothing else`);
+  }
+  if (id !== undefined && !UUID_V7.test(id)) {
+    throw new UsageError('--id takes the ID an earlier run gave: a UUIDv7, in lower case');
+  }
+  const asked = handoffAskedOf({ reason, id: id ?? SOME_ID });
+  if ('problems' in asked) throw new UsageError(asked.problems.join('; '));
+  return { command, reason: asked.reason, id };
 }
 
 /** One of the job's secrets that the vault holds, as Azure gives it back: sent back just so. */
@@ -723,6 +765,76 @@ export function auditExport(
   }));
 }
 
+/**
+ * What a pause's or resume's run did (Phase 4 B1), from the command's own
+ * lines about this request's platform event: 0 once it is in force and every
+ * organisation is told, by this run or an earlier one of the same request,
+ * or once hand-offs were found as asked by another change (that change's own
+ * request tells); 1 otherwise, saying what to do next.
+ */
+function handoffOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: string, verb: string): number {
+  const said = commandLines(lines);
+  const about = (event: string): Readonly<Record<string, unknown>> | undefined =>
+    said.find((line) => line.event === event && line.platformEventId === id);
+  const unchanged = about('operator.handoff_unchanged');
+  if (unchanged !== undefined && unchanged.inForce !== id) {
+    const inForce = typeof unchanged.inForce === 'string' ? unchanged.inForce : null;
+    steps.say(
+      inForce === null
+        ? `Hand-offs to the bank are already ${verb}, as a new environment starts: nothing was recorded, and nobody was told.`
+        : `Hand-offs to the bank are already ${verb}, by the platform event ${inForce}: nothing was recorded, and nobody was told by this request. That change's own request, run again with its --id, tells any organisation it didn't.`,
+    );
+    return 0;
+  }
+  const done =
+    unchanged === undefined
+      ? `Hand-offs to the bank are ${verb} (platform event ${id})`
+      : `Hand-offs to the bank were already ${verb} by this request (platform event ${id}), and nothing was recorded again`;
+  const told = about('operator.handoff_told');
+  const again = `Run the same command again with --id ${id}: it records nothing twice, and tells only the organisations not told yet.`;
+  if (told !== undefined) {
+    const counts = `${String(told.told)} organisations told now, ${String(told.toldBefore)} by an earlier run`;
+    if (told.failed === 0) {
+      steps.say(`${done}; ${counts}.`);
+      return 0;
+    }
+    steps.say(`${done}; ${counts}, but ${String(told.failed)} couldn't be told: their lines are above. ${again}`);
+    return 1;
+  }
+  if (about(`operator.handoff_${verb}`) !== undefined || unchanged !== undefined) {
+    steps.say(`${done}, but the run's lines don't show every organisation told. ${again}`);
+    return 1;
+  }
+  const refused = said.find((line) => line.event === 'operator.refused');
+  if (refusedFor(refused, NO_REQUEST_PROBLEM)) {
+    steps.say(noRequestFound(id));
+    return 1;
+  }
+  if (refusedAbout(refused, 'platformEventId', id)) {
+    steps.say(`The operator's command refused it, and nothing was recorded: ${String(problemsSaid(refused))}.`);
+    return 1;
+  }
+  steps.say(
+    run.status === 'Succeeded'
+      ? `The run succeeded, but its lines don't show hand-offs ${verb} by ${id}: they may not all have arrived, or another request ran in this one's place. ${again}`
+      : `Hand-offs may not have been ${verb}: read the lines above. If they leave it unclear: ${again}`,
+  );
+  return 1;
+}
+
+/** Pauses or resumes every hand-off to the bank on the job (Phase 4 B1): 0 once in force and every organisation is told. */
+export function handoffChange(request: HandoffArguments, steps: JobSteps): Promise<number> {
+  const id = request.id ?? uuidV7Ids.next();
+  const [noun, verb] = request.command === 'handoff-pause' ? ['pause', 'paused'] : ['resume', 'resumed'];
+  return runRequest(steps, () => ({
+    text: handoffRequest(request.command, request.reason, id),
+    intro: `The ${noun}'s platform event ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it records nothing twice, tells only the organisations not told yet, and takes the request off the job at its end.`,
+    tryAgain: `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. Nothing is recorded twice, and no organisation is told twice.`,
+    mayStillHold: mayStillHold(id, noun),
+    judge: (ended, lines) => handoffOutcome(steps, ended, lines, id, verb),
+  }));
+}
+
 /** Writes a request, runs it, puts [] back, and says what the run did: 0 once what it makes exists. */
 async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
@@ -794,6 +906,10 @@ export function main(
         const kind = argv[0];
         const request = parseAuditExport(argv, kind);
         return (steps) => auditExport(request, steps, kind);
+      }
+      if (argv[0] === 'handoff-pause' || argv[0] === 'handoff-resume') {
+        const request = parseHandoff(argv);
+        return (steps) => handoffChange(request, steps);
       }
       if (argv[0] === 'invite-first-admin') {
         const request = parseFirstAdmin(argv);

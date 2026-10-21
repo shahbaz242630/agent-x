@@ -532,6 +532,12 @@ export const PLAIN_WORDS = {
     broke: 'Its work most likely did not happen, though a connection lost at the very end may have saved it.',
     next: 'Check the database, then re-run the same request file: it says if it was done. Check a new organisation was not made before typing it again.',
   },
+  'operator.handoff_notice_failed': {
+    happened: 'A pause or resume of payments to the bank was recorded, but one organisation was not told.',
+    broke:
+      'That organisation has no audit log entry for it yet and its admins got no email; the pause or resume holds.',
+    next: 'Run the job again with the same request file: it tells only the organisations not told yet.',
+  },
   'operator.refused': {
     happened: 'An operator job refused the request it was given.',
     broke:

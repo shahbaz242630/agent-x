@@ -309,6 +309,30 @@ describe('a notice’s email (B5-1b)', () => {
     });
   });
 
+  describe('Phase 4 B1 our team paused or resumed every hand-off to the bank (0056; partner decision 4; SEC-OPS-03)', () => {
+    const entry = '0199a0f0-0000-7000-8000-0000000004b1';
+
+    it.each([
+      ['handoff_paused', 'paused', 'approved ones wait, and nothing is sent to the bank until we resume'],
+      ['handoff_resumed', 'resumed', 'Each approved payment that waited is checked again before it goes'],
+    ] as const)(
+      'tells every admin of %s, naming the log entry by ID alone and where to read its reason',
+      (kind, word, what) => {
+        const message = messageFor(
+          { ...NOTICE, kind, membershipId: null, role: null, aboutId: entry },
+          'a@example.test',
+        );
+
+        expect(message.subject).toBe(`Agent X: payments to the bank are ${word}`);
+        expect(message.text).toContain(`Agent X's own team ${word}`);
+        expect(message.text).toContain(what);
+        expect(message.text).toContain(`Audit log entry: ${entry}`);
+        expect(message.text).toContain('open the audit log to see this entry and its reason');
+        expect(message.text).toContain("You're told because you're an admin of this organisation.");
+      },
+    );
+  });
+
   describe('B1, B2 a spend request waiting for approval (0045, Phase 3; partner decision 2; SEC-HA-11)', () => {
     const request = '0199a0f0-0000-7000-8000-0000000003b2';
     const waitingNotice: ClaimedNotice = {

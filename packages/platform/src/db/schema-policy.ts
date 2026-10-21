@@ -358,6 +358,11 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       reason: "The platform audit chain's one head row, which the app locks and moves on with every event",
       columns: ['only_row', 'seq', 'hash', 'mac', 'mac_key_version'],
     },
+    'platform_controls.handoff_pause': {
+      reason:
+        "The platform hand-off pause's one row (0056, SEC-OPS-03): one switch for every organisation's hand-offs to the bank, and the platform event that set it",
+      columns: ['only_row', 'paused', 'event_seq', 'event_id'],
+    },
   },
   // The audit trails' schemas (ADR-004 §4): the app role may only add audit rows and read them (ADR-005 §9).
   appendOnlySchemas: ['audit', 'platform_controls', 'access'],
@@ -366,6 +371,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       "Each organisation's chain head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
     'platform_controls.audit_head':
       "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
+    'platform_controls.handoff_pause':
+      'The platform hand-off pause (0056, SEC-OPS-03): the app locks its one row first (ADR-006 §6 level 1) and moves it with the platform event that pauses or resumes, never adding or deleting a row',
   },
   fillInTables: {
     'activity_exports.exports': {
