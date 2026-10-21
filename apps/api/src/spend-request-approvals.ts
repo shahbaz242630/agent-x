@@ -318,7 +318,12 @@ function recheckShown(
 export async function weighedAgain(
   tx: ApproveTx,
   states: SignedStates,
-  { orgId, requestId, now, decides }: { orgId: string; requestId: string; now: Date; decides: boolean },
+  {
+    orgId,
+    requestId,
+    now,
+    decides,
+  }: { readonly orgId: string; readonly requestId: string; readonly now: Date; readonly decides: boolean },
 ) {
   const named = await namedBy(tx, orgId, requestId);
   if (named === undefined) throw new MandateRefused(404, 'NOT_FOUND');

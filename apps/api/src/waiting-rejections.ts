@@ -49,8 +49,8 @@ export const WAITING_REJECTIONS_EVERY_MS = 5 * 60_000;
 /** How many of an organisation's leftovers one run rejects: the rest wait for the next run. */
 const MOST_REJECTED_A_RUN = 100;
 
-/** How many of an organisation's policies one run looks at, oldest version first: the rest wait for the next. */
-const MOST_POLICIES_A_RUN = 50;
+/** How many of an organisation's candidate policies a page holds, each page after the last (expiry-pages.ts' reason). */
+const POLICIES_A_PAGE = 50;
 
 type RejectionTx = DatabaseTransaction<DecisionTables>;
 
@@ -65,15 +65,22 @@ interface Leftovers {
 
 /**
  * The organisation's policies whose version in force names leftovers still
- * waiting, by their rows and that version's event, unverified, at most
- * `most`: each then read through its signed state.
+ * waiting, by their rows and that version's event, unverified, in order of
+ * ID, after `after` when given, at most `most`: each then read through its
+ * signed state.
  */
-async function withLeftovers(tx: RejectionTx, orgId: string, most: number): Promise<readonly string[]> {
+async function withLeftovers(
+  tx: RejectionTx,
+  orgId: string,
+  most: number,
+  after: string | undefined,
+): Promise<readonly string[]> {
   const rows = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state before anything moves
     .selectFrom('mandates.policies as p')
     .select('p.id')
     .where('p.org_id', '=', orgId)
+    .where((where) => (after === undefined ? where.lit(true) : where('p.id', '>', after)))
     .where((where) =>
       where.exists(
         where
@@ -94,16 +101,16 @@ async function withLeftovers(tx: RejectionTx, orgId: string, most: number): Prom
           ),
       ),
     )
-    .orderBy('p.current_version_id')
+    .orderBy('p.id')
     .limit(most)
     .execute();
   return rows.map(({ id }) => id);
 }
 
 /**
- * The policy's leftovers, its row and its version's event believed:
- * undefined for none (another version in force since the candidates were
- * read). One that can't be believed throws, its alarm raised.
+ * The policy's leftovers whose rows still wait, its row and its version's
+ * event believed: undefined for none (another version in force since the
+ * candidates were read). One that can't be believed throws, its alarm raised.
  */
 async function leftoversOf(
   tx: RejectionTx,
@@ -124,7 +131,8 @@ async function leftoversOf(
     throw new Error(`A policy version's leftovers can't be believed: ${versionId}`);
   }
   if (requestIds.length === 0) return undefined;
-  return { policyId, versionId, mandateId: policy.policy.mandateId, userId: event.actor.id, requestIds };
+  const waiting = await stillWaiting(tx, orgId, requestIds);
+  return { policyId, versionId, mandateId: policy.policy.mandateId, userId: event.actor.id, requestIds: waiting };
 }
 
 /** Of the leftovers, those whose rows still wait, oldest first, unverified: each then weighed through its signed states. */
@@ -137,7 +145,7 @@ async function stillWaiting(tx: RejectionTx, orgId: string, ids: readonly string
     .where('id', 'in', ids)
     .where('status', '=', 'APPROVAL_REQUIRED')
     .execute();
-  const waiting = new Set(rows.map(({ id }) => id.toLowerCase()));
+  const waiting = new Set(rows.map(({ id }) => id));
   return ids.filter((id) => waiting.has(id));
 }
 
@@ -154,6 +162,7 @@ export function createWaitingRejections({
   clock,
   logger,
   most = MOST_REJECTED_A_RUN,
+  page = POLICIES_A_PAGE,
 }: {
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -164,11 +173,19 @@ export function createWaitingRejections({
   readonly logger: Logger;
   /** MOST_REJECTED_A_RUN, but for the tests. */
   readonly most?: number;
+  /** POLICIES_A_PAGE, but for the tests. */
+  readonly page?: number;
 }): WaitingRejections {
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
   /** The leftover weighed as its approver's confirm weighs it, and rejected if the rules in force refuse it; whether it was. */
-  const rejected = async (tx: RejectionTx, states: SignedStates, orgId: string, requestId: string, from: Leftovers) => {
+  const rejected = async (
+    tx: RejectionTx,
+    states: SignedStates,
+    orgId: string,
+    requestId: string,
+    from: Leftovers,
+  ): Promise<boolean> => {
     // Read before the lock waits below, as a decision's: the instant it is weighed at.
     const now = clock.now();
     await notFrozen(tx, states, orgId);
@@ -196,7 +213,7 @@ export function createWaitingRejections({
   };
 
   /** The leftover rejected if it should be, logging what came of it; whether it was. Never throws. */
-  const rejectedLogged = async (log: Logger, orgId: string, requestId: string, from: Leftovers) => {
+  const rejectedLogged = async (log: Logger, orgId: string, requestId: string, from: Leftovers): Promise<boolean> => {
     try {
       return await withSignedStates(database, orgId, services(log), (tx, states) =>
         rejected(tx, states, orgId, requestId, from),
@@ -213,43 +230,81 @@ export function createWaitingRejections({
   /** The policy's leftovers still waiting, read in a transaction of their own; none for one that can't be read, logged. */
   const leftoversLogged = async (log: Logger, orgId: string, policyId: string): Promise<Leftovers | undefined> => {
     try {
-      return await withSignedStates(database, orgId, services(log), async (tx, states) => {
-        const leftovers = await leftoversOf(tx, states, orgId, policyId);
-        if (leftovers === undefined) return undefined;
-        return { ...leftovers, requestIds: await stillWaiting(tx, orgId, leftovers.requestIds) };
-      });
+      return await withSignedStates(database, orgId, services(log), (tx, states) =>
+        leftoversOf(tx, states, orgId, policyId),
+      );
     } catch (error) {
       log.error('waiting_rejection.unreadable', { policyId, err: error });
       return undefined;
     }
   };
 
-  /** Rejects the organisation's leftovers, up to its share; false if the signal stopped it. */
-  const rejectIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
-    const log = logger.child({ orgId });
-    let policies: readonly string[];
+  /** A page of the organisation's candidate policies, after `after`; undefined for one that can't be read, logged. */
+  const pageOf = async (log: Logger, orgId: string, after: string | undefined) => {
     try {
-      policies = await withSignedStates(database, orgId, services(log), (tx) =>
-        withLeftovers(tx, orgId, MOST_POLICIES_A_RUN),
-      );
+      return await withSignedStates(database, orgId, services(log), (tx) => withLeftovers(tx, orgId, page, after));
     } catch (error) {
       log.error('waiting_rejection.unreadable', { err: error });
-      return true;
+      return undefined;
     }
+  };
+
+  /** One policy's leftovers rejected while `left` and the signal allow: how many, or null once the signal stops it. */
+  const rejectedOf = async (
+    log: Logger,
+    orgId: string,
+    from: Leftovers,
+    left: number,
+    aborted: () => boolean,
+  ): Promise<number | null> => {
     let done = 0;
-    for (const policyId of policies) {
-      const from = await leftoversLogged(log, orgId, policyId);
-      if (from === undefined) continue;
-      for (const requestId of from.requestIds) {
-        if (signal?.aborted === true) return false;
-        if (done >= most) return true;
-        if (await rejectedLogged(log, orgId, requestId, from)) {
-          done += 1;
-          log.info('waiting_rejection.rejected', { requestId, policyVersionId: from.versionId });
-        }
+    for (const requestId of from.requestIds) {
+      if (aborted()) return null;
+      if (done >= left) return done;
+      if (await rejectedLogged(log, orgId, requestId, from)) {
+        done += 1;
+        log.info('waiting_rejection.rejected', { requestId, policyVersionId: from.versionId });
       }
     }
-    return true;
+    return done;
+  };
+
+  /** A page's policies' leftovers rejected while `left` and the signal allow: how many, or null once the signal stops it. */
+  const rejectedInPage = async (
+    log: Logger,
+    orgId: string,
+    policies: readonly string[],
+    left: number,
+    aborted: () => boolean,
+  ): Promise<number | null> => {
+    let done = 0;
+    for (const policyId of policies) {
+      if (aborted()) return null;
+      if (done >= left) return done;
+      const from = await leftoversLogged(log, orgId, policyId);
+      const rejected = from === undefined ? 0 : await rejectedOf(log, orgId, from, left - done, aborted);
+      if (rejected === null) return null;
+      done += rejected;
+    }
+    return done;
+  };
+
+  /** Rejects the organisation's leftovers, up to its share, a page of policies at a time; false if the signal stopped it. */
+  const rejectIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
+    const log = logger.child({ orgId });
+    // A call, read afresh after each await (a property check would stay narrowed).
+    const aborted = () => signal?.aborted === true;
+    let done = 0;
+    let after: string | undefined;
+    for (;;) {
+      const policies = await pageOf(log, orgId, after);
+      if (policies === undefined) return true;
+      const rejected = await rejectedInPage(log, orgId, policies, most - done, aborted);
+      if (rejected === null) return false;
+      done += rejected;
+      if (done >= most || policies.length < page) return true;
+      after = policies.at(-1);
+    }
   };
 
   return {

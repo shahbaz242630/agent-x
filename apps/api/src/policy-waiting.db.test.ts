@@ -217,7 +217,7 @@ async function twentyTwoWaiting() {
 }
 
 /** The waiting-rejections job over `w`'s organisation alone, as main.ts makes it. */
-const rejections = (w: World, most?: number) =>
+const rejections = (w: World, most?: number, page?: number) =>
   createWaitingRejections({
     list: () => Promise.resolve([w.org]),
     database: app,
@@ -226,6 +226,7 @@ const rejections = (w: World, most?: number) =>
     clock,
     logger: testLogger(capture),
     ...(most === undefined ? {} : { most }),
+    ...(page === undefined ? {} : { page }),
   });
 
 /** The log lines of `event`. */
@@ -821,6 +822,60 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     expect(lines('waiting_rejection.failed')).toEqual([]);
   });
 
+  it('rejects them in the name of the admin who confirmed the change', async () => {
+    const { w, left } = await leftTwo();
+
+    await rejections(w).run();
+
+    const actors = await database
+      .as('admin')
+      .query<{ actor_id: string }>(
+        "select actor_id from audit.events where action = 'spend_request.rejected' and subject_id = any($1::uuid[])",
+        [left],
+      );
+    expect(actors.map(({ actor_id }) => actor_id)).toEqual([w.admin.userId, w.admin.userId]);
+  });
+
+  it('leaves one its key was revoked since, as its approver could no longer approve it', async () => {
+    const { w, acting, left } = await leftTwo();
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: acting.keyId }, 'revoke', {
+        actor: OPERATOR,
+        action: 'agent_key.revoked',
+        details: {},
+      }),
+    );
+
+    await rejections(w).run();
+
+    for (const id of left) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('leaves one the rules in force now let stand: capacity freed by another settled since', async () => {
+    const w = await shared.world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await shared.inForce(registry, w, { approvalThreshold: AED(10_000n) });
+    const acting = await shared.agentKey(w);
+    const made: string[] = [];
+    for (let at = 0; at < 26; at += 1) {
+      made.push((await ask(acting, w, { amount: AED(20_000n) })).id);
+      clock.advanceBy(1_000);
+    }
+    // AED 1,000 a month: the oldest 5 stand, the 21 younger go, the youngest left for the job.
+    const { done } = await changed(w, ORGANIZATION, rulesOf(100_000n), 'reject');
+    expect((await versionEvent(w, done))?.details).toMatchObject({ waitingLeftover1: made[25] });
+    // One of the 5 rejected by its approver: the youngest's AED 200 now fits.
+    await signed(w, async (tx, states) => {
+      await requestOf(tx, states, { orgId: w.org, id: made[0] ?? '' }, 'change');
+      return rejectedPastTheUseCase(tx, states, w, made[0] ?? '');
+    });
+
+    await rejections(w).run();
+
+    expect(await statusOf(w, made[25] ?? '')).toBe('APPROVAL_REQUIRED');
+    expect(lines('waiting_rejection.failed')).toEqual([]);
+  });
+
   it('stops at its share a run, the rest on the next', async () => {
     const { w, left } = await leftTwo();
 
@@ -828,6 +883,17 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     expect(await Promise.all(left.map((id) => statusOf(w, id)))).toEqual(['DENIED', 'APPROVAL_REQUIRED']);
     await rejections(w, 1).run();
     expect(await statusOf(w, left[1] ?? '')).toBe('DENIED');
+  });
+
+  it('reads the candidate policies a page at a time, each after the last', async () => {
+    const { w, made } = await twentyTwoWaiting();
+    const mandateId = await mandateIdOf(w);
+    // The mandate's change rejects 20 and leaves 2; the organisation's then rejects none of those left.
+    await changed(w, { scope: 'mandate', mandateId }, rulesOf(10_000n), 'reject');
+
+    await rejections(w, undefined, 1).run();
+
+    for (const id of made) expect(await statusOf(w, id)).toBe('DENIED');
   });
 
   it('stops when its signal is aborted, rejecting nothing more', async () => {
@@ -1023,6 +1089,34 @@ describe('the job waits in the lock order, never crosswise (forced, F1 G8)', () 
     await runWhileHeld(w, async (tx, states, gate) => {
       const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'change');
       await gate();
+      if (read.outcome !== 'found') throw new Error('no policy');
+      return setPolicy(tx, states, {
+        orgId: w.org,
+        existing: read,
+        scope: 'organization',
+        mandateId: null,
+        versionId: ids.next(),
+        rules: rulesOf(10_000n),
+        madeBy: w.admin.membershipId,
+        madeAt: clock.now(),
+        actor: OPERATOR,
+        details: capChoiceDetails('amount'),
+      });
+    });
+
+    for (const id of made.slice(20)) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+    expect(lines('waiting_rejection.failed')).toEqual([]);
+  });
+
+  it('waits for a change holding the organisation, then the policy: the version that named them gone, it rejects nothing', async () => {
+    const { w, made } = await twentyTwoWaiting();
+    await changed(w, ORGANIZATION, rulesOf(10_000n), 'reject');
+
+    // The job reads the leftovers first, then waits on the organisation (2) while the policy (4) moves on.
+    await runWhileHeld(w, async (tx, states, gate) => {
+      await states.verifiedState(tx, ORGANIZATIONS, { orgId: w.org, id: w.org }, 'change');
+      await gate();
+      const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'change');
       if (read.outcome !== 'found') throw new Error('no policy');
       return setPolicy(tx, states, {
         orgId: w.org,
