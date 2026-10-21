@@ -4,18 +4,25 @@
 // (policy-waiting.ts); the others its plan weighed are bound into its step-up
 // and kept on the new version's event (WAITING_LEFTOVER_KEYS), and this
 // rejects each as its approver's confirm would (decision 18), while that
-// version stays in force.
+// version stays in force. Past the oldest 100 its confirm weighed, the
+// younger waiting when it was confirmed are this job's too ("the rest",
+// decision 33b; G8b): weighed 100 at a time as the confirm's plan weighs them
+// (waitingPlan), under the rules the change replaced and its own in their
+// place, so one is rejected only if the change alone would reject it, then
+// each as a leftover is.
 //
 // For each organisation the directory lists, the candidates are its policies
-// whose version in force names leftovers still waiting, found by their rows
-// and that event's details, unverified: a filter alone. Each policy is then
+// whose version in force names leftovers still waiting, or the youngest its
+// confirm weighed with any request waiting, found by their rows and that
+// event's details, unverified: a filter alone. Each policy is then
 // read through its signed state, and its version's event believed only whole
 // (eventOf); then each leftover in a transaction of its own, in the approval's
 // lock order (ADR-006 §6): the organisation (2, not frozen), then levels 3–8
 // as its approver's confirm weighs it (`weighedAgain`). It is rejected only
 // when nothing it was decided against moved, its supplier's details are those
-// it was decided under, the policy's version in force is still the one that
-// named it, and the engine now refuses it only under rules the team set; as
+// it was decided under, it was decided before the change, the policy's
+// version in force is still the one that named it, and the engine now
+// refuses it only under rules the team set; as
 // the admin's who confirmed, with those rules as `causes`, its holdings
 // released. Anything else leaves it with its approver: one approved, rejected,
 // expired or voided meanwhile, or one the rules in force let stand. A later
@@ -27,9 +34,10 @@ import {
   namedInDetails,
   type SignedStates,
   type SignedStatesServices,
+  withDetail,
   withSignedStates,
 } from '@agentx/core/modules/audit';
-import { POLICY_VERSIONS, policyOf } from '@agentx/core/modules/mandates';
+import { POLICIES, POLICY_VERSIONS, policyOf, policyVersionOf, type PolicyRules } from '@agentx/core/modules/mandates';
 import { rejectRequest, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
@@ -38,10 +46,17 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { rejectionNote } from './approval-rejections.ts';
 import { eachOrganisation } from './expiry-pages.ts';
-import { MandateRefused } from './mandate-reads.ts';
-import { leftoverOf, WAITING_LEFTOVER_KEYS } from './policy-waiting.ts';
+import { MandateRefused, organizationChoicesOf } from './mandate-reads.ts';
+import {
+  leftoverOf,
+  WAITING_LEFTOVER_KEYS,
+  WAITING_YOUNGER_KEY,
+  waitingPlan,
+  type Younger,
+  youngerAfterOf,
+} from './policy-waiting.ts';
 import { weighedAgain } from './spend-request-approvals.ts';
-import { type DecisionTables, notFrozen } from './spend-request-decisions.ts';
+import { type DecisionTables, notFrozen, type PoliciesWeighed } from './spend-request-decisions.ts';
 
 /** How often the leftovers are looked over, once the last run has ended: the rest are rejected within this. */
 export const WAITING_REJECTIONS_EVERY_MS = 5 * 60_000;
@@ -54,14 +69,34 @@ const POLICIES_A_PAGE = 50;
 
 type RejectionTx = DatabaseTransaction<DecisionTables>;
 
-/** One policy's leftovers, as its version's event names them: which version, who confirmed, and the requests. */
+/**
+ * One policy's leftovers, as its version's event names them: which version,
+ * where in the chain, who confirmed, and the requests; and the younger, past
+ * the oldest 100 its confirm weighed, when there were any (G8b).
+ */
 interface Leftovers {
   readonly policyId: string;
   readonly versionId: string;
+  readonly versionSeq: bigint;
   readonly mandateId: string | null;
   readonly userId: string;
   readonly requestIds: readonly string[];
+  readonly younger: Weighed | null;
 }
+
+/** Where the younger are taken up, with the change's rules and those it replaced, as its confirm's plan weighed them. */
+interface Weighed extends Younger {
+  readonly rules: PolicyRules;
+  readonly before: (inForce: PoliciesWeighed) => PoliciesWeighed;
+}
+
+/** The policy's version in force's event, as the candidates' filters name it. */
+const MADE = {
+  type: POLICY_VERSIONS.subject,
+  idColumn: 'p.current_version_id',
+  orgColumn: 'p.org_id',
+  action: 'policy_version.made',
+} as const;
 
 /**
  * The organisation's policies whose version in force names leftovers still
@@ -89,15 +124,11 @@ async function withLeftovers(
           .select('r.id')
           .whereRef('r.org_id', '=', 'p.org_id')
           .where('r.status', '=', 'APPROVAL_REQUIRED')
-          .where(
-            namedInDetails({
-              type: POLICY_VERSIONS.subject,
-              idColumn: 'p.current_version_id',
-              orgColumn: 'p.org_id',
-              action: 'policy_version.made',
-              keys: WAITING_LEFTOVER_KEYS,
-              named: 'r.id',
-            }),
+          .where((named) =>
+            named.or([
+              namedInDetails({ ...MADE, keys: WAITING_LEFTOVER_KEYS, named: 'r.id' }),
+              withDetail({ ...MADE, key: WAITING_YOUNGER_KEY }),
+            ]),
           ),
       ),
     )
@@ -108,9 +139,10 @@ async function withLeftovers(
 }
 
 /**
- * The policy's leftovers whose rows still wait, its row and its version's
- * event believed: undefined for none (another version in force since the
- * candidates were read). One that can't be believed throws, its alarm raised.
+ * The policy's leftovers whose rows still wait, and the younger's start, its
+ * row and its version's event believed: undefined for neither (another
+ * version in force since the candidates were read). One that can't be
+ * believed throws, its alarm raised.
  */
 async function leftoversOf(
   tx: RejectionTx,
@@ -125,18 +157,91 @@ async function leftoversOf(
   if (found.outcome !== 'read' || found.event === undefined) {
     throw new Error(`A policy's version in force has no event to believe: ${versionId}`);
   }
-  const { event } = found.event;
-  const requestIds = event.action === 'policy_version.made' ? leftoverOf(event.details) : undefined;
-  if (requestIds === undefined) throw new Error(`A policy version's leftovers can't be believed: ${versionId}`);
-  if (requestIds.length === 0) return undefined;
+  const { event, seq } = found.event;
+  const made = event.action === 'policy_version.made';
+  const requestIds = made ? leftoverOf(event.details) : undefined;
+  const after = made ? youngerAfterOf(event.details) : undefined;
+  if (requestIds === undefined || after === undefined) {
+    throw new Error(`A policy version's leftovers can't be believed: ${versionId}`);
+  }
+  if (requestIds.length === 0 && after === null) return undefined;
   // Leftovers are a person's choice (an admin's confirm): any other actor can't be believed.
   if (event.actor.type !== 'user') throw new Error(`A policy version's leftovers name no person: ${versionId}`);
-  const waiting = await stillWaiting(tx, orgId, requestIds);
-  return { policyId, versionId, mandateId: policy.policy.mandateId, userId: event.actor.id, requestIds: waiting };
+  const { mandateId } = policy.policy;
+  const at = { orgId, policyId, mandateId, versionId };
+  return {
+    policyId,
+    versionId,
+    versionSeq: seq,
+    mandateId,
+    userId: event.actor.id,
+    requestIds: await stillWaiting(tx, orgId, requestIds),
+    younger: after === null ? null : await youngerOf(tx, states, at, after),
+  };
+}
+
+/** Which policy version, of which policy. */
+interface VersionAt {
+  readonly orgId: string;
+  readonly policyId: string;
+  readonly mandateId: string | null;
+  readonly versionId: string;
+}
+
+/** Where the younger are taken up, past `after`, with the version's rules and those it replaced, believed. */
+async function youngerOf(tx: RejectionTx, states: SignedStates, at: VersionAt, after: string): Promise<Weighed> {
+  const read = await policyVersionOf(tx, states, { orgId: at.orgId, id: at.versionId }, at.policyId);
+  if (read.outcome !== 'found') throw new Error(`A policy's version can't be believed: ${at.versionId}`);
+  return {
+    after,
+    // When the version was made, by the app's clock as each request's row is: one made since was decided under it.
+    until: read.version.madeAt,
+    rules: read.version,
+    before: await rulesBefore(tx, states, at),
+  };
+}
+
+/**
+ * The policies as they stood before the change that made the version, as its
+ * confirm's plan weighed them: the version it replaced in place of its own
+ * (with that version's choices, for the organisation's), or none for a
+ * policy's first; from the policy's newest event, which must be the change
+ * that made the version in force.
+ */
+async function rulesBefore(
+  tx: RejectionTx,
+  states: SignedStates,
+  { orgId, policyId, mandateId, versionId }: VersionAt,
+): Promise<(inForce: PoliciesWeighed) => PoliciesWeighed> {
+  const history = await states.historyOf(tx, orgId, {
+    subjectTypes: [POLICIES.subject],
+    subjectId: policyId,
+    actions: ['policy.set', 'policy.changed'],
+    limit: 1,
+    newest: true,
+  });
+  const newest = history.outcome === 'read' ? history.events.at(-1)?.event : undefined;
+  if (newest?.details.versionId !== versionId) throw new Error(`A policy's change can't be believed: ${policyId}`);
+  const replaced = newest.action === 'policy.changed' ? newest.details.replaced : null;
+  if (replaced !== null && typeof replaced !== 'string')
+    throw new Error(`A policy's change can't be believed: ${policyId}`);
+  const was = replaced === null ? null : await policyVersionOf(tx, states, { orgId, id: replaced }, policyId);
+  if (was !== null && was.outcome !== 'found') throw new Error(`A policy's version can't be believed: ${replaced}`);
+  const rules = was === null ? null : { ...was.version, versionId: was.version.id };
+  if (mandateId !== null) return (inForce) => ({ ...inForce, mandatePolicy: rules });
+  const chosen = await organizationChoicesOf(tx, states, orgId, was?.version ?? null);
+  return (inForce) => ({
+    ...inForce,
+    organizationPolicy: rules,
+    organizationCapChosen: chosen.capChoice !== null,
+    approvalWait: chosen.approvalWait,
+  });
 }
 
 /** Of the leftovers, those whose rows still wait, oldest first, unverified: each then weighed through its signed states. */
 async function stillWaiting(tx: RejectionTx, orgId: string, ids: readonly string[]): Promise<readonly string[]> {
+  // None named past the 20 (the younger alone): no statement.
+  if (ids.length === 0) return [];
   const rows = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each weighed through its signed states before anything moves
     .selectFrom(SPEND_REQUESTS.table)
@@ -189,7 +294,7 @@ export function createWaitingRejections({
     // Read before the lock waits below, as a decision's: the instant it is weighed at.
     const now = clock.now();
     await notFrozen(tx, states, orgId);
-    const { made, supplierNow, unchanged, rejection } = await weighedAgain(tx, states, {
+    const { made, supplierNow, unchanged, rejection, decidedSeq } = await weighedAgain(tx, states, {
       orgId,
       requestId,
       now,
@@ -197,6 +302,8 @@ export function createWaitingRejections({
     });
     const inForce = from.mandateId === null ? made.versions.organizationPolicy : made.versions.mandatePolicy;
     if (!unchanged || supplierNow.move !== 'same' || inForce !== from.versionId || rejection === null) return false;
+    // Waiting when the change was confirmed: one decided since was decided under its rules.
+    if (decidedSeq === null || decidedSeq > from.versionSeq) return false;
     await rejectRequest(
       tx,
       states,
@@ -249,16 +356,17 @@ export function createWaitingRejections({
     }
   };
 
-  /** One policy's leftovers rejected while `left` and the signal allow: how many, or null once the signal stops it. */
+  /** The requests rejected in turn while `left` and the signal allow: how many, or null once the signal stops it. */
   const rejectedOf = async (
     log: Logger,
     orgId: string,
     from: Leftovers,
+    requestIds: readonly string[],
     left: number,
     aborted: () => boolean,
   ): Promise<number | null> => {
     let done = 0;
-    for (const requestId of from.requestIds) {
+    for (const requestId of requestIds) {
       if (aborted()) return null;
       if (done >= left) return done;
       if (await rejectedLogged(log, orgId, requestId, from)) {
@@ -267,6 +375,67 @@ export function createWaitingRejections({
       }
     }
     return done;
+  };
+
+  /**
+   * The next 100 younger waiting past `after` as the change's confirm would
+   * have weighed them, in a transaction of their own (FOR SHARE): those it
+   * would reject, and where the next 100 start (null: none wait past them);
+   * undefined for a plan that can't be read, logged.
+   */
+  const youngerPlanned = async (log: Logger, orgId: string, from: Leftovers, younger: Weighed, after: string) => {
+    try {
+      return await withSignedStates(database, orgId, services(log), async (tx, states) => {
+        const scope = { orgId, now: clock.now(), mandateId: from.mandateId, rules: younger.rules };
+        const plan = await waitingPlan(tx, states, scope, {
+          decides: false,
+          before: younger.before,
+          younger: { after, until: younger.until },
+        });
+        return { requestIds: [...plan.rejected.map(({ id }) => id), ...plan.leftover], next: plan.weighedTo };
+      });
+    } catch (error) {
+      log.error('waiting_rejection.unreadable', { policyId: from.policyId, err: error });
+      return undefined;
+    }
+  };
+
+  /** The policy's younger rejected, 100 weighed at a time, while `left` and the signal allow: how many, or null once the signal stops it. */
+  const youngerRejected = async (
+    log: Logger,
+    orgId: string,
+    from: Leftovers,
+    left: number,
+    aborted: () => boolean,
+  ): Promise<number | null> => {
+    const { younger } = from;
+    if (younger === null) return 0;
+    let done = 0;
+    let after = younger.after;
+    for (;;) {
+      if (done >= left) return done;
+      const planned = await youngerPlanned(log, orgId, from, younger, after);
+      if (planned === undefined) return done;
+      const rejected = await rejectedOf(log, orgId, from, planned.requestIds, left - done, aborted);
+      if (rejected === null) return null;
+      done += rejected;
+      if (planned.next === null) return done;
+      after = planned.next;
+    }
+  };
+
+  /** One policy's leftovers, then its younger, rejected while `left` and the signal allow: how many, or null once the signal stops it. */
+  const rejectedFor = async (
+    log: Logger,
+    orgId: string,
+    from: Leftovers,
+    left: number,
+    aborted: () => boolean,
+  ): Promise<number | null> => {
+    const listed = await rejectedOf(log, orgId, from, from.requestIds, left, aborted);
+    if (listed === null) return null;
+    const younger = await youngerRejected(log, orgId, from, left - listed, aborted);
+    return younger === null ? null : listed + younger;
   };
 
   /** A page's policies' leftovers rejected while `left` and the signal allow: how many, or null once the signal stops it. */
@@ -281,7 +450,7 @@ export function createWaitingRejections({
     for (const policyId of policies) {
       if (done >= left) return done;
       const from = await leftoversLogged(log, orgId, policyId);
-      const rejected = from === undefined ? 0 : await rejectedOf(log, orgId, from, left - done, aborted);
+      const rejected = from === undefined ? 0 : await rejectedFor(log, orgId, from, left - done, aborted);
       if (rejected === null) return null;
       done += rejected;
     }

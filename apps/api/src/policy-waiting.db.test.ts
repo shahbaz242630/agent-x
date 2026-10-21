@@ -13,11 +13,13 @@
 // others; past 100 waiting, the oldest 100 weighed, the younger holding theirs. It writes nothing; a member not an admin is refused; a request
 // tampered with refuses it, its alarm raised. Past 20 a `reject` rejects 20
 // at once, keeps the rest on the version, and the job rejects them as their
-// approvers' confirms would (decision 33b, F1 G8).
+// approvers' confirms would (decision 33b, F1 G8); past 100 the younger too,
+// weighed 100 at a time as the confirm would have, under the rules it
+// replaced (G8b).
 import { AGENT_KEYS } from '@agentx/core/modules/agents';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
-import { POLICIES, policyOf, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
+import { POLICIES, POLICY_VERSIONS, policyOf, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { rejectRequest, requestOf } from '@agentx/core/modules/spend-requests';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { supplierOf } from '@agentx/core/modules/suppliers';
@@ -211,6 +213,20 @@ async function twentyTwoWaiting() {
   const made: string[] = [];
   for (let at = 0; at < 22; at += 1) {
     made.push((await ask(acting, w, { amount: AED(20_000n) })).id);
+    clock.advanceBy(1_000);
+  }
+  return { w, acting, made };
+}
+
+/** `count` requests of AED 60, each waiting (approval above AED 50), a second apart; within every limit in force. */
+async function waitingOf(count: number) {
+  const w = await shared.world();
+  for (const id of w.suppliers) await shared.verified(w, id);
+  await shared.inForce(registry, w, { approvalThreshold: AED(5_000n) });
+  const acting = await shared.agentKey(w);
+  const made: string[] = [];
+  for (let at = 0; at < count; at += 1) {
+    made.push((await ask(acting, w, { amount: AED(6_000n) })).id);
     clock.advanceBy(1_000);
   }
   return { w, acting, made };
@@ -548,7 +564,7 @@ describe('the admin chooses: reject them now, or leave them for their approvers 
     expect(await versionEvent(w, done)).toMatchObject({
       action: 'policy_version.made',
       actorType: 'user',
-      details: { waitingRequests: 'reject', waitingStatementVersion: 3, waitingListed: 2, waitingMore: false },
+      details: { waitingRequests: 'reject', waitingStatementVersion: 4, waitingListed: 2, waitingMore: false },
     });
     const versionId = done.outcome === 'changed' ? done.current?.id : undefined;
     for (const id of [second, third]) {
@@ -581,7 +597,7 @@ describe('the admin chooses: reject them now, or leave them for their approvers 
 
     expect(done).toMatchObject({ outcome: 'changed' });
     expect(await versionEvent(w, done)).toMatchObject({
-      details: { waitingRequests: 'leave', waitingStatementVersion: 3, waitingListed: 2, waitingMore: false },
+      details: { waitingRequests: 'leave', waitingStatementVersion: 4, waitingListed: 2, waitingMore: false },
     });
     for (const id of made) {
       expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
@@ -619,7 +635,7 @@ describe('the admin chooses: reject them now, or leave them for their approvers 
     const details = (await versionEvent(w, done))?.details;
     expect(details).toMatchObject({
       waitingRequests: 'reject',
-      waitingStatementVersion: 3,
+      waitingStatementVersion: 4,
       waitingListed: 20,
       waitingMore: true,
       waitingLeftover1: `${made[20]} ${made[21]}`,
@@ -989,33 +1005,75 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     for (const id of left) expect(await statusOf(w, id)).toBe('DENIED');
   });
 
-  // 101 requests decided and 100 rejected, a transaction each: near the default 30 s under coverage.
-  it('past 100 waiting, rejects the other 80 of the oldest 100; the younger stays with its approver', async () => {
-    const w = await shared.world();
-    for (const id of w.suppliers) await shared.verified(w, id);
-    await shared.inForce(registry, w, { approvalThreshold: AED(5_000n) });
-    const acting = await shared.agentKey(w);
-    const made: string[] = [];
-    for (let at = 0; at < 101; at += 1) {
-      made.push((await ask(acting, w, { amount: AED(10_000n) })).id);
-      clock.advanceBy(1_000);
-    }
+  // 215 requests decided and 195 rejected, a transaction each: well past the default 30 s.
+  it('past 100 waiting, rejects all the rest: the other 80 of the oldest 100, then the younger 100 weighed at a time', async () => {
+    const { w, made } = await waitingOf(215);
 
-    // AED 50 a month: every one of the oldest 100 would go, the youngest counted as holding its AED 100.
+    // AED 50 a month: every one would go.
     const { done } = await changed(w, ORGANIZATION, rulesOf(5_000n), 'reject');
-    const details = (await versionEvent(w, done))?.details;
-    expect(details).toMatchObject({
+    expect((await versionEvent(w, done))?.details).toMatchObject({
       waitingListed: 20,
       waitingMore: true,
       waitingLeftover1: made.slice(20, 40).join(' '),
       waitingLeftover4: made.slice(80, 100).join(' '),
+      waitingYoungerAfter: made[99],
     });
+    // Its share a run: the 80 named, which leave none for the younger; then the oldest 10 of them.
+    await rejections(w, 80).run();
+    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual(made.slice(20, 100));
+    await rejections(w, 10).run();
+    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual(made.slice(20, 110));
+    // The rest: the next 100 weighed, then the last 5.
+    await rejections(w, 1_000).run();
+
+    expect(await Promise.all(made.map((id) => statusOf(w, id)))).toEqual(Array<string>(215).fill('DENIED'));
+    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual(made.slice(20));
+    expect(lines('waiting_rejection.failed')).toEqual([]);
+  }, 300_000);
+
+  it('leaves a younger one the rules the change replaced refused already: its approver’s still (S118)', async () => {
+    const { w, made } = await waitingOf(101);
+    // AED 50 an order, left with their approvers: the rules in force then refuse all 101.
+    await changed(w, ORGANIZATION, rulesOf(2_000_000n, 5_000n), 'leave');
+
+    // AED 50 a month too, rejecting: none this change alone rejects, but the youngest wasn't weighed.
+    const { done } = await changed(w, ORGANIZATION, rulesOf(5_000n, 5_000n), 'reject');
+    expect((await versionEvent(w, done))?.details).toMatchObject({ waitingListed: 0, waitingYoungerAfter: made[99] });
     await rejections(w).run();
 
-    expect(await Promise.all(made.slice(0, 100).map((id) => statusOf(w, id)))).toEqual(
-      Array<string>(100).fill('DENIED'),
-    );
     expect(await statusOf(w, made[100] ?? '')).toBe('APPROVAL_REQUIRED');
+    expect(lines('waiting_rejection.rejected')).toEqual([]);
+    expect(lines('waiting_rejection.unreadable')).toEqual([]);
+  }, 120_000);
+
+  it('rejects the younger on a mandate’s first policy, weighed with none before it', async () => {
+    const { w, made } = await waitingOf(101);
+    const mandateId = await mandateIdOf(w);
+
+    await changed(w, { scope: 'mandate', mandateId }, rulesOf(5_000n), 'reject');
+    await rejections(w).run();
+
+    expect(await Promise.all(made.map((id) => statusOf(w, id)))).toEqual(Array<string>(101).fill('DENIED'));
+  }, 120_000);
+
+  it('logs younger ones that can’t be weighed, one changed past the app, and rejects them not; the named still go (FX-TAMPER)', async () => {
+    const { w, made } = await waitingOf(101);
+    await changed(w, ORGANIZATION, rulesOf(5_000n), 'reject');
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      await owner.stripSeals(made[100] ?? '');
+    } finally {
+      await owner.end();
+    }
+
+    await rejections(w).run();
+
+    expect(await Promise.all(made.slice(20, 100).map((id) => statusOf(w, id)))).toEqual(
+      Array<string>(80).fill('DENIED'),
+    );
+    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual(made.slice(20, 100));
+    expect(lines('waiting_rejection.unreadable')).toHaveLength(1);
+    expect(capture.lines().map((line) => line.event)).toContain('audit.integrity_failed');
   }, 120_000);
 
   it('rejects a mandate’s rest on its policy’s change', async () => {
@@ -1044,6 +1102,27 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     expect(lines('waiting_rejection.unreadable')).toHaveLength(1);
     expect(capture.lines().map((line) => line.event)).toContain('audit.integrity_failed');
   });
+
+  it('rejects nothing on a policy whose replaced version was changed past the app, raising the alarm (FX-TAMPER)', async () => {
+    const { w } = await waitingOf(101);
+    const replaced = await signed(w, async (tx, states) => {
+      const read = await policyOf(tx, states, { orgId: w.org, id: w.org }, 'share');
+      return read.outcome === 'found' ? read.policy.currentVersionId : '';
+    });
+    await changed(w, ORGANIZATION, rulesOf(5_000n), 'reject');
+    const owner = await tamperAsOwner(database, POLICY_VERSIONS, w.org);
+    try {
+      await owner.stripSeals(replaced);
+    } finally {
+      await owner.end();
+    }
+
+    await rejections(w).run();
+
+    expect(lines('waiting_rejection.rejected')).toEqual([]);
+    expect(lines('waiting_rejection.unreadable')).toHaveLength(1);
+    expect(capture.lines().map((line) => line.event)).toContain('audit.integrity_failed');
+  }, 120_000);
 
   it('rejects nothing on a policy whose row was changed past the app (FX-TAMPER)', async () => {
     const { w, left } = await leftTwo();

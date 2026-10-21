@@ -1,6 +1,7 @@
 // Phase 3 F1 G8 (decision 33b): the choice past 20, and the leftovers a
 // `reject` keeps on the policy's new version for the waiting-rejections job,
-// 20 IDs a detail, read back only as a `reject` past 20 writes them.
+// 20 IDs a detail, read back only as a `reject` past 20 writes them; and past
+// 100 the youngest weighed, where the job takes up the younger (G8b).
 import { describe, expect, it } from 'vitest';
 
 import { MandateRefused } from './mandate-reads.ts';
@@ -11,6 +12,7 @@ import {
   waitingDetails,
   waitingHashParts,
   type WaitingPlan,
+  youngerAfterOf,
 } from './policy-waiting.ts';
 
 /** The nth made-up request ID, in lower case. */
@@ -28,6 +30,7 @@ const planOf = (leftover: number): WaitingPlan => ({
   rejected: LISTED,
   more: leftover > 0,
   leftover: Array.from({ length: leftover }, (_, at) => idOf(100 + at)),
+  weighedTo: null,
 });
 
 describe('the choice past 20 (decision 33b)', () => {
@@ -48,7 +51,7 @@ describe('the choice past 20 (decision 33b)', () => {
 describe('the leftovers kept on the version, and read back', () => {
   it('keeps 20 a detail, as many as needed, for `reject` alone; none past none', () => {
     const details = waitingDetails('reject', planOf(41));
-    expect(details).toMatchObject({ waitingRequests: 'reject', waitingStatementVersion: 3, waitingMore: true });
+    expect(details).toMatchObject({ waitingRequests: 'reject', waitingStatementVersion: 4, waitingMore: true });
     expect(Object.keys(details).filter((key) => key.startsWith('waitingLeftover'))).toEqual(
       WAITING_LEFTOVER_KEYS.slice(0, 3),
     );
@@ -83,5 +86,29 @@ describe('the leftovers kept on the version, and read back', () => {
     expect(leftoverOf({ ...one, waitingLeftover1: `${idOf(1)}  ${idOf(2)}` })).toBeUndefined();
     const over = Array.from({ length: 21 }, (_, at) => idOf(at)).join(' ');
     expect(leftoverOf({ ...one, waitingLeftover1: over })).toBeUndefined();
+  });
+});
+
+describe('the younger past the oldest 100, kept on the version and read back (G8b)', () => {
+  const pastHundred: WaitingPlan = { ...planOf(80), weighedTo: idOf(99).toUpperCase() };
+
+  it('binds and keeps the youngest weighed for `reject` alone, in lower case', () => {
+    expect(waitingHashParts('reject', pastHundred).slice(-2)).toEqual(['younger', idOf(99)]);
+    expect(waitingHashParts('leave', pastHundred)).not.toContain('younger');
+    expect(waitingHashParts('reject', planOf(80))).not.toContain('younger');
+    expect(waitingDetails('reject', pastHundred)).toMatchObject({ waitingYoungerAfter: idOf(99) });
+    expect(Object.keys(waitingDetails('leave', pastHundred))).not.toContain('waitingYoungerAfter');
+    expect(Object.keys(waitingDetails('reject', planOf(80)))).not.toContain('waitingYoungerAfter');
+    expect(youngerAfterOf(waitingDetails('reject', pastHundred))).toBe(idOf(99));
+  });
+
+  it('reads none from an event that names none, and believes none a `reject` with more never writes', () => {
+    expect(youngerAfterOf({ waitingRequests: 'reject', waitingMore: true })).toBeNull();
+    const kept = { waitingRequests: 'reject', waitingMore: true, waitingYoungerAfter: idOf(99) };
+    expect(youngerAfterOf({ ...kept, waitingRequests: 'leave' })).toBeUndefined();
+    expect(youngerAfterOf({ ...kept, waitingMore: false })).toBeUndefined();
+    expect(youngerAfterOf({ ...kept, waitingYoungerAfter: 99 })).toBeUndefined();
+    expect(youngerAfterOf({ ...kept, waitingYoungerAfter: idOf(99).toUpperCase() })).toBeUndefined();
+    expect(youngerAfterOf({ ...kept, waitingYoungerAfter: `${idOf(98)} ${idOf(99)}` })).toBeUndefined();
   });
 });

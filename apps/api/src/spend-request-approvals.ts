@@ -383,7 +383,8 @@ export async function weighedAgain(
     weighed.mandate.versionId === against.mandateVersionId &&
     supplierNow.move !== 'moved';
   const rejection = holdsCapacity(made.decision) ? null : rejectedFor(made.decision, made.reasons);
-  return { read, made, supplierNow, unchanged, rejection };
+  // Its decided event's place in the chain: the job rejects only one decided before the change that named it (G8b).
+  return { read, made, supplierNow, unchanged, rejection, decidedSeq: decision?.seq ?? null };
 }
 
 export function createSpendRequestApprovals({

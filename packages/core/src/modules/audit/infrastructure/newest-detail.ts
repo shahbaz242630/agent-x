@@ -134,3 +134,26 @@ export const namedInDetails = ({
       and ${sql.ref(named)}::text = any(pg_catalog.string_to_array(pg_catalog.concat_ws(' ', ${sql.join(
         keys.map((key) => sql`(e.details::jsonb) ->> ${key}::text`),
       )}), ' ')))`;
+
+/**
+ * Whether an event of `action` about the object of `type` whose ID is the
+ * column `idColumn`, in the organisation the column `orgColumn` names, has
+ * the detail `key` (F1 G8b: a policy version naming the youngest its change
+ * weighed).
+ */
+export const withDetail = ({
+  type,
+  idColumn,
+  orgColumn,
+  action,
+  key,
+}: {
+  readonly type: string;
+  readonly idColumn: string;
+  readonly orgColumn: string;
+  readonly action: string;
+  readonly key: string;
+}): RawBuilder<boolean> =>
+  sql<boolean>`exists (select 1 from audit.events e
+    where e.org_id = ${sql.ref(orgColumn)} and e.subject_type = ${type} and e.subject_id = ${sql.ref(idColumn)}
+      and e.action = ${action} and ((e.details::jsonb) ->> ${key}::text) is not null)`;
