@@ -191,7 +191,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: mandates.MANDATES.fields,
         status: mandates.MANDATE,
         fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
-        statusConditions: ['a_status_on_its_versions'],
+        // Each by name and its printed definition, which A3c's schema test proves against the migrated server.
+        statusConditions: mandates.MANDATES.statusConditions,
       },
       // A version is made once and never moved, as a supplier's.
       {
@@ -223,14 +224,14 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         subject: suppliers.SUPPLIERS.subject,
         fields: suppliers.SUPPLIERS.fields,
         status: suppliers.SUPPLIER,
-        statusConditions: ['verified_rests_on_its_version'],
+        statusConditions: suppliers.SUPPLIERS.statusConditions,
       },
       {
         table: suppliers.BENEFICIARY_REGISTRATIONS.table,
         subject: suppliers.BENEFICIARY_REGISTRATIONS.subject,
         fields: suppliers.BENEFICIARY_REGISTRATIONS.fields,
         status: suppliers.BENEFICIARY_REGISTRATION,
-        statusConditions: ['registered_with_its_reference', 'failed_with_its_reason'],
+        statusConditions: suppliers.BENEFICIARY_REGISTRATIONS.statusConditions,
       },
       // A version is made once and never moved: no status of its own, and the made-once guard.
       {

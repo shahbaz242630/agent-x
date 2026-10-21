@@ -720,7 +720,22 @@ describe('A3c each rule fails on a broken fixture', () => {
         "alter table t.agents add constraint revoked_expires check (status <> 'REVOKED' or expires_at is not null)",
       ];
 
-      expect(await problemsAfter(conditional, [{ ...AGENTS, statusConditions: ['revoked_expires'] }])).toEqual([]);
+      const named = { revoked_expires: "CHECK (((status <> 'REVOKED'::text) OR (expires_at IS NOT NULL)))" };
+      expect(await problemsAfter(conditional, [{ ...AGENTS, statusConditions: named }])).toEqual([]);
+    });
+
+    it('fails one rewritten under a name the registry allows: the definition is pinned, not the name alone', async () => {
+      const rewritten = [
+        ...SOUND,
+        "alter table t.agents add constraint revoked_expires check (status <> 'ACTIVE' or expires_at is not null)",
+      ];
+      const named = { revoked_expires: "CHECK (((status <> 'REVOKED'::text) OR (expires_at IS NOT NULL)))" };
+
+      expect(await problemsAfter(rewritten, [{ ...AGENTS, statusConditions: named }])).toEqual([
+        expect.stringContaining(
+          'the check constraint revoked_expires holds status with other columns as the registry doesn',
+        ),
+      ]);
     });
 
     it('fails a missing guard, and one that carries other rules than the machine', async () => {

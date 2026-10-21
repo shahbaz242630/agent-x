@@ -85,10 +85,13 @@ export const SUPPLIERS = {
   ],
   rules: SUPPLIER,
   // VERIFIED only on the version verified, with nothing pending (0032): CI's A3c allows this one check over the status with other columns.
-  statusConditions: ['verified_rests_on_its_version'],
+  statusConditions: {
+    verified_rests_on_its_version:
+      "CHECK (((status <> 'VERIFIED'::text) OR ((verified_version_id IS NOT NULL) AND (verified_version_id = current_version_id) AND (pending_version_id IS NULL))))",
+  },
 } as const satisfies SignedStateTable & {
   readonly rules: typeof SUPPLIER;
-  readonly statusConditions: readonly string[];
+  readonly statusConditions: Readonly<Record<string, string>>;
 };
 
 /** A supplier version's row, as the signed state reads and records it: made once, never moved (0032's `made_once`). */
