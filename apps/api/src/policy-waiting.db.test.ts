@@ -218,15 +218,18 @@ async function twentyTwoWaiting() {
   return { w, acting, made };
 }
 
-/** `count` requests of AED 60, each waiting (approval above AED 50), a second apart; within every limit in force. */
-async function waitingOf(count: number) {
+/**
+ * `count` requests, the nth of `minorOf(n)`, each waiting (approval above AED
+ * 30), a second apart; AED 60 each unless given, within every limit in force.
+ */
+async function waitingOf(count: number, minorOf: (at: number) => bigint = () => 6_000n) {
   const w = await shared.world();
   for (const id of w.suppliers) await shared.verified(w, id);
-  await shared.inForce(registry, w, { approvalThreshold: AED(5_000n) });
+  await shared.inForce(registry, w, { approvalThreshold: AED(3_000n) });
   const acting = await shared.agentKey(w);
   const made: string[] = [];
   for (let at = 0; at < count; at += 1) {
-    made.push((await ask(acting, w, { amount: AED(6_000n) })).id);
+    made.push((await ask(acting, w, { amount: AED(minorOf(at)) })).id);
     clock.advanceBy(1_000);
   }
   return { w, acting, made };
@@ -1033,16 +1036,8 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
 
   // 205 requests decided and 105 rejected, a transaction each: well past the default 30 s.
   it('weighs past 100 younger that all stand to the ones after them', async () => {
-    const w = await shared.world();
-    for (const id of w.suppliers) await shared.verified(w, id);
-    await shared.inForce(registry, w, { approvalThreshold: AED(3_000n) });
-    const acting = await shared.agentKey(w);
-    // 100 of AED 60, then 100 of AED 40, then 5 of AED 60: all waiting (approval above AED 30).
-    const made: string[] = [];
-    for (let at = 0; at < 205; at += 1) {
-      made.push((await ask(acting, w, { amount: AED(at >= 100 && at < 200 ? 4_000n : 6_000n) })).id);
-      clock.advanceBy(1_000);
-    }
+    // 100 of AED 60, then 100 of AED 40, then 5 of AED 60.
+    const { w, made } = await waitingOf(205, (at) => (at >= 100 && at < 200 ? 4_000n : 6_000n));
 
     // AED 50 an order: those of AED 60 go, those of AED 40 stand.
     await changed(w, ORGANIZATION, rulesOf(2_000_000n, 5_000n), 'reject');
@@ -1075,15 +1070,33 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
 
   it('leaves the younger with their approvers once another policy changes since: no confirm weighed them so', async () => {
     const { w, made } = await waitingOf(101);
-    await changed(w, ORGANIZATION, rulesOf(5_000n), 'reject');
     const mandateId = await mandateIdOf(w);
-    // The same cap on the mandate: none it alone refuses, with 81 waiting, so no choice to make.
-    await changed(w, { scope: 'mandate', mandateId }, rulesOf(5_000n));
+    // The mandate's AED 50 an order, left with their approvers: its rules then refuse all 101.
+    await changed(w, { scope: 'mandate', mandateId }, rulesOf(2_000_000n, 5_000n), 'leave');
+    // The organisation's AED 50 an order too, rejecting: none it alone rejects, the youngest not weighed.
+    const { done } = await changed(w, ORGANIZATION, rulesOf(2_000_000n, 5_000n), 'reject');
+    expect((await versionEvent(w, done))?.details).toMatchObject({ waitingListed: 0, waitingYoungerAfter: made[99] });
+    // Then the mandate's lifted, leaving them: the organisation's alone now refuses them, which no confirm weighed.
+    await changed(w, { scope: 'mandate', mandateId }, LOOSE, 'leave');
 
     await rejections(w).run();
 
-    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual(made.slice(20, 100));
+    expect(lines('waiting_rejection.rejected')).toEqual([]);
     expect(await statusOf(w, made[100] ?? '')).toBe('APPROVAL_REQUIRED');
+  }, 120_000);
+
+  it('rejects the younger when the change named none past its 20', async () => {
+    // 10 of AED 60, 90 of AED 40, then 5 of AED 60.
+    const { w, made } = await waitingOf(105, (at) => (at >= 10 && at < 100 ? 4_000n : 6_000n));
+
+    // AED 50 an order: the 10 at once, none left over, then the 5 younger.
+    const { done } = await changed(w, ORGANIZATION, rulesOf(2_000_000n, 5_000n), 'reject');
+    const details = (await versionEvent(w, done))?.details;
+    expect(details).toMatchObject({ waitingListed: 10, waitingYoungerAfter: made[99] });
+    expect(details).not.toHaveProperty('waitingLeftover1');
+    await rejections(w).run();
+
+    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual(made.slice(100));
   }, 120_000);
 
   it('rejects the younger on a mandate’s first policy, weighed with none before it', async () => {
