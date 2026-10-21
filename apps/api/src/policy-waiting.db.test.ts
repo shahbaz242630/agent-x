@@ -851,6 +851,16 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     for (const id of left) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
   });
 
+  it('leaves those carried to new supplier details by a pause: their approvers re-check them first (E5a)', async () => {
+    const { w, left } = await leftTwo();
+    await shared.detailsChanged(w, w.suppliers[0] ?? '', { pendingRequests: 'pause' });
+
+    await rejections(w).run();
+
+    for (const id of left) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
+    expect(lines('waiting_rejection.failed')).toEqual([]);
+  });
+
   it('leaves one the rules in force now let stand: capacity freed by another settled since', async () => {
     const w = await shared.world();
     for (const id of w.suppliers) await shared.verified(w, id);

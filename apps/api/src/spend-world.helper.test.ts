@@ -202,8 +202,8 @@ export function spendWorld({
       return id;
     });
 
-  /** The supplier's details changed (a new version), then verified again: only its version differs. */
-  async function detailsChanged(w: World, supplierId: string) {
+  /** The supplier's details changed (a new version) with its event's `details`, then verified again: only its version differs. */
+  async function detailsChanged(w: World, supplierId: string, details?: Record<string, string>) {
     await signed(w, async (tx, states) => {
       const found = await supplierOf(tx, states, { orgId: w.org, id: supplierId }, 'change');
       if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
@@ -223,6 +223,7 @@ export function spendWorld({
         enteredAt: clock().now(),
         actor: OPERATOR,
         follows: current.version,
+        ...(details === undefined ? {} : { details }),
       });
     });
     await shared.verified(w, supplierId);
@@ -276,5 +277,17 @@ export function spendWorld({
       ),
   } as const;
 
-  return { ...shared, ready, ask, statusOf, holdingsOf, spentOf, signed, waitChosen, mandateIdOf, STOPS };
+  return {
+    ...shared,
+    ready,
+    ask,
+    statusOf,
+    holdingsOf,
+    spentOf,
+    signed,
+    waitChosen,
+    mandateIdOf,
+    detailsChanged,
+    STOPS,
+  };
 }
