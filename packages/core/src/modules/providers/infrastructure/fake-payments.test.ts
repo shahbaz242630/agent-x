@@ -142,9 +142,10 @@ describe('a payment refused, lost, duplicated or unknown', () => {
     expect(found).toMatchObject({ kind: 'found', execution: { providerStatus: 'Pending', amountMinor } });
     // Asked again within the window, it answers this time, the same payment.
     const again = await rail.submitApprovedIntent(intentOf(consentId, { amountMinor }));
+    if (found.kind !== 'found') throw new Error('not found');
     expect(again).toMatchObject({
       kind: 'accepted',
-      execution: { paymentInstructionRef: expect.any(String) as string },
+      execution: { paymentInstructionRef: found.execution.paymentInstructionRef },
     });
   });
 
@@ -177,8 +178,19 @@ describe('what the rail refuses before making anything', () => {
     expect(await refusedFor(intentOf(consentId, { amountMinor: USUAL_CONTROLS.maxPaymentMinor + 100n }))).toBe(
       FAKE_REJECT_CODES.overLimit,
     );
+    expect(await refusedFor(intentOf(consentId, { amountMinor: 0n }))).toBe(FAKE_REJECT_CODES.overLimit);
+    expect(await refusedFor(intentOf(consentId, { amountMinor: -100n }))).toBe(FAKE_REJECT_CODES.overLimit);
     await rail.bank.changeConsent(ORG, consentId, 'Suspended');
     expect(await refusedFor(intentOf(consentId))).toBe(FAKE_REJECT_CODES.consent);
+  });
+
+  it('refuses a consent past its expiry, though nothing read it since', async () => {
+    const { clock, rail, consentId } = await linked();
+    clock.advanceBy(366 * DAY);
+    expect(await rail.submitApprovedIntent(intentOf(consentId))).toEqual({
+      kind: 'refused',
+      code: FAKE_REJECT_CODES.consent,
+    });
   });
 
   it('refuses an instruction ID the rail can’t take as its key, before anything', async () => {

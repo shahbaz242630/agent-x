@@ -285,6 +285,41 @@ describe(`the fake partner on the database (D2-1, Postgres ${server.version})`, 
     });
   });
 
+  it('makes one payment for two submissions of the same key at once: the second waits, then answers the first’s (B2)', async () => {
+    const linkId = fresh('link');
+    const session = await partner().startSourceLink({ organizationId: ORG, linkId });
+    const consentId = await partner().bank.approve(ORG, session.sessionRef, ACCOUNT);
+    const instructionId = fresh('instruction');
+    const body = {
+      accountConsentId: consentId,
+      beneficiaryRef: 'fake-payee-first',
+      amountMinor: '100000',
+      currency: 'AED',
+      paymentReference: 'INV-FIRST',
+      submittedAt: START.toISOString(),
+      script: 'succeeds',
+    } as const;
+    const held = await heldOpen((records) =>
+      records.add('payment', { ref: instructionId, alias: `first-${instructionId}`, body }),
+    );
+    const second = partner().submitApprovedIntent({
+      organizationId: ORG,
+      instructionId,
+      accountConsentId: consentId,
+      beneficiaryRef: 'fake-payee-second',
+      // `.02` would lose its answer: the payment the first made is answered instead, not lost.
+      amountMinor: 100_002n,
+      currency: 'AED',
+      paymentReference: 'INV-SECOND',
+    });
+    await waitUntilQueued(database.as('admin'), 1);
+    await held.finish();
+    expect(await second).toMatchObject({
+      kind: 'accepted',
+      execution: { paymentInstructionRef: `first-${instructionId}`, amountMinor: 100_000n },
+    });
+  });
+
   it('answers another organisation’s link and source as none', async () => {
     const linkId = fresh('link');
     const session = await partner().startSourceLink({ organizationId: ORG, linkId });

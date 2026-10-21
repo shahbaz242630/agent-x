@@ -10,9 +10,12 @@
 //   a second payment (kept beside the first, `ref:2`…), which is why Agent X
 //   never resends (ADR-007 §10) and the lookup by key gives the newest.
 // - The consent must be the organisation's, in use (Authorized), in the
-//   payment's currency and within its per-payment limit; otherwise the rail
-//   refuses with a 4xx that creates nothing (a code, no record). The payee
-//   isn't checked: the fake keeps no index of its references.
+//   payment's currency, not past its expiry, and within its per-payment
+//   limit, the amount above nothing; otherwise the rail refuses with a 4xx
+//   that creates nothing (a code, no record). Not checked by the fake: the
+//   payee (it keeps no index of its references) and the consent's limits per
+//   period (it keeps no index of payments by consent); the free sandboxes
+//   check both before Phase 5.
 // - What the rail answers is chosen by the amount's fils, so anyone can show
 //   every outcome on staging (decision 5): `.01` declined (refused, no
 //   payment made: FAILED); `.02` the submission's answer lost (a timeout: the
@@ -115,8 +118,14 @@ export function createFakePayments({ clock }: { readonly clock: Clock }): FakePa
 
   /** Why the rail refuses this payment before making it (a 4xx that creates nothing), or undefined. */
   const refusalOf = async (held: FakeRecords, intent: ApprovedPaymentIntent): Promise<string | undefined> => {
+    if (intent.amountMinor <= 0n) return FAKE_REJECT_CODES.overLimit;
     const source = await held.byAlias('source', intent.accountConsentId);
-    if (source === undefined || availabilityOf(source.body.status) !== 'ACTIVE') return FAKE_REJECT_CODES.consent;
+    // Its stored status, and its expiry as the rail would by now have moved it (fake-rail's `brought`).
+    const inUse =
+      source !== undefined &&
+      availabilityOf(source.body.status) === 'ACTIVE' &&
+      clock.now() < new Date(source.body.expiresAt);
+    if (!inUse) return FAKE_REJECT_CODES.consent;
     const { currency, maxPaymentMinor } = source.body.controls;
     if (currency !== intent.currency) return FAKE_REJECT_CODES.consent;
     if (intent.amountMinor > BigInt(maxPaymentMinor)) return FAKE_REJECT_CODES.overLimit;
@@ -152,10 +161,13 @@ export function createFakePayments({ clock }: { readonly clock: Clock }): FakePa
           script,
         },
       };
-      await held.add('payment', record);
+      // Another submission of the same key at once made it first (the second's add waits for its step, then adds
+      // nothing): the rail answers with that payment, as within the window.
+      const stored = (await held.add('payment', record)) ? record : await held.get('payment', record.ref);
+      if (stored === undefined) throw new Error('A payment the fake partner just made is gone');
       return {
-        result: { kind: 'accepted', execution: executionOf(held.organizationId, intent.instructionId, record) },
-        lost: script === 'lost' || script === 'duplicate',
+        result: { kind: 'accepted', execution: executionOf(held.organizationId, intent.instructionId, stored) },
+        lost: stored === record && (script === 'lost' || script === 'duplicate'),
       };
     },
 
