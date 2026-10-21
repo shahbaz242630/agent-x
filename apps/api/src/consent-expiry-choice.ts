@@ -16,6 +16,7 @@ import type { AuditDetails, AuditTransaction, SignedStates } from '@agentx/core/
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
 import { z } from 'zod';
+import { IntegrityFailure } from './errors.ts';
 
 /** The action of the event that keeps a source's choice: the newest is in force. */
 export const CONSENT_EXPIRY_CHOSEN = 'funding_source.consent_expiry_chosen';
@@ -73,7 +74,8 @@ export async function consentExpiryOf(
     limit: 1,
     newest: true,
   });
-  if (history.outcome !== 'read') throw new Error(`A source's consent-expiry choice can't be believed: ${sourceId}`);
+  if (history.outcome !== 'read')
+    throw new IntegrityFailure(`A source's consent-expiry choice can't be believed: ${sourceId}`);
   return consentExpiryIn(history.events.at(-1)?.event.details);
 }
 

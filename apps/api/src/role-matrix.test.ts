@@ -289,11 +289,14 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
     );
   });
 
+  // Every operation by every caller, an operation's callers at once: ~1,500 answers, past 5 s under a loaded run (S131, S134).
   it('SEC-HA-09 answers each caller its access names, and refuses every other with 401 or 403', async () => {
     const wrong: string[] = [];
     for (const operation of operations) {
-      for (const caller of CALLERS) {
-        const response = await app.inject(requestFor(operation, caller));
+      const responses = await Promise.all(CALLERS.map((caller) => app.inject(requestFor(operation, caller))));
+      for (const [at, caller] of CALLERS.entries()) {
+        const response = responses[at];
+        if (response === undefined) throw new Error('an answer per caller');
         const refused = accessRefusal(response.statusCode, response.body);
         if (refused === allowed(operation, caller)) {
           wrong.push(`${operation.method} ${operation.path} by ${caller.name}: ${String(response.statusCode)}`);
@@ -308,7 +311,7 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
       }
     }
     expect(wrong).toEqual([]);
-  });
+  }, 30_000);
 
   it("refuses a GET's HEAD exactly when it refuses the GET (a HEAD's answer has no body to read its reason from)", async () => {
     const wrong: string[] = [];
