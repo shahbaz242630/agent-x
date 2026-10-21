@@ -53,9 +53,10 @@ describe('the pinned Bicep compiler', () => {
     const workflow = parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as {
       jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
     };
-    const steps = workflow.jobs.verify?.steps ?? [];
+    // The tests run in Verify's parts (Phase 3 debt), each installing it first.
+    const steps = workflow.jobs['verify-tests']?.steps ?? [];
     const install = steps.findIndex((step) => step.run === 'pnpm tools');
-    const tests = steps.findIndex((step) => step.run === 'pnpm test:coverage');
+    const tests = steps.findIndex((step) => step.run?.startsWith('pnpm test:coverage ') === true);
     expect(install).toBeGreaterThan(-1);
     expect(install).toBeLessThan(tests);
     const scripts = (JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> }).scripts;

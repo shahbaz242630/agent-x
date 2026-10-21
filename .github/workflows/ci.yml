@@ -1,7 +1,7 @@
 # CI for every pull request and every push to main.
 #
 # Every job that runs on a pull request is a required status check on the main
-# ruleset. The three image jobs run only on a push to main, after every other
+# ruleset, but Verify's test parts, which Verify itself requires. The three image jobs run only on a push to main, after every other
 # job passed, so they can't gate a PR: they publish and sign the image that
 # deployments run (SEC-SC-02). The release job then releases that image to
 # staging (G4). All actions are pinned to full commit SHAs, the default token
@@ -83,16 +83,94 @@ jobs:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
           GITLEAKS_ENABLE_COMMENTS: false
 
+  # The suite in three parts at once (Phase 3 debt: one run took 15 of Verify's
+  # 18-23 minutes). Each part's coverage is partial, so its limits are checked
+  # by Verify once the parts are merged (VITEST_PART, vitest.config.ts).
+  verify-tests:
+    name: Verify tests (${{ matrix.part }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: unit
+            projects: --project unit --project repo-checks
+          - part: pg16
+            projects: --project db-pg16
+          - part: pg18
+            projects: --project db-pg18
+    env:
+      # Corepack must not read a .corepack.env file from the repository, which
+      # could turn off its signature checks or point it at another registry.
+      COREPACK_ENV_FILE: '0'
+      VITEST_PART: ${{ matrix.part }}
+      PROJECTS: ${{ matrix.projects }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          # The newest Node 24, so it always meets package.json engines (>=24.19.0).
+          check-latest: true
+          package-manager-cache: false
+
+      # Corepack ships with Node 24. It fetches the pnpm package pinned in
+      # package.json's packageManager field and checks it against the sha512
+      # there. That package then downloads pnpm's native binary and checks it
+      # against npm's registry signature, using keys inside the pinned package.
+      - name: Enable pnpm through Corepack
+        run: corepack enable pnpm
+
+      # pnpm re-applies the release-age and trust checks to the lockfile here.
+      # New advisories are caught by Dependency review (packages this PR adds)
+      # and the weekly full audit, which never blocks a PR.
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # The deploy/azure checks run the Bicep compiler, and tests download
+      # nothing (Rule Book §6), so the pinned binary is installed here and
+      # checked against its SHA-256 (tooling/bicep/bicep.ts).
+      - name: Install the pinned Bicep compiler
+        run: pnpm tools
+
+      # Only this run's reports go up: anything committed under the folder is cleared first.
+      - name: Clear old test reports
+        run: rm -rf .vitest-reports
+
+      # PROJECTS is one of the three literal lists above, split into its flags on purpose.
+      - name: Tests, gate proofs and coverage (one part)
+        run: pnpm test:coverage ${PROJECTS} --reporter=default --reporter=blob --outputFile.blob=".vitest-reports/blob-${VITEST_PART}.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vitest-${{ matrix.part }}
+          path: .vitest-reports/
+          # The folder's name starts with a dot, which the action leaves out unless told.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
   verify:
     name: Verify
     runs-on: ubuntu-latest
-    # The whole suite ran 19-20 minutes by S119 and #370's merge passed 20 (cancelled): room while it is split.
+    needs: [verify-tests]
+    # Runs whatever the parts did, a cancelled run too, so any part not passed
+    # fails Verify: a skipped required check would count as passed.
+    if: ${{ always() }}
     timeout-minutes: 30
     env:
       # Corepack must not read a .corepack.env file from the repository, which
       # could turn off its signature checks or point it at another registry.
       COREPACK_ENV_FILE: '0'
+      PARTS: ${{ needs.verify-tests.result }}
     steps:
+      - name: Every test part passed
+        run: test "${PARTS}" = success
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -138,14 +216,20 @@ jobs:
       - name: Duplicated code (jscpd, threshold in .jscpd.json)
         run: pnpm duplicates
 
-      # The deploy/azure checks run the Bicep compiler, and tests download
-      # nothing (Rule Book §6), so the pinned binary is installed here and
-      # checked against its SHA-256 (tooling/bicep/bicep.ts).
-      - name: Install the pinned Bicep compiler
-        run: pnpm tools
+      # Only the parts' reports are merged: anything committed under the folder is cleared first.
+      - name: Clear old test reports
+        run: rm -rf .vitest-reports
 
-      - name: Tests, gate proofs and coverage
-        run: pnpm test:coverage
+      # Refuses a download whose hash differs from the one recorded at upload.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vitest-*
+          path: .vitest-reports
+          merge-multiple: true
+
+      # Every part's tests, counted and their coverage merged, each file held to its limit.
+      - name: Tests, gate proofs and coverage (the parts merged)
+        run: pnpm vitest --merge-reports --coverage
 
   dependency-review:
     name: Dependency review
@@ -252,7 +336,7 @@ jobs:
   image-publish:
     name: Image (main) - build, push and sign
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [workflow-policy, zizmor, gitleaks, verify, end-to-end]
+    needs: [workflow-policy, zizmor, gitleaks, verify-tests, verify, end-to-end]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

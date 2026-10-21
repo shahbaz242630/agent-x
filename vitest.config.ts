@@ -53,7 +53,8 @@ export default defineConfig({
       include: ['packages/*/src/**/*.{ts,tsx}', 'apps/*/src/**/*.{ts,tsx}'],
       exclude: ['**/*.test.{ts,tsx}'],
       reporter: ['text', 'json-summary'],
-      thresholds: coverageThresholds,
+      // CI runs the suite in parts at once (VITEST_PART), each one's coverage partial: the limits are checked once the parts are merged.
+      thresholds: process.env.VITEST_PART === undefined ? coverageThresholds : {},
     },
   },
 });

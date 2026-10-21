@@ -31,8 +31,11 @@ export const ALLOWED_ACTIONS = new Set([
   'anchore/sbom-action',
   // SEC-SC-02: cosign, which signs the published image; the installer checks cosign's own signature.
   'sigstore/cosign-installer',
-  // SEC-SC-02: hands the published image's SBOM from the job that makes it to the job that signs it.
+  // SEC-SC-02: hands the published image's SBOM from the job that makes it to the job that signs it;
+  // and the test parts' reports to Verify, which merges them (Phase 3 debt).
   'actions/download-artifact',
+  // The test parts' reports (blob, with coverage) up to Verify, kept a day.
+  'actions/upload-artifact',
   // G4 (ADR-002 "Deploying"): the release job signs in to Azure by OIDC, as the
   // identity whose one role is given on the API and the migration job alone;
   // no credential is stored, and only a main job in `staging` is trusted.
