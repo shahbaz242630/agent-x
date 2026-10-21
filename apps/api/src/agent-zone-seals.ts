@@ -15,6 +15,7 @@
 import { type AuditTables, type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import {
   type LimitReservationsTables,
+  MOST_UNSEALED_A_CALL,
   sealKeptZone,
   type UnsealedZone,
   unsealedZones,
@@ -60,13 +61,13 @@ export function createZoneSealing({
         .selectFrom('spend_requests.requests')
         .select(['id', 'mandate_id'])
         .where('agent_id', '=', unsealed.agentId)
+        // One weighed with no mandate in force kept no zone (its month is never asked): the first under one did.
+        .where('mandate_id', 'is not', null)
         .orderBy('id')
         .limit(1)
         .executeTakeFirst();
-      const mandate =
-        first?.mandate_id === undefined || first.mandate_id === null
-          ? undefined
-          : await mandateOf(tx, states, { orgId, id: first.mandate_id }, 'share');
+      const mandateId = first?.mandate_id ?? null;
+      const mandate = mandateId === null ? undefined : await mandateOf(tx, states, { orgId, id: mandateId }, 'share');
       const expected = mandate?.outcome === 'found' ? mandate.mandate.timeZone : '';
       const sealed = await sealKeptZone(tx, states, orgId, unsealed, expected);
       if (sealed === 'sealed' && first !== undefined) {
@@ -83,16 +84,25 @@ export function createZoneSealing({
     const log = logger.child({ orgId });
     const counts = { sealed: 0, mismatched: 0, gone: 0 };
     try {
-      const unsealed = await withSignedStates(database, orgId, services(log), (tx) => unsealedZones(tx, orgId));
-      for (const zone of unsealed) {
-        if (signal?.aborted === true) return false;
-        counts[await sealOne(orgId, zone, log)] += 1;
+      // A page at a time past the last agent listed, so zones left unsealed (mismatched) never hide the ones after.
+      let after: string | null = null;
+      for (;;) {
+        const from = after;
+        const unsealed: UnsealedZone[] = await withSignedStates(database, orgId, services(log), (tx) =>
+          unsealedZones(tx, orgId, from),
+        );
+        for (const zone of unsealed) {
+          if (signal?.aborted === true) return false;
+          counts[await sealOne(orgId, zone, log)] += 1;
+        }
+        if (unsealed.length < MOST_UNSEALED_A_CALL) break;
+        after = unsealed.at(-1)?.agentId ?? null;
       }
     } catch (error) {
       log.error('agent_zones.seal_failed', { err: error, ...counts });
       return true;
     }
-    if (counts.sealed + counts.mismatched > 0) log.info('agent_zones.sealed', counts);
+    if (counts.sealed + counts.mismatched + counts.gone > 0) log.info('agent_zones.sealed', counts);
     return true;
   };
 

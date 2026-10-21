@@ -138,8 +138,15 @@ export interface UnsealedZone {
 /** The most unsealed zones one call lists. */
 export const MOST_UNSEALED_A_CALL = 200;
 
-/** The organisation's zones kept before 0054 and not yet sealed, by agent, at most MOST_UNSEALED_A_CALL. */
-export async function unsealedZones(tx: ZonesTransaction, orgId: string): Promise<UnsealedZone[]> {
+/**
+ * The organisation's zones kept before 0054 and not yet sealed, by agent,
+ * after the agent `after` (null from the start), at most MOST_UNSEALED_A_CALL.
+ */
+export async function unsealedZones(
+  tx: ZonesTransaction,
+  orgId: string,
+  after: string | null,
+): Promise<UnsealedZone[]> {
   const rows = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the rows with no signed state yet, to seal: none is decided on before sealKeptZone checks it against the signed mandate
     .selectFrom(AGENT_ZONES.table)
@@ -147,6 +154,7 @@ export async function unsealedZones(tx: ZonesTransaction, orgId: string): Promis
     .where('org_id', '=', orgId)
     .where('state_event_id', 'is', null)
     .where('state_version', '=', 1)
+    .$if(after !== null, (query) => query.where('agent_id', '>', after ?? ''))
     .orderBy('agent_id')
     .limit(MOST_UNSEALED_A_CALL)
     .execute();
