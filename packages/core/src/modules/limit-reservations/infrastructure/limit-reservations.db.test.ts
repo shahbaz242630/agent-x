@@ -203,6 +203,18 @@ describe("an agent's zone", () => {
     await expect(inOrg(org, (tx) => tx.deleteFrom('limit_reservations.agent_zones').execute())).rejects.toEqual(DENIED);
   });
 
+  it("is addressed by its agent's own ID, and no other (0054's id_is_its_agent)", async () => {
+    const org = await organisation();
+    await expect(
+      inOrg(org, (tx) =>
+        tx
+          .insertInto('limit_reservations.agent_zones')
+          .values({ org_id: org.id, id: randomUUID(), agent_id: org.agent, time_zone: 'Asia/Dubai', created_at: AT })
+          .execute(),
+      ),
+    ).rejects.toEqual(refusedBy('id_is_its_agent'));
+  });
+
   it('comes before any period of the agent', async () => {
     const org = await organisation();
     await expect(
