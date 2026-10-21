@@ -78,7 +78,13 @@ describe('at start-up', () => {
       authorityTables: AUTHORITY_TABLES,
       statusGuardedTables: statuses,
       // And the made-once guard on each whose rows are made once (E1-1's review).
-      madeOnceTables: ['mandates.versions', 'mandates.policy_versions', 'suppliers.supplier_versions'],
+      madeOnceTables: [
+        'mandates.versions',
+        'mandates.policy_versions',
+        'suppliers.supplier_versions',
+        // An agent's month zone (0054, PL-40).
+        'limit_reservations.agent_zones',
+      ],
       // And the fixed-at-creation guard on each with columns fixed when made (Phase 2 B1).
       // Phase 2 D1: a spend request's all but its status.
       fixedAtCreation: {
