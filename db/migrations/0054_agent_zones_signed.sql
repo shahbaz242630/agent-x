@@ -27,7 +27,13 @@ ALTER TABLE limit_reservations.agent_zones
   ADD COLUMN state_version integer NOT NULL DEFAULT 1,
   ADD COLUMN state_event_id uuid;
 
+-- The rows kept before this migration, every organisation's: the table's
+-- tenant wall binds its owner too (FORCE), and this runs as the owner with no
+-- organisation named, so the wall is lifted for this one statement and put
+-- back, all in the migration's own transaction.
+ALTER TABLE limit_reservations.agent_zones NO FORCE ROW LEVEL SECURITY;
 UPDATE limit_reservations.agent_zones SET id = agent_id;
+ALTER TABLE limit_reservations.agent_zones FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE limit_reservations.agent_zones
   ALTER COLUMN id SET NOT NULL,
