@@ -26,6 +26,8 @@ type Job = Record<string, unknown> & { name?: string; steps?: Step[] };
 const scripts = (JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> }).scripts;
 const ciJobs = (parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as { jobs: Record<string, Job> }).jobs;
 const verifyJob = ciJobs.verify;
+/** The suite's parts at once (Phase 3 debt), whose reports Verify merges. */
+const partsJob = ciJobs['verify-tests'];
 const endToEndJob = ciJobs['end-to-end'];
 
 /** The end-to-end suite (ADR-010 §7), run by its own CI job against the compose stack. */
@@ -93,16 +95,31 @@ describe('CI-05 verify gate', () => {
     expect(installScripts).toEqual([]);
   });
 
-  it('runs every check in the CI "Verify" job', () => {
+  it('runs every check in the CI "Verify" job, the tests in its parts, merged there with every limit', () => {
     expect(verifyJob?.name).toBe('Verify');
     const runs = (verifyJob?.steps ?? []).map((step) => step.run);
-    expect(runs).toEqual(expect.arrayContaining(Object.keys(CHECKS).map((check) => `pnpm ${check}`)));
+    const { 'test:coverage': _tests, ...statics } = CHECKS;
+    expect(runs).toEqual(expect.arrayContaining(Object.keys(statics).map((check) => `pnpm ${check}`)));
+    expect(runs).toContain('pnpm vitest --merge-reports --coverage');
+    const partRuns = (partsJob?.steps ?? []).map((step) => step.run ?? '');
+    expect(partRuns.filter((run) => run.startsWith('pnpm test:coverage '))).toHaveLength(1);
+    // Together the parts run every project, each once.
+    const projects = ((partsJob?.strategy as { matrix?: { include?: { projects: string }[] } }).matrix?.include ?? [])
+      .flatMap(({ projects: flags }) => flags.split(' ').filter((flag) => flag !== '--project'))
+      .sort();
+    expect(projects).toEqual(['db-pg16', 'db-pg18', 'repo-checks', 'unit']);
   });
 
-  it('lets no Verify step, or the job, be skipped or allowed to fail', () => {
-    const escapes = [verifyJob ?? {}, ...(verifyJob?.steps ?? [])].filter(
+  it('lets no Verify step, or a part, be skipped or allowed to fail; Verify runs past a failed part and fails', () => {
+    const escapes = [...(verifyJob?.steps ?? []), partsJob ?? {}, ...(partsJob?.steps ?? [])].filter(
       (entry) => 'if' in entry || 'continue-on-error' in entry,
     );
     expect(escapes).toEqual([]);
+    expect(verifyJob?.needs).toEqual(['verify-tests']);
+    expect(verifyJob?.if).toBe('${{ !cancelled() }}');
+    expect('continue-on-error' in (verifyJob ?? {})).toBe(false);
+    expect(verifyJob?.steps?.[0]).toMatchObject({ name: 'Every test part passed', run: 'test "${PARTS}" = success' });
+    expect((verifyJob?.env as Record<string, string> | undefined)?.PARTS).toBe('${{ needs.verify-tests.result }}');
+    expect((partsJob?.strategy as { 'fail-fast'?: boolean })['fail-fast']).toBe(false);
   });
 });

@@ -23,6 +23,8 @@ dist/
 build/
 *.tsbuildinfo
 coverage/
+# The test parts' reports CI merges (vitest --merge-reports).
+.vitest-reports/
 .turbo/
 
 # Logs
