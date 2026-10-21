@@ -180,8 +180,9 @@ export function createMandateRegistry({
         if (agent.outcome === 'missing') throw new MandateRefused(404, 'NOT_FOUND');
         if (agent.agent.status !== 'ACTIVE') throw new MandateRefused(409, 'AGENT_NOT_ACTIVE');
         // The admin's zone is the one months are counted in, or refused: never overridden unseen (decision 15).
-        const kept = await keptZoneOf(tx, agent.agent.id);
-        if (kept !== undefined && kept !== timeZone) throw new MandateRefused(409, 'AGENT_ZONE_KEPT');
+        const kept = await keptZoneOf(tx, states, { orgId: member.orgId, agentId: agent.agent.id });
+        if (kept.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+        if (kept.outcome === 'kept' && kept.zone !== timeZone) throw new MandateRefused(409, 'AGENT_ZONE_KEPT');
         const open = await openMandateOfAgent(tx, states, member.orgId, agent.agent.id);
         if (open.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
         if (open.outcome === 'found') throw new MandateRefused(409, 'MANDATE_OPEN');

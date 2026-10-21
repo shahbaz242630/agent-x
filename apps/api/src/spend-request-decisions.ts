@@ -44,6 +44,7 @@ import {
   lockAgentMonth,
   monthSpent,
   reserve,
+  sealNewZone,
   splitHeld,
 } from '@agentx/core/modules/limit-reservations';
 import { currencyAllowed, openMandateOfAgent, type PolicyVersionRecord } from '@agentx/core/modules/mandates';
@@ -472,10 +473,17 @@ export function createSpendRequestDecisions({
     const now = clock.now();
     await currencyTaken(tx, asked.amount.currency);
     const { agent, keyId } = await actingIn(tx, states, acting, now);
+    // The agent's zone, when this is its first decision: sealed with the request, as the audit head comes last.
+    let zoneKept: string | undefined;
     const { input, mandate, supplier, order, month, approvalWait } = await weigh(tx, states, orgId, agent, asked, {
       now,
       decides: true,
-      monthOf: (zoneIfNew) => lockAgentMonth(tx, { orgId, agentId, zoneIfNew, at: now }),
+      monthOf: async (zoneIfNew) => {
+        const locked = await lockAgentMonth(tx, states, { orgId, agentId, zoneIfNew, at: now });
+        if (locked.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+        if (locked.keptNow) zoneKept = zoneIfNew;
+        return locked.month;
+      },
     });
     const made = decide(input);
     const requestId = ids.next();
@@ -532,6 +540,15 @@ export function createSpendRequestDecisions({
       // The supplier held and its payee key its own alone: see the top of this file.
       if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
       held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };
+    }
+    if (zoneKept !== undefined) {
+      await sealNewZone(tx, states, {
+        orgId,
+        agentId,
+        zone: zoneKept,
+        at: now,
+        actor: { type: 'agent', id: agent.id },
+      });
     }
     await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
     // Every admin and approver is told it waits (partner decision 2, Phase 3); the email reads it as it is sent.

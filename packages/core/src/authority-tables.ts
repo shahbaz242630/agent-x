@@ -16,6 +16,7 @@ import type { SignedStateTable } from '@agentx/platform/db';
 import { AGENT_KEYS, AGENTS } from './modules/agents/index.ts';
 import { SOURCES } from './modules/funding-sources/index.ts';
 import { FACTOR_RESETS, INVITATIONS, MEMBERSHIPS, REGISTERED_CONTACTS } from './modules/identity/index.ts';
+import { AGENT_ZONES } from './modules/limit-reservations/index.ts';
 import { MANDATE_VERSIONS, MANDATES, POLICIES, POLICY_VERSIONS } from './modules/mandates/index.ts';
 import { ORGANIZATIONS } from './modules/organizations/index.ts';
 import { SPEND_REQUESTS } from './modules/spend-requests/index.ts';
@@ -64,7 +65,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * after the mandates, Phase 2 C1), then its funding sources (5, D2-2),
  * then its suppliers (6), their payee registrations (6, after their supplier,
  * E2-1) and their versions (6, after the registration that gives one its
- * reference, E1-1), then its spend requests (8, Phase 2 D1). Clearing the
+ * reference, E1-1), then its agents' month zones (7, with the agent's month,
+ * 0054), then its spend requests (8, Phase 2 D1). Clearing the
  * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
  * table with `liveStatuses`, its live rows), so a new table goes in at its
  * level.
@@ -85,5 +87,6 @@ export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   SUPPLIERS,
   BENEFICIARY_REGISTRATIONS,
   SUPPLIER_VERSIONS,
+  AGENT_ZONES,
   SPEND_REQUESTS,
 ];

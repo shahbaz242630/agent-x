@@ -66,7 +66,7 @@ const period = (org: Org, month = MONTH, zone = 'Asia/Dubai') =>
   inOrg(org, async (tx) => {
     await tx
       .insertInto('limit_reservations.agent_zones')
-      .values({ org_id: org.id, agent_id: org.agent, time_zone: zone, created_at: AT })
+      .values({ org_id: org.id, id: org.agent, agent_id: org.agent, time_zone: zone, created_at: AT })
       .onConflict((conflict) => conflict.doNothing())
       .execute();
     await tx
@@ -188,12 +188,31 @@ describe("an agent's zone", () => {
       tx.selectFrom('limit_reservations.agent_zones').select('time_zone').execute(),
     );
     expect(zones).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    // Its fields are written only as its first signed state is recorded (0054): once it points at it, never again.
+    await inOrg(org, (tx) =>
+      tx.updateTable('limit_reservations.agent_zones').set({ state_event_id: randomUUID() }).execute(),
+    );
     await expect(
       inOrg(org, (tx) =>
         tx.updateTable('limit_reservations.agent_zones').set({ time_zone: 'Pacific/Kiritimati' }).execute(),
       ),
+    ).rejects.toEqual(refusedBy('made_once'));
+    await expect(
+      inOrg(org, (tx) => tx.updateTable('limit_reservations.agent_zones').set({ agent_id: randomUUID() }).execute()),
     ).rejects.toEqual(DENIED);
     await expect(inOrg(org, (tx) => tx.deleteFrom('limit_reservations.agent_zones').execute())).rejects.toEqual(DENIED);
+  });
+
+  it("is addressed by its agent's own ID, and no other (0054's id_is_its_agent)", async () => {
+    const org = await organisation();
+    await expect(
+      inOrg(org, (tx) =>
+        tx
+          .insertInto('limit_reservations.agent_zones')
+          .values({ org_id: org.id, id: randomUUID(), agent_id: org.agent, time_zone: 'Asia/Dubai', created_at: AT })
+          .execute(),
+      ),
+    ).rejects.toEqual(refusedBy('id_is_its_agent'));
   });
 
   it('comes before any period of the agent', async () => {
@@ -559,11 +578,13 @@ describe('the tenant wall', () => {
     await period(org);
     const request = await requestOf(org);
     for (const write of [
-      (tx: Tx) =>
-        tx
+      (tx: Tx) => {
+        const agent = randomUUID();
+        return tx
           .insertInto('limit_reservations.agent_zones')
-          .values({ org_id: org.id, agent_id: randomUUID(), time_zone: 'Asia/Dubai', created_at: AT })
-          .execute(),
+          .values({ org_id: org.id, id: agent, agent_id: agent, time_zone: 'Asia/Dubai', created_at: AT })
+          .execute();
+      },
       (tx: Tx) =>
         tx
           .insertInto('limit_reservations.agent_periods')

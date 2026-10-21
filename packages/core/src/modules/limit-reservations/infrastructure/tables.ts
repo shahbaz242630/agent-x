@@ -1,3 +1,5 @@
+import type { Generated } from 'kysely';
+
 /** The limit_reservations schema's tables (db/migrations/0040_limit_reservations.sql), as Kysely sees them. */
 export interface LimitReservationsTables {
   'limit_reservations.agent_zones': AgentZonesTable;
@@ -8,9 +10,13 @@ export interface LimitReservationsTables {
 /** The time zone an agent's months are named in: its first reservation's mandate's, kept for good. */
 interface AgentZonesTable {
   org_id: string;
+  /** Its agent's ID: the row's own, as a signed record is addressed (0054's `id_is_its_agent`). */
+  id: string;
   agent_id: string;
   time_zone: string;
   created_at: Date;
+  state_version: Generated<number>;
+  state_event_id: string | null;
 }
 
 /** Only a lock target: one row an agent a month, never changed (partner decision 4). */

@@ -27,7 +27,8 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
 import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
-import { type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
+import { keptZonesOf, type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
+import { periodOf } from '../../../shared-kernel/index.ts';
 import { bankKeyOf } from '../domain/asked.ts';
 import { type ApprovalClock, approvalWaitOf } from '../domain/approval-wait.ts';
 import { type ClaimHolding, type HeldSealed, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
@@ -229,6 +230,15 @@ async function judged(
     orgId,
     requests.filter(({ status }) => holdsNow(status)).map(({ id }) => id),
   );
+  // Each sealed month must be the month of its instant in the agent's signed zone (0054, PL-40): a decision made
+  // while the zone was changed past the app is caught, even once it is changed back.
+  const zones = await keptZonesOf(tx, states, orgId, [
+    ...new Set(requests.filter(({ id }) => (sealed.get(id)?.held ?? null) !== null).map(({ agentId }) => agentId)),
+  ]);
+  const inItsZone = (agentId: string, held: HeldSealed): boolean => {
+    const zone = zones.get(agentId.toLowerCase());
+    return zone?.outcome === 'kept' && periodOf(held.reservedAt, zone.zone).month === held.month;
+  };
   let mismatched = 0;
   for (const request of requests) {
     const held = sealed.get(request.id)?.held ?? null;
@@ -251,7 +261,10 @@ async function judged(
       ...reservation,
       payeeAsSealed: asSealed(reservation.payeeKey),
     }));
-    if (!holdingsMatch({ ...request, held }, reserved, claims)) {
+    if (
+      !holdingsMatch({ ...request, held }, reserved, claims) ||
+      (held !== null && !inItsZone(request.agentId, held))
+    ) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       mismatched += 1;
     }
