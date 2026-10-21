@@ -2,7 +2,7 @@
 // decision 31). The API builds each file a block at a time and later hands it
 // out a part at a time, as its own identity (packages/platform/src/storage/
 // block-store.ts): `<org>/<export>/<YYYY-MM>-try<n>.<csv|ndjson>.gz`. It never
-// deletes one; the lifecycle rule below does, a week after.
+// deletes one; the lifecycle rule below does, two weeks after.
 //
 // - shut as the audit exports' store is (evidence.bicep): shared keys off, so
 //   every request signs in with Entra; no public blob access; no copying in
@@ -82,7 +82,7 @@ resource account 'Microsoft.Storage/storageAccounts@2025-01-01' = {
   }
 }
 
-// No versions and no soft delete: either would keep a file past its week.
+// No versions and no soft delete: either would keep a file past its two weeks.
 resource blobs 'Microsoft.Storage/storageAccounts/blobServices@2025-01-01' = {
   parent: account
   name: 'default'
@@ -102,9 +102,12 @@ resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@20
   }
 }
 
-// Every file deleted a week after it is made (decision 31). Eight days, not
-// seven: Azure runs the rule about once a day, and the day over keeps a file
-// from going while the API still offers it.
+// Every file deleted 14 days after it is made (decisions 31, 32e). A download
+// reads ready 7 days from its last file and is given up past 6 days building,
+// so its first file may be 13 days old when the API stops offering it; the
+// API refuses every read past its 7 days, and this deletes what it no longer
+// reads. Azure runs the rule about once a day, so a file goes within a day
+// after.
 resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2025-01-01' = {
   parent: account
   name: 'default'
@@ -112,7 +115,7 @@ resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2025-01
     policy: {
       rules: [
         {
-          name: 'delete-after-a-week'
+          name: 'delete-after-two-weeks'
           enabled: true
           type: 'Lifecycle'
           definition: {
@@ -127,7 +130,7 @@ resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2025-01
             actions: {
               baseBlob: {
                 delete: {
-                  daysAfterCreationGreaterThan: 8
+                  daysAfterCreationGreaterThan: 14
                 }
               }
             }

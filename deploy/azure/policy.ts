@@ -680,8 +680,13 @@ const DOWNLOADS_ACTIONS = [
 /** The activity downloads' custom role as a role assignment names it, without case (modules/activity-downloads.bicep). */
 const downloadsRoleName = (groupId: string): string => bicepGuid(groupId, 'activity-downloads');
 
-/** The most days a download may be kept (decision 31: a week, and a day over, since Azure runs the rule daily). */
-const DOWNLOADS_KEPT_DAYS = 8;
+/**
+ * The most days the store keeps a download's file: a download reads ready 7
+ * days from its last file, and builds for 7 days at most, so its first file
+ * may be 14 days old when it expires (decision 31; 32e, F1 G5). The API refuses
+ * every read past its 7 days; this deletes what it no longer reads.
+ */
+const DOWNLOADS_KEPT_DAYS = 14;
 
 /** Key Vault Secrets User, by its id: reads a secret's value and nothing else (Microsoft's built-in role). */
 const VAULT_READER_ROLE = '4633458b-17de-408a-b874-0445c86b69e6';
@@ -1939,7 +1944,7 @@ function downloadsAccountProblems(account: PredictedResource, appsSubnets: Reado
  * within DOWNLOADS_KEPT_DAYS of its making: switched on, for block blobs,
  * narrowed by nothing but the container itself.
  */
-function deletesWithinAWeek(rule: unknown): boolean {
+function deletesWithinTwoWeeks(rule: unknown): boolean {
   const filters = at(rule, 'definition', 'filters');
   const prefixes = list(at(filters, 'prefixMatch'));
   const days = at(rule, 'definition', 'actions', 'baseBlob', 'delete', 'daysAfterCreationGreaterThan');
@@ -1996,12 +2001,12 @@ function downloadsPartsProblems(
   const deletes = lifecycles.some(
     (found) =>
       found.id === `${account.id}/managementPolicies/default` &&
-      list(at(found.properties, 'policy', 'rules')).some(deletesWithinAWeek),
+      list(at(found.properties, 'policy', 'rules')).some(deletesWithinTwoWeeks),
   );
   if (blobServices.length !== 1 || containers.length !== 1 || lifecycles.length !== 1 || !deletes) {
     problem(
       account.name,
-      `needs one blob service, one container and one lifecycle rule deleting every file in it within ${String(DOWNLOADS_KEPT_DAYS)} days of its making (decision 31)`,
+      `needs one blob service, one container and one lifecycle rule deleting every file in it within ${String(DOWNLOADS_KEPT_DAYS)} days of its making (decisions 31, 32e)`,
     );
   }
   const known: readonly string[] = [TYPES.blobService, TYPES.container, TYPES.lifecycle];
