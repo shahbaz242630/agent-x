@@ -279,7 +279,6 @@ export function createWaitingRejections({
   ): Promise<number | null> => {
     let done = 0;
     for (const policyId of policies) {
-      if (aborted()) return null;
       if (done >= left) return done;
       const from = await leftoversLogged(log, orgId, policyId);
       const rejected = from === undefined ? 0 : await rejectedOf(log, orgId, from, left - done, aborted);

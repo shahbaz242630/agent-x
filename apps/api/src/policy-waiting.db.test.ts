@@ -895,15 +895,40 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     expect(await statusOf(w, left[1] ?? '')).toBe('DENIED');
   });
 
-  it('reads the candidate policies a page at a time, each after the last', async () => {
-    const { w, made } = await twentyTwoWaiting();
+  it('reads the candidate policies a page at a time, each after the last: both policies’ rest in one run', async () => {
+    const w = await shared.world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await shared.inForce(registry, w, { approvalThreshold: AED(10_000n) });
+    const acting = await shared.agentKey(w);
+    const made: string[] = [];
+    for (let at = 0; at < 44; at += 1) {
+      made.push((await ask(acting, w, { amount: AED(at % 2 === 0 ? 30_000n : 20_000n) })).id);
+      clock.advanceBy(1_000);
+    }
+    // The organisation's AED 250 an order goes for the 22 of AED 300; then the mandate's AED 150, for the 22 of AED 200.
+    await changed(w, ORGANIZATION, rulesOf(2_000_000n, 25_000n), 'reject');
     const mandateId = await mandateIdOf(w);
-    // The mandate's change rejects 20 and leaves 2; the organisation's then rejects none of those left.
-    await changed(w, { scope: 'mandate', mandateId }, rulesOf(10_000n), 'reject');
+    await changed(w, { scope: 'mandate', mandateId }, rulesOf(2_000_000n, 15_000n), 'reject');
 
     await rejections(w, undefined, 1).run();
 
     for (const id of made) expect(await statusOf(w, id)).toBe('DENIED');
+    expect(lines('waiting_rejection.rejected')).toHaveLength(4);
+  });
+
+  it('pages past a policy whose rest stands, ending the run', async () => {
+    const { w, acting, left } = await leftTwo();
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: acting.keyId }, 'revoke', {
+        actor: OPERATOR,
+        action: 'agent_key.revoked',
+        details: {},
+      }),
+    );
+
+    await within(20_000, rejections(w, undefined, 1).run(), 'a run of one-policy pages');
+
+    for (const id of left) expect(await statusOf(w, id)).toBe('APPROVAL_REQUIRED');
   });
 
   it('stops when its signal is aborted, rejecting nothing more', async () => {
