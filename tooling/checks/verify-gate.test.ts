@@ -9,6 +9,10 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
+import config from '../../vitest.config.ts';
+import { coverageThresholds } from '../coverage-thresholds.ts';
+import { POSTGRES_IMAGES } from '../test-db/postgres-images.ts';
+
 /** Each check and the exact command it runs. */
 const CHECKS = {
   'format:check': 'prettier --check .',
@@ -24,7 +28,15 @@ type Step = Record<string, unknown> & { run?: string };
 type Job = Record<string, unknown> & { name?: string; steps?: Step[] };
 
 const scripts = (JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> }).scripts;
-const ciJobs = (parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as { jobs: Record<string, Job> }).jobs;
+const workflow = parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as {
+  env?: Record<string, string>;
+  jobs: Record<string, Job>;
+};
+const ciJobs = workflow.jobs;
+
+/** The part step's command, exactly: the projects, both reporters and the blob's own file. */
+const PART_RUN =
+  'pnpm test:coverage ${PROJECTS} --reporter=default --reporter=blob --outputFile.blob=".vitest-reports/blob-${VITEST_PART}.json"';
 const verifyJob = ciJobs.verify;
 /** The suite's parts at once (Phase 3 debt), whose reports Verify merges. */
 const partsJob = ciJobs['verify-tests'];
@@ -102,12 +114,24 @@ describe('CI-05 verify gate', () => {
     expect(runs).toEqual(expect.arrayContaining(Object.keys(statics).map((check) => `pnpm ${check}`)));
     expect(runs).toContain('pnpm vitest --merge-reports --coverage');
     const partRuns = (partsJob?.steps ?? []).map((step) => step.run ?? '');
-    expect(partRuns.filter((run) => run.startsWith('pnpm test:coverage '))).toHaveLength(1);
-    // Together the parts run every project, each once.
+    expect(partRuns.filter((run) => run.startsWith('pnpm test:coverage '))).toEqual([PART_RUN]);
+    // Together the parts run every project the config makes, each once: one added is in a part or this fails.
     const projects = ((partsJob?.strategy as { matrix?: { include?: { projects: string }[] } }).matrix?.include ?? [])
       .flatMap(({ projects: flags }) => flags.split(' ').filter((flag) => flag !== '--project'))
       .sort();
-    expect(projects).toEqual(['db-pg16', 'db-pg18', 'repo-checks', 'unit']);
+    expect(projects).toEqual(['unit', 'repo-checks', ...Object.keys(POSTGRES_IMAGES)].sort());
+    const configured = (config.test?.projects ?? []).map((project) =>
+      typeof project === 'object' && 'test' in project ? project.test.name : undefined,
+    );
+    expect(configured.toSorted()).toEqual(projects);
+  });
+
+  it('checks every coverage limit on the merge: VITEST_PART reaches the parts alone', () => {
+    expect(process.env.VITEST_PART).toBeUndefined();
+    expect(config.test?.coverage).toMatchObject({ thresholds: coverageThresholds });
+    expect(workflow.env?.VITEST_PART).toBeUndefined();
+    expect((verifyJob?.env as Record<string, string> | undefined)?.VITEST_PART).toBeUndefined();
+    expect((partsJob?.env as Record<string, string> | undefined)?.VITEST_PART).toBe('${{ matrix.part }}');
   });
 
   it('lets no Verify step, or a part, be skipped or allowed to fail; Verify runs past a failed part and fails', () => {
@@ -116,7 +140,7 @@ describe('CI-05 verify gate', () => {
     );
     expect(escapes).toEqual([]);
     expect(verifyJob?.needs).toEqual(['verify-tests']);
-    expect(verifyJob?.if).toBe('${{ !cancelled() }}');
+    expect(verifyJob?.if).toBe('${{ always() }}');
     expect('continue-on-error' in (verifyJob ?? {})).toBe(false);
     expect(verifyJob?.steps?.[0]).toMatchObject({ name: 'Every test part passed', run: 'test "${PARTS}" = success' });
     expect((verifyJob?.env as Record<string, string> | undefined)?.PARTS).toBe('${{ needs.verify-tests.result }}');
