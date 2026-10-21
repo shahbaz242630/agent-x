@@ -925,6 +925,8 @@ export function createAuditTrail({
     async recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck> {
       let which;
       if ('eventId' in find) {
+        // Refused before any SQL, as an object's key is: the ID can come from outside (a route's export or file).
+        if (!UUID.test(find.eventId)) throw new AuditEventRefused(['eventId must be a UUID']);
         which = sql`e.id = ${find.eventId}`;
       } else {
         const problems = subjectKeyProblems(find.onlyAbout);
