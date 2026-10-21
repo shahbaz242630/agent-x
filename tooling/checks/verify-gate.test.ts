@@ -10,7 +10,6 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 import config from '../../vitest.config.ts';
-import { coverageThresholds } from '../coverage-thresholds.ts';
 import { POSTGRES_IMAGES } from '../test-db/postgres-images.ts';
 
 /** Each check and the exact command it runs. */
@@ -127,8 +126,10 @@ describe('CI-05 verify gate', () => {
   });
 
   it('checks every coverage limit on the merge: VITEST_PART reaches the parts alone', () => {
-    expect(process.env.VITEST_PART).toBeUndefined();
-    expect(config.test?.coverage).toMatchObject({ thresholds: coverageThresholds });
+    // Read as written: this test itself runs in a part, where the limits are off.
+    expect(readFileSync('vitest.config.ts', 'utf8')).toContain(
+      'thresholds: process.env.VITEST_PART === undefined ? coverageThresholds : {},',
+    );
     expect(workflow.env?.VITEST_PART).toBeUndefined();
     expect((verifyJob?.env as Record<string, string> | undefined)?.VITEST_PART).toBeUndefined();
     expect((partsJob?.env as Record<string, string> | undefined)?.VITEST_PART).toBe('${{ matrix.part }}');

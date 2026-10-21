@@ -149,6 +149,8 @@ jobs:
         with:
           name: vitest-${{ matrix.part }}
           path: .vitest-reports/
+          # The folder's name starts with a dot, which the action leaves out unless told.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
@@ -334,7 +336,7 @@ jobs:
   image-publish:
     name: Image (main) - build, push and sign
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [workflow-policy, zizmor, gitleaks, verify, end-to-end]
+    needs: [workflow-policy, zizmor, gitleaks, verify-tests, verify, end-to-end]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
