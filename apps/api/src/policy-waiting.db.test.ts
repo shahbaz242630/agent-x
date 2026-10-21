@@ -1031,6 +1031,33 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     expect(lines('waiting_rejection.failed')).toEqual([]);
   }, 300_000);
 
+  // 205 requests decided and 105 rejected, a transaction each: well past the default 30 s.
+  it('weighs past 100 younger that all stand to the ones after them', async () => {
+    const w = await shared.world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await shared.inForce(registry, w, { approvalThreshold: AED(3_000n) });
+    const acting = await shared.agentKey(w);
+    // 100 of AED 60, then 100 of AED 40, then 5 of AED 60: all waiting (approval above AED 30).
+    const made: string[] = [];
+    for (let at = 0; at < 205; at += 1) {
+      made.push((await ask(acting, w, { amount: AED(at >= 100 && at < 200 ? 4_000n : 6_000n) })).id);
+      clock.advanceBy(1_000);
+    }
+
+    // AED 50 an order: those of AED 60 go, those of AED 40 stand.
+    await changed(w, ORGANIZATION, rulesOf(2_000_000n, 5_000n), 'reject');
+    await rejections(w).run();
+    await rejections(w).run();
+
+    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual([
+      ...made.slice(20, 100),
+      ...made.slice(200),
+    ]);
+    expect(await Promise.all(made.slice(100, 200).map((id) => statusOf(w, id)))).toEqual(
+      Array<string>(100).fill('APPROVAL_REQUIRED'),
+    );
+  }, 300_000);
+
   it('leaves a younger one the rules the change replaced refused already: its approver’s still (S118)', async () => {
     const { w, made } = await waitingOf(101);
     // AED 50 an order, left with their approvers: the rules in force then refuse all 101.
@@ -1044,6 +1071,19 @@ describe('the job rejects the rest an admin chose to reject (decision 33b, F1 G8
     expect(await statusOf(w, made[100] ?? '')).toBe('APPROVAL_REQUIRED');
     expect(lines('waiting_rejection.rejected')).toEqual([]);
     expect(lines('waiting_rejection.unreadable')).toEqual([]);
+  }, 120_000);
+
+  it('leaves the younger with their approvers once another policy changes since: no confirm weighed them so', async () => {
+    const { w, made } = await waitingOf(101);
+    await changed(w, ORGANIZATION, rulesOf(5_000n), 'reject');
+    const mandateId = await mandateIdOf(w);
+    // The same cap on the mandate: none it alone refuses, with 81 waiting, so no choice to make.
+    await changed(w, { scope: 'mandate', mandateId }, rulesOf(5_000n));
+
+    await rejections(w).run();
+
+    expect(lines('waiting_rejection.rejected').map(({ requestId }) => requestId)).toEqual(made.slice(20, 100));
+    expect(await statusOf(w, made[100] ?? '')).toBe('APPROVAL_REQUIRED');
   }, 120_000);
 
   it('rejects the younger on a mandate’s first policy, weighed with none before it', async () => {

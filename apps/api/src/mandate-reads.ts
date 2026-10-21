@@ -222,7 +222,7 @@ export async function policyRulesIn(
 }
 
 /** The action whose event keeps a policy version's choices (`setPolicy`'s). */
-const VERSION_MADE = 'policy_version.made';
+export const VERSION_MADE = 'policy_version.made';
 
 /**
  * The organisation's monthly cap as an admin chose it (E2), from its policy

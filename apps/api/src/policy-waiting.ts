@@ -189,8 +189,13 @@ export const waitingHashParts = (choice: WaitingChoice | null, plan: WaitingPlan
         String(WAITING_STATEMENT_VERSION),
         String(plan.more),
         ...plan.rejected.map(({ id, reasons }) => `${id.toLowerCase()}:${reasons.join(',')}`),
-        ...(choice === 'reject' ? ['leftover', ...plan.leftover.map((id) => id.toLowerCase())] : []),
-        ...(choice === 'reject' && plan.weighedTo !== null ? ['younger', plan.weighedTo.toLowerCase()] : []),
+        ...(choice === 'reject'
+          ? [
+              'leftover',
+              ...plan.leftover.map((id) => id.toLowerCase()),
+              ...(plan.weighedTo === null ? [] : ['younger', plan.weighedTo.toLowerCase()]),
+            ]
+          : []),
       ];
 
 /**
@@ -325,7 +330,7 @@ export async function waitingPlan(
   {
     decides,
     locked,
-    before,
+    before = (inForce) => inForce,
     younger,
   }: {
     readonly decides: boolean;
@@ -351,8 +356,7 @@ export async function waitingPlan(
     const { agent, mandate } = known(inForce.get(agentId));
     if (mandate === null) continue;
     // 4, the policies: at the confirm once its own is held for the change.
-    const inForceNow = await policiesIn(tx, states, scope.orgId, mandate);
-    const policies = before === undefined ? inForceNow : before(inForceNow);
+    const policies = before(await policiesIn(tx, states, scope.orgId, mandate));
     const own = rows.filter((row) => row.agent_id === agentId);
     // 5–7 FOR SHARE, no month locked: the policy held for the change keeps decisions and approvals out (above).
     const authority = await heldAuthority(tx, states, { ...scope, agentId, decides: false }, own, mandate);
