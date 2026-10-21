@@ -4,8 +4,20 @@
 // agent's month, reads its total and reserves through them (D4).
 export { RESERVATION, type ReservationState } from './domain/reservation.ts';
 export {
-  agentMonth,
+  addZone,
+  AGENT_ZONES,
   keptZoneOf,
+  keptZonesOf,
+  MOST_UNSEALED_A_CALL,
+  sealKeptZone,
+  sealNewZone,
+  type UnsealedZone,
+  unsealedZones,
+  type ZoneCheck,
+} from './infrastructure/agent-zones.ts';
+export {
+  agentMonth,
+  type LockedMonth,
   lockAgentMonth,
   lockAgentPeriod,
   lockReservationsOf,

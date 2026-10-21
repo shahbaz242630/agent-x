@@ -4,7 +4,8 @@
 //
 // The caller (D4's decideAndReserve) has taken ADR-006's locks 2–6 first, then:
 // - `lockAgentMonth`: the agent's zone (added from the mandate in force on its
-//   first decision, then kept for good: D2's review), its month at `at` in that
+//   first decision, then kept for good: D2's review; a signed record, 0054,
+//   agent-zones.ts), its month at `at` in that
 //   zone, and that month's period row locked FOR NO KEY UPDATE (level 7);
 // - `monthSpent`: the agent's month, every reservation but a released one, in
 //   a statement of its own after the lock, so READ COMMITTED's fresh snapshot
@@ -22,34 +23,43 @@
 // `held_for_its_request` refuses it before).
 import { sql, type Transaction } from 'kysely';
 
+import type { AuditTables, SignedStates } from '../../audit/index.ts';
 import { periodOf } from '../../../shared-kernel/index.ts';
 import { RESERVATION } from '../domain/reservation.ts';
+import { addZone, keptZoneOf } from './agent-zones.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
-type ReservationsTransaction = Transaction<LimitReservationsTables>;
+type ReservationsTransaction = Transaction<LimitReservationsTables & AuditTables>;
+
+/** The agent's month a decision locked, and whether this decision kept the agent's zone (sealNewZone's to seal); or its zone tampered with. */
+export type LockedMonth =
+  { readonly outcome: 'locked'; readonly month: string; readonly keptNow: boolean } | { readonly outcome: 'tampered' };
 
 /**
  * The agent's month at `at` (`YYYY-MM`), its period row locked FOR NO KEY
  * UPDATE: two decisions for one agent's month run one after the other. Named
- * in the agent's kept zone; `zoneIfNew` (the mandate in force's) only for an
- * agent with none yet.
+ * in the agent's kept zone, read through its signed state (0054); `zoneIfNew`
+ * (the mandate in force's) only for an agent with none yet, which this call
+ * adds and the caller seals (`keptNow`) with its own events.
  */
 export async function lockAgentMonth(
   tx: ReservationsTransaction,
+  states: SignedStates,
   { orgId, agentId, zoneIfNew, at }: { orgId: string; agentId: string; zoneIfNew: string; at: Date },
-): Promise<string> {
-  await tx
-    .insertInto('limit_reservations.agent_zones')
-    .values({ org_id: orgId, agent_id: agentId, time_zone: zoneIfNew, created_at: at })
-    .onConflict((conflict) => conflict.doNothing())
-    .execute();
-  const month = await agentMonth(tx, { agentId, zoneIfNew, at });
+): Promise<LockedMonth> {
+  const keptNow = await addZone(tx, { orgId, agentId, zone: zoneIfNew, at });
+  const kept = keptNow
+    ? ({ outcome: 'kept', zone: zoneIfNew } as const)
+    : await keptZoneOf(tx, states, { orgId, agentId });
+  // Not added now, its row is there (the insert waits for one being added to commit): none is one deleted.
+  if (kept.outcome !== 'kept') return { outcome: 'tampered' };
+  const month = periodOf(at, kept.zone).month;
   await tx
     .insertInto('limit_reservations.agent_periods')
     .values({ org_id: orgId, agent_id: agentId, month, created_at: at })
     .onConflict((conflict) => conflict.doNothing())
     .execute();
-  return lockAgentPeriod(tx, { agentId, month });
+  return { outcome: 'locked', month: await lockAgentPeriod(tx, { agentId, month }), keptNow };
 }
 
 /**
@@ -73,29 +83,20 @@ export async function lockAgentPeriod(
 }
 
 /**
- * The zone the agent's months are kept in, from its first decision on, or
- * none for an agent never weighed: a later mandate can't move its month edges
- * (0040), so a draft naming another is refused (Phase 3 decision 15).
- */
-export async function keptZoneOf(tx: ReservationsTransaction, agentId: string): Promise<string | undefined> {
-  const kept = await tx
-    .selectFrom('limit_reservations.agent_zones')
-    .select('time_zone')
-    .where('agent_id', '=', agentId)
-    .executeTakeFirst();
-  return kept?.time_zone;
-}
-
-/**
- * The agent's month at `at` (`YYYY-MM`), writing and locking nothing: named
- * in its kept zone, or `zoneIfNew` for an agent with none yet, as its first
- * decision would keep it. The simulator's (C4); a decision locks it instead.
+ * The agent's month at `at` (`YYYY-MM`), writing and locking nothing but its
+ * zone's signed read: named in its kept zone, or `zoneIfNew` for an agent
+ * with none yet, as its first decision would keep it; undefined for a zone
+ * tampered with (its alarm raised). The simulator's (C4); a decision locks it
+ * instead.
  */
 export async function agentMonth(
   tx: ReservationsTransaction,
-  { agentId, zoneIfNew, at }: { agentId: string; zoneIfNew: string; at: Date },
-): Promise<string> {
-  return periodOf(at, (await keptZoneOf(tx, agentId)) ?? zoneIfNew).month;
+  states: SignedStates,
+  { orgId, agentId, zoneIfNew, at }: { orgId: string; agentId: string; zoneIfNew: string; at: Date },
+): Promise<string | undefined> {
+  const kept = await keptZoneOf(tx, states, { orgId, agentId });
+  if (kept.outcome === 'tampered') return undefined;
+  return periodOf(at, kept.outcome === 'kept' ? kept.zone : zoneIfNew).month;
 }
 
 /**

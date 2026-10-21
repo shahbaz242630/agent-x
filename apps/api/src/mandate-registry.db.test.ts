@@ -10,6 +10,7 @@
 import { AGENTS } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
+import { addZone, sealNewZone } from '@agentx/core/modules/limit-reservations';
 import { MANDATE_VERSIONS, MANDATES } from '@agentx/core/modules/mandates';
 import { createDatabase, type Database, lockName, withTenant } from '@agentx/platform/db';
 import {
@@ -123,13 +124,12 @@ describe('drafting a mandate (B2)', () => {
 
   it('refuses another zone than the one an agent already weighed keeps its months in: AGENT_ZONE_KEPT (decision 15)', async () => {
     const w = await world();
-    // As the agent's first decision keeps it (lockAgentMonth).
-    await withTenant(app, w.org, (tx) =>
-      tx
-        .insertInto('limit_reservations.agent_zones')
-        .values({ org_id: w.org, agent_id: w.agent, time_zone: 'Asia/Dubai', created_at: clock.now() })
-        .execute(),
-    );
+    // As the agent's first decision keeps it (lockAgentMonth) and seals it.
+    await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const zone = { orgId: w.org, agentId: w.agent, zone: 'Asia/Dubai', at: clock.now() };
+      await addZone(tx, zone);
+      await sealNewZone(tx, states, { ...zone, actor: { type: 'agent', id: w.agent } });
+    });
 
     expect(await draft(w.admin, { ...draftOf(w), timeZone: 'Europe/London' })).toEqual({
       outcome: 'refused',

@@ -126,7 +126,11 @@ export function createPolicySimulations({
         const { input, mandate, month } = await weigh(tx, states, orgId, agent, asked, {
           now,
           decides: false,
-          monthOf: (zoneIfNew) => agentMonth(tx, { agentId, zoneIfNew, at: now }),
+          monthOf: async (zoneIfNew) => {
+            const month = await agentMonth(tx, states, { orgId, agentId, zoneIfNew, at: now });
+            if (month === undefined) throw new MandateRefused(503, 'INTEGRITY_FAILED');
+            return month;
+          },
           rules: policiesFor(mandateId, whatIf),
         });
         return {

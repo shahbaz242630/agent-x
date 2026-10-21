@@ -18,6 +18,16 @@ export const PLAIN_WORDS = {
       'Activity rows still get a country and city, but places from newer internet addresses may be missing or wrong.',
     next: 'Check the monthly place file refresh ran, open its branch as a pull request and merge it.',
   },
+  'agent_zones.run_failed': {
+    happened: "The list of organisations could not be read, so no agent's old month time zone was sealed.",
+    broke: 'An agent whose zone is still unsealed has its spend requests refused.',
+    next: 'It is tried again in about 15 minutes. If it keeps failing, check the database.',
+  },
+  'agent_zones.seal_failed': {
+    happened: "Sealing an organisation's old agent month time zones failed.",
+    broke: 'An agent of that organisation whose zone is still unsealed has its spend requests refused.',
+    next: 'It is tried again in about 15 minutes. If it keeps failing, a developer should read the error.',
+  },
   'access_log.write_failed': {
     happened: "A request's activity-log row could not be saved.",
     broke: "That one request is missing from its organisation's activity log; the request itself went through.",

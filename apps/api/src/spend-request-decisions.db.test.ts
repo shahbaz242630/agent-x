@@ -21,7 +21,7 @@
 // VALIDATING.
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
+import { addZone, type LimitReservationsTables, sealNewZone } from '@agentx/core/modules/limit-reservations';
 import {
   draftMandate,
   MANDATE_VERSIONS,
@@ -1178,12 +1178,11 @@ describe('the simulator (C4, decision 9)', () => {
   it('names the month in the agent’s kept zone, not its mandate’s, as a decision would', async () => {
     const { w, mandateId } = await ready();
     // A zone kept from an earlier mandate (UTC+14): already November when Dubai is still in October.
-    await withTenant(app, w.org, (tx) =>
-      tx
-        .insertInto('limit_reservations.agent_zones')
-        .values({ org_id: w.org, agent_id: w.agent, time_zone: 'Pacific/Kiritimati', created_at: clock.now() })
-        .execute(),
-    );
+    await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const zone = { orgId: w.org, agentId: w.agent, zone: 'Pacific/Kiritimati', at: clock.now() };
+      await addZone(tx, zone);
+      await sealNewZone(tx, states, { ...zone, actor: { type: 'agent', id: w.agent } });
+    });
     clock.advanceBy(Date.parse('2026-10-31T12:00:00Z') - clock.now().getTime());
 
     expect(simulatedOf(await simulated(w, mandateId ?? '')).month).toBe('2026-11');

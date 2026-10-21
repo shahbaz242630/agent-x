@@ -106,6 +106,7 @@ import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads.ts';
+import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createAgentMandates } from './agent-mandate.ts';
 import { createPolicySimulations } from './policy-simulations.ts';
@@ -706,6 +707,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
     fakeBank: rail?.bank,
   });
+  // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
+  const zoneSealing = createZoneSealing({
+    list: () => listedOrganizations(database),
+    database,
+    keys,
+    ids: uuidV7Ids,
+    logger,
+  });
+  await zoneSealing.run();
   try {
     await server.listen({ host: config.http.host, port: config.http.port });
   } catch (error) {
@@ -882,6 +892,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     HOLD_HISTORY_EVERY_MS,
   );
   // Every request's reservation and order claim checked against its signed state (Phase 2 E1), on a timer of its own.
+  const zoneSealingRuns = scheduleRuns(zoneSealing, ZONE_SEALING_EVERY_MS);
   const holdingsChecking = scheduleRuns(
     createHoldingsCheck({ list: () => listedOrganizations(database), database, keys, ids: uuidV7Ids, logger }),
     HOLDINGS_CHECK_EVERY_MS,
@@ -964,6 +975,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           expiring.stop(),
           historyChecking.stop(),
           holdingsChecking.stop(),
+          zoneSealingRuns.stop(),
           requestExpiring.stop(),
           requestVoiding.stop(),
           waitingRejecting.stop(),
