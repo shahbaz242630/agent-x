@@ -107,7 +107,7 @@ function confirmedChoice(plan: WaitingPlan, waiting: WaitingChoice | undefined):
 }
 
 /** No waiting request weighed yet: an ask's plan until its transaction has read one. */
-const NONE_WAITING: WaitingPlan = { rejected: [], more: false, leftover: [] };
+const NONE_WAITING: WaitingPlan = { rejected: [], more: false, leftover: [], weighedTo: null };
 
 /** The mandate a target names, in lower case as its rows hold it; null for the organisation's own. */
 const mandateIdOf = (target: PolicyTarget): string | null =>

@@ -146,9 +146,13 @@ export interface SpendRequestDecisions {
   ): Promise<SpendRequestDecided>;
 }
 
+/** A policy's version as the engine weighs it; null for none. */
+export const versionRules = (version: PolicyVersionRecord | null): PolicyRules | null =>
+  version === null ? null : { ...version, versionId: version.id };
+
 /** A policy's version in force as the engine weighs it; null for one never set. */
 const rulesOf = (read: { readonly current: PolicyVersionRecord } | null): PolicyRules | null =>
-  read === null ? null : { ...read.current, versionId: read.current.id };
+  versionRules(read?.current ?? null);
 
 /** The agent's mandate in force as the engine weighs it, with the zone its months start in and its split window. */
 export type MandateWeighed = MandateInForce & { readonly timeZone: string; readonly splitWindowHours: number };
@@ -257,10 +261,23 @@ export async function policiesIn(
 ): Promise<PoliciesWeighed> {
   const mandatePolicy = mandate === null ? null : rulesOf(await policyRulesIn(tx, states, orgId, mandate.id));
   const organization = await policyRulesIn(tx, states, orgId, orgId);
-  const chosen = await organizationChoicesOf(tx, states, orgId, organization?.current ?? null);
+  return { mandatePolicy, ...(await organizationWeighed(tx, states, orgId, organization?.current ?? null)) };
+}
+
+/**
+ * The organisation's policies as the engine weighs them under its version
+ * `current` (null: never set), with that version's choices: policiesIn's,
+ * and the waiting-rejections job's under the version a change replaced (G8b).
+ */
+export async function organizationWeighed(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  current: PolicyVersionRecord | null,
+): Promise<Omit<PoliciesWeighed, 'mandatePolicy'>> {
+  const chosen = await organizationChoicesOf(tx, states, orgId, current);
   return {
-    mandatePolicy,
-    organizationPolicy: rulesOf(organization),
+    organizationPolicy: versionRules(current),
     organizationCapChosen: chosen.capChoice !== null,
     approvalWait: chosen.approvalWait,
   };

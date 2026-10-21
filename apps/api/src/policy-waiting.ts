@@ -39,9 +39,12 @@
 // policy's new version, and the waiting-rejections job rejects each as its
 // approver's confirm would, while that version stays in force. Past 100
 // waiting the oldest 100 are weighed (their catch, S118: the oldest are still
-// shown), the younger counted as holding what they hold and left with their
-// approvers, whatever the choice: so one listed is one each approver's
-// confirm would reject with them all still waiting.
+// shown), the younger counted as holding what they hold: so one listed is
+// one each approver's confirm would reject with them all still waiting. The
+// younger are the job's too after a `reject` ("the rest", decision 33b; G8b):
+// the youngest weighed (`weighedTo`) is bound and kept, and the job weighs
+// those waiting past it 100 at a time as this plan does, under the rules the
+// change replaced (`before`), the change's in their place.
 //
 // Reads (partner, S116: no row-by-row reads): the waiting requests' IDs in
 // one statement, then for each agent with any: the agent (3), its mandate in
@@ -109,12 +112,15 @@ interface WaitingRejected {
 /**
  * The requests the change would reject, oldest first, at most 20; `more`:
  * others not listed; `leftover`: the IDs of those weighed past the 20, oldest
- * first, which the waiting-rejections job rejects after a `reject` (G8).
+ * first, which the waiting-rejections job rejects after a `reject` (G8);
+ * `weighedTo`: the youngest weighed when younger ones wait past it, else
+ * null, where the job takes up the younger after a `reject` (G8b).
  */
 export interface WaitingPlan {
   readonly rejected: readonly WaitingRejected[];
   readonly more: boolean;
   readonly leftover: readonly string[];
+  readonly weighedTo: string | null;
 }
 
 /** What a change weighs: whose, when, which policy (a mandate's by its ID, or null: the organisation's), and its new rules. */
@@ -139,16 +145,15 @@ const WAITING_STATEMENTS = {
   reject:
     'Once you confirm, each request listed is rejected at once and the money held for it freed, with the rules that ' +
     'refuse it kept on its record; the agent learns only that a person rejected it, and asks again. Up to 20 are ' +
-    'rejected at once; the others these rules would reject, of the oldest 100 waiting, are rejected the same way ' +
-    'within minutes while these rules stay in force, unless an approver settles one first. Any younger than the ' +
-    'oldest 100 stay with their approvers.',
+    'rejected at once; all the others these rules would reject are rejected the same way within minutes while ' +
+    'these rules stay in force, unless an approver settles one first.',
   leave:
     'Once you confirm, the requests listed keep waiting and their money stays held. Each is rejected, with why and ' +
     'what to do, when its approver approves it under the new rules, or it expires when its wait ends.',
 } as const satisfies Record<WaitingChoice, string>;
 
 /** The version of WAITING_STATEMENTS each change names: raised with any change to their words. */
-const WAITING_STATEMENT_VERSION = 3;
+const WAITING_STATEMENT_VERSION = 4;
 
 /** A change's choice, as its bodies name it: only when the change would reject a waiting request. */
 export const WAITING_REQUESTS = z
@@ -184,7 +189,13 @@ export const waitingHashParts = (choice: WaitingChoice | null, plan: WaitingPlan
         String(WAITING_STATEMENT_VERSION),
         String(plan.more),
         ...plan.rejected.map(({ id, reasons }) => `${id.toLowerCase()}:${reasons.join(',')}`),
-        ...(choice === 'reject' ? ['leftover', ...plan.leftover.map((id) => id.toLowerCase())] : []),
+        ...(choice === 'reject'
+          ? [
+              'leftover',
+              ...plan.leftover.map((id) => id.toLowerCase()),
+              ...(plan.weighedTo === null ? [] : ['younger', plan.weighedTo.toLowerCase()]),
+            ]
+          : []),
       ];
 
 /**
@@ -236,10 +247,27 @@ export function leftoverOf(details: Readonly<Record<string, unknown>>): readonly
   return ids;
 }
 
+/** The detail of a version's event naming the youngest its change weighed, after a `reject` past 100 (G8b). */
+export const WAITING_YOUNGER_KEY = 'waitingYoungerAfter';
+
+/**
+ * The request a version's event says the job weighs the younger after, from
+ * its verified details: null for an event that names none; undefined for
+ * details no `reject` makes (not a `reject` with more, or not an ID), which
+ * can't be believed.
+ */
+export function youngerAfterOf(details: Readonly<Record<string, unknown>>): string | null | undefined {
+  const after = details[WAITING_YOUNGER_KEY];
+  if (after === undefined) return null;
+  if (details.waitingRequests !== 'reject' || details.waitingMore !== true) return undefined;
+  return typeof after === 'string' && LEFTOVER_ID.test(after) ? after : undefined;
+}
+
 /**
  * The choice as the policy's event keeps it, with its words' version, how
  * many were listed and, after a `reject` with any past the 20, the requests
- * the job rejects (WAITING_LEFTOVER_KEYS).
+ * the job rejects (WAITING_LEFTOVER_KEYS), and past 100 the youngest weighed
+ * (WAITING_YOUNGER_KEY).
  */
 export const waitingDetails = (choice: WaitingChoice | null, plan: WaitingPlan) =>
   choice === null
@@ -250,6 +278,9 @@ export const waitingDetails = (choice: WaitingChoice | null, plan: WaitingPlan) 
         waitingListed: plan.rejected.length,
         waitingMore: plan.more,
         ...(choice === 'reject' ? leftoverDetails(plan.leftover) : {}),
+        ...(choice === 'reject' && plan.weighedTo !== null
+          ? { [WAITING_YOUNGER_KEY]: plan.weighedTo.toLowerCase() }
+          : {}),
       };
 
 /**
@@ -296,15 +327,27 @@ export async function waitingPlan(
   tx: WaitingTx,
   states: SignedStates,
   scope: WaitingScope,
-  { decides, locked }: { readonly decides: boolean; readonly locked?: () => Promise<void> } = { decides: false },
+  {
+    decides,
+    locked,
+    before = (inForce) => inForce,
+    younger,
+  }: {
+    readonly decides: boolean;
+    readonly locked?: () => Promise<void>;
+    /** The job's (G8b): the rules a change already made replaced, in place of those in force. */
+    readonly before?: (inForce: PoliciesWeighed) => PoliciesWeighed;
+    /** The job's (G8b): only those waiting past the request `after`, made no later than `until`. */
+    readonly younger?: Younger;
+  } = { decides: false },
 ): Promise<WaitingPlan> {
-  const { rows, beyond } = await waitingRows(tx, scope);
+  const { rows, beyond } = await waitingRows(tx, scope, younger);
   const agents = distinct(rows.map((row) => row.agent_id));
   const inForce = new Map<string, Awaited<ReturnType<typeof inForceOf>>>();
   for (const agentId of agents) inForce.set(agentId, await inForceOf(tx, states, scope.orgId, agentId));
   await locked?.();
   if (decides) {
-    const again = await waitingRows(tx, scope);
+    const again = await waitingRows(tx, scope, younger);
     const same = again.beyond === beyond && again.rows.map(({ id }) => id).join() === rows.map(({ id }) => id).join();
     if (!same) throw new MandateRefused(403, 'STEP_UP_FAILED');
   }
@@ -313,7 +356,7 @@ export async function waitingPlan(
     const { agent, mandate } = known(inForce.get(agentId));
     if (mandate === null) continue;
     // 4, the policies: at the confirm once its own is held for the change.
-    const policies = await policiesIn(tx, states, scope.orgId, mandate);
+    const policies = before(await policiesIn(tx, states, scope.orgId, mandate));
     const own = rows.filter((row) => row.agent_id === agentId);
     // 5–7 FOR SHARE, no month locked: the policy held for the change keeps decisions and approvals out (above).
     const authority = await heldAuthority(tx, states, { ...scope, agentId, decides: false }, own, mandate);
@@ -334,13 +377,21 @@ export async function waitingPlan(
     rejected: rejected.slice(0, MOST_WAITING_REJECTED),
     more: beyond || rejected.length > MOST_WAITING_REJECTED,
     leftover: rejected.slice(MOST_WAITING_REJECTED).map(({ id }) => id),
+    weighedTo: beyond ? (rows.at(-1)?.id ?? null) : null,
   };
+}
+
+/** Where the job takes up a change's younger waiting requests (G8b): past `after`, made no later than `until`. */
+export interface Younger {
+  readonly after: string;
+  readonly until: Date;
 }
 
 /** The oldest waiting requests' IDs and facts, at most MOST_WAITING_WEIGHED, unlocked; `beyond`: younger ones wait. */
 async function waitingRows(
   tx: WaitingTx,
   { orgId, mandateId }: WaitingScope,
+  younger: Younger | undefined,
 ): Promise<{ readonly rows: readonly WaitingRow[]; readonly beyond: boolean }> {
   let waiting = tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs and facts alone, each held to its signed state (requestsHeld)
@@ -349,12 +400,38 @@ async function waitingRows(
     .where('org_id', '=', orgId)
     .where('status', '=', 'APPROVAL_REQUIRED');
   if (mandateId !== null) waiting = waiting.where('mandate_id', '=', mandateId);
+  if (younger !== undefined) {
+    const from = await youngerFrom(tx, orgId, younger.after);
+    // In the plan's order, past the one named: none when it can't be found.
+    waiting = waiting
+      .where('created_at', '<=', younger.until)
+      .where((where) =>
+        from === undefined
+          ? where.lit(false)
+          : where.or([
+              where('created_at', '>', from),
+              where.and([where('created_at', '=', from), where('id', '>', younger.after.toLowerCase())]),
+            ]),
+      );
+  }
   const rows = await waiting
     .orderBy('created_at')
     .orderBy('id')
     .limit(MOST_WAITING_WEIGHED + 1)
     .execute();
   return { rows: rows.slice(0, MOST_WAITING_WEIGHED), beyond: rows.length > MOST_WAITING_WEIGHED };
+}
+
+/** When the request the younger are taken up after was made, by its row: a filter alone. */
+async function youngerFrom(tx: WaitingTx, orgId: string, id: string): Promise<Date | undefined> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an order's start alone; each weighed is held to its signed state
+    .selectFrom(SPEND_REQUESTS.table)
+    .select('created_at')
+    .where('org_id', '=', orgId)
+    .where('id', '=', id)
+    .executeTakeFirst();
+  return row?.created_at;
 }
 
 /** Levels 3 and 4 for one agent: the agent, and its mandate in force. */
