@@ -93,7 +93,16 @@ export function responseForStatus(status: number): ErrorResponse {
   return code === undefined ? { status: 400, code: 'BAD_REQUEST' } : { status, code };
 }
 
-/** What to send for an error, from its own status. */
+/**
+ * A record a helper the use cases share can't believe, its alarm already
+ * raised and the organisation held: answered 503 INTEGRITY_FAILED, as each
+ * use case's own refusal answers it, never a plain 500 (Phase 3 debt, E7
+ * review).
+ */
+export class IntegrityFailure extends Error {}
+
+/** What to send for an error, from its own status; an integrity failure is 503 INTEGRITY_FAILED. */
 export function responseFor(error: unknown): ErrorResponse {
+  if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };
   return responseForStatus(statusOf(error));
 }

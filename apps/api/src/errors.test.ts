@@ -1,7 +1,7 @@
 import { REASON_CODES } from '@agentx/core/shared-kernel';
 import { describe, expect, it } from 'vitest';
 
-import { errorBody, responseFor } from './errors.ts';
+import { errorBody, IntegrityFailure, responseFor } from './errors.ts';
 
 const withStatus = (statusCode: unknown): Error => Object.assign(new Error('internal detail'), { statusCode });
 
@@ -26,6 +26,14 @@ describe('SEC-DATA-04 an error response carries a reason code, never the error',
 
   it.each([401, 403, 405, 409, 414, 499])('sends any other client error (%d) as a plain 400', (status) => {
     expect(responseFor(withStatus(status))).toEqual({ status: 400, code: 'BAD_REQUEST' });
+  });
+
+  it('sends a record a shared helper can’t believe as 503 INTEGRITY_FAILED, never a plain 500', () => {
+    expect(responseFor(new IntegrityFailure('a history can’t be believed'))).toEqual({
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
+    expect(responseFor(new Error('a history can’t be believed'))).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
   });
 
   it.each([500, 502, 503, 599, 600, 1000])('sends every status from 500 up (%d) as a 500', (status) => {
