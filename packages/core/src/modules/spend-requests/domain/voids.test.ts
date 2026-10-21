@@ -29,12 +29,25 @@ describe('voidCauses', () => {
     expect(voidCauses(DECIDED, STANDING)).toEqual([]);
   });
 
+  it('finds none for a request its mandate’s version in force still carries (PL-47), but one with no version', () => {
+    const carrying = { ...STANDING, mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesFrom: 'mv1' } };
+    expect(voidCauses(DECIDED, carrying)).toEqual([]);
+    expect(voidCauses({ ...DECIDED, mandateVersionId: null }, carrying)).toEqual(['MANDATE_NOT_IN_FORCE']);
+    // Still judged by everything else.
+    expect(voidCauses(DECIDED, { ...carrying, agentStatus: 'SUSPENDED' })).toEqual(['AGENT_SUSPENDED']);
+  });
+
   it.each([
     ['the organisation frozen', { organizationStatus: 'FROZEN' }, 'ORG_FROZEN'],
     ['the agent suspended', { agentStatus: 'SUSPENDED' }, 'AGENT_SUSPENDED'],
     ['the mandate suspended', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate superseded', { mandate: { status: 'ACTIVE', currentVersionId: 'mv2' } }, 'MANDATE_NOT_IN_FORCE'],
+    [
+      'the mandate superseded, carrying from another version (PL-47)',
+      { mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesFrom: 'mv0' } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
     ['the mandate not found', { mandate: null }, 'MANDATE_NOT_IN_FORCE'],
     [
       'the source suspended',

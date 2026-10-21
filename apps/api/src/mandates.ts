@@ -304,6 +304,16 @@ const CARRY_PLAN = z
       'this; if anything changes first, the confirm is refused and you ask again. Null otherwise.',
   );
 
+/** How many pending requests past the plan are left for the carry job (PL-47). */
+const CARRY_LATER = z
+  .int()
+  .min(0)
+  .describe(
+    `For \`carry\`: how many pending requests past the ${String(MOST_CARRIED)} above are left on the version in force ` +
+      'once you confirm, each then checked the same way within minutes, oldest first, against those carried before ' +
+      'it, while the new version stays in force. 0 otherwise.',
+  );
+
 const ACCEPT_SCHEMA = {
   summary: 'Ask to accept the draft waiting, signing in again with a passkey',
   params: MANDATE_ID,
@@ -317,7 +327,7 @@ const ACCEPT_SCHEMA = {
     202: stepUpAskedWith(
       'MandateAcceptanceAsked',
       'Accepting a mandate’s draft, waiting for the admin to sign in again; for a carry, what it will do.',
-      { carry: CARRY_PLAN },
+      { carry: CARRY_PLAN, carryLater: CARRY_LATER },
     ),
   },
 };
@@ -561,7 +571,9 @@ export function registerMandates(
       );
       if (asked.outcome !== 'asked') return answerAsked(asked, request, reply);
       const carry = asked.carry?.map(({ id, outcome, reasons }) => ({ id, outcome, reasons: reasonsOf(reasons) }));
-      return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId, carry: carry ?? null });
+      return reply
+        .code(202)
+        .send({ stepUpChallengeId: asked.stepUpChallengeId, carry: carry ?? null, carryLater: asked.carryLater });
     },
   );
 

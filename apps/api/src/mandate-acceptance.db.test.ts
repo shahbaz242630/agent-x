@@ -189,7 +189,7 @@ describe('accepting a mandate’s draft (B3)', () => {
     // The admin's choice for its pending requests is on the signed event, with its words' version (E4c).
     expect(events.at(-1)).toMatchObject({
       action: 'mandate.accepted',
-      details: { versionId: second, replaced: versionId, pendingRequests: 'cancel', pendingStatementVersion: 1 },
+      details: { versionId: second, replaced: versionId, pendingRequests: 'cancel', pendingStatementVersion: 2 },
     });
   });
 

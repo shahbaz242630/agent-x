@@ -79,6 +79,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
 import { CONSENT_EXPIRY_EVENTS, holdsOverExpiry } from './consent-expiry-choice.ts';
 import { CONSENT_LAPSED, lapsedBy, lapseRecorded } from './consent-lapses.ts';
+import { carriesFromOf } from './mandate-carry-rest.ts';
 import {
   CANCEL_BRAKES,
   cancelledSinceOf,
@@ -272,7 +273,7 @@ async function namedBy(tx: VoidTx, orgId: string, requestId: string) {
   const row = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- what it names alone, each read through its signed state, and checked against the request's own by voidRequest
     .selectFrom('spend_requests.requests')
-    .select(['agent_id', 'mandate_id', 'funding_source_id', 'supplier_id'])
+    .select(['agent_id', 'mandate_id', 'mandate_version_id', 'funding_source_id', 'supplier_id'])
     .where('org_id', '=', orgId)
     .where('id', '=', requestId)
     .where('mandate_id', 'is not', null)
@@ -281,6 +282,7 @@ async function namedBy(tx: VoidTx, orgId: string, requestId: string) {
   return {
     agentId: row.agent_id,
     mandateId: row.mandate_id,
+    mandateVersionId: row.mandate_version_id,
     fundingSourceId: row.funding_source_id,
     supplierId: row.supplier_id,
   };
@@ -358,10 +360,15 @@ export function createRequestVoids({
         ['supplier', supplier.supplier],
       ] as const
     ).filter(([which, { status }]) => PAUSE_EVENTS[which][status] !== undefined);
+    // On a version replaced, it may be one the version in force still carries (PL-47): the carry job's, not a void.
+    const replaced = named.mandateVersionId !== mandate.mandate.currentVersionId;
     const authority: AuthorityNow = {
       organizationStatus,
       agentStatus: agent.agent.status,
-      mandate: mandate.mandate,
+      mandate: {
+        ...mandate.mandate,
+        carriesFrom: replaced ? await carriesFromOf(tx, states, orgId, mandate.mandate) : null,
+      },
       source: {
         status: source.source.status,
         availability: source.source.availability,

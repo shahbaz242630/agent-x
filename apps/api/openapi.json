@@ -2039,11 +2039,17 @@
                 "type": "null"
               }
             ]
+          },
+          "carryLater": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
           "stepUpChallengeId",
-          "carry"
+          "carry",
+          "carryLater"
         ],
         "additionalProperties": false,
         "description": "Accepting a mandate’s draft, waiting for the admin to sign in again; for a carry, what it will do."

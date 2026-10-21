@@ -18,6 +18,17 @@ export const PLAIN_WORDS = {
       'Activity rows still get a country and city, but places from newer internet addresses may be missing or wrong.',
     next: 'Check the monthly place file refresh ran, open its branch as a pull request and merge it.',
   },
+  'mandate_carry.failed': {
+    happened: "Carrying a mandate's remaining waiting requests onto its new version failed.",
+    broke: 'Those requests stay on the old version, so none of them can be approved or paid yet.',
+    next: 'It is tried again in about 5 minutes. If it keeps failing, a developer should read the error.',
+  },
+  'mandate_carry.run_failed': {
+    happened:
+      'The list of organisations could not be read, so no waiting requests were carried to a new mandate version.',
+    broke: 'Requests left to carry stay on the old version for now.',
+    next: 'It is tried again in about 5 minutes. If it keeps failing, check the database.',
+  },
   'agent_zones.run_failed': {
     happened: "The list of organisations could not be read, so no agent's old month time zone was sealed.",
     broke: 'An agent whose zone is still unsealed has its spend requests refused.',
