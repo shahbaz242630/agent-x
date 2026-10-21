@@ -1419,15 +1419,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'resource-logs',
     ]);
 
-    // The lifecycle rule: every file in the container, deleted within eight days of its making.
+    // The lifecycle rule: every file in the container, deleted within 14 days of its making (decision 32e).
     expect(at(staging.predictedResources.find(LIFECYCLE)?.properties, 'policy', 'rules')).toEqual([
       {
-        name: 'delete-after-a-week',
+        name: 'delete-after-two-weeks',
         enabled: true,
         type: 'Lifecycle',
         definition: {
           filters: { blobTypes: ['blockBlob'], prefixMatch: ['activity-downloads/'] },
-          actions: { baseBlob: { delete: { daysAfterCreationGreaterThan: 8 } } },
+          actions: { baseBlob: { delete: { daysAfterCreationGreaterThan: 14 } } },
         },
       },
     ]);
@@ -1442,12 +1442,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (found: Mutable) => (filters(found).prefixMatch = ['other/']),
       (found: Mutable) => (filters(found).prefixMatch = ['activity-downloads/', 'activity-downloads/x']),
       (found: Mutable) => (filters(found).blobIndexMatch = [{ name: 'keep', op: '==', value: 'yes' }]),
-      (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = 9),
+      (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = 15),
       (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = 30),
-      (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = '8'),
+      (found: Mutable) => (deletion(found).daysAfterCreationGreaterThan = '14'),
       (found: Mutable) => {
         delete deletion(found).daysAfterCreationGreaterThan;
-        deletion(found).daysAfterModificationGreaterThan = 8;
+        deletion(found).daysAfterModificationGreaterThan = 14;
       },
       (found: Mutable) => (inside(found, 'properties', 'policy').rules = []),
       (found: Mutable) => (found.id = String(found.id).replace(/default$/, 'second')),
