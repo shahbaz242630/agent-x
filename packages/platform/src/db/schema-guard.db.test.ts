@@ -196,7 +196,7 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
     expect(await read()).toEqual([
       {
         name: 'guard_carried_version',
-        body: 'f67ca41da4d11c544c014a10acaef9d58bacce284f29fb8f526c749f65742e70',
+        body: '74a3f6a55278f43bc05ab3855b82cb9dcc13a6291e2f9da7f1d1669484f1f198',
         config: 'search_path=pg_catalog',
         definer: false,
       },

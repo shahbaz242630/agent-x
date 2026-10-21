@@ -16,7 +16,13 @@
 // left out): when the new monthly limit can't hold them all, the oldest
 // stand. The split total still counts them all, so it errs to asking an
 // approval. What each outcome means is `carries` (decision 17). Past 20
-// pending, refused: choose cancel, or act on some first (17.3).
+// pending (Phase 4 A3, partner decision 6, PL-47): the oldest 20 are settled
+// at the confirm, and the rest are left on the version replaced, named on the
+// acceptance's signed event (`carryRest`), for the carry job
+// (mandate-carry-rest.ts), which weighs them the same way under the version
+// now in force, 20 at a time, oldest first, against what the older ones carried
+// hold. Those waiting their turn are left out of every total a plan weighs
+// against (as its own requests are), so the oldest still stand.
 //
 // Reads (partner, S116: no row-by-row reads): what all the requests share is
 // read once, each set in one statement where it can be: the draft and the
@@ -88,11 +94,13 @@ const SUPERSEDE_STATEMENTS = {
     'they are: one waiting still waits for its approver, and one a person approved stays approved even where the ' +
     'new terms would ask for approval. The others are cancelled and the money held for them freed: one the new ' +
     'terms refuse, one over the new limits once the older ones are counted, and one approved without a person that ' +
-    'the new terms would send for approval. You see which before you confirm. At most 20 can be carried at once.',
+    'the new terms would send for approval. You see which before you confirm. Up to 20 are settled at once; any ' +
+    'others are checked the same way within minutes, oldest first, against those carried before them, while ' +
+    'this version stays in force.',
 } as const satisfies Record<SupersedeChoice, string>;
 
 /** The version of SUPERSEDE_STATEMENTS each acceptance names: raised with any change to their words. */
-const SUPERSEDE_STATEMENT_VERSION = 1;
+const SUPERSEDE_STATEMENT_VERSION = 2;
 
 /** The choice as an acceptance's event keeps it, with its words' version (none for a first version). */
 export const supersedeChoiceDetails = (choice: SupersedeChoice | null) =>
@@ -113,7 +121,7 @@ export const SUPERSEDE_PENDING_REQUESTS = z
       `\`cancel\`: ${SUPERSEDE_STATEMENTS.cancel} \`carry\`: ${SUPERSEDE_STATEMENTS.carry}`,
   );
 
-/** The most pending requests a carry weighs again in the acceptance's own transaction (17.3: as one brake voids). */
+/** The most pending requests a carry weighs again in one transaction, the acceptance's or a turn of the job's (as one brake voids). */
 export const MOST_CARRIED = 20;
 
 /** One pending request as the carry settles it: carried to the draft, or cancelled with the new terms' reasons. */
@@ -153,45 +161,74 @@ export interface WeighScope {
   readonly decides: boolean;
 }
 
-/** A carry's: the mandate whose pending requests it weighs. */
-interface CarryScope extends WeighScope {
+/**
+ * A carry's: the mandate whose pending requests it weighs, and under which
+ * of its versions: the draft waiting (the acceptance), or the version in
+ * force (the job), then only the requests still on an older version: those
+ * the acceptance left for the job, and any an acceptance before it left and
+ * the job hadn't reached yet (the newer acceptance's plan weighed them all,
+ * and its `carryLater` counted them).
+ */
+export interface CarryScope extends WeighScope {
   readonly mandateId: string;
+  readonly under: { readonly version: 'draft' } | { readonly version: 'inForce'; readonly currentVersionId: string };
+}
+
+/** A carry's plan: the oldest MOST_CARRIED settled now, and how many more wait their turn (the job's). */
+export interface CarryPlan {
+  readonly plan: readonly CarryPlanned[];
+  readonly later: number;
 }
 
 /**
- * The mandate's pending requests weighed again under its draft waiting, in
- * the lock order above. More than MOST_CARRIED pending:
- * PENDING_REQUESTS_TOO_MANY_TO_CARRY. One whose signed state, history or
- * holdings can't be believed, or whose row names other facts than its signed
- * state: INTEGRITY_FAILED.
+ * The mandate's oldest MOST_CARRIED pending requests weighed again under its
+ * draft waiting (or, for the job, its version in force), in the lock order
+ * above, and how many more wait their turn. One whose signed state, history
+ * or holdings can't be believed, or whose row names other facts than its
+ * signed state: INTEGRITY_FAILED.
  */
-export async function carryPlan(
-  tx: CarryTx,
-  states: SignedStates,
-  scope: CarryScope,
-): Promise<readonly CarryPlanned[]> {
-  const rows = await tx
+export async function carryPlan(tx: CarryTx, states: SignedStates, scope: CarryScope): Promise<CarryPlan> {
+  const { under } = scope;
+  const pending = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs and facts alone, each held to its signed state below
     .selectFrom(SPEND_REQUESTS.table)
     .select(['id', 'supplier_id', 'funding_source_id'])
     .where('org_id', '=', scope.orgId)
     .where('mandate_id', '=', scope.mandateId)
     .where('status', 'in', PENDING_STATUSES)
+    .where((where) =>
+      under.version === 'inForce' ? where('mandate_version_id', '<>', under.currentVersionId) : where.lit(true),
+    )
     .orderBy('created_at')
     .orderBy('id')
-    .limit(MOST_CARRIED + 1)
     .execute();
-  if (rows.length > MOST_CARRIED) throw new MandateRefused(409, 'PENDING_REQUESTS_TOO_MANY_TO_CARRY');
-  if (rows.length === 0) return [];
-  // 4: the draft, the mandate's policy and the organisation's, once.
-  const { mandate, ...policies } = await authorityIn(tx, states, scope.orgId, scope.agentId, 'draft');
+  const rows = pending.slice(0, MOST_CARRIED);
+  const later = pending.length - rows.length;
+  if (rows.length === 0) return { plan: [], later };
+  // 4: the version weighed under, the mandate's policy and the organisation's, once.
+  const { mandate, ...policies } = await authorityIn(tx, states, scope.orgId, scope.agentId, under.version);
   const authority = await heldAuthority(tx, states, scope, rows, known(mandate));
-  const requests = (await requestsHeld(tx, states, scope, rows)).map(({ request }) => request);
-  const outside = await outsideOf(tx, scope, authority, requests);
+  // The job read its rows unlocked: one ended since (voided, cancelled, expired) is left out, not taken for
+  // tampering. The acceptance refuses instead, as its step-up bound the plan with it.
+  const ended = under.version === 'inForce' ? 'left out' : 'refused';
+  const requests = (await requestsHeld(tx, states, scope, rows, ended)).map(({ request }) => request);
+  // Those waiting their turn hold capacity too, but are weighed after these: left out of the totals, as these are.
+  const outside = await outsideOf(
+    tx,
+    scope,
+    authority,
+    requests,
+    pending.map(({ id }) => id),
+  );
   const agent = { id: scope.agentId, status: 'ACTIVE' };
-  return weighedInOrder({ now: scope.now, agent }, authority, policies, outside, requests, (request, made) =>
+  const plan = weighedInOrder({ now: scope.now, agent }, authority, policies, outside, requests, (request, made) =>
     carries(request.status, request.decision, made.decision),
-  ).map(({ request, made, stays }) => ({ id: request.id, outcome: stays ? 'carry' : 'cancel', reasons: made.reasons }));
+  ).map(({ request, made, stays }): CarryPlanned => ({
+    id: request.id,
+    outcome: stays ? 'carry' : 'cancel',
+    reasons: made.reasons,
+  }));
+  return { plan, later };
 }
 
 /** A pending request as its row names it: what the authority is read by, before its signed state is. */
@@ -310,9 +347,10 @@ export async function outsideOf(
   { agentId, now }: Pick<WeighScope, 'agentId' | 'now'>,
   { mandate, suppliers, held }: HeldAuthority,
   requests: readonly SpendRequestRecord[],
+  leftOut: readonly string[] = requests.map(({ id }) => id),
 ): Promise<HeldOutside> {
   const currency = mandate.perOrderLimit.currency;
-  const inPlan = requests.map(({ id }) => id);
+  const inPlan = leftOut;
   const spent = await monthsSpent(tx, { agentId, months: monthsOf(held), currency, except: inPlan });
   const since = windowStart(now, mandate.splitWindowHours);
   const split = mandate.splitCheck

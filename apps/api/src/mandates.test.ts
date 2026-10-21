@@ -376,12 +376,12 @@ const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c6';
 describe('POST /v1/mandates/:id/accept asks a passkey step-up to accept the draft (B3)', () => {
   it('answers 202 with the step-up, passing the member in their session, the key and the draft named', async () => {
     const { app, calls } = await withMandates({
-      asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE, carry: null },
+      asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE, carry: null, carryLater: 0 },
     });
     const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept`, { versionId: VERSION_ID }));
 
     expect(reply.statusCode).toBe(202);
-    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE, carry: null });
+    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE, carry: null, carryLater: 0 });
     expect(calls).toEqual([
       {
         kind: 'accept',
@@ -403,6 +403,7 @@ describe('POST /v1/mandates/:id/accept asks a passkey step-up to accept the draf
           { id: carried, outcome: 'carry', reasons: ['APPROVAL_THRESHOLD'] },
           { id: cancelled, outcome: 'cancel', reasons: ['MANDATE_ORDER_LIMIT'] },
         ],
+        carryLater: 7,
       },
     });
     const reply = await app.inject(
@@ -424,6 +425,7 @@ describe('POST /v1/mandates/:id/accept asks a passkey step-up to accept the draf
           reasons: [{ code: 'MANDATE_ORDER_LIMIT', message: expect.any(String) as string }],
         },
       ],
+      carryLater: 7,
     });
     expect(calls[0]?.subject).toEqual({ mandateId: MANDATE_ID, versionId: VERSION_ID, pendingRequests: 'carry' });
   });

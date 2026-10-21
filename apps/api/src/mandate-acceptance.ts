@@ -89,6 +89,8 @@ export type AcceptAsked =
       readonly stepUpChallengeId: string;
       /** A carry's plan: what it will do to each pending request (decision 17); null for any other. */
       readonly carry: readonly CarryPlanned[] | null;
+      /** A carry's: how many pending requests past the plan wait for the job, checked the same way (PL-47); 0 for any other. */
+      readonly carryLater: number;
     }
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
@@ -119,10 +121,14 @@ export interface MandateAcceptance {
   ): Promise<MandateAccepted>;
 }
 
-/** What a supersede does to the pending requests: the admin's choice and a carry's plan; neither for a first. */
+/**
+ * What a supersede does to the pending requests: the admin's choice, a
+ * carry's plan and how many more wait for the job; neither for a first.
+ */
 interface Settling {
   readonly choice: SupersedeChoice | null;
   readonly plan: readonly CarryPlanned[] | null;
+  readonly later: number;
 }
 
 /**
@@ -138,7 +144,7 @@ const acceptanceHash = (
   orgId: string,
   mandateEvent: string,
   draft: MandateVersionRecord,
-  { choice, plan }: Settling,
+  { choice, plan, later }: Settling,
 ): Buffer =>
   changeHashOf([
     ACCEPT_OPERATION,
@@ -148,6 +154,8 @@ const acceptanceHash = (
     draft.termsHash,
     ...supersedeHashParts(choice),
     plan === null ? 'none' : planHashOf(plan),
+    // Whether any are left for the job, not how many: one asked meanwhile is weighed the same way, in its turn.
+    later > 0 ? 'later' : 'all',
   ]);
 
 /** A mandate as accepting reads it: its signed state, the state a change records from, and its draft. */
@@ -253,28 +261,31 @@ export function createMandateAcceptance({
   ): Promise<Settling> => {
     if (mandate.currentVersionId === null) {
       if (choice !== undefined) throw new MandateRefused(400, 'PENDING_CHOICE_NOT_OFFERED');
-      return { choice: null, plan: null };
+      return { choice: null, plan: null, later: 0 };
     }
     if (choice === undefined) throw new MandateRefused(400, 'PENDING_CHOICE_REQUIRED');
-    if (choice === 'cancel') return { choice, plan: null };
-    const plan = await carryPlan(tx, states, {
+    if (choice === 'cancel') return { choice, plan: null, later: 0 };
+    const { plan, later } = await carryPlan(tx, states, {
       orgId,
       agentId: mandate.agentId,
       mandateId: mandate.id,
       now: clock.now(),
       decides,
+      under: { version: 'draft' },
     });
-    return { choice, plan };
+    return { choice, plan, later };
   };
 
   return {
     async accept(member, idempotent, mandateId, versionId, pendingRequests, correlationId) {
       let carry: readonly CarryPlanned[] | null = null;
+      let carryLater = 0;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, ACCEPTING_ROLES);
         const read = await acceptable(tx, states, member.orgId, mandateId, versionId, 'share');
         const settled = await settling(tx, states, member.orgId, read, pendingRequests, false);
         carry = settled.plan;
+        carryLater = settled.later;
         return stepUps.ask(tx, member, {
           action: ACCEPT_OPERATION,
           changeHash: acceptanceHash(member.orgId, read.state.eventId, read.draft, settled),
@@ -286,12 +297,14 @@ export function createMandateAcceptance({
       if (done.outcome === 'replayed' && pendingRequests === 'carry') {
         const again = await work.answered(member.orgId, correlationId, async (tx, states) => {
           const read = await acceptable(tx, states, member.orgId, mandateId, versionId, 'share');
-          return { plan: (await settling(tx, states, member.orgId, read, pendingRequests, false)).plan };
+          const { plan, later } = await settling(tx, states, member.orgId, read, pendingRequests, false);
+          return { plan, later };
         });
         if ('outcome' in again) return again;
         carry = again.plan;
+        carryLater = again.later;
       }
-      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, carry };
+      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId, carry, carryLater };
     },
 
     async acceptConfirm(member, idempotent, mandateId, stepUpChallengeId, pendingRequests, correlationId) {
@@ -338,6 +351,8 @@ export function createMandateAcceptance({
               carried: settled.plan.filter(({ outcome }) => outcome === 'carry').length,
               cancelled: settled.plan.filter(({ outcome }) => outcome === 'cancel').length,
             }),
+            // The rest left on the version replaced for the carry job (PL-47), which reads this event to take them.
+            ...(settled.later > 0 && { carryRest: true, carryLater: settled.later }),
           },
         });
         await outbox.add(tx, toldAdminsAndApprovers(member.orgId, 'mandate_accepted', read.mandate.id));

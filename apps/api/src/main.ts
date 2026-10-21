@@ -107,6 +107,7 @@ import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
+import { CARRY_REST_EVERY_MS, createCarryRest } from './mandate-carry-rest.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createAgentMandates } from './agent-mandate.ts';
 import { createPolicySimulations } from './policy-simulations.ts';
@@ -933,6 +934,18 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     WAITING_REJECTIONS_EVERY_MS,
   );
+  // A carry past 20's rest weighed and carried onto the version in force (Phase 4 A3, PL-47), on a timer of its own.
+  const carryResting = scheduleRuns(
+    createCarryRest({
+      list: () => listedOrganizations(database),
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    }),
+    CARRY_REST_EVERY_MS,
+  );
   // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6), on a timer of its own.
   const activitySealing = scheduleRuns(
     createActivitySeal({
@@ -979,6 +992,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           requestExpiring.stop(),
           requestVoiding.stop(),
           waitingRejecting.stop(),
+          carryResting.stop(),
           activitySealing.stop(),
           downloadBuilding.stop(),
           sealChecking.stop(),
