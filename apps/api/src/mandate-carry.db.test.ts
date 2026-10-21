@@ -589,6 +589,54 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     for (const { id } of pending) expect(await versionOf(w, id)).toBe(versionId);
   });
 
+  it('refuses the confirm when some came to wait for the job since the ask, though the 20 are the same', async () => {
+    const { w, acting, mandateId } = await ready();
+    await askedInTurn(acting, w, 20);
+    const { asked } = await asking(w, mandateId, {}, 'carry');
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    expect(asked.carryLater).toBe(0);
+    await ask(acting, w, { amount: AED(1_000n), orderReference: 'TURN-LATE' });
+
+    expect(await confirmed(w, mandateId, asked.stepUpChallengeId, 'carry')).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+  });
+
+  it('leaves out one that ends while its turn waits for it (forced), carrying the rest: no integrity failure', async () => {
+    const { w, acting, mandateId } = await ready();
+    const pending = await askedInTurn(acting, w, 22);
+    const { versionId } = await carried(w, mandateId);
+    const ending = pending[20]?.id ?? '';
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const cancelling = signed(w, async (tx, states) => {
+      const ended = await cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: ending },
+        { kind: 'user', userId: w.admin.userId },
+        clock.now(),
+      );
+      holding(undefined);
+      await gate;
+      return ended;
+    });
+    await held;
+
+    const running = within(20_000, carryRest(w).run(), 'the carry job');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await cancelling;
+    await running;
+
+    expect(await statusOf(w, ending)).toBe('CANCELLED');
+    expect(await versionOf(w, pending[21]?.id ?? '')).toBe(versionId);
+    expect(capture.lines().filter(({ event }) => event === 'mandate_carry.failed')).toEqual([]);
+  });
+
   it('refuses to approve one waiting its turn: it is weighed under the version in force first', async () => {
     const { w, acting, mandateId } = await ready();
     await askedInTurn(acting, w, 20);
@@ -670,13 +718,16 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     expect(await versionOf(w, pending[20]?.id ?? '')).toBe(versionId);
   });
 
-  it('cancel still accepts past 20, the rest voided (17.3)', async () => {
+  it('cancel still accepts past 20, the rest voided, never carried (17.3)', async () => {
     const { w, acting, mandateId } = await ready();
     const pending = await askedInTurn(acting, w, 21);
-    const { asked } = await asking(w, mandateId, {}, 'cancel');
+    const { asked, versionId } = await asking(w, mandateId, {}, 'cancel');
     if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
     expect(asked.carryLater).toBe(0);
     expect(await confirmed(w, mandateId, asked.stepUpChallengeId, 'cancel')).toMatchObject({ outcome: 'accepted' });
+    // The carry job's turn first: an acceptance that chose cancel leaves it nothing to carry.
+    await carryRest(w).run();
+    expect(await versionOf(w, pending[20]?.id ?? '')).not.toBe(versionId);
     await voids(w).run();
     for (const { id } of pending) expect(await statusOf(w, id)).toBe('DENIED');
   });

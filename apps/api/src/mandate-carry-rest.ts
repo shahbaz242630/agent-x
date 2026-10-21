@@ -79,8 +79,8 @@ export async function carriesRest(
   });
   if (history.outcome !== 'read') throw new Error(`A mandate's acceptances can't be believed: ${mandate.id}`);
   // A version in force came with an acceptance: none read is a history that can't be believed, as one unread.
-  const details = history.events.at(-1)?.event.details;
-  return details?.versionId === mandate.currentVersionId && details.carryRest === true;
+  // The newest acceptance made the version in force (its signed state is that event's): its own words decide.
+  return history.events.at(-1)?.event.details.carryRest === true;
 }
 
 /** A mandate with requests on a version not its own in force, as its rows name them. */
