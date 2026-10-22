@@ -51,3 +51,6 @@ dast-results/
 
 # DB-IP City Lite, which the image fetches (Dockerfile); a developer may keep a copy here.
 /geo/
+
+# The load test's working files: the seed's agent keys, k6's numbers, the API's log (tooling/load/run.ts).
+/tooling/load/.out/

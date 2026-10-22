@@ -2,9 +2,10 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
-      "entry": ["eslint.quality.config.js"],
+      "entry": ["eslint.quality.config.js", "vitest.load.config.ts", "tooling/load/money-paths.k6.js"],
       "project": ["**/*.{js,mjs,ts,tsx}", "!tooling/gate-proofs/fixtures/**"]
     }
   },
-  "ignoreBinaries": ["mkfifo"]
+  "ignoreBinaries": ["mkfifo"],
+  "ignoreDependencies": ["k6"]
 }

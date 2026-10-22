@@ -18,6 +18,7 @@
     "test:coverage": "vitest run --coverage",
     "verify": "prettier --check . && node tooling/quality/lint.ts && tsc --project tsconfig.json && depcruise apps packages && knip && vitest run --coverage",
     "e2e": "vitest run --config vitest.e2e.config.ts",
+    "load": "node tooling/load/run.ts",
     "hooks": "node tooling/git-hooks/install.ts",
     "tools": "node tooling/bicep/install.ts",
     "tools:cosign": "node tooling/cosign/install.ts"

@@ -35,9 +35,9 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import { createFakeRail, type FakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { addSupplier, supplierOf, type SuppliersTables, verifySupplier } from '@agentx/core/modules/suppliers';
-import { DAY_MS, money } from '@agentx/core/shared-kernel';
+import { DAY_MS, type IdGenerator, money } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
-import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { type FixedClock, SequentialIds, testLogger } from '@agentx/testing';
 
 import { DRAFT_OPERATION, type MandateDraft, type MandateRegistry, type MandateWrite } from './mandate-registry.ts';
@@ -101,20 +101,24 @@ export const draftedOf = (write: MandateWrite) => {
 /**
  * The world's makers and reads for one test file: `app` and `clock` are read
  * at each call, as the file sets them in its hooks; `name` keeps its people's
- * subjects apart from another file's.
+ * subjects apart from another file's. The load test (tooling/load) seeds a
+ * running stack with it: its own IDs, and `keyring`, the keys the stack's API
+ * reads, so the API believes what it signs.
  */
 export function mandateWorld({
   app,
   clock,
   ids,
   name,
+  keyring = keys,
 }: {
   readonly app: () => Database<MandateWorldTables>;
   readonly clock: () => FixedClock;
-  readonly ids: SequentialIds;
+  readonly ids: IdGenerator;
   readonly name: string;
+  readonly keyring?: KeyProvider;
 }) {
-  const quiet = () => ({ keys, ids, logger: testLogger() });
+  const quiet = () => ({ keys: keyring, ids, logger: testLogger() });
   let people = 0;
   let keysUsed = 0;
 
@@ -148,11 +152,14 @@ export function mandateWorld({
 
   /**
    * An organisation with an admin, an active agent, a source linked through
-   * the fake partner, and two suppliers; its monthly cap chosen, AED 20,000,
-   * as its admin's policy change records it (E2), unless `capChosen` is false:
-   * no organisation policy at all.
+   * the fake partner, and two suppliers (or `suppliers`); its monthly cap
+   * chosen, AED 20,000, as its admin's policy change records it (E2), unless
+   * `capChosen` is false: no organisation policy at all.
    */
-  async function world({ capChosen = true }: { readonly capChosen?: boolean } = {}): Promise<World> {
+  async function world({
+    capChosen = true,
+    suppliers: supplierCount = 2,
+  }: { readonly capChosen?: boolean; readonly suppliers?: number } = {}): Promise<World> {
     const now = clock().now();
     const org = ids.next();
     await withSignedStates(app(), org, quiet(), (tx, states) =>
@@ -224,10 +231,10 @@ export function mandateWorld({
       });
       await settleLink(tx, { orgId: org, id: linkId }, { outcome: 'linked', sourceId: source }, now);
     });
-    const suppliers = [ids.next(), ids.next()];
+    const suppliers = Array.from({ length: supplierCount }, () => ids.next());
     for (const id of suppliers) {
       await withSignedStates(app(), org, quiet(), (tx, states) =>
-        addSupplier(tx, states, keys, {
+        addSupplier(tx, states, keyring, {
           orgId: org,
           id,
           versionId: ids.next(),
@@ -413,7 +420,7 @@ export function mandateWorld({
   ): Promise<{ orgId: string; agentId: string; keyId: string; text: string }> {
     const keyId = ids.next();
     const secret = randomBytes(32);
-    const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, secret));
+    const { mac, keyVersion } = keyring.mac('agent-key-pepper', keySecretMessage(keyId, secret));
     await withSignedStates(app(), w.org, quiet(), (tx, states) =>
       addAgentKey(tx, states, {
         orgId: w.org,

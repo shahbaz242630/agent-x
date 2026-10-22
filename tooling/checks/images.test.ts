@@ -65,6 +65,12 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(imageProblems(pulled)).toEqual([]);
   });
 
+  it("pins the load test's k6 (Phase 4 D2)", () => {
+    const load = composeImages(readFileSync('tooling/load/compose.load.yaml', 'utf8'));
+    expect(Object.keys(load)).toEqual(['k6']);
+    expect(imageProblems(Object.values(load))).toEqual([]);
+  });
+
   it("pins the dynamic scan's scanners (B7)", () => {
     expect(Object.keys(SCANNER_IMAGES)).toEqual(['zap', 'schemathesis']);
     expect(imageProblems(Object.values(SCANNER_IMAGES))).toEqual([]);
