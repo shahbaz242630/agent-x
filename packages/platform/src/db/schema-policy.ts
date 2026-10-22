@@ -167,6 +167,15 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // and one deleted would leave an open invitation no one can accept.
       appMay: ['SELECT', 'INSERT'],
     },
+    'directory.instructions': {
+      reason:
+        "The directory's list of instructions handed to the partner (ADR-005, ADR-007 §7 step 6, Phase 4 B3): an instruction's ID and its organisation, added in the hand-off's Tx A, so a partner's event naming only our ID finds its organisation before any is known; the instruction itself is read inside that organisation's withTenant",
+      columns: ['instruction_id', 'org_id'],
+      // Added with its instruction, and read; an entry changed would route a
+      // partner's event to an organisation with no such instruction (which then
+      // finds none), and one deleted would leave its events unrouted (alerted).
+      appMay: ['SELECT', 'INSERT'],
+    },
     'directory.agent_keys': {
       reason:
         "The directory's list of agent keys (ADR-005 §6, ADR-011 §1, C1-1): a key's ID and its organisation, found when a request carries the key, before any organisation is known; the key itself is read and verified inside that organisation's withTenant",
