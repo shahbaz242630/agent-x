@@ -4,6 +4,7 @@
 export { isSettled, TRANSACTION, type TransactionEvent, type TransactionStatus } from './domain/transaction.ts';
 export {
   moveTransaction,
+  noteTransactionFacts,
   openTransaction,
   type ProviderFacts,
   type TransactionChange,

@@ -84,7 +84,7 @@ describe('at start-up', () => {
         'suppliers.supplier_versions',
         // An agent's month zone (0054, PL-40).
         'limit_reservations.agent_zones',
-        // A handed-off request's instruction (0057, Phase 4 B3).
+        // A handed-off request's instruction (0058, Phase 4 B3).
         'instructions.instructions',
       ],
       // And the fixed-at-creation guard on each with columns fixed when made (Phase 2 B1).

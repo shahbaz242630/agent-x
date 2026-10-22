@@ -55,7 +55,10 @@ CREATE TABLE instructions.instructions (
   state_event_id uuid,
   PRIMARY KEY (org_id, id),
   CONSTRAINT one_instruction_a_request UNIQUE (org_id, spend_request_id),
-  CONSTRAINT of_a_spend_request FOREIGN KEY (org_id, spend_request_id) REFERENCES spend_requests.requests (org_id, id)
+  CONSTRAINT of_a_spend_request FOREIGN KEY (org_id, spend_request_id) REFERENCES spend_requests.requests (org_id, id),
+  CONSTRAINT of_a_supplier_version FOREIGN KEY (org_id, supplier_version_id)
+    REFERENCES suppliers.supplier_versions (org_id, id),
+  CONSTRAINT of_a_funding_source FOREIGN KEY (org_id, funding_source_id) REFERENCES funding_sources.sources (org_id, id)
 );
 
 ALTER TABLE instructions.instructions ENABLE ROW LEVEL SECURITY;

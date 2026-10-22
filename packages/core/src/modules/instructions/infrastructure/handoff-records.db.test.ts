@@ -19,6 +19,7 @@ import { withSignedStates } from '../../audit/index.ts';
 import { createOrganization } from '../../organizations/index.ts';
 import {
   moveTransaction,
+  noteTransactionFacts,
   openTransaction,
   type ProviderFacts,
   transactionOf,
@@ -217,7 +218,7 @@ describe('B3 the instruction (one a request, made once)', () => {
     await expect(handedOff(world)).rejects.toMatchObject({ constraint: 'one_instruction_a_request' });
   });
 
-  it('hashes every field: any one changed is another intent', () => {
+  it('hashes every field, and no two fields’ texts run together alike', () => {
     const base = instructionFor({
       orgId: ids.next(),
       request: ids.next(),
@@ -225,15 +226,27 @@ describe('B3 the instruction (one a request, made once)', () => {
       supplierVersion: ids.next(),
     });
     const hash = intentHashOf(base);
-    for (const changed of [
-      { beneficiaryRef: 'fake-payee-2' },
-      { amountMinor: 100_001n },
+    const changes: Partial<NewInstruction>[] = [
+      { orgId: ids.next() },
+      { id: ids.next() },
+      { spendRequestId: ids.next() },
+      { routeReason: 'another_reason' },
+      { fundingSourceId: ids.next() },
+      { partner: 'other' },
+      { partnerLegalEntityId: 'OTHER-LEI' },
+      { partnerLicenceRef: 'OTHER-LICENCE' },
       { accountConsentId: 'fake-consent-2' },
+      { beneficiaryRef: 'fake-payee-2' },
+      { supplierVersionId: ids.next() },
+      { amountMinor: 100_001n },
+      { currency: 'USD' },
       { paymentReference: 'INV-2' },
-      { partnerLicenceRef: 'OTHER' },
-    ]) {
-      expect(intentHashOf({ ...base, ...changed })).not.toBe(hash);
-    }
+    ];
+    for (const changed of changes) expect(intentHashOf({ ...base, ...changed })).not.toBe(hash);
+    // The same texts split differently between two fields are another intent.
+    expect(intentHashOf({ ...base, partnerLegalEntityId: 'AB', partnerLicenceRef: 'C' })).not.toBe(
+      intentHashOf({ ...base, partnerLegalEntityId: 'A', partnerLicenceRef: 'BC' }),
+    );
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -283,6 +296,16 @@ describe('B3 the transaction (PRD §4.3)', () => {
     );
   const read = (orgId: string, id: string) =>
     withSignedStates(app, orgId, services(), (tx, states) => transactionOf(tx, states, { orgId, id }, 'share'));
+  const eventsOf = (orgId: string, id: string) =>
+    withTenant(app, orgId, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('action')
+        .where('subject_type', '=', 'transaction')
+        .where('subject_id', '=', id)
+        .orderBy('seq')
+        .execute(),
+    );
 
   it('is born SUBMISSION_PENDING with its instruction, and moves by its machine with the partner’s facts beside', async () => {
     const world = await approvedRequest();
@@ -361,6 +384,126 @@ describe('B3 the transaction (PRD §4.3)', () => {
 
     expect((await read(world.orgId, transactionId)).outcome).toBe('tampered');
     expect((await move(world.orgId, transactionId, 'reverse')).outcome).toBe('tampered');
+  });
+
+  it('keeps the facts given before when a later move gives none, and notes the same facts nothing new', async () => {
+    const world = await approvedRequest();
+    const { transactionId } = await handedOff(world);
+    const pending: ProviderFacts = {
+      providerStatus: 'Pending',
+      paymentInstructionRef: 'fake-payment-1',
+      rejectCode: null,
+      providerChangedAt: AT,
+    };
+    await move(world.orgId, transactionId, 'submitted', pending);
+    await move(world.orgId, transactionId, 'processing', pending);
+    await move(world.orgId, transactionId, 'lose_track');
+
+    expect(await read(world.orgId, transactionId)).toMatchObject({ transaction: { status: 'UNKNOWN', ...pending } });
+    const actions = (await eventsOf(world.orgId, transactionId)).map(({ action }) => action);
+    expect(actions).toEqual([
+      'transaction.opened',
+      'transaction.provider_noted',
+      'transaction.submitted',
+      'transaction.processing',
+      'transaction.lose_track',
+    ]);
+  });
+
+  it('keeps the partner’s answer when its machine refuses the move, and notes facts with no move at all', async () => {
+    const world = await approvedRequest();
+    const { transactionId } = await handedOff(world);
+    await move(world.orgId, transactionId, 'submitted', { ...NO_FACTS, providerStatus: 'Pending' });
+    await move(world.orgId, transactionId, 'processing');
+
+    // Under way again, later: refused as a move, kept as evidence.
+    const later = {
+      ...NO_FACTS,
+      providerStatus: 'AcceptedSettlementCompleted',
+      providerChangedAt: new Date(AT.getTime() + 60_000),
+    };
+    expect(await move(world.orgId, transactionId, 'processing', later)).toEqual({
+      outcome: 'refused',
+      from: 'PROCESSING',
+    });
+    expect(await read(world.orgId, transactionId)).toMatchObject({ transaction: { status: 'PROCESSING', ...later } });
+
+    const latest = { ...later, providerChangedAt: new Date(AT.getTime() + 90_000) };
+    expect(
+      await withSignedStates(app, world.orgId, services(), (tx, states) =>
+        noteTransactionFacts(tx, states, { orgId: world.orgId, id: transactionId }, latest, {
+          actor: ACTOR,
+          details: {},
+        }),
+      ),
+    ).toEqual({ outcome: 'noted' });
+    expect(await read(world.orgId, transactionId)).toMatchObject({
+      transaction: { providerChangedAt: latest.providerChangedAt },
+    });
+    expect(
+      await withSignedStates(app, world.orgId, services(), (tx, states) =>
+        noteTransactionFacts(tx, states, { orgId: world.orgId, id: ids.next() }, latest, { actor: ACTOR, details: {} }),
+      ),
+    ).toEqual({ outcome: 'missing' });
+  });
+
+  it('moves SUBMISSION_PENDING to SUBMITTED to SUCCEEDED in one transaction (ADR-007 §13)', async () => {
+    const world = await approvedRequest();
+    const { transactionId } = await handedOff(world);
+    const credited = {
+      ...NO_FACTS,
+      providerStatus: 'AcceptedCreditSettlementCompleted',
+      paymentInstructionRef: 'fake-payment-9',
+    };
+
+    await withSignedStates(app, world.orgId, services(), async (tx, states) => {
+      const key = { orgId: world.orgId, id: transactionId };
+      await moveTransaction(tx, states, key, 'submitted', credited, { actor: ACTOR, details: {} });
+      await moveTransaction(tx, states, key, 'succeed', credited, { actor: ACTOR, details: {} });
+    });
+
+    expect(await read(world.orgId, transactionId)).toMatchObject({ transaction: { status: 'SUCCEEDED', ...credited } });
+  });
+
+  it('fails only with proof: a reject code, or an evidence reference a person attached (ADR-007 §9–§10)', async () => {
+    const world = await approvedRequest();
+    const { transactionId } = await handedOff(world);
+
+    await expect(move(world.orgId, transactionId, 'fail')).rejects.toThrow(RangeError);
+    await move(world.orgId, transactionId, 'lose_track');
+    expect(
+      await withSignedStates(app, world.orgId, services(), (tx, states) =>
+        moveTransaction(tx, states, { orgId: world.orgId, id: transactionId }, 'fail', NO_FACTS, {
+          actor: ACTOR,
+          details: { evidenceRef: 'PARTNER-CASE-77' },
+        }),
+      ),
+    ).toMatchObject({ outcome: 'moved', to: 'FAILED' });
+  });
+
+  it('is one an instruction, its instruction and opening fixed: the database refuses the app either change', async () => {
+    const world = await approvedRequest();
+    const { instruction, transactionId } = await handedOff(world);
+
+    await expect(
+      withSignedStates(app, world.orgId, services(), (tx, states) =>
+        openTransaction(
+          tx,
+          states,
+          { orgId: world.orgId, id: ids.next(), instructionId: instruction.id, createdAt: AT },
+          { actor: ACTOR, details: {} },
+        ),
+      ),
+    ).rejects.toMatchObject({ constraint: 'one_transaction_an_instruction' });
+    await expect(
+      withTenant(app, world.orgId, (tx) =>
+        tx
+          .updateTable('transactions.transactions')
+          .set({ created_at: new Date(AT.getTime() + 1) })
+          .where('id', '=', transactionId)
+          .execute(),
+      ),
+    ).rejects.toMatchObject({ constraint: 'fixed_at_creation' });
   });
 
   it('a move on a transaction that isn’t there is missing', async () => {

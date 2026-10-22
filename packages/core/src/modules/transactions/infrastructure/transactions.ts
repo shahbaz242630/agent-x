@@ -8,9 +8,16 @@
 //   hand-off's Tx A, and signed (`transaction.opened`).
 // - `transactionOf`: read through its signed state.
 // - `moveTransaction`: the partner's facts as it gave them (its status, its
-//   reference, a reject code, when it says the status changed), recorded
-//   first where any differ, then the status moved by its machine, both from
-//   the state verified for change (Tx B, ADR-007 §9; events and lookups, E1).
+//   reference, a reject code, when it says the status changed), merged over
+//   those kept (a fact it didn't give now keeps the one it gave before, so a
+//   timeout never clears the partner's reference), recorded first where any
+//   differ, then the status moved by its machine, both from the state
+//   verified for change (Tx B, ADR-007 §9; events and lookups, E1). A move
+//   its machine refuses still keeps the facts: the partner's answer is
+//   evidence whoever won (ADR-007 §9). A move to FAILED needs proof: a reject
+//   code, or the evidence reference a person attached (ADR-007 §9–§10).
+// - `noteTransactionFacts`: the facts alone, no move (a second "under way").
+
 import type { SignedStateTable, StatusTable } from '@agentx/platform/db';
 import type { Transaction } from 'kysely';
 
@@ -158,12 +165,20 @@ export async function transactionOf(
   return { outcome: 'found', transaction: recordOf(key.id.toLowerCase(), state.fields), state };
 }
 
-/** What a move came to: moved (or the facts alone noted), refused by the machine, or the row tampered with or gone. */
+/** What a move came to: moved, refused by the machine (its facts still noted), or the row tampered with or gone. */
 export type TransactionMoved =
   | { readonly outcome: 'moved'; readonly from: TransactionStatus; readonly to: TransactionStatus }
   | { readonly outcome: 'refused'; readonly from: TransactionStatus }
   | { readonly outcome: 'missing' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/** The facts given merged over those kept: one the partner didn't give now keeps the one it gave before. */
+const merged = (kept: ProviderFacts, given: ProviderFacts): ProviderFacts => ({
+  providerStatus: given.providerStatus ?? kept.providerStatus,
+  paymentInstructionRef: given.paymentInstructionRef ?? kept.paymentInstructionRef,
+  rejectCode: given.rejectCode ?? kept.rejectCode,
+  providerChangedAt: given.providerChangedAt ?? kept.providerChangedAt,
+});
 
 /** The facts as the row writes them, each column its text or null. */
 const factsSet = ({ providerStatus, paymentInstructionRef, rejectCode, providerChangedAt }: ProviderFacts) => ({
@@ -195,17 +210,14 @@ export async function moveTransaction(
   facts: ProviderFacts,
   change: TransactionChange,
 ): Promise<TransactionMoved> {
+  if (event === 'fail' && facts.rejectCode === null && typeof change.details.evidenceRef !== 'string') {
+    throw new RangeError('A transaction fails only with proof: a reject code, or an evidence reference');
+  }
   const read = await transactionOf(tx, states, key, 'change');
   if (read.outcome !== 'found') return read;
   const from = read.transaction.status;
+  await noted(tx, states, key, read, facts, change);
   if (!TRANSACTION.transition(from, event).ok) return { outcome: 'refused', from };
-  if (!sameFacts(read.transaction, facts)) {
-    await states.record(tx, TRANSACTIONS, key, read.state, factsSet(facts), {
-      actor: change.actor,
-      action: 'transaction.provider_noted',
-      details: change.details,
-    });
-  }
   const moved = await states.changeStatus(tx, TRANSACTIONS, key, event, {
     actor: change.actor,
     action: `transaction.${event}`,
@@ -216,4 +228,44 @@ export async function moveTransaction(
     throw new Error(`A transaction verified for change didn't move: ${key.id} (${moved.outcome})`);
   }
   return { outcome: 'moved', from: moved.from, to: moved.to };
+}
+
+/** The facts merged over those kept, recorded from the state read for change, where any differ. */
+async function noted(
+  tx: TransactionsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  read: Extract<TransactionCheck, { outcome: 'found' }>,
+  facts: ProviderFacts,
+  change: TransactionChange,
+): Promise<void> {
+  const next = merged(read.transaction, facts);
+  if (sameFacts(read.transaction, next)) return;
+  await states.record(tx, TRANSACTIONS, key, read.state, factsSet(next), {
+    actor: change.actor,
+    action: 'transaction.provider_noted',
+    details: change.details,
+  });
+}
+
+/**
+ * The partner's facts alone, no move (a second report that it is under way,
+ * a lookup's newer time), merged and recorded where any differ, in the
+ * caller's transaction (withSignedStates'): `noted`, or as the row stands.
+ */
+export async function noteTransactionFacts(
+  tx: TransactionsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  facts: ProviderFacts,
+  change: TransactionChange,
+): Promise<
+  | { readonly outcome: 'noted' }
+  | { readonly outcome: 'missing' }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const read = await transactionOf(tx, states, key, 'change');
+  if (read.outcome !== 'found') return read;
+  await noted(tx, states, key, read, facts, change);
+  return { outcome: 'noted' };
 }
