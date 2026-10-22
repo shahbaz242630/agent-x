@@ -16,7 +16,11 @@
 // rule). Failures are logged and the run goes on: the partner's unexpected
 // error (UNKNOWN, never resent), an answer that can't be recorded (its
 // transaction changed past the app: never logged as handed off), a request
-// that can't be believed, a list that can't be read.
+// that can't be believed, a list that can't be read. Phase 4 D1 (PL-38):
+// random batches handed off by runs racing each other, some runs dying
+// before their answer is recorded, a sweep between: whatever order they go
+// in, each request is sent once, makes one instruction and one transaction,
+// and one left waiting is marked UNKNOWN, never sent again.
 import { AGENT_KEYS } from '@agentx/core/modules/agents';
 import { holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
 import { instructionOfRequest, type InstructionsTables } from '@agentx/core/modules/instructions';
@@ -57,6 +61,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
+import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createHandoff, HEARTBEAT_STALE_MS, heartbeatChecks } from './handoff.ts';
@@ -956,4 +961,115 @@ describe('failures logged, the run going on', () => {
     expect(lines('handoff.failed')).toHaveLength(1);
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
   });
+});
+
+describe('the model: random batches handed off by runs racing each other (D1; SEC-DP-01, ADR-007 §10)', () => {
+  /** The fake's fils outcome, and the status each leaves (decision 5). */
+  const OUTCOMES = [
+    { fils: 0n, status: 'PROCESSING' },
+    { fils: 1n, status: 'FAILED' },
+    { fils: 2n, status: 'UNKNOWN' },
+    { fils: 3n, status: 'UNKNOWN' },
+    { fils: 4n, status: 'PROCESSING' },
+  ] as const;
+  const REQUEST = fc.record({
+    outcome: fc.integer({ min: 0, max: OUTCOMES.length - 1 }),
+    // The second supplier has no payee: its requests wait.
+    supplier: fc.integer({ min: 0, max: 1 }),
+    // A run that reaches it dies before its answer is recorded.
+    dies: fc.boolean(),
+  });
+  /** AED 100, or 150 for one whose run dies, and the fils: six stay under the approval threshold together (the split check). */
+  const LIVES = 10_000n;
+  const DIES = 15_000n;
+  // The call's limit is never reached here (B5's own tests time it): an answer held back stands for a run that died.
+  const LIMITS = { callTimeoutMs: 60_000, unknownAfterMs: 120_000 };
+
+  it('sends each request once, one instruction and one transaction; one left waiting UNKNOWN, never sent again', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(REQUEST, { minLength: 2, maxLength: 6 }),
+        fc.integer({ min: 2, max: 4 }),
+        async (batch, racing) => {
+          capture = new LogCapture();
+          const { w, acting } = await ready();
+          const asked = [];
+          for (const r of batch) {
+            const outcome = OUTCOMES[r.outcome] ?? OUTCOMES[0];
+            const amount = AED((r.dies ? DIES : LIVES) + outcome.fils);
+            const request = await ask(acting, w, { amount, supplierId: w.suppliers[r.supplier] ?? '' });
+            expect(request.status).toBe('APPROVED');
+            asked.push({ request, outcome, supplier: r.supplier });
+          }
+          // Every submission counted by its instruction; in the first runs, an answer to one that dies held back.
+          const sent = new Map<string, number>();
+          const held = new Set<string>();
+          let holding = true;
+          const { promise: released, resolve: release } = Promise.withResolvers<undefined>();
+          const rail: FakeRail = {
+            ...w.rail,
+            submitApprovedIntent: async (intent) => {
+              sent.set(intent.instructionId, (sent.get(intent.instructionId) ?? 0) + 1);
+              if (holding && intent.amountMinor >= DIES) {
+                held.add(intent.instructionId);
+                await released;
+              }
+              return w.rail.submitApprovedIntent(intent);
+            },
+          };
+          const run = () =>
+            createHandoff({
+              list: () => Promise.resolve([w.org]),
+              database: app,
+              outbox: createOutbox({ ids, clock }),
+              rail,
+              keys,
+              ids,
+              clock,
+              logger: testLogger(capture),
+              ...LIMITS,
+            }).run();
+
+          // The first runs at once, each going until it finishes or reaches one that dies (one each at most).
+          let finished = 0;
+          const first = Array.from({ length: racing }, () => run().then(() => (finished += 1)));
+          await expect.poll(() => finished + held.size, { timeout: 60_000 }).toBe(racing);
+          // Past every wait, more at once: the rest handed off, those left waiting swept.
+          holding = false;
+          clock.advanceBy(LIMITS.unknownAfterMs + 1);
+          await Promise.all(Array.from({ length: racing }, run));
+          // The dead runs' answers come after all.
+          release(undefined);
+          await Promise.all(first);
+
+          for (const { request, outcome, supplier } of asked) {
+            const payment = await paymentOf(w, request.id);
+            if (supplier === 1) {
+              expect(await statusOf(w, request.id)).toBe('APPROVED');
+              expect(payment).toEqual({ instruction: 'missing' });
+              continue;
+            }
+            expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+            expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
+            const instructionId = typeof payment.instruction === 'object' ? payment.instruction.id : '';
+            // Left waiting: UNKNOWN, its late answer kept as facts; a late refusal is still proof (B5).
+            const left = outcome.status === 'FAILED' ? 'FAILED' : 'UNKNOWN';
+            const status = held.has(instructionId) ? left : outcome.status;
+            expect(payment).toMatchObject({ transactions: 1, transaction: { status } });
+            expect(sent.get(instructionId)).toBe(1);
+          }
+          // Nothing sent but the instructions made, each once.
+          expect([...sent.values()].reduce((total, count) => total + count, 0)).toBe(
+            asked.filter(({ supplier }) => supplier === 0).length,
+          );
+          expect(lines('handoff.marked_unknown')).toHaveLength(held.size);
+          expect(lines('handoff.failed')).toEqual([]);
+          expect(lines('handoff.answer_unrecorded')).toEqual([]);
+          expect(lines('handoff.sweep_failed')).toEqual([]);
+        },
+      ),
+      // Shrinking replays whole worlds, and a race may not replay at all: the failing batch is printed as it was.
+      { numRuns: 8, endOnFailure: true },
+    );
+  }, 300_000);
 });
