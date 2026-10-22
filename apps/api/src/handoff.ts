@@ -112,10 +112,10 @@ import { type AuthorityRead, authorityOf, type VoidTables } from './request-void
 export const HANDOFF_EVERY_MS = 10_000;
 
 /** How long the partner has to answer a hand-off (ADR-007 §8): past it the answer can't be known, and is never resent. */
-export const PARTNER_CALL_TIMEOUT_MS = 30_000;
+const PARTNER_CALL_TIMEOUT_MS = 30_000;
 
 /** How long a transaction may wait for its answer before it is marked UNKNOWN (ADR-007 §10): far past the call's limit. */
-export const UNKNOWN_AFTER_MS = 10 * 60_000;
+const UNKNOWN_AFTER_MS = 10 * 60_000;
 
 /** How old the hand-off's heartbeat may grow before /health says it has stopped (ADR-013): many runs' worth. */
 export const HEARTBEAT_STALE_MS = 5 * 60_000;
