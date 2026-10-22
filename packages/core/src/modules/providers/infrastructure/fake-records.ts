@@ -1,4 +1,4 @@
-// Where the fake partner keeps its records (D2-1): in memory for the unit
+// Where the fake partner keeps its records (D2-1; payments since Phase 4 B2, 0056): in memory for the unit
 // tests, and in the database (0028) wherever it must outlive a restart and be
 // the same partner to every process: on staging, the API and the test steps
 // playing the business at its bank. Both pass the same contract tests.
@@ -58,10 +58,27 @@ export interface RegistrationBody {
   readonly outcome: 'waiting' | 'invalid_details' | { readonly beneficiary: BeneficiaryBody };
 }
 
+/**
+ * A payment the partner made (Phase 4 B2; ref: our instruction ID, or `ID:2`…
+ * for one a resend past the key's window made; alias: the partner's own
+ * reference): what was asked, when, and the outcome the amount's fils chose.
+ */
+export interface PaymentBody {
+  readonly accountConsentId: string;
+  readonly beneficiaryRef: string;
+  /** Minor units, as decimal text: JSON has no bigint. */
+  readonly amountMinor: string;
+  readonly currency: string;
+  readonly paymentReference: string;
+  readonly submittedAt: string;
+  readonly script: 'lost' | 'duplicate' | 'unknown' | 'succeeds';
+}
+
 interface FakeBodies {
   readonly link: LinkBody;
   readonly source: SourceBody;
   readonly registration: RegistrationBody;
+  readonly payment: PaymentBody;
 }
 
 type FakeRecordKind = keyof FakeBodies;

@@ -6,8 +6,9 @@
 //
 // The contract grows with the phase that first uses each part. Phase 1:
 // linking a business's bank account (D1-1; PRD §2.3, rail map §2) and
-// registering a supplier as the partner's payee (D1-2; ADR-014 §3). The
-// hand-off, its status and events come with Phase 4.
+// registering a supplier as the partner's payee (D1-2; ADR-014 §3). Phase 4
+// (B2): handing off a policy-approved payment intent and reading how it
+// stands (payments.ts). The partner's events come with E1.
 //
 // Linking, on any rail:
 // 1. Agent X starts a link with its own ID for it; the partner answers with a
@@ -18,6 +19,8 @@
 //    that organisation ended: linked, waiting, or refused.
 // 4. From then on the partner's state of the source is read by its reference,
 //    again only for the organisation that linked it.
+
+import type { ApprovedPaymentIntent, ExecutionLookup, PartnerExecutionRef, SubmissionResult } from './payments.ts';
 
 /** A partner's name, as Agent X keeps it on a link or a registration: lower-case words, such as `fake`. */
 export const PARTNER_NAME = /^[a-z][a-z0-9_]{0,31}$/;
@@ -217,6 +220,14 @@ export interface FinancialRailAdapter {
   /** Registering again with the same ID answers as the first did, whatever details come with it. */
   registerBeneficiary(input: BeneficiaryRegistration): Promise<BeneficiaryOutcome>;
   getBeneficiaryState(ref: BeneficiaryRef): Promise<BeneficiaryOutcome>;
+  /**
+   * Hands the partner the intent (payments.ts): accepted, or refused with its
+   * proof that no payment was made. Throws RailUnavailable when the outcome
+   * can't be known: never resend; look it up.
+   */
+  submitApprovedIntent(intent: ApprovedPaymentIntent): Promise<SubmissionResult>;
+  /** The payment by our instruction ID (the rail's lookup by key), or `not_found`, which proves nothing. */
+  getExecution(ref: PartnerExecutionRef): Promise<ExecutionLookup>;
 }
 
 /**

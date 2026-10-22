@@ -5,7 +5,7 @@
 // be suspended and come back, or end revoked, expired or consumed. Its bank
 // offers the sandbox's synthetic business accounts, and its answers pass the
 // same account-number check a real adapter's must. Its payees are in
-// fake-payees.ts.
+// fake-payees.ts, its payments in fake-payments.ts (Phase 4 B2).
 //
 // `bank` plays everything that happens outside Agent X: the business at its
 // bank, a person at the partner's payee form, the partner changing a consent,
@@ -35,7 +35,9 @@ import {
   type SourceLookup,
   type SourceSummary,
 } from '../domain/rail.ts';
+import { PARTNER_IDEMPOTENCY_KEY } from '../domain/payments.ts';
 import { availabilityOf, type ConsentStatus, consentMayMove } from '../domain/uae-consent.ts';
+import { createFakePayments } from './fake-payments.ts';
 import { createFakePayees, FakeBankRefused, FORM_ORIGIN } from './fake-payees.ts';
 import {
   createMemoryRecords,
@@ -169,6 +171,7 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
     stablePayeeIdentity,
     formMinutes,
   });
+  const payments = createFakePayments({ clock });
   let down = false;
   let loseAnswer = false;
 
@@ -383,5 +386,19 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
       }),
 
     getBeneficiaryState: (ref) => answer(() => records.within(ref.organizationId, (held) => payees.stateOf(held, ref))),
+
+    // A payment whose script loses its answer (decision 5's `.02` and `.03`) was made at the partner first: its
+    // record is committed, then the caller sees what a timeout or a 409 gives it, an outcome it can't know.
+    submitApprovedIntent: (intent) =>
+      answer(async () => {
+        if (!PARTNER_IDEMPOTENCY_KEY.test(intent.instructionId)) {
+          throw new RangeError('An instruction ID is 1 to 40 characters, with no spaces');
+        }
+        const { result, lost } = await records.within(intent.organizationId, (held) => payments.submit(held, intent));
+        if (lost) throw new RailUnavailable();
+        return result;
+      }),
+
+    getExecution: (ref) => answer(() => records.within(ref.organizationId, (held) => payments.lookup(held, ref))),
   };
 }
