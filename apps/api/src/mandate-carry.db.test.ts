@@ -189,14 +189,7 @@ const agentMoved = (w: World, event: 'suspend' | 'reactivate') =>
   );
 
 const voids = (w: World) =>
-  createRequestVoids({
-    list: () => Promise.resolve([w.org]),
-    database: app,
-    keys,
-    ids,
-    clock,
-    logger: logger(),
-  });
+  createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
 
 const carryRest = (w: World) =>
   createCarryRest({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
