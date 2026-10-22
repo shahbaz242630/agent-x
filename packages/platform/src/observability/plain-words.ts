@@ -333,15 +333,30 @@ export const PLAIN_WORDS = {
     broke: 'The payment is kept as waiting for an answer, and nothing is sent again.',
     next: 'It is marked unknown and checked against the bank. If this repeats, a developer should read the error.',
   },
+  'handoff.marked_unknown': {
+    happened: 'A payment sent to the bank had no recorded answer after 10 minutes, so it was marked unknown.',
+    broke: 'Its money stays held and it is never sent again; the bank may or may not have paid it.',
+    next: "Check it against the bank's record. If this happens often, a developer should look at the hand-off.",
+  },
   'handoff.failed': {
     happened: 'Checking an approved payment before handing it to the bank failed.',
     broke: 'That payment was not sent and waits, its money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
   },
+  'handoff.partner_timeout': {
+    happened: "The bank didn't answer a payment handed to it within 30 seconds.",
+    broke: 'Whether the bank took it is not known, so it is marked unknown and never sent again.',
+    next: "It is checked against the bank's record. If this keeps happening, the bank's service may be slow or down.",
+  },
   'handoff.partner_failed': {
     happened: 'Handing a payment to the bank failed in an unexpected way.',
     broke: 'Whether the bank took it is not known, so it is marked unknown and never sent again.',
     next: 'It is checked against the bank. A developer should read the error.',
+  },
+  'handoff.sweep_failed': {
+    happened: "Checking for payments left waiting for the bank's answer failed.",
+    broke: 'A payment with no answer may not be marked unknown yet; its money stays held and nothing is sent again.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
   },
   'handoff.run_failed': {
     happened: 'The list of organisations could not be read, so no approved payments were handed to the bank.',

@@ -458,11 +458,26 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
   // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
   const rail = railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids });
+  // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
+  // where a partner is configured (ADR-014 §4). Its heartbeat is /health's first check (B5, ADR-013).
+  const handoff =
+    rail &&
+    createHandoff({
+      list: () => listedOrganizations(database),
+      database,
+      rail,
+      outbox,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    });
   const server = await buildServer({
     config,
     logger,
     ids: uuidV7Ids,
-    healthChecks: [],
+    healthChecks:
+      handoff === undefined ? [] : [{ name: 'handoff_heartbeat', check: () => Promise.resolve(handoff.beating()) }],
     signIn:
       signIn === undefined
         ? undefined
@@ -927,22 +942,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     REQUEST_VOIDS_EVERY_MS,
   );
-  // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46), on a
-  // timer of its own; only where a partner is configured (ADR-014 §4).
-  const handingOff = scheduleRunsIfAny(
-    rail &&
-      createHandoff({
-        list: () => listedOrganizations(database),
-        database,
-        rail,
-        outbox,
-        keys,
-        ids: uuidV7Ids,
-        clock: systemClock,
-        logger,
-      }),
-    HANDOFF_EVERY_MS,
-  );
+  // The hand-off on a timer of its own, where there is one.
+  const handingOff = scheduleRunsIfAny(handoff, HANDOFF_EVERY_MS);
   logger.info('api.handoff', { running: handingOff.running });
   // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b), on a timer of its own.
   const waitingRejecting = scheduleRuns(

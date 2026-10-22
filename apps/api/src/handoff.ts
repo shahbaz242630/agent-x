@@ -49,8 +49,15 @@
 // it answered (ADR-007 §9): accepted (SUBMITTED, then the rail's state now:
 // under way, credited, failed with proof, or unknown); refused with proof that
 // nothing was made (FAILED); no answer that can be known (UNKNOWN: never
-// resent, ADR-007 §10). A run that dies between the two leaves the
-// transaction SUBMISSION_PENDING, for the timer that marks it UNKNOWN (B5).
+// resent, ADR-007 §10); the call is given PARTNER_CALL_TIMEOUT_MS, and no
+// answer by then is one that can't be known. An answer that comes once the
+// transaction has moved on is kept as its facts (B3), never a move. A run
+// that dies between the two leaves the transaction SUBMISSION_PENDING: a run
+// a minute marks one left so past UNKNOWN_AFTER_MS UNKNOWN (Phase 4 B5), for
+// reconciliation to settle with the partner, never resent; the wait is
+// refused at start unless it is longer than the call may take (ADR-007 §10).
+// Each run's heartbeat is read by /health (ADR-013): a stale one says the
+// hand-off has stopped.
 // A handed-off request is never voided after: it is tracked to its outcome
 // (PL-46, the in-flight rule); its holdings stay held meanwhile (C3 releases
 // them on a proven failure).
@@ -84,6 +91,8 @@ import { versionOf } from '@agentx/core/modules/suppliers';
 import {
   moveTransaction,
   openTransaction,
+  TRANSACTIONS,
+  transactionOf,
   type ProviderFacts,
   type TransactionEvent,
   type TransactionsTables,
@@ -99,6 +108,18 @@ import { type AuthorityRead, authorityOf, type VoidTables } from './request-void
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
 export const HANDOFF_EVERY_MS = 10_000;
+
+/** How long the partner has to answer a hand-off (ADR-007 §8): past it the answer can't be known, and is never resent. */
+export const PARTNER_CALL_TIMEOUT_MS = 30_000;
+
+/** How long a transaction may wait for its answer before it is marked UNKNOWN (ADR-007 §10): far past the call's limit. */
+export const UNKNOWN_AFTER_MS = 10 * 60_000;
+
+/** How old the hand-off's heartbeat may grow before /health says it has stopped (ADR-013): many runs' worth. */
+export const HEARTBEAT_STALE_MS = 5 * 60_000;
+
+/** How often a run sweeps for transactions left waiting: often enough for UNKNOWN_AFTER_MS, few database calls. */
+const SWEEP_EVERY_MS = 60_000;
 
 /** How many of an organisation's approved requests are read at once: the run then takes the next page after them. */
 const HANDOFF_PAGE = 50;
@@ -178,8 +199,37 @@ const AFTER_SUBMITTED: Readonly<Record<ReturnType<typeof paymentStateOf>, Transa
 };
 
 export interface Handoff {
-  /** Hands off each organisation's approved requests that may go, a page at a time, until the signal is aborted. Never throws. */
+  /**
+   * Hands off each organisation's approved requests that may go, a page at a
+   * time, and marks its transactions left waiting past UNKNOWN_AFTER_MS
+   * UNKNOWN, until the signal is aborted. Never throws.
+   */
   run(signal?: AbortSignal): Promise<void>;
+  /** Whether a run has beaten within HEARTBEAT_STALE_MS: /health's check (ADR-013). */
+  beating(): boolean;
+}
+
+/** The partner gave no answer within its time: one that can't be known (ADR-007 §8). */
+class PartnerTimedOut extends Error {
+  constructor() {
+    super("The partner didn't answer the hand-off in time");
+    this.name = 'PartnerTimedOut';
+  }
+}
+
+/** The partner's answer, or PartnerTimedOut once `ms` pass; a late answer is left unread (Promise.race keeps hold of it). */
+async function withinTime<T>(answer: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new PartnerTimedOut());
+    }, ms);
+  });
+  try {
+    return await Promise.race([answer, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function createHandoff({
@@ -192,6 +242,8 @@ export function createHandoff({
   clock,
   logger,
   page = HANDOFF_PAGE,
+  callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
+  unknownAfterMs = UNKNOWN_AFTER_MS,
 }: {
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -205,8 +257,23 @@ export function createHandoff({
   readonly logger: Logger;
   /** How many of an organisation's requests are read at once (HANDOFF_PAGE unless a test names fewer). */
   readonly page?: number;
+  /** How long the partner is given (PARTNER_CALL_TIMEOUT_MS unless a test names less). */
+  readonly callTimeoutMs?: number;
+  /** How long a transaction waits for its answer before UNKNOWN (UNKNOWN_AFTER_MS unless a test names less). */
+  readonly unknownAfterMs?: number;
 }): Handoff {
+  // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
+  if (!(unknownAfterMs > callTimeoutMs)) {
+    throw new RangeError("A transaction's wait for its answer must be longer than the partner's call may take");
+  }
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
+  // Its first beat is its start, so /health gives a new process HEARTBEAT_STALE_MS to make its first run; after that
+  // only a run that reads its organisations beats, so one failing every time reads as stopped.
+  let beat = clock.now().getTime();
+  let sweptAt = Number.NEGATIVE_INFINITY;
+  const beatNow = (): void => {
+    beat = clock.now().getTime();
+  };
 
   /** A page of the organisation's approved requests after `after`, oldest first, by their rows, unverified: each read through its signed state in Tx A. */
   const approvedOf = (orgId: string, after: string | undefined, log: Logger): Promise<string[]> =>
@@ -321,24 +388,48 @@ export function createHandoff({
     return { outcome: 'handed_off', intent, transactionId };
   };
 
-  /** Tx B: the partner's answer recorded on the transaction (ADR-007 §9); throws for any move that didn't land. */
-  const txB = (orgId: string, transactionId: string, answer: Answer, log: Logger): Promise<void> =>
+  /**
+   * Tx B: the partner's answer recorded on the transaction (ADR-007 §9):
+   * `recorded`, or `late` when it had moved on meanwhile (marked UNKNOWN by a
+   * run's sweep): the answer then kept as its facts, never a move (B3,
+   * ADR-007 §9). Throws for a transaction that can't be believed.
+   */
+  const txB = (orgId: string, transactionId: string, answer: Answer, log: Logger): Promise<'recorded' | 'late'> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
       const key = { orgId, id: transactionId };
-      const move = async (event: TransactionEvent, facts: ProviderFacts, via: string): Promise<void> => {
+      const move = async (event: TransactionEvent, facts: ProviderFacts, via: string): Promise<boolean> => {
         const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details: { via } });
-        // Tampered (its alarm raised) or refused by the machine: the answer isn't on the record, so not "handed off".
-        if (moved.outcome !== 'moved') throw new Error(`A transaction didn't move by ${event}: ${moved.outcome}`);
+        // Tampered (its alarm raised): the answer isn't on the record, so not "handed off".
+        if (moved.outcome !== 'moved' && moved.outcome !== 'refused') {
+          throw new Error(`A transaction didn't move by ${event}: ${moved.outcome}`);
+        }
+        return moved.outcome === 'moved';
       };
-      if (answer.kind === 'unknown') return move('lose_track', NO_FACTS, 'no_answer');
-      if (answer.kind === 'refused') return move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused');
+      if (answer.kind === 'unknown') return (await move('lose_track', NO_FACTS, 'no_answer')) ? 'recorded' : 'late';
+      if (answer.kind === 'refused') {
+        return (await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused')) ? 'recorded' : 'late';
+      }
       const facts = factsOf(answer.execution);
-      await move('submitted', facts, 'accepted');
+      if (!(await move('submitted', facts, 'accepted'))) return 'late';
       await move(AFTER_SUBMITTED[paymentStateOf(answer.execution)], facts, 'accepted');
+      return 'recorded';
     });
+
+  /** The partner's answer to the intent, within its time; any it can't give is `unknown` (never resent). */
+  const answerOf = async (intent: ApprovedPaymentIntent, id: string, log: Logger): Promise<Answer> => {
+    try {
+      const submitted = await withinTime(rail.submitApprovedIntent(intent), callTimeoutMs);
+      return submitted.kind === 'accepted' ? submitted : { kind: 'refused', code: submitted.code };
+    } catch (error) {
+      if (error instanceof PartnerTimedOut) log.warn('handoff.partner_timeout', { requestId: id });
+      else if (!(error instanceof RailUnavailable)) log.error('handoff.partner_failed', { requestId: id, err: error });
+      return { kind: 'unknown' };
+    }
+  };
 
   /** One request handed off if it may go, its outcome logged. */
   const handOff = async (orgId: string, id: string, log: Logger): Promise<void> => {
+    beatNow();
     let done: TxA;
     try {
       done = await withSignedStates(database, orgId, services(log), (tx, states) => txA(tx, states, orgId, id, log));
@@ -351,26 +442,23 @@ export function createHandoff({
     if (done.outcome === 'waiting') log.info('handoff.waiting', { requestId: id, why: done.why });
     if (done.outcome !== 'handed_off') return;
     const { intent, transactionId } = done;
-    let answer: Answer;
+    const answer = await answerOf(intent, id, log);
     try {
-      const submitted = await rail.submitApprovedIntent(intent);
-      answer = submitted.kind === 'accepted' ? submitted : { kind: 'refused', code: submitted.code };
+      const recorded = await txB(orgId, transactionId, answer, log);
+      log.info('handoff.handed_off', {
+        requestId: id,
+        instructionId: intent.instructionId,
+        answer: answer.kind,
+        recorded,
+      });
     } catch (error) {
-      if (!(error instanceof RailUnavailable)) log.error('handoff.partner_failed', { requestId: id, err: error });
-      answer = { kind: 'unknown' };
-    }
-    try {
-      await txB(orgId, transactionId, answer, log);
-      log.info('handoff.handed_off', { requestId: id, instructionId: intent.instructionId, answer: answer.kind });
-    } catch (error) {
-      // The answer is lost to the record, not the partner's: the transaction stays SUBMISSION_PENDING for B5's timer.
+      // The answer is lost to the record, not the partner's: the transaction stays SUBMISSION_PENDING for the sweep.
       log.error('handoff.answer_unrecorded', { requestId: id, instructionId: intent.instructionId, err: error });
     }
   };
 
   /** The organisation's approved requests handed off, a page at a time; false if the signal stopped the run. */
-  const handOffAll = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
-    const log = logger.child({ orgId });
+  const handOffAll = async (orgId: string, log: Logger, signal: AbortSignal | undefined): Promise<boolean> => {
     let after: string | undefined;
     for (;;) {
       let approved: string[];
@@ -389,6 +477,59 @@ export function createHandoff({
     }
   };
 
+  /** A page of the organisation's transactions waiting for their answer since before `before`, by their rows, unverified. */
+  const waitingSince = (orgId: string, before: Date, log: Logger): Promise<string[]> =>
+    withSignedStates(database, orgId, services(log), async (tx) =>
+      (
+        await tx
+          // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state before it moves
+          .selectFrom(TRANSACTIONS.table)
+          .select('id')
+          .where('org_id', '=', orgId)
+          .where('status', '=', 'SUBMISSION_PENDING')
+          .where('created_at', '<=', before)
+          .orderBy('id')
+          .limit(page)
+          .execute()
+      ).map(({ id }) => id),
+    );
+
+  /**
+   * The organisation's transactions left waiting for their answer past
+   * unknownAfterMs marked UNKNOWN, a page a run (ADR-007 §10): each read for
+   * change, and moved only if it is still waiting then, so one Tx B recorded
+   * meanwhile is never undone. Never resent; reconciliation settles them.
+   */
+  const sweepIn = async (orgId: string, log: Logger): Promise<void> => {
+    let waiting: string[];
+    try {
+      waiting = await waitingSince(orgId, new Date(clock.now().getTime() - unknownAfterMs), log);
+    } catch (error) {
+      log.error('handoff.sweep_failed', { err: error });
+      return;
+    }
+    for (const id of waiting) {
+      beatNow();
+      try {
+        const marked = await withSignedStates(database, orgId, services(log), async (tx, states) => {
+          const key = { orgId, id };
+          const read = await transactionOf(tx, states, key, 'change');
+          if (read.outcome !== 'found')
+            throw new Error(`A transaction waiting for its answer can't be believed: ${id}`);
+          if (read.transaction.status !== 'SUBMISSION_PENDING') return false;
+          const moved = await moveTransaction(tx, states, key, 'lose_track', NO_FACTS, {
+            actor: ACTOR,
+            details: { via: 'no_answer_in_time' },
+          });
+          return moved.outcome === 'moved';
+        });
+        if (marked) log.warn('handoff.marked_unknown', { transactionId: id });
+      } catch (error) {
+        log.error('handoff.sweep_failed', { transactionId: id, err: error });
+      }
+    }
+  };
+
   return {
     async run(signal) {
       let orgs: readonly string[];
@@ -398,10 +539,19 @@ export function createHandoff({
         logger.error('handoff.run_failed', { err: error });
         return;
       }
+      beatNow();
+      const sweeping = clock.now().getTime() - sweptAt >= SWEEP_EVERY_MS;
+      if (sweeping) sweptAt = clock.now().getTime();
       for (const orgId of orgs) {
-        if (!(await handOffAll(orgId, signal))) return;
+        // Stopped between organisations too, so the process stops promptly however many there are.
+        if (signal?.aborted === true) return;
+        const log = logger.child({ orgId });
+        if (!(await handOffAll(orgId, log, signal))) return;
+        if (sweeping) await sweepIn(orgId, log);
       }
+      beatNow();
     },
+    beating: () => clock.now().getTime() - beat <= HEARTBEAT_STALE_MS,
   };
 }
 
