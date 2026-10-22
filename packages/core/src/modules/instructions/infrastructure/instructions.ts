@@ -57,7 +57,7 @@ export const INSTRUCTIONS = {
 export type InstructionsTransaction = Transaction<InstructionsTables & AuditTables>;
 
 /** The one rail Agent X routes to in the Pilot (BR-12: one partner rail, a push payment). */
-export type Route = 'push';
+type Route = 'push';
 
 /** An instruction as the hand-off makes it: every field from what it verified in its Tx A. */
 export interface NewInstruction {
@@ -82,7 +82,7 @@ export interface NewInstruction {
 }
 
 /** An instruction as its signed state holds it, its intent's hash with it. */
-export interface InstructionRecord extends Omit<NewInstruction, 'orgId' | 'createdAt'> {
+interface InstructionRecord extends Omit<NewInstruction, 'orgId' | 'createdAt'> {
   readonly intentHash: string;
   readonly createdAt: Date;
 }

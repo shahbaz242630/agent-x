@@ -70,7 +70,7 @@ export interface ProviderFacts {
 }
 
 /** A transaction as its signed state holds it. */
-export interface TransactionRecord extends ProviderFacts {
+interface TransactionRecord extends ProviderFacts {
   readonly id: string;
   readonly instructionId: string;
   readonly status: TransactionStatus;

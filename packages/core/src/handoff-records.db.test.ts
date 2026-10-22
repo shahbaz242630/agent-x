@@ -11,12 +11,12 @@ import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { randomUUID } from 'node:crypto';
-import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { seedRows } from '../../../seed-rows.helper.test.ts';
-import { withSignedStates } from '../../audit/index.ts';
-import { createOrganization } from '../../organizations/index.ts';
+import { seedRows } from './seed-rows.helper.test.ts';
+import { type AuditTables, withSignedStates } from './modules/audit/index.ts';
+import type { DirectoryTables } from './modules/directory/index.ts';
+import { createOrganization, type OrganizationsTables } from './modules/organizations/index.ts';
 import {
   moveTransaction,
   noteTransactionFacts,
@@ -24,7 +24,7 @@ import {
   type ProviderFacts,
   transactionOf,
   type TransactionsTables,
-} from '../../transactions/index.ts';
+} from './modules/transactions/index.ts';
 import {
   instructionOf,
   instructionOfRequest,
@@ -32,11 +32,10 @@ import {
   makeInstruction,
   type NewInstruction,
   organizationOfInstruction,
-} from './instructions.ts';
-import type { InstructionsTables } from './tables.ts';
+} from './modules/instructions/index.ts';
+import type { InstructionsTables } from './modules/instructions/index.ts';
 
-type OrganizationTables = Parameters<typeof createOrganization>[0] extends Transaction<infer T> ? T : never;
-type Tables = InstructionsTables & TransactionsTables & OrganizationTables;
+type Tables = InstructionsTables & TransactionsTables & OrganizationsTables & DirectoryTables & AuditTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
