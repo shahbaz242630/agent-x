@@ -12,20 +12,28 @@
 // exists) is tampering: the integrity alarm is raised, and every caller reads
 // it as paused, so a hand-off fails closed.
 //
-// The read checks the row against the events as stored, not the chain whole:
-// an event changed or deleted to match a row changed past the app breaks the
-// chain, which the anchor check verifies every 5 minutes, so no hand-off pays
-// for a full check of its own.
+// The read checks the row against its newest event, and that event alone
+// against its seal (its hash and MAC, platformEventSealed) and its actor (the
+// operator's command, the one actor that moves the pause): an event planted
+// with the app's own rights (it may add platform events, and moves this row)
+// is never believed, the B1 review's catch. The chain whole (an event deleted
+// or reordered) is the anchor check's, every 5 minutes; no hand-off pays for
+// a full check of its own.
 //
 // The row is the first lock any transaction that reads or moves it takes
 // (ADR-006 §6 level 1): FOR SHARE by a hand-off, FOR NO KEY UPDATE by a
 // change, so a pause can't commit halfway through a hand-off's check, and
 // whichever commits second sees the first. The change records its event
 // last, under the chain head's lock (level 13).
+import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
+import { sql } from 'kysely';
 
 import { PlatformEventRefused, type PlatformActor } from '../domain/event.ts';
-import type { PlatformChain, PlatformTransaction } from './platform-chain.ts';
+import { type PlatformChain, platformEventSealed, type PlatformTransaction } from './platform-chain.ts';
+
+/** The one actor whose event moves the pause: the operator's command (apps/operator). */
+export const PAUSE_ACTOR: PlatformActor = { type: 'system', id: 'operator' };
 
 /** The platform event that pauses every hand-off. */
 export const HANDOFF_PAUSED = 'platform.handoff_paused';
@@ -81,7 +89,15 @@ interface Read {
   readonly row:
     { readonly paused: boolean; readonly seq: bigint | null; readonly id: string | null } | 'missing' | 'unreadable';
   readonly newest:
-    { readonly seq: bigint; readonly id: string; readonly action: string; readonly at: Date } | undefined;
+    | {
+        readonly seq: bigint;
+        readonly id: string;
+        readonly action: string;
+        readonly at: Date;
+        /** Sealed as its hash and MAC say, and recorded by the operator's command. */
+        readonly believed: boolean;
+      }
+    | undefined;
 }
 
 /**
@@ -92,12 +108,13 @@ interface Read {
  * event as it was before the wait while Postgres re-reads the row as it is
  * after, and take a pause just made for tampering.
  */
-async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock): Promise<Read> {
+async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock, keys: KeyProvider): Promise<Read> {
   const locking = tx.selectFrom('platform_controls.handoff_pause').select(['paused', 'event_seq', 'event_id']);
   const rows = await (lock === 'share' ? locking.forShare() : locking.forNoKeyUpdate()).execute();
   const newest = await tx
     .selectFrom('platform_controls.audit_events')
-    .select(['seq', 'id', 'action', 'recorded_at'])
+    .selectAll()
+    .select(sql<boolean>`recorded_at = pg_catalog.date_trunc('milliseconds', recorded_at)`.as('whole_ms'))
     .where('action', 'in', [HANDOFF_PAUSED, HANDOFF_RESUMED])
     .orderBy('seq', 'desc')
     .limit(1)
@@ -109,7 +126,19 @@ async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock): Promi
   else if (others.length === 0) read = { paused: row.paused, seq: row.event_seq, id: row.event_id };
   return {
     row: read,
-    newest: newest === undefined ? undefined : { ...newest, at: newest.recorded_at },
+    newest:
+      newest === undefined
+        ? undefined
+        : {
+            seq: newest.seq,
+            id: newest.id,
+            action: newest.action,
+            at: newest.recorded_at,
+            believed:
+              newest.actor_type === PAUSE_ACTOR.type &&
+              newest.actor_id === PAUSE_ACTOR.id &&
+              platformEventSealed(keys, newest),
+          },
   };
 }
 
@@ -123,7 +152,7 @@ function agreed({ row, newest }: Read): HandoffPause | undefined {
       : undefined;
   }
   const same = row.seq === newest.seq && row.id?.toLowerCase() === newest.id.toLowerCase();
-  if (!same || row.paused !== (newest.action === HANDOFF_PAUSED)) return undefined;
+  if (!newest.believed || !same || row.paused !== (newest.action === HANDOFF_PAUSED)) return undefined;
   return { outcome: row.paused ? 'paused' : 'running', since: newest.at, eventId: newest.id };
 }
 
@@ -136,15 +165,15 @@ function agreed({ row, newest }: Read): HandoffPause | undefined {
 export async function handoffPauseOf(
   tx: PlatformTransaction,
   lock: HandoffPauseLock,
-  logger: Logger,
+  { keys, logger }: { readonly keys: KeyProvider; readonly logger: Logger },
 ): Promise<HandoffPause> {
-  const read = await readPause(tx, lock);
+  const read = await readPause(tx, lock, keys);
   const pause = agreed(read);
   if (pause !== undefined) return pause;
   logger.error('audit.integrity_failed', {
     chain: 'platform',
     check: 'handoff_pause',
-    reason: typeof read.row === 'string' ? read.row : 'mismatch',
+    reason: typeof read.row === 'string' ? read.row : read.newest?.believed === false ? 'unsealed' : 'mismatch',
   });
   return { outcome: 'tampered' };
 }
@@ -159,11 +188,15 @@ export async function handoffPauseOf(
  */
 export async function changeHandoffPause(
   tx: PlatformTransaction,
-  { chain, logger }: { readonly chain: PlatformChain; readonly logger: Logger },
+  { chain, keys, logger }: { readonly chain: PlatformChain; readonly keys: KeyProvider; readonly logger: Logger },
   { paused, reason, actor, release, run }: HandoffPauseChange,
 ): Promise<HandoffPauseChanged> {
   if (reason.trim() === '') throw new PlatformEventRefused(['details.reason must be given']);
-  const now = await handoffPauseOf(tx, 'change', logger);
+  // Any other actor's event would never be believed: the pause would read as tampered for good.
+  if (actor.type !== PAUSE_ACTOR.type || actor.id !== PAUSE_ACTOR.id) {
+    throw new PlatformEventRefused(['actor must be the operator']);
+  }
+  const now = await handoffPauseOf(tx, 'change', { keys, logger });
   if (now.outcome === 'tampered') return now;
   if ((now.outcome === 'paused') === paused) {
     return { outcome: 'unchanged', paused, since: now.since, eventId: now.eventId };

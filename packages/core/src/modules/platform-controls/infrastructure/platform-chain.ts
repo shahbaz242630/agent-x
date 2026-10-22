@@ -14,6 +14,7 @@ import {
   type ChainReader,
   type ChainReport,
   type ChainWriter,
+  entryIsSealed,
   headFields,
   sealedFields,
   type StoredEntry,
@@ -102,6 +103,19 @@ function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content
     { actor: { type: actorType as 'system', id: actorId as string }, action: action as string },
     details as string,
   );
+}
+
+/**
+ * Whether one stored platform event, read whole (`select *` with the reader's
+ * `whole_ms`), is sealed: its content hashes to its hash and its MAC is right
+ * (entryIsSealed). For reading one event on its own, such as the hand-off
+ * pause's newest (B1): an event planted or edited past the app isn't believed,
+ * without waiting for the whole chain's check.
+ */
+export function platformEventSealed(keys: KeyProvider, row: Readonly<Record<string, unknown>>): boolean {
+  const sealed = sealedFields(row);
+  const content = contentOf(row);
+  return sealed !== undefined && content !== undefined && entryIsSealed(keys, CHAIN, { ...sealed, content });
 }
 
 /** Recording's steps over the platform-controls tables, for one event. */

@@ -55,14 +55,16 @@ async function change(paused: boolean, overrides: Partial<HandoffPauseChange> = 
   const capture = new LogCapture();
   const done = await app
     .transaction()
-    .execute((tx) => changeHandoffPause(tx, { chain, logger: testLogger(capture) }, asked(paused, overrides)));
+    .execute((tx) => changeHandoffPause(tx, { chain, keys, logger: testLogger(capture) }, asked(paused, overrides)));
   return { done, lines: capture.lines() };
 }
 
 /** The pause as a hand-off reads it, the log captured. */
 async function pauseNow(lock: HandoffPauseLock = 'share') {
   const capture = new LogCapture();
-  const pause = await app.transaction().execute((tx) => handoffPauseOf(tx, lock, testLogger(capture)));
+  const pause = await app
+    .transaction()
+    .execute((tx) => handoffPauseOf(tx, lock, { keys, logger: testLogger(capture) }));
   return { pause, lines: capture.lines() };
 }
 
@@ -224,6 +226,59 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
     expect((await pauseNow()).pause).toEqual({ outcome: 'tampered' });
   });
 
+  it('an event planted with the app’s own rights, unsealed, the row pointed at it: tampering (B1 review)', async () => {
+    await change(false);
+    await change(true);
+    // As anything running as the app role could: an event added after the head, the row pointed at it.
+    await app.transaction().execute(async (tx) => {
+      await tx
+        .insertInto('platform_controls.audit_events')
+        .values({
+          seq: 3n,
+          id: '0199a0f0-0000-7000-8000-00000000b1f0',
+          recorded_at: new Date(),
+          actor_type: 'system',
+          actor_id: 'operator',
+          action: HANDOFF_RESUMED,
+          details: '{"reason":"planted"}',
+          prev_hash: Buffer.alloc(32),
+          hash: Buffer.alloc(32, 1),
+          mac: Buffer.alloc(32, 2),
+          mac_key_version: 1,
+        })
+        .execute();
+      await tx
+        .updateTable('platform_controls.handoff_pause')
+        .set({ paused: false, event_seq: 3n, event_id: '0199a0f0-0000-7000-8000-00000000b1f0' })
+        .execute();
+    });
+
+    expect(await pauseNow()).toEqual({
+      pause: { outcome: 'tampered' },
+      lines: [expect.objectContaining({ ...ALARM, reason: 'unsealed' })],
+    });
+  });
+
+  it('an event sealed by another process (the API), not the operator: never believed, nor recorded by the change', async () => {
+    // A process holding the chain's keys records a resume of its own, and points the row at it.
+    const recorded = await app.transaction().execute(async (tx) => {
+      const event = await chain.record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: HANDOFF_RESUMED,
+        details: { reason: 'not-the-operator' },
+      });
+      await tx
+        .updateTable('platform_controls.handoff_pause')
+        .set({ paused: false, event_seq: event.seq, event_id: event.id })
+        .execute();
+      return event;
+    });
+
+    expect(recorded.seq).toBe(1n);
+    expect((await pauseNow()).pause).toEqual({ outcome: 'tampered' });
+    await expect(change(false, { actor: { type: 'system', id: 'api' } })).rejects.toThrow(PlatformEventRefused);
+  });
+
   it('a row resumed with no event behind it is tampering', async () => {
     await tamper('update platform_controls.handoff_pause set paused = false');
 
@@ -249,6 +304,33 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
 });
 
 describe('B1 the pause row is the first lock (ADR-006 §6 level 1)', () => {
+  it('two changes at once (forced): the second waits, then finds it done, never tampered', async () => {
+    let changed: (value: undefined) => void = () => undefined;
+    const held = new Promise<undefined>((resolve) => {
+      changed = resolve;
+    });
+    let release: (value: undefined) => void = () => undefined;
+    const gate = new Promise<undefined>((resolve) => {
+      release = resolve;
+    });
+    const first = app.transaction().execute(async (tx) => {
+      const done = await changeHandoffPause(tx, { chain, keys, logger: testLogger() }, asked(false));
+      changed(undefined);
+      await gate;
+      return done;
+    });
+    await held;
+    const second = within(20_000, change(false), 'the second change');
+    await waitUntilQueued(database.as('admin'), 1);
+    release(undefined);
+
+    expect(await first).toMatchObject({ outcome: 'changed' });
+    const { done, lines } = await second;
+    expect(lines).toEqual([]);
+    expect(done).toMatchObject({ outcome: 'unchanged', paused: false });
+    expect(await pauseEvents()).toHaveLength(1);
+  });
+
   it("a hand-off's FOR SHARE read waits for a change in flight, then sees it whole, never tampered", async () => {
     let changed: (value: undefined) => void = () => undefined;
     const held = new Promise<undefined>((resolve) => {
@@ -259,7 +341,7 @@ describe('B1 the pause row is the first lock (ADR-006 §6 level 1)', () => {
       release = resolve;
     });
     const resuming = app.transaction().execute(async (tx) => {
-      const done = await changeHandoffPause(tx, { chain, logger: testLogger() }, asked(false));
+      const done = await changeHandoffPause(tx, { chain, keys, logger: testLogger() }, asked(false));
       changed(undefined);
       await gate;
       return done;

@@ -13,6 +13,7 @@ export {
   type HandoffPauseChanged,
   type HandoffPauseLock,
   handoffPauseOf,
+  PAUSE_ACTOR,
 } from './infrastructure/handoff-pause.ts';
 export {
   createPlatformChain,

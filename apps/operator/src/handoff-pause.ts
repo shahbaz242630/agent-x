@@ -86,7 +86,7 @@ function change(
       await limitStatements(tx);
       return changeHandoffPause(
         tx,
-        { chain, logger: services.logger },
+        { chain, keys: services.keys, logger: services.logger },
         { paused, reason, actor: OPERATOR, release, run },
       );
     });
