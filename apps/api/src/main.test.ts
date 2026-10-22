@@ -525,6 +525,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
       'api.idp_events',
       'api.contact_fill',
       'api.factor_resets',
+      'api.handoff',
       'api.background_downloads',
     ]);
     // A test runs with the fake partner, the default where nothing real is at stake (D2-3a).

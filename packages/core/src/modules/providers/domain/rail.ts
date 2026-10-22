@@ -207,8 +207,21 @@ export interface BeneficiaryRef {
   readonly registrationId: string;
 }
 
+/**
+ * The licensed partner as evidence names it (PRD §6.2): its name in Agent X,
+ * and the legal entity and licence its regulated service is under, copied
+ * onto each instruction at hand-off so a later change can't rewrite evidence
+ * (PRD §3). From the partner's configuration; the fake's are its own.
+ */
+export interface PartnerIdentity {
+  readonly partner: string;
+  readonly legalEntityId: string;
+  readonly licenceRef: string;
+}
+
 /** The adapter every partner implements, and its fake (Rule Book §6: both pass the same contract tests). */
 export interface FinancialRailAdapter {
+  readonly identity: PartnerIdentity;
   /** The origin of the partner's own pages: an `authoriseUrl` must be on it (the S68 audit). */
   readonly authoriseOrigin: string;
   /** The origin of the partner's hosted payee form: a `formUrl` must be on it, as an `authoriseUrl` on the other. */

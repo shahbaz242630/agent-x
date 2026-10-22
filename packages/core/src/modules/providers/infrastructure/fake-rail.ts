@@ -340,6 +340,9 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
   return {
     bank,
 
+    // The fake's own: no regulated entity stands behind it, which its names say.
+    identity: { partner: 'fake', legalEntityId: 'FAKE-NOT-REGULATED', licenceRef: 'FAKE-NO-LICENCE' },
+
     authoriseOrigin: AUTHORISE_ORIGIN,
 
     formOrigin: FORM_ORIGIN,

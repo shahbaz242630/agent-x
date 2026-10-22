@@ -61,6 +61,8 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import type { MandatesTables } from '@agentx/core/modules/mandates';
 import type { OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import type { InstructionsTables } from '@agentx/core/modules/instructions';
+import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
@@ -125,6 +127,7 @@ import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
+import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -163,7 +166,9 @@ type ApiTables = PlatformControlsTables &
   NotificationsTables &
   SecurityEventsTables &
   ActivityTables &
-  ActivityExportTables;
+  ActivityExportTables &
+  InstructionsTables &
+  TransactionsTables;
 
 const SERVICE = 'api';
 
@@ -922,6 +927,22 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     REQUEST_VOIDS_EVERY_MS,
   );
+  // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46), on a
+  // timer of its own; only where a partner is configured (ADR-014 §4).
+  const handingOff = scheduleRunsIfAny(
+    rail &&
+      createHandoff({
+        list: () => listedOrganizations(database),
+        database,
+        rail,
+        keys,
+        ids: uuidV7Ids,
+        clock: systemClock,
+        logger,
+      }),
+    HANDOFF_EVERY_MS,
+  );
+  logger.info('api.handoff', { running: handingOff.running });
   // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b), on a timer of its own.
   const waitingRejecting = scheduleRuns(
     createWaitingRejections({
@@ -991,6 +1012,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           zoneSealingRuns.stop(),
           requestExpiring.stop(),
           requestVoiding.stop(),
+          handingOff.stop(),
           waitingRejecting.stop(),
           carryResting.stop(),
           activitySealing.stop(),

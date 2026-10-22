@@ -27,6 +27,7 @@ export {
 } from './domain/agent.ts';
 export {
   AGENT_KEYS,
+  type AgentKeyCheck,
   agentKeyOf,
   type AgentKeyRecord,
   agentKeysOf,

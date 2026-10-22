@@ -76,6 +76,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "AGENT_KEY_ENDED",
+                    "description": "The agent key this request was made with was ended at once after it was approved, so it wasn't handed to the bank, and the money held for it was freed. The agent asks again with a live key."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGENT_KEY_NOT_LIVE",
                     "description": "The key is revoked or expired, so there is nothing to rotate. Nothing was changed."
                   },

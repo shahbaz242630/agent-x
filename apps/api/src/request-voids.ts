@@ -45,7 +45,7 @@
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next.
-import { agentOf, type AgentsTables } from '@agentx/core/modules/agents';
+import { type AgentKeyCheck, agentKeyOf, agentOf, type AgentsTables } from '@agentx/core/modules/agents';
 import {
   type AuditTables,
   cancelledSince,
@@ -56,7 +56,7 @@ import {
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type FundingSourcesTables, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
+import { type FundingSourcesTables, SOURCES, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
@@ -70,7 +70,7 @@ import {
   type Voided,
   voidRequest,
 } from '@agentx/core/modules/spend-requests';
-import { SUPPLIERS, supplierOf, type SuppliersTables } from '@agentx/core/modules/suppliers';
+import { SUPPLIERS, supplierOf, type SupplierRecord, type SuppliersTables } from '@agentx/core/modules/suppliers';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -101,7 +101,7 @@ const MOST_VOIDED_A_RUN = 100;
 /** How many of an organisation's lapsed consents one run records: the rest wait for the next. */
 const MOST_LAPSES_A_RUN = 50;
 
-type VoidTables = SpendRequestsTables &
+export type VoidTables = SpendRequestsTables &
   LimitReservationsTables &
   AuditTables &
   AgentsTables &
@@ -273,7 +273,7 @@ async function namedBy(tx: VoidTx, orgId: string, requestId: string) {
   const row = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- what it names alone, each read through its signed state, and checked against the request's own by voidRequest
     .selectFrom('spend_requests.requests')
-    .select(['agent_id', 'mandate_id', 'mandate_version_id', 'funding_source_id', 'supplier_id'])
+    .select(['agent_id', 'agent_key_id', 'mandate_id', 'mandate_version_id', 'funding_source_id', 'supplier_id'])
     .where('org_id', '=', orgId)
     .where('id', '=', requestId)
     .where('mandate_id', 'is not', null)
@@ -281,11 +281,103 @@ async function namedBy(tx: VoidTx, orgId: string, requestId: string) {
     .executeTakeFirstOrThrow();
   return {
     agentId: row.agent_id,
+    agentKeyId: row.agent_key_id,
     mandateId: row.mandate_id,
     mandateVersionId: row.mandate_version_id,
     fundingSourceId: row.funding_source_id,
     supplierId: row.supplier_id,
   };
+}
+
+/**
+ * The authority a pending request was decided under, as it stands now, in
+ * ADR-006's lock order: its organisation, agent, mandate, source and supplier
+ * read through their signed states (levels 2–6, share), each stop's chosen
+ * pause or cancel, and what its mandate's version in force still carries
+ * (voidCauses' input). The voids job judges it; the hand-off (Phase 4 B4)
+ * re-checks a request by it in its Tx A, so the two can never weigh it
+ * differently. Throws for anything that can't be believed (its alarm raised).
+ */
+export async function authorityOf(
+  tx: VoidTx,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  now: Date,
+): Promise<{
+  readonly named: Awaited<ReturnType<typeof namedBy>>;
+  readonly authority: AuthorityNow;
+  /** The source and supplier as verified here: what a hand-off takes its consent and payee from. */
+  readonly source: SourceRecord;
+  readonly supplier: SupplierRecord;
+  /** The key its row names, read at its level (3a): the hand-off holds it to the request's signed state. */
+  readonly agentKey: AgentKeyCheck;
+}> {
+  const { orgId } = key;
+  const named = await namedBy(tx, orgId, key.id);
+  const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
+  const agent = await agentOf(tx, states, { orgId, id: named.agentId }, 'share');
+  const agentKey = await agentKeyOf(tx, states, { orgId, id: named.agentKeyId }, 'share');
+  const mandate = await mandateOf(tx, states, { orgId, id: named.mandateId }, 'share');
+  const source = await sourceOf(tx, states, { orgId, id: named.fundingSourceId }, 'share');
+  const supplier = await supplierOf(tx, states, { orgId, id: named.supplierId }, 'share');
+  const consentPast = source.outcome === 'found' && source.source.consentExpiresAt <= now;
+  // Nothing is judged on what can't be believed (each read tampered with has raised its own alarm) or isn't
+  // there (each held by the request's foreign keys, 0039, and never deleted): the run logs it and goes on.
+  if (
+    organization.outcome !== 'verified' ||
+    agent.outcome !== 'found' ||
+    mandate.outcome !== 'found' ||
+    source.outcome !== 'found' ||
+    supplier.outcome !== 'found'
+  ) {
+    throw new Error(`What a pending request names can't be believed: ${key.id}`);
+  }
+  // Pending, it was decided (signRequest); none is a history that can't be believed (its alarm raised) or a bug.
+  const decision = await decisionOf(tx, states, key);
+  if (decision === null) throw new Error(`A pending request has no decision to read: ${key.id}`);
+  const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, {
+    organization: orgId,
+    agent: named.agentId,
+    mandate: named.mandateId,
+    source: named.fundingSourceId,
+    supplier: named.supplierId,
+  });
+  const organizationStatus = String(organization.fields.get('status'));
+  const stopped = (
+    [
+      ['organization', { id: orgId, status: organizationStatus }],
+      ['agent', agent.agent],
+      ['mandate', mandate.mandate],
+      ['source', source.source],
+      ['supplier', supplier.supplier],
+    ] as const
+  ).filter(([which, { status }]) => PAUSE_EVENTS[which][status] !== undefined);
+  // On a version replaced, it may be one the version in force still carries (PL-47): the carry job's, not a void.
+  const replaced = named.mandateVersionId !== mandate.mandate.currentVersionId;
+  const authority: AuthorityNow = {
+    organizationStatus,
+    agentStatus: agent.agent.status,
+    mandate: {
+      ...mandate.mandate,
+      carriesRest: replaced && (await carriesRest(tx, states, orgId, mandate.mandate)),
+    },
+    source: {
+      status: source.source.status,
+      availability: source.source.availability,
+      consentPast,
+      // Its admin's choice for an expiry (decision 21), read from the log only once the consent has run out.
+      consentHeld: consentPast && (await holdsOverExpiry(tx, states, orgId, source.source.id)),
+    },
+    supplier: { ...supplier.supplier, pausedFrom: await pausedFromOf(tx, states, orgId, supplier.supplier) },
+    paused: await pausedOf(
+      tx,
+      states,
+      orgId,
+      stopped.map(([which, { id, status }]) => [which, id, status] as const),
+    ),
+    cancelledBy,
+  };
+  return { named, authority, source: source.source, supplier: supplier.supplier, agentKey };
 }
 
 export interface RequestVoids {
@@ -320,71 +412,8 @@ export function createRequestVoids({
     states: SignedStates,
     key: { readonly orgId: string; readonly id: string },
   ): Promise<Voided> => {
-    const { orgId } = key;
-    const named = await namedBy(tx, orgId, key.id);
     const now = clock.now();
-    const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
-    const agent = await agentOf(tx, states, { orgId, id: named.agentId }, 'share');
-    const mandate = await mandateOf(tx, states, { orgId, id: named.mandateId }, 'share');
-    const source = await sourceOf(tx, states, { orgId, id: named.fundingSourceId }, 'share');
-    const supplier = await supplierOf(tx, states, { orgId, id: named.supplierId }, 'share');
-    const consentPast = source.outcome === 'found' && source.source.consentExpiresAt <= now;
-    // Nothing is judged on what can't be believed (each read tampered with has raised its own alarm) or isn't
-    // there (each held by the request's foreign keys, 0039, and never deleted): the run logs it and goes on.
-    if (
-      organization.outcome !== 'verified' ||
-      agent.outcome !== 'found' ||
-      mandate.outcome !== 'found' ||
-      source.outcome !== 'found' ||
-      supplier.outcome !== 'found'
-    ) {
-      throw new Error(`What a pending request names can't be believed: ${key.id}`);
-    }
-    // Pending, it was decided (signRequest); none is a history that can't be believed (its alarm raised) or a bug.
-    const decision = await decisionOf(tx, states, key);
-    if (decision === null) throw new Error(`A pending request has no decision to read: ${key.id}`);
-    const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, {
-      organization: orgId,
-      agent: named.agentId,
-      mandate: named.mandateId,
-      source: named.fundingSourceId,
-      supplier: named.supplierId,
-    });
-    const organizationStatus = String(organization.fields.get('status'));
-    const stopped = (
-      [
-        ['organization', { id: orgId, status: organizationStatus }],
-        ['agent', agent.agent],
-        ['mandate', mandate.mandate],
-        ['source', source.source],
-        ['supplier', supplier.supplier],
-      ] as const
-    ).filter(([which, { status }]) => PAUSE_EVENTS[which][status] !== undefined);
-    // On a version replaced, it may be one the version in force still carries (PL-47): the carry job's, not a void.
-    const replaced = named.mandateVersionId !== mandate.mandate.currentVersionId;
-    const authority: AuthorityNow = {
-      organizationStatus,
-      agentStatus: agent.agent.status,
-      mandate: {
-        ...mandate.mandate,
-        carriesRest: replaced && (await carriesRest(tx, states, orgId, mandate.mandate)),
-      },
-      source: {
-        status: source.source.status,
-        availability: source.source.availability,
-        consentPast,
-        // Its admin's choice for an expiry (decision 21), read from the log only once the consent has run out.
-        consentHeld: consentPast && (await holdsOverExpiry(tx, states, orgId, source.source.id)),
-      },
-      supplier: { ...supplier.supplier, pausedFrom: await pausedFromOf(tx, states, orgId, supplier.supplier) },
-      paused: await pausedOf(
-        tx,
-        states,
-        orgId,
-        stopped.map(([which, { id, status }]) => [which, id, status] as const),
-      ),
-      cancelledBy,
-    };
+    const { named, authority } = await authorityOf(tx, states, key, now);
     return voidRequest(tx, states, keys, key, { named, authority }, now);
   };
 
