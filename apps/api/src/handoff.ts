@@ -263,7 +263,7 @@ export function createHandoff({
   readonly unknownAfterMs?: number;
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
-  if (!(unknownAfterMs > callTimeoutMs)) {
+  if (unknownAfterMs <= callTimeoutMs) {
     throw new RangeError("A transaction's wait for its answer must be longer than the partner's call may take");
   }
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
