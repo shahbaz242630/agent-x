@@ -8,6 +8,8 @@ import { amountText, messageFor, type ResetLink, type WaitingRequest } from './m
 import {
   AGENT_NOTICE_KINDS,
   type ClaimedNotice,
+  isAboutASpendRequest,
+  isToAdminsAndApprovers,
   MANDATE_NOTICE_KINDS,
   type NoticeKind,
   SIGN_IN_NOTICE_KINDS,
@@ -306,6 +308,29 @@ describe('a notice’s email (B5-1b)', () => {
       expect(message.text).toContain('open the audit log to see this entry: its case reference');
       expect(message.text).toContain("You're told because you're an admin of this organisation.");
       expect(message.text).toContain("This email can't approve or change anything.");
+    });
+  });
+
+  describe('Phase 4 B4b an approved payment stopped before it reached the bank (0059; partner decision 3)', () => {
+    const request = '0199a0f0-0000-7000-8000-0000000004b4';
+    const message = messageFor(
+      { ...NOTICE, kind: 'spend_request_stopped', membershipId: null, role: null, aboutId: request },
+      'a@example.test',
+    );
+
+    it('tells every admin, naming the request by ID alone, that nothing was paid and the money held was freed', () => {
+      expect(message.subject).toBe('Agent X: an approved payment was stopped before it reached the bank');
+      expect(message.text).toContain('Nothing was paid, and the money held for it was freed.');
+      expect(message.text).toContain('Once whatever stopped it is put right, the agent can ask again');
+      expect(message.text).toContain(`Spend request: ${request}`);
+      expect(message.text).toContain("You're told because you're an admin of this organisation.");
+      expect(message.text).toContain("This email can't approve or change anything.");
+    });
+
+    it('is about a spend request, told to the admins alone, not the approvers', () => {
+      expect(isAboutASpendRequest('spend_request_stopped')).toBe(true);
+      expect(isToAdminsAndApprovers('spend_request_stopped')).toBe(false);
+      expect(isToAdminsAndApprovers('spend_request_waiting')).toBe(true);
     });
   });
 

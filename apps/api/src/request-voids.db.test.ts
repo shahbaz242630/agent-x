@@ -79,6 +79,22 @@ const { quiet, ready, ask, statusOf, holdingsOf, spentOf, mandateIdOf, signed, i
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
+/** The requests the world's admins were told were stopped before the bank (B4b, 0059), by their IDs. */
+const stoppedToldOf = (w: World) =>
+  withTenant(app, w.org, async (tx) =>
+    (
+      await tx
+        // A global table (0021): the world's own organisation's notices alone.
+        .selectFrom('notifications.outbox')
+        .select('about_id')
+        .where('org_id', '=', w.org)
+        .where('kind', '=', 'spend_request_stopped')
+        .where('recipient_user_id', 'is', null)
+        .orderBy('id')
+        .execute()
+    ).map(({ about_id }) => about_id),
+  );
+
 /** The brakes that void: all but the bank's own suspension, which pauses (decision 7). */
 type Voiding = Exclude<keyof typeof STOPS, 'the source suspended by the partner'>;
 
@@ -167,6 +183,8 @@ describe('pending spend requests voided once their authority no longer stands (C
       }
       const stands = ON_THE_FIRST_SUPPLIER.includes(what);
       expect(await statusOf(w, elsewhere.id)).toBe(stands ? 'APPROVED' : 'DENIED');
+      // The hand-off's own notice (B4b) is never the voids job's: its brakes tell as they did.
+      expect(await stoppedToldOf(w)).toEqual([]);
       expect(await spentOf(w, acting)).toBe(stands ? 50_000n : 0n);
       expect(lines('request_void.voided')).toHaveLength(stands ? 2 : 3);
       expect(lines('request_void.failed')).toEqual([]);

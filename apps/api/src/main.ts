@@ -935,6 +935,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
         list: () => listedOrganizations(database),
         database,
         rail,
+        outbox,
         keys,
         ids: uuidV7Ids,
         clock: systemClock,

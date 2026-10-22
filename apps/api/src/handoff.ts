@@ -89,6 +89,7 @@ import {
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { mayFund } from '@agentx/core/modules/funding-sources';
+import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -115,7 +116,24 @@ const ROUTE = { route: 'push', reason: 'mandate_source_push_rail' } as const;
 /** The API, as the hand-off's actor in the signed events. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
-type HandoffTables = VoidTables & PlatformControlsTables & InstructionsTables & TransactionsTables & AuditTables;
+type HandoffTables = VoidTables &
+  PlatformControlsTables &
+  InstructionsTables &
+  TransactionsTables &
+  AuditTables &
+  NotificationsTables;
+
+/**
+ * The notice that an approved request was stopped at its hand-off (0059,
+ * Phase 4 B4b; partner decision 3: what the hand-off's re-check finds): to
+ * every admin, found as it is sent, written in the transaction that denied
+ * it. The voids job and the brakes tell as they did (the mandate expired,
+ * the supplier's details changed, the organisation frozen each has its own
+ * notice); a key ended at once and a payee changed are found only here.
+ */
+const stoppedNotice = (orgId: string, requestId: string): Notice[] => [
+  { orgId, recipientUserId: null, kind: 'spend_request_stopped', membershipId: null, role: null, aboutId: requestId },
+];
 type HandoffTx = DatabaseTransaction<HandoffTables>;
 
 /** What Tx A came to: the intent handed off with its transaction's ID; or left as it is, and why. */
@@ -168,6 +186,7 @@ export function createHandoff({
   list,
   database,
   rail,
+  outbox,
   keys,
   ids,
   clock,
@@ -178,6 +197,8 @@ export function createHandoff({
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<HandoffTables>;
   readonly rail: FinancialRailAdapter;
+  /** Where a denial is written for the admins: an approved payment stopped before the bank (B4b, decision 3). */
+  readonly outbox: Outbox;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
@@ -204,8 +225,15 @@ export function createHandoff({
       ).map(({ id }) => id),
     );
 
-  /** Tx A for one request, in the lock order above. */
+  /** Tx A for one request, in the lock order above; a denial tells the admins in it (decision 3). */
   const txA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
+    const done = await judgedA(tx, states, orgId, id, log);
+    if (done.outcome === 'denied') await outbox.add(tx, stoppedNotice(orgId, id));
+    return done;
+  };
+
+  /** Tx A's checks and moves for one request, in the lock order above. */
+  const judgedA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
     const key = { orgId, id };
     const pause = await handoffPauseOf(tx, 'share', { keys, logger: log });
     if (pause.outcome !== 'running') return { outcome: 'waiting', why: `pause_${pause.outcome}` };

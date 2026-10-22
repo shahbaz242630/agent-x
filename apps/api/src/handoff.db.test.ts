@@ -40,7 +40,7 @@ import {
   versionOf,
 } from '@agentx/core/modules/suppliers';
 import { TRANSACTIONS, transactionOf, type TransactionsTables } from '@agentx/core/modules/transactions';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -87,9 +87,34 @@ const { quiet, ask, statusOf, holdingsOf, signed, moved, STOPS, mandateIdOf } = 
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
+/** The requests the world's admins were told were stopped before the bank (B4b, 0059), by their IDs. */
+const stoppedToldOf = (w: World) =>
+  withTenant(app, w.org, async (tx) =>
+    (
+      await tx
+        // A global table (0021): the world's own organisation's notices alone.
+        .selectFrom('notifications.outbox')
+        .select('about_id')
+        .where('org_id', '=', w.org)
+        .where('kind', '=', 'spend_request_stopped')
+        .where('recipient_user_id', 'is', null)
+        .orderBy('id')
+        .execute()
+    ).map(({ about_id }) => about_id),
+  );
+
 /** The job over the world alone, paying through `rail` (the world's own fake unless given). */
 const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resolve([w.org])) =>
-  createHandoff({ list, database: app, rail, keys, ids, clock, logger: testLogger(capture) });
+  createHandoff({
+    list,
+    database: app,
+    outbox: createOutbox({ ids, clock }),
+    rail,
+    keys,
+    ids,
+    clock,
+    logger: testLogger(capture),
+  });
 
 /** AED 500 and the fils that choose the fake's answer (decision 5): under the approval threshold, so APPROVED. */
 const ALLOWED = (fils = 0n) => AED(50_000n + fils);
@@ -354,6 +379,7 @@ describe('an approved request handed to the partner once (B4)', () => {
     await createHandoff({
       list: () => Promise.resolve([w.org]),
       database: app,
+      outbox: createOutbox({ ids, clock }),
       rail: w.rail,
       keys,
       ids,
@@ -400,6 +426,8 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
       expect(lines('handoff.waiting')).toEqual([
         expect.objectContaining({ requestId: request.id, why: 'pause_paused' }),
       ]);
+      // Waiting is no stop: no one is told.
+      expect(await stoppedToldOf(w)).toEqual([]);
     } finally {
       await pauseMoved(false);
     }
@@ -510,6 +538,8 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
     expect(await paymentOf(w, request.id)).toEqual({ instruction: 'missing' });
     expect(submitted()).toBe(0);
     expect(lines('handoff.denied')).toEqual([expect.objectContaining({ requestId: request.id, causes })]);
+    // Approved, then stopped before the bank: the admins told, with the denial (decision 3, B4b).
+    expect(await stoppedToldOf(w)).toEqual([request.id]);
   });
 
   it('denies it once its agent key was ended at once (AGENT_KEY_ENDED, SEC-AG-12/13)', async () => {
@@ -534,6 +564,7 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
       actorType: 'system',
       details: { statusTo: 'DENIED', causes: 'AGENT_KEY_ENDED' },
     });
+    expect(await stoppedToldOf(w)).toEqual([request.id]);
   });
 
   it('waits for a cancel holding the request, and the cancel wins (forced, SEC-DP-12)', async () => {
