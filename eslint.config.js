@@ -334,6 +334,11 @@ export default defineConfig([
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: globals.node },
   },
+  // The load test's k6 script runs in k6, which gives it these and no Node.
+  {
+    files: ['tooling/load/*.k6.js'],
+    languageOptions: { globals: { __ENV: 'readonly', open: 'readonly' } },
+  },
 
   // Product code: packages and apps.
   {

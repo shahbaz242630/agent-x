@@ -1,0 +1,48 @@
+# The load test's changes to the compose stack (Phase 4 D2, PL-38), run as a
+# project of its own by `corepack pnpm load` (tooling/load/run.ts):
+#
+#   docker compose -p agentx-load -f deploy/compose/compose.yaml -f tooling/load/compose.load.yaml up --wait api
+#
+# Only the database and the API come up (with their set-up jobs): no login
+# service, no edge. k6 runs on the internal network and reaches the API
+# directly. Paths are relative to deploy/compose, the first file's folder.
+services:
+  db:
+    # The seed and verify steps reach it here, from this machine only. An
+    # internal network can't publish a port, so it joins a second one.
+    ports: ['127.0.0.1:56540:5432']
+    networks: [internal, loopback]
+    # Never back by itself after Docker restarts: a run left half-done holds no port or memory.
+    restart: 'no'
+
+  api:
+    environment:
+      # Room for the load: k6 is one client, and each agent sends thousands a minute.
+      AGENTX_RATE_LIMIT_PER_MINUTE: '50000'
+      AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '50000'
+      AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '50000'
+      # Twice the rate limits (the API refuses less), so no line of the run is suppressed.
+      AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000'
+      # Staging's API (deploy/azure/apps.bicep): ten connections, half a CPU, 1 GiB.
+      AGENTX_DB_POOL_MAX: '10'
+    cpus: 0.5
+    mem_limit: 1g
+    restart: 'no'
+
+  # k6, started by the runner for each phase, never by `up` (its profile).
+  # The script and the run's folder (the seed's keys in, k6's numbers out)
+  # are all it mounts; it reaches nothing but the internal network.
+  k6:
+    image: grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34
+    profiles: [load]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [internal]
+    volumes:
+      - ../../tooling/load/money-paths.k6.js:/load/money-paths.k6.js:ro
+      - ../../tooling/load/.out:/out
+    restart: 'no'
+
+networks:
+  loopback: {}

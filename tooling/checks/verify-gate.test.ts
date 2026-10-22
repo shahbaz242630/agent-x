@@ -60,6 +60,8 @@ const OTHER_SCRIPTS = {
   'tools:cosign': 'node tooling/cosign/install.ts',
   // The copied-code check (#222): Verify runs it, failing past the threshold in .jscpd.json.
   duplicates: 'jscpd',
+  // The load test of the money paths (Phase 4 D2), run by hand: it needs Docker and takes minutes.
+  load: 'node tooling/load/run.ts',
 };
 
 /** Scripts pnpm runs by itself during an install. */
