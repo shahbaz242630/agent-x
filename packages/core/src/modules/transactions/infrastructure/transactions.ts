@@ -1,4 +1,4 @@
-// A handed-off request's transaction (0057; PRD §3 `Transaction`, §4.3;
+// A handed-off request's transaction (0058; PRD §3 `Transaction`, §4.3;
 // ADR-007 §7–§13; Phase 4 B3): the single source of truth for its outcome, an
 // authority table read and moved through the audit module's signed states,
 // its status by its machine (domain/transaction.ts), the partner's own words
@@ -40,7 +40,7 @@ export const TRANSACTIONS = {
     { column: 'created_at', type: 'timestamptz' },
   ],
   rules: TRANSACTION,
-  // Its instruction and when it was opened, fixed when it is made: 0057's `fixed_at_creation` refuses any change after.
+  // Its instruction and when it was opened, fixed when it is made: 0058's `fixed_at_creation` refuses any change after.
   fixedAtCreation: ['instruction_id', 'created_at'],
   // Clearing the integrity hold checks those whose outcome can still move.
   liveStatuses: ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN', 'SUCCEEDED'],
@@ -128,7 +128,7 @@ export async function openTransaction(
 
 /**
  * The record a verified state holds: every field is the table's own (a map of
- * them all, each its text or null), held to its kind by 0057's checks and the
+ * them all, each its text or null), held to its kind by 0058's checks and the
  * status guard, and the seal to what was written.
  */
 function recordOf(id: string, fields: ReadonlyMap<string, string | null>): TransactionRecord {

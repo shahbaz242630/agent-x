@@ -2,7 +2,7 @@
 // source of truth for a handed-off request's outcome. Born SUBMISSION_PENDING
 // with its instruction in the hand-off's Tx A (PRD's CREATED is never stored:
 // the two are made together); the partner's answers and events move it. The
-// database's status guard holds the same moves (0057).
+// database's status guard holds the same moves (0058).
 //
 // - `submitted`: the partner accepted the instruction.
 // - `processing`: the partner says it is under way (rail map §4: Pending, or

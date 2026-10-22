@@ -1,4 +1,4 @@
-// PRD §4.3 (Phase 4 B3): a transaction's machine, as 0057's status guard holds it.
+// PRD §4.3 (Phase 4 B3): a transaction's machine, as 0058's status guard holds it.
 import { describe, expect, it } from 'vitest';
 
 import { isSettled, TRANSACTION } from './transaction.ts';

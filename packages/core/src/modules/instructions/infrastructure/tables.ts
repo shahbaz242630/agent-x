@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The instructions schema's table and its directory entry (db/migrations/0057_instructions_transactions.sql), as Kysely sees them. */
+/** The instructions schema's table and its directory entry (db/migrations/0058_instructions_transactions.sql), as Kysely sees them. */
 export interface InstructionsTables {
   'instructions.instructions': InstructionsTable;
   'directory.instructions': DirectoryInstructionsTable;

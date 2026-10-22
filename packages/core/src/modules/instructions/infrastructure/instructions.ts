@@ -1,4 +1,4 @@
-// The one logical instruction a spend request hands to the partner (0057;
+// The one logical instruction a spend request hands to the partner (0058;
 // PRD §3 `ProviderInstruction`; ADR-007 §7; ADR-014 §1–§3; Phase 4 B3): the
 // approved intent exactly as it went, made once in the hand-off's Tx A and
 // never changed, an authority table read and recorded through the audit
@@ -29,7 +29,7 @@ import type {
 } from '../../audit/index.ts';
 import type { InstructionsTables } from './tables.ts';
 
-/** An instruction's row, as the signed state reads and records it: made once, never moved (0057's `made_once`). */
+/** An instruction's row, as the signed state reads and records it: made once, never moved (0058's `made_once`). */
 export const INSTRUCTIONS = {
   table: 'instructions.instructions',
   subject: 'instruction',
@@ -189,13 +189,13 @@ export async function makeInstruction(
   return { ...recorded, intentHash };
 }
 
-/** The instruction its verified state holds: 0057's checks hold every field to its kind (none null), and the seal to what was written. */
+/** The instruction its verified state holds: 0058's checks hold every field to its kind (none null), and the seal to what was written. */
 function recordOf(id: string, fields: ReadonlyMap<string, string | null>): InstructionRecord {
   const text = (column: string): string => String(fields.get(column));
   return {
     id,
     spendRequestId: text('spend_request_id'),
-    // 0057's check holds the route to the one the Pilot has.
+    // 0058's check holds the route to the one the Pilot has.
     route: text('route') as Route,
     routeReason: text('route_reason'),
     fundingSourceId: text('funding_source_id'),

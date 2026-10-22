@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The transactions schema's table (db/migrations/0057_instructions_transactions.sql), as Kysely sees it. */
+/** The transactions schema's table (db/migrations/0058_instructions_transactions.sql), as Kysely sees it. */
 export interface TransactionsTables {
   'transactions.transactions': TransactionsTable;
 }

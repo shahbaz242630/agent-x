@@ -1,4 +1,4 @@
-// Phase 4 B3 (0057; PRD §3, §4.3; ADR-007 §7–§13): a handed-off request's
+// Phase 4 B3 (0058; PRD §3, §4.3; ADR-007 §7–§13): a handed-off request's
 // instruction and transaction on the real migrated schema, as the app role.
 // The instruction is made once, signed, entered in the directory and read
 // back through its seal; one a request, whoever makes a second. The
