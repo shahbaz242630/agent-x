@@ -29,7 +29,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
-import { auditExportRequest, firstAdminRequest, restoreCheckRequest } from './request.ts';
+import { auditExportRequest, firstAdminRequest, handoffRequest, restoreCheckRequest } from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({ create: undefined as Error | undefined, readOnly: [] as boolean[] }));
@@ -647,6 +647,38 @@ describe(`E10c the operator exports an organisation's audit log for a case, as t
     } finally {
       await head.release().catch(() => undefined);
     }
+  });
+});
+
+describe(`Phase 4 B1 the operator resumes every hand-off, as the job runs it (Postgres ${server.version})`, () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-handoff-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const REASON = 'INC-2026/0042';
+
+  it('resumes from a request file, checking the schema first, then tells every organisation, never logging the reason', async () => {
+    const id = uuidV7Ids.next();
+    const asked = path.join(folder, `resume-${id}`);
+    writeFileSync(asked, handoffRequest('handoff-resume', REASON, id));
+
+    const { code, events, line, text } = await run(['--request', asked]);
+
+    expect(events).toEqual([
+      'operator.starting',
+      'db.schema_checked',
+      'operator.handoff_resumed',
+      'operator.handoff_told',
+    ]);
+    expect(code).toBe(0);
+    expect(line('operator.starting')).toMatchObject({ command: 'handoff-resume' });
+    expect(line('operator.handoff_resumed')).toMatchObject({ platformEventId: id });
+    expect(line('operator.handoff_told')).toMatchObject({ platformEventId: id, failed: 0 });
+    const [event] = await database
+      .as('owner')
+      .query<{ details: string }>('select details from platform_controls.audit_events where id = $1', [id]);
+    expect(JSON.parse(String(event?.details))).toEqual({ reason: REASON, release: 'r-operator', run: null });
+    expect(text).not.toContain(REASON);
   });
 });
 

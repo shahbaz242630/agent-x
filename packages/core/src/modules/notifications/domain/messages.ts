@@ -95,6 +95,9 @@ const POLICIES_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's policies, and tell its admins at once: a policy sets how much, and whom, its AI agents may pay.";
 const FREEZE_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's state, and tell its admins at once: a freeze is the organisation's emergency brake on its AI agents' spending.";
+/** What an admin can check of a pause or resume of every hand-off to the bank (0057): its entry, with its reason. */
+const HANDOFF_CHECK =
+  "Sign in to Agent X and open the audit log to see this entry and its reason. If you have questions about it, tell the organisation's other admins and contact us.";
 /** What a person's second factor is, as the emails name it. */
 const SECOND_FACTOR = 'second factor (an authenticator app, a security key or a passkey)';
 
@@ -343,6 +346,20 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       "Agent X's own team exported the activity log of one of your Agent X organisations for a case: a dispute, or a regulator's request. The export only reads the log; it changed nothing.",
     check:
       "Sign in to Agent X and open the audit log to see this entry: its case reference, the dates it covers and how many requests it held. If you didn't expect it, tell the organisation's other admins.",
+  },
+  // About an audit log entry (0057, Phase 4 B1): Agent X's own team paused or resumed every hand-off to the bank, for
+  // every organisation at once, to every admin (partner decision 4). Its reason is on the entry, never in the email.
+  handoff_paused: {
+    subject: () => 'Agent X: payments to the bank are paused',
+    firstLine: () =>
+      "Agent X's own team paused every hand-off of approved payments to the bank, for every organisation, one of yours among them. Spend requests are still decided and approved; approved ones wait, and nothing is sent to the bank until we resume.",
+    check: HANDOFF_CHECK,
+  },
+  handoff_resumed: {
+    subject: () => 'Agent X: payments to the bank are resumed',
+    firstLine: () =>
+      "Agent X's own team resumed the hand-off of approved payments to the bank, for every organisation, one of yours among them. Each approved payment that waited is checked again before it goes.",
+    check: HANDOFF_CHECK,
   },
 };
 

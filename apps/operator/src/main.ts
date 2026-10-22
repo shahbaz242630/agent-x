@@ -12,7 +12,10 @@
 // against the drill's copy (AGENTX_DB_DRILL_HOST) and the live server. Or
 // export an organisation's audit log for a case (Phase 3 E10c,
 // audit-export.ts): only from a file, its case reference never logged, the
-// file to the evidence store alone.
+// file to the evidence store alone. Or pause or resume every hand-off of an
+// approved payment to the bank, for every organisation (Phase 4 B1,
+// handoff-pause.ts): only from a file, its reason never logged, every
+// organisation's admins told.
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -66,12 +69,16 @@ import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
+import { changeHandoffPauseAsOperator, type HandoffPauseTables } from './handoff-pause.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
 import {
   ACTIVITY_EXPORT_USAGE,
   AUDIT_EXPORT_USAGE,
   auditExportOf,
   FIRST_ADMIN_USAGE,
+  type HandoffCommand,
+  handoffAskedOf,
+  handoffUsage,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
@@ -83,7 +90,7 @@ import {
 import { checkRestoredCopy } from './restore-check.ts';
 
 /** Every table the commands reach. */
-type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables;
+type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables & HandoffPauseTables;
 
 const SERVICE = 'operator';
 
@@ -153,7 +160,19 @@ type Request =
       /** The export's ID: its record's on the organisation's chain. */
       readonly id: string;
     }
+  | HandoffRequest
   | { readonly command: typeof RESTORE_CHECK };
+
+/** A pause or resume of every hand-off, one shape for each command, so a check of the command narrows to its own. */
+type HandoffRequest = {
+  readonly [C in HandoffCommand]: {
+    readonly command: C;
+    /** A case reference, sealed on the chains; never logged, nor repeated in a problem. */
+    readonly reason: string;
+    /** The platform event's ID. */
+    readonly id: string;
+  };
+}[HandoffCommand];
 
 /** Why a request can't be done, each rule broken. */
 interface Problems {
@@ -229,6 +248,8 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['invite-first-admin', firstAdminRequest],
   ['audit-export', (words, fromFile) => caseExportAsked('audit-export', AUDIT_EXPORT_USAGE, words, fromFile)],
   ['activity-export', (words, fromFile) => caseExportAsked('activity-export', ACTIVITY_EXPORT_USAGE, words, fromFile)],
+  ['handoff-pause', (words, fromFile) => handoffAsked('handoff-pause', words, fromFile)],
+  ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
   [RESTORE_CHECK, restoreCheckAsked],
 ]);
 
@@ -328,6 +349,18 @@ function caseExportAsked(
   return 'problems' in asked ? asked : { command, ...asked };
 }
 
+/** A pause or resume of every hand-off a request file asks for (Phase 4 B1), or the problems; never typed. */
+function handoffAsked(command: HandoffCommand, words: readonly string[], fromFile: boolean): Request | Problems {
+  const [, reasonFlag, reason, idFlag, id, ...more] = words;
+  const usage = handoffUsage(command);
+  if (!fromFile) return problem(`${command} runs only from a request file: ${usage}`);
+  if (!(reasonFlag === '--reason' && idFlag === '--id' && id !== undefined && more.length === 0)) {
+    return problem(`the request file holds ${usage} as a JSON list, and nothing else`);
+  }
+  const asked = handoffAskedOf({ reason, id });
+  return 'problems' in asked ? asked : { command, ...asked };
+}
+
 /**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
@@ -401,6 +434,9 @@ async function run(
   const database = await connect(config, logger);
   if (database === undefined) return 1;
   if (request.command === 'invite-first-admin') return inviteFirst(config, keys, request, database, logger);
+  if (request.command === 'handoff-pause' || request.command === 'handoff-resume') {
+    return handoff(config, keys, request, database, logger);
+  }
   // The request file's, or made here, by the server: known before the work, so a failure can name it.
   const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
@@ -472,6 +508,32 @@ async function inviteFirst(
     }
     log.error('operator.failed', { command: request.command, invitationId, err: error });
     return 1;
+  } finally {
+    await database.destroy();
+  }
+}
+
+/** Pauses or resumes every hand-off to the bank and tells every organisation (Phase 4 B1): the exit code. */
+async function handoff(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: HandoffRequest,
+  database: Database<HandoffPauseTables>,
+  logger: Logger,
+): Promise<number> {
+  try {
+    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    return await changeHandoffPauseAsOperator(
+      database,
+      { keys, ids: uuidV7Ids, logger },
+      {
+        paused: request.command === 'handoff-pause',
+        reason: request.reason,
+        eventId: request.id,
+        release: config.release,
+        run: config.run,
+      },
+    );
   } finally {
     await database.destroy();
   }

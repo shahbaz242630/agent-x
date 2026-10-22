@@ -13,6 +13,7 @@ import {
   activityExportRequest,
   auditExportRequest,
   createOrganizationRequest,
+  handoffRequest,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
@@ -24,6 +25,8 @@ import { jobName, JOBS_API, UsageError } from './jobs.ts';
 import {
   auditExport,
   createOrganization,
+  handoffChange,
+  type HandoffArguments,
   inviteFirstAdmin,
   main,
   NO_REQUEST,
@@ -31,6 +34,7 @@ import {
   parseArguments,
   parseAuditExport,
   parseFirstAdmin,
+  parseHandoff,
   REQUEST_SECRET,
   restoreCheck,
   USAGE,
@@ -167,7 +171,15 @@ type Ending =
   | 'exported-other'
   | 'export-unwritten'
   | 'export-refused'
-  | 'no-store';
+  | 'no-store'
+  | 'resumed'
+  | 'resumed-told-before'
+  | 'resumed-partly-told'
+  | 'resumed-untold'
+  | 'resumed-by-another'
+  | 'paused-as-born'
+  | 'resume-refused'
+  | 'resumed-other';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
@@ -299,6 +311,48 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     TERMINATED,
   ],
   'no-store': () => [said({ event: 'operator.refused', problems: [NO_STORE_PROBLEM] }), TERMINATED],
+  resumed: (id) => [
+    said({ event: 'operator.starting' }),
+    said({ event: 'operator.handoff_resumed', platformEventId: id, platformSeq: 12 }),
+    said({ event: 'operator.handoff_told', platformEventId: id, organizations: 3, told: 3, toldBefore: 0, failed: 0 }),
+    TERMINATED,
+  ],
+  'resumed-told-before': (id) => [
+    said({ event: 'operator.handoff_unchanged', platformEventId: id, paused: false, inForce: id }),
+    said({ event: 'operator.handoff_told', platformEventId: id, organizations: 3, told: 1, toldBefore: 2, failed: 0 }),
+    TERMINATED,
+  ],
+  'resumed-partly-told': (id) => [
+    said({ event: 'operator.handoff_resumed', platformEventId: id, platformSeq: 12 }),
+    said({ event: 'operator.handoff_told', platformEventId: id, organizations: 3, told: 2, toldBefore: 0, failed: 1 }),
+    TERMINATED,
+  ],
+  'resumed-untold': (id) => [
+    said({ event: 'operator.handoff_resumed', platformEventId: id, platformSeq: 12 }),
+    said({ event: 'operator.failed', platformEventId: id }),
+    TERMINATED,
+  ],
+  'resumed-by-another': (id) => [
+    said({ event: 'operator.handoff_unchanged', platformEventId: id, paused: false, inForce: OTHER_ID }),
+    TERMINATED,
+  ],
+  'paused-as-born': (id) => [
+    said({ event: 'operator.handoff_unchanged', platformEventId: id, paused: true, inForce: null }),
+    TERMINATED,
+  ],
+  'resume-refused': (id) => [
+    said({
+      event: 'operator.refused',
+      platformEventId: id,
+      problems: ["the hand-off pause's record can't be verified, so nothing was changed"],
+    }),
+    TERMINATED,
+  ],
+  'resumed-other': () => [
+    said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
+    said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
+    TERMINATED,
+  ],
 };
 
 /** The endings whose command exits 0, so Azure ends the run Succeeded. */
@@ -312,6 +366,11 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'exported',
   'exported-there-already',
   'exported-other',
+  'resumed',
+  'resumed-told-before',
+  'resumed-by-another',
+  'paused-as-born',
+  'resumed-other',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -1586,5 +1645,169 @@ describe('an audit export for a case (E10c)', () => {
     expect(lines).toEqual([
       `say audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else\n${USAGE}`,
     ]);
+  });
+});
+
+describe('a pause or resume of every hand-off to the bank (Phase 4 B1, SEC-OPS-03)', () => {
+  /** A reason no test line repeats in a problem. */
+  const REASON = 'INC-2026/0042';
+  const resume = ['handoff-resume', '--reason', REASON];
+
+  async function handoffRun(script: Script = {}, request: Partial<HandoffArguments> = {}) {
+    const az = new FakeAzure({ ending: 'resumed', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await handoffChange(
+      { command: 'handoff-resume', reason: REASON, id: undefined, ...request },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    );
+    const words = JSON.parse(az.heldAtStart ?? '[]') as string[];
+    return { status, az, said: lines, id: String(words[4]) };
+  }
+
+  it('reads the command, the reason, and an earlier ID when one is given', () => {
+    expect(parseHandoff(resume)).toEqual({ command: 'handoff-resume', reason: REASON, id: undefined });
+    expect(parseHandoff(['handoff-pause', '--reason', REASON, '--id', EARLIER_ID])).toEqual({
+      command: 'handoff-pause',
+      reason: REASON,
+      id: EARLIER_ID,
+    });
+  });
+
+  it("refuses what the operator's command would, before writing anything, never repeating the reason", () => {
+    const refused = (argv: readonly string[]): string => {
+      try {
+        parseHandoff(argv);
+      } catch (error) {
+        expect(error).toBeInstanceOf(UsageError);
+        return (error as Error).message;
+      }
+      return 'read';
+    };
+    const shape = 'say handoff-resume --reason <case reference> [--id <ID>], and nothing else';
+    for (const argv of [
+      resume.slice(0, 1),
+      resume.with(1, '--case'),
+      [...resume, '--id'],
+      [...resume, '--id', EARLIER_ID, 'more'],
+    ]) {
+      expect(refused(argv)).toBe(shape);
+    }
+    expect(refused([...resume, '--id', 'not-an-id'])).toBe(
+      '--id takes the ID an earlier run gave: a UUIDv7, in lower case',
+    );
+    const badReason = 'a note with spaces';
+    const said = refused(resume.with(2, badReason));
+    expect(said).toBe(
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+    );
+    expect(said).not.toContain(badReason);
+    expect(refused(resume.slice(0, 2))).toBe(
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+    );
+  });
+
+  it("writes the operator's request, runs it, puts [] back and says it is in force and every organisation told", async () => {
+    const done = await handoffRun();
+
+    expect(done.status).toBe(0);
+    expect(done.id).toMatch(UUID_V7);
+    expect(done.az.heldAtStart).toBe(handoffRequest('handoff-resume', REASON, done.id));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said).toContain(
+      `The resume's platform event ID is ${done.id}. If this run's end is unclear, run the same command again with --id ${done.id}: it records nothing twice, tells only the organisations not told yet, and takes the request off the job at its end.`,
+    );
+    expect(done.said.at(-1)).toBe(
+      `Hand-offs to the bank are resumed (platform event ${done.id}); 3 organisations told now, 0 by an earlier run.`,
+    );
+  });
+
+  it('writes a pause the same way, with the ID given for a retry', async () => {
+    const done = await handoffRun({ ending: 'paused-as-born' }, { command: 'handoff-pause', id: EARLIER_ID });
+
+    expect(done.status).toBe(0);
+    expect(done.az.heldAtStart).toBe(handoffRequest('handoff-pause', REASON, EARLIER_ID));
+    expect(done.said.at(-1)).toBe(
+      'Hand-offs to the bank are already paused, as a new environment starts: nothing was recorded, and nobody was told.',
+    );
+  });
+
+  it('says a retry recorded nothing again and told only those left', async () => {
+    const done = await handoffRun({ ending: 'resumed-told-before' }, { id: EARLIER_ID });
+
+    expect(done.status).toBe(0);
+    expect(done.said.at(-1)).toBe(
+      `Hand-offs to the bank were already resumed by this request (platform event ${EARLIER_ID}), and nothing was recorded again; 1 organisations told now, 2 by an earlier run.`,
+    );
+  });
+
+  it('says organisations left untold, and how the same ID tells them', async () => {
+    const partly = await handoffRun({ ending: 'resumed-partly-told', states: ['Failed'] });
+    expect(partly.status).toBe(1);
+    expect(partly.said.at(-1)).toBe(
+      `Hand-offs to the bank are resumed (platform event ${partly.id}); 2 organisations told now, 0 by an earlier run, but 1 couldn't be told: their lines are above. Run the same command again with --id ${partly.id}: it records nothing twice, and tells only the organisations not told yet.`,
+    );
+    const untold = await handoffRun({ ending: 'resumed-untold', states: ['Failed'] });
+    expect(untold.status).toBe(1);
+    expect(untold.said.at(-1)).toBe(
+      `Hand-offs to the bank are resumed (platform event ${untold.id}), but the run's lines don't show every organisation told. Run the same command again with --id ${untold.id}: it records nothing twice, and tells only the organisations not told yet.`,
+    );
+  });
+
+  it("says hand-offs found as asked by another request's change, telling nobody", async () => {
+    const done = await handoffRun({ ending: 'resumed-by-another' });
+
+    expect(done.status).toBe(0);
+    expect(done.said.at(-1)).toBe(
+      `Hand-offs to the bank are already resumed, by the platform event ${OTHER_ID}: nothing was recorded, and nobody was told by this request. That change's own request, run again with its --id, tells any organisation it didn't.`,
+    );
+  });
+
+  it('says a refusal and a run that found no request, each recording nothing', async () => {
+    const refused = await handoffRun({ ending: 'resume-refused', states: ['Failed'] });
+    expect(refused.status).toBe(1);
+    expect(refused.said.at(-1)).toBe(
+      "The operator's command refused it, and nothing was recorded: the hand-off pause's record can't be verified, so nothing was changed.",
+    );
+    const empty = await handoffRun({ ending: 'no-request', states: ['Failed'] });
+    expect(empty.status).toBe(1);
+    expect(empty.said.at(-1)).toBe(
+      `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again with --id ${empty.id}.`,
+    );
+  });
+
+  it('never takes a line about another pause for this one, nor a run whose lines say nothing', async () => {
+    for (const ending of ['resumed-other', 'silent'] as const) {
+      const done = await handoffRun({ ending });
+      expect({ ending, status: done.status }).toEqual({ ending, status: 1 });
+      expect(done.said.at(-1)).toBe(
+        `The run succeeded, but its lines don't show hand-offs resumed by ${done.id}: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${done.id}: it records nothing twice, and tells only the organisations not told yet.`,
+      );
+    }
+    const stopped = await handoffRun({ ending: 'failed', states: ['Failed'] });
+    expect(stopped.status).toBe(1);
+    expect(stopped.said.at(-1)).toBe(
+      `Hand-offs may not have been resumed: read the lines above. If they leave it unclear: Run the same command again with --id ${stopped.id}: it records nothing twice, and tells only the organisations not told yet.`,
+    );
+  });
+
+  it('is read by main as its own command, saying how to use it, and ending 2, when asked it wrongly', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['handoff-pause', '--id', EARLIER_ID],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([`say handoff-pause --reason <case reference> [--id <ID>], and nothing else\n${USAGE}`]);
   });
 });

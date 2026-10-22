@@ -84,13 +84,17 @@ const SPEND_REQUEST_NOTICE_KINDS = ['spend_request_waiting'] as const;
  * entry's event ID: Agent X's own team exported the audit log (0050) or the
  * activity log (0053, L7) for a case, told to every admin (ADR-005 §6,
  * partner decision 24); an admin's background download of the activity log
- * ready, or given up on, told to them (0053, decision 31).
+ * ready, or given up on, told to them (0053, decision 31); Agent X's own team
+ * paused or resumed every hand-off to the bank, for every organisation, told
+ * to every admin (0057, Phase 4 B1, partner decision 4).
  */
 const AUDIT_LOG_NOTICE_KINDS = [
   'audit_log_exported',
   'access_log_export_ready',
   'access_log_export_failed',
   'access_log_exported',
+  'handoff_paused',
+  'handoff_resumed',
 ] as const;
 
 export const NOTICE_KINDS = [

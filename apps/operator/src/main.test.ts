@@ -22,6 +22,8 @@ import {
   createOrganizationRequest,
   FIRST_ADMIN_USAGE,
   firstAdminRequest,
+  handoffRequest,
+  handoffUsage,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
   RESTORE_CHECK,
@@ -642,6 +644,66 @@ describe('E10c an audit export for a case, only ever from a file', () => {
     );
 
     expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+  });
+});
+
+describe('Phase 4 B1 a pause or resume of every hand-off, only ever from a file', () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-handoff-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const REASON = 'INC-2026/0042';
+
+  it.each(['handoff-pause', 'handoff-resume'] as const)(
+    'reads a well-formed %s, then connects, never repeating the reason',
+    async (command) => {
+      const { events, line, text } = await run(['--request', requestFile(handoffRequest(command, REASON, NEW_ID))]);
+
+      expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+      expect(line('operator.starting')).toMatchObject({ command });
+      expect(text).not.toContain(REASON);
+    },
+  );
+
+  it.each(['handoff-pause', 'handoff-resume'] as const)('refuses %s typed', async (command) => {
+    const { events, line, text } = await run(JSON.parse(handoffRequest(command, REASON, NEW_ID)) as string[]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `${command} runs only from a request file: ${handoffUsage(command)}`,
+    ]);
+    expect(text).not.toContain(REASON);
+  });
+
+  it.each([
+    ['its reason missing', ['handoff-resume', '--id', NEW_ID]],
+    ['its ID missing', ['handoff-resume', '--reason', REASON]],
+    ['its ID flag with no ID', ['handoff-resume', '--reason', REASON, '--id']],
+    ['a word more', ['handoff-resume', '--reason', REASON, '--id', NEW_ID, 'x']],
+    ['a flag misnamed', ['handoff-resume', '--case', REASON, '--id', NEW_ID]],
+  ])('refuses %s, naming the shape', async (_what, words) => {
+    const { events, line, text } = await run(['--request', requestFile(JSON.stringify(words))]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `the request file holds ${handoffUsage('handoff-resume')} as a JSON list, and nothing else`,
+    ]);
+    expect(text).not.toContain(REASON);
+  });
+
+  it('names a reason that isn’t a case reference and an ID that isn’t one, never repeating the reason', async () => {
+    const reason = 'a note about the incident';
+    const { line, text } = await run([
+      '--request',
+      requestFile(handoffRequest('handoff-pause', reason, NEW_ID.toUpperCase())),
+    ]);
+
+    expect(line('operator.refused')?.problems).toEqual([
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+      "the pause's ID must be a UUIDv7, in lower case",
+    ]);
+    expect(text).not.toContain(reason);
   });
 });
 
