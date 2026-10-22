@@ -563,6 +563,8 @@ export function createSpendRequestDecisions({
       const log = logger.child({ correlationId, orgId: agent.orgId });
       // Each attempt sets it; only the one that committed is returned, so it is that attempt's decision.
       let made: Awaited<ReturnType<typeof decided>> | undefined;
+      // The whole decision, its lock waits and retries too, for the Pilot's policy target (PL-38).
+      const started = performance.now();
       const done = await retryingTransaction(log, DECIDE_OPERATION, () =>
         work.write(agent, idempotent, correlationId, async (tx, states) => {
           made = await decided(tx, states, agent, idempotent.key, asked);
@@ -578,6 +580,7 @@ export function createSpendRequestDecisions({
           agentId: agent.agentId,
           decision: made.decision,
           reasons: made.reasons.join(' '),
+          durationMs: Math.round(performance.now() - started),
         });
       }
       return work.answered(agent.orgId, correlationId, async (tx, states) => {

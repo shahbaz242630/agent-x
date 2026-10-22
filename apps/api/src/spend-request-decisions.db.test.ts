@@ -544,7 +544,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect((await made(w.org)).requests).toBe(1);
   });
 
-  it('logs each decision once it is made, for the denial-surge alert, and never for its key’s replay (E2)', async () => {
+  it('logs each decision once it is made, with how long it took, for the denial-surge alert, and never for its key’s replay (E2)', async () => {
     const { w, acting } = await ready();
     const decided = () => capture.lines().filter((line) => line.event === 'spend_request.decided');
     const allowed = decidedOf(await ask(acting, asking(w), 'logged-once'));
@@ -560,6 +560,11 @@ describe('deciding a spend request and reserving it (D4)', () => {
         reasons: denied.reasons.join(' '),
       }),
     ]);
+    // The whole decision in whole milliseconds, for the policy target (PL-38): never below the transaction's own work.
+    for (const line of decided()) {
+      expect(Number.isInteger(line.durationMs)).toBe(true);
+      expect(line.durationMs).toBeGreaterThan(0);
+    }
     // The signal alone: no order, amount or supplier in the line.
     const lines = JSON.stringify(decided());
     for (const value of ['inv-1001', 'INV-1001', w.suppliers[0] ?? '', '1000000', 'Printer paper']) {
