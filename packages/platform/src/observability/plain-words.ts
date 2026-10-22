@@ -328,6 +328,26 @@ export const PLAIN_WORDS = {
     broke: 'The hold stays in place, and the integrity alarm was raised.',
     next: 'Find out what changed the records and put them right; the check then starts again.',
   },
+  'handoff.answer_unrecorded': {
+    happened: "A payment was handed to the bank, but the bank's answer could not be written down.",
+    broke: 'The payment is kept as waiting for an answer, and nothing is sent again.',
+    next: 'It is marked unknown and checked against the bank. If this repeats, a developer should read the error.',
+  },
+  'handoff.failed': {
+    happened: 'Checking an approved payment before handing it to the bank failed.',
+    broke: 'That payment was not sent and waits, its money still held.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
+  },
+  'handoff.partner_failed': {
+    happened: 'Handing a payment to the bank failed in an unexpected way.',
+    broke: 'Whether the bank took it is not known, so it is marked unknown and never sent again.',
+    next: 'It is checked against the bank. A developer should read the error.',
+  },
+  'handoff.run_failed': {
+    happened: 'The list of organisations could not be read, so no approved payments were handed to the bank.',
+    broke: 'Approved payments wait, their money still held.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
+  },
   'holdings_check.failed': {
     happened: "The regular check of an organisation's spend requests against their budget holds failed.",
     broke: "Part of that organisation's requests went unchecked this run.",

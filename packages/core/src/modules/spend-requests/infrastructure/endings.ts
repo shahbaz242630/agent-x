@@ -237,8 +237,13 @@ export async function voidRequest(
   return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
 }
 
-/** DENIED as the API's void with its causes (`spend_request.voided`), its holdings released. */
-const voidedWith = (
+/**
+ * DENIED as the API's void with its causes (`spend_request.voided`), its
+ * holdings released: the voids' own, and the hand-off's for a cause only it
+ * judges (Phase 4 B4: a key ended at once since the approval). The caller has
+ * read it pending, for change, in this transaction.
+ */
+export const voidedWith = (
   tx: EndingsTransaction,
   states: SignedStates,
   keys: KeyProvider,

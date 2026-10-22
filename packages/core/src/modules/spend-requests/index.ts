@@ -64,6 +64,7 @@ export {
   type Voided,
   type VoidingShown,
   voidPendingOf,
+  voidedWith,
   voidRequest,
 } from './infrastructure/endings.ts';
 export {

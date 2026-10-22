@@ -11,6 +11,7 @@
     "./modules/evidence": "./src/modules/evidence/index.ts",
     "./modules/funding-sources": "./src/modules/funding-sources/index.ts",
     "./modules/identity": "./src/modules/identity/index.ts",
+    "./modules/instructions": "./src/modules/instructions/index.ts",
     "./modules/limit-reservations": "./src/modules/limit-reservations/index.ts",
     "./modules/mandates": "./src/modules/mandates/index.ts",
     "./modules/notifications": "./src/modules/notifications/index.ts",
@@ -22,6 +23,7 @@
     "./modules/activity": "./src/modules/activity/index.ts",
     "./modules/spend-requests": "./src/modules/spend-requests/index.ts",
     "./modules/suppliers": "./src/modules/suppliers/index.ts",
+    "./modules/transactions": "./src/modules/transactions/index.ts",
     "./schema-check": "./src/schema-check.ts",
     "./shared-kernel": "./src/shared-kernel/index.ts"
   },

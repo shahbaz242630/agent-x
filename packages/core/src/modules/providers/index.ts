@@ -39,6 +39,7 @@ export {
   type LinkContext,
   type LinkOutcome,
   PARTNER_NAME,
+  type PartnerIdentity,
   type PartnerLinkSession,
   type PayeeDetails,
   type PayeeNameCheck,

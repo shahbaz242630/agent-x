@@ -6,13 +6,21 @@
 import type { FixedClock, SequentialIds, TestDatabase } from '@agentx/testing';
 import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
+import { MANDATES } from '@agentx/core/modules/mandates';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { monthSpent } from '@agentx/core/modules/limit-reservations';
 import { policyOf, setPolicy } from '@agentx/core/modules/mandates';
-import { type ApprovalWaitHours, requestOf } from '@agentx/core/modules/spend-requests';
+import {
+  type ApprovalWaitHours,
+  type Pausable,
+  type PendingChoice,
+  requestOf,
+} from '@agentx/core/modules/spend-requests';
 import {
   changeDetails,
   nextVersionNumber,
+  SUPPLIERS,
   supplierOf,
   suspendSupplier,
   versionOf,
@@ -29,6 +37,7 @@ import {
   type SpendAskedByAgent,
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
+import { choiceDetails, SUSPENDS } from './suspensions.ts';
 
 export type SpendWorldTables = MandateWorldTables;
 
@@ -195,6 +204,36 @@ export function spendWorld({
       });
     });
 
+  /** The world's own one: its agent, the mandate named, its source, its first supplier. */
+  const idOf = (w: World, mandateId: string, which: Pausable): string =>
+    ({ organization: w.org, agent: w.agent, mandate: mandateId, source: w.source, supplier: w.suppliers[0] ?? '' })[
+      which
+    ];
+
+  /** Suspends it with the choice, as its use case records one (suspensions.ts), or lifts it; past the use case. */
+  const moved = (w: World, mandateId: string, which: Pausable, choice: PendingChoice | 'resume') =>
+    signed(w, async (tx, states): Promise<unknown> => {
+      const key = { orgId: w.org, id: idOf(w, mandateId, which) };
+      const suspend = choice !== 'resume';
+      const change = {
+        actor: OPERATOR,
+        action: suspend ? SUSPENDS[which].action : `${SUSPENDS[which].type}.resumed`,
+        details: suspend ? choiceDetails(choice) : {},
+      };
+      switch (which) {
+        case 'organization':
+          return states.changeStatus(tx, ORGANIZATIONS, key, suspend ? 'freeze' : 'unfreeze', change);
+        case 'agent':
+          return states.changeStatus(tx, AGENTS, key, suspend ? 'suspend' : 'reactivate', change);
+        case 'mandate':
+          return states.changeStatus(tx, MANDATES, key, suspend ? 'suspend' : 'resume', change);
+        case 'source':
+          return states.changeStatus(tx, SOURCES, key, suspend ? 'suspend' : 'reactivate', change);
+        case 'supplier':
+          return states.changeStatus(tx, SUPPLIERS, key, suspend ? 'suspend' : 'reactivate_verified', change);
+      }
+    });
+
   /** The agent's mandate in force: the world's only one. */
   const mandateIdOf = (w: World) =>
     withTenant(app(), w.org, async (tx) => {
@@ -288,6 +327,8 @@ export function spendWorld({
     waitChosen,
     mandateIdOf,
     detailsChanged,
+    idOf,
+    moved,
     STOPS,
   };
 }

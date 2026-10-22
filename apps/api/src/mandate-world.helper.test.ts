@@ -32,7 +32,7 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import { acceptDraft, mandateOf, MANDATES, type MandatesTables, setPolicy } from '@agentx/core/modules/mandates';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
+import { createFakeRail, type FakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { addSupplier, supplierOf, type SuppliersTables, verifySupplier } from '@agentx/core/modules/suppliers';
 import { DAY_MS, money } from '@agentx/core/shared-kernel';
@@ -77,6 +77,8 @@ export interface World {
   /** The source as the partner answered it when linked. */
   readonly state: FundingSourceState;
   readonly suppliers: readonly string[];
+  /** The world's own fake partner, holding its source's consent: what a hand-off pays through (Phase 4 B4). */
+  readonly rail: FakeRail;
 }
 
 export const AED = (minor: bigint) => money(minor, 'AED');
@@ -241,7 +243,7 @@ export function mandateWorld({
       );
     }
     const maxPayment = answer.source.controls.maxPaymentMinor;
-    return { org, admin, agent, source, maxPayment, state: answer.source, suppliers };
+    return { org, admin, agent, source, maxPayment, state: answer.source, suppliers, rail };
   }
 
   /** Terms within the source's consent: the per-order limit what it allows per payment. */
