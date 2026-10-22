@@ -89,13 +89,13 @@ import {
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { mayFund } from '@agentx/core/modules/funding-sources';
-import type { Outbox } from '@agentx/core/modules/notifications';
+import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type AuthorityRead, authorityOf, stoppedNotice, type VoidTables } from './request-voids.ts';
+import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
 export const HANDOFF_EVERY_MS = 10_000;
@@ -116,7 +116,24 @@ const ROUTE = { route: 'push', reason: 'mandate_source_push_rail' } as const;
 /** The API, as the hand-off's actor in the signed events. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
-type HandoffTables = VoidTables & PlatformControlsTables & InstructionsTables & TransactionsTables & AuditTables;
+type HandoffTables = VoidTables &
+  PlatformControlsTables &
+  InstructionsTables &
+  TransactionsTables &
+  AuditTables &
+  NotificationsTables;
+
+/**
+ * The notice that an approved request was stopped at its hand-off (0059,
+ * Phase 4 B4b; partner decision 3: what the hand-off's re-check finds): to
+ * every admin, found as it is sent, written in the transaction that denied
+ * it. The voids job and the brakes tell as they did (the mandate expired,
+ * the supplier's details changed, the organisation frozen each has its own
+ * notice); a key ended at once and a payee changed are found only here.
+ */
+const stoppedNotice = (orgId: string, requestId: string): Notice[] => [
+  { orgId, recipientUserId: null, kind: 'spend_request_stopped', membershipId: null, role: null, aboutId: requestId },
+];
 type HandoffTx = DatabaseTransaction<HandoffTables>;
 
 /** What Tx A came to: the intent handed off with its transaction's ID; or left as it is, and why. */

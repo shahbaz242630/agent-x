@@ -315,7 +315,6 @@ const job = (w: World) =>
   createRequestVoids({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
     keys,
     ids,
     clock,

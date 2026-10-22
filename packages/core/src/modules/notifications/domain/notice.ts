@@ -81,8 +81,8 @@ const SPEND_REQUEST_NOTICE_KINDS = ['spend_request_waiting'] as const;
 
 /**
  * The kinds about a spend request told to every admin alone, `aboutId` its ID
- * (0059, Phase 4 B4b): an approved one stopped before it reached the bank,
- * by the hand-off's last check or the voids job (partner decision 3, S135).
+ * (0059, Phase 4 B4b): an approved one stopped by the hand-off's last check
+ * before it reached the bank (partner decision 3, S135).
  */
 const SPEND_REQUEST_ADMIN_NOTICE_KINDS = ['spend_request_stopped'] as const;
 

@@ -145,7 +145,6 @@ beforeEach(() => {
     createRequestVoids({
       list: orgs,
       database: app,
-      outbox: createOutbox({ ids, clock }),
       keys,
       ids,
       clock,
@@ -184,10 +183,8 @@ describe('pending spend requests voided once their authority no longer stands (C
       }
       const stands = ON_THE_FIRST_SUPPLIER.includes(what);
       expect(await statusOf(w, elsewhere.id)).toBe(stands ? 'APPROVED' : 'DENIED');
-      // The approved ones stopped before the bank tell the admins (B4b); the one waiting for approval tells no one.
-      expect((await stoppedToldOf(w)).toSorted()).toEqual(
-        (stands ? [approved.id] : [approved.id, elsewhere.id]).toSorted(),
-      );
+      // The hand-off's own notice (B4b) is never the voids job's: its brakes tell as they did.
+      expect(await stoppedToldOf(w)).toEqual([]);
       expect(await spentOf(w, acting)).toBe(stands ? 50_000n : 0n);
       expect(lines('request_void.voided')).toHaveLength(stands ? 2 : 3);
       expect(lines('request_void.failed')).toEqual([]);

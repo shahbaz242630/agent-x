@@ -192,7 +192,6 @@ const voids = (w: World) =>
   createRequestVoids({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
     keys,
     ids,
     clock,
@@ -284,7 +283,6 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     await createRequestVoids({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
       keys,
       ids,
       clock,

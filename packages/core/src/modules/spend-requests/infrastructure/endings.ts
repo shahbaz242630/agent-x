@@ -194,13 +194,7 @@ export interface SubjectsNamed {
 
 /** What came of voiding a request: void, its holdings released; still standing; or as an ending's. */
 export type Voided =
-  | {
-      readonly outcome: 'voided';
-      readonly request: SpendRequestRecord;
-      readonly causes: readonly ReasonCode[];
-      /** The status it was voided from: approved ones tell the admins (Phase 4 B4b). */
-      readonly from: SpendRequestRecord['status'];
-    }
+  | { readonly outcome: 'voided'; readonly request: SpendRequestRecord; readonly causes: readonly ReasonCode[] }
   | { readonly outcome: 'standing' }
   | Extract<Ended, { readonly outcome: 'not_open' | 'missing' | 'tampered' }>;
 
@@ -240,7 +234,7 @@ export async function voidRequest(
   const causes = voidCauses({ mandateId: request.mandateId, ...against }, authority);
   if (causes.length === 0) return { outcome: 'standing' };
   await voidedWith(tx, states, keys, key, causes, now);
-  return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes, from: request.status };
+  return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
 }
 
 /**

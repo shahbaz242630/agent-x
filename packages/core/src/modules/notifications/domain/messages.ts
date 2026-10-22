@@ -317,14 +317,14 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       "Sign in to Agent X to see the request in full and approve or reject it. If you didn't expect it, reject it and tell the organisation's admins.",
   },
-  // About a spend request (0059, Phase 4 B4b): an approved one stopped before it reached the bank, to every admin
+  // About a spend request (0059, Phase 4 B4b): an approved one stopped by the hand-off's last check, to every admin
   // (partner decision 3). Never its amount or supplier: the console shows those to whoever signs in.
   spend_request_stopped: {
     subject: () => 'Agent X: an approved payment was stopped before it reached the bank',
     firstLine: () =>
-      "An approved spend request in one of your Agent X organisations was stopped just before it was handed to the bank, because something it was approved under changed: for example its agent's key was ended, its supplier's details changed, or its mandate was replaced or stopped. Nothing was paid, and the money held for it was freed.",
+      "An approved spend request in one of your Agent X organisations was stopped by Agent X's last check before it was handed to the bank, because something it was approved under had changed: for example its agent's key was ended, its supplier's payee changed, or its mandate was replaced or stopped. Nothing was paid, and the money held for it was freed.",
     check:
-      "Sign in to Agent X to see the request and why it was stopped. If the payment is still needed, the agent can ask again. If you didn't expect this, tell the organisation's other admins.",
+      "Sign in to Agent X to see the request and why it was stopped. Once whatever stopped it is put right, the agent can ask again if the payment is still needed. If you didn't expect this, tell the organisation's other admins.",
   },
   // About an audit log entry (0050): Agent X's own team read the log for a case, to every admin (ADR-005 §6).
   audit_log_exported: {

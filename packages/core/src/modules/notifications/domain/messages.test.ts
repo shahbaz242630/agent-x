@@ -321,7 +321,7 @@ describe('a notice’s email (B5-1b)', () => {
     it('tells every admin, naming the request by ID alone, that nothing was paid and the money held was freed', () => {
       expect(message.subject).toBe('Agent X: an approved payment was stopped before it reached the bank');
       expect(message.text).toContain('Nothing was paid, and the money held for it was freed.');
-      expect(message.text).toContain('If the payment is still needed, the agent can ask again.');
+      expect(message.text).toContain('Once whatever stopped it is put right, the agent can ask again');
       expect(message.text).toContain(`Spend request: ${request}`);
       expect(message.text).toContain("You're told because you're an admin of this organisation.");
       expect(message.text).toContain("This email can't approve or change anything.");

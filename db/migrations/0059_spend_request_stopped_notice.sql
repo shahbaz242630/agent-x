@@ -1,10 +1,9 @@
--- An approved spend request stopped before it reached the bank, told to every
--- admin of its organisation (Phase 4 B4b; partner decision 3, S135): denied
--- by the hand-off's last check (a key ended at once, the payee changed, a
--- stop found) or by the voids job, whichever reaches it first, its holdings
--- freed. One notice kind, `spend_request_stopped`, `aboutId` the request's
--- ID, written in the same transaction as the denial and fanned out to the
--- admins as it is sent.
+-- An approved spend request stopped by the hand-off's last check before it
+-- reached the bank, told to every admin of its organisation (Phase 4 B4b;
+-- partner decision 3, S135): a key ended at once, the payee changed, or a
+-- stop found, its holdings freed. One notice kind, `spend_request_stopped`,
+-- `aboutId` the request's ID, written in the same transaction as the denial
+-- and fanned out to the admins as it is sent.
 
 ALTER TABLE notifications.outbox DROP CONSTRAINT outbox_kind_check;
 ALTER TABLE notifications.outbox

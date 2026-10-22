@@ -614,7 +614,6 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
     await createRequestVoids({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
       keys,
       ids,
       clock,
