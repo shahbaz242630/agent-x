@@ -39,7 +39,12 @@ import {
   supplierOf,
   versionOf,
 } from '@agentx/core/modules/suppliers';
-import { TRANSACTIONS, transactionOf, type TransactionsTables } from '@agentx/core/modules/transactions';
+import {
+  moveTransaction,
+  TRANSACTIONS,
+  transactionOf,
+  type TransactionsTables,
+} from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -54,7 +59,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff } from './handoff.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, heartbeatChecks } from './handoff.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createRequestVoids } from './request-voids.ts';
@@ -624,6 +629,238 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
     expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
     expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1 });
+  });
+});
+
+/** An answer with nothing more to say than its move. */
+const NO_ANSWER_FACTS = {
+  providerStatus: null,
+  paymentInstructionRef: null,
+  rejectCode: null,
+  providerChangedAt: null,
+};
+
+describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §10)', () => {
+  interface Limits {
+    callTimeoutMs: number;
+    unknownAfterMs: number;
+  }
+
+  /** The job with the given time limits, paying through `rail`. */
+  const timed = (w: World, rail: FakeRail, limits: Limits) =>
+    createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      ...limits,
+    });
+
+  /**
+   * The request handed off by a run whose partner answers only when the test
+   * lets it: its transaction left SUBMISSION_PENDING, as a run that died
+   * between Tx A and Tx B would leave it. `answered` lets the answer come.
+   */
+  async function leftWaiting(w: World, requestId: string, limits: Limits) {
+    const { promise: answer, resolve } = Promise.withResolvers<undefined>();
+    const slow: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await answer;
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+    const first = timed(w, slow, limits).run();
+    await expect
+      .poll(async () => (await paymentOf(w, requestId)).transaction)
+      .toMatchObject({ status: 'SUBMISSION_PENDING' });
+    return {
+      answered: async () => {
+        resolve(undefined);
+        await first;
+      },
+    };
+  }
+
+  it('marks UNKNOWN a transaction left waiting past its wait, never one within it; the late answer kept as facts', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // The call's limit runs on real time, the wait on the test's clock: the answer is held back well within both.
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+
+    // Within its wait: left be.
+    await timed(w, w.rail, limits).run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMISSION_PENDING' } });
+    expect(lines('handoff.marked_unknown')).toEqual([]);
+
+    // Past it: UNKNOWN, said in plain words, never sent again.
+    clock.advanceBy(60_001);
+    await timed(w, w.rail, limits).run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+    expect(lines('handoff.marked_unknown')).toHaveLength(1);
+
+    // The answer comes after all: kept as the transaction's facts, never a move, and not an error.
+    await answered();
+    expect(await paymentOf(w, request.id)).toMatchObject({
+      transaction: { status: 'UNKNOWN', providerStatus: 'Pending' },
+    });
+    expect(lines('handoff.handed_off')).toEqual([
+      expect.objectContaining({ requestId: request.id, answer: 'accepted', recorded: 'late' }),
+    ]);
+    expect(lines('handoff.answer_unrecorded')).toEqual([]);
+  });
+
+  it('settles FAILED a refusal that comes once the transaction was marked UNKNOWN: its code the proof (ADR-007 §11)', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: the fake declines it.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+    clock.advanceBy(60_001);
+    await timed(w, w.rail, limits).run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+
+    await answered();
+    expect(await paymentOf(w, request.id)).toMatchObject({
+      transaction: { status: 'FAILED', rejectCode: 'AANI.AM04' },
+    });
+    expect(lines('handoff.handed_off')).toEqual([
+      expect.objectContaining({ requestId: request.id, answer: 'refused', recorded: 'recorded' }),
+    ]);
+  });
+
+  it('sweeps once a minute, not every run: few database calls', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 30_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+    const job = timed(w, w.rail, limits);
+    await job.run();
+
+    // Past its wait, but the job swept under a minute ago: left for its next sweep.
+    clock.advanceBy(30_001);
+    await job.run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMISSION_PENDING' } });
+
+    clock.advanceBy(30_000);
+    await job.run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+    await answered();
+  });
+
+  it('leaves be a transaction its answer moved after the sweep listed it (forced)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+    const waiting = await paymentOf(w, request.id);
+    const key = { orgId: w.org, id: typeof waiting.transaction === 'object' ? waiting.transaction.id : '' };
+    clock.advanceBy(60_001);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The transaction (level 10) held by an answer being recorded: the sweep lists it, then queues on it.
+    const answering = withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      await transactionOf(tx, states, key, 'change');
+      holding(undefined);
+      await gate;
+      await moveTransaction(tx, states, key, 'submitted', NO_ANSWER_FACTS, {
+        actor: { type: 'system', id: 'api' },
+        details: { via: 'test' },
+      });
+    });
+    await held;
+    const sweeping = within(20_000, timed(w, w.rail, limits).run(), 'the sweep');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await answering;
+    await sweeping;
+
+    // SUBMITTED may lose track too: only the sweep's own check leaves the answer be.
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMITTED' } });
+    expect(lines('handoff.marked_unknown')).toEqual([]);
+    expect(lines('handoff.sweep_failed')).toEqual([]);
+    await answered();
+  });
+
+  it('sweeps nothing once stopped, so the process stops promptly', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+    clock.advanceBy(60_001);
+    const stopping = new AbortController();
+    stopping.abort();
+
+    await timed(w, w.rail, limits).run(stopping.signal);
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMISSION_PENDING' } });
+
+    await timed(w, w.rail, limits).run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+    await answered();
+  });
+
+  it('gives the partner its time limit: no answer by then is UNKNOWN, said in plain words', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const silent: FakeRail = { ...w.rail, submitApprovedIntent: () => new Promise(() => undefined) };
+
+    await timed(w, silent, { callTimeoutMs: 50, unknownAfterMs: 60_000 }).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+    expect(lines('handoff.partner_timeout')).toEqual([expect.objectContaining({ requestId: request.id })]);
+    expect(lines('handoff.partner_failed')).toEqual([]);
+  });
+
+  it('refuses to start with a wait no longer than the partner’s time limit (ADR-007 §10)', async () => {
+    const { w } = await ready();
+
+    expect(() => timed(w, w.rail, { callTimeoutMs: 60_000, unknownAfterMs: 60_000 })).toThrow(RangeError);
+    expect(() => timed(w, w.rail, { callTimeoutMs: 60_000, unknownAfterMs: 60_001 })).not.toThrow();
+  });
+
+  it('beats from its start and with each run, for /health; past its limit with no run, it reads as stopped (ADR-013)', async () => {
+    const { w } = await ready();
+    const handoff = handoffOf(w);
+    expect(handoff.beating()).toBe(true);
+    clock.advanceBy(HEARTBEAT_STALE_MS + 1);
+    expect(handoff.beating()).toBe(false);
+
+    await handoff.run();
+    expect(handoff.beating()).toBe(true);
+
+    clock.advanceBy(HEARTBEAT_STALE_MS);
+    expect(handoff.beating()).toBe(true);
+    clock.advanceBy(1);
+    expect(handoff.beating()).toBe(false);
+  });
+
+  it('gives /health its heartbeat, and nothing where there is no hand-off', async () => {
+    const { w } = await ready();
+    const handoff = handoffOf(w);
+    await handoff.run();
+
+    const [check, ...rest] = heartbeatChecks(handoff);
+    expect(check?.name).toBe('handoff_heartbeat');
+    expect(rest).toEqual([]);
+    expect(await check?.check()).toBe(true);
+    clock.advanceBy(HEARTBEAT_STALE_MS + 1);
+    expect(await check?.check()).toBe(false);
+    expect(heartbeatChecks(undefined)).toEqual([]);
+  });
+
+  it('never beats for a run that can’t read its organisations: one failing every time reads as stopped', async () => {
+    const { w } = await ready();
+    const failing = handoffOf(w, w.rail, () => Promise.reject(new Error('directory down')));
+    clock.advanceBy(HEARTBEAT_STALE_MS + 1);
+
+    await failing.run();
+
+    expect(failing.beating()).toBe(false);
   });
 });
 
