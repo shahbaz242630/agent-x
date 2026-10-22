@@ -312,7 +312,15 @@ const approvals = () =>
 
 /** The request-voids job, over the world's organisation alone. */
 const job = (w: World) =>
-  createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
+  createRequestVoids({
+    list: () => Promise.resolve([w.org]),
+    database: app,
+    outbox: createOutbox({ ids, clock }),
+    keys,
+    ids,
+    clock,
+    logger: logger(),
+  });
 
 /** The world's first supplier reactivated by its admin with `choice`, stepped up with a passkey. */
 const reactivated = async (w: World, choice: PendingChoice) => {

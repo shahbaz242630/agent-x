@@ -920,6 +920,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     createRequestVoids({
       list: () => listedOrganizations(database),
       database,
+      outbox,
       keys,
       ids: uuidV7Ids,
       clock: systemClock,
@@ -935,6 +936,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
         list: () => listedOrganizations(database),
         database,
         rail,
+        outbox,
         keys,
         ids: uuidV7Ids,
         clock: systemClock,

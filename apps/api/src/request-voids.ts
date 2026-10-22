@@ -56,6 +56,7 @@ import {
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
+import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import { type FundingSourcesTables, SOURCES, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
@@ -109,8 +110,19 @@ export type VoidTables = SpendRequestsTables &
   MandatesTables &
   FundingSourcesTables &
   SuppliersTables &
-  OrganizationsTables;
+  OrganizationsTables &
+  NotificationsTables;
 type VoidTx = DatabaseTransaction<VoidTables>;
+
+/**
+ * The notice that an approved request was stopped before it reached the bank
+ * (0059, Phase 4 B4b; partner decision 3): to every admin, found as it is
+ * sent, written in the transaction that denied it. A request still waiting
+ * for approval tells no one: no one approved it yet.
+ */
+export const stoppedNotice = (orgId: string, requestId: string): Notice[] => [
+  { orgId, recipientUserId: null, kind: 'spend_request_stopped', membershipId: null, role: null, aboutId: requestId },
+];
 
 /**
  * The pause in force's choice (PAUSE_EVENTS) for the object a candidate's
@@ -411,6 +423,7 @@ export interface RequestVoids {
 export function createRequestVoids({
   list,
   database,
+  outbox,
   keys,
   ids,
   clock,
@@ -420,6 +433,8 @@ export function createRequestVoids({
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<VoidTables>;
+  /** Where an approved request's stop is written for its admins (Phase 4 B4b). */
+  readonly outbox: Outbox;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
@@ -437,7 +452,11 @@ export function createRequestVoids({
   ): Promise<Voided> => {
     const now = clock.now();
     const { named, authority } = await authorityOf(tx, states, key, now);
-    return voidRequest(tx, states, keys, key, { named, authority }, now);
+    const voided = await voidRequest(tx, states, keys, key, { named, authority }, now);
+    if (voided.outcome === 'voided' && voided.from !== 'APPROVAL_REQUIRED') {
+      await outbox.add(tx, stoppedNotice(key.orgId, key.id));
+    }
+    return voided;
   };
 
   /** Voids the request if its authority no longer stands, logging what came of it; whether it did. Never throws. */

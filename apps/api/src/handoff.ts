@@ -89,12 +89,13 @@ import {
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { mayFund } from '@agentx/core/modules/funding-sources';
+import type { Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
+import { type AuthorityRead, authorityOf, stoppedNotice, type VoidTables } from './request-voids.ts';
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
 export const HANDOFF_EVERY_MS = 10_000;
@@ -168,6 +169,7 @@ export function createHandoff({
   list,
   database,
   rail,
+  outbox,
   keys,
   ids,
   clock,
@@ -178,6 +180,8 @@ export function createHandoff({
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<HandoffTables>;
   readonly rail: FinancialRailAdapter;
+  /** Where a denial is written for the admins: an approved payment stopped before the bank (B4b, decision 3). */
+  readonly outbox: Outbox;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
@@ -204,8 +208,15 @@ export function createHandoff({
       ).map(({ id }) => id),
     );
 
-  /** Tx A for one request, in the lock order above. */
+  /** Tx A for one request, in the lock order above; a denial tells the admins in it (decision 3). */
   const txA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
+    const done = await judgedA(tx, states, orgId, id, log);
+    if (done.outcome === 'denied') await outbox.add(tx, stoppedNotice(orgId, id));
+    return done;
+  };
+
+  /** Tx A's checks and moves for one request, in the lock order above. */
+  const judgedA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
     const key = { orgId, id };
     const pause = await handoffPauseOf(tx, 'share', { keys, logger: log });
     if (pause.outcome !== 'running') return { outcome: 'waiting', why: `pause_${pause.outcome}` };
