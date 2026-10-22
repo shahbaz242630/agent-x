@@ -39,7 +39,12 @@ import {
   supplierOf,
   versionOf,
 } from '@agentx/core/modules/suppliers';
-import { TRANSACTIONS, transactionOf, type TransactionsTables } from '@agentx/core/modules/transactions';
+import {
+  moveTransaction,
+  TRANSACTIONS,
+  transactionOf,
+  type TransactionsTables,
+} from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -627,9 +632,22 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
   });
 });
 
+/** An answer with nothing more to say than its move. */
+const NO_ANSWER_FACTS = {
+  providerStatus: null,
+  paymentInstructionRef: null,
+  rejectCode: null,
+  providerChangedAt: null,
+};
+
 describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §10)', () => {
+  interface Limits {
+    callTimeoutMs: number;
+    unknownAfterMs: number;
+  }
+
   /** The job with the given time limits, paying through `rail`. */
-  const timed = (w: World, rail: FakeRail, limits: { callTimeoutMs: number; unknownAfterMs: number }) =>
+  const timed = (w: World, rail: FakeRail, limits: Limits) =>
     createHandoff({
       list: () => Promise.resolve([w.org]),
       database: app,
@@ -642,26 +660,38 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
       ...limits,
     });
 
-  it('marks UNKNOWN a transaction left waiting past its wait, never one within it; the late answer kept as facts', async () => {
-    const { w, acting } = await ready();
-    const request = await ask(acting, w, { amount: ALLOWED() });
-    // The partner answers only when the test lets it: as a run that died between Tx A and Tx B would leave it.
-    const { promise: answered, resolve: answer } = Promise.withResolvers<undefined>();
+  /**
+   * The request handed off by a run whose partner answers only when the test
+   * lets it: its transaction left SUBMISSION_PENDING, as a run that died
+   * between Tx A and Tx B would leave it. `answered` lets the answer come.
+   */
+  async function leftWaiting(w: World, requestId: string, limits: Limits) {
+    const { promise: answer, resolve } = Promise.withResolvers<undefined>();
     const slow: FakeRail = {
       ...w.rail,
       submitApprovedIntent: async (intent) => {
-        await answered;
+        await answer;
         return w.rail.submitApprovedIntent(intent);
       },
     };
-    // The call's limit runs on real time, the wait on the test's clock: the answer is held back well within both.
-    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
     const first = timed(w, slow, limits).run();
     await expect
-      .poll(async () => (await paymentOf(w, request.id)).transaction)
-      .toMatchObject({
-        status: 'SUBMISSION_PENDING',
-      });
+      .poll(async () => (await paymentOf(w, requestId)).transaction)
+      .toMatchObject({ status: 'SUBMISSION_PENDING' });
+    return {
+      answered: async () => {
+        resolve(undefined);
+        await first;
+      },
+    };
+  }
+
+  it('marks UNKNOWN a transaction left waiting past its wait, never one within it; the late answer kept as facts', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // The call's limit runs on real time, the wait on the test's clock: the answer is held back well within both.
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
 
     // Within its wait: left be.
     await timed(w, w.rail, limits).run();
@@ -675,8 +705,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     expect(lines('handoff.marked_unknown')).toHaveLength(1);
 
     // The answer comes after all: kept as the transaction's facts, never a move, and not an error.
-    answer(undefined);
-    await first;
+    await answered();
     expect(await paymentOf(w, request.id)).toMatchObject({
       transaction: { status: 'UNKNOWN', providerStatus: 'Pending' },
     });
@@ -689,21 +718,8 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
   it('sweeps once a minute, not every run: few database calls', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
-    const { promise: answered, resolve: answer } = Promise.withResolvers<undefined>();
-    const slow: FakeRail = {
-      ...w.rail,
-      submitApprovedIntent: async (intent) => {
-        await answered;
-        return w.rail.submitApprovedIntent(intent);
-      },
-    };
     const limits = { callTimeoutMs: 20_000, unknownAfterMs: 30_000 };
-    const first = timed(w, slow, limits).run();
-    await expect
-      .poll(async () => (await paymentOf(w, request.id)).transaction)
-      .toMatchObject({
-        status: 'SUBMISSION_PENDING',
-      });
+    const { answered } = await leftWaiting(w, request.id, limits);
     const job = timed(w, w.rail, limits);
     await job.run();
 
@@ -715,8 +731,58 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     clock.advanceBy(30_000);
     await job.run();
     expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
-    answer(undefined);
-    await first;
+    await answered();
+  });
+
+  it('leaves be a transaction its answer moved after the sweep listed it (forced)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+    const waiting = await paymentOf(w, request.id);
+    const key = { orgId: w.org, id: typeof waiting.transaction === 'object' ? waiting.transaction.id : '' };
+    clock.advanceBy(60_001);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The transaction (level 10) held by an answer being recorded: the sweep lists it, then queues on it.
+    const answering = withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      await transactionOf(tx, states, key, 'change');
+      holding(undefined);
+      await gate;
+      await moveTransaction(tx, states, key, 'submitted', NO_ANSWER_FACTS, {
+        actor: { type: 'system', id: 'api' },
+        details: { via: 'test' },
+      });
+    });
+    await held;
+    const sweeping = within(20_000, timed(w, w.rail, limits).run(), 'the sweep');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await answering;
+    await sweeping;
+
+    // SUBMITTED may lose track too: only the sweep's own check leaves the answer be.
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMITTED' } });
+    expect(lines('handoff.marked_unknown')).toEqual([]);
+    expect(lines('handoff.sweep_failed')).toEqual([]);
+    await answered();
+  });
+
+  it('sweeps nothing once stopped, so the process stops promptly', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+    clock.advanceBy(60_001);
+    const stopping = new AbortController();
+    stopping.abort();
+
+    await timed(w, w.rail, limits).run(stopping.signal);
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMISSION_PENDING' } });
+
+    await timed(w, w.rail, limits).run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+    await answered();
   });
 
   it('gives the partner its time limit: no answer by then is UNKNOWN, said in plain words', async () => {
