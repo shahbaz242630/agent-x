@@ -236,7 +236,7 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
         .values({
           seq: 3n,
           id: '0199a0f0-0000-7000-8000-00000000b1f0',
-          recorded_at: new Date(),
+          recorded_at: new Date('2026-10-22T08:00:00Z'),
           actor_type: 'system',
           actor_id: 'operator',
           action: HANDOFF_RESUMED,
@@ -277,6 +277,17 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
     expect(recorded.seq).toBe(1n);
     expect((await pauseNow()).pause).toEqual({ outcome: 'tampered' });
     await expect(change(false, { actor: { type: 'system', id: 'api' } })).rejects.toThrow(PlatformEventRefused);
+  });
+
+  it('a row pointing at an event that was never recorded, paused or not, is tampering', async () => {
+    await tamper('update platform_controls.handoff_pause set event_seq = 7, event_id = $1', [
+      '0199a0f0-0000-7000-8000-00000000b1f7',
+    ]);
+
+    expect(await pauseNow()).toEqual({
+      pause: { outcome: 'tampered' },
+      lines: [expect.objectContaining({ ...ALARM, reason: 'mismatch' })],
+    });
   });
 
   it('a row resumed with no event behind it is tampering', async () => {

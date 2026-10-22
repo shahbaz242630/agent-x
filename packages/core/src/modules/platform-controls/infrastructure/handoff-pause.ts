@@ -134,10 +134,8 @@ async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock, keys: 
             id: newest.id,
             action: newest.action,
             at: newest.recorded_at,
-            believed:
-              newest.actor_type === PAUSE_ACTOR.type &&
-              newest.actor_id === PAUSE_ACTOR.id &&
-              platformEventSealed(keys, newest),
+            // Every platform event's actor is a process (`system`, event.ts): its name is what tells the operator's.
+            believed: newest.actor_id === PAUSE_ACTOR.id && platformEventSealed(keys, newest),
           },
   };
 }
@@ -151,7 +149,8 @@ function agreed({ row, newest }: Read): HandoffPause | undefined {
       ? { outcome: 'paused', since: null, eventId: null }
       : undefined;
   }
-  const same = row.seq === newest.seq && row.id?.toLowerCase() === newest.id.toLowerCase();
+  // An event's ID is its own (the table's unique key): the row names the newest event by it.
+  const same = row.id?.toLowerCase() === newest.id.toLowerCase();
   if (!newest.believed || !same || row.paused !== (newest.action === HANDOFF_PAUSED)) return undefined;
   return { outcome: row.paused ? 'paused' : 'running', since: newest.at, eventId: newest.id };
 }
@@ -193,7 +192,7 @@ export async function changeHandoffPause(
 ): Promise<HandoffPauseChanged> {
   if (reason.trim() === '') throw new PlatformEventRefused(['details.reason must be given']);
   // Any other actor's event would never be believed: the pause would read as tampered for good.
-  if (actor.type !== PAUSE_ACTOR.type || actor.id !== PAUSE_ACTOR.id) {
+  if (actor.id !== PAUSE_ACTOR.id) {
     throw new PlatformEventRefused(['actor must be the operator']);
   }
   const now = await handoffPauseOf(tx, 'change', { keys, logger });
