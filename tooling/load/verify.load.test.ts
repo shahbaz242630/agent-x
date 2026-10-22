@@ -62,6 +62,19 @@ describe('after the load (D2, PL-38)', () => {
     }
   });
 
+  it('handed nothing off: the stack’s hand-off is paused from birth, as staging’s is, so the check below holds', async () => {
+    for (const { orgId } of agents) {
+      const moved = await withTenant(database, orgId, (tx) =>
+        tx
+          .selectFrom('spend_requests.requests')
+          .select('id')
+          .where('status', 'in', ['INSTRUCTION_READY', 'HANDED_OFF'])
+          .execute(),
+      );
+      expect(moved).toEqual([]);
+    }
+  });
+
   it('holds exactly one reservation and one open claim for each request holding money, and none for the rest', async () => {
     for (const { orgId } of agents) {
       const found = await withTenant(database, orgId, async (tx) => {

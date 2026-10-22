@@ -12,6 +12,8 @@ export interface PhaseResult {
   readonly serverErrors: number;
   readonly rateLimited: number;
   readonly checksFailed: number;
+  /** Requests k6 never sent, having no free VU: the load fell short of the plan. */
+  readonly dropped: number;
   readonly asksMs: { readonly p50: number; readonly p95: number; readonly p99: number; readonly max: number };
   /** Each threshold, as `metric rule`, and whether it held. */
   readonly thresholds: Readonly<Record<string, boolean>>;
@@ -48,20 +50,21 @@ export function renderReport(run: RunResult): string {
     run.failures.length === 0 ? '**Passed.**' : `**Failed: ${String(run.failures.length)} check(s).**`,
     '',
     `Commit \`${run.commit}\`, run at ${run.at}, on a laptop: the compose stack's database and API only, the API`,
-    "sized as staging's (half a CPU, 1 GiB, ten connections), k6 straight to it. Laptop numbers compare versions;",
+    "sized as staging's (half a CPU, 1 GiB, ten connections), k6 straight to it. As on staging today, the hand-off is",
+    'paused: its timer re-checks the approved requests each run, and that work is in these numbers. Laptop numbers compare versions;',
     'they do not close PL-38, which closes on the same run on Azure, production-sized, before live.',
     '',
     '## Requests (k6)',
     '',
-    '| Phase | Requests | New | p50 ms | p95 ms | p99 ms | Max ms | 5xx | 429 | Checks failed |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Phase | Requests | New | Not sent | p50 ms | p95 ms | p99 ms | Max ms | 5xx | 429 | Checks failed |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...run.phases.map(
       (p) =>
-        `| ${String(p.phase)} | ${String(p.requests)} | ${String(p.created)} | ${ms(p.asksMs.p50)} | ${ms(p.asksMs.p95)} | ` +
+        `| ${String(p.phase)} | ${String(p.requests)} | ${String(p.created)} | ${String(p.dropped)} | ${ms(p.asksMs.p50)} | ${ms(p.asksMs.p95)} | ` +
         `${ms(p.asksMs.p99)} | ${ms(p.asksMs.max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} |`,
     ),
     '',
-    'Target: a request p95 under 500 ms.',
+    'Target: a request p95 under 500 ms, with every planned request sent.',
     '',
     '## Decisions (the API’s log)',
     '',

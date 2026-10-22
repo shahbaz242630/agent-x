@@ -50,6 +50,8 @@ export const options = {
   thresholds: {
     // The Pilot's request target (PRD §8).
     'http_req_duration{kind:ask}': ['p(95)<500'],
+    // An arrival k6 had no free VU for is a request never sent: the run then sent less than it says.
+    dropped_iterations: ['count==0'],
     server_errors: ['count==0'],
     rate_limited: ['count==0'],
     checks: ['rate==1'],
@@ -132,6 +134,7 @@ export function handleSummary(data) {
     serverErrors: count('server_errors'),
     rateLimited: count('rate_limited'),
     checksFailed: metrics.checks.values.fails,
+    dropped: count('dropped_iterations'),
     asksMs: { p50: asks.med, p95: asks['p(95)'], p99: asks['p(99)'], max: asks.max },
     thresholds,
   };
