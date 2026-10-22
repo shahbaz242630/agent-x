@@ -973,7 +973,7 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
     { fils: 4n, status: 'PROCESSING' },
   ] as const;
   const REQUEST = fc.record({
-    outcome: fc.integer({ min: 0, max: OUTCOMES.length - 1 }),
+    outcome: fc.constantFrom(...OUTCOMES),
     // The second supplier has no payee: its requests wait.
     supplier: fc.integer({ min: 0, max: 1 }),
     // A run that reaches it dies before its answer is recorded.
@@ -982,20 +982,31 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
   /** AED 100, or 150 for one whose run dies, and the fils: six stay under the approval threshold together (the split check). */
   const LIVES = 10_000n;
   const DIES = 15_000n;
-  // The call's limit is never reached here (B5's own tests time it): an answer held back stands for a run that died.
-  const LIMITS = { callTimeoutMs: 60_000, unknownAfterMs: 120_000 };
+  // The call's limit, on real time, is never reached here (B5's own tests time it; checked below): an answer held
+  // back stands for a run that died. The wait is on the test's clock, which each run moves past it.
+  const LIMITS = { callTimeoutMs: 180_000, unknownAfterMs: 180_001 };
+  /** Two runs at once that die at the first two, one a refusal that comes late; the rest go in the second round. */
+  const dying = (fils: bigint) => ({
+    outcome: OUTCOMES.find((outcome) => outcome.fils === fils) ?? OUTCOMES[0],
+    supplier: 0,
+    dies: true,
+  });
+  const ROUND_TWO: [ReturnType<typeof dying>[], number] = [
+    [dying(1n), dying(4n), { ...dying(2n), dies: false }, dying(0n)],
+    2,
+  ];
 
   it('sends each request once, one instruction and one transaction; one left waiting UNKNOWN, never sent again', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(REQUEST, { minLength: 2, maxLength: 6 }),
-        fc.integer({ min: 2, max: 4 }),
+        fc.integer({ min: 1, max: 4 }),
         async (batch, racing) => {
           capture = new LogCapture();
           const { w, acting } = await ready();
-          const asked = [];
+          const asked: { request: { id: string }; outcome: (typeof OUTCOMES)[number]; supplier: number }[] = [];
           for (const r of batch) {
-            const outcome = OUTCOMES[r.outcome] ?? OUTCOMES[0];
+            const { outcome } = r;
             const amount = AED((r.dies ? DIES : LIVES) + outcome.fils);
             const request = await ask(acting, w, { amount, supplierId: w.suppliers[r.supplier] ?? '' });
             expect(request.status).toBe('APPROVED');
@@ -1052,7 +1063,7 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
             expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
             expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
             const instructionId = typeof payment.instruction === 'object' ? payment.instruction.id : '';
-            // Left waiting: UNKNOWN, its late answer kept as facts; a late refusal is still proof (B5).
+            // Left waiting: UNKNOWN, whatever its late answer; a late refusal is still proof (B5).
             const left = outcome.status === 'FAILED' ? 'FAILED' : 'UNKNOWN';
             const status = held.has(instructionId) ? left : outcome.status;
             expect(payment).toMatchObject({ transactions: 1, transaction: { status } });
@@ -1066,10 +1077,11 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
           expect(lines('handoff.failed')).toEqual([]);
           expect(lines('handoff.answer_unrecorded')).toEqual([]);
           expect(lines('handoff.sweep_failed')).toEqual([]);
+          expect(lines('handoff.partner_timeout')).toEqual([]);
         },
       ),
       // Shrinking replays whole worlds, and a race may not replay at all: the failing batch is printed as it was.
-      { numRuns: 8, endOnFailure: true },
+      { numRuns: 8, endOnFailure: true, examples: [ROUND_TWO] },
     );
   }, 300_000);
 });
