@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The platform-controls schema's tables (db/migrations/0003_platform_controls.sql, 0056_handoff_pause.sql), as Kysely sees them. */
+/** The platform-controls schema's tables (db/migrations/0003_platform_controls.sql, 0057_handoff_pause.sql), as Kysely sees them. */
 export interface PlatformControlsTables {
   'platform_controls.audit_events': EventsTable;
   'platform_controls.audit_head': HeadTable;

@@ -95,7 +95,7 @@ const POLICIES_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's policies, and tell its admins at once: a policy sets how much, and whom, its AI agents may pay.";
 const FREEZE_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's state, and tell its admins at once: a freeze is the organisation's emergency brake on its AI agents' spending.";
-/** What an admin can check of a pause or resume of every hand-off to the bank (0056): its entry, with its reason. */
+/** What an admin can check of a pause or resume of every hand-off to the bank (0057): its entry, with its reason. */
 const HANDOFF_CHECK =
   "Sign in to Agent X and open the audit log to see this entry and its reason. If you have questions about it, tell the organisation's other admins and contact us.";
 /** What a person's second factor is, as the emails name it. */
@@ -347,7 +347,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       "Sign in to Agent X and open the audit log to see this entry: its case reference, the dates it covers and how many requests it held. If you didn't expect it, tell the organisation's other admins.",
   },
-  // About an audit log entry (0056, Phase 4 B1): Agent X's own team paused or resumed every hand-off to the bank, for
+  // About an audit log entry (0057, Phase 4 B1): Agent X's own team paused or resumed every hand-off to the bank, for
   // every organisation at once, to every admin (partner decision 4). Its reason is on the entry, never in the email.
   handoff_paused: {
     subject: () => 'Agent X: payments to the bank are paused',

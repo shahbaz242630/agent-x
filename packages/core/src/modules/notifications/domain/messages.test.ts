@@ -309,7 +309,7 @@ describe('a notice’s email (B5-1b)', () => {
     });
   });
 
-  describe('Phase 4 B1 our team paused or resumed every hand-off to the bank (0056; partner decision 4; SEC-OPS-03)', () => {
+  describe('Phase 4 B1 our team paused or resumed every hand-off to the bank (0057; partner decision 4; SEC-OPS-03)', () => {
     const entry = '0199a0f0-0000-7000-8000-0000000004b1';
 
     it.each([

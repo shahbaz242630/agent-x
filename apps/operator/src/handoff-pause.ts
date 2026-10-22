@@ -14,7 +14,7 @@
 // 2. Then every organisation the directory lists is told, each in a
 //    transaction of its own, withSignedStates' for it: `handoff.paused` or
 //    `handoff.resumed` on its own chain (about the platform event, naming it
-//    and the reason), and a notice to every admin about that entry (0056).
+//    and the reason), and a notice to every admin about that entry (0057).
 //    One told already by an earlier run (its chain holds an event about the
 //    platform event) is passed over; one that fails is logged and the rest
 //    are still told, and the run then exits 1, to be run again, telling only

@@ -86,7 +86,7 @@ const SPEND_REQUEST_NOTICE_KINDS = ['spend_request_waiting'] as const;
  * partner decision 24); an admin's background download of the activity log
  * ready, or given up on, told to them (0053, decision 31); Agent X's own team
  * paused or resumed every hand-off to the bank, for every organisation, told
- * to every admin (0056, Phase 4 B1, partner decision 4).
+ * to every admin (0057, Phase 4 B1, partner decision 4).
  */
 const AUDIT_LOG_NOTICE_KINDS = [
   'audit_log_exported',

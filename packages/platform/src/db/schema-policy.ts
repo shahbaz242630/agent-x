@@ -360,7 +360,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     'platform_controls.handoff_pause': {
       reason:
-        "The platform hand-off pause's one row (0056, SEC-OPS-03): one switch for every organisation's hand-offs to the bank, and the platform event that set it",
+        "The platform hand-off pause's one row (0057, SEC-OPS-03): one switch for every organisation's hand-offs to the bank, and the platform event that set it",
       columns: ['only_row', 'paused', 'event_seq', 'event_id'],
     },
   },
@@ -372,7 +372,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'platform_controls.audit_head':
       "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
     'platform_controls.handoff_pause':
-      'The platform hand-off pause (0056, SEC-OPS-03): the app locks its one row first (ADR-006 §6 level 1) and moves it with the platform event that pauses or resumes, never adding or deleting a row',
+      'The platform hand-off pause (0057, SEC-OPS-03): the app locks its one row first (ADR-006 §6 level 1) and moves it with the platform event that pauses or resumes, never adding or deleting a row',
   },
   fillInTables: {
     'activity_exports.exports': {

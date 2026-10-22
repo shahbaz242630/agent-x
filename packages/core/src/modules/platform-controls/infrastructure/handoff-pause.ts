@@ -3,7 +3,7 @@
 // hand-off of an approved payment to the bank, moved only by the operator's
 // command, with a reason, each move a signed event on the platform chain.
 //
-// Its row (0056) is believed only as its newest event says: it must point at
+// Its row (0057) is believed only as its newest event says: it must point at
 // the newest `platform.handoff_paused` or `platform.handoff_resumed` event,
 // by seq and ID, and say what that event did; or, with no such event ever,
 // be the row as born, paused and pointing at nothing (ADR-014 §4: the first
