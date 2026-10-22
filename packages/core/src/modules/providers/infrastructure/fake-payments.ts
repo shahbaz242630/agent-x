@@ -65,7 +65,7 @@ const SCRIPTS: Readonly<Record<string, Scripted>> = { '1': 'declined', '2': 'los
 export const scriptOf = (amountMinor: bigint): Scripted => SCRIPTS[String(amountMinor % 100n)] ?? 'succeeds';
 
 /** A submission as the fake did it: the rail's answer, and whether that answer is lost on the way back. */
-export interface FakeSubmission {
+interface FakeSubmission {
   readonly result: SubmissionResult;
   readonly lost: boolean;
 }
