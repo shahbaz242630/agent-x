@@ -356,7 +356,7 @@ export const PLAIN_WORDS = {
   'handoff.sweep_failed': {
     happened: "Checking for payments left waiting for the bank's answer failed.",
     broke: 'A payment with no answer may not be marked unknown yet; its money stays held and nothing is sent again.',
-    next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
+    next: 'It is tried again in about a minute. If it keeps failing, a developer should read the error.',
   },
   'handoff.run_failed': {
     happened: 'The list of organisations could not be read, so no approved payments were handed to the bank.',

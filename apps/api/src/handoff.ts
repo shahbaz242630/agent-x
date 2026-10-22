@@ -50,8 +50,10 @@
 // under way, credited, failed with proof, or unknown); refused with proof that
 // nothing was made (FAILED); no answer that can be known (UNKNOWN: never
 // resent, ADR-007 §10); the call is given PARTNER_CALL_TIMEOUT_MS, and no
-// answer by then is one that can't be known. An answer that comes once the
-// transaction has moved on is kept as its facts (B3), never a move. A run
+// answer by then is one that can't be known. An accepted or unknowable
+// answer that comes once the transaction has moved on is kept as its facts
+// (B3), never a move; a refusal still settles it FAILED, its reject code the
+// proof nothing was made (ADR-007 §9, §11). A run
 // that dies between the two leaves the transaction SUBMISSION_PENDING: a run
 // a minute marks one left so past UNKNOWN_AFTER_MS UNKNOWN (Phase 4 B5), for
 // reconciliation to settle with the partner, never resent; the wait is
@@ -392,7 +394,8 @@ export function createHandoff({
    * Tx B: the partner's answer recorded on the transaction (ADR-007 §9):
    * `recorded`, or `late` when it had moved on meanwhile (marked UNKNOWN by a
    * run's sweep): the answer then kept as its facts, never a move (B3,
-   * ADR-007 §9). Throws for a transaction that can't be believed.
+   * ADR-007 §9). A refusal moves even an UNKNOWN one to FAILED: its reject
+   * code is the proof (§11). Throws for a transaction that can't be believed.
    */
   const txB = (orgId: string, transactionId: string, answer: Answer, log: Logger): Promise<'recorded' | 'late'> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
@@ -521,7 +524,9 @@ export function createHandoff({
             actor: ACTOR,
             details: { via: 'no_answer_in_time' },
           });
-          return moved.outcome === 'moved';
+          // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
+          if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
+          return true;
         });
         if (marked) log.warn('handoff.marked_unknown', { transactionId: id });
       } catch (error) {

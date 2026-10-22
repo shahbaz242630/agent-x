@@ -715,6 +715,25 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     expect(lines('handoff.answer_unrecorded')).toEqual([]);
   });
 
+  it('settles FAILED a refusal that comes once the transaction was marked UNKNOWN: its code the proof (ADR-007 §11)', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: the fake declines it.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const { answered } = await leftWaiting(w, request.id, limits);
+    clock.advanceBy(60_001);
+    await timed(w, w.rail, limits).run();
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+
+    await answered();
+    expect(await paymentOf(w, request.id)).toMatchObject({
+      transaction: { status: 'FAILED', rejectCode: 'AANI.AM04' },
+    });
+    expect(lines('handoff.handed_off')).toEqual([
+      expect.objectContaining({ requestId: request.id, answer: 'refused', recorded: 'recorded' }),
+    ]);
+  });
+
   it('sweeps once a minute, not every run: few database calls', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
