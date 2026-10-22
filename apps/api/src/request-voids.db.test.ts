@@ -20,8 +20,6 @@
 // judged again each run.
 import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
-import { MANDATES } from '@agentx/core/modules/mandates';
-import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
@@ -30,7 +28,6 @@ import {
   checkHoldings,
   denialOf,
   type Pausable,
-  type PendingChoice,
   SPEND_REQUESTS,
   voidRequest,
 } from '@agentx/core/modules/spend-requests';
@@ -54,7 +51,7 @@ import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts'
 import { createRequestVoids, type RequestVoids } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
-import { choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
+import { chosenAgain, SUSPENDS } from './suspensions.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -78,7 +75,7 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { quiet, ready, ask, statusOf, holdingsOf, spentOf, mandateIdOf, signed, STOPS } = shared;
+const { quiet, ready, ask, statusOf, holdingsOf, spentOf, mandateIdOf, signed, idOf, moved, STOPS } = shared;
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
@@ -95,36 +92,6 @@ const CAUSES: Readonly<Record<Voiding, string>> = {
   'the source suspended by the organisation': 'SOURCE_NOT_USABLE',
   'the agent suspended': 'AGENT_SUSPENDED',
 };
-
-/** The world's own one: its agent, the mandate named, its source, its first supplier. */
-const idOf = (w: World, mandateId: string, which: Pausable): string =>
-  ({ organization: w.org, agent: w.agent, mandate: mandateId, source: w.source, supplier: w.suppliers[0] ?? '' })[
-    which
-  ];
-
-/** Suspends it with the choice, as its use case records one (suspensions.ts), or lifts it; past the use case. */
-const moved = (w: World, mandateId: string, which: Pausable, choice: PendingChoice | 'resume') =>
-  signed(w, async (tx, states): Promise<unknown> => {
-    const key = { orgId: w.org, id: idOf(w, mandateId, which) };
-    const suspend = choice !== 'resume';
-    const change = {
-      actor: OPERATOR,
-      action: suspend ? SUSPENDS[which].action : `${SUSPENDS[which].type}.resumed`,
-      details: suspend ? choiceDetails(choice) : {},
-    };
-    switch (which) {
-      case 'organization':
-        return states.changeStatus(tx, ORGANIZATIONS, key, suspend ? 'freeze' : 'unfreeze', change);
-      case 'agent':
-        return states.changeStatus(tx, AGENTS, key, suspend ? 'suspend' : 'reactivate', change);
-      case 'mandate':
-        return states.changeStatus(tx, MANDATES, key, suspend ? 'suspend' : 'resume', change);
-      case 'source':
-        return states.changeStatus(tx, SOURCES, key, suspend ? 'suspend' : 'reactivate', change);
-      case 'supplier':
-        return states.changeStatus(tx, SUPPLIERS, key, suspend ? 'suspend' : 'reactivate_verified', change);
-    }
-  });
 
 const PAUSABLE: readonly Pausable[] = ['organization', 'agent', 'mandate', 'source', 'supplier'];
 

@@ -17,19 +17,17 @@
 // error (UNKNOWN, never resent), an answer that can't be recorded (its
 // transaction changed past the app: never logged as handed off), a request
 // that can't be believed, a list that can't be read.
-import { AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
+import { AGENT_KEYS } from '@agentx/core/modules/agents';
 import { holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
 import { instructionOfRequest, type InstructionsTables } from '@agentx/core/modules/instructions';
-import { MANDATES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
   changeHandoffPause,
   createPlatformChain,
   type PlatformControlsTables,
 } from '@agentx/core/modules/platform-controls';
 import { type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
-import { cancelRequest, type PendingChoice, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { cancelRequest, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import {
   addVersion,
   confirmPayeeChange,
@@ -62,7 +60,6 @@ import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts'
 import { createRequestVoids } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
-import { choiceDetails, SUSPENDS } from './suspensions.ts';
 
 type Tables = SpendWorldTables & PlatformControlsTables & InstructionsTables & TransactionsTables;
 
@@ -86,7 +83,7 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { quiet, ask, statusOf, holdingsOf, signed, STOPS, mandateIdOf } = shared;
+const { quiet, ask, statusOf, holdingsOf, signed, moved, STOPS, mandateIdOf } = shared;
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
@@ -97,17 +94,16 @@ const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resol
 /** AED 500 and the fils that choose the fake's answer (decision 5): under the approval threshold, so APPROVED. */
 const ALLOWED = (fils = 0n) => AED(50_000n + fils);
 
-/** The platform's hand-off pause moved, as the operator's command moves it (B1). */
-const pauseMoved = (paused: boolean) =>
-  app
-    .transaction()
-    .execute((tx) =>
-      changeHandoffPause(
-        tx,
-        { chain, keys, logger: testLogger() },
-        { paused, reason: 'TEST-B4', actor: { type: 'system', id: 'operator' }, release: 'r-test', run: null },
-      ),
-    );
+/** The platform's hand-off pause moved in the caller's transaction, as the operator's command moves it (B1). */
+const pauseIn = (tx: Parameters<typeof changeHandoffPause>[0], paused: boolean) =>
+  changeHandoffPause(
+    tx,
+    { chain, keys, logger: testLogger() },
+    { paused, reason: 'TEST-B4', actor: { type: 'system', id: 'operator' }, release: 'r-test', run: null },
+  );
+
+/** The platform's hand-off pause moved, in a transaction of its own. */
+const pauseMoved = (paused: boolean) => app.transaction().execute((tx) => pauseIn(tx, paused));
 
 /** The partner's reference for the world's first supplier's payee. */
 const payeeRefOf = (w: World) => `fake-beneficiary-${w.org.slice(-12)}`;
@@ -232,23 +228,6 @@ function counted(w: World): { rail: FakeRail; submitted: () => number } {
   };
 }
 
-/** Suspends it with the choice (as its use case records one), or lifts it; past the use case. */
-const stopped = (w: World, which: 'organization' | 'agent' | 'mandate', id: string, choice: PendingChoice | 'resume') =>
-  signed(w, async (tx, states): Promise<unknown> => {
-    const key = { orgId: w.org, id };
-    const suspend = choice !== 'resume';
-    const change = {
-      actor: OPERATOR,
-      action: suspend ? SUSPENDS[which].action : `${SUSPENDS[which].type}.resumed`,
-      details: suspend ? choiceDetails(choice) : {},
-    };
-    if (which === 'organization') {
-      return states.changeStatus(tx, ORGANIZATIONS, key, suspend ? 'freeze' : 'unfreeze', change);
-    }
-    if (which === 'agent') return states.changeStatus(tx, AGENTS, key, suspend ? 'suspend' : 'reactivate', change);
-    return states.changeStatus(tx, MANDATES, key, suspend ? 'suspend' : 'resume', change);
-  });
-
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
@@ -336,16 +315,55 @@ describe('an approved request handed to the partner once (B4)', () => {
     expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
   });
 
-  it('makes one instruction and calls the partner once, though two runs go at once (SEC-DP-01)', async () => {
+  it('makes one instruction and calls the partner once, though two runs reach the request at once (forced, SEC-DP-01)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     const { rail, submitted } = counted(w);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The request (level 8) held, so both runs' Tx A queue on it, then go as one lets go.
+    const holder = signed(w, async (tx) => {
+      await tx
+        .selectFrom('spend_requests.requests')
+        .select('id')
+        .where('id', '=', request.id)
+        .forNoKeyUpdate()
+        .execute();
+      holding(undefined);
+      await gate;
+    });
+    await held;
+    const runs = within(20_000, Promise.all([handoffOf(w, rail).run(), handoffOf(w, rail).run()]), 'the runs');
+    await waitUntilQueued(database.as('admin'), 2);
+    open(undefined);
+    await holder;
+    await runs;
 
-    await Promise.all([handoffOf(w, rail).run(), handoffOf(w, rail).run(), handoffOf(w, rail).run()]);
-
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
     expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1 });
     expect(submitted()).toBe(1);
     expect(lines('handoff.failed')).toEqual([]);
+  });
+
+  it('pages past requests left waiting, so a younger one still goes in the same run', async () => {
+    const { w, acting } = await ready();
+    // Older, to the supplier with no payee yet: it waits.
+    const stuck = await ask(acting, w, { amount: ALLOWED(), supplierId: w.suppliers[1] ?? '' });
+    const younger = await ask(acting, w, { amount: ALLOWED() });
+
+    await createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      rail: w.rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      page: 1,
+    }).run();
+
+    expect(await statusOf(w, stuck.id)).toBe('APPROVED');
+    expect(await statusOf(w, younger.id)).toBe('HANDED_OFF');
   });
 
   it('leaves a request waiting for approval, and every one not approved, alone', async () => {
@@ -398,11 +416,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
     // The operator's pause holds the row (level 1) until it commits.
     const pausing = app.transaction().execute(async (tx) => {
-      await changeHandoffPause(
-        tx,
-        { chain, keys, logger: testLogger() },
-        { paused: true, reason: 'TEST-B4', actor: { type: 'system', id: 'operator' }, release: 'r-test', run: null },
-      );
+      await pauseIn(tx, true);
       holding(undefined);
       await gate;
     });
@@ -439,17 +453,18 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     ['the organisation frozen', 'organization', 'organization'],
     ['the agent suspended', 'agent', 'agent'],
     ['the mandate suspended', 'mandate', 'mandate'],
+    ['the supplier suspended', 'supplier', 'supplier'],
   ] as const)('waits while %s chosen to pause, and goes once lifted', async (_name, which, why) => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
-    const id = { organization: w.org, agent: w.agent, mandate: await mandateIdOf(w) }[which];
-    await stopped(w, which, id, 'pause');
+    const mandateId = await mandateIdOf(w);
+    await moved(w, mandateId, which, 'pause');
 
     await handoffOf(w).run();
     expect(await statusOf(w, request.id)).toBe('APPROVED');
     expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: request.id, why })]);
 
-    await stopped(w, which, id, 'resume');
+    await moved(w, mandateId, which, 'resume');
     await handoffOf(w).run();
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
   });
@@ -563,7 +578,7 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await handoffOf(w).run();
-    await stopped(w, 'mandate', await mandateIdOf(w), 'cancel');
+    await moved(w, await mandateIdOf(w), 'mandate', 'cancel');
 
     await createRequestVoids({
       list: () => Promise.resolve([w.org]),

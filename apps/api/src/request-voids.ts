@@ -269,11 +269,30 @@ async function lapsedByTheirRows(
  * never deleted (0039's grants); pending, it was decided under a mandate
  * (0039's check on an allowed or waiting decision's versions).
  */
-async function namedBy(tx: VoidTx, orgId: string, requestId: string) {
+/** What a pending request's row names, read before any lock: each then read through its signed state. */
+interface Named {
+  readonly agentId: string;
+  readonly agentKeyId: string;
+  readonly mandateId: string;
+  readonly mandateVersionId: string | null;
+  readonly fundingSourceId: string;
+  readonly supplierId: string;
+  readonly supplierVersionId: string | null;
+}
+
+async function namedBy(tx: VoidTx, orgId: string, requestId: string): Promise<Named> {
   const row = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- what it names alone, each read through its signed state, and checked against the request's own by voidRequest
     .selectFrom('spend_requests.requests')
-    .select(['agent_id', 'agent_key_id', 'mandate_id', 'mandate_version_id', 'funding_source_id', 'supplier_id'])
+    .select([
+      'agent_id',
+      'agent_key_id',
+      'mandate_id',
+      'mandate_version_id',
+      'funding_source_id',
+      'supplier_id',
+      'supplier_version_id',
+    ])
     .where('org_id', '=', orgId)
     .where('id', '=', requestId)
     .where('mandate_id', 'is not', null)
@@ -286,7 +305,19 @@ async function namedBy(tx: VoidTx, orgId: string, requestId: string) {
     mandateVersionId: row.mandate_version_id,
     fundingSourceId: row.funding_source_id,
     supplierId: row.supplier_id,
+    supplierVersionId: row.supplier_version_id,
   };
+}
+
+/** A pending request's authority as authorityOf reads it: what the voids job judges, and the hand-off re-checks. */
+export interface AuthorityRead {
+  readonly named: Named;
+  readonly authority: AuthorityNow;
+  /** The source and supplier as verified here: what a hand-off takes its consent and payee from. */
+  readonly source: SourceRecord;
+  readonly supplier: SupplierRecord;
+  /** The key its row names, read at its level (3a): the hand-off holds it to the request's signed state. */
+  readonly agentKey: AgentKeyCheck;
 }
 
 /**
@@ -303,15 +334,7 @@ export async function authorityOf(
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
   now: Date,
-): Promise<{
-  readonly named: Awaited<ReturnType<typeof namedBy>>;
-  readonly authority: AuthorityNow;
-  /** The source and supplier as verified here: what a hand-off takes its consent and payee from. */
-  readonly source: SourceRecord;
-  readonly supplier: SupplierRecord;
-  /** The key its row names, read at its level (3a): the hand-off holds it to the request's signed state. */
-  readonly agentKey: AgentKeyCheck;
-}> {
+): Promise<AuthorityRead> {
   const { orgId } = key;
   const named = await namedBy(tx, orgId, key.id);
   const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');

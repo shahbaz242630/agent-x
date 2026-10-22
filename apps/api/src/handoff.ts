@@ -8,8 +8,9 @@
 // The queue is the request's own status (decision 2: no "send" step): an
 // APPROVED request is waiting to be handed off, committed with its approval
 // or decision, so nothing is lost between the two (ADR-007 §6's outbox).
-// Each run takes each organisation's approved requests, oldest first, each in
-// a transaction of its own:
+// Each run takes each organisation's approved requests, oldest first, a page
+// at a time, each page after the last, so a page of requests left waiting
+// never keeps a younger one from its turn; each in a transaction of its own:
 //
 // Tx A, in ADR-006 §6's lock order:
 // 1. the platform hand-off pause, FOR SHARE (level 1): paused, or a row that
@@ -26,16 +27,22 @@
 //    and its agent key (3a), named by its row and held to its signed state at
 //    4: one ended at once since its approval (decision 22) denies it
 //    (`AGENT_KEY_ENDED`); the payee from the supplier's verified version in
-//    force (6), never the request's: one without a payee leaves it waiting;
+//    force (6), never the request's: one without a payee leaves it waiting,
+//    and one other than the version it was approved under denies it
+//    (`SUPPLIER_CHANGED`: never paid to a payee no one approved);
 // 4. the request itself, for change (8): APPROVED (or INSTRUCTION_READY), moved
 //    to INSTRUCTION_READY then HANDED_OFF; any other status (cancelled, denied,
 //    handed off by another run) leaves it be: a duplicate run hands off nothing;
-// 5. its one instruction and transaction (10): the payee's reference as read, the consent
-//    from the verified source, the rail's payment reference from the order
-//    reference (`bankReferenceOf`), the partner's identity copied for evidence;
-//    the table's key refuses a second one for the request (SEC-DP-01);
-// 6. the organisation's integrity hold, at the head (12), last: held leaves it
-//    waiting (ADR-012 §2: a hold stops hand-offs as a freeze does).
+// 5. the organisation's integrity hold, at the head (12): held leaves it
+//    waiting (ADR-012 §2: a hold stops hand-offs as a freeze does);
+// 6. its one instruction and transaction, new rows at level 10 after the
+//    head: the one step past the order, which can't wait on anyone, as no one
+//    else holds a row that isn't there yet and their parents are locked above
+//    (ADR-006's rule is about rows two transactions both reach); the payee's
+//    reference as read, the consent from the verified source, the rail's
+//    payment reference from the order reference (`bankReferenceOf`), the
+//    partner's identity copied for evidence; the table's key refuses a second
+//    one for the request (SEC-DP-01).
 //
 // The partner is called only after Tx A committed, by the run that knows it
 // did (ADR-007 §8), our instruction ID its idempotency key. Tx B records what
@@ -87,13 +94,20 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { authorityOf, type VoidTables } from './request-voids.ts';
+import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
 export const HANDOFF_EVERY_MS = 10_000;
 
-/** How many of an organisation's approved requests one run takes: the rest on the next run. */
-const MOST_HANDED_A_RUN = 50;
+/** How many of an organisation's approved requests are read at once: the run then takes the next page after them. */
+const HANDOFF_PAGE = 50;
+
+/**
+ * The statuses a request is handed off from. This job never commits one
+ * INSTRUCTION_READY (both moves are in one Tx A); it takes one left there all
+ * the same, so a request moved there by anything else is never stranded.
+ */
+const HANDED_FROM = ['APPROVED', 'INSTRUCTION_READY'] as const;
 
 /** The route the Pilot takes (BR-12: one partner rail, a push payment), and why, as the instruction keeps it. */
 const ROUTE = { route: 'push', reason: 'mandate_source_push_rail' } as const;
@@ -116,10 +130,7 @@ type TxA =
  * stop chosen to pause (the voids job's own read leaves it standing), or a
  * carry that hasn't reached it yet (decision 3); each re-checked next run.
  */
-function waitingFor(
-  { named, authority, source, supplier }: Omit<Awaited<ReturnType<typeof authorityOf>>, 'agentKey'>,
-  now: Date,
-): string {
+function waitingFor({ named, authority, source, supplier }: Omit<AuthorityRead, 'agentKey'>, now: Date): string {
   return [
     authority.organizationStatus !== 'ACTIVE' && 'organization',
     authority.agentStatus !== 'ACTIVE' && 'agent',
@@ -149,7 +160,7 @@ const AFTER_SUBMITTED: Readonly<Record<ReturnType<typeof paymentStateOf>, Transa
 };
 
 export interface Handoff {
-  /** Hands off each organisation's approved requests that may go, up to MOST_HANDED_A_RUN each, until the signal is aborted. Never throws. */
+  /** Hands off each organisation's approved requests that may go, a page at a time, until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
@@ -161,6 +172,7 @@ export function createHandoff({
   ids,
   clock,
   logger,
+  page = HANDOFF_PAGE,
 }: {
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -170,11 +182,13 @@ export function createHandoff({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
+  /** How many of an organisation's requests are read at once (HANDOFF_PAGE unless a test names fewer). */
+  readonly page?: number;
 }): Handoff {
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
-  /** The organisation's approved requests, oldest first, by their rows, unverified: each read through its signed state in Tx A. */
-  const approvedOf = (orgId: string, log: Logger): Promise<string[]> =>
+  /** A page of the organisation's approved requests after `after`, oldest first, by their rows, unverified: each read through its signed state in Tx A. */
+  const approvedOf = (orgId: string, after: string | undefined, log: Logger): Promise<string[]> =>
     withSignedStates(database, orgId, services(log), async (tx) =>
       (
         await tx
@@ -182,9 +196,10 @@ export function createHandoff({
           .selectFrom(SPEND_REQUESTS.table)
           .select('id')
           .where('org_id', '=', orgId)
-          .where('status', 'in', ['APPROVED', 'INSTRUCTION_READY'])
+          .where('status', 'in', HANDED_FROM)
+          .where((where) => (after === undefined ? where.lit(true) : where('id', '>', after)))
           .orderBy('id')
-          .limit(MOST_HANDED_A_RUN)
+          .limit(page)
           .execute()
       ).map(({ id }) => id),
     );
@@ -200,6 +215,10 @@ export function createHandoff({
     // The payee as the supplier's verified version in force names it: one carried through a details change chosen to
     // pause (E3) has the same payee, so this is never the request's own, and never an agent's (PRD §6).
     const version = await versionOf(tx, states, { orgId, id: supplier.currentVersionId }, supplier.id);
+    const approvedUnder =
+      named.supplierVersionId === null
+        ? ({ outcome: 'missing' } as const)
+        : await versionOf(tx, states, { orgId, id: named.supplierVersionId }, supplier.id);
     // A cause the voids job would void it for: denied now, its holdings freed, as that job would (decision 3).
     const voided = await voidRequest(tx, states, keys, key, { named, authority }, now);
     if (voided.outcome === 'voided') return { outcome: 'denied', causes: voided.causes.join(',') };
@@ -209,10 +228,10 @@ export function createHandoff({
     const read = await requestOf(tx, states, key, 'change');
     if (read.outcome !== 'found') throw new Error(`A request judged standing can't be read: ${id}`);
     const { request } = read;
-    if (request.status !== 'APPROVED' && request.status !== 'INSTRUCTION_READY') return { outcome: 'not_approved' };
-    // The key read at its level is the one its signed state names, never only its row's.
-    if (decidedAgainst(read.state).agentKeyId !== named.agentKeyId) {
-      throw new Error(`A request's row names a key its signed state doesn't: ${id}`);
+    // The key and version read at their levels are those its signed state names, never only its row's.
+    const against = decidedAgainst(read.state);
+    if (against.agentKeyId !== named.agentKeyId || against.supplierVersionId !== named.supplierVersionId) {
+      throw new Error(`A request's row names a key or supplier version its signed state doesn't: ${id}`);
     }
     // A key ended at once since its approval (decision 22): never handed off on authority since withdrawn.
     if (agentKey.key.status === 'REVOKED') {
@@ -221,6 +240,11 @@ export function createHandoff({
     }
     if (version.outcome !== 'found' || version.version.beneficiaryRef === null) {
       return { outcome: 'waiting', why: 'payee' };
+    }
+    // Paid only to the payee it was approved under: a version carried since (E3) keeps it, any other change denies.
+    if (approvedUnder.outcome !== 'found' || approvedUnder.version.beneficiaryRef !== version.version.beneficiaryRef) {
+      await voidedWith(tx, states, keys, key, ['SUPPLIER_CHANGED'], now);
+      return { outcome: 'denied', causes: 'SUPPLIER_CHANGED' };
     }
     const hold = await states.integrityHold(tx, orgId, 'head');
     if (hold.outcome !== 'clear') return { outcome: 'waiting', why: `hold_${hold.outcome}` };
@@ -285,7 +309,7 @@ export function createHandoff({
       await move(AFTER_SUBMITTED[paymentStateOf(answer.execution)], facts, 'accepted');
     });
 
-  /** One request handed off if it may go, its outcome logged; false if the signal stopped the run. */
+  /** One request handed off if it may go, its outcome logged. */
   const handOff = async (orgId: string, id: string, log: Logger): Promise<void> => {
     let done: TxA;
     try {
@@ -316,6 +340,27 @@ export function createHandoff({
     }
   };
 
+  /** The organisation's approved requests handed off, a page at a time; false if the signal stopped the run. */
+  const handOffAll = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
+    const log = logger.child({ orgId });
+    let after: string | undefined;
+    for (;;) {
+      let approved: string[];
+      try {
+        approved = await approvedOf(orgId, after, log);
+      } catch (error) {
+        log.error('handoff.failed', { err: error });
+        return true;
+      }
+      for (const id of approved) {
+        if (signal?.aborted === true) return false;
+        await handOff(orgId, id, log);
+      }
+      if (approved.length < page) return true;
+      after = approved.at(-1);
+    }
+  };
+
   return {
     async run(signal) {
       let orgs: readonly string[];
@@ -326,18 +371,7 @@ export function createHandoff({
         return;
       }
       for (const orgId of orgs) {
-        const log = logger.child({ orgId });
-        let approved: string[];
-        try {
-          approved = await approvedOf(orgId, log);
-        } catch (error) {
-          log.error('handoff.failed', { err: error });
-          continue;
-        }
-        for (const id of approved) {
-          if (signal?.aborted === true) return;
-          await handOff(orgId, id, log);
-        }
+        if (!(await handOffAll(orgId, signal))) return;
       }
     },
   };

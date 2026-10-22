@@ -18,7 +18,14 @@
 import { AGENTS } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
+import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import {
+  changeHandoffPause,
+  createPlatformChain,
+  type PlatformControlsTables,
+} from '@agentx/core/modules/platform-controls';
+import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import {
   approveRequest,
   cancelRequest,
@@ -50,6 +57,7 @@ import {
 } from './mandate-registry.ts';
 import { AED, askedFor, draftedOf, keys, type World } from './mandate-world.helper.test.ts';
 import { createCarryRest } from './mandate-carry-rest.ts';
+import { createHandoff } from './handoff.ts';
 import { createRequestVoids } from './request-voids.ts';
 import {
   APPROVE_CONFIRM_OPERATION,
@@ -61,7 +69,8 @@ import { changedPastTheApp, spendWorld, type SpendWorldTables } from './spend-wo
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<SpendWorldTables>;
+type Tables = SpendWorldTables & PlatformControlsTables & InstructionsTables & TransactionsTables;
+let app: Database<Tables>;
 
 const ids = new SequentialIds(0xe4c0_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000e4';
@@ -202,7 +211,7 @@ const versionOf = (w: World, id: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<SpendWorldTables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -537,6 +546,28 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     // Waiting their turn, the voids job leaves them be.
     await voids(w).run();
     for (const { id } of pending.slice(20)) expect(await statusOf(w, id)).toBe('APPROVED');
+    // And the hand-off waits for the carry (Phase 4 B4): never paid on the version replaced before it is weighed again.
+    const chain = createPlatformChain({ keys, ids });
+    await app
+      .transaction()
+      .execute((tx) =>
+        changeHandoffPause(
+          tx,
+          { chain, keys, logger: testLogger() },
+          { paused: false, reason: 'TEST-B4', actor: { type: 'system', id: 'operator' }, release: 'r-test', run: null },
+        ),
+      );
+    await createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      rail: w.rail,
+      keys,
+      ids,
+      clock,
+      logger: logger(),
+    }).run();
+    for (const { id } of pending.slice(20)) expect(await statusOf(w, id)).toBe('APPROVED');
+    expect(capture.lines().filter((line) => line.event === 'handoff.waiting' && line.why === 'carry')).toHaveLength(2);
   });
 
   it('carries the rest within minutes as the confirm would have, oldest first, and the oldest stand (PL-47)', async () => {
