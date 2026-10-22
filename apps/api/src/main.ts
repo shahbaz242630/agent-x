@@ -127,7 +127,7 @@ import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
-import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
+import { createHandoff, HANDOFF_EVERY_MS, heartbeatChecks } from './handoff.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -476,8 +476,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     config,
     logger,
     ids: uuidV7Ids,
-    healthChecks:
-      handoff === undefined ? [] : [{ name: 'handoff_heartbeat', check: () => Promise.resolve(handoff.beating()) }],
+    healthChecks: heartbeatChecks(handoff),
     signIn:
       signIn === undefined
         ? undefined

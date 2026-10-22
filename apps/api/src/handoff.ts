@@ -106,6 +106,7 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import type { HealthCheck } from './health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
@@ -559,6 +560,10 @@ export function createHandoff({
     beating: () => clock.now().getTime() - beat <= HEARTBEAT_STALE_MS,
   };
 }
+
+/** /health's checks for the hand-off (ADR-013): its heartbeat, where there is one. */
+export const heartbeatChecks = (handoff: Handoff | undefined): HealthCheck[] =>
+  handoff === undefined ? [] : [{ name: 'handoff_heartbeat', check: () => Promise.resolve(handoff.beating()) }];
 
 /** What the partner answered, as Tx B records it. */
 type Answer =

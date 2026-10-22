@@ -59,7 +59,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, heartbeatChecks } from './handoff.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createRequestVoids } from './request-voids.ts';
@@ -837,6 +837,20 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     expect(handoff.beating()).toBe(true);
     clock.advanceBy(1);
     expect(handoff.beating()).toBe(false);
+  });
+
+  it('gives /health its heartbeat, and nothing where there is no hand-off', async () => {
+    const { w } = await ready();
+    const handoff = handoffOf(w);
+    await handoff.run();
+
+    const [check, ...rest] = heartbeatChecks(handoff);
+    expect(check?.name).toBe('handoff_heartbeat');
+    expect(rest).toEqual([]);
+    expect(await check?.check()).toBe(true);
+    clock.advanceBy(HEARTBEAT_STALE_MS + 1);
+    expect(await check?.check()).toBe(false);
+    expect(heartbeatChecks(undefined)).toEqual([]);
   });
 
   it('never beats for a run that can’t read its organisations: one failing every time reads as stopped', async () => {
