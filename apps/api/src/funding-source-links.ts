@@ -69,6 +69,7 @@ import { createHash } from 'node:crypto';
 
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import type { Partner } from '@agentx/platform/config';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -165,17 +166,18 @@ const isLinkTaken = (error: unknown): boolean =>
 /**
  * The partner the config names (ADR-014 §4): the fake, over its own records in
  * the app's database, its bank for the staging demo's steps (fake-bank.ts), or
- * none, when every link answers PARTNER_UNAVAILABLE.
+ * none, when every link answers PARTNER_UNAVAILABLE: the real partner's
+ * sandbox and live service have no adapter until Phase 5, and nothing reaches them.
  */
 export function railFor(
-  partner: { readonly mode: 'fake' } | undefined,
+  partner: Partner,
   {
     database,
     clock,
     ids,
   }: { readonly database: Database<FakePartnerTables>; readonly clock: Clock; readonly ids: IdGenerator },
 ): FakeRail | undefined {
-  return partner === undefined ? undefined : createFakeRail({ clock, ids, records: createDatabaseRecords(database) });
+  return partner.mode !== 'fake' ? undefined : createFakeRail({ clock, ids, records: createDatabaseRecords(database) });
 }
 
 export function createFundingSourceLinks({
@@ -191,7 +193,7 @@ export function createFundingSourceLinks({
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
-  /** The partner, or undefined where none is set up (config.partner): then every call answers PARTNER_UNAVAILABLE. */
+  /** The partner's rail, or undefined where its adapter isn't built yet (config.partner): then every call answers PARTNER_UNAVAILABLE. */
   readonly rail: FinancialRailAdapter | undefined;
   /** The partner's name, as a link and a source keep it. */
   readonly partner: string;

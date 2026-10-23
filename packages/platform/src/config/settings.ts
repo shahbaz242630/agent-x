@@ -15,6 +15,7 @@ import {
   type Env,
   type Environment,
   ENVIRONMENTS,
+  LIVE_MONEY_GATE_REF,
   LOCAL_ONLY,
   LOG_LEVELS,
   PARTNER_MODES,
@@ -262,6 +263,12 @@ const SETTINGS = {
   AGENTX_PARTNER_MODE: {
     schema: text.pipe(z.enum(PARTNER_MODES, { error: `must be one of: ${PARTNER_MODES.join(', ')}` })).optional(),
   },
+  // ADR-014 §4: the live-money gate record's version and its signed evidence's hash, which `live` needs.
+  AGENTX_LIVE_MONEY_GATE_REF: {
+    schema: text
+      .regex(LIVE_MONEY_GATE_REF, { error: 'must be LMG-v<n>-sha256:<64 lowercase hex>, as the gate record names it' })
+      .optional(),
+  },
   AGENTX_PAYEE_COOLING_OFF_HOURS: {
     schema: wholeNumber({
       min: 24,
@@ -380,6 +387,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_SECURITY_EVENT_RETENTION_DAYS',
       'AGENTX_PARTNER_MODE',
+      'AGENTX_LIVE_MONEY_GATE_REF',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
       'AGENTX_AUDIT_ANCHOR_SECONDS',
       'AGENTX_ACTIVITY_DOWNLOADS_DIR',

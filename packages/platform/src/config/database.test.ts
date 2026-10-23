@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { ConfigError } from './common.ts';
-import { loadConfig } from './config.ts';
+import { loadConfig as loadConfigWith } from './config.ts';
 import { pgVariableProblems, secretSetting } from './database.ts';
 import { loadMigrationConfig } from './migration.ts';
 
@@ -15,11 +15,21 @@ type Env = Record<string, string | undefined>;
 const APP_LOGIN = 'app login for these tests';
 const OWNER_LOGIN = 'owner login for these tests';
 
-/** Staging must name its payment partner (ADR-014 §4, D2-3b): the fake, in tests of anything else. */
-const partnerFor = (environment: string): Env => (environment === 'staging' ? { AGENTX_PARTNER_MODE: 'fake' } : {});
+/** A well-formed live-money gate reference (ADR-014 §4): production runs live, which needs one. */
+const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
+/** A real partner's adapter as built (partner.ts), declaring no origins, so production can run live here. */
+const loadConfig = (env: Env) => loadConfigWith(env, { liveOrigins: [], sandboxOrigins: [] });
+
+/** Production runs live (APP's); staging must name its partner, the fake in tests of anything else (ADR-014 §4). */
+const partnerFor = (environment: string): Env =>
+  environment === 'production'
+    ? {}
+    : { AGENTX_PARTNER_MODE: environment === 'staging' ? 'fake' : undefined, AGENTX_LIVE_MONEY_GATE_REF: undefined };
 
 const APP: Env = {
   AGENTX_ENV: 'production',
+  AGENTX_PARTNER_MODE: 'live',
+  AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: 'r-1',
   AGENTX_PUBLIC_ORIGIN: 'https://app.agentx.example',
   AGENTX_TRUSTED_PROXIES: '10.0.0.0/23',

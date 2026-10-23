@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { ConfigError } from './common.ts';
-import { loadConfig, partnerName } from './config.ts';
+import { loadConfig as loadConfigWith } from './config.ts';
 import { fingerprintedSettings } from './fingerprint.ts';
+import { gateRefOf, type PartnerDeclaration, partnerFrom, partnerName } from './partner.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -20,8 +21,12 @@ const DB_LOGIN = 'app login for these tests';
 const CLIENT_PASS = 'client pass words';
 /** Where the platform mounts the keys; loadConfig checks the setting, and loadKeys reads the files. */
 const KEYS_DIR = '/mnt/secrets';
+/** A well-formed live-money gate reference (ADR-014 §4): production runs live, which needs one. */
+const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
 const MINIMAL: Env = {
   AGENTX_ENV: 'production',
+  AGENTX_PARTNER_MODE: 'live',
+  AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: RELEASE,
   AGENTX_PUBLIC_ORIGIN: PUBLIC_ORIGIN,
   AGENTX_TRUSTED_PROXIES: PROXIES,
@@ -41,13 +46,30 @@ const DB_DEFAULTS = {
 /** The database settings a local run can't do without, for tests of the other settings' local defaults. */
 const LOCAL: Env = { AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN, AGENTX_KEYS_DIR: KEYS_DIR };
 
-/** Staging must name its payment partner (ADR-014 §4, D2-3b): the fake, in tests of anything else. */
-const partnerFor = (environment: string): Env => (environment === 'staging' ? { AGENTX_PARTNER_MODE: 'fake' } : {});
+/**
+ * A real partner's adapter as built (partner.ts), declaring no origins: production
+ * runs live in tests of anything else. The partner's own tests declare origins.
+ */
+const BUILT: PartnerDeclaration = { liveOrigins: [], sandboxOrigins: [] };
+const loadConfig = (env: Env) => loadConfigWith(env, BUILT);
 
-/** The problems loadConfig reports, or [] when it accepts the config. */
-function problemsWith(env: Env): readonly string[] {
+/**
+ * The partner each environment runs in tests of anything else (ADR-014 §4):
+ * production live (MINIMAL's), staging the fake it must name, and the fake by
+ * default where nothing real is at stake.
+ */
+const partnerFor = (environment: string): Env =>
+  environment === 'production'
+    ? {}
+    : {
+        AGENTX_PARTNER_MODE: environment === 'staging' ? 'fake' : undefined,
+        AGENTX_LIVE_MONEY_GATE_REF: undefined,
+      };
+
+/** The problems loadConfig reports, or [] when it accepts the config; against the partner built here, or none (null). */
+function problemsWith(env: Env, built: PartnerDeclaration | null = BUILT): readonly string[] {
   try {
-    loadConfig(env);
+    loadConfigWith(env, built ?? undefined);
     return [];
   } catch (error) {
     if (error instanceof ConfigError) return error.problems;
@@ -73,6 +95,7 @@ describe('config: a correct config loads', () => {
       db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
       signIn: undefined,
+      partner: { mode: 'live', gateRef: GATE_REF },
       sessions: { idleSeconds: 1800, absoluteSeconds: 43_200 },
       securityEvents: { retentionDays: 90 },
       payees: { coolingOffHours: 24 },
@@ -183,6 +206,7 @@ describe('config: a correct config loads', () => {
     expect(Object.isFrozen(config.http)).toBe(true);
     expect(Object.isFrozen(config.http.trustedProxies)).toBe(true);
     expect(Object.isFrozen(config.outbound)).toBe(true);
+    expect(Object.isFrozen(config.partner)).toBe(true);
     expect(Object.isFrozen(config.outbound.allowedOrigins)).toBe(true);
     expect(Object.isFrozen(config.payees)).toBe(true);
     expect(Object.isFrozen(config.db)).toBe(true);
@@ -461,6 +485,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       expect.stringMatching(/^AGENTX_LOG_LEVEL: debug is off in production/),
       expect.stringMatching(/^AGENTX_PUBLIC_ORIGIN: is required in production/),
       expect.stringMatching(/^AGENTX_TRUSTED_PROXIES: is required in production/),
+      expect.stringMatching(/^AGENTX_PARTNER_MODE: is required in production/),
     ]);
   });
 
@@ -1066,51 +1091,181 @@ describe('config: email for the admins’ notices (B5-3)', () => {
   });
 });
 
-describe('SEC-OPS-07 config: the payment partner (ADR-014 §4, D2-3a)', () => {
-  const STAGING: Env = { ...MINIMAL, AGENTX_ENV: 'staging' };
-  const FAKE_STAGING: Env = { ...STAGING, AGENTX_PARTNER_MODE: 'fake' };
+describe('SEC-OPS-07 config: the payment partner and the live-money switch (ADR-014 §4, D2-3a, Phase 4 C1)', () => {
+  const STAGING: Env = { ...MINIMAL, AGENTX_ENV: 'staging', ...partnerFor('staging') };
+  const LIVE_ORIGIN = 'https://pay.bank.example';
+  const SANDBOX_ORIGIN = 'https://sandbox.bank.example';
+  /** A partner's adapter declaring where its live service and its sandbox answer. */
+  const DECLARED: PartnerDeclaration = { liveOrigins: [LIVE_ORIGIN], sandboxOrigins: [SANDBOX_ORIGIN] };
+  /** Everywhere but production, each as the tests of anything else run it. */
+  const NOT_PRODUCTION: Readonly<Record<string, Env>> = {
+    development: { ...LOCAL, AGENTX_ENV: 'development' },
+    test: { ...LOCAL, AGENTX_ENV: 'test' },
+    staging: STAGING,
+  };
+  const allowing = (env: Env, ...origins: string[]): Env => ({
+    ...env,
+    AGENTX_OUTBOUND_ALLOWED_ORIGINS: origins.join(','),
+  });
 
   it('is the fake by default where nothing real is at stake', () => {
     expect(loadConfig({ ...LOCAL, AGENTX_ENV: 'development' }).partner).toEqual({ mode: 'fake' });
     expect(loadConfig({ ...LOCAL, AGENTX_ENV: 'test' }).partner).toEqual({ mode: 'fake' });
   });
 
-  it('is required in staging: a missing setting never falls back to the fake (D2-3b)', () => {
-    expect(loadConfig({ ...STAGING, AGENTX_PARTNER_MODE: 'fake' }).partner).toEqual({ mode: 'fake' });
-    expect(problemsWith(STAGING)).toEqual([
-      'AGENTX_PARTNER_MODE: is required in staging; a missing setting never falls back to the fake',
+  it.each(['staging', 'production'])('is required in %s: a missing setting never falls back to the fake', (env) => {
+    const unnamed = {
+      ...MINIMAL,
+      AGENTX_ENV: env,
+      AGENTX_PARTNER_MODE: undefined,
+      AGENTX_LIVE_MONEY_GATE_REF: undefined,
+    };
+    expect(problemsWith(unnamed)).toEqual([
+      `AGENTX_PARTNER_MODE: is required in ${env}; a missing setting never falls back to the fake`,
     ]);
   });
 
-  it('is never the fake in production: production never pretends to pay', () => {
-    expect(problemsWith({ ...MINIMAL, AGENTX_PARTNER_MODE: 'fake' })).toEqual([
-      'AGENTX_PARTNER_MODE: fake is refused in production; production never pretends to pay',
-    ]);
-    expect(loadConfig(MINIMAL).partner).toBeUndefined();
+  it('is live in production, with the gate reference its start records (gateRefOf)', () => {
+    const { partner } = loadConfig(MINIMAL);
+    expect(partner).toEqual({ mode: 'live', gateRef: GATE_REF });
+    expect(partnerName(partner)).toBe('live');
+    expect(gateRefOf(partner)).toBe(GATE_REF);
+    expect(gateRefOf({ mode: 'fake' })).toBeUndefined();
+    expect(gateRefOf({ mode: 'sandbox' })).toBeUndefined();
   });
 
-  it.each(['sandbox', 'live'])('refuses %s anywhere until its adapter is built', (mode) => {
-    for (const env of [
-      FAKE_STAGING,
-      MINIMAL,
-      { ...LOCAL, AGENTX_ENV: 'test' },
-      { ...LOCAL, AGENTX_ENV: 'development' },
-    ]) {
-      expect(problemsWith({ ...env, AGENTX_PARTNER_MODE: mode })).toEqual([
-        `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,
-      ]);
+  it.each(['fake', 'sandbox'])('refuses %s in production: production pays for real or not at all', (mode) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_PARTNER_MODE: mode, AGENTX_LIVE_MONEY_GATE_REF: undefined })).toEqual([
+      `AGENTX_PARTNER_MODE: ${mode} is refused in production; production pays for real or not at all`,
+    ]);
+  });
+
+  it.each(Object.keys(NOT_PRODUCTION))('refuses live in %s, even with a gate reference', (env) => {
+    const live = { ...NOT_PRODUCTION[env], AGENTX_PARTNER_MODE: 'live', AGENTX_LIVE_MONEY_GATE_REF: GATE_REF };
+    expect(problemsWith(live)).toEqual([
+      `AGENTX_PARTNER_MODE: live is refused in ${env}; real money moves only from production`,
+    ]);
+  });
+
+  it('runs the fake and the sandbox everywhere but production', () => {
+    for (const [env, settings] of Object.entries(NOT_PRODUCTION)) {
+      for (const mode of ['fake', 'sandbox'] as const) {
+        expect(loadConfig({ ...settings, AGENTX_PARTNER_MODE: mode }).partner, `${env} ${mode}`).toEqual({ mode });
+      }
     }
   });
 
-  it('is named on the start-up line by its mode, or none', () => {
-    expect(partnerName({ mode: 'fake' })).toBe('fake');
-    expect(partnerName(undefined)).toBe('none');
+  it('refuses live without a gate reference, and a gate reference without live', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_LIVE_MONEY_GATE_REF: undefined })).toEqual([
+      "AGENTX_LIVE_MONEY_GATE_REF: is required with live; real money waits for the live-money gate's signed record",
+    ]);
+    for (const [env, settings] of Object.entries(NOT_PRODUCTION)) {
+      for (const mode of ['fake', 'sandbox']) {
+        expect(
+          problemsWith({ ...settings, AGENTX_PARTNER_MODE: mode, AGENTX_LIVE_MONEY_GATE_REF: GATE_REF }),
+          `${env} ${mode}`,
+        ).toEqual(['AGENTX_LIVE_MONEY_GATE_REF: set only with AGENTX_PARTNER_MODE live']);
+      }
+    }
+  });
+
+  it.each([
+    ['no version', `LMG-sha256:${'ab'.repeat(32)}`],
+    ['version 0', `LMG-v0-sha256:${'ab'.repeat(32)}`],
+    ['a version with a leading zero', `LMG-v01-sha256:${'ab'.repeat(32)}`],
+    ['a seven-digit version', `LMG-v1234567-sha256:${'ab'.repeat(32)}`],
+    ['63 hex digits', `LMG-v1-sha256:${'a'.repeat(63)}`],
+    ['65 hex digits', `LMG-v1-sha256:${'a'.repeat(65)}`],
+    ['uppercase hex', `LMG-v1-sha256:${'AB'.repeat(32)}`],
+    ['another hash', `LMG-v1-sha512:${'ab'.repeat(32)}`],
+    ['another prefix', `LMX-v1-sha256:${'ab'.repeat(32)}`],
+    ['text after it', `${GATE_REF}0`],
+    ['text before it', `x${GATE_REF}`],
+  ])('refuses a gate reference with %s', (_, gateRef) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_LIVE_MONEY_GATE_REF: gateRef })).toEqual([
+      'AGENTX_LIVE_MONEY_GATE_REF: must be LMG-v<n>-sha256:<64 lowercase hex>, as the gate record names it',
+    ]);
+  });
+
+  it('accepts a later version of the gate record', () => {
+    const gateRef = `LMG-v123456-sha256:${'0f'.repeat(32)}`;
+    expect(loadConfig({ ...MINIMAL, AGENTX_LIVE_MONEY_GATE_REF: gateRef }).partner).toEqual({ mode: 'live', gateRef });
+  });
+
+  describe('until the partner’s adapter is built (Phase 5)', () => {
+    const notBuilt = (mode: string) =>
+      `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phase 5)`;
+
+    it('refuses the sandbox everywhere', () => {
+      for (const settings of [...Object.values(NOT_PRODUCTION), MINIMAL]) {
+        const sandbox = { ...settings, AGENTX_PARTNER_MODE: 'sandbox', AGENTX_LIVE_MONEY_GATE_REF: undefined };
+        expect(problemsWith(sandbox, null)).toContain(notBuilt('sandbox'));
+      }
+    });
+
+    it('refuses live everywhere, so production starts nowhere', () => {
+      expect(problemsWith(MINIMAL, null)).toEqual([notBuilt('live')]);
+      for (const settings of Object.values(NOT_PRODUCTION)) {
+        const live = { ...settings, AGENTX_PARTNER_MODE: 'live', AGENTX_LIVE_MONEY_GATE_REF: GATE_REF };
+        expect(problemsWith(live, null)).toContain(notBuilt('live'));
+      }
+    });
+
+    it('runs the fake, as the app does today', () => {
+      expect(loadConfigWith(STAGING).partner).toEqual({ mode: 'fake' });
+      expect(loadConfigWith(allowing(STAGING, LIVE_ORIGIN)).partner).toEqual({ mode: 'fake' });
+    });
+  });
+
+  describe('the outbound allowlist against the origins the partner’s adapter declares', () => {
+    const NEEDS_LIVE =
+      "AGENTX_OUTBOUND_ALLOWED_ORIGINS: must hold the partner's live origin with AGENTX_PARTNER_MODE live";
+
+    it('lets live reach its live origins, and needs every one of them there', () => {
+      expect(loadConfigWith(allowing(MINIMAL, LIVE_ORIGIN), DECLARED).outbound.allowedOrigins).toEqual([LIVE_ORIGIN]);
+      expect(problemsWith(MINIMAL, DECLARED)).toEqual([NEEDS_LIVE]);
+      const two = { liveOrigins: [LIVE_ORIGIN, 'https://pay2.bank.example'], sandboxOrigins: [] };
+      expect(problemsWith(allowing(MINIMAL, LIVE_ORIGIN), two)).toEqual([NEEDS_LIVE]);
+    });
+
+    it('refuses live with the sandbox origin there too', () => {
+      expect(problemsWith(allowing(MINIMAL, LIVE_ORIGIN, SANDBOX_ORIGIN), DECLARED)).toEqual([
+        "AGENTX_OUTBOUND_ALLOWED_ORIGINS: holds the partner's sandbox origin, refused with AGENTX_PARTNER_MODE live",
+      ]);
+    });
+
+    it('refuses the live origin to every other mode, so a staging app can’t reach the live partner', () => {
+      for (const [env, settings] of Object.entries(NOT_PRODUCTION)) {
+        for (const mode of env === 'staging' ? ['fake', 'sandbox'] : ['fake', 'sandbox', undefined]) {
+          const named = allowing({ ...settings, AGENTX_PARTNER_MODE: mode }, SANDBOX_ORIGIN, LIVE_ORIGIN);
+          expect(problemsWith(named, DECLARED), `${env} ${String(mode)}`).toEqual([
+            "AGENTX_OUTBOUND_ALLOWED_ORIGINS: holds the partner's live origin, refused unless AGENTX_PARTNER_MODE is live",
+          ]);
+        }
+      }
+    });
+
+    it('reports both, with the live origin missing and the sandbox origin there', () => {
+      expect(problemsWith(allowing(MINIMAL, SANDBOX_ORIGIN), DECLARED)).toEqual([
+        NEEDS_LIVE,
+        "AGENTX_OUTBOUND_ALLOWED_ORIGINS: holds the partner's sandbox origin, refused with AGENTX_PARTNER_MODE live",
+      ]);
+    });
+
+    it('lets the sandbox reach its sandbox origin', () => {
+      const sandbox = allowing({ ...STAGING, AGENTX_PARTNER_MODE: 'sandbox' }, SANDBOX_ORIGIN);
+      expect(loadConfigWith(sandbox, DECLARED).partner).toEqual({ mode: 'sandbox' });
+    });
   });
 
   it('refuses a mode that isn’t one', () => {
-    expect(problemsWith({ ...FAKE_STAGING, AGENTX_PARTNER_MODE: 'Fake' })).toEqual([
+    expect(problemsWith({ ...STAGING, AGENTX_PARTNER_MODE: 'Fake' })).toEqual([
       'AGENTX_PARTNER_MODE: must be one of: fake, sandbox, live',
     ]);
+  });
+
+  it('never makes a live partner without its reference, should a caller skip the rules', () => {
+    expect(() => partnerFrom('live', undefined)).toThrow('live has no live-money gate reference');
   });
 });
 
@@ -1247,7 +1402,12 @@ describe('config: sign-in (ADR-003 §5, §7)', () => {
       expect(problemsWith({ ...plain, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://zitadel:8080' })).toContain(
         'AGENTX_OIDC_INTERNAL_ORIGIN: plain http is allowed only in development and test; production must use https',
       );
-      const local = { ...plain, AGENTX_ENV: 'development', AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://zitadel:8080' };
+      const local = {
+        ...plain,
+        AGENTX_ENV: 'development',
+        ...partnerFor('development'),
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://zitadel:8080',
+      };
       expect(loadConfig(local).signIn?.internalOrigin).toBe('http://zitadel:8080');
     });
 

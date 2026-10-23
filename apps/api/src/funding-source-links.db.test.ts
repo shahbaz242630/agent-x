@@ -70,6 +70,8 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xd23b_0000_0000);
 const MINUTE_MS = 60_000;
+/** A well-formed live-money gate reference (ADR-014 §4), for the partner live has no adapter for yet. */
+const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
 const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
@@ -283,7 +285,9 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
 
 describe(`the partner the config names (D2-3b, Postgres ${server.version})`, () => {
   it('is none without one, and the fake over the database’s records with it', async () => {
-    expect(railFor(undefined, { database: app, clock, ids })).toBeUndefined();
+    for (const partner of [{ mode: 'sandbox' }, { mode: 'live', gateRef: GATE_REF }] as const) {
+      expect(railFor(partner, { database: app, clock, ids }), partner.mode).toBeUndefined();
+    }
     const fake = railFor({ mode: 'fake' }, { database: app, clock, ids });
     expect(await fake?.capabilities()).toEqual({
       beneficiaryRoutes: ['hosted', 'pass_through'],

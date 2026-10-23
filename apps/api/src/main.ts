@@ -73,7 +73,14 @@ import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
-import { type Config, ConfigError, configFingerprint, loadConfig, partnerName } from '@agentx/platform/config';
+import {
+  type Config,
+  ConfigError,
+  configFingerprint,
+  gateRefOf,
+  loadConfig,
+  partnerName,
+} from '@agentx/platform/config';
 import {
   assertRuntimeRole,
   createDatabase,
@@ -386,7 +393,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   const fingerprint = configFingerprint(config, keys.describe(), options.env);
   logger.info('api.starting', { ...fingerprint });
-  // ADR-014 §4: which payment partner this process talks to, if any.
+  // ADR-014 §4: which payment partner this process talks to.
   logger.info('api.partner', { mode: partnerName(config.partner) });
 
   const database = await connectDatabase(config, logger);
@@ -411,6 +418,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     recorded = await recordStart(database, keys, uuidV7Ids, {
       configHash: fingerprint.configHash,
       release: config.release,
+      gateRef: gateRefOf(config.partner),
     });
   } catch (error) {
     // The platform chain refused the event or the database did: either way no
@@ -456,10 +464,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   // An agent's key, checked before its request goes on (C2-1).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
-  // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
+  // ADR-014 §4: the fake, over its own records in this database, where the config says so; no other rail is built yet.
   const rail = railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids });
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
-  // where a partner is configured (ADR-014 §4). Its heartbeat is /health's first check (B5, ADR-013).
+  // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
   const handoff =
     rail &&
     createHandoff({

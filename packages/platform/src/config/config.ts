@@ -13,15 +13,7 @@ import {
   blobContainerProblems,
   type BlobContainerSettings,
 } from './blob-container.ts';
-import {
-  ConfigError,
-  type Env,
-  type Environment,
-  LOCAL_ONLY,
-  LOCAL_RELEASE,
-  type LogLevel,
-  type PartnerMode,
-} from './common.ts';
+import { ConfigError, type Env, type Environment, LOCAL_ONLY, LOCAL_RELEASE, type LogLevel } from './common.ts';
 import {
   checkLocation,
   deployedProblems,
@@ -30,6 +22,7 @@ import {
   secretSetting,
   startProblems,
 } from './database.ts';
+import { BUILT_PARTNER, type Partner, type PartnerDeclaration, partnerFrom, partnerProblems } from './partner.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
 import { allOk, logLevelProblems, releaseProblems, setting, type SettingName } from './settings.ts';
 
@@ -130,12 +123,11 @@ export interface Config {
   /** ADR-005 §6, ADR-011 §7: how long a security event is kept, in whole days. */
   readonly securityEvents: { readonly retentionDays: number };
   /**
-   * ADR-014 §4: the payment partner the app talks to. The fake alone is built
-   * (D2-3a): the default in development and test, required in staging (D2-3b),
-   * never in production. Undefined in production, where none is set until
-   * the live adapter: then nothing reaches a partner.
+   * ADR-014 §4: the payment partner the app talks to (partner.ts): the fake by
+   * default in development and test, named in staging and production, and in
+   * production only live, with the live-money gate's reference (Phase 4 C1).
    */
-  readonly partner: { readonly mode: Extract<PartnerMode, 'fake'> } | undefined;
+  readonly partner: Partner;
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
   /** ADR-012 §2: how often each audit chain is checked against its last anchor, and anchored again. */
@@ -334,37 +326,6 @@ function portProblems(environment: Environment, value: number): string[] {
     : [];
 }
 
-/**
- * ADR-014 §4: where each partner mode is allowed. Only the fake is built, so
- * the partner's sandbox and live service are refused until their adapters
- * are (Phases 4 and 5); the fake is refused in production, whatever else is
- * set, so production never pretends to pay. Staging must name its partner
- * (D2-3b): a missing setting never falls back to the fake there.
- */
-function partnerModeProblems(environment: Environment, mode: PartnerMode | undefined): string[] {
-  if (mode === undefined && environment === 'staging') {
-    return ['AGENTX_PARTNER_MODE: is required in staging; a missing setting never falls back to the fake'];
-  }
-  if (mode === 'sandbox' || mode === 'live') {
-    return [
-      `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,
-    ];
-  }
-  return mode === 'fake' && environment === 'production'
-    ? ['AGENTX_PARTNER_MODE: fake is refused in production; production never pretends to pay']
-    : [];
-}
-
-/** The partner, once partnerModeProblems has passed: the fake where set, and by default where nothing real is at stake. */
-function partnerFrom(environment: Environment, mode: PartnerMode | undefined): Config['partner'] {
-  return mode === 'fake' || (mode === undefined && LOCAL_ONLY.includes(environment))
-    ? Object.freeze({ mode: 'fake' as const })
-    : undefined;
-}
-
-/** The partner as a start-up line names it: its mode, or `none` when nothing reaches a partner. */
-export const partnerName = (partner: Config['partner']): string => partner?.mode ?? 'none';
-
 /** The login service's settings, once signInProblems has found them all set or none. */
 function signInFrom(
   issuer: string | undefined,
@@ -405,6 +366,7 @@ function readSettings(env: Env, location: LocationChecks) {
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),
     partnerMode: setting(env, 'AGENTX_PARTNER_MODE'),
+    gateRef: setting(env, 'AGENTX_LIVE_MONEY_GATE_REF'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
     downloadsDirectory: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_DIR'),
@@ -509,11 +471,28 @@ function serviceRuleProblems(checks: Settings): string[] {
   ];
 }
 
+/** The partner's rules (partner.ts), where the settings they weigh are valid. */
+function partnerRuleProblems(checks: Settings, built: PartnerDeclaration | undefined): string[] {
+  const { environment, partnerMode, gateRef, allowedOrigins } = checks;
+  return environment.ok && partnerMode.ok && gateRef.ok && allowedOrigins.ok
+    ? partnerProblems(
+        {
+          environment: environment.value,
+          mode: partnerMode.value,
+          gateRef: gateRef.value,
+          allowedOrigins: allowedOrigins.value ?? [],
+        },
+        built,
+      )
+    : [];
+}
+
 /**
  * Reads and checks the config, or throws a ConfigError listing every problem.
- * The app calls this once at start-up and exits if it throws.
+ * The app calls this once at start-up and exits if it throws. `built` is the
+ * real partner's adapter, once there is one (partner.ts); tests give their own.
  */
-export function loadConfig(env: Env = process.env): Config {
+export function loadConfig(env: Env = process.env, built: PartnerDeclaration | undefined = BUILT_PARTNER): Config {
   const location = checkLocation(env);
   const checks = readSettings(env, location);
   const { environment } = checks;
@@ -525,9 +504,7 @@ export function loadConfig(env: Env = process.env): Config {
     ...httpRuleProblems(checks),
     ...rateLimitRuleProblems(checks),
     ...serviceRuleProblems(checks),
-    ...(environment.ok && checks.partnerMode.ok
-      ? partnerModeProblems(environment.value, checks.partnerMode.value)
-      : []),
+    ...partnerRuleProblems(checks, built),
     ...(environment.ok && checks.downloadsDirectory.ok && checks.downloadsContainer.ok && checks.downloadsClientId.ok
       ? blobContainerProblems(env, environment.value, ACTIVITY_DOWNLOADS, {
           directory: checks.downloadsDirectory.value,
@@ -583,7 +560,7 @@ export function loadConfig(env: Env = process.env): Config {
       absoluteSeconds: checks.sessionAbsolute.value * 3600,
     }),
     securityEvents: Object.freeze({ retentionDays: checks.securityEventRetention.value }),
-    partner: partnerFrom(checks.environment.value, checks.partnerMode.value),
+    partner: partnerFrom(checks.partnerMode.value, checks.gateRef.value),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
     audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value }),
     activityDownloads: Object.freeze({

@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto';
 import type { KeyDescription } from '../keys/key-provider.ts';
 import type { Env } from './common.ts';
 import type { Config } from './config.ts';
+import { gateRefOf } from './partner.ts';
 
 export const WATCHED_VARIABLES = [
   // Which certificates Node trusts
@@ -101,7 +102,8 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     factorResets: config.factorResets === undefined ? null : {},
     sessions: { idleSeconds: config.sessions.idleSeconds, absoluteSeconds: config.sessions.absoluteSeconds },
     securityEvents: { retentionDays: config.securityEvents.retentionDays },
-    partner: config.partner === undefined ? undefined : { mode: config.partner.mode },
+    // ADR-014 §4: a live start's gate reference too, which names the gate record, never a secret.
+    partner: { mode: config.partner.mode, gateRef: gateRefOf(config.partner) },
     payees: { coolingOffHours: config.payees.coolingOffHours },
     audit: { anchorSeconds: config.audit.anchorSeconds },
     // Azure's identity header is left out: it's a secret. Where its token is asked is kept.
