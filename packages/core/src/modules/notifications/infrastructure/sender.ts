@@ -29,6 +29,9 @@
 //   organisation's admins (`no_address`), who are told instead; records that
 //   can't be read or believed leave it to be tried again
 //   (`payment_unavailable`).
+//   Each remittance's end is kept in the organisation's audit log (partner
+//   S119): a skip by the read that decides it, one sent once the notifier has
+//   sent it (a failure to keep that is logged; the email is never sent again).
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
 // - A recipient with no address gives the notice up at once (`no_address`);
@@ -126,10 +129,20 @@ export type RemittanceRead =
   /** The payment is no longer SUCCEEDED: nothing is sent. */
   | { readonly outcome: 'not_succeeded' };
 
-/** Finds a payment's remittance at send time (Phase 4 C2b): from its verified records, which the API wires. */
+/**
+ * Finds a payment's remittance at send time, and keeps in the organisation's
+ * audit log what became of it (Phase 4 C2b; partner S119: every choice
+ * logged, readable by the organisation): the API's, from its verified records.
+ */
 export interface Remittances {
-  /** The supplier's email for the payment, or why there is none. Throws if its records can't be read, or can't be believed. */
+  /**
+   * The supplier's email for the payment, or why there is none; a skip
+   * (off, no email, not SUCCEEDED) is recorded in the audit log in the same
+   * transaction. Throws if its records can't be read, or can't be believed.
+   */
   remittanceOf(orgId: string, transactionId: string): Promise<RemittanceRead>;
+  /** Records in the audit log that the payment's supplier was emailed. Throws if it can't be recorded. */
+  emailed(orgId: string, transactionId: string): Promise<void>;
 }
 
 /** Why a remittance is given up at once, as the outbox keeps it. */
@@ -302,22 +315,32 @@ export function createNoticeSender({
     await sendAndRecord(notice, messageFor(notice, address, extras.link, extras.request));
   };
 
-  /** Sends the notice's email and records how it went. */
-  const sendAndRecord = async (notice: ClaimedNotice, message: NoticeMessage): Promise<void> => {
+  /** Sends the notice's email and records how it went; says whether the notifier sent it. */
+  const sendAndRecord = async (notice: ClaimedNotice, message: NoticeMessage): Promise<boolean> => {
     let sent: SendOutcome;
     try {
       sent = await notifier.send(message);
     } catch {
       await failed(notice, 'send_error', false);
-      return;
+      return false;
     }
     if (sent.outcome === 'failed') {
       const keptAs = FAILURE.test(sent.failure) && sent.failure !== LEASE_EXPIRED ? sent.failure : 'send_failed';
       await failed(notice, keptAs, sent.lasting);
-      return;
+      return false;
     }
     await outbox.sent(db, notice.id);
     logger.info('notification.sent', { noticeId: notice.id, kind: notice.kind, attempt: notice.attempts + 1 });
+    return true;
+  };
+
+  /** The remittance sent, kept in the audit log; a failure to keep it is logged, the email never sent again. */
+  const emailedLogged = async (notice: ClaimedNotice): Promise<void> => {
+    try {
+      await remittances.emailed(notice.orgId, notice.aboutId ?? '');
+    } catch (error) {
+      logger.error('notification.remittance_unrecorded', { noticeId: notice.id, err: error });
+    }
   };
 
   /**
@@ -335,12 +358,13 @@ export function createNoticeSender({
       return false;
     }
     if (read.outcome === 'send') {
-      await sendAndRecord(notice, messageFor(notice, read.to, undefined, undefined, read.paid));
+      const sent = await sendAndRecord(notice, messageFor(notice, read.to, undefined, undefined, read.paid));
+      if (sent) await emailedLogged(notice);
       return false;
     }
     if (read.outcome === 'no_email') {
       const passed = await outbox.passOn(db, notice.id, REMITTANCE_NO_EMAIL_KIND, 'no_address');
-      if (passed) logger.info('notification.remittance_skipped', { noticeId: notice.id, why: 'no_email' });
+      logger.info('notification.remittance_skipped', { noticeId: notice.id, why: 'no_email', passedOn: passed });
       return passed;
     }
     const became = await outbox.failed(db, notice.id, REMITTANCE_SKIPPED[read.outcome], true);

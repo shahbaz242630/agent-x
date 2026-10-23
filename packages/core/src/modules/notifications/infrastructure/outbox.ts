@@ -322,7 +322,7 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
       if (!FAILURE.test(failure) || failure === LEASE_EXPIRED) {
         throw new RangeError("a notice passed on gives a short lowercase reason of the caller's");
       }
-      // To the admins, about what the notice was about: never a membership's, a person's or a contact's own kind.
+      // To the admins, about what the notice was about: never a membership's kind, a remittance or a reset's link.
       if (!isNoticeKind(kind) || isAboutAMembership(kind) || kind === REMITTANCE_KIND || kind === RESET_LINK_KIND) {
         throw new RangeError('a notice is passed on to the admins as a kind about what it was about');
       }

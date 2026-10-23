@@ -242,11 +242,17 @@ const remittances = (
     to: SUPPLIER_ADDRESS,
     paid: PAID,
   }),
+  emailed: (transactionId: string) => Error | undefined = () => undefined,
 ): Remittances => ({
   remittanceOf: (orgId, transactionId) => {
     expect(orgId).toBe(ORG);
     const found = lookup(transactionId);
     return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
+  },
+  emailed: (orgId, transactionId) => {
+    expect(orgId).toBe(ORG);
+    const failed = emailed(transactionId);
+    return failed === undefined ? Promise.resolve() : Promise.reject(failed);
   },
 });
 
@@ -706,10 +712,24 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
     const { sent, service } = notifier();
+    const logged: string[] = [];
 
-    const { capture, run } = sender(service);
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(undefined, (id) => {
+        logged.push(id);
+        return undefined;
+      }),
+    );
     await run.run();
 
+    // Kept in the organisation's audit log once the email went (partner S119).
+    expect(logged).toEqual([PAYMENT]);
     expect(sent).toHaveLength(1);
     const [message] = sent;
     expect(message?.to).toBe(SUPPLIER_ADDRESS);
@@ -723,6 +743,56 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       { sent_at: START, given_up_at: null },
     ]);
     expect(JSON.stringify(capture.lines())).not.toContain(SUPPLIER_ADDRESS);
+  });
+
+  it('C2b keeps a remittance the provider refused out of the audit log, and one it can’t log still sent once', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b03';
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
+    const logged: string[] = [];
+    // The first payment's supplier refused by the provider; the second's sent, its event not kept.
+    const { sent, service } = notifier(({ text }) =>
+      text.includes('INV-REFUSED')
+        ? { outcome: 'failed', failure: 'address_refused', lasting: true }
+        : { outcome: 'sent' },
+    );
+
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(
+        (id) => ({
+          outcome: 'send',
+          to: SUPPLIER_ADDRESS,
+          paid: { ...PAID, invoiceNumber: id === PAYMENT ? 'INV-REFUSED' : 'INV-SENT' },
+        }),
+        (id) => {
+          logged.push(id);
+          return new Error('the audit chain is held');
+        },
+      ),
+    );
+    await run.run();
+
+    expect(sent).toHaveLength(2);
+    expect(logged).toEqual([OTHER_PAYMENT]);
+    const kept = await app
+      .selectFrom('notifications.outbox')
+      .select(['about_id', 'sent_at', 'given_up_at', 'last_failure'])
+      .orderBy('about_id')
+      .execute();
+    expect(kept).toEqual([
+      { about_id: PAYMENT, sent_at: null, given_up_at: START, last_failure: 'address_refused' },
+      { about_id: OTHER_PAYMENT, sent_at: START, given_up_at: null, last_failure: null },
+    ]);
+    expect(capture.lines().filter(({ event }) => event === 'notification.remittance_unrecorded')).toHaveLength(1);
+    // Never sent again: nothing is due.
+    await run.run();
+    expect(sent).toHaveLength(2);
   });
 
   it('C2b gives a remittance up, logged with why, once its setting is off or the payment no longer SUCCEEDED', async () => {

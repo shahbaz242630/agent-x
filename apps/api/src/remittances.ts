@@ -8,7 +8,15 @@
 // is fixed when it is made (0008: the app never changes it), so it is read
 // as it stands. A record that can't be believed raises its alarm through its
 // read and throws, so nothing is sent and the notice is tried again.
-import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
+//
+// What became of each is kept in the organisation's audit log, readable and
+// downloadable by its admins and by us (partner S119; decision 34: every send
+// or skip with its reason): a skip in the transaction that decides it
+// (`payment.remittance_skipped`, its reason), one sent once the email went
+// (`payment.remittance_emailed`). About the payment's transaction by a
+// subject of its own (never the transaction's signed state), by the API; never
+// the address.
+import { type AuditTables, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { instructionOf, type InstructionsTables } from '@agentx/core/modules/instructions';
 import type { RemittanceRead, Remittances } from '@agentx/core/modules/notifications';
 import type { OrganizationsTables } from '@agentx/core/modules/organizations';
@@ -16,7 +24,7 @@ import { requestOf, type SpendRequestsTables } from '@agentx/core/modules/spend-
 import { contactsOf, remittanceOf, type SuppliersTables, versionOf } from '@agentx/core/modules/suppliers';
 import { transactionOf, type TransactionsTables } from '@agentx/core/modules/transactions';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database } from '@agentx/platform/db';
+import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -26,6 +34,12 @@ export type RemittanceTables = OrganizationsTables &
   InstructionsTables &
   TransactionsTables &
   AuditTables;
+
+/** The API, as the actor of the remittance's events. */
+const ACTOR = { type: 'system', id: 'api' } as const;
+
+/** Why a remittance was skipped, as its event keeps it. */
+const SKIPPED_BECAUSE = { off: 'setting_off', no_email: 'no_email', not_succeeded: 'payment_not_succeeded' } as const;
 
 /** A payment's records that can't be believed, or don't name each other: nothing is sent. */
 class RemittanceUnbelieved extends Error {
@@ -46,7 +60,38 @@ export function createRemittances({
   readonly ids: IdGenerator;
   readonly logger: Logger;
 }): Remittances {
+  /** Records what became of the payment's remittance, in the caller's transaction. */
+  const recorded = (
+    tx: DatabaseTransaction<RemittanceTables>,
+    orgId: string,
+    transactionId: string,
+    action: 'payment.remittance_emailed' | 'payment.remittance_skipped',
+    details: Record<string, string>,
+  ) =>
+    createAuditTrail({ keys, ids }).record(tx, orgId, {
+      actor: ACTOR,
+      action,
+      subject: { type: 'payment_remittance', id: transactionId, version: 1 },
+      details,
+    });
+
+  /** The read's outcome, a skip recorded with its reason first. */
+  const skipped = async (
+    tx: DatabaseTransaction<RemittanceTables>,
+    orgId: string,
+    transactionId: string,
+    outcome: keyof typeof SKIPPED_BECAUSE,
+  ): Promise<RemittanceRead> => {
+    await recorded(tx, orgId, transactionId, 'payment.remittance_skipped', { reason: SKIPPED_BECAUSE[outcome] });
+    return { outcome };
+  };
+
   return {
+    emailed: async (orgId, transactionId) => {
+      await withSignedStates(database, orgId, { keys, ids, logger }, (tx) =>
+        recorded(tx, orgId, transactionId, 'payment.remittance_emailed', {}),
+      );
+    },
     remittanceOf: (orgId, transactionId) =>
       withSignedStates(database, orgId, { keys, ids, logger }, async (tx, states): Promise<RemittanceRead> => {
         const named = await tx
@@ -95,10 +140,10 @@ export function createRemittances({
         ) {
           throw new RemittanceUnbelieved(transactionId, 'records, which name others,');
         }
-        if (transaction.transaction.status !== 'SUCCEEDED') return { outcome: 'not_succeeded' };
-        if (setting.remittanceEmail === 'off') return { outcome: 'off' };
+        if (transaction.transaction.status !== 'SUCCEEDED') return skipped(tx, orgId, transactionId, 'not_succeeded');
+        if (setting.remittanceEmail === 'off') return skipped(tx, orgId, transactionId, 'off');
         const { email } = await contactsOf(tx, keys, orgId, version.version);
-        if (email === null) return { outcome: 'no_email' };
+        if (email === null) return skipped(tx, orgId, transactionId, 'no_email');
         return {
           outcome: 'send',
           to: email,

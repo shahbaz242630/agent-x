@@ -40,7 +40,9 @@ const remittanceOf = (orgId: string, transactionId: string): Notice => ({
  * Settles what the payment's request holds as it now stands, and queues its
  * remittance once it SUCCEEDED: at most once a payment, as its machine
  * reaches SUCCEEDED once and the outbox holds one remittance a transaction
- * (0062).
+ * (0062). A caller must never move a payment to SUCCEEDED twice (E1's
+ * partner events included): the second remittance would be refused, and the
+ * move with it.
  */
 export async function settlePayment(
   tx: DatabaseTransaction<PaymentOutcomeTables>,

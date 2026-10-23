@@ -1437,13 +1437,29 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
   describe('read as it is sent, from the payment’s verified records (remittances.ts)', () => {
     const SUPPLIER_EMAIL = 'accounts@gulf-office.example.test';
     const remittances = () => createRemittances({ database: app, keys, ids, logger: testLogger(capture) });
+    /** An invoice number the rail can't carry whole: its bank reference keeps the Latin part alone. */
+    const INVOICE = 'فاتورة INV-C2B-0042';
+
+    /** What the world's audit log keeps of its remittances (partner S119): readable by its admins. */
+    const remittanceEvents = (w: World) =>
+      withTenant(app, w.org, async (tx) =>
+        (
+          await tx
+            .selectFrom('audit.events')
+            .select(['actor_type', 'actor_id', 'action', 'subject_id', 'details'])
+            .where('org_id', '=', w.org)
+            .where('subject_type', '=', 'payment_remittance')
+            .orderBy('seq')
+            .execute()
+        ).map((row) => ({ ...row, details: JSON.parse(row.details) as unknown })),
+      );
 
     /** A world whose first supplier holds SUPPLIER_EMAIL (unless `email` says otherwise), and one payment to it credited. */
     async function paid(email: string | null = SUPPLIER_EMAIL) {
       const { w, acting } = await ready();
       const supplierId = w.suppliers[0] ?? '';
       if (email !== null) await shared.detailsChanged(w, supplierId, undefined, email);
-      const request = await ask(acting, w, { amount: ALLOWED(), orderReference: 'INV-C2B-0042' });
+      const request = await ask(acting, w, { amount: ALLOWED(), orderReference: INVOICE });
       await handoffOf(w, creditedAtOnce(w)).run();
       return { w, supplierId, request, transactionId: await transactionIdOf(w, request.id) };
     }
@@ -1453,22 +1469,38 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
       const payment = await paymentOf(w, request.id);
       if (typeof payment.instruction === 'string') throw new Error('no instruction');
 
+      expect(payment.instruction.paymentReference).toBe('INV-C2B-0042');
       expect(await remittances().remittanceOf(w.org, transactionId)).toEqual({
         outcome: 'send',
         to: SUPPLIER_EMAIL,
         paid: {
           payerName: 'Acme Trading LLC',
-          invoiceNumber: 'INV-C2B-0042',
-          bankReference: payment.instruction.paymentReference,
+          invoiceNumber: INVOICE,
+          bankReference: 'INV-C2B-0042',
           amountMinor: ALLOWED().minor,
           currency: 'AED',
         },
       });
+      // Nothing kept until it is sent; then that it was, by the API, never the address.
+      expect(await remittanceEvents(w)).toEqual([]);
+      await remittances().emailed(w.org, transactionId);
+      expect(await remittanceEvents(w)).toEqual([
+        {
+          actor_type: 'system',
+          actor_id: 'api',
+          action: 'payment.remittance_emailed',
+          subject_id: transactionId,
+          details: {},
+        },
+      ]);
     });
 
     it('says no email when the version paid holds none (34c), and off once the setting is turned off since (34b)', async () => {
       const bare = await paid(null);
       expect(await remittances().remittanceOf(bare.w.org, bare.transactionId)).toEqual({ outcome: 'no_email' });
+      expect(await remittanceEvents(bare.w)).toMatchObject([
+        { action: 'payment.remittance_skipped', subject_id: bare.transactionId, details: { reason: 'no_email' } },
+      ]);
 
       const { w, supplierId, transactionId } = await paid();
       await signed(w, async (tx, states) => {
@@ -1484,6 +1516,9 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
         });
       });
       expect(await remittances().remittanceOf(w.org, transactionId)).toEqual({ outcome: 'off' });
+      expect(await remittanceEvents(w)).toMatchObject([
+        { action: 'payment.remittance_skipped', subject_id: transactionId, details: { reason: 'setting_off' } },
+      ]);
     });
 
     it('says not succeeded for a payment still under way, whatever its setting and address', async () => {
@@ -1492,9 +1527,15 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
       const request = await ask(acting, w, { amount: ALLOWED() });
       await handoffOf(w).run();
 
-      expect(await remittances().remittanceOf(w.org, await transactionIdOf(w, request.id))).toEqual({
-        outcome: 'not_succeeded',
-      });
+      const transactionId = await transactionIdOf(w, request.id);
+      expect(await remittances().remittanceOf(w.org, transactionId)).toEqual({ outcome: 'not_succeeded' });
+      expect(await remittanceEvents(w)).toMatchObject([
+        {
+          action: 'payment.remittance_skipped',
+          subject_id: transactionId,
+          details: { reason: 'payment_not_succeeded' },
+        },
+      ]);
     });
 
     it('throws, sending nothing, for a transaction it can’t find or can’t believe (its alarm raised)', async () => {

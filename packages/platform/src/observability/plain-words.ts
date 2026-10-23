@@ -537,6 +537,13 @@ export const PLAIN_WORDS = {
     broke: 'Its recipient has not been told yet; a notice that can never be sent is given up at once.',
     next: 'It is tried again later, up to 8 tries in all. If many fail, check the email service and the login service.',
   },
+  'notification.remittance_unrecorded': {
+    happened:
+      "A supplier was emailed that it was paid, but the email couldn't be written into its organisation's audit log.",
+    broke:
+      "The organisation's audit log doesn't show that this payment's supplier was emailed; the email itself went out.",
+    next: 'Nothing is sent again. If it repeats, check the database; the API log names the payment.',
+  },
   'notification.run_failed': {
     happened: 'The run that sends email notices stopped early.',
     broke: 'Notices it had not sent are waiting and are not lost.',
