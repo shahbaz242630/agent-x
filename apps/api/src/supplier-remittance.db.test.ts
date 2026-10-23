@@ -142,6 +142,23 @@ async function added(admin: SessionMember, remittanceEmail: RemittanceEmail): Pr
   return write.supplier.id;
 }
 
+/** A supplier as added before 0061, with no setting: its ID. */
+async function addedBefore0061(admin: SessionMember & { membershipId: string }): Promise<string> {
+  const id = ids.next();
+  await withSignedStates(app, admin.orgId, quiet(), (tx, states) =>
+    addSupplierUnset(tx, states, keys, {
+      orgId: admin.orgId,
+      id,
+      versionId: ids.next(),
+      supplier: DETAILS,
+      enteredBy: admin.membershipId,
+      createdAt: clock.now(),
+      actor: OPERATOR,
+    }),
+  );
+  return id;
+}
+
 const ask = (who: SessionMember, id: string, choice: RemittanceEmail) =>
   remittance.ask(who, keyed(who, REMITTANCE_OPERATION), id, choice, CORRELATION);
 const confirm = (who: SessionMember, id: string, stepUpChallengeId: string, choice: RemittanceEmail) =>
@@ -285,18 +302,7 @@ describe(`a supplier's remittance email (C2a, Postgres ${server.version})`, () =
   it('changed first for a supplier added before 0061: read as on, its row added and sealed with the step-up', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
-    const id = ids.next();
-    await withSignedStates(app, org, quiet(), (tx, states) =>
-      addSupplierUnset(tx, states, keys, {
-        orgId: org,
-        id,
-        versionId: ids.next(),
-        supplier: DETAILS,
-        enteredBy: admin.membershipId,
-        createdAt: clock.now(),
-        actor: OPERATOR,
-      }),
-    );
+    const id = await addedBefore0061(admin);
     expect(await registry.show(org, id, CORRELATION)).toMatchObject({ remittanceEmail: 'on' });
     expect(await ask(admin, id, 'on')).toMatchObject({ status: 409, code: 'SUPPLIER_REMITTANCE_UNCHANGED' });
     const stale = askedFor(await ask(admin, id, 'off'));
@@ -315,6 +321,19 @@ describe(`a supplier's remittance email (C2a, Postgres ${server.version})`, () =
     // Asked from no setting at all: once it has one, back at `on`, the step-up no longer names where it stands.
     await changed(admin, id, 'on');
     expect(await confirm(admin, id, stale, 'off')).toMatchObject({ status: 403, code: 'STEP_UP_FAILED' });
+  });
+
+  it('refuses a step-up asked for another supplier added before 0061, though neither has a setting yet', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await addedBefore0061(admin);
+    const other = await addedBefore0061(admin);
+    const forOther = askedFor(await ask(admin, other, 'off'));
+    await stepUp(admin, forOther);
+
+    expect(await confirm(admin, id, forOther, 'off')).toMatchObject({ status: 403, code: 'STEP_UP_FAILED' });
+    expect(await registry.show(org, id, CORRELATION)).toMatchObject({ remittanceEmail: 'on' });
+    expect(await settingEvents(org, id)).toEqual([]);
   });
 
   it('already as asked is refused before any step-up, SUPPLIER_REMITTANCE_UNCHANGED, recording nothing', async () => {
