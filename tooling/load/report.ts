@@ -3,6 +3,7 @@
 // answers stay right under load and how one version compares with another;
 // PL-38 closes only on the same run against a production-sized Azure stack.
 import type { LogSummary } from './logs.ts';
+import { STAGING_API_CPUS } from './plan.ts';
 
 /** One phase as k6 sums it up (money-paths.k6.js, handleSummary). */
 export interface PhaseResult {
@@ -24,6 +25,8 @@ export interface RunResult {
   readonly at: string;
   /** The commit it ran. */
   readonly commit: string;
+  /** The CPUs the API was given: staging's half unless the run said otherwise. */
+  readonly apiCpus: number;
   readonly phases: readonly PhaseResult[];
   readonly logs: LogSummary;
   readonly databaseChecksPassed: boolean;
@@ -44,13 +47,17 @@ export function phaseFailures(phase: PhaseResult): string[] {
 export function renderReport(run: RunResult): string {
   const { decisions } = run.logs;
   const checked = run.logs.holdingsChecks.reduce((sum, { requests }) => sum + requests, 0);
+  const size =
+    run.apiCpus === STAGING_API_CPUS
+      ? "sized as staging's (half a CPU, 1 GiB, ten connections)"
+      : `given ${String(run.apiCpus)} CPU(s) (staging has half), 1 GiB and ten connections as staging`;
   const lines = [
-    `# Load test, ${run.at.slice(0, 10)} (local)`,
+    `# Load test, ${run.at.slice(0, 10)} (local, API ${String(run.apiCpus)} CPU)`,
     '',
     run.failures.length === 0 ? '**Passed.**' : `**Failed: ${String(run.failures.length)} check(s).**`,
     '',
     `Commit \`${run.commit}\`, run at ${run.at}, on a laptop: the compose stack's database and API only, the API`,
-    "sized as staging's (half a CPU, 1 GiB, ten connections), k6 straight to it. As on staging today, the hand-off is",
+    `${size}, k6 straight to it. As on staging today, the hand-off is`,
     'paused: its timer re-checks the approved requests each run, and that work is in these numbers. Laptop numbers compare versions;',
     'they do not close PL-38, which closes on the same run on Azure, production-sized, before live.',
     '',

@@ -15,6 +15,45 @@ export const LOAD_PROJECT = 'agentx-load';
 /** Where the seed and verify steps reach its database: loopback only (compose.load.yaml), clear of another project's 554xx. */
 export const LOAD_DB_PORT = 56_540;
 
+/** Staging's API has half a CPU (deploy/azure/apps.bicep): a run's size unless told otherwise. */
+export const STAGING_API_CPUS = 0.5;
+
+/** The most a run may give the API: past this a laptop's own cores are the limit, not the API. */
+export const MOST_API_CPUS = 4;
+
+/** How the runner tells compose.load.yaml the API's CPUs. */
+export const API_CPUS_VARIABLE = 'AGENTX_LOAD_API_CPUS';
+
+/** The least a run may give the API: Docker refuses less, and only once the stack starts. */
+export const LEAST_API_CPUS = 0.01;
+
+/** What the runner was asked: whether to leave the stack up, and the API's CPUs (staging's unless given). */
+export interface LoadOptions {
+  readonly keep: boolean;
+  readonly apiCpus: number;
+}
+
+/**
+ * The runner's arguments (`--keep`, `--cpus 2`), or undefined for any it can't
+ * run: an unknown one (`--cpus=2`, `--cpu 2`) is refused, never a run at
+ * another size than asked.
+ */
+export function optionsOf(args: readonly string[]): LoadOptions | undefined {
+  let keep = false;
+  let apiCpus = STAGING_API_CPUS;
+  for (let at = 0; at < args.length; at++) {
+    if (args[at] === '--keep') {
+      keep = true;
+    } else if (args[at] === '--cpus') {
+      apiCpus = Number(args[++at]);
+      if (!(apiCpus >= LEAST_API_CPUS && apiCpus <= MOST_API_CPUS)) return undefined;
+    } else {
+      return undefined;
+    }
+  }
+  return { keep, apiCpus };
+}
+
 /** The run's working files (the seed's agent keys, k6's results, the API's log): gitignored. */
 export const OUT_DIR = fileURLToPath(new URL('./.out', import.meta.url));
 

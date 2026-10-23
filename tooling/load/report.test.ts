@@ -19,6 +19,7 @@ const phase = (n: number, overrides: Partial<PhaseResult> = {}): PhaseResult => 
 const clean: RunResult = {
   at: '2026-10-22T12:00:00.000Z',
   commit: 'abc1234',
+  apiCpus: 0.5,
   phases: [phase(1), phase(2)],
   logs: summariseLogs(
     [
@@ -51,7 +52,8 @@ describe('a phase’s numbers', () => {
 describe('the report', () => {
   it('gives a clean run’s numbers, and says a laptop run doesn’t close PL-38', () => {
     const report = renderReport(clean);
-    expect(report).toContain('# Load test, 2026-10-22 (local)\n\n**Passed.**');
+    expect(report).toContain('# Load test, 2026-10-22 (local, API 0.5 CPU)\n\n**Passed.**');
+    expect(report).toContain("the API\nsized as staging's (half a CPU, 1 GiB, ten connections)");
     expect(report).toContain('| 1 | 3300 | 3150 | 0 | 21.3 | 88.5 | 140.0 | 310.8 | 0 | 0 | 0 |');
     expect(report).toContain('the hand-off is\npaused');
     expect(report).toContain('| 1 | 31 | 31 | 31 | 31 |');
@@ -60,6 +62,12 @@ describe('the report', () => {
     expect(report).toContain('The holdings check at the restart: 1 run(s) over 3150 request(s).');
     expect(report).toContain('Warnings or errors logged: 0; lines suppressed: 0.');
     expect(report).not.toContain('What failed');
+  });
+
+  it('says when the API was given more than staging’s half a CPU', () => {
+    const report = renderReport({ ...clean, apiCpus: 2 });
+    expect(report).toContain('# Load test, 2026-10-22 (local, API 2 CPU)');
+    expect(report).toContain('the API\ngiven 2 CPU(s) (staging has half), 1 GiB and ten connections as staging, k6');
   });
 
   it('lists what failed', () => {
