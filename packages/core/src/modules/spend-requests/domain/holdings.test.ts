@@ -6,6 +6,7 @@ import {
   heldOf,
   holdingsMatch,
   holdsNow,
+  type PaymentHolds,
   type RequestHolding,
   type ReservationHolding,
 } from './holdings.ts';
@@ -81,14 +82,42 @@ describe('what a request holds (E1)', () => {
     expect(holdingsMatch(unsealed, [reservation({ amountMinor: 1n })], [OPEN])).toBe(false);
   });
 
-  it('HANDED_OFF: its reservation follows the payment, never released, and its claim stays open', () => {
-    for (const state of ['HELD', 'FINALISED', 'BLOCKED_UNKNOWN']) {
-      expect(holdingsMatch(request('HANDED_OFF'), [reservation({ state })], [OPEN])).toBe(true);
-    }
-    expect(holdingsMatch(request('HANDED_OFF'), [reservation({ state: 'RELEASED' })], [OPEN])).toBe(false);
-    expect(holdingsMatch(request('HANDED_OFF'), [reservation()], [RELEASED])).toBe(false);
-    expect(holdingsMatch(request('HANDED_OFF'), [reservation({ amountMinor: 1n })], [OPEN])).toBe(false);
-    expect(holdingsMatch(request('HANDED_OFF'), [reservation({ payeeAsSealed: false })], [OPEN])).toBe(false);
+  describe('HANDED_OFF: as its payment says (Phase 4 C3)', () => {
+    const handedOff = (payment?: PaymentHolds) => ({ ...request('HANDED_OFF'), payment });
+    const STATES = ['HELD', 'FINALISED', 'BLOCKED_UNKNOWN', 'RELEASED'];
+
+    it.each([
+      ['following', 'HELD'],
+      ['spent', 'FINALISED'],
+      ['blocked', 'BLOCKED_UNKNOWN'],
+    ] as const)('%s: its reservation %s, of its own, and its claim open', (payment, held) => {
+      for (const state of STATES) {
+        expect(holdingsMatch(handedOff(payment), [reservation({ state })], [OPEN]), state).toBe(state === held);
+      }
+      expect(holdingsMatch(handedOff(payment), [reservation({ state: held })], [RELEASED])).toBe(false);
+      expect(holdingsMatch(handedOff(payment), [reservation({ state: held, amountMinor: 1n })], [OPEN])).toBe(false);
+      expect(holdingsMatch(handedOff(payment), [reservation({ state: held, payeeAsSealed: false })], [OPEN])).toBe(
+        false,
+      );
+      expect(holdingsMatch(handedOff(payment), [], [OPEN])).toBe(false);
+    });
+
+    it('ended (a verified failure or cancellation): all of it given back, as an ended request', () => {
+      expect(holdingsMatch(handedOff('ended'), [reservation({ state: 'RELEASED' })], [RELEASED])).toBe(true);
+      expect(holdingsMatch(handedOff('ended'), [reservation({ state: 'RELEASED' })], [OPEN])).toBe(false);
+      for (const state of ['HELD', 'FINALISED', 'BLOCKED_UNKNOWN']) {
+        expect(holdingsMatch(handedOff('ended'), [reservation({ state })], [RELEASED]), state).toBe(false);
+      }
+    });
+
+    it('never matches a payment that can’t be read, or none given', () => {
+      for (const payment of ['unreadable', undefined] as const) {
+        for (const state of STATES) {
+          expect(holdingsMatch(handedOff(payment), [reservation({ state })], [OPEN])).toBe(false);
+          expect(holdingsMatch(handedOff(payment), [reservation({ state })], [RELEASED])).toBe(false);
+        }
+      }
+    });
   });
 
   it.each(['DENIED', 'EXPIRED', 'CANCELLED'] as const)('%s: nothing held, or all of it given back', (status) => {

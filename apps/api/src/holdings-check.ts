@@ -5,9 +5,10 @@
 // page at a time, each page in a transaction of its own (`checkHoldings`):
 // each request the table or the log holds verified (one deleted is alarmed),
 // and its reservation and claim compared with what its signed status and
-// decision say they must be. A request tampered with is passed over, its
-// alarm raised, so the ones after it are still checked. A mismatch raises the integrity alarm
-// (`holding`, SEV-1) and puts the organisation on hold, as any tamper sign
+// decision say they must be, and a handed-off one's with what its payment
+// says (Phase 4 C3, the outcomes module's `paymentHoldsOf`). A request
+// tampered with is passed over, its alarm raised, so the ones after it are
+// still checked. A mismatch raises the integrity alarm (`holding`, SEV-1) and puts the organisation on hold, as any tamper sign
 // does, so its hand-offs stop until an admin clears it.
 //
 // Where an organisation's pass has got to is kept here, in the process, as
@@ -19,7 +20,9 @@
 // the run goes on to the next.
 import { type AuditTables, type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
+import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import { checkHoldings, MOST_CHECKED_A_PAGE, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { PaymentsTables } from '@agentx/core/modules/transactions';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -47,7 +50,7 @@ export function createHoldingsCheck({
 }: {
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
-  readonly database: Database<SpendRequestsTables & LimitReservationsTables & AuditTables>;
+  readonly database: Database<SpendRequestsTables & LimitReservationsTables & PaymentsTables & AuditTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
@@ -70,7 +73,7 @@ export function createHoldingsCheck({
       const after = progress.get(orgId) ?? null;
       try {
         const checked = await withSignedStates(database, orgId, services(log), (tx, states) =>
-          checkHoldings(tx, states, keys, orgId, { after, limit: page }),
+          checkHoldings(tx, states, keys, orgId, { after, limit: page }, paymentHoldsOf),
         );
         requests += checked.requests;
         mismatched += checked.mismatched;

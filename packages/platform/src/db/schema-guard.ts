@@ -149,12 +149,13 @@ const TABLE_GUARDS: readonly TableGuard[] = [
     body: '74a3f6a55278f43bc05ab3855b82cb9dcc13a6291e2f9da7f1d1669484f1f198',
   },
   {
-    // An order claimed for a request holding capacity, with its supplier's payee key; released once, after its request ends.
+    // An order claimed for a request holding capacity, with its supplier's payee key; released once, after its request
+    // ends (a handed-off one's after its payment failed or was cancelled: 0060, Phase 4 C3).
     table: 'spend_requests.order_claims',
     name: 'claim_guard',
     function: 'spend_requests.guard_claim',
     type: 23,
-    body: 'e1e611bdc0fbcd13e60ddaf0163089449a39b28558f2baa13f1bd4439cdaeb52',
+    body: 'e183d7fba80e4b6c79b6c16d2fbed8d6538226a60d454e419c60a983abb5623b',
   },
   {
     // An agent's period is only locked, never changed (0040).
@@ -183,12 +184,13 @@ const TABLE_GUARDS: readonly TableGuard[] = [
   },
   {
     // spend-requests' rule on a reservation: for a request just decided to hold capacity, exactly what it asked;
-    // released only once it has ended, blocked or finalised only once handed off (0040, D2's review).
+    // released only once it has ended, blocked or finalised only once handed off (0040, D2's review); a handed-off
+    // one's only as its payment is (0060, Phase 4 C3).
     table: 'limit_reservations.reservations',
     name: 'held_for_its_request',
     function: 'spend_requests.guard_held_for_request',
     type: 23,
-    body: 'd0b0b8f9d8853eccb566418ce454cb7ee6930ec0b08a83125134cc99a9abefe7',
+    body: '6a8ccc6175211c502201b27730484333c9207be8e3be7c7b3497a13ad9ddee1e',
   },
 ];
 

@@ -13,8 +13,13 @@
 //   a claim or reservation whose key was nulled or swapped past the app
 //   would let a supplier record made again for the same account be paid
 //   the same invoice; requests decided before E1b sealed none);
-// - handed off: the same, but the reservation follows the payment (HELD,
-//   FINALISED or BLOCKED_UNKNOWN), never RELEASED;
+// - handed off: as its payment says (Phase 4 C3, ADR-006 §10–§11; the
+//   outcomes module reads it): under way, the same; succeeded (or reversed
+//   since: no capacity back in the MVP), the reservation FINALISED and the
+//   claim open; unknown, BLOCKED_UNKNOWN and the claim open (possibly paid);
+//   a verified failure or cancellation, nothing held, as an ended request;
+//   a payment that can't be read (its instruction or transaction tampered
+//   with, or gone) never matches;
 // - ended (denied, expired, cancelled): nothing held: no reservation or a
 //   RELEASED one, no claim or a released one;
 // - VALIDATING: never seen once committed (a request leaves it in the
@@ -46,6 +51,14 @@ export interface HeldAs extends Omit<HeldSealed, 'payee' | 'bankKeyed'> {
   readonly payee: PayeeSeal;
 }
 
+/**
+ * What a handed-off request's payment says it must hold (C3), as the outcomes
+ * module reads it from the transaction: `following` while under way, `spent`
+ * once it succeeded, `blocked` while unknown, `ended` after a verified
+ * failure or cancellation, `unreadable` where it can't be believed.
+ */
+export type PaymentHolds = 'following' | 'spent' | 'blocked' | 'ended' | 'unreadable';
+
 /** The request as its signed state holds it, what the check compares by. */
 export interface RequestHolding {
   readonly agentId: string;
@@ -55,6 +68,8 @@ export interface RequestHolding {
   readonly status: SpendRequestStatus;
   /** What its decision sealed of what it holds; null for a decision that sealed none. */
   readonly held: HeldSealed | null;
+  /** A handed-off request's payment; one handed off without it never matches. */
+  readonly payment?: PaymentHolds | undefined;
 }
 
 /** A reservation of the request, as its table holds it. */
@@ -132,8 +147,13 @@ function payeeSealOf(details: Readonly<Record<string, unknown>> | undefined): He
 export const holdsNow = (status: SpendRequestStatus): boolean =>
   HOLDS[status] === 'holding' || HOLDS[status] === 'handed_off';
 
-/** A handed-off request's reservation follows its payment, never given back before a verified failure (Phase 4–5). */
-const FOLLOWING_THE_PAYMENT: ReadonlySet<string> = new Set(['HELD', 'FINALISED', 'BLOCKED_UNKNOWN']);
+/** The reservation's state while a request holds: HELD until its payment is spent or unknown. */
+const RESERVATION_STATE: Readonly<Record<'holding' | 'following' | 'spent' | 'blocked', string>> = {
+  holding: 'HELD',
+  following: 'HELD',
+  spent: 'FINALISED',
+  blocked: 'BLOCKED_UNKNOWN',
+};
 
 /** Whether the request's reservations and claims are exactly what its signed status says they must be. */
 export function holdingsMatch(
@@ -141,8 +161,10 @@ export function holdingsMatch(
   reservations: readonly ReservationHolding[],
   claims: readonly ClaimHolding[],
 ): boolean {
-  const holds = HOLDS[request.status];
-  if (holds === 'never' || reservations.length > 1 || claims.length > 1) return false;
+  const byStatus = HOLDS[request.status];
+  // A handed-off request holds as its payment says (C3), never given back before a verified failure.
+  const holds = byStatus === 'handed_off' ? (request.payment ?? 'unreadable') : byStatus;
+  if (holds === 'never' || holds === 'unreadable' || reservations.length > 1 || claims.length > 1) return false;
   if (holds === 'ended') {
     return reservations.every(({ state }) => state === 'RELEASED') && claims.every(({ released }) => released);
   }
@@ -150,9 +172,8 @@ export function holdingsMatch(
   const [claim] = claims;
   if (reservation === undefined || claim === undefined || claim.released || !claim.itsOwn) return false;
   if (!claim.payeeAsSealed || !reservation.payeeAsSealed) return false;
-  const stateHeld = holds === 'holding' ? reservation.state === 'HELD' : FOLLOWING_THE_PAYMENT.has(reservation.state);
   return (
-    stateHeld &&
+    reservation.state === RESERVATION_STATE[holds] &&
     reservation.agentId === request.agentId &&
     reservation.mandateId === request.mandateId &&
     reservation.supplierId === request.supplierId &&

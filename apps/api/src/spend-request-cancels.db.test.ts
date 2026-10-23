@@ -18,6 +18,7 @@ import {
   cancelRequest,
   checkHoldings,
   expireRequest,
+  NO_PAYMENTS,
   requestOf,
   SPEND_REQUESTS,
 } from '@agentx/core/modules/spend-requests';
@@ -117,7 +118,7 @@ const eventsOf = (w: World, id: string) => eventsAbout(w.org, id, SPEND_REQUESTS
 
 const cleanHoldings = (w: World) =>
   withSignedStates(app, w.org, quiet(), (tx, states) =>
-    checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+    checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS),
   );
 
 beforeAll(async () => {

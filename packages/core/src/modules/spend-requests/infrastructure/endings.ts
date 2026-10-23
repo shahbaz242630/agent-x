@@ -46,7 +46,7 @@ import { waitedOut } from '../domain/approval-wait.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
-import { decisionOf, requestHoldingsWhole } from './holdings-check.ts';
+import { decisionOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -286,7 +286,8 @@ export async function settleCarried(
     await voidedWith(tx, states, keys, key, settled.causes, now);
     return 'settled';
   }
-  if (!(await requestHoldingsWhole(tx, states, keys, key.orgId, key.id))) return 'mismatch';
+  // A pending one carried: never handed off.
+  if (!(await requestHoldingsWhole(tx, states, keys, key.orgId, key.id, NO_PAYMENTS))) return 'mismatch';
   const read = await requestOf(tx, states, key, 'change');
   // The caller read it pending in this transaction, locked: anything else is a bug.
   if (read.outcome !== 'found' || !isPending(read.request.status)) {
@@ -488,7 +489,8 @@ async function endHolding(
   await lockReservationsOf(tx, [key.id]);
   await lockClaimsOf(tx, [key.id]);
   // A mismatch is alarmed by the judging itself.
-  await requestHoldingsWhole(tx, states, keys, key.orgId, key.id);
+  // Ending before its hand-off: no payment to read.
+  await requestHoldingsWhole(tx, states, keys, key.orgId, key.id, NO_PAYMENTS);
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);
   movedAsRead(moved, `A spend request read as open didn't ${event}`);
   await releaseReservationsOf(tx, { requestId: key.id, at });

@@ -30,8 +30,9 @@ import type {
   TamperSign,
   VerifiedState,
 } from '../../audit/index.ts';
+import { INSTRUCTIONS } from '../../instructions/index.ts';
 import { TRANSACTION, type TransactionEvent, type TransactionStatus } from '../domain/transaction.ts';
-import type { TransactionsTables } from './tables.ts';
+import type { PaymentsTables, TransactionsTables } from './tables.ts';
 
 /** A transaction's row, as the signed state reads, records and moves it. */
 export const TRANSACTIONS = {
@@ -268,4 +269,66 @@ export async function noteTransactionFacts(
   if (read.outcome !== 'found') return read;
   await noted(tx, states, key, read, facts, change);
   return { outcome: 'noted' };
+}
+
+/** A handed-off request's payment, as its signed instruction and transaction hold it; or either tampered with (its alarm raised). */
+export type PaymentCheck =
+  { readonly outcome: 'found'; readonly status: TransactionStatus } | { readonly outcome: 'tampered' };
+
+/**
+ * The payments of the requests named (at most 500), by request ID in lower
+ * case, each through its instruction's and its transaction's signed states
+ * (`share`, level 10), in two reads and one look-up: a request with neither
+ * isn't in the map; one with an instruction but no transaction, or either
+ * changed past the app (its request or its instruction swapped), is
+ * `tampered`. For the holdings check (C3): what its reservation and claim
+ * must be follows from the payment.
+ */
+export async function paymentsOfRequests(
+  tx: Transaction<PaymentsTables & AuditTables>,
+  states: SignedStates,
+  orgId: string,
+  requestIds: readonly string[],
+): Promise<ReadonlyMap<string, PaymentCheck>> {
+  if (requestIds.length === 0) return new Map();
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- their IDs alone, each then read through its signed state
+    .selectFrom(`${INSTRUCTIONS.table} as i`)
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same: its ID alone, then its signed state
+    .leftJoin(`${TRANSACTIONS.table} as t`, (join) =>
+      join.onRef('t.org_id', '=', 'i.org_id').onRef('t.instruction_id', '=', 'i.id'),
+    )
+    .select(['i.spend_request_id as requestId', 'i.id as instructionId', 't.id as transactionId'])
+    .where('i.org_id', '=', orgId)
+    .where('i.spend_request_id', 'in', requestIds)
+    .execute();
+  const instructions = await states.verifiedStates(
+    tx,
+    INSTRUCTIONS,
+    orgId,
+    rows.map(({ instructionId }) => instructionId),
+  );
+  const transactions = await states.verifiedStates(
+    tx,
+    TRANSACTIONS,
+    orgId,
+    rows.flatMap(({ transactionId }) => (transactionId === null ? [] : [transactionId])),
+  );
+  const payments = new Map<string, PaymentCheck>();
+  for (const { requestId, instructionId, transactionId } of rows) {
+    const instruction = instructions.get(instructionId.toLowerCase());
+    const transaction = transactionId === null ? undefined : transactions.get(transactionId.toLowerCase());
+    const whole =
+      instruction?.outcome === 'verified' &&
+      instruction.fields.get('spend_request_id')?.toLowerCase() === requestId.toLowerCase() &&
+      transaction?.outcome === 'verified' &&
+      transaction.fields.get('instruction_id')?.toLowerCase() === instructionId.toLowerCase();
+    payments.set(
+      requestId.toLowerCase(),
+      whole && transactionId !== null
+        ? { outcome: 'found', status: recordOf(transactionId, transaction.fields).status }
+        : { outcome: 'tampered' },
+    );
+  }
+  return payments;
 }

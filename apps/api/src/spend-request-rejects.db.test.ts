@@ -21,8 +21,9 @@ import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
   cancelRequest,
   checkHoldings,
-  expireRequest,
   denialOf,
+  expireRequest,
+  NO_PAYMENTS,
   requestOf,
   SPEND_REQUESTS,
   type SpendRequestRecord,
@@ -167,7 +168,7 @@ describe('rejecting a spend request waiting for approval (B4a)', () => {
     const again = await ask(acting, w, { orderReference: 'inv-r1' });
     expect(again.reasons).not.toContain('DUPLICATE_ORDER_REFERENCE');
     const holdings = await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+      checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS),
     );
     expect(holdings).toMatchObject({ mismatched: 0, tampered: 0 });
 

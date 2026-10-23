@@ -27,6 +27,7 @@ import {
   cancelRequest,
   checkHoldings,
   denialOf,
+  NO_PAYMENTS,
   type Pausable,
   SPEND_REQUESTS,
   voidRequest,
@@ -190,7 +191,7 @@ describe('pending spend requests voided once their authority no longer stands (C
       expect(lines('request_void.failed')).toEqual([]);
       // The orders may be asked for again, and the holdings check still finds everything as signed.
       const checked = await withSignedStates(app, w.org, quiet(), (tx, states) =>
-        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS),
       );
       expect(checked).toMatchObject({ mismatched: 0, tampered: 0 });
     },

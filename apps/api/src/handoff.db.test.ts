@@ -20,10 +20,13 @@
 // random batches handed off by runs racing each other, some runs dying
 // before their answer is recorded, a sweep between: whatever order they go
 // in, each request is sent once, makes one instruction and one transaction,
-// and one left waiting is marked UNKNOWN, never sent again.
+// and one left waiting is marked UNKNOWN, never sent again. Phase 4 C3:
+// what it holds follows its payment (spent, blocked while unknown, given back
+// after a proven failure), refused past the app (0060) and alarmed by the
+// holdings check where it gets past.
 import { AGENT_KEYS } from '@agentx/core/modules/agents';
 import { holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
-import { instructionOfRequest, type InstructionsTables } from '@agentx/core/modules/instructions';
+import { INSTRUCTIONS, instructionOfRequest, type InstructionsTables } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   changeHandoffPause,
@@ -43,8 +46,11 @@ import {
   supplierOf,
   versionOf,
 } from '@agentx/core/modules/suppliers';
+import { lockHoldingsOf, settleHoldings } from '@agentx/core/modules/outcomes';
 import {
   moveTransaction,
+  type ProviderFacts,
+  type TransactionEvent,
   TRANSACTIONS,
   transactionOf,
   type TransactionsTables,
@@ -56,6 +62,7 @@ import {
   LogCapture,
   SequentialIds,
   tamperAsOwner,
+  type TestClient,
   type TestDatabase,
   testLogger,
   waitUntilQueued,
@@ -65,6 +72,7 @@ import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createHandoff, HEARTBEAT_STALE_MS, heartbeatChecks } from './handoff.ts';
+import { createHoldingsCheck } from './holdings-check.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createRequestVoids } from './request-voids.ts';
@@ -93,7 +101,7 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { quiet, ask, statusOf, holdingsOf, signed, moved, STOPS, mandateIdOf } = shared;
+const { quiet, ask, statusOf, holdingsOf, spentOf, signed, moved, STOPS, mandateIdOf } = shared;
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
@@ -128,6 +136,9 @@ const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resol
 
 /** AED 500 and the fils that choose the fake's answer (decision 5): under the approval threshold, so APPROVED. */
 const ALLOWED = (fils = 0n) => AED(50_000n + fils);
+
+/** AED 200 and the fils: three of them to one supplier still under the approval threshold, its split check included. */
+const SMALL = (fils = 0n) => AED(20_000n + fils);
 
 /** The platform's hand-off pause moved in the caller's transaction, as the operator's command moves it (B1). */
 const pauseIn = (tx: Parameters<typeof changeHandoffPause>[0], paused: boolean) =>
@@ -346,8 +357,8 @@ describe('an approved request handed to the partner once (B4)', () => {
     expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1, transaction });
     // Once, whatever it answered: an answer not known is never resent (ADR-007 §10).
     expect(submitted()).toBe(1);
-    // Its holdings stay held until an outcome is proven (C3).
-    expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
+    // Its holdings follow its payment (C3): released only after a proven refusal, blocked while unknown.
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER[transaction.status]);
   });
 
   it('makes one instruction and calls the partner once, though two runs reach the request at once (forced, SEC-DP-01)', async () => {
@@ -636,6 +647,14 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
     expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1 });
   });
 });
+
+/** What a handed-off request holds as its payment stands (C3, ADR-006 §10–§11): given back only after a proven failure. */
+const HOLDS_AFTER: Readonly<Record<string, { readonly reservation: string; readonly released: boolean }>> = {
+  PROCESSING: { reservation: 'HELD', released: false },
+  SUCCEEDED: { reservation: 'FINALISED', released: false },
+  UNKNOWN: { reservation: 'BLOCKED_UNKNOWN', released: false },
+  FAILED: { reservation: 'RELEASED', released: true },
+};
 
 /** An answer with nothing more to say than its move. */
 const NO_ANSWER_FACTS = {
@@ -1061,12 +1080,13 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
               continue;
             }
             expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
-            expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
             const instructionId = typeof payment.instruction === 'object' ? payment.instruction.id : '';
             // Left waiting: UNKNOWN, whatever its late answer; a late refusal is still proof (B5).
             const left = outcome.status === 'FAILED' ? 'FAILED' : 'UNKNOWN';
             const status = held.has(instructionId) ? left : outcome.status;
             expect(payment).toMatchObject({ transactions: 1, transaction: { status } });
+            // What it holds follows where its payment ended, however the runs raced (C3).
+            expect(await holdingsOf(w, request.id), status).toEqual(HOLDS_AFTER[status]);
             expect(sent.get(instructionId)).toBe(1);
           }
           // Nothing sent but the instructions made, each once.
@@ -1084,4 +1104,254 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
       { numRuns: 8, endOnFailure: true, examples: [ROUND_TWO] },
     );
   }, 300_000);
+});
+
+describe('what a handed-off request holds follows its payment (C3; ADR-006 §10–§11, SEC-LIM-02)', () => {
+  /** The partner's later word on the payment, applied as the outcomes module applies it: in lock order, then settled. */
+  const settledBy = (w: World, requestId: string, event: TransactionEvent, facts: Partial<ProviderFacts> = {}) =>
+    withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const [row] = await tx
+        .selectFrom('transactions.transactions as t')
+        .innerJoin('instructions.instructions as i', 'i.id', 't.instruction_id')
+        .select('t.id')
+        .where('i.spend_request_id', '=', requestId)
+        .execute();
+      const key = { orgId: w.org, id: row?.id ?? '' };
+      await transactionOf(tx, states, key, 'change');
+      await lockHoldingsOf(tx, requestId);
+      const moved = await moveTransaction(
+        tx,
+        states,
+        key,
+        event,
+        { ...NO_ANSWER_FACTS, ...facts },
+        { actor: { type: 'system', id: 'test' }, details: {} },
+      );
+      if (moved.outcome !== 'moved') throw new Error(`not moved by ${event}: ${moved.outcome}`);
+      await settleHoldings(tx, { requestId, status: moved.to, at: clock.now() });
+    });
+
+  /** The world's holdings checked as the API's job checks them, its pass logged. */
+  const holdingsChecked = async (w: World) => {
+    await createHoldingsCheck({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    }).run();
+    return lines('holdings_check.passed');
+  };
+
+  it('spends it on success, its order kept for good; a reversal after gives nothing back', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await handoffOf(w).run();
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.PROCESSING);
+
+    await settledBy(w, request.id, 'succeed');
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
+    // Later: its reservation, spent once, is left as it was (it settles once: 0040).
+    clock.advanceBy(60_000);
+    await settledBy(w, request.id, 'reverse');
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
+
+    expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 0, tampered: 0 })]);
+  });
+
+  it('keeps an unknown one blocked until it is known: then spent on success, given back after a proven failure', async () => {
+    const { w, acting } = await ready();
+    const paid = await ask(acting, w, { amount: SMALL(2n) });
+    const failed = await ask(acting, w, { amount: SMALL(2n) });
+    await handoffOf(w).run();
+    expect(await holdingsOf(w, paid.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(await holdingsOf(w, failed.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+
+    await settledBy(w, paid.id, 'succeed');
+    await settledBy(w, failed.id, 'fail', { rejectCode: 'AANI.AM04' });
+
+    expect(await holdingsOf(w, paid.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
+    expect(await holdingsOf(w, failed.id)).toEqual(HOLDS_AFTER.FAILED);
+    expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 0, tampered: 0 })]);
+  });
+
+  it('SEC-LIM-02: an unknown payment still uses the month and blocks its order; a failed one gives both back', async () => {
+    const { w, acting } = await ready();
+    const unknown = await ask(acting, w, { amount: SMALL(2n), orderReference: 'INV-C3-UNKNOWN' });
+    const refused = await ask(acting, w, { amount: SMALL(1n), orderReference: 'INV-C3-REFUSED' });
+    await handoffOf(w).run();
+
+    expect(await spentOf(w, acting)).toBe(SMALL(2n).minor);
+    const twice = await ask(acting, w, { amount: SMALL(), orderReference: 'INV-C3-UNKNOWN' });
+    expect(twice.reasons).toContain('DUPLICATE_ORDER_REFERENCE');
+    const again = await ask(acting, w, { amount: SMALL(), orderReference: 'INV-C3-REFUSED' });
+    expect(again.reasons).not.toContain('DUPLICATE_ORDER_REFERENCE');
+    expect(again.status).toBe('APPROVED');
+    expect(await holdingsOf(w, refused.id)).toEqual(HOLDS_AFTER.FAILED);
+    expect(await holdingsOf(w, unknown.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+  });
+
+  describe('refused past the app (0060), and alarmed by the holdings check where it got past', () => {
+    /** `change` run as the tables' owner on the world's rows, with the guards on, or switched off for it. */
+    const asOwner = async (w: World, change: (owner: TestClient) => Promise<unknown>, guards: 'on' | 'off') => {
+      const owner = await database.connect('owner');
+      try {
+        await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+        await owner.query('begin');
+        if (guards === 'off') {
+          await owner.query('alter table limit_reservations.reservations disable trigger user');
+          await owner.query('alter table spend_requests.order_claims disable trigger user');
+        }
+        await change(owner);
+        if (guards === 'off') {
+          await owner.query('alter table limit_reservations.reservations enable trigger user');
+          await owner.query('alter table spend_requests.order_claims enable trigger user');
+        }
+        await owner.query('commit');
+      } catch (error) {
+        await owner.query('rollback');
+        throw error;
+      } finally {
+        await owner.end();
+      }
+    };
+    /** The request's reservation moved to `state`, settled or not as 0040's `settled_at_its_end` needs. */
+    const reservationTo = (state: string) => (id: string) => (owner: TestClient) =>
+      owner.query(
+        `update limit_reservations.reservations
+           set state = $1, settled_at = case when $1 in ('FINALISED', 'RELEASED') then reserved_at end
+           where request_id = $2`,
+        [state, id],
+      );
+    const claimReleased = (id: string) => (owner: TestClient) =>
+      owner.query('update spend_requests.order_claims set released_at = claimed_at where request_id = $1', [id]);
+
+    it.each([
+      ['released while under way', 'PROCESSING', 0n, reservationTo('RELEASED')],
+      ['finalised while under way', 'PROCESSING', 0n, reservationTo('FINALISED')],
+      ['blocked while under way', 'PROCESSING', 0n, reservationTo('BLOCKED_UNKNOWN')],
+      ['released while unknown', 'UNKNOWN', 2n, reservationTo('RELEASED')],
+      ['finalised while unknown', 'UNKNOWN', 2n, reservationTo('FINALISED')],
+      ['its claim released while unknown', 'UNKNOWN', 2n, claimReleased],
+      ['its claim released while under way', 'PROCESSING', 0n, claimReleased],
+    ] as const)('a reservation or claim %s', async (_name, status, fils, change) => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED(fils) });
+      await handoffOf(w).run();
+      expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status } });
+
+      await expect(asOwner(w, change(request.id), 'on')).rejects.toThrow(
+        /only as its payment does|only after its payment failed/,
+      );
+      expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER[status]);
+
+      await asOwner(w, change(request.id), 'off');
+      expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 1 })]);
+    });
+
+    it('a failed one kept held: never given back is a mismatch too', async () => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED(1n) });
+      await handoffOf(w).run();
+      await asOwner(
+        w,
+        (owner) =>
+          owner.query(
+            `update limit_reservations.reservations set state = 'HELD', settled_at = null where request_id = $1`,
+            [request.id],
+          ),
+        'off',
+      );
+
+      expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 1 })]);
+    });
+
+    it('a handed-off request whose transaction is gone holds nothing it can be matched against', async () => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      await handoffOf(w).run();
+      const owner = await tamperAsOwner(database, TRANSACTIONS, w.org);
+      try {
+        await owner.query(
+          `delete from transactions.transactions where instruction_id =
+             (select id from instructions.instructions where spend_request_id = $1)`,
+          [request.id],
+        );
+      } finally {
+        await owner.end();
+      }
+
+      expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 1 })]);
+    });
+    it.each([
+      ['instruction', INSTRUCTIONS],
+      ['transaction', TRANSACTIONS],
+    ] as const)(
+      'a handed-off request whose %s can’t be believed holds nothing it can be matched against',
+      async (_name, table) => {
+        const { w, acting } = await ready();
+        const request = await ask(acting, w, { amount: SMALL() });
+        await handoffOf(w).run();
+        const payment = await paymentOf(w, request.id);
+        const instructionId = typeof payment.instruction === 'object' ? payment.instruction.id : '';
+        const transactionId = typeof payment.transaction === 'object' ? payment.transaction.id : '';
+        const owner = await tamperAsOwner(database, table, w.org);
+        try {
+          await owner.stripSeals(table === INSTRUCTIONS ? instructionId : transactionId);
+        } finally {
+          await owner.end();
+        }
+
+        expect(await holdingsChecked(w)).toEqual([expect.objectContaining({ mismatched: 1 })]);
+      },
+    );
+  });
+
+  it('settles in the lock order: its holdings locked before the head, so their holder never waits on it (ADR-006 §6)', async () => {
+    const { w, acting } = await ready();
+    // Refused: Tx B gives its holdings back, so it writes them.
+    const request = await ask(acting, w, { amount: SMALL(1n) });
+    const { promise: answered, resolve: answer } = Promise.withResolvers<undefined>();
+    const { promise: called, resolve: calling } = Promise.withResolvers<undefined>();
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        calling(undefined);
+        await answered;
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+    const run = handoffOf(w, rail).run();
+    await called;
+    // Something holding the request's reservation (as an ending or a holdings page would) as the answer is recorded.
+    const holder = await database.connect('owner');
+    try {
+      await holder.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+      await holder.query('begin');
+      await holder.query('select id from limit_reservations.reservations where request_id = $1 for no key update', [
+        request.id,
+      ]);
+      answer(undefined);
+      await waitUntilQueued(database.as('admin'), 1);
+      // Tx B waits at the reservation (11) holding nothing of the head (12): the organisation's head is free.
+      const looker = await database.connect('owner');
+      try {
+        await looker.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+        await expect(
+          looker.query('select org_id from audit.heads where org_id = $1 for update nowait', [w.org]),
+        ).resolves.toHaveLength(1);
+      } finally {
+        await looker.end();
+      }
+      await holder.query('commit');
+    } finally {
+      await holder.end();
+    }
+    await run;
+
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
+    expect(lines('handoff.handed_off')).toEqual([
+      expect.objectContaining({ requestId: request.id, recorded: 'recorded' }),
+    ]);
+  });
 });

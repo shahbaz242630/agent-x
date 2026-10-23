@@ -17,7 +17,7 @@ import type { Transaction } from 'kysely';
 import type { AuditDetails, AuditTables, SignedStates } from '../../audit/index.ts';
 import type { LimitReservationsTables } from '../../limit-reservations/index.ts';
 import { movedAsRead } from '../../../shared-kernel/index.ts';
-import { requestHoldingsWhole } from './holdings-check.ts';
+import { NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
@@ -40,7 +40,8 @@ export async function approveRequest(
   key: { readonly orgId: string; readonly id: string },
   approval: Approval,
 ): Promise<'approved' | 'mismatch'> {
-  if (!(await requestHoldingsWhole(tx, states, keys, key.orgId, key.id))) return 'mismatch';
+  // Waiting for approval: never handed off.
+  if (!(await requestHoldingsWhole(tx, states, keys, key.orgId, key.id, NO_PAYMENTS))) return 'mismatch';
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, 'approve', {
     actor: { type: 'user', id: approval.userId },
     action: 'spend_request.approved',

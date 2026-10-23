@@ -1,9 +1,14 @@
 import type { Generated } from 'kysely';
 
+import type { InstructionsTables } from '../../instructions/index.ts';
+
 /** The transactions schema's table (db/migrations/0058_instructions_transactions.sql), as Kysely sees it. */
 export interface TransactionsTables {
   'transactions.transactions': TransactionsTable;
 }
+
+/** The tables a payment is read from (paymentsOfRequests): its instruction and its transaction. */
+export type PaymentsTables = TransactionsTables & InstructionsTables;
 
 interface TransactionsTable {
   org_id: string;

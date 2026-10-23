@@ -9,15 +9,17 @@
 // order or supplier is refused even then, by 0039's `for_its_request` key.)
 import { createAuditTrail, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
+import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import {
   checkHoldings,
   holdingsRecordChecks,
   SPEND_REQUESTS,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
+import type { PaymentsTables } from '@agentx/core/modules/transactions';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -42,7 +44,7 @@ import {
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
 
-type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables;
+type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables & PaymentsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -218,7 +220,7 @@ describe('the holdings check (E1)', () => {
           },
           transformResult: ({ result }) => Promise.resolve(result),
         };
-        return checkHoldings(tx.withPlugin(counting), states, keys, w.org, { after: null, limit: 200 });
+        return checkHoldings(tx.withPlugin(counting), states, keys, w.org, { after: null, limit: 200 }, paymentHoldsOf);
       });
       return { sent, checked };
     };
@@ -245,7 +247,7 @@ describe('the holdings check (E1)', () => {
     const trail = createAuditTrail({ keys, ids });
     const page = () =>
       withSignedStates(app, w.org, quiet(), (tx, states) =>
-        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, paymentHoldsOf),
       );
     // Sealed by the app's own keys, signing no state: only the decided events' count is wrong.
     const decidedAgain = (times: number, details: Record<string, string> = {}) =>
@@ -396,7 +398,12 @@ describe('the holdings check (E1)', () => {
     const held = await requests(acting, w);
     const whole = (id: string) =>
       withSignedStates(app, w.org, quiet(), (tx, states) =>
-        holdingsRecordChecks(keys)[SPEND_REQUESTS.subject](tx, states, w.org, id),
+        holdingsRecordChecks<DatabaseTransaction<Tables>>(keys, paymentHoldsOf)[SPEND_REQUESTS.subject](
+          tx,
+          states,
+          w.org,
+          id,
+        ),
       );
 
     expect([await whole(held.allowed), await whole(held.waiting), await whole(held.denied)]).toEqual([
