@@ -16,6 +16,7 @@
     "./modules/mandates": "./src/modules/mandates/index.ts",
     "./modules/notifications": "./src/modules/notifications/index.ts",
     "./modules/organizations": "./src/modules/organizations/index.ts",
+    "./modules/outcomes": "./src/modules/outcomes/index.ts",
     "./modules/platform-controls": "./src/modules/platform-controls/index.ts",
     "./modules/policies": "./src/modules/policies/index.ts",
     "./modules/providers": "./src/modules/providers/index.ts",

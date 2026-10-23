@@ -16,7 +16,13 @@
 // (decision 20), on the expiry too; a due one behind a page not yet due (past
 // the shortest wait by their rows) still reached.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
-import { checkHoldings, expireRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import {
+  checkHoldings,
+  expireRequest,
+  NO_PAYMENTS,
+  requestOf,
+  SPEND_REQUESTS,
+} from '@agentx/core/modules/spend-requests';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -136,7 +142,7 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     const again = await ask(acting, w, { orderReference: 'inv-72' });
     expect(again.reasons).not.toContain('DUPLICATE_ORDER_REFERENCE');
     const checked = await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+      checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS),
     );
     expect(checked).toMatchObject({ mismatched: 0, tampered: 0 });
   });
@@ -358,7 +364,7 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
       if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
       holding(undefined);
       await gate;
-      return checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 });
+      return checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS);
     });
     await held;
     const running = within(20_000, expiryOf(only(w)).run(), 'the run');

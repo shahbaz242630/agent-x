@@ -68,6 +68,7 @@ import { createOutbox, type NotificationsTables } from '@agentx/core/modules/not
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { type ActivityExportTables, type ActivityTables, createActivityLog } from '@agentx/core/modules/activity';
+import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -85,6 +86,7 @@ import {
   assertRuntimeRole,
   createDatabase,
   type Database,
+  type DatabaseTransaction,
   sweepExpiredKeys,
   UnsafeDatabaseRole,
 } from '@agentx/platform/db';
@@ -581,7 +583,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
       authorityTables: AUTHORITY_TABLES,
       // A held request's reservation and claim match its decision again before the hold clears (G1).
-      namedRecordChecks: holdingsRecordChecks(keys),
+      namedRecordChecks: holdingsRecordChecks<DatabaseTransaction<ApiTables>>(keys, paymentHoldsOf),
     }),
     agentRegistrations: createAgentRegistrations({
       database,

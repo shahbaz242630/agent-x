@@ -30,6 +30,7 @@ import {
   approveRequest,
   cancelRequest,
   checkHoldings,
+  NO_PAYMENTS,
   requestOf,
   SPEND_REQUESTS,
 } from '@agentx/core/modules/spend-requests';
@@ -270,7 +271,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     });
     // Whole under their new version: the holdings check, and the job finds nothing to void.
     const checked = await withSignedStates(app, w.org, shared.quiet(), (tx, states) =>
-      checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+      checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS),
     );
     expect(checked).toMatchObject({ mismatched: 0, tampered: 0 });
     await createRequestVoids({

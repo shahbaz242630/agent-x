@@ -202,7 +202,7 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
       },
       {
         name: 'guard_claim',
-        body: 'e1e611bdc0fbcd13e60ddaf0163089449a39b28558f2baa13f1bd4439cdaeb52',
+        body: 'e183d7fba80e4b6c79b6c16d2fbed8d6538226a60d454e419c60a983abb5623b',
         config: 'search_path=pg_catalog',
         definer: false,
       },
@@ -214,7 +214,7 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
       },
       {
         name: 'guard_held_for_request',
-        body: 'd0b0b8f9d8853eccb566418ce454cb7ee6930ec0b08a83125134cc99a9abefe7',
+        body: '6a8ccc6175211c502201b27730484333c9207be8e3be7c7b3497a13ad9ddee1e',
         config: 'search_path=pg_catalog',
         definer: false,
       },
@@ -320,16 +320,16 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
   });
 
   it('sees one replaced by a function that lets everything through', async () => {
-    const [kept] = /CREATE FUNCTION spend_requests\.guard_claim\(\)[\s\S]*?\$\$;/.exec(
-      readFileSync(new URL('../../../../db/migrations/0039_spend_requests.sql', import.meta.url), 'utf8'),
+    const [kept] = /CREATE OR REPLACE FUNCTION spend_requests\.guard_claim\(\)[\s\S]*?\$\$;/.exec(
+      readFileSync(new URL('../../../../db/migrations/0060_payment_holdings.sql', import.meta.url), 'utf8'),
     ) ?? [''];
     await owner.query(`create or replace function spend_requests.guard_claim() returns trigger
       language plpgsql set search_path = pg_catalog as $$ begin return new; end; $$`);
     try {
       expect(await problems()).toContain('spend_requests.guard_claim is not the function the migration wrote');
     } finally {
-      // eslint-disable-next-line agentx/no-string-built-sql -- 0039's own statement, read from the migration
-      await owner.query(kept.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'));
+      // eslint-disable-next-line agentx/no-string-built-sql -- 0060's own statement, read from the migration
+      await owner.query(kept);
     }
     expect(await aboutThem()).toEqual([]);
   });

@@ -7,8 +7,10 @@
 // and their payee keys against its payee seal (E1b, payee-seal.ts).
 // A page is a fixed number of statements, however many requests it holds
 // (E1c, the partner's no-per-row-loops rule): the rows and their signed
-// states two (verifiedStates), the decided events one. A
-// request whose holdings don't match raises the integrity alarm (`holding`),
+// states two (verifiedStates), the decided events one, and the handed-off
+// ones' payments a few more (C3: `PaymentsOf`, the outcomes module's, after
+// the requests and before their reservations and claims, in the lock order).
+// A request whose holdings don't match raises the integrity alarm (`holding`),
 // and the organisation is put on hold once the page's transaction ends
 // (withSignedStates).
 //
@@ -31,7 +33,14 @@ import { keptZonesOf, type LimitReservationsTables, reservationsFor } from '../.
 import { periodOf } from '../../../shared-kernel/index.ts';
 import { bankKeyOf } from '../domain/asked.ts';
 import { type ApprovalClock, approvalWaitOf } from '../domain/approval-wait.ts';
-import { type ClaimHolding, type HeldSealed, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
+import {
+  type ClaimHolding,
+  type HeldSealed,
+  heldOf,
+  holdingsMatch,
+  holdsNow,
+  type PaymentHolds,
+} from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
 import { payeeAsSealed } from './payee-seal.ts';
@@ -42,6 +51,26 @@ type HoldingsTransaction = Transaction<SpendRequestsTables & LimitReservationsTa
 
 /** The most requests one page checks: each is a verified read, locked until the page's transaction ends. */
 export const MOST_CHECKED_A_PAGE = 200;
+
+/**
+ * The handed-off requests' payments (Phase 4 C3), as the outcomes module reads
+ * them, by request ID in lower case, in the page's transaction: one not in the
+ * map holds nothing it can be matched against. Spend requests can't read
+ * transactions (ADR-004, ADR-006 §9), so the caller passes it in.
+ */
+export type PaymentsOf<Tx> = (
+  tx: Tx,
+  states: SignedStates,
+  orgId: string,
+  requestIds: readonly string[],
+) => Promise<ReadonlyMap<string, PaymentHolds>>;
+
+/**
+ * For the moves that judge a request still waiting or approved (an approval,
+ * an ending), where none is handed off: a handed-off request judged with it
+ * never matches.
+ */
+export const NO_PAYMENTS = (): Promise<ReadonlyMap<string, PaymentHolds>> => Promise.resolve(new Map());
 
 /** A request's decided event names one decision: a few more read are already tampering. */
 const MOST_DECIDED_EVENTS = 4;
@@ -167,18 +196,19 @@ function byRequest<Row extends { readonly requestId: string }>(rows: readonly Ro
  * hold, in the caller's transaction, which must be withSignedStates' for it.
  * A limit outside 1 to MOST_CHECKED_A_PAGE is refused before any SQL runs.
  */
-export async function checkHoldings(
-  tx: HoldingsTransaction,
+export async function checkHoldings<Tx extends HoldingsTransaction>(
+  tx: Tx,
   states: SignedStates,
   keys: KeyProvider,
   orgId: string,
   { after, limit }: PageAsked,
+  payments: PaymentsOf<Tx>,
 ): Promise<HoldingsChecked> {
   if (!Number.isInteger(limit) || limit < 1 || limit > MOST_CHECKED_A_PAGE) {
     throw new RangeError(`A page is 1 to ${String(MOST_CHECKED_A_PAGE)} spend requests`);
   }
   const { ids, next } = await states.objectIds(tx, orgId, SPEND_REQUESTS, after, limit);
-  return { ...(await judged(tx, states, keys, orgId, ids)), next };
+  return { ...(await judged(tx, states, keys, orgId, ids, payments)), next };
 }
 
 /**
@@ -186,31 +216,33 @@ export async function checkHoldings(
  * the caller's transaction: whole, or a mismatch alarmed (G1: clearing a hold
  * waits for its named request's reservation and claim to match again).
  */
-export async function requestHoldingsWhole(
-  tx: HoldingsTransaction,
+export async function requestHoldingsWhole<Tx extends HoldingsTransaction>(
+  tx: Tx,
   states: SignedStates,
   keys: KeyProvider,
   orgId: string,
   requestId: string,
+  payments: PaymentsOf<Tx>,
 ): Promise<boolean> {
   // A request not found counts as tampered with.
-  const { mismatched, tampered } = await judged(tx, states, keys, orgId, [requestId]);
+  const { mismatched, tampered } = await judged(tx, states, keys, orgId, [requestId], payments);
   return mismatched === 0 && tampered === 0;
 }
 
 /** For the hold's clearing (identity's `namedRecordChecks`): a spend request named whole only when it holds as decided. */
-export const holdingsRecordChecks = (keys: KeyProvider) => ({
-  [SPEND_REQUESTS.subject]: (tx: HoldingsTransaction, states: SignedStates, orgId: string, id: string) =>
-    requestHoldingsWhole(tx, states, keys, orgId, id),
+export const holdingsRecordChecks = <Tx extends HoldingsTransaction>(keys: KeyProvider, payments: PaymentsOf<Tx>) => ({
+  [SPEND_REQUESTS.subject]: (tx: Tx, states: SignedStates, orgId: string, id: string) =>
+    requestHoldingsWhole(tx, states, keys, orgId, id, payments),
 });
 
 /** The requests `ids` judged against what each holds, each mismatch alarmed. */
-async function judged(
-  tx: HoldingsTransaction,
+async function judged<Tx extends HoldingsTransaction>(
+  tx: Tx,
   states: SignedStates,
   keys: KeyProvider,
   orgId: string,
   ids: readonly string[],
+  paymentsOf: PaymentsOf<Tx>,
 ): Promise<Omit<HoldingsChecked, 'next'>> {
   const requests: SpendRequestRecord[] = [];
   let tampered = 0;
@@ -220,6 +252,8 @@ async function judged(
     else tampered += 1;
   }
   const found = requests.map(({ id }) => id);
+  const handedOff = requests.filter(({ status }) => status === 'HANDED_OFF').map(({ id }) => id);
+  const payments = await paymentsOf(tx, states, orgId, handedOff);
   const reservations = byRequest(await reservationsFor(tx, found));
   const claimed = byRequest(await claimsFor(tx, found));
   const orderKeys = await orderKeysOf(tx, [...new Set(requests.map(({ orderReference }) => orderReference))]);
@@ -262,7 +296,7 @@ async function judged(
       payeeAsSealed: asSealed(reservation.payeeKey),
     }));
     if (
-      !holdingsMatch({ ...request, held }, reserved, claims) ||
+      !holdingsMatch({ ...request, held, payment: payments.get(request.id) }, reserved, claims) ||
       (held !== null && !inItsZone(request.agentId, held))
     ) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });

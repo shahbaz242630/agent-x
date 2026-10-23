@@ -20,12 +20,14 @@
 // its capacity back: `lockReservationsOf` takes its reservation FOR NO KEY
 // UPDATE at level 11, after the request (8) and before the audit head (12),
 // and `releaseReservationsOf` releases it once the request has ended (0040's
-// `held_for_its_request` refuses it before).
+// `held_for_its_request` refuses it before). A handed-off one follows its
+// payment (C3): `settleReservationsOf` finalises, blocks or releases it, in
+// the transaction that records the payment's outcome.
 import { sql, type Transaction } from 'kysely';
 
 import type { AuditTables, SignedStates } from '../../audit/index.ts';
 import { periodOf } from '../../../shared-kernel/index.ts';
-import { RESERVATION } from '../domain/reservation.ts';
+import { RESERVATION, type ReservationState } from '../domain/reservation.ts';
 import { addZone, keptZoneOf } from './agent-zones.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
@@ -314,4 +316,28 @@ export async function releaseReservationsOf(
     .where('state', '=', RESERVATION.initial)
     .executeTakeFirst();
   return Number(released.numUpdatedRows);
+}
+
+/** Where a handed-off request's payment moves its reservation (ADR-006 §10): spent, blocked while unknown, or given back. */
+export type ReservationSettlement = Extract<ReservationState, 'FINALISED' | 'BLOCKED_UNKNOWN' | 'RELEASED'>;
+
+/**
+ * Moves the handed-off request's reservation as its payment came out (Phase 4
+ * C3), from any state the machine moves it there from (a blocked one
+ * finalised or released once the unknown resolves): how many moved.
+ * `settled_at` is written as it ends, never as it is blocked (0040's
+ * `settled_at_its_end`).
+ */
+export async function settleReservationsOf(
+  tx: ReservationsTransaction,
+  { requestId, to, at }: { readonly requestId: string; readonly to: ReservationSettlement; readonly at: Date },
+): Promise<number> {
+  const from = RESERVATION.moves.filter((move) => move.to === to).map((move) => move.from);
+  const moved = await tx
+    .updateTable('limit_reservations.reservations')
+    .set({ state: to, settled_at: to === 'BLOCKED_UNKNOWN' ? null : at })
+    .where('request_id', '=', requestId)
+    .where('state', 'in', from)
+    .executeTakeFirst();
+  return Number(moved.numUpdatedRows);
 }

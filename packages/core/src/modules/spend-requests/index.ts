@@ -30,8 +30,10 @@ export {
   decisionsOf,
   type Decided,
   MOST_CHECKED_A_PAGE,
+  NO_PAYMENTS,
+  type PaymentsOf,
 } from './infrastructure/holdings-check.ts';
-export type { HeldAs, HeldSealed } from './domain/holdings.ts';
+export type { HeldAs, HeldSealed, PaymentHolds } from './domain/holdings.ts';
 export { type Approval, approveRequest } from './infrastructure/approvals.ts';
 export {
   type DecidedAgainst,
@@ -90,6 +92,7 @@ export {
   claimOrder,
   claimsOn,
   claimsOnEach,
+  lockClaimsOf,
   type OrderClaimsSeen,
   type OrderOf,
   type OrderWeighed,

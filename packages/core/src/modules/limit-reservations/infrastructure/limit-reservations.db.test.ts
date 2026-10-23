@@ -157,6 +157,20 @@ const moved = async (org: Org, ...states: string[]): Promise<string> => {
   return id;
 };
 
+/**
+ * `run` with 0060's payment rule switched off (`held_for_its_request`): the
+ * machine and the totals tested alone, where a request is handed off here with
+ * no payment at all. The rule has its tests below and with the hand-off (C3).
+ */
+const withoutPayments = async (run: () => Promise<void>) => {
+  await database.as('owner').query('alter table limit_reservations.reservations disable trigger held_for_its_request');
+  try {
+    await run();
+  } finally {
+    await database.as('owner').query('alter table limit_reservations.reservations enable trigger held_for_its_request');
+  }
+};
+
 const stateOf = (org: Org, id: string) =>
   inOrg(org, (tx) =>
     tx
@@ -308,39 +322,43 @@ describe('a reservation', () => {
   it('moves along its machine, and no other way', async () => {
     const org = await organisation();
     await period(org);
-    for (const from of RESERVATION.states) {
-      for (const to of RESERVATION.states.filter((state) => state !== from)) {
-        // Every state is one move from HELD.
-        const id = await moved(org, ...(from === 'HELD' ? [] : [from]));
-        const allowed = RESERVATION.moves.some((move) => move.from === from && move.to === to);
-        const moving = change(org, id, moveTo(to));
-        if (allowed) {
-          await moving;
-          expect((await stateOf(org, id)).state).toBe(to);
-        } else {
-          await expect(moving).rejects.toEqual(refusedBy('reservation_moves'));
+    await withoutPayments(async () => {
+      for (const from of RESERVATION.states) {
+        for (const to of RESERVATION.states.filter((state) => state !== from)) {
+          // Every state is one move from HELD.
+          const id = await moved(org, ...(from === 'HELD' ? [] : [from]));
+          const allowed = RESERVATION.moves.some((move) => move.from === from && move.to === to);
+          const moving = change(org, id, moveTo(to));
+          if (allowed) {
+            await moving;
+            expect((await stateOf(org, id)).state).toBe(to);
+          } else {
+            await expect(moving).rejects.toEqual(refusedBy('reservation_moves'));
+          }
         }
       }
-    }
+    });
   });
 
   it('is settled exactly as it reaches FINALISED or RELEASED, and only then', async () => {
     const org = await organisation();
     await period(org);
-    const held = await moved(org);
-    await expect(change(org, held, { state: 'FINALISED' })).rejects.toEqual(refusedBy('settled_at_its_end'));
-    await expect(change(org, held, { state: 'BLOCKED_UNKNOWN', settled_at: LATER })).rejects.toEqual(
-      refusedBy('settled_at_its_end'),
-    );
-    await expect(change(org, held, { settled_at: LATER })).rejects.toEqual(refusedBy('reservation_moves'));
-    await expect(
-      change(org, held, { state: 'RELEASED', settled_at: new Date('2026-10-01T00:00:00Z') }),
-    ).rejects.toEqual(refusedBy('settled_after_reserved'));
-    const released = await moved(org, 'RELEASED');
-    await expect(change(org, released, { settled_at: new Date('2026-10-10T08:00:00Z') })).rejects.toEqual(
-      refusedBy('reservation_moves'),
-    );
-    expect(await stateOf(org, released)).toEqual({ state: 'RELEASED', settled_at: LATER });
+    await withoutPayments(async () => {
+      const held = await moved(org);
+      await expect(change(org, held, { state: 'FINALISED' })).rejects.toEqual(refusedBy('settled_at_its_end'));
+      await expect(change(org, held, { state: 'BLOCKED_UNKNOWN', settled_at: LATER })).rejects.toEqual(
+        refusedBy('settled_at_its_end'),
+      );
+      await expect(change(org, held, { settled_at: LATER })).rejects.toEqual(refusedBy('reservation_moves'));
+      await expect(
+        change(org, held, { state: 'RELEASED', settled_at: new Date('2026-10-01T00:00:00Z') }),
+      ).rejects.toEqual(refusedBy('settled_after_reserved'));
+      const released = await moved(org, 'RELEASED');
+      await expect(change(org, released, { settled_at: new Date('2026-10-10T08:00:00Z') })).rejects.toEqual(
+        refusedBy('reservation_moves'),
+      );
+      expect(await stateOf(org, released)).toEqual({ state: 'RELEASED', settled_at: LATER });
+    });
   });
 
   it('is changed in nothing but its state and when it settled, and never deleted', async () => {
@@ -455,6 +473,15 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
     expect((await stateOf(org, id)).state).toBe('RELEASED');
   });
 
+  it('follows its payment once handed off (0060, C3): with none, never blocked, finalised or released', async () => {
+    const org = await organisation();
+    await period(org);
+    const id = await moved(org);
+    for (const state of ['BLOCKED_UNKNOWN', 'FINALISED', 'RELEASED']) {
+      await expect(change(org, id, moveTo(state))).rejects.toEqual(refusedBy('held_for_its_request'));
+    }
+  });
+
   it('follows a payment only once the request is handed off: never blocked or finalised for one ended without', async () => {
     const org = await organisation();
     await period(org);
@@ -523,8 +550,10 @@ describe('the split total (`splitHeld`, D5)', () => {
     const org = await organisation();
     await period(org);
     await reserve(org);
-    await moved(org, 'FINALISED');
-    await moved(org, 'RELEASED');
+    await withoutPayments(async () => {
+      await moved(org, 'FINALISED');
+      await moved(org, 'RELEASED');
+    });
     const other = await organisation();
     await period(other);
     await reserve(other);

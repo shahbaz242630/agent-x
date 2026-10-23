@@ -20,6 +20,7 @@ import {
 } from '@agentx/core/modules/limit-reservations';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { PaymentsTables } from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -45,7 +46,7 @@ import {
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
 
-type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables;
+type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables & PaymentsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

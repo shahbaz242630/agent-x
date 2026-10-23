@@ -27,7 +27,9 @@ export {
   releaseReservationsOf,
   reservationsFor,
   type ReservationSeen,
+  type ReservationSettlement,
   reserve,
+  settleReservationsOf,
   splitHeld,
 } from './infrastructure/reservations.ts';
 export type { LimitReservationsTables } from './infrastructure/tables.ts';

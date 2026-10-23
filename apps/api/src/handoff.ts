@@ -61,8 +61,11 @@
 // Each run's heartbeat is read by /health (ADR-013): a stale one says the
 // hand-off has stopped.
 // A handed-off request is never voided after: it is tracked to its outcome
-// (PL-46, the in-flight rule); its holdings stay held meanwhile (C3 releases
-// them on a proven failure).
+// (PL-46, the in-flight rule). Its reservation and order claim follow its
+// payment (Phase 4 C3, the outcomes module): Tx B and the sweep read the
+// transaction for change (10), lock both (11), move it (the head, 12), then
+// settle them as it now stands: spent on success, blocked while unknown,
+// given back after a verified failure, held while under way.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next.
@@ -72,7 +75,8 @@ import {
   type SignedStatesServices,
   withSignedStates,
 } from '@agentx/core/modules/audit';
-import { type InstructionsTables, makeInstruction } from '@agentx/core/modules/instructions';
+import { instructionOf, type InstructionsTables, makeInstruction } from '@agentx/core/modules/instructions';
+import { lockHoldingsOf, settleHoldings } from '@agentx/core/modules/outcomes';
 import { handoffPauseOf, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import {
   type ApprovedPaymentIntent,
@@ -97,6 +101,7 @@ import {
   transactionOf,
   type ProviderFacts,
   type TransactionEvent,
+  type TransactionStatus,
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { mayFund } from '@agentx/core/modules/funding-sources';
@@ -398,26 +403,63 @@ export function createHandoff({
    * ADR-007 §9). A refusal moves even an UNKNOWN one to FAILED: its reject
    * code is the proof (§11). Throws for a transaction that can't be believed.
    */
-  const txB = (orgId: string, transactionId: string, answer: Answer, log: Logger): Promise<'recorded' | 'late'> =>
+  const txB = (
+    orgId: string,
+    requestId: string,
+    transactionId: string,
+    answer: Answer,
+    log: Logger,
+  ): Promise<'recorded' | 'late'> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
       const key = { orgId, id: transactionId };
-      const move = async (event: TransactionEvent, facts: ProviderFacts, via: string): Promise<boolean> => {
+      await lockedHoldings(tx, states, key, requestId);
+      /** The status it moved to, or null where its machine refused the move. */
+      const move = async (
+        event: TransactionEvent,
+        facts: ProviderFacts,
+        via: string,
+      ): Promise<TransactionStatus | null> => {
         const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details: { via } });
         // Tampered (its alarm raised): the answer isn't on the record, so not "handed off".
         if (moved.outcome !== 'moved' && moved.outcome !== 'refused') {
           throw new Error(`A transaction didn't move by ${event}: ${moved.outcome}`);
         }
-        return moved.outcome === 'moved';
+        return moved.outcome === 'moved' ? moved.to : null;
       };
-      if (answer.kind === 'unknown') return (await move('lose_track', NO_FACTS, 'no_answer')) ? 'recorded' : 'late';
-      if (answer.kind === 'refused') {
-        return (await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused')) ? 'recorded' : 'late';
-      }
+      const settled = async (status: TransactionStatus | null): Promise<'recorded' | 'late'> => {
+        if (status === null) return 'late';
+        await settleHoldings(tx, { requestId, status, at: clock.now() });
+        return 'recorded';
+      };
+      if (answer.kind === 'unknown') return settled(await move('lose_track', NO_FACTS, 'no_answer'));
+      if (answer.kind === 'refused')
+        return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
       const facts = factsOf(answer.execution);
-      if (!(await move('submitted', facts, 'accepted'))) return 'late';
-      await move(AFTER_SUBMITTED[paymentStateOf(answer.execution)], facts, 'accepted');
-      return 'recorded';
+      const submitted = await move('submitted', facts, 'accepted');
+      if (submitted === null) return 'late';
+      return settled((await move(AFTER_SUBMITTED[paymentStateOf(answer.execution)], facts, 'accepted')) ?? submitted);
     });
+
+  /**
+   * The transaction read for change (10), then its request's reservation and
+   * claim locked (11), before a move takes the head (12); throws for a
+   * transaction that can't be believed (its alarm raised), or one not its request's.
+   */
+  const lockedHoldings = async (
+    tx: HandoffTx,
+    states: SignedStates,
+    key: { readonly orgId: string; readonly id: string },
+    requestId: string,
+  ): Promise<TransactionStatus> => {
+    const read = await transactionOf(tx, states, key, 'change');
+    if (read.outcome !== 'found') throw new Error(`A handed-off transaction can't be believed: ${key.id}`);
+    const instruction = await instructionOf(tx, states, { orgId: key.orgId, id: read.transaction.instructionId });
+    if (instruction.outcome !== 'found' || instruction.instruction.spendRequestId !== requestId.toLowerCase()) {
+      throw new Error(`A handed-off transaction's instruction can't be believed: ${key.id}`);
+    }
+    await lockHoldingsOf(tx, requestId);
+    return read.transaction.status;
+  };
 
   /** The partner's answer to the intent, within its time; any it can't give is `unknown` (never resent). */
   const answerOf = async (intent: ApprovedPaymentIntent, id: string, log: Logger): Promise<Answer> => {
@@ -448,7 +490,7 @@ export function createHandoff({
     const { intent, transactionId } = done;
     const answer = await answerOf(intent, id, log);
     try {
-      const recorded = await txB(orgId, transactionId, answer, log);
+      const recorded = await txB(orgId, id, transactionId, answer, log);
       log.info('handoff.handed_off', {
         requestId: id,
         instructionId: intent.instructionId,
@@ -481,21 +523,32 @@ export function createHandoff({
     }
   };
 
-  /** A page of the organisation's transactions waiting for their answer since before `before`, by their rows, unverified. */
-  const waitingSince = (orgId: string, before: Date, log: Logger): Promise<string[]> =>
-    withSignedStates(database, orgId, services(log), async (tx) =>
-      (
-        await tx
-          // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state before it moves
-          .selectFrom(TRANSACTIONS.table)
-          .select('id')
-          .where('org_id', '=', orgId)
-          .where('status', '=', 'SUBMISSION_PENDING')
-          .where('created_at', '<=', before)
-          .orderBy('id')
-          .limit(page)
-          .execute()
-      ).map(({ id }) => id),
+  /**
+   * A page of the organisation's transactions waiting for their answer since
+   * before `before`, each with its request's ID through its instruction (none
+   * where that is gone: the transaction then can't be believed, and is logged),
+   * by their rows, unverified (each then read through its signed state).
+   */
+  const waitingSince = (
+    orgId: string,
+    before: Date,
+    log: Logger,
+  ): Promise<{ readonly id: string; readonly requestId: string | null }[]> =>
+    withSignedStates(database, orgId, services(log), (tx) =>
+      tx
+        // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state before it moves
+        .selectFrom(`${TRANSACTIONS.table} as t`)
+        // eslint-disable-next-line agentx/authority-tables-through-signed-state -- its request's ID alone, read again through its signed instruction before anything moves
+        .leftJoin('instructions.instructions as i', (join) =>
+          join.onRef('i.org_id', '=', 't.org_id').onRef('i.id', '=', 't.instruction_id'),
+        )
+        .select(['t.id as id', 'i.spend_request_id as requestId'])
+        .where('t.org_id', '=', orgId)
+        .where('t.status', '=', 'SUBMISSION_PENDING')
+        .where('t.created_at', '<=', before)
+        .orderBy('t.id')
+        .limit(page)
+        .execute(),
     );
 
   /**
@@ -505,33 +558,33 @@ export function createHandoff({
    * meanwhile is never undone. Never resent; reconciliation settles them.
    */
   const sweepIn = async (orgId: string, log: Logger): Promise<void> => {
-    let waiting: string[];
+    let waiting: { readonly id: string; readonly requestId: string | null }[];
     try {
       waiting = await waitingSince(orgId, new Date(clock.now().getTime() - unknownAfterMs), log);
     } catch (error) {
       log.error('handoff.sweep_failed', { err: error });
       return;
     }
-    for (const id of waiting) {
+    for (const transaction of waiting) {
       beatNow();
       try {
         const marked = await withSignedStates(database, orgId, services(log), async (tx, states) => {
-          const key = { orgId, id };
-          const read = await transactionOf(tx, states, key, 'change');
-          if (read.outcome !== 'found')
-            throw new Error(`A transaction waiting for its answer can't be believed: ${id}`);
-          if (read.transaction.status !== 'SUBMISSION_PENDING') return false;
+          const key = { orgId, id: transaction.id };
+          // A transaction with no instruction is refused by lockedHoldings before anything is locked.
+          const requestId = transaction.requestId ?? '';
+          if ((await lockedHoldings(tx, states, key, requestId)) !== 'SUBMISSION_PENDING') return false;
           const moved = await moveTransaction(tx, states, key, 'lose_track', NO_FACTS, {
             actor: ACTOR,
             details: { via: 'no_answer_in_time' },
           });
           // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
           if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
+          await settleHoldings(tx, { requestId, status: moved.to, at: clock.now() });
           return true;
         });
-        if (marked) log.warn('handoff.marked_unknown', { transactionId: id });
+        if (marked) log.warn('handoff.marked_unknown', { transactionId: transaction.id });
       } catch (error) {
-        log.error('handoff.sweep_failed', { transactionId: id, err: error });
+        log.error('handoff.sweep_failed', { transactionId: transaction.id, err: error });
       }
     }
   };

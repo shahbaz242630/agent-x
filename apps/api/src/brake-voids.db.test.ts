@@ -50,6 +50,7 @@ import {
   approveRequest,
   cancelRequest,
   checkHoldings,
+  NO_PAYMENTS,
   type PendingChoice,
   requestOf,
   SPEND_REQUESTS,
@@ -631,7 +632,7 @@ describe('the brakes void their own pending requests in their transaction (C2b)'
       expect(await spentOf(w, acting)).toBe(0n);
       // The holdings check still finds everything as signed.
       const checked = await withSignedStates(app, w.org, shared.quiet(), (tx, states) =>
-        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS),
       );
       expect(checked).toMatchObject({ mismatched: 0, tampered: 0 });
     },
@@ -1318,7 +1319,7 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
         },
       });
       const holdings = await signed(w, (tx, states) =>
-        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
+        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }, NO_PAYMENTS),
       );
       expect(holdings).toMatchObject({ mismatched: 0, tampered: 0 });
     });
