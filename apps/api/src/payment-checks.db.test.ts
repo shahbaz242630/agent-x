@@ -297,11 +297,12 @@ describe('a payment finished by the bank’s word (E1a; rail map §4)', () => {
       .poll(async () => (await paymentOf(w, request.id)).transaction)
       .toMatchObject({ status: 'SUBMISSION_PENDING' });
 
-    // Its answer not yet due: left to its own Tx B.
+    // Its answer not yet due, though past the bank's call's time limit: left to its own Tx B.
+    clock.advanceBy(STEP - 1);
     await checksOf(w).run();
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUBMISSION_PENDING' });
 
-    clock.advanceBy(2 * STEP);
+    clock.advanceBy(STEP + 1);
     await checksOf(w).run();
     expect(await transactionOf(w, request.id)).toMatchObject({
       status: 'SUCCEEDED',
@@ -481,10 +482,19 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     await checksOf(w).run();
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUCCEEDED' });
     let asked = 0;
+    // At first a newer word that doesn't go back on the payment (settled at the debtor); then Rejected.
+    let bank: 'AcceptedSettlementCompleted' | 'Rejected' = 'AcceptedSettlementCompleted';
     const rejectedAfter = answering(w, (found) => {
       asked += 1;
       return found.kind === 'found'
-        ? { kind: 'found', execution: { ...found.execution, providerStatus: 'Rejected', rejectCode: 'AANI.FF01' } }
+        ? {
+            kind: 'found',
+            execution: {
+              ...found.execution,
+              providerStatus: bank,
+              rejectCode: bank === 'Rejected' ? 'AANI.FF01' : null,
+            },
+          }
         : found;
     });
     const checks = checksOf(w, rejectedAfter);
@@ -492,8 +502,11 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     // Its first run checks every one, the paid among them; then every 30th.
     await checks.run();
     expect(asked).toBe(1);
+    expect(await transactionOf(w, request.id)).toMatchObject({ providerStatus: 'AcceptedSettlementCompleted' });
+    expect(lines('payment_check.contradicts')).toEqual([]);
     for (let run = 1; run < 30; run += 1) await checks.run();
     expect(asked).toBe(1);
+    bank = 'Rejected';
     await checks.run();
     expect(asked).toBe(2);
 
@@ -515,13 +528,16 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     const request = await ask(acting, w, { amount: ALLOWED() });
     await handoffOf(w).run();
     clock.advanceBy(STEP);
-    // One check's word (settled at the debtor, a minute in) held back until another read the newer one (credited).
+    // One check's word (Rejected, a minute in) held back until another read the newer one (credited): were it
+    // applied, a paid payment would read as contradicted.
     const { promise: release, resolve } = Promise.withResolvers<undefined>();
     const { promise: asked, resolve: asking } = Promise.withResolvers<undefined>();
     const held = answering(w, async (found) => {
       asking(undefined);
       await release;
-      return found;
+      return found.kind === 'found'
+        ? { kind: 'found', execution: { ...found.execution, providerStatus: 'Rejected', rejectCode: 'AANI.FF01' } }
+        : found;
     });
     const late = checksOf(w, held).run();
     await asked;
