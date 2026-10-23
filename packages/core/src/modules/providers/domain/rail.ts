@@ -20,6 +20,7 @@
 // 4. From then on the partner's state of the source is read by its reference,
 //    again only for the organisation that linked it.
 
+import type { EventCheck, EventHeaders } from './events.ts';
 import type { ApprovedPaymentIntent, ExecutionLookup, PartnerExecutionRef, SubmissionResult } from './payments.ts';
 
 /** A partner's name, as Agent X keeps it on a link or a registration: lower-case words, such as `fake`. */
@@ -241,6 +242,12 @@ export interface FinancialRailAdapter {
   submitApprovedIntent(intent: ApprovedPaymentIntent): Promise<SubmissionResult>;
   /** The payment by our instruction ID (the rail's lookup by key), or `not_found`, which proves nothing. */
   getExecution(ref: PartnerExecutionRef): Promise<ExecutionLookup>;
+  /**
+   * A message from the partner (events.ts), checked over its raw body before
+   * anything is read from it: verified and normalised, or refused and why.
+   * Never throws for a message, whatever it holds.
+   */
+  verifyEvent(body: Uint8Array, headers: EventHeaders): Promise<EventCheck>;
 }
 
 /**

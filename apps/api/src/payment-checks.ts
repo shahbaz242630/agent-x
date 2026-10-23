@@ -6,12 +6,15 @@
 // messages early, late, twice or missed change nothing. Nothing is ever sent
 // to the bank again (ADR-007 §10).
 //
-// Each run takes each organisation's transactions still under way
-// (SUBMISSION_PENDING past its answer's time, SUBMITTED, PROCESSING, UNKNOWN),
-// oldest first, a page at a time: one under 15 minutes old every run, one
-// under a day old every 5th run, every one every 30th (the real partner's rate
-// limits), with those paid in the last 7 days. The bank is asked outside any database transaction; then one
-// transaction a payment, in ADR-006 §6's lock order, as Tx B (`lockPayment`:
+// Each run first takes the partner's messages waiting in the inbox (E1b), and
+// checks the payments each names, ahead of their turn; a message is taken once
+// the bank answered for each, tried at most 5 runs. Then it takes each
+// organisation's transactions still under way (SUBMISSION_PENDING past its
+// answer's time, SUBMITTED, PROCESSING, UNKNOWN), oldest first, a page at a
+// time: one under 15 minutes old every run, one under a day old every 5th
+// run, every one every 30th (the real partner's rate limits), with those paid
+// in the last 7 days; none twice in a run. The bank is asked outside any
+// database transaction; then one transaction a payment, in ADR-006 §6's lock order, as Tx B (`lockPayment`:
 // the transaction for change, 10; its holdings, 11; the move, the head, 12),
 // and every move settled by `settlePayment` (its holdings; on SUCCEEDED, the
 // supplier's remittance email).
@@ -38,6 +41,12 @@
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import {
+  MOST_TRIES,
+  type Nudge,
+  type ProviderEvents,
+  type ProviderEventsTables,
+} from '@agentx/core/modules/provider-events';
 import {
   type ExecutionLookup,
   type FinancialRailAdapter,
@@ -103,13 +112,16 @@ const STILL_UNKNOWN_MS = DAY_MS;
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
 
+/** How many of the partner's messages a run takes, oldest first: the rest wait for the next. */
+const NUDGES_A_RUN = 100;
+
 /** How many unanswered calls in a row end a run: the bank is down, and each would wait its time limit. */
 const UNREACHED_IN_A_ROW = 3;
 
 /** The API, as the check's actor in the signed events. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
-type CheckTables = VoidTables & InstructionsTables & TransactionsTables & NotificationsTables;
+type CheckTables = VoidTables & InstructionsTables & TransactionsTables & NotificationsTables & ProviderEventsTables;
 
 /** A payment under way as listed, by its rows, unverified: each read through its signed state before it moves. */
 interface Listed {
@@ -126,6 +138,14 @@ type Word = ExecutionLookup | { readonly kind: 'unavailable' } | { readonly kind
 interface Due {
   readonly since: Date | undefined;
   readonly watchPaid: boolean;
+}
+
+/** A run's own count: the bank's unanswered calls (in a row, and in all), checks that failed, and the payments checked. */
+interface Run {
+  unreached: number;
+  inRow: number;
+  failed: number;
+  readonly seen: Set<string>;
 }
 
 /** Where a check found the payment, and left it. */
@@ -163,6 +183,7 @@ export function createPaymentChecks({
   ids,
   clock,
   logger,
+  events,
   page = CHECK_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
 }: {
@@ -176,6 +197,8 @@ export function createPaymentChecks({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
+  /** The partner's messages taken in (E1b): each names payments this checks first, ahead of their turn; none where there is no inbox. */
+  readonly events?: ProviderEvents;
   /** How many of an organisation's payments are read at once (CHECK_PAGE unless a test names fewer). */
   readonly page?: number;
   /** How long the bank has to answer (PARTNER_CALL_TIMEOUT_MS unless a test names less). */
@@ -235,6 +258,77 @@ export function createPaymentChecks({
           .execute()
       );
     });
+
+  /**
+   * The payments a partner's message names, by their rows, unverified (each
+   * then read through its signed state): its instruction's, whatever its
+   * status (one settled may be contradicted, rail map §4); or a consent's,
+   * a page of those under way or paid in PAID_WATCH_MS.
+   */
+  const namedBy = (nudge: Nudge, log: Logger): Promise<Listed[]> =>
+    withSignedStates(database, nudge.orgId, services(log), (tx) => {
+      const paidSince = new Date(clock.now().getTime() - PAID_WATCH_MS);
+      const { reference } = nudge;
+      return (
+        tx
+          // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state before it moves
+          .selectFrom(`${TRANSACTIONS.table} as t`)
+          // eslint-disable-next-line agentx/authority-tables-through-signed-state -- its request's ID and consent alone, read again through its signed instruction before anything moves
+          .innerJoin('instructions.instructions as i', (join) =>
+            join.onRef('i.org_id', '=', 't.org_id').onRef('i.id', '=', 't.instruction_id'),
+          )
+          .select(['t.id as id', 't.instruction_id as instructionId', 'i.spend_request_id as requestId'])
+          .where('t.org_id', '=', nudge.orgId)
+          .where((where) =>
+            reference.kind === 'instruction'
+              ? where('i.id', '=', reference.instructionId)
+              : where.and([
+                  where('i.account_consent_id', '=', reference.consentId),
+                  where.or([
+                    where('t.status', 'in', UNDER_WAY),
+                    where.and([where('t.status', '=', 'SUCCEEDED'), where('t.created_at', '>=', paidSince)]),
+                  ]),
+                ]),
+          )
+          .orderBy('t.id')
+          .limit(page)
+          .execute()
+      );
+    });
+
+  /**
+   * The partner's messages waiting in the inbox, each one's payments checked
+   * with the bank now, ahead of their turn, then the message taken once the
+   * bank answered for each. False if the signal stopped the run or the bank
+   * went unanswered UNREACHED_IN_A_ROW times: the rest wait for the next run.
+   */
+  const checkNudged = async (run: Run, signal: AbortSignal | undefined): Promise<boolean> => {
+    if (events === undefined) return true;
+    let nudges: Nudge[];
+    try {
+      nudges = await events.waiting(database, NUDGES_A_RUN);
+    } catch (error) {
+      logger.error('payment_check.nudge_failed', { err: error });
+      return true;
+    }
+    for (const nudge of nudges) {
+      const log = logger.child({ orgId: nudge.orgId });
+      try {
+        const tries = await events.tried(database, nudge.id);
+        const { unreached, failed } = run;
+        for (const payment of await namedBy(nudge, log)) {
+          if (signal?.aborted === true || !(await checkCounted(nudge.orgId, payment, run, log))) return false;
+        }
+        // Taken once the bank answered for every payment it names and each was recorded; else tried again next run,
+        // up to MOST_TRIES: then left to the regular check, so it never holds up the messages behind it.
+        if (run.unreached === unreached && run.failed === failed) await events.taken(database, nudge.id);
+        else if (tries >= MOST_TRIES) log.warn('payment_check.nudge_given_up', { messageId: nudge.id });
+      } catch (error) {
+        log.error('payment_check.nudge_failed', { err: error });
+      }
+    }
+    return true;
+  };
 
   /** The bank's word on the payment, within its time: unreachable is asked again; anything else it can't give is unreadable. */
   const wordOf = async (orgId: string, listed: Listed, log: Logger): Promise<Word> => {
@@ -328,41 +422,43 @@ export function createPaymentChecks({
     });
 
   /** One payment checked with the bank, its outcome logged; false where the bank couldn't be reached. */
-  const check = async (orgId: string, listed: Listed, log: Logger): Promise<boolean> => {
+  const check = async (orgId: string, listed: Listed, log: Logger): Promise<'checked' | 'unreached' | 'failed'> => {
     beatNow();
     const word = await wordOf(orgId, listed, log);
-    if (word.kind === 'unavailable') return false;
+    if (word.kind === 'unavailable') return 'unreached';
     try {
       const checked = await applied(orgId, listed, word, log);
       log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
+      return 'checked';
     } catch (error) {
       log.error('payment_check.failed', { transactionId: listed.id, err: error });
+      return 'failed';
     }
-    return true;
   };
 
-  /** One payment checked, the bank's unanswered calls counted in `bank`; false once UNREACHED_IN_A_ROW went unanswered. */
-  const checkCounted = async (
-    orgId: string,
-    payment: Listed,
-    bank: { unreached: number; inRow: number },
-    log: Logger,
-  ): Promise<boolean> => {
-    const reached = await check(orgId, payment, log);
-    bank.inRow = reached ? 0 : bank.inRow + 1;
-    if (!reached) bank.unreached += 1;
-    return bank.inRow < UNREACHED_IN_A_ROW;
+  /**
+   * One payment checked, unless this run checked it already (a message named
+   * it), counted in `run`; false once UNREACHED_IN_A_ROW went unanswered.
+   */
+  const checkCounted = async (orgId: string, payment: Listed, run: Run, log: Logger): Promise<boolean> => {
+    if (run.seen.has(payment.id)) return true;
+    run.seen.add(payment.id);
+    const checked = await check(orgId, payment, log);
+    run.inRow = checked === 'unreached' ? run.inRow + 1 : 0;
+    if (checked === 'unreached') run.unreached += 1;
+    if (checked === 'failed') run.failed += 1;
+    return run.inRow < UNREACHED_IN_A_ROW;
   };
 
   /**
    * The organisation's due payments checked, a page at a time, the bank's
-   * unanswered calls counted in `bank`; false if the signal stopped the run,
+   * unanswered calls counted in `run`; false if the signal stopped the run,
    * or the bank left UNREACHED_IN_A_ROW unanswered.
    */
   const checkAll = async (
     orgId: string,
     due: Due,
-    bank: { unreached: number; inRow: number },
+    run: Run,
     log: Logger,
     signal: AbortSignal | undefined,
   ): Promise<boolean> => {
@@ -376,7 +472,7 @@ export function createPaymentChecks({
         return true;
       }
       for (const payment of listed) {
-        if (signal?.aborted === true || !(await checkCounted(orgId, payment, bank, log))) return false;
+        if (signal?.aborted === true || !(await checkCounted(orgId, payment, run, log))) return false;
       }
       if (listed.length < page) return true;
       after = listed.at(-1)?.id;
@@ -402,19 +498,20 @@ export function createPaymentChecks({
         since: all ? undefined : new Date(now - (n % DAY_EVERY === 0 ? DAY_MS : FRESH_MS)),
         watchPaid: all,
       };
-      const bank = { unreached: 0, inRow: 0 };
+      const run: Run = { unreached: 0, inRow: 0, failed: 0, seen: new Set() };
       try {
+        if (!(await checkNudged(run, signal))) return;
         for (const orgId of orgs) {
           if (signal?.aborted === true) return;
-          if (!(await checkAll(orgId, due, bank, logger.child({ orgId }), signal))) return;
+          if (!(await checkAll(orgId, due, run, logger.child({ orgId }), signal))) return;
         }
         beatNow();
       } finally {
         // Once a run, not once a payment: the bank down is one thing to say.
-        if (bank.unreached > 0) {
+        if (run.unreached > 0) {
           logger.warn('payment_check.bank_unavailable', {
-            unreached: bank.unreached,
-            stopped: bank.inRow >= UNREACHED_IN_A_ROW,
+            unreached: run.unreached,
+            stopped: run.inRow >= UNREACHED_IN_A_ROW,
           });
         }
       }

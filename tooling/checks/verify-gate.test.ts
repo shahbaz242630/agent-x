@@ -15,8 +15,9 @@ import { POSTGRES_IMAGES } from '../test-db/postgres-images.ts';
 /** Each check and the exact command it runs. */
 const CHECKS = {
   'format:check': 'prettier --check .',
-  // ESLint once with the repository's rules and SonarJS's, failing on every finding but SonarJS's not yet blocking (#222).
-  lint: 'node tooling/quality/lint.ts',
+  // ESLint once with the repository's rules and SonarJS's, failing on every finding but SonarJS's not yet blocking (#222);
+  // with a 6 GB heap: the whole repository in one process passed Node's 4 GB default on CI's runner (S141, #453).
+  lint: 'node --max-old-space-size=6144 tooling/quality/lint.ts',
   typecheck: 'tsc --project tsconfig.json',
   boundaries: `depcruise ${['apps', 'packages'].filter((folder) => existsSync(folder)).join(' ')}`,
   knip: 'knip',

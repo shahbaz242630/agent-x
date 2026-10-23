@@ -5,6 +5,7 @@
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { instructionOfRequest, type InstructionsTables } from '@agentx/core/modules/instructions';
 import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import type { ProviderEventsTables } from '@agentx/core/modules/provider-events';
 import {
   addVersion,
   confirmPayeeChange,
@@ -24,7 +25,11 @@ import type { MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import type { spendWorld, SpendWorldTables } from './spend-world.helper.test.ts';
 
-export type HandoffWorldTables = SpendWorldTables & PlatformControlsTables & InstructionsTables & TransactionsTables;
+export type HandoffWorldTables = SpendWorldTables &
+  PlatformControlsTables &
+  InstructionsTables &
+  TransactionsTables &
+  ProviderEventsTables;
 
 /** AED 500 and the fils that choose the fake's answer (decision 5): under the approval threshold, so APPROVED. */
 export const ALLOWED = (fils = 0n) => AED(50_000n + fils);

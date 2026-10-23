@@ -34,4 +34,6 @@ interface InstructionsTable {
 interface DirectoryInstructionsTable {
   instruction_id: string;
   org_id: string;
+  /** The consent it pays under (0063); null for one entered before. */
+  account_consent_id: string | null;
 }

@@ -29,7 +29,12 @@ import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
  * named like `session`.
  */
 export type SweptRows =
-  'identity.flow' | 'identity.session' | 'identity.step_up_challenge' | 'notifications.notice' | 'security.event';
+  | 'identity.flow'
+  | 'identity.session'
+  | 'identity.step_up_challenge'
+  | 'notifications.notice'
+  | 'security.event'
+  | 'provider_events.message';
 
 export interface RowSweepOptions {
   readonly rows: SweptRows;

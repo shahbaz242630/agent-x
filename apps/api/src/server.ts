@@ -4,7 +4,8 @@
 // 2. is counted against its client address's rate limit (ADR-011 §4); a
 //    refusal is noted as a security event (B2-5b)
 // 3. is refused if it can change something but didn't come from our own origin
-//    (SEC-WEB-01), unless it is an agent's, with its key (C2-1)
+//    (SEC-WEB-01), unless it is an agent's, with its key (C2-1), or the
+//    partner's, judged by its signature (partner-events.ts, E1b)
 // 4. is refused if its route doesn't name its caller (access.ts, BR-04): a
 //    signed-in person is found by their session cookie (B2-4b), and on a
 //    route naming roles, their membership in the organisation the request
@@ -93,6 +94,7 @@ import type { FundingSourceChanges } from './funding-source-changes.ts';
 import type { FundingSourceLinks } from './funding-source-links.ts';
 import type { FundingSourceReads } from './funding-source-reads.ts';
 import { registerFakeBank } from './fake-bank.ts';
+import { type PartnerEventIntake, registerPartnerEvents } from './partner-events.ts';
 import { registerFundingSources } from './funding-sources.ts';
 import type { OrganizationChanges } from './organization-changes.ts';
 import { registerOrganization } from './organization.ts';
@@ -221,6 +223,8 @@ export interface ServerOptions {
   readonly supplierVerifications?: SupplierVerifications | undefined;
   /** The fake partner's bank, where the partner is the fake (fake-bank.ts); without it, those routes answer 404. */
   readonly fakeBank?: FakeBank | undefined;
+  /** Taking in the partner's messages (partner-events.ts, E1b); without it, that route answers 404. */
+  readonly partnerEvents?: PartnerEventIntake | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -325,8 +329,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // done() only for a request let through, as in access.ts: a refusal the client
   // hangs up on must not go on to the route.
   app.addHook('onRequest', (request, reply, done) => {
+    const { access = [], partnerSigned } = request.routeOptions.config;
     if (
-      !isAgentsRequest(request.headers.authorization, request.routeOptions.config.access ?? []) &&
+      !isAgentsRequest(request.headers.authorization, access) &&
+      partnerSigned !== true &&
       isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)
     ) {
       void sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
@@ -416,6 +422,16 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
   registerPolicies(app, { changes: options.policyChanges, simulations: options.policySimulations });
   registerFakeBank(app, { bank: options.fakeBank });
+  // The partner's messages read as bytes, in a scope of their own (E1b): the signature is over the body as sent, so it
+  // is never parsed first. JSON alone: the text parser Fastify adds by default would let any other body through.
+  void app.register((scoped, _options, done) => {
+    scoped.removeAllContentTypeParsers();
+    scoped.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_request, body, parsed) => {
+      parsed(null, body);
+    });
+    registerPartnerEvents(scoped, options.partnerEvents, logger);
+    done();
+  });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,

@@ -66,6 +66,7 @@ import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
+import { createProviderEvents, type ProviderEventsTables } from '@agentx/core/modules/provider-events';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { type ActivityExportTables, type ActivityTables, createActivityLog } from '@agentx/core/modules/activity';
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
@@ -139,6 +140,7 @@ import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
 import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
 import { heartbeatChecks } from './health.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
+import { createPartnerEventIntake } from './partner-events.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -181,7 +183,8 @@ type ApiTables = PlatformControlsTables &
   ActivityTables &
   ActivityExportTables &
   InstructionsTables &
-  TransactionsTables;
+  TransactionsTables &
+  ProviderEventsTables;
 
 const SERVICE = 'api';
 
@@ -486,7 +489,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       clock: systemClock,
       logger,
     });
-  // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off.
+  // The partner's messages as kept (E1b): the inbox, and the refused ones as evidence, for the security events' retention.
+  const providerEvents = createProviderEvents({
+    keys,
+    ids: uuidV7Ids,
+    clock: systemClock,
+    retentionDays: config.securityEvents.retentionDays,
+  });
+  // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
+  // the payments the partner's messages name first (E1b).
   const paymentChecks =
     rail &&
     createPaymentChecks({
@@ -498,6 +509,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       logger,
+      events: providerEvents,
     });
   const server = await buildServer({
     config,
@@ -762,6 +774,9 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
     fakeBank: rail?.bank,
+    // The partner's messages, where its rail is built (E1b): checked by its signature, kept, then checked with the bank.
+    partnerEvents:
+      rail && createPartnerEventIntake({ database, rail, events: providerEvents, securityEvents: recorder }),
   });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing({
@@ -850,6 +865,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const challengeSweeping = sweepRows('identity.step_up_challenge', (most) => challenges.sweep(database, most));
   // The security events past the retention the config names (B2-5a), on a timer of its own too.
   const eventSweeping = sweepRows('security.event', (most) => securityEvents.sweep(database, most));
+  // The partner's messages and the refused ones kept as evidence, past the same retention (E1b), on a timer of their own.
+  const messageSweeping = sweepRows('provider_events.message', (most) => providerEvents.sweep(database, most));
   // Notices sent or given up, past their retention (B5-1b), on a timer of their own too.
   const noticeSweeping = sweepRows('notifications.notice', (most) => outbox.sweep(database, most));
   // The one allowlisted fetch the notices, the login service's events and the resets send with.
@@ -1042,6 +1059,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           sessionSweeping.stop(),
           challengeSweeping.stop(),
           eventSweeping.stop(),
+          messageSweeping.stop(),
           noticeSweeping.stop(),
           noticeSending?.stop(),
           idpCopying.stop(),

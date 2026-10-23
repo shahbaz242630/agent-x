@@ -22,7 +22,7 @@ import { type Kysely } from 'kysely';
 import { type Clock, DAY_MS, type IdGenerator, isIpAddress, UUID } from '../../../shared-kernel/index.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
-export const SECURITY_EVENT_KINDS = ['sign_in_failed', 'rate_limited'] as const;
+export const SECURITY_EVENT_KINDS = ['sign_in_failed', 'rate_limited', 'partner_event_refused'] as const;
 export type SecurityEventKind = (typeof SECURITY_EVENT_KINDS)[number];
 
 /** The least time a security event is kept: AGENTX_SECURITY_EVENT_RETENTION_DAYS's minimum. */

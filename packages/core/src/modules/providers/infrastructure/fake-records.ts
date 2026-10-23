@@ -12,8 +12,10 @@
 // calls adding it at once both find none, and the second's `add` waits for the
 // first's step, then adds nothing and says so, and the caller reads what the
 // first added.
+import { randomBytes } from 'node:crypto';
+
 import { limitStatements, withTenant } from '@agentx/platform/db';
-import type { Kysely, Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { ConsentControls, PayeeNameCheck } from '../domain/rail.ts';
 import type { ConsentStatus } from '../domain/uae-consent.ts';
@@ -107,6 +109,8 @@ export interface FakeRecords {
 
 export interface FakePartnerStore {
   within<T>(organizationId: string, work: (records: FakeRecords) => Promise<T>): Promise<T>;
+  /** The fake partner's key for signing its messages (E1b, 0063): made the first time it is asked for, then the same everywhere. */
+  eventKey(): Promise<Buffer>;
 }
 
 /** A copy through JSON, as the database would give back: what the fake holds is never the caller's object. */
@@ -152,16 +156,18 @@ export function createMemoryRecords(): FakePartnerStore {
     };
   };
 
+  const eventKey = randomBytes(32);
   return {
     within: (organizationId, work) => {
       const step = queue.then(() => work(of(organizationId)));
       queue = step.catch(() => undefined);
       return step;
     },
+    eventKey: () => Promise.resolve(Buffer.from(eventKey)),
   };
 }
 
-/** The fake partner's table (db/migrations/0028_fake_partner.sql), as Kysely sees it. */
+/** The fake partner's tables (db/migrations/0028_fake_partner.sql, 0063), as Kysely sees them. */
 export interface FakePartnerTables {
   'fake_partner.records': {
     org_id: string;
@@ -170,7 +176,15 @@ export interface FakePartnerTables {
     alias: string | null;
     body: unknown;
   };
+  'fake_partner.event_keys': {
+    partner: string;
+    key: Buffer;
+    created_at: Date;
+  };
 }
+
+/** The partner the fake's own message key is kept under. */
+const FAKE_PARTNER = 'fake';
 
 /** The records in the database (0028), each organisation's behind the tenant walls. */
 export function createDatabaseRecords(db: Kysely<FakePartnerTables>): FakePartnerStore {
@@ -221,5 +235,20 @@ export function createDatabaseRecords(db: Kysely<FakePartnerTables>): FakePartne
         await limitStatements(tx);
         return work(of(tx, organizationId));
       }),
+    // Two processes asking at once: the second's insert adds nothing, and both read the one that stands.
+    eventKey: async () => {
+      await db
+        .insertInto('fake_partner.event_keys')
+        // The database's own time: only when it was made, never a business time (ADR-006).
+        .values({ partner: FAKE_PARTNER, key: randomBytes(32), created_at: sql<Date>`now()` })
+        .onConflict((conflict) => conflict.column('partner').doNothing())
+        .execute();
+      const row = await db
+        .selectFrom('fake_partner.event_keys')
+        .select('key')
+        .where('partner', '=', FAKE_PARTNER)
+        .executeTakeFirstOrThrow();
+      return row.key;
+    },
   };
 }

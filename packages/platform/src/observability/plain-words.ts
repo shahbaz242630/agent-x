@@ -363,6 +363,27 @@ export const PLAIN_WORDS = {
     broke: 'Approved payments wait, their money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
+  'partner_event.refused': {
+    happened:
+      "A message sent as the payment partner's was refused: a bad signature, an old time or an unreadable body.",
+    broke: 'Nothing was changed. The message was kept, encrypted, as security evidence.',
+    next: 'If these keep coming, someone may be posing as the partner, or its key changed: check with the partner.',
+  },
+  'partner_event.unknown_reference': {
+    happened: "The payment partner sent a message about a payment or consent Agent X doesn't hold.",
+    broke: 'Nothing was changed. The message was kept, encrypted, for checking.',
+    next: 'Check with the partner which payment it means: it may be one Agent X never handed off.',
+  },
+  'payment_check.nudge_given_up': {
+    happened: "The payments a partner's message named couldn't be checked after 5 tries, so the message was set aside.",
+    broke: 'Nothing is lost: those payments are still checked by the regular run, on its usual timing.',
+    next: 'If this happens often, a developer should read the earlier errors for those payments.',
+  },
+  'payment_check.nudge_failed': {
+    happened: "Checking the payments a partner's message named failed.",
+    broke: 'Those payments are still checked by the regular run, on its usual timing.',
+    next: 'It is tried again in about a minute. If it keeps failing, a developer should read the error.',
+  },
   'payment_check.unreadable': {
     happened: "The bank's answer about a payment could not be read, or was about another payment.",
     broke: 'A payment under way is marked unknown, its money held; it is never counted as paid.',
@@ -687,6 +708,11 @@ export const PLAIN_WORDS = {
     happened: "An organisation's spend requests that are no longer allowed could not be looked up.",
     broke: 'None of them was cancelled this run.',
     next: 'It is tried again at the next run, about 5 minutes later. If it keeps failing, check the database.',
+  },
+  'provider_events.message_sweep_failed': {
+    happened: "The hourly clean-up of the payment partner's old messages failed.",
+    broke: "Some of the partner's messages, and refused ones kept as evidence, were kept past their time this run.",
+    next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
   },
   'security.event_sweep_failed': {
     happened: 'The hourly clean-up of old security records failed.',

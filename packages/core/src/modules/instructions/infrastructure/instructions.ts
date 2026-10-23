@@ -157,7 +157,11 @@ export async function makeInstruction(
       created_at: instruction.createdAt,
     })
     .execute();
-  await tx.insertInto('directory.instructions').values({ instruction_id: id, org_id: orgId }).execute();
+  // With its consent (0063, E1b): a partner's message naming the consent alone finds its payments.
+  await tx
+    .insertInto('directory.instructions')
+    .values({ instruction_id: id, org_id: orgId, account_consent_id: instruction.accountConsentId })
+    .execute();
   const recorded = await states.record(
     tx,
     INSTRUCTIONS,
@@ -255,6 +259,26 @@ export async function organizationOfInstruction(
     .selectFrom('directory.instructions')
     .select('org_id')
     .where('instruction_id', '=', instructionId)
+    .executeTakeFirst();
+  return row?.org_id;
+}
+
+/**
+ * The organisation a consent's payments are in, from the directory (E1b): a
+ * partner's message naming the consent alone (rail map §1.8) is routed there,
+ * and the bank check finds the payments under it inside that organisation.
+ * A consent is one organisation's; none where no payment was made under it.
+ */
+export async function organizationOfConsent(
+  db: Pick<Transaction<InstructionsTables>, 'selectFrom'>,
+  consentId: string,
+): Promise<string | undefined> {
+  const row = await db
+    .selectFrom('directory.instructions')
+    .select('org_id')
+    .where('account_consent_id', '=', consentId)
+    .orderBy('instruction_id')
+    .limit(1)
     .executeTakeFirst();
   return row?.org_id;
 }
