@@ -540,8 +540,7 @@ export const PLAIN_WORDS = {
   'notification.remittance_unrecorded': {
     happened:
       "A supplier was emailed that it was paid, but the email couldn't be written into its organisation's audit log.",
-    broke:
-      "The organisation's audit log doesn't show that this payment's supplier was emailed; the email itself went out.",
+    broke: "The audit log won't show this email; the email itself went out.",
     next: 'Nothing is sent again. If it repeats, check the database; the API log names the payment.',
   },
   'notification.run_failed': {
