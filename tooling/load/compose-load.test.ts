@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { API_CPUS_VARIABLE, apiCpusOf, LOAD_DB_PORT, STAGING_API_CPUS } from './plan.ts';
+import { API_CPUS_VARIABLE, LOAD_DB_PORT, optionsOf, STAGING_API_CPUS } from './plan.ts';
 
 interface Service {
   ports?: string[];
@@ -71,12 +71,29 @@ describe('the load stack (compose.load.yaml)', () => {
     for (const [name, value] of limits) expect(Number(value) * 2, name).toBeLessThanOrEqual(cap);
   });
 
-  it('runs the API at staging’s half a CPU unless `--cpus` gives a size above 0, at most 4', () => {
-    expect(apiCpusOf(['--keep'])).toBe(0.5);
-    expect(apiCpusOf(['--cpus', '2'])).toBe(2);
-    expect(apiCpusOf(['--cpus', '4'])).toBe(4);
-    for (const bad of [['--cpus'], ['--cpus', '0'], ['--cpus', '4.5'], ['--cpus', 'two'], ['--cpus', '-1']]) {
-      expect(apiCpusOf(bad), bad.join(' ')).toBeUndefined();
-    }
+  describe('the runner’s arguments', () => {
+    it('runs the API at staging’s half a CPU unless `--cpus` gives a size from 0.01 to 4, in either order with `--keep`', () => {
+      expect(optionsOf([])).toEqual({ keep: false, apiCpus: 0.5 });
+      expect(optionsOf(['--keep'])).toEqual({ keep: true, apiCpus: 0.5 });
+      expect(optionsOf(['--cpus', '2'])).toEqual({ keep: false, apiCpus: 2 });
+      expect(optionsOf(['--keep', '--cpus', '1.5'])).toEqual({ keep: true, apiCpus: 1.5 });
+      expect(optionsOf(['--cpus', '0.01', '--keep'])).toEqual({ keep: true, apiCpus: 0.01 });
+      expect(optionsOf(['--cpus', '4'])).toEqual({ keep: false, apiCpus: 4 });
+    });
+
+    it.each([
+      ['--cpus'],
+      ['--cpus', '0'],
+      ['--cpus', '0.009'],
+      ['--cpus', '4.5'],
+      ['--cpus', 'two'],
+      ['--cpus', '-1'],
+      ['--cpus', '--keep'],
+      ['--cpus=2'],
+      ['--cpu', '2'],
+      ['2'],
+    ])('refuses %s, never a run at another size than asked', (...bad) => {
+      expect(optionsOf(bad)).toBeUndefined();
+    });
   });
 });

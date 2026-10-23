@@ -24,12 +24,34 @@ export const MOST_API_CPUS = 4;
 /** How the runner tells compose.load.yaml the API's CPUs. */
 export const API_CPUS_VARIABLE = 'AGENTX_LOAD_API_CPUS';
 
-/** The API's CPUs from the runner's arguments (`--cpus 2`), staging's when not given; undefined when not a size it can run. */
-export function apiCpusOf(args: readonly string[]): number | undefined {
-  const at = args.indexOf('--cpus');
-  if (at === -1) return STAGING_API_CPUS;
-  const cpus = Number(args[at + 1]);
-  return cpus > 0 && cpus <= MOST_API_CPUS ? cpus : undefined;
+/** The least a run may give the API: Docker refuses less, and only once the stack starts. */
+export const LEAST_API_CPUS = 0.01;
+
+/** What the runner was asked: whether to leave the stack up, and the API's CPUs (staging's unless given). */
+export interface LoadOptions {
+  readonly keep: boolean;
+  readonly apiCpus: number;
+}
+
+/**
+ * The runner's arguments (`--keep`, `--cpus 2`), or undefined for any it can't
+ * run: an unknown one (`--cpus=2`, `--cpu 2`) is refused, never a run at
+ * another size than asked.
+ */
+export function optionsOf(args: readonly string[]): LoadOptions | undefined {
+  let keep = false;
+  let apiCpus = STAGING_API_CPUS;
+  for (let at = 0; at < args.length; at++) {
+    if (args[at] === '--keep') {
+      keep = true;
+    } else if (args[at] === '--cpus') {
+      apiCpus = Number(args[++at]);
+      if (!(apiCpus >= LEAST_API_CPUS && apiCpus <= MOST_API_CPUS)) return undefined;
+    } else {
+      return undefined;
+    }
+  }
+  return { keep, apiCpus };
 }
 
 /** The run's working files (the seed's agent keys, k6's results, the API's log): gitignored. */

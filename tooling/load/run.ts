@@ -21,9 +21,10 @@ import { ENV_FILE, prepare } from '../../deploy/compose/prepare.ts';
 import { logFailures, summariseLogs } from './logs.ts';
 import {
   API_CPUS_VARIABLE,
-  apiCpusOf,
+  LEAST_API_CPUS,
   LOAD_PROJECT,
   MOST_API_CPUS,
+  optionsOf,
   OUT_DIR,
   POLICY_P95_MS,
   REPORTS_DIR,
@@ -163,10 +164,13 @@ function main(keep: boolean, apiCpus: number): number {
 
 if (import.meta.main) {
   try {
-    const apiCpus = apiCpusOf(process.argv);
-    if (apiCpus === undefined)
-      throw new LoadRefused(`--cpus takes a number above 0, at most ${String(MOST_API_CPUS)}.`);
-    process.exitCode = main(process.argv.includes('--keep'), apiCpus);
+    const options = optionsOf(process.argv.slice(2));
+    if (options === undefined) {
+      throw new LoadRefused(
+        `Run it as \`corepack pnpm load [--keep] [--cpus <n>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}.`,
+      );
+    }
+    process.exitCode = main(options.keep, options.apiCpus);
   } catch (error) {
     if (!(error instanceof LoadRefused)) throw error;
     console.error(`\n${error.message}`);
