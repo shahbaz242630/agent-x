@@ -153,6 +153,7 @@ import { recordStart } from './start-record.ts';
 import { createOrganizationChanges } from './organization-changes.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
 import { createSupplierDetailsChanges } from './supplier-details.ts';
+import { createSupplierRemittance } from './supplier-remittance.ts';
 import { createSupplierPayeeChanges } from './supplier-payee-changes.ts';
 import { createSupplierVerifications } from './supplier-verifications.ts';
 import { createSupplierPayees } from './supplier-payees.ts';
@@ -699,6 +700,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     supplierDetailsChanges: createSupplierDetailsChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
+    supplierRemittance: createSupplierRemittance({
       database,
       keys,
       ids: uuidV7Ids,

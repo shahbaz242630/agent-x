@@ -94,6 +94,7 @@ async function addedSupplier(details: SupplierDetails = DETAILS): Promise<{ id: 
       versionId,
       supplier: details,
       enteredBy: ids.next(),
+      remittanceEmail: 'on',
       createdAt: clock.now(),
       actor: OPERATOR,
     }),
@@ -371,9 +372,9 @@ describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and hel
 
   it('deleted with its version, which the app role cannot do', async () => {
     const { id, versionId } = await addedSupplier();
-    // One statement: each row is the other's key, so neither goes alone.
+    // One statement: each row is the other's key, so neither goes alone; its remittance setting (0061) with them.
     await owner.query(
-      'with gone as (delete from suppliers.suppliers where id = $1 returning id) delete from suppliers.supplier_versions where id = $2',
+      'with setting as (delete from suppliers.remittance_settings where id = $1), gone as (delete from suppliers.suppliers where id = $1 returning id) delete from suppliers.supplier_versions where id = $2',
       [id, versionId],
     );
 

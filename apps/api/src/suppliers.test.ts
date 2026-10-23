@@ -11,6 +11,7 @@ import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type {
   RegistrationRecord,
+  RemittanceEmail,
   SupplierDetails,
   SupplierRecord,
   SupplierShown,
@@ -26,6 +27,7 @@ import { SESSION_COOKIE } from './sign-in.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
 import type { SupplierDetailsChanges } from './supplier-details.ts';
+import type { SupplierRemittance } from './supplier-remittance.ts';
 import type { SupplierVerifications } from './supplier-verifications.ts';
 import type { PayeeWrite, SupplierPayees } from './supplier-payees.ts';
 import type { SupplierAddWrite, SupplierPage, SupplierRegistry, SuppliersListed } from './supplier-registry.ts';
@@ -86,6 +88,7 @@ const VIEW: SupplierView = {
   contacts: { phone: '+971501234567', email: 'accounts@gulfoffice.example', tradeLicence: null },
   payee: null,
   pending: null,
+  remittanceEmail: 'on',
 };
 
 /** A payee as the partner described it (E2-2b). */
@@ -117,6 +120,7 @@ const DETAILS_ANSWERED = {
   enteredBy: MEMBERSHIP,
   enteredAt: '2026-10-01T08:00:00.000Z',
   payee: null,
+  remittanceEmail: 'on',
   pendingChange: null,
 };
 
@@ -126,6 +130,9 @@ const BODY = {
   email: 'Accounts@GulfOffice.example',
   source: { kind: 'registry', ref: 'DED-123456' },
 };
+
+/** An add's body: the details, and the admin's choice of the remittance email (partner decision 34b). */
+const ADD_BODY = { ...BODY, remittanceEmail: 'on' };
 
 const AGENT_KEY = `axk_${'a'.repeat(32)}_${'b'.repeat(43)}`;
 const AGENT_KEY_WITHOUT_SUPPLIERS = `axk_${'c'.repeat(32)}_${'b'.repeat(43)}`;
@@ -179,7 +186,11 @@ const REGISTRATION_ANSWERED = {
 
 /** What the routes asked of the use cases. */
 type Asked =
-  | { readonly kind: 'add'; readonly keyed: IdempotentRequest; readonly details: SupplierDetails }
+  | {
+      readonly kind: 'add';
+      readonly keyed: IdempotentRequest;
+      readonly added: { readonly details: SupplierDetails; readonly remittanceEmail: RemittanceEmail };
+    }
   | { readonly kind: 'list' | 'usableByAgent'; readonly orgId: string; readonly page: SupplierPage }
   | { readonly kind: 'show'; readonly orgId: string; readonly supplierId: string }
   | {
@@ -214,6 +225,14 @@ type Asked =
       readonly pendingRequests: string;
     }
   | {
+      readonly kind: 'remittance' | 'remittanceConfirm';
+      readonly member: object;
+      readonly keyed: IdempotentRequest;
+      readonly supplierId: string;
+      readonly remittanceEmail: RemittanceEmail;
+      readonly stepUpChallengeId?: string;
+    }
+  | {
       readonly kind: 'details' | 'detailsConfirm';
       readonly member: object;
       readonly keyed: IdempotentRequest;
@@ -242,8 +261,8 @@ async function withSuppliers(
   asked: Asked[] = [],
 ) {
   const registry: SupplierRegistry = {
-    add: (_member, keyed, details) => {
-      asked.push({ kind: 'add', keyed, details });
+    add: (_member, keyed, added) => {
+      asked.push({ kind: 'add', keyed, added });
       return Promise.resolve(answers.add ?? { outcome: 'busy' });
     },
     list: (orgId, page) => {
@@ -323,6 +342,16 @@ async function withSuppliers(
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
+  const remittance: SupplierRemittance = {
+    ask: (member, keyed, supplierId, remittanceEmail) => {
+      asked.push({ kind: 'remittance', member, keyed, supplierId, remittanceEmail });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+    confirm: (member, keyed, supplierId, { stepUpChallengeId, remittanceEmail }) => {
+      asked.push({ kind: 'remittanceConfirm', member, keyed, supplierId, remittanceEmail, stepUpChallengeId });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+  };
   const app = await routeServer({
     live: LIVE,
     member: ADMIN,
@@ -336,6 +365,7 @@ async function withSuppliers(
     supplierPayeeChanges: payeeChanges,
     supplierVerifications: verifications,
     supplierDetailsChanges: detailsChanges,
+    supplierRemittance: remittance,
   });
   return app;
 }
@@ -381,7 +411,7 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
     const asked: Asked[] = [];
     const app = await withSuppliers({ add: { outcome: 'added', ...VIEW } }, asked);
 
-    const response = await app.inject(post('', BODY));
+    const response = await app.inject(post('', ADD_BODY));
 
     expect(response.statusCode).toBe(201);
     expect(response.json()).toEqual(DETAILS_ANSWERED);
@@ -389,27 +419,44 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
       {
         kind: 'add',
         keyed: expect.objectContaining({ orgId: ORG, operation: 'suppliers.add', key: 'k-1' }) as unknown,
-        details: {
-          displayName: 'Gulf Office Supplies LLC',
-          contacts: { phone: '+971501234567', email: 'accounts@gulfoffice.example', tradeLicence: null },
-          source: { kind: 'registry', ref: 'DED-123456' },
+        added: {
+          details: {
+            displayName: 'Gulf Office Supplies LLC',
+            contacts: { phone: '+971501234567', email: 'accounts@gulfoffice.example', tradeLicence: null },
+            source: { kind: 'registry', ref: 'DED-123456' },
+          },
+          remittanceEmail: 'on',
         },
       },
     ]);
   });
 
+  it('passes the admin’s choice of off as it is, the supplier answered with it', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ add: { outcome: 'added', ...VIEW, remittanceEmail: 'off' } }, asked);
+
+    const response = await app.inject(post('', { ...BODY, remittanceEmail: 'off' }));
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({ remittanceEmail: 'off' });
+    expect(asked).toMatchObject([{ kind: 'add', added: { remittanceEmail: 'off' } }]);
+  });
+
   it.each([
-    ['no name', { ...BODY, displayName: '' }],
-    ['a name of 101 characters', { ...BODY, displayName: 'a'.repeat(101) }],
-    ['a phone not in international form', { ...BODY, phone: '0501234567' }],
-    ['an email that isn’t one', { ...BODY, email: 'not an email' }],
-    ['a trade licence with a space', { ...BODY, tradeLicence: 'DED 123' }],
-    ['a source of another kind', { ...BODY, source: { kind: 'a friend', ref: 'x' } }],
-    ['a source reference of 201 characters', { ...BODY, source: { kind: 'registry', ref: 'r'.repeat(201) } }],
-    ['a field it doesn’t know', { ...BODY, iban: 'AE070331234567890123456' }],
-    ['an IBAN as the name', { ...BODY, displayName: 'AE07 0331 2345 6789 0123 456' }],
-    ['an IBAN as the source reference', { ...BODY, source: { kind: 'registry', ref: 'AE070331234567890123456' } }],
-    ['no phone', { displayName: 'A', source: BODY.source }],
+    ['no name', { ...ADD_BODY, displayName: '' }],
+    ['a name of 101 characters', { ...ADD_BODY, displayName: 'a'.repeat(101) }],
+    ['a phone not in international form', { ...ADD_BODY, phone: '0501234567' }],
+    ['an email that isn’t one', { ...ADD_BODY, email: 'not an email' }],
+    ['a trade licence with a space', { ...ADD_BODY, tradeLicence: 'DED 123' }],
+    ['a source of another kind', { ...ADD_BODY, source: { kind: 'a friend', ref: 'x' } }],
+    ['a source reference of 201 characters', { ...ADD_BODY, source: { kind: 'registry', ref: 'r'.repeat(201) } }],
+    ['a field it doesn’t know', { ...ADD_BODY, iban: 'AE070331234567890123456' }],
+    ['an IBAN as the name', { ...ADD_BODY, displayName: 'AE07 0331 2345 6789 0123 456' }],
+    ['an IBAN as the source reference', { ...ADD_BODY, source: { kind: 'registry', ref: 'AE070331234567890123456' } }],
+    ['no phone', { displayName: 'A', source: BODY.source, remittanceEmail: 'on' }],
+    ['no choice of the remittance email (Rule Book §1.9: no hidden default)', BODY],
+    ['a remittance email that is neither on nor off', { ...ADD_BODY, remittanceEmail: 'yes' }],
+    ['a remittance email as true', { ...ADD_BODY, remittanceEmail: true }],
   ])('refuses %s with 400, before the use case runs', async (_what, body) => {
     const asked: Asked[] = [];
     const app = await withSuppliers({}, asked);
@@ -423,7 +470,7 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
 
   const longestEmail = `${'a'.repeat(64)}@${'b'.repeat(189)}`;
   const longest = (name: string) =>
-    `{"displayName":"${escaped(name)}","phone":"${escaped('+971501234567890')}","email":"${escaped(longestEmail)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"}}`;
+    `{"displayName":"${escaped(name)}","phone":"${escaped('+971501234567890')}","email":"${escaped(longestEmail)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"},"remittanceEmail":"${escaped('off')}"}`;
 
   it.each([
     ['100 astral characters', String.fromCodePoint(0x1d400).repeat(100)],
@@ -452,7 +499,7 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
   ] as const)('answers %i %s as the use case refuses', async (status, code) => {
     const app = await withSuppliers({ add: { outcome: 'refused', status, code } });
 
-    const response = await app.inject(post('', BODY));
+    const response = await app.inject(post('', ADD_BODY));
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });
@@ -464,9 +511,104 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
   ] as const)('answers a key %s as the idempotency store says', async (outcome, code) => {
     const app = await withSuppliers({ add: { outcome } });
 
-    const response = await app.inject(post('', BODY));
+    const response = await app.inject(post('', ADD_BODY));
 
     expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code } });
+  });
+});
+
+describe('POST /v1/suppliers/:id/remittance-email, then /confirm, with a step-up (C2a, decision 34d)', () => {
+  it.each(['on', 'off'] as const)(
+    'answers the ask for %s 202 with the step-up to sign in again for',
+    async (choice) => {
+      const asked: Asked[] = [];
+      const app = await withSuppliers({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, asked);
+
+      const response = await app.inject(post(`/${SUPPLIER_ID}/remittance-email`, { remittanceEmail: choice }));
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+      expect(asked).toEqual([
+        {
+          kind: 'remittance',
+          member: { ...MEMBER, sessionId: LIVE.sessionId },
+          keyed: expect.objectContaining({
+            orgId: ORG,
+            operation: 'suppliers.remittance-email',
+            key: 'k-1',
+          }) as unknown,
+          supplierId: SUPPLIER_ID,
+          remittanceEmail: choice,
+        },
+      ]);
+    },
+  );
+
+  it('answers the confirm 200 with the supplier and its new setting, passing the step-up', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW, remittanceEmail: 'off' } }, asked);
+
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/remittance-email/confirm`, { stepUpChallengeId: CHALLENGE, remittanceEmail: 'off' }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ...DETAILS_ANSWERED, remittanceEmail: 'off' });
+    expect(asked).toEqual([
+      {
+        kind: 'remittanceConfirm',
+        member: { ...MEMBER, sessionId: LIVE.sessionId },
+        keyed: expect.objectContaining({ operation: 'suppliers.remittance-email.confirm' }) as unknown,
+        supplierId: SUPPLIER_ID,
+        remittanceEmail: 'off',
+        stepUpChallengeId: CHALLENGE,
+      },
+    ]);
+  });
+
+  it.each([
+    ['', {}],
+    ['', { remittanceEmail: 'maybe' }],
+    ['', { remittanceEmail: false }],
+    ['', { remittanceEmail: 'on', email: 'other@example.com' }],
+    ['/confirm', {}],
+    ['/confirm', { stepUpChallengeId: CHALLENGE }],
+    ['/confirm', { remittanceEmail: 'off' }],
+    ['/confirm', { stepUpChallengeId: CHALLENGE, remittanceEmail: 'off', more: 1 }],
+  ])(
+    'refuses remittance-email%s with %j (no choice, no step-up, or more) before the use case runs',
+    async (path, body) => {
+      const asked: Asked[] = [];
+      const app = await withSuppliers({}, asked);
+
+      expect((await app.inject(post(`/${SUPPLIER_ID}/remittance-email${path}`, body))).statusCode).toBe(400);
+      expect(asked).toEqual([]);
+    },
+  );
+
+  it('refuses a supplier ID that isn’t one with 400, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({}, asked);
+
+    expect((await app.inject(post('/not-an-id/remittance-email', { remittanceEmail: 'on' }))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it.each([
+    [409, 'SUPPLIER_REMITTANCE_UNCHANGED'],
+    [403, 'STEP_UP_FAILED'],
+    [403, 'FORBIDDEN'],
+    [404, 'NOT_FOUND'],
+    [503, 'INTEGRITY_FAILED'],
+  ] as const)('answers %i %s as the use case refuses', async (status, code) => {
+    const app = await withSuppliers({ change: { outcome: 'refused', status, code } });
+
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/remittance-email/confirm`, { stepUpChallengeId: CHALLENGE, remittanceEmail: 'off' }),
+    );
+
+    expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });
   });
 });

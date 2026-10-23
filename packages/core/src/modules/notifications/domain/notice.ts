@@ -40,13 +40,14 @@ const RESET_NOTICE_KINDS = [
   'factor_reset_completed',
 ] as const;
 
-/** The kinds about a supplier, `aboutId` its ID (0033): sent by E2-2 and E3-2. */
+/** The kinds about a supplier, `aboutId` its ID (0033): sent by E2-2 and E3-2; its remittance email changed by Phase 4 C2a (0061). */
 export const SUPPLIER_NOTICE_KINDS = [
   'supplier_reactivated',
   'supplier_payee_changed',
   'supplier_details_changed',
   'supplier_verified',
   'supplier_suspended',
+  'supplier_remittance_changed',
 ] as const;
 
 /** The kinds about an agent, `aboutId` its ID (0034): its handover, told to the admins and to its new owner. */

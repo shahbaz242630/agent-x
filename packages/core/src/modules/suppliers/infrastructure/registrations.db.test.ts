@@ -119,6 +119,7 @@ async function supplier(orgId: string): Promise<{ id: string; versionId: string 
       versionId,
       supplier: DETAILS,
       enteredBy: ids.next(),
+      remittanceEmail: 'on',
       createdAt: clock.now(),
       actor: OPERATOR,
     }),
@@ -311,12 +312,11 @@ const supplierNow = (orgId: string, supplierId: string) =>
   withSignedStates(app, orgId, services(), (tx, states) => supplierOf(tx, states, { orgId, id: supplierId }, 'share'));
 
 const eventsAbout = (orgId: string, subjectId: string) =>
-  database
-    .as('backup')
-    .query<{ action: string; details: string }>(
-      'select action, details::text as details from audit.events where org_id = $1 and subject_id = $2 order by seq',
-      [orgId, subjectId],
-    );
+  database.as('backup').query<{ action: string; details: string }>(
+    // Never its supplier's remittance setting's (0061), whose ID is the supplier's.
+    "select action, details::text as details from audit.events where org_id = $1 and subject_id = $2 and subject_type <> 'supplier_remittance' order by seq",
+    [orgId, subjectId],
+  );
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });

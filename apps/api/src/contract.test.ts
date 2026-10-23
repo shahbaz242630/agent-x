@@ -263,6 +263,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/suppliers/{id}/payee-registrations/{registrationId}/check',
       'POST /v1/suppliers/{id}/reactivate',
       'POST /v1/suppliers/{id}/reactivate/confirm',
+      'POST /v1/suppliers/{id}/remittance-email',
+      'POST /v1/suppliers/{id}/remittance-email/confirm',
       'POST /v1/suppliers/{id}/suspend',
       'POST /v1/suppliers/{id}/verify',
       'POST /v1/suppliers/{id}/verify/confirm',
@@ -1245,8 +1247,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), with each GET's HEAD.
-    expect(answers).toHaveLength(157);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), with each GET's HEAD.
+    expect(answers).toHaveLength(159);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1328,6 +1330,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'SupplierPayee',
       'SupplierPayeeApprovalAsked',
       'SupplierReactivationAsked',
+      'SupplierRemittanceChangeAsked',
       'SupplierVerificationAsked',
     ]);
   });

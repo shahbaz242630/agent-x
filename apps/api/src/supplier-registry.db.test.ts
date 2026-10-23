@@ -123,7 +123,7 @@ const keyed = (who: SupplierMember, key = nextKey()): IdempotentRequest => ({
 });
 
 const add = (who: SupplierMember, details: SupplierDetails = DETAILS, key?: string) =>
-  registry.add(who, keyed(who, key), details, CORRELATION);
+  registry.add(who, keyed(who, key), { details: details, remittanceEmail: 'on' }, CORRELATION);
 
 const addedOf = (write: SupplierAddWrite) => {
   if (write.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(write)}`);
@@ -196,7 +196,11 @@ describe(`adding a supplier (E1-2, Postgres ${server.version})`, () => {
         .where('subject_id', '=', added.supplier.id)
         .execute(),
     );
-    expect(events).toEqual([{ action: 'supplier.added', actor_type: 'user', actor_id: admin.userId }]);
+    // The admin's choice of its remittance email (0061) signed as theirs too, its ID the supplier's.
+    expect(events).toEqual([
+      { action: 'supplier.added', actor_type: 'user', actor_id: admin.userId },
+      { action: 'supplier_remittance.chosen', actor_type: 'user', actor_id: admin.userId },
+    ]);
   });
 
   it.each(['approver', 'developer', 'viewer'] as const)(
@@ -239,7 +243,9 @@ describe(`adding a supplier (E1-2, Postgres ${server.version})`, () => {
     await add(admin, DETAILS, 'the-key');
 
     const other = { ...keyed(admin, 'the-key'), payload: '{"displayName":"Another"}' };
-    expect(await registry.add(admin, other, named('Another'), CORRELATION)).toEqual({ outcome: 'conflict' });
+    expect(await registry.add(admin, other, { details: named('Another'), remittanceEmail: 'on' }, CORRELATION)).toEqual(
+      { outcome: 'conflict' },
+    );
   });
 
   it(`past ${String(MOST_SUPPLIERS_ADDED_A_DAY)} in 24 hours: SUPPLIER_ADDS_SPENT, until a day has passed`, async () => {
@@ -392,6 +398,7 @@ describe(`reading suppliers (E1-2, Postgres ${server.version})`, () => {
       const alarms = capture.lines().filter((line) => line.event === 'audit.integrity_failed');
       expect(alarms).toMatchObject([{ level: 'error', subjectType: 'supplier_version', objectId: added.version.id }]);
     } finally {
+      await owner.query('delete from suppliers.remittance_settings where id = $1', [added.supplier.id]);
       await owner.query('delete from suppliers.suppliers where id = $1', [added.supplier.id]);
       await owner.query('alter table suppliers.supplier_versions enable trigger made_once');
       await owner.query(

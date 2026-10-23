@@ -14,6 +14,8 @@ import {
   type NameCheck,
   registrationOf,
   type RegistrationRecord,
+  type RemittanceEmail,
+  remittanceOf,
   type SupplierContacts,
   SupplierContactsUnreadable,
   supplierOf,
@@ -68,6 +70,8 @@ export interface SupplierView {
   readonly contacts: SupplierContacts;
   readonly payee: PayeeShown | null;
   readonly pending: { readonly version: VersionRecord; readonly payee: PayeeShown | null } | null;
+  /** Whether it is emailed when it is paid (0061). */
+  readonly remittanceEmail: RemittanceEmail;
 }
 
 /** A change of a supplier, as the use cases answer it: the supplier as it now stands, a step-up asked, or a refusal. */
@@ -86,6 +90,7 @@ export const toldEveryone = (
     | 'supplier_payee_changed'
     | 'supplier_verified'
     | 'supplier_details_changed'
+    | 'supplier_remittance_changed'
     | 'supplier_suspended'
     | 'supplier_reactivated',
 ): Notice[] => {
@@ -210,10 +215,11 @@ export function createSupplierWork(services: {
   };
 
   /**
-   * The supplier with its current version, contacts and payee, and the change
-   * waiting, read (`share`) in the organisation's transaction: NOT_FOUND for
-   * one it doesn't have; INTEGRITY_FAILED for a supplier, version or
-   * registration that can't be believed, or contacts that won't open.
+   * The supplier with its current version, contacts and payee, the change
+   * waiting, and its remittance setting, read (`share`) in the
+   * organisation's transaction: NOT_FOUND for one it doesn't have;
+   * INTEGRITY_FAILED for a supplier, version, registration or setting that
+   * can't be believed, or contacts that won't open.
    */
   const viewIn = async (
     tx: SupplierTx,
@@ -228,13 +234,12 @@ export function createSupplierWork(services: {
       supplier.pendingVersionId === null
         ? null
         : await versionIn(tx, states, orgId, supplier.id, supplier.pendingVersionId);
-    return {
-      supplier,
-      version,
-      contacts: await contactsIn(tx, orgId, version, correlationId),
-      payee: await payeeOf(tx, states, orgId, version),
-      pending: pending === null ? null : { version: pending, payee: await payeeOf(tx, states, orgId, pending) },
-    };
+    const contacts = await contactsIn(tx, orgId, version, correlationId);
+    const payee = await payeeOf(tx, states, orgId, version);
+    const waiting = pending === null ? null : { version: pending, payee: await payeeOf(tx, states, orgId, pending) };
+    const remittance = await remittanceOf(tx, states, { orgId, supplierId: supplier.id }, 'share');
+    if (remittance.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
+    return { supplier, version, contacts, payee, pending: waiting, remittanceEmail: remittance.remittanceEmail };
   };
 
   /** The supplier as the members' routes show it, in a transaction of its own. */

@@ -105,8 +105,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), and its instruction and transaction (Phase 4 B3)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then the agents' month zones, then spend requests, then their instructions and transactions.
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), and its instruction and transaction (Phase 4 B3)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions.
     const [
       organizations,
       invitations,
@@ -123,6 +123,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
       supplierRows,
       registrations,
       supplierVersions,
+      remittanceSettings,
       zones,
       requests,
       instructionRows,
@@ -145,6 +146,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(supplierRows).toBe(suppliers.SUPPLIERS);
     expect(registrations).toBe(suppliers.BENEFICIARY_REGISTRATIONS);
     expect(supplierVersions).toBe(suppliers.SUPPLIER_VERSIONS);
+    expect(remittanceSettings).toBe(suppliers.REMITTANCE_SETTINGS);
     expect(zones).toBe(limitReservations.AGENT_ZONES);
     expect(requests).toBe(spendRequests.SPEND_REQUESTS);
     expect(instructionRows).toBe(instructions.INSTRUCTIONS);
@@ -249,6 +251,12 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: suppliers.SUPPLIER_VERSIONS.fields,
         madeOnce: true,
       },
+      // A supplier's remittance setting changes in place: no status, not made once.
+      {
+        table: suppliers.REMITTANCE_SETTINGS.table,
+        subject: suppliers.REMITTANCE_SETTINGS.subject,
+        fields: suppliers.REMITTANCE_SETTINGS.fields,
+      },
       // An agent's zone, made once as a supplier's version is.
       {
         table: limitReservations.AGENT_ZONES.table,
@@ -331,14 +339,16 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[13]?.status).toBe(suppliers.BENEFICIARY_REGISTRATION);
     expect(AUTHORITY_TABLES[14]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
     expect(AUTHORITY_TABLES[14]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[15]?.fields).toBe(limitReservations.AGENT_ZONES.fields);
+    expect(AUTHORITY_TABLES[15]?.fields).toBe(suppliers.REMITTANCE_SETTINGS.fields);
     expect(AUTHORITY_TABLES[15]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[16]?.fields).toBe(spendRequests.SPEND_REQUESTS.fields);
-    expect(AUTHORITY_TABLES[16]?.status).toBe(spendRequests.SPEND_REQUEST);
-    expect(AUTHORITY_TABLES[17]?.fields).toBe(instructions.INSTRUCTIONS.fields);
-    expect(AUTHORITY_TABLES[17]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[18]?.fields).toBe(transactions.TRANSACTIONS.fields);
-    expect(AUTHORITY_TABLES[18]?.status).toBe(transactions.TRANSACTION);
+    expect(AUTHORITY_TABLES[16]?.fields).toBe(limitReservations.AGENT_ZONES.fields);
+    expect(AUTHORITY_TABLES[16]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[17]?.fields).toBe(spendRequests.SPEND_REQUESTS.fields);
+    expect(AUTHORITY_TABLES[17]?.status).toBe(spendRequests.SPEND_REQUEST);
+    expect(AUTHORITY_TABLES[18]?.fields).toBe(instructions.INSTRUCTIONS.fields);
+    expect(AUTHORITY_TABLES[18]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[19]?.fields).toBe(transactions.TRANSACTIONS.fields);
+    expect(AUTHORITY_TABLES[19]?.status).toBe(transactions.TRANSACTION);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

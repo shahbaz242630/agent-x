@@ -43,6 +43,7 @@ export {
 export { ACCOUNT_NUMBER_KEPT, keptSupplierDetails } from './infrastructure/kept-details.ts';
 export {
   addSupplier,
+  addSupplierUnset,
   addVersion,
   changeDetails,
   confirmPayeeChange,
@@ -102,6 +103,16 @@ export {
   startRegistration,
   supplierWithPayeeKey,
 } from './infrastructure/registrations.ts';
+export {
+  REMITTANCE_EMAIL_UNSET,
+  REMITTANCE_EMAILS,
+  REMITTANCE_SETTINGS,
+  type RemittanceCheck,
+  type RemittanceEmail,
+  remittanceOf,
+  type RemittanceSet,
+  setRemittance,
+} from './infrastructure/remittance.ts';
 export type { SuppliersTables } from './infrastructure/tables.ts';
 export {
   MOST_VERIFICATIONS_READ,

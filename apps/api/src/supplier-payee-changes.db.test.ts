@@ -149,7 +149,12 @@ const keyed = (who: SessionMember, operation: string, key = nextKey()): Idempote
 
 /** A supplier added by the admin, as E1-2 adds it. */
 async function added(admin: SessionMember): Promise<string> {
-  const write = await registry.add(admin, keyed(admin, ADD_OPERATION), DETAILS, CORRELATION);
+  const write = await registry.add(
+    admin,
+    keyed(admin, ADD_OPERATION),
+    { details: DETAILS, remittanceEmail: 'on' },
+    CORRELATION,
+  );
   if (write.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(write)}`);
   return write.supplier.id;
 }
