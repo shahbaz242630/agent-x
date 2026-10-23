@@ -341,6 +341,19 @@ export function createPaymentChecks({
     return true;
   };
 
+  /** One payment checked, the bank's unanswered calls counted in `bank`; false once UNREACHED_IN_A_ROW went unanswered. */
+  const checkCounted = async (
+    orgId: string,
+    payment: Listed,
+    bank: { unreached: number; inRow: number },
+    log: Logger,
+  ): Promise<boolean> => {
+    const reached = await check(orgId, payment, log);
+    bank.inRow = reached ? 0 : bank.inRow + 1;
+    if (!reached) bank.unreached += 1;
+    return bank.inRow < UNREACHED_IN_A_ROW;
+  };
+
   /**
    * The organisation's due payments checked, a page at a time, the bank's
    * unanswered calls counted in `bank`; false if the signal stopped the run,
@@ -363,11 +376,7 @@ export function createPaymentChecks({
         return true;
       }
       for (const payment of listed) {
-        if (signal?.aborted === true) return false;
-        const reached = await check(orgId, payment, log);
-        bank.inRow = reached ? 0 : bank.inRow + 1;
-        if (!reached) bank.unreached += 1;
-        if (bank.inRow >= UNREACHED_IN_A_ROW) return false;
+        if (signal?.aborted === true || !(await checkCounted(orgId, payment, bank, log))) return false;
       }
       if (listed.length < page) return true;
       after = listed.at(-1)?.id;
