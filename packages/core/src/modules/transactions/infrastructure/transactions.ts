@@ -173,13 +173,24 @@ export type TransactionMoved =
   | { readonly outcome: 'missing' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
-/** The facts given merged over those kept: one the partner didn't give now keeps the one it gave before. */
-const merged = (kept: ProviderFacts, given: ProviderFacts): ProviderFacts => ({
-  providerStatus: given.providerStatus ?? kept.providerStatus,
-  paymentInstructionRef: given.paymentInstructionRef ?? kept.paymentInstructionRef,
-  rejectCode: given.rejectCode ?? kept.rejectCode,
-  providerChangedAt: given.providerChangedAt ?? kept.providerChangedAt,
-});
+/**
+ * The facts given merged over those kept: one the partner didn't give now
+ * keeps the one it gave before, and a status older than the one kept (a late
+ * answer after a newer lookup, E1a) never replaces it: the newer word stands.
+ */
+const merged = (kept: ProviderFacts, given: ProviderFacts): ProviderFacts => {
+  const older =
+    given.providerChangedAt !== null &&
+    kept.providerChangedAt !== null &&
+    given.providerChangedAt.getTime() < kept.providerChangedAt.getTime();
+  const status = older ? kept : given;
+  return {
+    providerStatus: status.providerStatus ?? kept.providerStatus,
+    paymentInstructionRef: given.paymentInstructionRef ?? kept.paymentInstructionRef,
+    rejectCode: status.rejectCode ?? kept.rejectCode,
+    providerChangedAt: status.providerChangedAt ?? kept.providerChangedAt,
+  };
+};
 
 /** The facts as the row writes them, each column its text or null. */
 const factsSet = ({ providerStatus, paymentInstructionRef, rejectCode, providerChangedAt }: ProviderFacts) => ({

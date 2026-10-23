@@ -34,6 +34,12 @@ interface Outcome {
   readonly err?: unknown;
 }
 
+/** /health's checks for the background jobs that beat (ADR-013): `<name>_heartbeat` for each there is. */
+export const heartbeatChecks = (jobs: Readonly<Record<string, { beating(): boolean } | undefined>>): HealthCheck[] =>
+  Object.entries(jobs).flatMap(([name, job]) =>
+    job === undefined ? [] : [{ name: `${name}_heartbeat`, check: () => Promise.resolve(job.beating()) }],
+  );
+
 async function run({ name, check }: HealthCheck): Promise<Outcome> {
   try {
     return { name, passed: await check() };

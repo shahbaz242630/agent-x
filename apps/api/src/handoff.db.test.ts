@@ -26,29 +26,17 @@
 // holdings check where it gets past.
 import { AGENT_KEYS } from '@agentx/core/modules/agents';
 import { holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
-import { INSTRUCTIONS, instructionOfRequest, type InstructionsTables } from '@agentx/core/modules/instructions';
+import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import {
-  changeHandoffPause,
-  createPlatformChain,
-  type PlatformControlsTables,
-} from '@agentx/core/modules/platform-controls';
+import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
 import { cancelRequest, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import {
-  addVersion,
-  confirmPayeeChange,
-  nextVersionNumber,
-  recordRegistered,
-  registrationOf,
   REMITTANCE_SETTINGS,
   remittanceOf,
   setRemittance,
-  stagePayeeChange,
-  startRegistration,
   SUPPLIER_VERSIONS,
   supplierOf,
-  versionOf,
 } from '@agentx/core/modules/suppliers';
 import { lockHoldingsOf, settleHoldings } from '@agentx/core/modules/outcomes';
 import {
@@ -57,7 +45,6 @@ import {
   type TransactionEvent,
   TRANSACTIONS,
   transactionOf,
-  type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -75,16 +62,25 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff, HEARTBEAT_STALE_MS, heartbeatChecks } from './handoff.ts';
+import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
+import {
+  ALLOWED,
+  handoffWorld,
+  type HandoffWorldTables,
+  HOLDS_AFTER,
+  payeeRefOf,
+  SMALL,
+} from './handoff-world.helper.test.ts';
+import { heartbeatChecks } from './health.ts';
 import { createHoldingsCheck } from './holdings-check.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestVoids } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
-import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
+import { spendWorld } from './spend-world.helper.test.ts';
 
-type Tables = SpendWorldTables & PlatformControlsTables & InstructionsTables & TransactionsTables;
+type Tables = HandoffWorldTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -107,6 +103,13 @@ const shared = spendWorld({
   decisions: () => decisions,
 });
 const { quiet, ask, statusOf, holdingsOf, spentOf, signed, moved, STOPS, mandateIdOf } = shared;
+const { ready, paymentOf } = handoffWorld({
+  app: () => app,
+  clock: () => clock,
+  ids,
+  registry: () => registry,
+  shared,
+});
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
@@ -139,12 +142,6 @@ const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resol
     logger: testLogger(capture),
   });
 
-/** AED 500 and the fils that choose the fake's answer (decision 5): under the approval threshold, so APPROVED. */
-const ALLOWED = (fils = 0n) => AED(50_000n + fils);
-
-/** AED 200 and the fils: three of them to one supplier still under the approval threshold, its split check included. */
-const SMALL = (fils = 0n) => AED(20_000n + fils);
-
 /** The platform's hand-off pause moved in the caller's transaction, as the operator's command moves it (B1). */
 const pauseIn = (tx: Parameters<typeof changeHandoffPause>[0], paused: boolean) =>
   changeHandoffPause(
@@ -155,114 +152,6 @@ const pauseIn = (tx: Parameters<typeof changeHandoffPause>[0], paused: boolean) 
 
 /** The platform's hand-off pause moved, in a transaction of its own. */
 const pauseMoved = (paused: boolean) => app.transaction().execute((tx) => pauseIn(tx, paused));
-
-/** The partner's reference for the world's first supplier's payee. */
-const payeeRefOf = (w: World) => `fake-beneficiary-${w.org.slice(-12)}`;
-
-/**
- * The world's first supplier given a payee, as E2's registration and its
- * admin's confirmation would: a version made from a registration REGISTERED
- * for it, made current with its payee key, its cooling-off already over.
- */
-async function payeeRegistered(w: World): Promise<void> {
-  const supplierId = w.suppliers[0] ?? '';
-  const key = { orgId: w.org, id: supplierId };
-  const registrationId = ids.next();
-  const versionId = ids.next();
-  await signed(w, async (tx, states) => {
-    await supplierOf(tx, states, key, 'change');
-    await startRegistration(tx, states, {
-      orgId: w.org,
-      id: registrationId,
-      supplierId,
-      versionId,
-      partner: 'fake',
-      route: 'hosted',
-      startedBy: w.admin.membershipId,
-      createdAt: clock.now(),
-      actor: OPERATOR,
-    });
-  });
-  const registration = await signed(w, async (tx, states) => {
-    const found = await registrationOf(tx, states, { orgId: w.org, id: registrationId }, supplierId, 'change');
-    if (found.outcome !== 'found') throw new Error(`no registration: ${found.outcome}`);
-    return recordRegistered(tx, states, { orgId: w.org, id: registrationId }, found, {
-      beneficiary: {
-        organizationId: w.org,
-        registrationId,
-        beneficiaryRef: payeeRefOf(w),
-        payeeIdentity: null,
-        nameCheck: 'match',
-        maskedName: 'G*** O***** S******* L**',
-        hint: 'AE…6026',
-        registeredAt: clock.now(),
-      },
-      payee: { key: `fake-payee-${'b'.repeat(32)}`, keyVersion: null },
-      actor: OPERATOR,
-    });
-  });
-  await signed(w, async (tx, states) => {
-    const found = await supplierOf(tx, states, key, 'change');
-    if (found.outcome !== 'found') throw new Error(`no supplier: ${found.outcome}`);
-    const current = await versionOf(tx, states, { orgId: w.org, id: found.supplier.currentVersionId }, supplierId);
-    if (current.outcome !== 'found') throw new Error(`no version: ${current.outcome}`);
-    await addVersion(tx, states, keys, {
-      orgId: w.org,
-      id: versionId,
-      supplierId,
-      version: await nextVersionNumber(tx, w.org, supplierId),
-      supplier: {
-        displayName: 'Gulf Office Supplies LLC',
-        contacts: { phone: '+971501234567', email: null, tradeLicence: null },
-        source: { kind: 'registry', ref: 'DED-123456' },
-      },
-      enteredBy: w.admin.membershipId,
-      enteredAt: clock.now(),
-      actor: OPERATOR,
-      of: found,
-      follows: current.version,
-      registration,
-    });
-    const made = await versionOf(tx, states, { orgId: w.org, id: versionId }, supplierId);
-    if (made.outcome !== 'found') throw new Error(`no new version: ${made.outcome}`);
-    const change = { version: made.version, registration, current: current.version };
-    const staged = await stagePayeeChange(tx, states, key, found, change, { actor: OPERATOR });
-    const restaged = await supplierOf(tx, states, key, 'change');
-    if (restaged.outcome !== 'found') throw new Error(`no supplier: ${restaged.outcome}`);
-    await confirmPayeeChange(tx, states, key, { supplier: staged, state: restaged.state }, change, {
-      actor: OPERATOR,
-      coolingOffUntil: new Date(clock.now().getTime() - 1),
-    });
-  });
-}
-
-/** A world whose first supplier has a payee, both verified, with a mandate in force and the agent's key. */
-async function ready() {
-  const w = await shared.world();
-  await payeeRegistered(w);
-  for (const id of w.suppliers) await shared.verified(w, id);
-  await shared.inForce(registry, w, { approvalThreshold: AED(100_000n) });
-  return { w, acting: await shared.agentKey(w) };
-}
-
-/** The request's instruction, if one was made, and its transaction. */
-async function paymentOf(w: World, requestId: string) {
-  return withSignedStates(app, w.org, quiet(), async (tx, states) => {
-    const instruction = await instructionOfRequest(tx, states, { orgId: w.org, spendRequestId: requestId });
-    if (instruction.outcome !== 'found') return { instruction: instruction.outcome };
-    const rows = await tx
-      .selectFrom('transactions.transactions')
-      .select('id')
-      .where('instruction_id', '=', instruction.instruction.id)
-      .execute();
-    const transaction = await transactionOf(tx, states, { orgId: w.org, id: rows[0]?.id ?? '' }, 'share');
-    return {
-      instruction: instruction.instruction,
-      transactions: rows.length,
-      transaction: transaction.outcome === 'found' ? transaction.transaction : transaction.outcome,
-    };
-  });
-}
 
 /** The world's rail, every submission counted. */
 function counted(w: World): { rail: FakeRail; submitted: () => number } {
@@ -653,14 +542,6 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
   });
 });
 
-/** What a handed-off request holds as its payment stands (C3, ADR-006 §10–§11): given back only after a proven failure. */
-const HOLDS_AFTER: Readonly<Record<string, { readonly reservation: string; readonly released: boolean }>> = {
-  PROCESSING: { reservation: 'HELD', released: false },
-  SUCCEEDED: { reservation: 'FINALISED', released: false },
-  UNKNOWN: { reservation: 'BLOCKED_UNKNOWN', released: false },
-  FAILED: { reservation: 'RELEASED', released: true },
-};
-
 /** An answer with nothing more to say than its move. */
 const NO_ANSWER_FACTS = {
   providerStatus: null,
@@ -873,13 +754,13 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     const handoff = handoffOf(w);
     await handoff.run();
 
-    const [check, ...rest] = heartbeatChecks(handoff);
+    const [check, ...rest] = heartbeatChecks({ handoff });
     expect(check?.name).toBe('handoff_heartbeat');
     expect(rest).toEqual([]);
     expect(await check?.check()).toBe(true);
     clock.advanceBy(HEARTBEAT_STALE_MS + 1);
     expect(await check?.check()).toBe(false);
-    expect(heartbeatChecks(undefined)).toEqual([]);
+    expect(heartbeatChecks({ handoff: undefined })).toEqual([]);
   });
 
   it('never beats for a run that can’t read its organisations: one failing every time reads as stopped', async () => {
