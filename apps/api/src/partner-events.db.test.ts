@@ -293,6 +293,29 @@ describe('a message names a payment: it is checked with the bank, ahead of its t
     }
   });
 
+  it('checks only the payments under the consent a message names, not the rest of its organisation’s', async () => {
+    const { w, acting } = await ready();
+    await ask(acting, w, { amount: ALLOWED() });
+    await handoffOf(w).run();
+    const { rail, asked } = counted(w);
+    const checks = checksOf(w, rail);
+    // Its own turn taken, then past 15 minutes: only a message could bring it forward now.
+    await checks.run();
+    clock.advanceBy(16 * STEP);
+    asked.length = 0;
+    // A message routed to the organisation, naming another consent of its.
+    await database.as('admin').query(
+      `insert into provider_events.inbox (id, partner, dedupe_key, event_type, reference_kind, reference, org_id, received_at)
+         values ($1, 'fake', $2, 'consent.payments', 'consent', 'another-consent', $3, now())`,
+      [ids.next(), ids.next(), w.org],
+    );
+
+    await checks.run();
+
+    expect(asked).toEqual([]);
+    expect((await inbox())[0]?.taken_at).not.toBeNull();
+  });
+
   it('SEC-PTR-02: the message’s word never moves a payment: the bank says Pending, and it stays under way', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
@@ -577,6 +600,18 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
     await send(forgedNow());
     expect(await kept()).toHaveLength(7);
     expect(lines('partner_event.refused')).toHaveLength(3);
+  });
+
+  it('keeps a refused body’s first 16 KiB alone, said as kept', async () => {
+    const { w } = await ready();
+    const { send } = await door(w);
+    const long = { ...forgedNow(), body: Buffer.alloc(20 * 1024, 0x61) };
+
+    expect((await send(long)).statusCode).toBe(401);
+
+    const [row] = await app.selectFrom('security.partner_event_evidence').select(['id', 'body_bytes']).execute();
+    expect(row?.body_bytes).toBe(16 * 1024);
+    expect(await events().refusedBody(app, row?.id ?? '')).toEqual(long.body.subarray(0, 16 * 1024));
   });
 
   it('counts an IPv6 /64 as one network, as the rate limit does: a new address in it gets no 5 of its own', async () => {
