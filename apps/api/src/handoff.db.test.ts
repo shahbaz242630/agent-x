@@ -41,8 +41,12 @@ import {
   nextVersionNumber,
   recordRegistered,
   registrationOf,
+  REMITTANCE_SETTINGS,
+  remittanceOf,
+  setRemittance,
   stagePayeeChange,
   startRegistration,
+  SUPPLIER_VERSIONS,
   supplierOf,
   versionOf,
 } from '@agentx/core/modules/suppliers';
@@ -75,6 +79,7 @@ import { createHandoff, HEARTBEAT_STALE_MS, heartbeatChecks } from './handoff.ts
 import { createHoldingsCheck } from './holdings-check.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { createRemittances } from './remittances.ts';
 import { createRequestVoids } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
@@ -1353,5 +1358,221 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 §10�
     expect(lines('handoff.handed_off')).toEqual([
       expect.objectContaining({ requestId: request.id, recorded: 'recorded' }),
     ]);
+  });
+});
+
+describe('a payment that SUCCEEDED queues its supplier’s remittance email, once (C2b; partner decision 34a)', () => {
+  /** The world's remittances, by the transaction each is about. */
+  const remittancesOf = (w: World) =>
+    withTenant(app, w.org, async (tx) =>
+      (
+        await tx
+          // A global table (0021): the world's own organisation's notices alone.
+          .selectFrom('notifications.outbox')
+          .select(['about_id', 'recipient_user_id', 'recipient_contact_id', 'to_contacts'])
+          .where('org_id', '=', w.org)
+          .where('kind', '=', 'payment_remittance')
+          .orderBy('id')
+          .execute()
+      ).map((row) => ({ ...row })),
+    );
+
+  /** The request's transaction's ID, through its instruction. */
+  const transactionIdOf = (w: World, requestId: string) =>
+    withTenant(app, w.org, async (tx) => {
+      const row = await tx
+        .selectFrom('transactions.transactions as t')
+        .innerJoin('instructions.instructions as i', 'i.id', 't.instruction_id')
+        .select('t.id')
+        .where('i.spend_request_id', '=', requestId)
+        .executeTakeFirstOrThrow();
+      return row.id;
+    });
+
+  /** The world's fake, its accepted answers the creditor's account credited at once, as a faster rail might answer. */
+  const creditedAtOnce = (w: World): FakeRail => ({
+    ...w.rail,
+    submitApprovedIntent: async (intent) => {
+      const answer = await w.rail.submitApprovedIntent(intent);
+      return answer.kind === 'accepted'
+        ? { ...answer, execution: { ...answer.execution, providerStatus: 'AcceptedCreditSettlementCompleted' } }
+        : answer;
+    },
+  });
+
+  it('queues one remittance to the supplier itself, about the transaction, in the Tx B that records SUCCEEDED', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+
+    await handoffOf(w, creditedAtOnce(w)).run();
+
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
+    expect(await remittancesOf(w)).toEqual([
+      {
+        about_id: await transactionIdOf(w, request.id),
+        recipient_user_id: null,
+        recipient_contact_id: null,
+        to_contacts: false,
+      },
+    ]);
+    // Another run finds nothing approved: the payment, and its remittance, once.
+    await handoffOf(w, creditedAtOnce(w)).run();
+    expect(await remittancesOf(w)).toHaveLength(1);
+  });
+
+  it('queues none for a payment under way, refused or unknown: only one that SUCCEEDED is told', async () => {
+    const { w, acting } = await ready();
+    const underWay = await ask(acting, w, { amount: SMALL() });
+    const refused = await ask(acting, w, { amount: SMALL(1n) });
+    const unknown = await ask(acting, w, { amount: SMALL(2n) });
+
+    await handoffOf(w).run();
+
+    expect(await holdingsOf(w, underWay.id)).toEqual(HOLDS_AFTER.PROCESSING);
+    expect(await holdingsOf(w, refused.id)).toEqual(HOLDS_AFTER.FAILED);
+    expect(await holdingsOf(w, unknown.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(await remittancesOf(w)).toEqual([]);
+  });
+
+  describe('read as it is sent, from the payment’s verified records (remittances.ts)', () => {
+    const SUPPLIER_EMAIL = 'accounts@gulf-office.example.test';
+    const remittances = () => createRemittances({ database: app, keys, ids, logger: testLogger(capture) });
+    /** An invoice number the rail can't carry whole: its bank reference keeps the Latin part alone. */
+    const INVOICE = 'فاتورة INV-C2B-0042';
+
+    /** What the world's audit log keeps of its remittances (partner S119): readable by its admins. */
+    const remittanceEvents = (w: World) =>
+      withTenant(app, w.org, async (tx) =>
+        (
+          await tx
+            .selectFrom('audit.events')
+            .select(['actor_type', 'actor_id', 'action', 'subject_id', 'details'])
+            .where('org_id', '=', w.org)
+            .where('subject_type', '=', 'payment_remittance')
+            .orderBy('seq')
+            .execute()
+        ).map((row) => ({ ...row, details: JSON.parse(row.details) as unknown })),
+      );
+
+    /** A world whose first supplier holds SUPPLIER_EMAIL (unless `email` says otherwise), and one payment to it credited. */
+    async function paid(email: string | null = SUPPLIER_EMAIL) {
+      const { w, acting } = await ready();
+      const supplierId = w.suppliers[0] ?? '';
+      if (email !== null) await shared.detailsChanged(w, supplierId, undefined, email);
+      const request = await ask(acting, w, { amount: ALLOWED(), orderReference: INVOICE });
+      await handoffOf(w, creditedAtOnce(w)).run();
+      return { w, supplierId, request, transactionId: await transactionIdOf(w, request.id) };
+    }
+
+    it('gives the supplier’s address and the payment’s four facts: who paid, the invoice, the bank reference, the amount', async () => {
+      const { w, request, transactionId } = await paid();
+      const payment = await paymentOf(w, request.id);
+      if (typeof payment.instruction === 'string') throw new Error('no instruction');
+
+      expect(payment.instruction.paymentReference).toBe('INV-C2B-0042');
+      expect(await remittances().remittanceOf(w.org, transactionId)).toEqual({
+        outcome: 'send',
+        to: SUPPLIER_EMAIL,
+        paid: {
+          payerName: 'Acme Trading LLC',
+          invoiceNumber: INVOICE,
+          bankReference: 'INV-C2B-0042',
+          amountMinor: ALLOWED().minor,
+          currency: 'AED',
+        },
+      });
+      // Nothing kept until it is sent; then that it was, by the API, never the address.
+      expect(await remittanceEvents(w)).toEqual([]);
+      await remittances().emailed(w.org, transactionId);
+      expect(await remittanceEvents(w)).toEqual([
+        {
+          actor_type: 'system',
+          actor_id: 'api',
+          action: 'payment.remittance_emailed',
+          subject_id: transactionId,
+          details: {},
+        },
+      ]);
+    });
+
+    it('says no email when the version paid holds none (34c), and off once the setting is turned off since (34b)', async () => {
+      const bare = await paid(null);
+      expect(await remittances().remittanceOf(bare.w.org, bare.transactionId)).toEqual({ outcome: 'no_email' });
+      expect(await remittanceEvents(bare.w)).toMatchObject([
+        { action: 'payment.remittance_skipped', subject_id: bare.transactionId, details: { reason: 'no_email' } },
+      ]);
+
+      const { w, supplierId, transactionId } = await paid();
+      await signed(w, async (tx, states) => {
+        await supplierOf(tx, states, { orgId: w.org, id: supplierId }, 'change');
+        const read = await remittanceOf(tx, states, { orgId: w.org, supplierId }, 'change');
+        if (read.outcome === 'tampered') throw new Error('tampered');
+        await setRemittance(tx, states, read, {
+          orgId: w.org,
+          supplierId,
+          remittanceEmail: 'off',
+          at: clock.now(),
+          actor: OPERATOR,
+        });
+      });
+      expect(await remittances().remittanceOf(w.org, transactionId)).toEqual({ outcome: 'off' });
+      expect(await remittanceEvents(w)).toMatchObject([
+        { action: 'payment.remittance_skipped', subject_id: transactionId, details: { reason: 'setting_off' } },
+      ]);
+    });
+
+    it('says not succeeded for a payment still under way, whatever its setting and address', async () => {
+      const { w, acting } = await ready();
+      await shared.detailsChanged(w, w.suppliers[0] ?? '', undefined, SUPPLIER_EMAIL);
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      await handoffOf(w).run();
+
+      const transactionId = await transactionIdOf(w, request.id);
+      expect(await remittances().remittanceOf(w.org, transactionId)).toEqual({ outcome: 'not_succeeded' });
+      expect(await remittanceEvents(w)).toMatchObject([
+        {
+          action: 'payment.remittance_skipped',
+          subject_id: transactionId,
+          details: { reason: 'payment_not_succeeded' },
+        },
+      ]);
+    });
+
+    it('throws, sending nothing, for a transaction it can’t find or can’t believe (its alarm raised)', async () => {
+      const { w, transactionId } = await paid();
+      await expect(remittances().remittanceOf(w.org, ids.next())).rejects.toThrow("can't be believed");
+
+      const owner = await tamperAsOwner(database, TRANSACTIONS, w.org);
+      try {
+        await owner.stripSeals(transactionId);
+      } finally {
+        await owner.end();
+      }
+      await expect(remittances().remittanceOf(w.org, transactionId)).rejects.toThrow("can't be believed");
+      expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
+    });
+
+    it.each([
+      ['its supplier version', SUPPLIER_VERSIONS],
+      ['its supplier’s setting', REMITTANCE_SETTINGS],
+      ['its request', SPEND_REQUESTS],
+    ] as const)('throws, sending nothing, when %s can’t be believed', async (_what, table) => {
+      const { w, supplierId, request, transactionId } = await paid();
+      const payment = await paymentOf(w, request.id);
+      if (typeof payment.instruction === 'string') throw new Error('no instruction');
+      const id = {
+        [SUPPLIER_VERSIONS.table]: payment.instruction.supplierVersionId,
+        [REMITTANCE_SETTINGS.table]: supplierId,
+        [SPEND_REQUESTS.table]: request.id,
+      }[table.table];
+      const owner = await tamperAsOwner(database, table, w.org);
+      try {
+        await owner.stripSeals(id);
+      } finally {
+        await owner.end();
+      }
+
+      await expect(remittances().remittanceOf(w.org, transactionId)).rejects.toThrow("can't be believed");
+    });
   });
 });

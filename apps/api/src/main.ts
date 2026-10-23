@@ -159,6 +159,7 @@ import { createSupplierVerifications } from './supplier-verifications.ts';
 import { createSupplierPayees } from './supplier-payees.ts';
 import { createSupplierRegistry } from './supplier-registry.ts';
 import { createWaitingRequests } from './waiting-requests.ts';
+import { createRemittances } from './remittances.ts';
 
 /** Every table the API reaches, module by module. */
 type ApiTables = PlatformControlsTables &
@@ -869,6 +870,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
       publicOrigin: config.http.publicOrigin,
     }),
+    // A paid supplier's email, from the payment's verified records (Phase 4 C2b).
+    remittances: createRemittances({ database, keys, ids: uuidV7Ids, logger }),
     fetch: outboundFetch,
     logger,
   });

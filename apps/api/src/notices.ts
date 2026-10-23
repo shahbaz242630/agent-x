@@ -15,6 +15,7 @@ import {
   type NoticeSender,
   type NotificationsTables,
   type Outbox,
+  type Remittances,
   type ResetLinks,
   type WaitingRequests,
 } from '@agentx/core/modules/notifications';
@@ -80,6 +81,7 @@ export function noticeSenderFrom({
   contactAddress,
   resetLink,
   waitingRequests,
+  remittances,
   fetch,
   logger,
 }: {
@@ -97,6 +99,8 @@ export function noticeSenderFrom({
   readonly resetLink: ResetLinks['linkFor'];
   /** A spend request waiting for approval, read as its email is sent (Phase 3 B2). */
   readonly waitingRequests: WaitingRequests;
+  /** A paid supplier's email, read as it is sent (Phase 4 C2b). */
+  readonly remittances: Remittances;
   readonly fetch: OutboundFetch;
   readonly logger: Logger;
 }): NoticeSender | undefined {
@@ -120,6 +124,7 @@ export function noticeSenderFrom({
     contactAddresses: { addressOf: contactAddress },
     resetLinks: { linkFor: resetLink },
     waitingRequests,
+    remittances,
     audience: audienceFrom(listMembers, listContacts, listCountingContacts),
     logger,
   });

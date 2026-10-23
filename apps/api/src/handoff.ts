@@ -65,7 +65,10 @@
 // payment (Phase 4 C3, the outcomes module): Tx B and the sweep read the
 // transaction for change (10), lock both (11), move it (the head, 12), then
 // settle them as it now stands: spent on success, blocked while unknown,
-// given back after a verified failure, held while under way.
+// given back after a verified failure, held while under way. A payment that
+// SUCCEEDED queues its supplier's remittance email in the same transaction
+// (Phase 4 C2b, partner decision 34a): the setting and the address are read
+// as it is sent, after this, never here, out of the lock order.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next.
@@ -76,7 +79,7 @@ import {
   withSignedStates,
 } from '@agentx/core/modules/audit';
 import { instructionOf, type InstructionsTables, makeInstruction } from '@agentx/core/modules/instructions';
-import { lockHoldingsOf, settleHoldings } from '@agentx/core/modules/outcomes';
+import { lockHoldingsOf } from '@agentx/core/modules/outcomes';
 import { handoffPauseOf, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import {
   type ApprovedPaymentIntent,
@@ -112,6 +115,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import type { HealthCheck } from './health.ts';
+import { settlePayment } from './payment-outcome.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
@@ -428,7 +432,7 @@ export function createHandoff({
       };
       const settled = async (status: TransactionStatus | null): Promise<'recorded' | 'late'> => {
         if (status === null) return 'late';
-        await settleHoldings(tx, { requestId, status, at: clock.now() });
+        await settlePayment(tx, outbox, { orgId, requestId, transactionId, status, at: clock.now() });
         return 'recorded';
       };
       if (answer.kind === 'unknown') return settled(await move('lose_track', NO_FACTS, 'no_answer'));
@@ -579,7 +583,13 @@ export function createHandoff({
           });
           // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
           if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
-          await settleHoldings(tx, { requestId, status: moved.to, at: clock.now() });
+          await settlePayment(tx, outbox, {
+            orgId,
+            requestId,
+            transactionId: transaction.id,
+            status: moved.to,
+            at: clock.now(),
+          });
           return true;
         });
         if (marked) log.warn('handoff.marked_unknown', { transactionId: transaction.id });

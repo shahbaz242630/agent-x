@@ -14,7 +14,7 @@ import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testL
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import type { NoticeMessage, ResetLink, WaitingRequest } from '../domain/messages.ts';
+import type { NoticeMessage, PaidRemittance, ResetLink, WaitingRequest } from '../domain/messages.ts';
 import type { Notice } from '../domain/notice.ts';
 import { createOutbox } from './outbox.ts';
 import {
@@ -24,6 +24,8 @@ import {
   type ContactAddresses,
   createNoticeSender,
   type Notifier,
+  type RemittanceRead,
+  type Remittances,
   type ResetLinks,
   type WaitingRequests,
   type SendOutcome,
@@ -72,6 +74,16 @@ const OTHER_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b2';
 const ABOUT_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b3';
 /** A supplier the notices are about (E2-2b). */
 const SUPPLIER = '0199a0f0-0000-7000-8000-00000000b6b5';
+/** A payment that SUCCEEDED, a remittance about it (Phase 4 C2b), and its supplier's address. */
+const PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b01';
+const SUPPLIER_ADDRESS = 'accounts@gulf-office.example.test';
+const PAID: PaidRemittance = {
+  payerName: 'Falcon Trading LLC',
+  invoiceNumber: 'INV-2026-0042',
+  bankReference: 'AGX INV-2026-0042',
+  amountMinor: 1_250_000n,
+  currency: 'AED',
+};
 /** A reset of the member's second factor (B6-3b), and the one link written for CONTACT. */
 const RESET = '0199a0f0-0000-7000-8000-00000000b6b4';
 const LINK: ResetLink = {
@@ -224,6 +236,36 @@ const waitingRequests = (
   },
 });
 
+const remittances = (
+  lookup: (transactionId: string) => RemittanceRead | Error = () => ({
+    outcome: 'send',
+    to: SUPPLIER_ADDRESS,
+    paid: PAID,
+  }),
+  emailed: (transactionId: string) => Error | undefined = () => undefined,
+): Remittances => ({
+  remittanceOf: (orgId, transactionId) => {
+    expect(orgId).toBe(ORG);
+    const found = lookup(transactionId);
+    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
+  },
+  emailed: (orgId, transactionId) => {
+    expect(orgId).toBe(ORG);
+    const failed = emailed(transactionId);
+    return failed === undefined ? Promise.resolve() : Promise.reject(failed);
+  },
+});
+
+/** The remittance about PAYMENT, as the payment's Tx B writes it. */
+const REMITTANCE: Notice = {
+  orgId: ORG,
+  recipientUserId: null,
+  kind: 'payment_remittance',
+  membershipId: null,
+  role: null,
+  aboutId: PAYMENT,
+};
+
 function sender(
   service: Notifier,
   addresses: AddressBook = addressBook(),
@@ -231,6 +273,7 @@ function sender(
   contacts: ContactAddresses = contactAddresses(),
   links: ResetLinks = resetLinks(),
   requests: WaitingRequests = waitingRequests(),
+  paid: Remittances = remittances(),
 ) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
@@ -244,6 +287,7 @@ function sender(
       contactAddresses: contacts,
       resetLinks: links,
       waitingRequests: requests,
+      remittances: paid,
       audience: admins,
       logger,
     }),
@@ -664,6 +708,179 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     );
   });
 
+  it('C2b sends a remittance to its paid supplier alone, with the payment read as it is sent, and never logs the address', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    const { sent, service } = notifier();
+    const logged: string[] = [];
+
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(undefined, (id) => {
+        logged.push(id);
+        return undefined;
+      }),
+    );
+    await run.run();
+
+    // Kept in the organisation's audit log once the email went (partner S119).
+    expect(logged).toEqual([PAYMENT]);
+    expect(sent).toHaveLength(1);
+    const [message] = sent;
+    expect(message?.to).toBe(SUPPLIER_ADDRESS);
+    expect(message?.subject).toBe('Payment sent to you by Falcon Trading LLC');
+    expect(message?.text).toContain('Amount: AED 12,500.00');
+    expect(message?.text).toContain('Invoice number: INV-2026-0042');
+    expect(message?.text).toContain('Bank reference: AGX INV-2026-0042');
+    // Nothing of ours goes to someone outside the organisation: no organisation, payment or anyone's ID.
+    for (const id of [ORG, PAYMENT, ADMIN]) expect(message?.text).not.toContain(id);
+    expect(await app.selectFrom('notifications.outbox').select(['sent_at', 'given_up_at']).execute()).toEqual([
+      { sent_at: START, given_up_at: null },
+    ]);
+    expect(JSON.stringify(capture.lines())).not.toContain(SUPPLIER_ADDRESS);
+  });
+
+  it('C2b keeps a remittance the provider refused out of the audit log, and one it can’t log still sent once', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b03';
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
+    const logged: string[] = [];
+    // The first payment's supplier refused by the provider; the second's sent, its event not kept.
+    const { sent, service } = notifier(({ text }) =>
+      text.includes('INV-REFUSED')
+        ? { outcome: 'failed', failure: 'address_refused', lasting: true }
+        : { outcome: 'sent' },
+    );
+
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(
+        (id) => ({
+          outcome: 'send',
+          to: SUPPLIER_ADDRESS,
+          paid: { ...PAID, invoiceNumber: id === PAYMENT ? 'INV-REFUSED' : 'INV-SENT' },
+        }),
+        (id) => {
+          logged.push(id);
+          return new Error('the audit chain is held');
+        },
+      ),
+    );
+    await run.run();
+
+    expect(sent).toHaveLength(2);
+    expect(logged).toEqual([OTHER_PAYMENT]);
+    const kept = await app
+      .selectFrom('notifications.outbox')
+      .select(['about_id', 'sent_at', 'given_up_at', 'last_failure'])
+      .orderBy('about_id')
+      .execute();
+    expect(kept).toEqual([
+      { about_id: PAYMENT, sent_at: null, given_up_at: START, last_failure: 'address_refused' },
+      { about_id: OTHER_PAYMENT, sent_at: START, given_up_at: null, last_failure: null },
+    ]);
+    expect(capture.lines().filter(({ event }) => event === 'notification.remittance_unrecorded')).toHaveLength(1);
+    // Never sent again: nothing is due.
+    await run.run();
+    expect(sent).toHaveLength(2);
+  });
+
+  it('C2b gives a remittance up, logged with why, once its setting is off or the payment no longer SUCCEEDED', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b02';
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
+    const { sent, service } = notifier();
+
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances((id) => (id === PAYMENT ? { outcome: 'off' } : { outcome: 'not_succeeded' })),
+    );
+    await run.run();
+
+    expect(sent).toEqual([]);
+    const kept = await app
+      .selectFrom('notifications.outbox')
+      .select(['about_id', 'sent_at', 'given_up_at', 'last_failure'])
+      .orderBy('about_id')
+      .execute();
+    expect(kept).toEqual([
+      { about_id: PAYMENT, sent_at: null, given_up_at: START, last_failure: 'remittance_off' },
+      { about_id: OTHER_PAYMENT, sent_at: null, given_up_at: START, last_failure: 'payment_not_succeeded' },
+    ]);
+    const skipped = capture.lines().filter(({ event }) => event === 'notification.remittance_skipped');
+    expect(skipped.map(({ why }) => why).sort()).toEqual(['not_succeeded', 'off']);
+  });
+
+  it('C2b tells every admin instead when the paid supplier has no email, sent in the same run (decision 34c)', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    const { sent, service } = notifier();
+
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(() => ({ outcome: 'no_email' })),
+    );
+    await run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'other.admin@example.test']);
+    for (const { subject, text } of sent) {
+      expect(subject).toBe('Agent X: a supplier was paid but not emailed');
+      expect(text).toContain(`Payment: ${PAYMENT}`);
+    }
+    const kept = await app
+      .selectFrom('notifications.outbox')
+      .select(['recipient_user_id', 'about_id', 'sent_at', 'given_up_at', 'last_failure'])
+      .where('kind', '=', 'payment_remittance')
+      .execute();
+    expect(kept).toEqual([
+      { recipient_user_id: null, about_id: PAYMENT, sent_at: null, given_up_at: START, last_failure: 'no_address' },
+    ]);
+    expect(capture.lines().filter(({ event }) => event === 'notification.remittance_skipped')).toMatchObject([
+      { why: 'no_email' },
+    ]);
+  });
+
+  it('C2b tries a remittance again when its payment cannot be read or believed', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    const { sent, service } = notifier();
+
+    await sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(() => new Error("A paid transaction's records can't be believed")),
+    ).run.run();
+
+    expect(sent).toEqual([]);
+    expect(
+      await app.selectFrom('notifications.outbox').select(['sent_at', 'given_up_at', 'last_failure']).execute(),
+    ).toEqual([{ sent_at: null, given_up_at: null, last_failure: 'payment_unavailable' }]);
+  });
+
   it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) =>
@@ -769,6 +986,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       contactAddresses: contactAddresses(),
       resetLinks: resetLinks(),
       waitingRequests: waitingRequests(),
+      remittances: remittances(),
       audience: audience(),
       logger: testLogger(),
     });
@@ -781,6 +999,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       contactAddresses: contactAddresses(),
       resetLinks: resetLinks(),
       waitingRequests: waitingRequests(),
+      remittances: remittances(),
       audience: audience(),
       logger: testLogger(capture),
     });

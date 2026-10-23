@@ -479,5 +479,13 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['org_id', 'payee_key', 'order_reference'],
       predicate: '((released_at IS NULL) AND (payee_key IS NOT NULL))',
     },
+    {
+      reason:
+        'One remittance email a payment (Phase 4 C2b, partner decision 34a; 0062): a second for the same transaction is refused. Partial as the outbox holds every other kind of notice too, many about the same thing',
+      table: 'notifications.outbox',
+      name: 'one_remittance_a_payment',
+      columns: ['org_id', 'about_id'],
+      predicate: "(kind = 'payment_remittance'::text)",
+    },
   ],
 };

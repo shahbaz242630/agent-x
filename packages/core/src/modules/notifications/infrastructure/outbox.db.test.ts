@@ -40,6 +40,9 @@ const OTHER_CONTACT = '0199a0f0-0000-7000-8000-00000000b6a2';
 const ABOUT_CONTACT = '0199a0f0-0000-7000-8000-00000000b6a3';
 /** A reset of a person's second factor (B6-3b), which a contact's link notice is about. */
 const RESET = '0199a0f0-0000-7000-8000-00000000b6a4';
+/** Two payments that SUCCEEDED, a remittance about each (Phase 4 C2b, 0062). */
+const PAYMENT = '0199a0f0-0000-7000-8000-0000000c2ba1';
+const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2ba2';
 
 /** A clock the tests set, forwards and back: the sweep's far future, then each test's own time. */
 const clock = {
@@ -340,6 +343,97 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
       [CONTACT, false],
       [null, true],
     ]);
+  });
+
+  it('C2b writes a remittance to its supplier alone, about its payment, and one a payment (0062)', async () => {
+    const remittance = aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT });
+    await app.transaction().execute((tx) => outbox.add(tx, [remittance]));
+
+    expect(await rows()).toMatchObject([
+      { kind: 'payment_remittance', recipient_user_id: null, recipient_contact_id: null, to_contacts: false },
+    ]);
+    // A second for the same payment, as a bug or a replay would write it: the table refuses it, and its change with it.
+    await expect(app.transaction().execute((tx) => outbox.add(tx, [remittance]))).rejects.toMatchObject({
+      code: '23505',
+      constraint: 'one_remittance_a_payment',
+    });
+    // Never to a person, a contact or the contacts: the module refuses it, and the table too.
+    for (const to of [{ recipientUserId: ADMIN }, { recipientContactId: CONTACT }, { toContacts: true }]) {
+      await expect(
+        app.transaction().execute((tx) => outbox.add(tx, [{ ...remittance, aboutId: OTHER_PAYMENT, ...to }])),
+      ).rejects.toThrow('a remittance goes to its supplier alone');
+    }
+    await expect(
+      sql`insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts, next_attempt_at)
+        values (${ids.next()}, ${ORG}, ${ADMIN}, 'payment_remittance', ${OTHER_PAYMENT}, ${START}, 0, ${START})`.execute(
+        app,
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'remittance_to_its_supplier' });
+    expect(await rows()).toHaveLength(1);
+  });
+
+  it('C2b passes a remittance on to the admins once, in one transaction, its own given up with why', async () => {
+    await app
+      .transaction()
+      .execute((tx) => outbox.add(tx, [aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT })]));
+    const [claimed] = await outbox.claimDue(app, 1);
+
+    expect(await outbox.passOn(app, claimed?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(true);
+    expect(await outbox.passOn(app, claimed?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(false);
+    expect(await rows()).toMatchObject([
+      { kind: 'payment_remittance', sent_at: null, given_up_at: START, last_failure: 'no_address' },
+      {
+        kind: 'payment_remittance_no_email',
+        org_id: ORG,
+        recipient_user_id: null,
+        recipient_contact_id: null,
+        to_contacts: false,
+        about_id: PAYMENT,
+        attempts: 0,
+        next_attempt_at: START,
+        sent_at: null,
+        given_up_at: null,
+      },
+    ]);
+    // The admins' notice is due at once, and fans out as any other to the admins.
+    const [passed] = await outbox.claimDue(app, 1);
+    expect(passed).toMatchObject({ kind: 'payment_remittance_no_email', aboutId: PAYMENT });
+    expect(await outbox.fanOut(app, passed?.id ?? '', [ADMIN, OTHER_ADMIN])).toBe(2);
+  });
+
+  it('C2b passes on a remittance whose last try was only slow past its lease, never one sent, and no ID not a UUID', async () => {
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [
+          aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT }),
+          aboutAContact({ kind: 'payment_remittance', aboutId: OTHER_PAYMENT }),
+        ]),
+      );
+    const [slow, sent] = await outbox.claimDue(app, 2);
+    expect(await outbox.sent(app, sent?.id ?? '')).toBe(true);
+    for (let tries = 1; tries < MOST_ATTEMPTS; tries += 1) {
+      clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
+      await outbox.claimDue(app, 1);
+    }
+    clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
+    expect(await outbox.claimDue(app, 10)).toEqual([]);
+
+    expect(await outbox.passOn(app, slow?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(true);
+    expect(await outbox.passOn(app, sent?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(false);
+    expect(await outbox.passOn(app, 'not-a-uuid', 'payment_remittance_no_email', 'no_address')).toBe(false);
+    const passed = (await rows()).filter(({ kind }) => kind === 'payment_remittance_no_email');
+    expect(passed).toMatchObject([{ about_id: PAYMENT }]);
+  });
+
+  it('C2b refuses to pass a notice on as a kind not to the admins, or with a reason not its own', async () => {
+    const id = ids.next();
+    for (const kind of ['payment_remittance', 'factor_reset_link', 'role_granted', 'no_such_kind'] as const) {
+      await expect(outbox.passOn(app, id, kind as never, 'no_address')).rejects.toThrow(RangeError);
+    }
+    for (const failure of ['lease_expired', 'No Address', '']) {
+      await expect(outbox.passOn(app, id, 'payment_remittance_no_email', failure)).rejects.toThrow(RangeError);
+    }
   });
 
   it(`refuses more than ${String(MOST_NOTICES_A_BATCH)} notices at a time`, async () => {

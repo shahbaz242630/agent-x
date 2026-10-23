@@ -43,6 +43,8 @@ import {
   isNoticeKind,
   isNoticeRole,
   type Notice,
+  type NoticeKind,
+  REMITTANCE_KIND,
   RESET_LINK_KIND,
 } from '../domain/notice.ts';
 import type { NotificationsTables } from './tables.ts';
@@ -84,6 +86,16 @@ export interface Outbox {
    */
   fanOut(db: Kysely<NotificationsTables>, id: string, recipients: readonly string[]): Promise<number | 'not_open'>;
   /**
+   * Gives the notice up as `failure` (a short constant) and writes, in its
+   * place and in the same transaction, one notice of `kind` to the
+   * organisation's admins about the same thing, due at once (0062: a paid
+   * supplier with no email, its admins told instead). False, writing nothing,
+   * if it was already sent or given up; a notice given up because its last
+   * try's lease ran out is passed on all the same. `id` is one claimDue
+   * handed out.
+   */
+  passOn(db: Kysely<NotificationsTables>, id: string, kind: NoticeKind, failure: string): Promise<boolean>;
+  /**
    * Marks the notice sent; false if it was already sent or given up. A notice
    * given up because its last try's lease ran out is marked sent all the
    * same: that try was only slow.
@@ -120,6 +132,8 @@ function problemWith(notice: Notice): string | undefined {
   if (!isNoticeKind(notice.kind)) return 'its kind is not one we send';
   // Its email carries one contact's own link: never to a group, nor to a person (0026).
   if (notice.kind === RESET_LINK_KIND && contact === null) return "a reset's link goes to one contact";
+  // Its email goes to the paid supplier, whose address the sender reads (0062).
+  if (notice.kind === REMITTANCE_KIND && recipients.some(Boolean)) return 'a remittance goes to its supplier alone';
   return subjectProblem(notice);
 }
 
@@ -301,6 +315,45 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
           .where('id', '=', id)
           .execute();
         return unique.length;
+      });
+    },
+
+    async passOn(db, id, kind, failure) {
+      if (!FAILURE.test(failure) || failure === LEASE_EXPIRED) {
+        throw new RangeError("a notice passed on gives a short lowercase reason of the caller's");
+      }
+      // To the admins, about what the notice was about: never a membership's kind, a remittance or a reset's link.
+      if (!isNoticeKind(kind) || isAboutAMembership(kind) || kind === REMITTANCE_KIND || kind === RESET_LINK_KIND) {
+        throw new RangeError('a notice is passed on to the admins as a kind about what it was about');
+      }
+      if (!isId(id)) return false;
+      const now = clock.now();
+      return limited(db, async (tx) => {
+        const row = await tx
+          .updateTable('notifications.outbox')
+          .set({ given_up_at: now, last_failure: failure })
+          .where('id', '=', id)
+          .where('sent_at', 'is', null)
+          .where((eb) => eb.or([eb('given_up_at', 'is', null), eb('last_failure', '=', LEASE_EXPIRED)]))
+          .returning(['org_id', 'about_id'])
+          .executeTakeFirst();
+        if (row === undefined) return false;
+        await tx
+          .insertInto('notifications.outbox')
+          .values({
+            id: ids.next(),
+            org_id: row.org_id,
+            recipient_user_id: null,
+            kind,
+            membership_id: null,
+            role: null,
+            about_id: row.about_id,
+            created_at: now,
+            attempts: 0,
+            next_attempt_at: now,
+          })
+          .execute();
+        return true;
       });
     },
 

@@ -53,6 +53,10 @@ function senderWith(
     contactAddress: () => Promise.reject(new Error('not asked')),
     resetLink: () => Promise.reject(new Error('not asked')),
     waitingRequests: { waitingOf: () => Promise.reject(new Error('not asked')) },
+    remittances: {
+      remittanceOf: () => Promise.reject(new Error('not asked')),
+      emailed: () => Promise.reject(new Error('not asked')),
+    },
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
     logger,
   });
