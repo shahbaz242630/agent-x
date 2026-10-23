@@ -17,6 +17,9 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export const PARTNER_MODES = ['fake', 'sandbox', 'live'] as const;
 export type PartnerMode = (typeof PARTNER_MODES)[number];
 
+/** ADR-014 §4: the live-money gate reference, `LMG-v<n>-sha256:<64 hex>`: the gate record's version and its signed evidence's hash. */
+export const LIVE_MONEY_GATE_REF = /^LMG-v[1-9][0-9]{0,5}-sha256:[0-9a-f]{64}$/;
+
 /** The log settings when none are set; also what the start-up logger writes with before the config is read. */
 export const DEFAULT_LOG: { readonly level: LogLevel; readonly eventCapPerMinute: number } = Object.freeze({
   level: 'info',

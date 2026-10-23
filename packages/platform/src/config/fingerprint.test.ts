@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
 import type { KeyDescription } from '../keys/key-provider.ts';
-import { type Config, loadConfig } from './config.ts';
+import { type Config, loadConfig as loadConfigWith } from './config.ts';
 import { configFingerprint, fingerprintedSettings, WATCHED_VARIABLES } from './fingerprint.ts';
 
 type Env = Record<string, string | undefined>;
 
 /** Plain words, so secret scanners ignore it. */
 const DB_LOGIN = 'app login for these tests';
+/** A well-formed live-money gate reference (ADR-014 §4): production runs live, which needs one. */
+const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
+/** A real partner's adapter as built (partner.ts), declaring no origins, so production can run live here. */
+const loadConfig = (env: Env) => loadConfigWith(env, { liveOrigins: [], sandboxOrigins: [] });
 const SETTINGS: Env = {
   AGENTX_ENV: 'production',
+  AGENTX_PARTNER_MODE: 'live',
+  AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: 'r-1',
   AGENTX_PUBLIC_ORIGIN: 'https://app.agentx.example',
   AGENTX_TRUSTED_PROXIES: '10.0.0.0/23',
@@ -130,8 +136,9 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ['the idle timeout', { AGENTX_SESSION_IDLE_MINUTES: '31' }],
     ['the absolute timeout', { AGENTX_SESSION_ABSOLUTE_HOURS: '11' }],
     ['the trusted proxies', { AGENTX_TRUSTED_PROXIES: '10.0.0.0/24' }],
+    ['the live-money gate reference', { AGENTX_LIVE_MONEY_GATE_REF: `LMG-v2-sha256:${'cd'.repeat(32)}` }],
     ['the public origin', { AGENTX_PUBLIC_ORIGIN: 'https://other.agentx.example' }],
-    ['the environment', { AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake' }],
+    ['the environment', { AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake', AGENTX_LIVE_MONEY_GATE_REF: undefined }],
     ['the database host', { AGENTX_DB_HOST: 'other.internal.example' }],
     ['the database port', { AGENTX_DB_PORT: '6432' }],
     ['the database name', { AGENTX_DB_NAME: 'agentx_uae' }],
@@ -195,10 +202,15 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(hashOf(WITH_EMAIL)).not.toBe(hashOf(SETTINGS));
   });
 
-  it('names the payment partner, or none (D2-3a)', () => {
-    const staging = { ...SETTINGS, AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake' };
+  it('names the payment partner, and the gate reference of a live one (D2-3a, C1)', () => {
+    const staging = {
+      ...SETTINGS,
+      AGENTX_ENV: 'staging',
+      AGENTX_PARTNER_MODE: 'fake',
+      AGENTX_LIVE_MONEY_GATE_REF: undefined,
+    };
     expect(fingerprintedSettings(loadConfig(staging)).partner).toEqual({ mode: 'fake' });
-    expect(fingerprintedSettings(loadConfig(SETTINGS)).partner).toBeUndefined();
+    expect(fingerprintedSettings(loadConfig(SETTINGS)).partner).toEqual({ mode: 'live', gateRef: GATE_REF });
   });
 
   it('ignores the OIDC client secret, as it does the password', () => {
@@ -243,7 +255,12 @@ describe('SEC-OPS-05 the config fingerprint', () => {
 
 describe('SEC-OPS-05 what can change the app from outside its settings is visible, by name only', () => {
   // Staging, because production refuses the debug switches at start-up.
-  const STAGING: Env = { ...SETTINGS, AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake' };
+  const STAGING: Env = {
+    ...SETTINGS,
+    AGENTX_ENV: 'staging',
+    AGENTX_PARTNER_MODE: 'fake',
+    AGENTX_LIVE_MONEY_GATE_REF: undefined,
+  };
 
   it.each(WATCHED_VARIABLES)('lists %s when set, and changes the hash', (name) => {
     const env = { ...STAGING, [name]: '/etc/ssl/bank-ca.pem' };

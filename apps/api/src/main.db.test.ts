@@ -23,6 +23,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type ApiProcess, runApi } from './main.ts';
+import { recordStart } from './start-record.ts';
 
 const server = inject('postgres');
 const keys = writeTestKeys(PURPOSES);
@@ -221,6 +222,23 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     } finally {
       await reader.destroy();
     }
+  });
+
+  it('SEC-OPS-07 a live start records its live-money gate reference beside the hash (ADR-014 §4)', async () => {
+    await database.as('admin').query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    const configHash = `sha256:${'0'.repeat(64)}`;
+    const gateRef = `LMG-v3-sha256:${'ab'.repeat(32)}`;
+    const app = createDatabase<PlatformControlsTables>(database.connection('app'), testLogger());
+    try {
+      const signing = loadKeys({ directory: keys.directory, current: {} });
+      await recordStart(app, signing, uuidV7Ids, { configHash, release: 'r-live', gateRef });
+    } finally {
+      await app.destroy();
+    }
+    const rows = await database
+      .as('admin')
+      .query<{ details: string }>('select details from platform_controls.audit_events order by seq');
+    expect(rows).toEqual([{ details: JSON.stringify({ configHash, gateRef, release: 'r-live' }) }]);
   });
 
   it('anchors the platform chain once it listens, where the start it recorded is the head (ADR-012 §2)', async () => {

@@ -12,6 +12,8 @@ export interface StartFacts {
   /** The config fingerprint's hash (`sha256:` and 64 hex digits). */
   readonly configHash: string;
   readonly release: string;
+  /** ADR-014 §4: a live start's live-money gate reference, recorded beside the config's hash; none otherwise. */
+  readonly gateRef: string | undefined;
 }
 
 /**
@@ -28,7 +30,11 @@ export async function recordStart(
   const recorded = await createPlatformChain({ keys, ids }).recordAlone(database, {
     actor: { type: 'system', id: 'api' },
     action: 'platform.started',
-    details: { configHash: facts.configHash, release: facts.release },
+    details: {
+      configHash: facts.configHash,
+      release: facts.release,
+      ...(facts.gateRef === undefined ? {} : { gateRef: facts.gateRef }),
+    },
   });
   return recorded.seq;
 }
