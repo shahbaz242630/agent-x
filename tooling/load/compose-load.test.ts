@@ -7,13 +7,13 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { LOAD_DB_PORT } from './plan.ts';
+import { API_CPUS_VARIABLE, apiCpusOf, LOAD_DB_PORT, STAGING_API_CPUS } from './plan.ts';
 
 interface Service {
   ports?: string[];
   networks?: string[];
   environment?: Record<string, string>;
-  cpus?: number;
+  cpus?: string;
   mem_limit?: string;
   profiles?: string[];
   read_only?: boolean;
@@ -60,14 +60,23 @@ describe('the load stack (compose.load.yaml)', () => {
     ]);
   });
 
-  it("sizes the API as staging's, with rate limits at most half its log cap (the API refuses more)", () => {
+  it("sizes the API as staging's unless the runner says otherwise, with rate limits at most half its log cap (the API refuses more)", () => {
     const api = services.api ?? {};
-    expect(api.cpus).toBe(0.5);
+    expect(api.cpus).toBe(`\${${API_CPUS_VARIABLE}:-${String(STAGING_API_CPUS)}}`);
     expect(api.mem_limit).toBe('1g');
     expect(api.environment?.AGENTX_DB_POOL_MAX).toBe('10');
     const cap = Number(api.environment?.AGENTX_LOG_EVENT_CAP_PER_MINUTE);
     const limits = Object.entries(api.environment ?? {}).filter(([name]) => name.startsWith('AGENTX_RATE_LIMIT_'));
     expect(limits).toHaveLength(3);
     for (const [name, value] of limits) expect(Number(value) * 2, name).toBeLessThanOrEqual(cap);
+  });
+
+  it('runs the API at staging’s half a CPU unless `--cpus` gives a size above 0, at most 4', () => {
+    expect(apiCpusOf(['--keep'])).toBe(0.5);
+    expect(apiCpusOf(['--cpus', '2'])).toBe(2);
+    expect(apiCpusOf(['--cpus', '4'])).toBe(4);
+    for (const bad of [['--cpus'], ['--cpus', '0'], ['--cpus', '4.5'], ['--cpus', 'two'], ['--cpus', '-1']]) {
+      expect(apiCpusOf(bad), bad.join(' ')).toBeUndefined();
+    }
   });
 });

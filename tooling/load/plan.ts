@@ -15,6 +15,23 @@ export const LOAD_PROJECT = 'agentx-load';
 /** Where the seed and verify steps reach its database: loopback only (compose.load.yaml), clear of another project's 554xx. */
 export const LOAD_DB_PORT = 56_540;
 
+/** Staging's API has half a CPU (deploy/azure/apps.bicep): a run's size unless told otherwise. */
+export const STAGING_API_CPUS = 0.5;
+
+/** The most a run may give the API: past this a laptop's own cores are the limit, not the API. */
+export const MOST_API_CPUS = 4;
+
+/** How the runner tells compose.load.yaml the API's CPUs. */
+export const API_CPUS_VARIABLE = 'AGENTX_LOAD_API_CPUS';
+
+/** The API's CPUs from the runner's arguments (`--cpus 2`), staging's when not given; undefined when not a size it can run. */
+export function apiCpusOf(args: readonly string[]): number | undefined {
+  const at = args.indexOf('--cpus');
+  if (at === -1) return STAGING_API_CPUS;
+  const cpus = Number(args[at + 1]);
+  return cpus > 0 && cpus <= MOST_API_CPUS ? cpus : undefined;
+}
+
 /** The run's working files (the seed's agent keys, k6's results, the API's log): gitignored. */
 export const OUT_DIR = fileURLToPath(new URL('./.out', import.meta.url));
 

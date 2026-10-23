@@ -8,7 +8,8 @@
  * 5. phase 2 of k6, with the spike
  * 6. the database checked (verify.load.test.ts) and the API's log read (logs.ts)
  * 7. the report, numbers only, into tooling/load/reports; the stack removed.
- * It fails if any check does. `--keep` leaves the stack up to look at.
+ * It fails if any check does. `--keep` leaves the stack up to look at;
+ * `--cpus 2` gives the API two CPUs instead of staging's half.
  * Docker and Vitest run with argument lists and no shell.
  */
 import { spawnSync } from 'node:child_process';
@@ -18,7 +19,15 @@ import { fileURLToPath } from 'node:url';
 
 import { ENV_FILE, prepare } from '../../deploy/compose/prepare.ts';
 import { logFailures, summariseLogs } from './logs.ts';
-import { LOAD_PROJECT, OUT_DIR, POLICY_P95_MS, REPORTS_DIR } from './plan.ts';
+import {
+  API_CPUS_VARIABLE,
+  apiCpusOf,
+  LOAD_PROJECT,
+  MOST_API_CPUS,
+  OUT_DIR,
+  POLICY_P95_MS,
+  REPORTS_DIR,
+} from './plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from './report.ts';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -89,18 +98,20 @@ function phase(n: 1 | 2): PhaseResult {
   return JSON.parse(readFileSync(path.join(OUT_DIR, `k6-phase-${String(n)}.json`), 'utf8')) as PhaseResult;
 }
 
-/** The report's file for today: a second run the same day gets its own. */
-function reportFile(at: string): string {
+/** The report's file for today and the API's size: a second run the same day gets its own. */
+function reportFile(at: string, apiCpus: number): string {
   mkdirSync(REPORTS_DIR, { recursive: true });
-  const day = at.slice(0, 10);
+  const name = `${at.slice(0, 10)}-local-${String(apiCpus)}cpu`;
   for (let n = 1; ; n += 1) {
-    const file = path.join(REPORTS_DIR, n === 1 ? `${day}-local.md` : `${day}-local-${String(n)}.md`);
+    const file = path.join(REPORTS_DIR, n === 1 ? `${name}.md` : `${name}-${String(n)}.md`);
     if (!existsSync(file)) return file;
   }
 }
 
-function main(keep: boolean): number {
+function main(keep: boolean, apiCpus: number): number {
   preflight();
+  // Read by compose.load.yaml: each docker call below inherits it.
+  process.env[API_CPUS_VARIABLE] = String(apiCpus);
   prepare();
   const login = { AGENTX_LOAD_DB_PASSWORD: localLogin('AGENTX_LOCAL_DB_APP_PASSWORD') };
   const at = new Date().toISOString();
@@ -131,10 +142,11 @@ function main(keep: boolean): number {
       ...(verified.code === 0 ? [] : ['The database checks failed: their output is above.']),
       ...logFailures(logs, created, POLICY_P95_MS),
     ];
-    const file = reportFile(at);
+    const file = reportFile(at, apiCpus);
     const report = renderReport({
       at,
       commit,
+      apiCpus,
       phases: [first, second],
       logs,
       databaseChecksPassed: verified.code === 0,
@@ -151,7 +163,10 @@ function main(keep: boolean): number {
 
 if (import.meta.main) {
   try {
-    process.exitCode = main(process.argv.includes('--keep'));
+    const apiCpus = apiCpusOf(process.argv);
+    if (apiCpus === undefined)
+      throw new LoadRefused(`--cpus takes a number above 0, at most ${String(MOST_API_CPUS)}.`);
+    process.exitCode = main(process.argv.includes('--keep'), apiCpus);
   } catch (error) {
     if (!(error instanceof LoadRefused)) throw error;
     console.error(`\n${error.message}`);

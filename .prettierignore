@@ -8,3 +8,5 @@ Documents/
 tooling/gate-proofs/fixtures/
 # Written from the routes by apps/api/src/contract.test.ts, never by hand.
 apps/api/openapi.json
+# Written by `corepack pnpm load` (tooling/load/run.ts), never by hand.
+tooling/load/reports/
