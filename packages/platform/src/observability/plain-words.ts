@@ -363,6 +363,51 @@ export const PLAIN_WORDS = {
     broke: 'Approved payments wait, their money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
+  'payment_check.unreadable': {
+    happened: "The bank's answer about a payment could not be read, or was about another payment.",
+    broke: 'A payment under way is marked unknown, its money held; it is never counted as paid.',
+    next: "Check the payment against the bank's record. If this repeats, a developer should read the error.",
+  },
+  'handoff.rejected_unproven': {
+    happened: 'The bank answered a new payment as rejected, but not that the money stayed in the account.',
+    broke: 'The payment is marked unknown and its money stays held until the bank proves what happened.',
+    next: 'Ask the bank whether the money left the account, then settle the payment.',
+  },
+  'payment_check.rejected_unproven': {
+    happened: 'The bank said a payment was rejected, but not that the money stayed in the account.',
+    broke: 'The payment is marked unknown and its money stays held until the bank proves what happened.',
+    next: 'Ask the bank whether the money left the account, then settle the payment.',
+  },
+  'payment_check.contradicts': {
+    happened: 'The bank now says something different about a payment that was already settled.',
+    broke: "The payment is left as it was settled; the bank's new answer is kept beside it.",
+    next: "Check the payment against the bank's record and settle the difference with the bank.",
+  },
+  'payment_check.still_unknown': {
+    happened: 'A payment has been unknown for more than a day.',
+    broke: 'Its money stays held, and the agent cannot ask for the same order again.',
+    next: 'Ask the bank what happened to it, then settle it.',
+  },
+  'payment_check.bank_unavailable': {
+    happened: 'The bank could not be reached to check payments under way; after 3 in a row the run stopped.',
+    broke: 'Those payments stay as they were, their money held; nothing is sent again.',
+    next: 'They are checked again in about a minute. If this keeps happening, the bank may be down.',
+  },
+  'payment_check.list_failed': {
+    happened: "An organisation's payments under way could not be listed, so none of them were checked with the bank.",
+    broke: 'Those payments stay as they were, their money held.',
+    next: 'It is tried again in about a minute. If it keeps failing, a developer should read the error.',
+  },
+  'payment_check.failed': {
+    happened: "Recording the bank's answer about a payment failed.",
+    broke: 'The payment stays as it was, its money held.',
+    next: 'It is checked again at the next run. If it keeps failing, a developer should read the error.',
+  },
+  'payment_check.run_failed': {
+    happened: 'The list of organisations could not be read, so no payments were checked with the bank.',
+    broke: 'Payments under way stay as they were, their money held.',
+    next: 'It is tried again in about a minute. If it keeps failing, check the database.',
+  },
   'holdings_check.failed': {
     happened: "The regular check of an organisation's spend requests against their budget holds failed.",
     broke: "Part of that organisation's requests went unchecked this run.",

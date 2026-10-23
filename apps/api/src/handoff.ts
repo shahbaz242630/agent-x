@@ -78,8 +78,7 @@ import {
   type SignedStatesServices,
   withSignedStates,
 } from '@agentx/core/modules/audit';
-import { instructionOf, type InstructionsTables, makeInstruction } from '@agentx/core/modules/instructions';
-import { lockHoldingsOf } from '@agentx/core/modules/outcomes';
+import { type InstructionsTables, makeInstruction } from '@agentx/core/modules/instructions';
 import { handoffPauseOf, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import {
   type ApprovedPaymentIntent,
@@ -101,7 +100,6 @@ import {
   moveTransaction,
   openTransaction,
   TRANSACTIONS,
-  transactionOf,
   type ProviderFacts,
   type TransactionEvent,
   type TransactionStatus,
@@ -114,15 +112,14 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import type { HealthCheck } from './health.ts';
-import { settlePayment } from './payment-outcome.ts';
+import { AFTER_SUBMITTED, factsOf, lockPayment, NO_FACTS, settlePayment } from './payment-outcome.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
 export const HANDOFF_EVERY_MS = 10_000;
 
 /** How long the partner has to answer a hand-off (ADR-007 §8): past it the answer can't be known, and is never resent. */
-const PARTNER_CALL_TIMEOUT_MS = 30_000;
+export const PARTNER_CALL_TIMEOUT_MS = 30_000;
 
 /** How long a transaction may wait for its answer before it is marked UNKNOWN (ADR-007 §10): far past the call's limit. */
 const UNKNOWN_AFTER_MS = 10 * 60_000;
@@ -194,22 +191,6 @@ function waitingFor({ named, authority, source, supplier }: Omit<AuthorityRead, 
     .join(',');
 }
 
-/** The partner's answer as a transaction's facts (PRD §6.2), its own words kept. */
-const factsOf = (execution: PaymentExecution): ProviderFacts => ({
-  providerStatus: execution.providerStatus,
-  paymentInstructionRef: execution.paymentInstructionRef,
-  rejectCode: execution.rejectCode,
-  providerChangedAt: execution.statusChangedAt,
-});
-
-/** The move after SUBMITTED that the rail's state now asks for (rail map §4). */
-const AFTER_SUBMITTED: Readonly<Record<ReturnType<typeof paymentStateOf>, TransactionEvent>> = {
-  PROCESSING: 'processing',
-  SUCCEEDED: 'succeed',
-  FAILED: 'fail',
-  UNKNOWN: 'lose_track',
-};
-
 export interface Handoff {
   /**
    * Hands off each organisation's approved requests that may go, a page at a
@@ -222,7 +203,7 @@ export interface Handoff {
 }
 
 /** The partner gave no answer within its time: one that can't be known (ADR-007 §8). */
-class PartnerTimedOut extends Error {
+export class PartnerTimedOut extends Error {
   constructor() {
     super("The partner didn't answer the hand-off in time");
     this.name = 'PartnerTimedOut';
@@ -230,7 +211,7 @@ class PartnerTimedOut extends Error {
 }
 
 /** The partner's answer, or PartnerTimedOut once `ms` pass; a late answer is left unread (Promise.race keeps hold of it). */
-async function withinTime<T>(answer: Promise<T>, ms: number): Promise<T> {
+export async function withinTime<T>(answer: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
@@ -416,7 +397,7 @@ export function createHandoff({
   ): Promise<'recorded' | 'late'> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
       const key = { orgId, id: transactionId };
-      await lockedHoldings(tx, states, key, requestId);
+      const from = await lockedHoldings(tx, states, key, requestId);
       /** The status it moved to, or null where its machine refused the move. */
       const move = async (
         event: TransactionEvent,
@@ -435,35 +416,28 @@ export function createHandoff({
         await settlePayment(tx, outbox, { orgId, requestId, transactionId, status, at: clock.now() });
         return 'recorded';
       };
-      if (answer.kind === 'unknown') return settled(await move('lose_track', NO_FACTS, 'no_answer'));
+      // No answer is no word at all: one the bank check (E1a) or the sweep moved meanwhile is left as they moved it.
+      if (answer.kind === 'unknown') {
+        return from === 'SUBMISSION_PENDING' ? settled(await move('lose_track', NO_FACTS, 'no_answer')) : 'late';
+      }
       if (answer.kind === 'refused')
         return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
       const facts = factsOf(answer.execution);
+      const state = paymentStateOf(answer.execution);
+      // Rejected with no proof the money stayed, in the answer itself: reconciliation's, as the bank check says it.
+      if (state === 'UNKNOWN') log.error('handoff.rejected_unproven', { transactionId });
       const submitted = await move('submitted', facts, 'accepted');
       if (submitted === null) return 'late';
-      return settled((await move(AFTER_SUBMITTED[paymentStateOf(answer.execution)], facts, 'accepted')) ?? submitted);
+      return settled((await move(AFTER_SUBMITTED[state], facts, 'accepted')) ?? submitted);
     });
 
-  /**
-   * The transaction read for change (10), then its request's reservation and
-   * claim locked (11), before a move takes the head (12); throws for a
-   * transaction that can't be believed (its alarm raised), or one not its request's.
-   */
+  /** The transaction and its holdings locked (`lockPayment`), its status as read. */
   const lockedHoldings = async (
     tx: HandoffTx,
     states: SignedStates,
     key: { readonly orgId: string; readonly id: string },
     requestId: string,
-  ): Promise<TransactionStatus> => {
-    const read = await transactionOf(tx, states, key, 'change');
-    if (read.outcome !== 'found') throw new Error(`A handed-off transaction can't be believed: ${key.id}`);
-    const instruction = await instructionOf(tx, states, { orgId: key.orgId, id: read.transaction.instructionId });
-    if (instruction.outcome !== 'found' || instruction.instruction.spendRequestId !== requestId.toLowerCase()) {
-      throw new Error(`A handed-off transaction's instruction can't be believed: ${key.id}`);
-    }
-    await lockHoldingsOf(tx, requestId);
-    return read.transaction.status;
-  };
+  ): Promise<TransactionStatus> => (await lockPayment(tx, states, key, requestId)).transaction.status;
 
   /** The partner's answer to the intent, within its time; any it can't give is `unknown` (never resent). */
   const answerOf = async (intent: ApprovedPaymentIntent, id: string, log: Logger): Promise<Answer> => {
@@ -624,22 +598,11 @@ export function createHandoff({
   };
 }
 
-/** /health's checks for the hand-off (ADR-013): its heartbeat, where there is one. */
-export const heartbeatChecks = (handoff: Handoff | undefined): HealthCheck[] =>
-  handoff === undefined ? [] : [{ name: 'handoff_heartbeat', check: () => Promise.resolve(handoff.beating()) }];
-
 /** What the partner answered, as Tx B records it. */
 type Answer =
   | { readonly kind: 'accepted'; readonly execution: PaymentExecution }
   | { readonly kind: 'refused'; readonly code: string }
   | { readonly kind: 'unknown' };
-
-const NO_FACTS: ProviderFacts = {
-  providerStatus: null,
-  paymentInstructionRef: null,
-  rejectCode: null,
-  providerChangedAt: null,
-};
 
 /** A request's move by its machine, signed, from its state read for change in this transaction. */
 async function moveRequest(

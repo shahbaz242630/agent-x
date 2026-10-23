@@ -446,6 +446,41 @@ describe('B3 the transaction (PRD §4.3)', () => {
     ).toEqual({ outcome: 'missing' });
   });
 
+  it('never lets an older status replace a newer one: a late answer after a lookup keeps the newer word (E1a)', async () => {
+    const world = await approvedRequest();
+    const { transactionId } = await handedOff(world);
+    const credited: ProviderFacts = {
+      providerStatus: 'AcceptedCreditSettlementCompleted',
+      paymentInstructionRef: null,
+      rejectCode: null,
+      providerChangedAt: new Date(AT.getTime() + 120_000),
+    };
+    await move(world.orgId, transactionId, 'submitted', credited);
+    await move(world.orgId, transactionId, 'succeed', credited);
+
+    // The hand-off's own answer, from before: its reference is new and kept, its older status isn't.
+    const late: ProviderFacts = {
+      providerStatus: 'Pending',
+      paymentInstructionRef: 'fake-payment-1',
+      rejectCode: 'AANI.XX00',
+      providerChangedAt: AT,
+    };
+    expect(await move(world.orgId, transactionId, 'submitted', late)).toEqual({
+      outcome: 'refused',
+      from: 'SUCCEEDED',
+    });
+    expect(await read(world.orgId, transactionId)).toMatchObject({
+      transaction: { status: 'SUCCEEDED', ...credited, paymentInstructionRef: 'fake-payment-1' },
+    });
+
+    // One as new as the kept one replaces it (the bank's newest word at the same moment).
+    const same = { ...late, providerStatus: 'Rejected', providerChangedAt: credited.providerChangedAt };
+    await move(world.orgId, transactionId, 'reverse', same);
+    expect(await read(world.orgId, transactionId)).toMatchObject({
+      transaction: { providerStatus: 'Rejected', rejectCode: 'AANI.XX00' },
+    });
+  });
+
   it('moves SUBMISSION_PENDING to SUBMITTED to SUCCEEDED in one transaction (ADR-007 §13)', async () => {
     const world = await approvedRequest();
     const { transactionId } = await handedOff(world);

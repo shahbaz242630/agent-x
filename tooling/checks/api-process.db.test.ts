@@ -113,6 +113,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
           'api.contact_fill',
           'api.factor_resets',
           'api.handoff',
+          'api.payment_checks',
           'api.background_downloads',
         ]);
       },

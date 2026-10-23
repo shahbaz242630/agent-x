@@ -136,7 +136,9 @@ import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
-import { createHandoff, HANDOFF_EVERY_MS, heartbeatChecks } from './handoff.ts';
+import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
+import { heartbeatChecks } from './health.ts';
+import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -484,11 +486,24 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       clock: systemClock,
       logger,
     });
+  // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off.
+  const paymentChecks =
+    rail &&
+    createPaymentChecks({
+      list: () => listedOrganizations(database),
+      database,
+      rail,
+      outbox,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    });
   const server = await buildServer({
     config,
     logger,
     ids: uuidV7Ids,
-    healthChecks: heartbeatChecks(handoff),
+    healthChecks: heartbeatChecks({ handoff, payment_checks: paymentChecks }),
     signIn:
       signIn === undefined
         ? undefined
@@ -967,6 +982,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // The hand-off on a timer of its own, where there is one.
   const handingOff = scheduleRunsIfAny(handoff, HANDOFF_EVERY_MS);
   logger.info('api.handoff', { running: handingOff.running });
+  const paymentChecking = scheduleRunsIfAny(paymentChecks, PAYMENT_CHECKS_EVERY_MS);
+  logger.info('api.payment_checks', { running: paymentChecking.running });
   // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b), on a timer of its own.
   const waitingRejecting = scheduleRuns(
     createWaitingRejections({
@@ -1037,6 +1054,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           requestExpiring.stop(),
           requestVoiding.stop(),
           handingOff.stop(),
+          paymentChecking.stop(),
           waitingRejecting.stop(),
           carryResting.stop(),
           activitySealing.stop(),
