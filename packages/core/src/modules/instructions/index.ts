@@ -8,6 +8,7 @@ export {
   intentHashOf,
   makeInstruction,
   type NewInstruction,
+  organizationOfConsent,
   organizationOfInstruction,
 } from './infrastructure/instructions.ts';
 export type { InstructionsTables } from './infrastructure/tables.ts';

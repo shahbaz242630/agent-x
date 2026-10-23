@@ -37,6 +37,13 @@ import {
 } from '../domain/rail.ts';
 import { PARTNER_IDEMPOTENCY_KEY } from '../domain/payments.ts';
 import { availabilityOf, type ConsentStatus, consentMayMove } from '../domain/uae-consent.ts';
+import {
+  type FakeMessage,
+  signFakeBody,
+  signFakeMessage,
+  type SignedMessage,
+  verifyFakeMessage,
+} from './fake-events.ts';
 import { createFakePayments } from './fake-payments.ts';
 import { createFakePayees, FakeBankRefused, FORM_ORIGIN } from './fake-payees.ts';
 import {
@@ -115,6 +122,10 @@ export interface FakeBank {
   comeBack(): void;
   /** The next call to this fake is done at the partner, but its answer is lost: the caller sees RailUnavailable. */
   loseNextAnswer(): void;
+  /** The partner sends a message (fake-events.ts): its body and headers, signed with the fake's own key now. */
+  signEvent(message: FakeMessage): Promise<SignedMessage>;
+  /** Any body, signed with the fake's own key now: a test's own shapes, malformed ones among them. */
+  signBody(body: Buffer): Promise<SignedMessage>;
 }
 
 export interface FakeRail extends FinancialRailAdapter {
@@ -174,6 +185,15 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
   const payments = createFakePayments({ clock });
   let down = false;
   let loseAnswer = false;
+  // Read once a process: it never changes (0063). One that fails to read is asked for again next time.
+  let key: Promise<Buffer> | undefined;
+  const eventKey = (): Promise<Buffer> => {
+    key ??= records.eventKey().catch((error: unknown) => {
+      key = undefined;
+      throw error;
+    });
+    return key;
+  };
 
   const accountOf = (accountId: string): RailAccount => {
     const account = accounts.find((each) => each.AccountId === accountId);
@@ -295,6 +315,8 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
     comeBack() {
       down = false;
     },
+    signEvent: async (message) => signFakeMessage(await eventKey(), message, clock.now()),
+    signBody: async (body) => signFakeBody(await eventKey(), body, clock.now()),
     loseNextAnswer() {
       loseAnswer = true;
     },
@@ -403,5 +425,8 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
       }),
 
     getExecution: (ref) => answer(() => records.within(ref.organizationId, (held) => payments.lookup(held, ref))),
+
+    // Checked here, not at the partner: no call to make, so never down.
+    verifyEvent: async (body, headers) => verifyFakeMessage(await eventKey(), body, headers, clock.now()),
   };
 }

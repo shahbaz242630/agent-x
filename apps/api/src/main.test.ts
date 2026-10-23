@@ -823,6 +823,7 @@ describe('the API stops cleanly on a signal', () => {
       'identity.session',
       'identity.step_up_challenge',
       'security.event',
+      'provider_events.message',
       'notifications.notice',
     ];
     expect(rowSweeps.scheduled).toEqual(tables);

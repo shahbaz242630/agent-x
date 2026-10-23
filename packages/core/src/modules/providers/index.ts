@@ -25,6 +25,14 @@ export {
   type SubmissionResult,
 } from './domain/payments.ts';
 export {
+  type EventCheck,
+  type EventHeaders,
+  type EventReference,
+  type EventRefusal,
+  MOST_EVENT_BYTES,
+  type PartnerEvent,
+} from './domain/events.ts';
+export {
   BENEFICIARY_ROUTES,
   type BeneficiaryOutcome,
   type BeneficiaryRef,
@@ -63,4 +71,10 @@ export {
   USUAL_CONTROLS,
 } from './infrastructure/fake-rail.ts';
 export { type RailAccount, SANDBOX_ACCOUNTS } from './infrastructure/sandbox-accounts.ts';
+export {
+  FAKE_EVENT_WINDOW_MS,
+  FAKE_SIGNATURE_HEADER,
+  type FakeMessage,
+  type SignedMessage,
+} from './infrastructure/fake-events.ts';
 export { createDatabaseRecords, type FakePartnerTables } from './infrastructure/fake-records.ts';

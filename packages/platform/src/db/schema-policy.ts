@@ -170,7 +170,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'directory.instructions': {
       reason:
         "The directory's list of instructions handed to the partner (ADR-005, ADR-007 §7 step 6, Phase 4 B3): an instruction's ID and its organisation, added in the hand-off's Tx A, so a partner's event naming only our ID finds its organisation before any is known; the instruction itself is read inside that organisation's withTenant",
-      columns: ['instruction_id', 'org_id'],
+      // The consent it pays under (0063, E1b): a message naming the consent alone finds its payments.
+      columns: ['instruction_id', 'org_id', 'account_consent_id'],
       // Added with its instruction, and read; an entry changed would route a
       // partner's event to an organisation with no such instruction (which then
       // finds none), and one deleted would leave its events unrouted (alerted).
@@ -339,6 +340,41 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // Added, read, and deleted once past the retention the config names;
       // never changed, so a count once written stands.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
+    },
+    'security.partner_event_evidence': {
+      reason:
+        "The partner's refused messages kept as security evidence (0063, SEC-PTR-01): refused before any organisation is known, the body encrypted, the address kept in-country, here alone",
+      columns: ['id', 'reason', 'ip', 'body_ciphertext', 'body_key_version', 'body_bytes', 'received_at'],
+      // Added (the first few an hour per address), read, and deleted once past the security events' retention.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+    },
+    'provider_events.inbox': {
+      reason:
+        "The partner's verified messages (0063, ADR-007 §12, SEC-PTR-03): a message arrives before any organisation is known; one row a message, so a replay adds nothing, routed to its organisation, or none where its reference is unknown",
+      columns: [
+        'id',
+        'partner',
+        'dedupe_key',
+        'event_type',
+        'reference_kind',
+        'reference',
+        'org_id',
+        'received_at',
+        'taken_at',
+        'attempts',
+        'body_ciphertext',
+        'body_key_version',
+      ],
+      // Added, taken once by the bank check, and deleted past the security events' retention: a message is a nudge.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['taken_at', 'attempts'],
+    },
+    'fake_partner.event_keys': {
+      reason:
+        "The fake partner's own signing key for its messages (0063, E1b): one a partner, made by the API when first needed so none sits in the code; the real partner's keys come with Phase 5",
+      columns: ['partner', 'key', 'created_at'],
+      // Added once and read; never changed or deleted, so a message signed under it still verifies.
+      appMay: ['SELECT', 'INSERT'],
     },
     'migrations.applied': {
       reason:

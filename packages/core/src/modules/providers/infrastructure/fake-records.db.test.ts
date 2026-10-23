@@ -78,6 +78,19 @@ const stores: readonly (readonly [string, () => FakePartnerStore])[] = [
   ['in the database', () => createDatabaseRecords(app)],
 ];
 
+describe(`the fake partner's message key in the database (E1b, 0063, Postgres ${server.version})`, () => {
+  it('is made once, the same to every store and to two asking at once, 32 bytes', async () => {
+    const [first, second] = await Promise.all([
+      createDatabaseRecords(app).eventKey(),
+      createDatabaseRecords(app).eventKey(),
+    ]);
+
+    expect(first).toHaveLength(32);
+    expect(second).toEqual(first);
+    expect(await createDatabaseRecords(app).eventKey()).toEqual(first);
+  });
+});
+
 describe.each(stores)(`the fake partner's records %s (D2-1, Postgres ${server.version})`, (where, storeOf) => {
   it('adds a record once: adding it again adds nothing and keeps the first', async () => {
     const store = storeOf();

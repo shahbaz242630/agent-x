@@ -162,6 +162,10 @@ export const REASON_CODES = {
     "An admin can't change their own role or deactivate themselves, so the organisation always keeps an admin. Ask another admin to make the change.",
   OWN_RESET:
     "No one can ask to reset their own second factor: another admin must ask for it. If you're the organisation's only admin, contact Agent X support, who follow the runbook.",
+  PARTNER_EVENT_MALFORMED:
+    "The partner's message was signed, but its body isn't a message this address reads, so nothing was taken in.",
+  PARTNER_EVENT_REFUSED:
+    "The partner's message didn't carry a signature that holds, so it was refused and nothing was taken in.",
   PARTNER_UNAVAILABLE:
     "The payment partner didn't answer, or none is set up here, so nothing was done at the partner. Try again in a few minutes.",
   PASSKEY_REQUIRED:
