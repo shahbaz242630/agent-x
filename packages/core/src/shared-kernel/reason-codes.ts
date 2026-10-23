@@ -269,6 +269,8 @@ export const REASON_CODES = {
     "Another of the organisation's suppliers is already paid to this bank account, suspended ones included, so it isn't this supplier's too. Nothing was changed. Look at the organisation's suppliers.",
   SUPPLIER_PHONE_TOO_NEW:
     "The supplier's phone number changed less than 30 days ago, so a call-back to it can't verify the supplier yet. Nothing was changed.",
+  SUPPLIER_REMITTANCE_UNCHANGED:
+    "This is already the supplier's remittance email setting, so nothing was changed and no sign-in is needed.",
   SUPPLIER_UNKNOWN:
     "A supplier the mandate names is not one of the organisation's. Check the suppliers' IDs. Nothing was changed.",
   TOO_MANY_CONTACTS:

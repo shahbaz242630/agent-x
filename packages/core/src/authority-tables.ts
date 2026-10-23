@@ -21,7 +21,12 @@ import { AGENT_ZONES } from './modules/limit-reservations/index.ts';
 import { MANDATE_VERSIONS, MANDATES, POLICIES, POLICY_VERSIONS } from './modules/mandates/index.ts';
 import { ORGANIZATIONS } from './modules/organizations/index.ts';
 import { SPEND_REQUESTS } from './modules/spend-requests/index.ts';
-import { BENEFICIARY_REGISTRATIONS, SUPPLIER_VERSIONS, SUPPLIERS } from './modules/suppliers/index.ts';
+import {
+  BENEFICIARY_REGISTRATIONS,
+  REMITTANCE_SETTINGS,
+  SUPPLIER_VERSIONS,
+  SUPPLIERS,
+} from './modules/suppliers/index.ts';
 import { TRANSACTIONS } from './modules/transactions/index.ts';
 
 /**
@@ -67,7 +72,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * after the mandates, Phase 2 C1), then its funding sources (5, D2-2),
  * then its suppliers (6), their payee registrations (6, after their supplier,
  * E2-1) and their versions (6, after the registration that gives one its
- * reference, E1-1), then its agents' month zones (7, with the agent's month,
+ * reference, E1-1) and their remittance settings (6, after the versions,
+ * Phase 4 C2a), then its agents' month zones (7, with the agent's month,
  * 0054), then its spend requests (8, Phase 2 D1), then a handed-off one's
  * instruction and transaction (10, Phase 4 B3). Clearing the
  * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
@@ -90,6 +96,7 @@ export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   SUPPLIERS,
   BENEFICIARY_REGISTRATIONS,
   SUPPLIER_VERSIONS,
+  REMITTANCE_SETTINGS,
   AGENT_ZONES,
   SPEND_REQUESTS,
   INSTRUCTIONS,

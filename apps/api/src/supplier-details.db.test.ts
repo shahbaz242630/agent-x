@@ -201,7 +201,12 @@ const askedFor = (write: SupplierChangeWrite): string => {
 /** A supplier added by the admin, its bank details registered, checked and confirmed with their passkey: its 24 h cooling-off begun. */
 async function payable(adminPerson: Person): Promise<string> {
   const admin = await signedIn(adminPerson);
-  const added = await registry.add(admin, keyed(admin, ADD_OPERATION), DETAILS, CORRELATION);
+  const added = await registry.add(
+    admin,
+    keyed(admin, ADD_OPERATION),
+    { details: DETAILS, remittanceEmail: 'on' },
+    CORRELATION,
+  );
   if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
   const supplierId = added.supplier.id;
   const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, 'cancel', CORRELATION);
@@ -443,6 +448,7 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
             versionId: ids.next(),
             supplier: { ...DETAILS, displayName: `Filler ${String(at)} LLC` },
             enteredBy: alice.membershipId,
+            remittanceEmail: 'on',
             createdAt: clock.now(),
             actor: OPERATOR,
           });

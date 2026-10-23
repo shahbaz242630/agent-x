@@ -67,6 +67,7 @@ import {
 } from '../domain/supplier.ts';
 import { oneOf, timeOf, wholeOf } from '../../../shared-kernel/index.ts';
 import type { RegistrationRecord } from './registrations.ts';
+import { REMITTANCE_EMAIL_UNSET, type RemittanceEmail, setRemittance } from './remittance.ts';
 import type { SuppliersTables } from './tables.ts';
 
 /** A supplier's row, as the signed state reads, records and moves it. */
@@ -320,6 +321,8 @@ export interface NewSupplier {
   readonly supplier: SupplierDetails;
   /** The membership of the member who entered them, checked active by the use case. */
   readonly enteredBy: string;
+  /** Whether it is emailed when it is paid (0061, partner decision 34b), as the admin chose. */
+  readonly remittanceEmail: RemittanceEmail;
   readonly createdAt: Date;
   /** Who is adding it. */
   readonly actor: AuditActor;
@@ -328,16 +331,41 @@ export interface NewSupplier {
 }
 
 /**
- * Adds the supplier, UNVERIFIED, with its first version, in the caller's
- * transaction, which must be withSignedStates' for its organisation. Details
- * it can't have are `SupplierDetailsRefused`, before any SQL runs. Gives the
- * supplier's first signed state, then the version's.
+ * Adds the supplier, UNVERIFIED, with its first version and its remittance
+ * setting (0061), in the caller's transaction, which must be
+ * withSignedStates' for its organisation. Details it can't have are
+ * `SupplierDetailsRefused`, before any SQL runs. Gives the supplier's first
+ * signed state, then the version's.
  */
 export async function addSupplier(
   tx: SuppliersTransaction,
   states: SignedStates,
   keys: KeyProvider,
-  { orgId, id, versionId, supplier, enteredBy, createdAt, actor, details = {} }: NewSupplier,
+  { remittanceEmail, ...added }: NewSupplier,
+): Promise<{ readonly supplier: RecordedState; readonly version: RecordedState }> {
+  const recorded = await addSupplierUnset(tx, states, keys, added);
+  const { orgId, id, createdAt, actor, details = {} } = added;
+  // Its setting after its version, as the lock order has them.
+  await setRemittance(
+    tx,
+    states,
+    { outcome: 'unset', remittanceEmail: REMITTANCE_EMAIL_UNSET },
+    { orgId, supplierId: id, remittanceEmail, at: createdAt, actor, details },
+  );
+  return recorded;
+}
+
+/**
+ * The supplier and its first version with no remittance setting: a supplier
+ * as added before 0061, which reads as `on` (remittance.ts). addSupplier's
+ * first steps; alone, only tests make one, to model those (the API's
+ * supplier-remittance.db.test.ts too); never a route.
+ */
+export async function addSupplierUnset(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  { orgId, id, versionId, supplier, enteredBy, createdAt, actor, details = {} }: Omit<NewSupplier, 'remittanceEmail'>,
 ): Promise<{ readonly supplier: RecordedState; readonly version: RecordedState }> {
   const first: NewVersion = {
     orgId,

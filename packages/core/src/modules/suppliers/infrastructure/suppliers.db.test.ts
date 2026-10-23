@@ -95,6 +95,7 @@ async function added(orgId: string, supplier: SupplierDetails = DETAILS) {
       versionId,
       supplier,
       enteredBy,
+      remittanceEmail: 'on',
       createdAt: clock.now(),
       actor: { type: 'user', id: ids.next() },
     }),
@@ -116,12 +117,13 @@ const contacts = (orgId: string, id: string, supplierId: string) =>
     return contactsOf(tx, keys, orgId, version.version);
   });
 
-const eventsAbout = (orgId: string, subjectId: string) =>
+/** The events about a supplier or its version; its remittance setting's (0061, ID its supplier's) only when asked. */
+const eventsAbout = (orgId: string, subjectId: string, withSetting = false) =>
   database
     .as('backup')
     .query<{ action: string; subject_type: string; details: string }>(
-      'select action, subject_type, details::text as details from audit.events where org_id = $1 and subject_id = $2 order by seq',
-      [orgId, subjectId],
+      "select action, subject_type, details::text as details from audit.events where org_id = $1 and subject_id = $2 and ($3 or subject_type <> 'supplier_remittance') order by seq",
+      [orgId, subjectId, withSetting],
     );
 
 beforeAll(async () => {
@@ -206,9 +208,10 @@ describe(`a supplier (E1-1, Postgres ${server.version})`, () => {
     const org = await organization();
     const { id, versionId } = await added(org);
 
-    const events = [...(await eventsAbout(org, id)), ...(await eventsAbout(org, versionId))];
+    const events = [...(await eventsAbout(org, id, true)), ...(await eventsAbout(org, versionId))];
     expect(events.map(({ action, subject_type }) => [action, subject_type])).toEqual([
       ['supplier.added', 'supplier'],
+      ['supplier_remittance.chosen', 'supplier_remittance'],
       ['supplier_version.made', 'supplier_version'],
     ]);
     const text = events.map(({ details }) => details).join('\n');
@@ -261,6 +264,7 @@ describe(`a supplier (E1-1, Postgres ${server.version})`, () => {
           versionId: ids.next(),
           supplier: { ...DETAILS, contacts: { ...DETAILS.contacts, phone: '050 123 4567' } },
           enteredBy: ids.next(),
+          remittanceEmail: 'on',
           createdAt: clock.now(),
           actor: OPERATOR,
         }),

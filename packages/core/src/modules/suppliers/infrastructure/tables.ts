@@ -1,10 +1,11 @@
 import type { Generated } from 'kysely';
 
-/** The suppliers schema's tables (db/migrations/0032_suppliers.sql, 0033_beneficiary_registrations.sql), as Kysely sees them. */
+/** The suppliers schema's tables (db/migrations/0032_suppliers.sql, 0033_beneficiary_registrations.sql, 0061_supplier_remittance_settings.sql), as Kysely sees them. */
 export interface SuppliersTables {
   'suppliers.suppliers': SuppliersTable;
   'suppliers.supplier_versions': SupplierVersionsTable;
   'suppliers.beneficiary_registrations': BeneficiaryRegistrationsTable;
+  'suppliers.remittance_settings': RemittanceSettingsTable;
 }
 
 interface SuppliersTable {
@@ -72,6 +73,17 @@ interface BeneficiaryRegistrationsTable {
   payee_hint: string | null;
   registered_at: Date | null;
   failure: string | null;
+  created_at: Date;
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
+}
+
+interface RemittanceSettingsTable {
+  org_id: string;
+  /** Its supplier's ID. */
+  id: string;
+  /** `on` or `off`. */
+  remittance_email: string;
   created_at: Date;
   state_version: Generated<number>;
   state_event_id: Generated<string | null>;

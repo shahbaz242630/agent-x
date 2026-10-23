@@ -7,7 +7,8 @@
 //   the organisation's lock for adding suppliers; the admin read again; the
 //   day's budget (SUPPLIER_ADDS_SPENT: their records are never retired, the
 //   B8-1 lesson); then the supplier, UNVERIFIED, with its first version,
-//   entered by the admin. No step-up: an unverified supplier can be paid
+//   entered by the admin, and the admin's choice of its remittance email
+//   (0061, partner decision 34b). No step-up: an unverified supplier can be paid
 //   nothing, and verifying it (E3) is the deliberate, stepped-up act
 //   (ADR-003 §8). Answered from the supplier read again, on a retry too.
 // - `list` and `show`: for the organisation's members, every supplier as
@@ -23,11 +24,13 @@
 //   the sources).
 //
 // Lock order (ADR-006 §6): the idempotency key, the add lock, the member's
-// membership (2a), the supplier (6), its version, the chain head last.
+// membership (2a), the supplier (6), its version, its remittance setting,
+// the chain head last.
 import {
   addSupplier,
   MOST_SUPPLIERS_ADDED_A_DAY,
   oneSupplierAddAtATime,
+  type RemittanceEmail,
   type SupplierDetails,
   type SupplierShown,
   suppliersAddedSince,
@@ -80,7 +83,7 @@ export interface SupplierRegistry {
   add(
     member: SupplierMember,
     idempotent: IdempotentRequest,
-    details: SupplierDetails,
+    added: { readonly details: SupplierDetails; readonly remittanceEmail: RemittanceEmail },
     correlationId: string,
   ): Promise<SupplierAddWrite>;
   list(orgId: string, page: SupplierPage, correlationId: string): Promise<SuppliersListed>;
@@ -112,7 +115,7 @@ export function createSupplierRegistry({
   };
 
   return {
-    async add(member, idempotent, details, correlationId) {
+    async add(member, idempotent, { details, remittanceEmail }, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneSupplierAddAtATime(tx, member.orgId);
         const admin = await work.memberIn(tx, states, member, ADDING_ROLES);
@@ -129,6 +132,7 @@ export function createSupplierRegistry({
           versionId: ids.next(),
           supplier: details,
           enteredBy: admin.id,
+          remittanceEmail,
           createdAt: now,
           actor: { type: 'user', id: member.userId },
         });

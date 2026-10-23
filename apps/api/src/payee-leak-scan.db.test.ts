@@ -185,6 +185,7 @@ const SUPPLIER = {
   displayName: 'Jasmine AI FZ-LLC',
   phone: '+971501234567',
   source: { kind: 'registry', ref: 'DED-123456' },
+  remittanceEmail: 'on',
 };
 const supplierOf = async (api: FastifyInstance) => {
   const added = await sent(api, org, '/v1/suppliers', SUPPLIER);
@@ -346,6 +347,7 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
             source: { kind: 'registry', ref: canary },
           },
           enteredBy: ids.next(),
+          remittanceEmail: 'on',
           createdAt: clock.now(),
           actor: OPERATOR,
         }),

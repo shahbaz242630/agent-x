@@ -226,6 +226,12 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       'The details of a supplier of one of your Agent X organisations were changed. Nothing is paid to it until a second person verifies it again.',
     check: SUPPLIERS_CHECK,
   },
+  supplier_remittance_changed: {
+    subject: () => "Agent X: a supplier's payment emails were switched on or off",
+    firstLine: () =>
+      'An admin of one of your Agent X organisations changed whether a supplier is emailed when a payment to it succeeds. Who is paid, and how much, did not change.',
+    check: SUPPLIERS_CHECK,
+  },
   supplier_verified: {
     subject: () => 'Agent X: a supplier was verified',
     firstLine: () =>

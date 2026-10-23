@@ -244,6 +244,7 @@ export function mandateWorld({
             source: { kind: 'registry', ref: 'DED-123456' },
           },
           enteredBy: ids.next(),
+          remittanceEmail: 'on',
           createdAt: now,
           actor: OPERATOR,
         }),

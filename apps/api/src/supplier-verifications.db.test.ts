@@ -204,7 +204,12 @@ async function payable(
   const admin = await signedIn(adminPerson);
   const adding = await signedIn(adder);
   const checking = await signedIn(checker);
-  const added = await registry.add(adding, keyed(adding, ADD_OPERATION), DETAILS, CORRELATION);
+  const added = await registry.add(
+    adding,
+    keyed(adding, ADD_OPERATION),
+    { details: DETAILS, remittanceEmail: 'on' },
+    CORRELATION,
+  );
   if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
   const supplierId = added.supplier.id;
   await afterAdd?.(supplierId);
@@ -428,7 +433,12 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(askedFor(await ask(signedBob, supplierId))).toEqual(expect.any(String));
 
     const admin = await signedIn(alice);
-    const bare = await registry.add(admin, keyed(admin, ADD_OPERATION), DETAILS, CORRELATION);
+    const bare = await registry.add(
+      admin,
+      keyed(admin, ADD_OPERATION),
+      { details: DETAILS, remittanceEmail: 'on' },
+      CORRELATION,
+    );
     if (bare.outcome !== 'added') throw new Error('not added');
     expect(await ask(signedBob, bare.supplier.id)).toEqual(refusedWith('SUPPLIER_NO_PAYEE', 409));
   });

@@ -2,9 +2,17 @@
 // SEC-AG-05; Phase 1 E1-2).
 //
 // - `POST /v1/suppliers`: adds a supplier, UNVERIFIED, with its name, its
-//   phone (an email and a trade licence number if known) and the independent
-//   source its details were checked against: 201 with the supplier. Admins;
+//   phone (an email and a trade licence number if known), the independent
+//   source its details were checked against, and `remittanceEmail`, `on` or
+//   `off`, required (partner decision 34b): 201 with the supplier. Admins;
 //   100 a day (409 SUPPLIER_ADDS_SPENT).
+// - `POST /v1/suppliers/:id/remittance-email`, with `remittanceEmail`, then
+//   `…/remittance-email/confirm` with the step-up's ID once signed in again (a
+//   passkey) and the same choice (decision 34d): whether the supplier is
+//   emailed when a payment to it succeeds: 202 with the step-up, then 200 with
+//   the supplier, its verification untouched, and every member and counting
+//   contact told. 409 SUPPLIER_REMITTANCE_UNCHANGED for one already as asked.
+//   Admins.
 // - `GET /v1/suppliers?after=&limit=` and `/v1/suppliers/:id`: the suppliers
 //   as Agent X holds them, each verified against its signed state; one with
 //   its contacts. Every member.
@@ -58,7 +66,7 @@
 // Refusals: 404 NOT_FOUND for a supplier not the organisation's; 503
 // INTEGRITY_FAILED when the caller's membership, a supplier or its version
 // can't be verified. The use cases are supplier-registry.ts,
-// supplier-changes.ts and supplier-payees.ts.
+// supplier-changes.ts, supplier-payees.ts and supplier-remittance.ts.
 import type { PayeeDetails } from '@agentx/core/modules/providers';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import { visibleName } from '@agentx/core/shared-kernel';
@@ -70,6 +78,7 @@ import {
   NAME_CHECKS,
   normalisedIban,
   REGISTRATION_FAILURES,
+  REMITTANCE_EMAILS,
   REGISTRATION_ROUTES,
   SOURCE_KINDS,
   type SupplierDetails,
@@ -129,6 +138,12 @@ import {
   WITHDRAWING_ROLES,
 } from './supplier-payee-changes.ts';
 import { DETAILS_CONFIRM_OPERATION, DETAILS_OPERATION, type SupplierDetailsChanges } from './supplier-details.ts';
+import {
+  REMITTANCE_CONFIRM_OPERATION,
+  REMITTANCE_OPERATION,
+  REMITTANCE_ROLES,
+  type SupplierRemittance,
+} from './supplier-remittance.ts';
 import {
   type SupplierVerifications,
   VERIFY_CONFIRM_OPERATION,
@@ -211,6 +226,12 @@ const SUPPLIER_DETAILS = SUPPLIER.extend({
   enteredBy: z.uuid().describe('The membership of the member who entered its current details.'),
   enteredAt: z.iso.datetime().describe('When they were entered.'),
   payee: PAYEE.nullable().describe('The bank account it is paid to, or null before one is registered.'),
+  remittanceEmail: z
+    .enum(REMITTANCE_EMAILS)
+    .describe(
+      'Whether its email is told when a payment to it succeeds (on or off): the invoice number, the bank ' +
+        'reference and the amount.',
+    ),
   pendingChange: z
     .object({
       version: z.int().describe('The details’ version waiting.'),
@@ -258,11 +279,17 @@ const detailsKept = (body: DetailFields, context: z.RefinementCtx): SupplierDeta
   }
 };
 
-const DETAILS_BODY = z.strictObject(DETAIL_FIELDS).transform(detailsKept);
+/** The admin's choice (Rule Book §1.9: required, no hidden default; partner decision 34b offers `on` first). */
+const REMITTANCE_EMAIL = z
+  .enum(REMITTANCE_EMAILS)
+  .describe('Whether its email is told when a payment to it succeeds: on (offered first) or off.');
 
 const ADD_SCHEMA = {
   summary: 'Add a supplier, unverified',
-  body: DETAILS_BODY.describe('The supplier to add, UNVERIFIED.'),
+  body: z
+    .strictObject({ ...DETAIL_FIELDS, remittanceEmail: REMITTANCE_EMAIL })
+    .transform((body, context) => ({ details: detailsKept(body, context), remittanceEmail: body.remittanceEmail }))
+    .describe('The supplier to add, UNVERIFIED, and whether it is emailed when it is paid.'),
   response: { 201: SUPPLIER_DETAILS.describe('The supplier, added UNVERIFIED.') },
 };
 
@@ -329,6 +356,31 @@ const DETAILS_CONFIRM_SCHEMA = {
     200: SUPPLIER_CHANGED.describe(
       'The supplier with its new details: UNVERIFIED until a second person verifies it again, and everyone told.',
     ),
+  },
+};
+
+const REMITTANCE_BODY = z.strictObject({ remittanceEmail: REMITTANCE_EMAIL }).describe('The admin’s new choice.');
+
+const REMITTANCE_SCHEMA = {
+  summary: 'Ask to change whether a supplier is emailed when it is paid',
+  params: SUPPLIER_ID,
+  body: REMITTANCE_BODY,
+  response: {
+    202: stepUpAsked(
+      'SupplierRemittanceChangeAsked',
+      'Changing whether a supplier is emailed when it is paid, waiting for the admin to sign in again.',
+    ),
+  },
+};
+
+const REMITTANCE_CONFIRM_SCHEMA = {
+  summary: 'Change whether a supplier is emailed when it is paid, once signed in again for it',
+  params: SUPPLIER_ID,
+  body: STEP_UP_CONFIRM.extend(REMITTANCE_BODY.shape).describe(
+    'The step-up signed in again for, and the choice it was asked with.',
+  ),
+  response: {
+    200: SUPPLIER_CHANGED.describe('The supplier with its new setting, its verification as it was, and everyone told.'),
   },
 };
 
@@ -592,7 +644,7 @@ const payeeBodyOf = (payee: PayeeShown | null) =>
         maskedName: payee.maskedName,
       };
 
-const detailsOf = ({ supplier, version, contacts, payee, pending }: SupplierView) => ({
+const detailsOf = ({ supplier, version, contacts, payee, pending, remittanceEmail }: SupplierView) => ({
   ...supplierOf(supplier, version.displayName),
   version: version.version,
   phone: contacts.phone,
@@ -603,6 +655,7 @@ const detailsOf = ({ supplier, version, contacts, payee, pending }: SupplierView
   enteredBy: version.enteredBy,
   enteredAt: version.enteredAt.toISOString(),
   payee: payeeBodyOf(payee),
+  remittanceEmail,
   pendingChange:
     pending === null
       ? null
@@ -635,6 +688,7 @@ export function registerSuppliers(
     payeeChanges,
     verifications,
     details,
+    remittance,
   }: {
     registry: SupplierRegistry | undefined;
     changes: SupplierChanges | undefined;
@@ -642,6 +696,7 @@ export function registerSuppliers(
     payeeChanges: SupplierPayeeChanges | undefined;
     verifications: SupplierVerifications | undefined;
     details: SupplierDetailsChanges | undefined;
+    remittance: SupplierRemittance | undefined;
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
@@ -724,6 +779,46 @@ export function registerSuppliers(
         idempotentRequest(request, member.orgId),
         request.params.id,
         request.body.pendingRequests,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/remittance-email',
+    {
+      schema: REMITTANCE_SCHEMA,
+      bodyLimit: CHOICE_BODY_LIMIT,
+      config: { access: [...REMITTANCE_ROLES], operation: REMITTANCE_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(remittance).ask(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.remittanceEmail,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/remittance-email/confirm',
+    {
+      schema: REMITTANCE_CONFIRM_SCHEMA,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
+      config: { access: [...REMITTANCE_ROLES], operation: REMITTANCE_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(remittance).confirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body,
         request.id,
       );
       return answerChange(written, request, reply);

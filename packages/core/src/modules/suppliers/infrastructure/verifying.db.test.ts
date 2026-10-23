@@ -163,6 +163,7 @@ beforeEach(async () => {
       versionId: ids.next(),
       supplier: DETAILS,
       enteredBy: firstEnterer,
+      remittanceEmail: 'on',
       createdAt: clock.now(),
       actor: OPERATOR,
     }),

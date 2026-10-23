@@ -98,6 +98,7 @@ import type { OrganizationChanges } from './organization-changes.ts';
 import { registerOrganization } from './organization.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierDetailsChanges } from './supplier-details.ts';
+import type { SupplierRemittance } from './supplier-remittance.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
 import type { SupplierVerifications } from './supplier-verifications.ts';
 import type { SupplierPayees } from './supplier-payees.ts';
@@ -214,6 +215,8 @@ export interface ServerOptions {
   readonly supplierPayeeChanges?: SupplierPayeeChanges | undefined;
   /** Changing suppliers' details (supplier-details.ts); without it, no one reaches those routes. */
   readonly supplierDetailsChanges?: SupplierDetailsChanges | undefined;
+  /** Setting whether suppliers are emailed when they are paid (supplier-remittance.ts); without it, no one reaches that route. */
+  readonly supplierRemittance?: SupplierRemittance | undefined;
   /** Verifying suppliers (supplier-verifications.ts); without it, no one reaches those routes. */
   readonly supplierVerifications?: SupplierVerifications | undefined;
   /** The fake partner's bank, where the partner is the fake (fake-bank.ts); without it, those routes answer 404. */
@@ -404,6 +407,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     payeeChanges: options.supplierPayeeChanges,
     verifications: options.supplierVerifications,
     details: options.supplierDetailsChanges,
+    remittance: options.supplierRemittance,
   });
   registerMandates(app, {
     registry: options.mandateRegistry,
