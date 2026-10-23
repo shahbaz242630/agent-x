@@ -20,6 +20,15 @@
 //   contact gives the notice up at once (`reset_closed`), as its link would do
 //   nothing; links that can't be read leave it to be tried again
 //   (`link_unavailable`).
+// - A remittance (Phase 4 C2b, 0062: a payment to a supplier SUCCEEDED) goes
+//   to the supplier itself: what it carries, its address and the setting are
+//   read at send time from the payment's verified records (`Remittances`). The
+//   setting `off` (decision 34b), or the payment no longer SUCCEEDED, gives it
+//   up at once, logged with why (`remittance_off`, `payment_not_succeeded`); a
+//   supplier version with no email (decision 34c) passes it on to the
+//   organisation's admins (`no_address`), who are told instead; records that
+//   can't be read or believed leave it to be tried again
+//   (`payment_unavailable`).
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
 // - A recipient with no address gives the notice up at once (`no_address`);
@@ -41,12 +50,20 @@
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
-import { messageFor, type NoticeMessage, type ResetLink, type WaitingRequest } from '../domain/messages.ts';
+import {
+  messageFor,
+  type NoticeMessage,
+  type PaidRemittance,
+  type ResetLink,
+  type WaitingRequest,
+} from '../domain/messages.ts';
 import {
   type ClaimedNotice,
   isAboutAPerson,
   isAboutASupplier,
   isToAdminsAndApprovers,
+  REMITTANCE_KIND,
+  REMITTANCE_NO_EMAIL_KIND,
   RESET_LINK_KIND,
 } from '../domain/notice.ts';
 import { LEASE_EXPIRED, type Outbox } from './outbox.ts';
@@ -99,6 +116,25 @@ export interface WaitingRequests {
   waitingOf(orgId: string, requestId: string): Promise<WaitingRequest | undefined>;
 }
 
+/** A paid supplier's email, as read at send time (Phase 4 C2b). */
+export type RemittanceRead =
+  | { readonly outcome: 'send'; readonly to: string; readonly paid: PaidRemittance }
+  /** Its setting is `off` (partner decision 34b): nothing is sent. */
+  | { readonly outcome: 'off' }
+  /** The version its instruction names holds no email (decision 34c): the admins are told instead. */
+  | { readonly outcome: 'no_email' }
+  /** The payment is no longer SUCCEEDED: nothing is sent. */
+  | { readonly outcome: 'not_succeeded' };
+
+/** Finds a payment's remittance at send time (Phase 4 C2b): from its verified records, which the API wires. */
+export interface Remittances {
+  /** The supplier's email for the payment, or why there is none. Throws if its records can't be read, or can't be believed. */
+  remittanceOf(orgId: string, transactionId: string): Promise<RemittanceRead>;
+}
+
+/** Why a remittance is given up at once, as the outbox keeps it. */
+const REMITTANCE_SKIPPED = { off: 'remittance_off', not_succeeded: 'payment_not_succeeded' } as const;
+
 /** An organisation's active admin, as their verified membership says. */
 export interface Admin {
   readonly userId: string;
@@ -137,6 +173,7 @@ export function createNoticeSender({
   contactAddresses,
   resetLinks,
   waitingRequests,
+  remittances,
   audience,
   logger,
 }: {
@@ -147,6 +184,7 @@ export function createNoticeSender({
   readonly contactAddresses: ContactAddresses;
   readonly resetLinks: ResetLinks;
   readonly waitingRequests: WaitingRequests;
+  readonly remittances: Remittances;
   readonly audience: Audience;
   readonly logger: Logger;
 }): NoticeSender {
@@ -261,9 +299,14 @@ export function createNoticeSender({
     }
     const extras = await extrasOf(notice);
     if (extras === undefined) return;
+    await sendAndRecord(notice, messageFor(notice, address, extras.link, extras.request));
+  };
+
+  /** Sends the notice's email and records how it went. */
+  const sendAndRecord = async (notice: ClaimedNotice, message: NoticeMessage): Promise<void> => {
     let sent: SendOutcome;
     try {
-      sent = await notifier.send(messageFor(notice, address, extras.link, extras.request));
+      sent = await notifier.send(message);
     } catch {
       await failed(notice, 'send_error', false);
       return;
@@ -277,8 +320,37 @@ export function createNoticeSender({
     logger.info('notification.sent', { noticeId: notice.id, kind: notice.kind, attempt: notice.attempts + 1 });
   };
 
-  /** Fans out a notice to no one in particular, or sends one to its recipient; says whether it fanned out. */
+  /**
+   * Sends a remittance to its paid supplier, as its records say at send time;
+   * or gives it up, or passes it on to the admins, logged with why. Says
+   * whether it wrote a notice in its place.
+   */
+  const sendRemittance = async (notice: ClaimedNotice): Promise<boolean> => {
+    let read: RemittanceRead;
+    try {
+      // The outbox writes a remittance about its transaction only.
+      read = await remittances.remittanceOf(notice.orgId, notice.aboutId ?? '');
+    } catch {
+      await failed(notice, 'payment_unavailable', false);
+      return false;
+    }
+    if (read.outcome === 'send') {
+      await sendAndRecord(notice, messageFor(notice, read.to, undefined, undefined, read.paid));
+      return false;
+    }
+    if (read.outcome === 'no_email') {
+      const passed = await outbox.passOn(db, notice.id, REMITTANCE_NO_EMAIL_KIND, 'no_address');
+      if (passed) logger.info('notification.remittance_skipped', { noticeId: notice.id, why: 'no_email' });
+      return passed;
+    }
+    const became = await outbox.failed(db, notice.id, REMITTANCE_SKIPPED[read.outcome], true);
+    logger.info('notification.remittance_skipped', { noticeId: notice.id, why: read.outcome, outcome: became });
+    return false;
+  };
+
+  /** Fans out a notice to no one in particular, or sends one to its recipient; says whether it wrote notices due now. */
   const deliver = async (notice: ClaimedNotice): Promise<boolean> => {
+    if (notice.kind === REMITTANCE_KIND) return sendRemittance(notice);
     if (notice.recipientUserId === null && notice.recipientContactId === null) {
       await fanOut(notice);
       return true;
@@ -303,13 +375,13 @@ export function createNoticeSender({
     for (;;) {
       if (stopped()) return;
       const due = await outbox.claimDue(db, NOTICES_A_RUN);
-      let fannedOut = false;
+      let wroteMore = false;
       for (const notice of due) {
         if (stopped()) return;
-        if (await deliver(notice)) fannedOut = true;
+        if (await deliver(notice)) wroteMore = true;
       }
-      // A full batch may have left more due, and a fan-out has just made some.
-      if (due.length < NOTICES_A_RUN && !fannedOut) return;
+      // A full batch may have left more due, and a fan-out or a notice passed on has just made some.
+      if (due.length < NOTICES_A_RUN && !wroteMore) return;
     }
   }
 }

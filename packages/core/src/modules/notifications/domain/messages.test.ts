@@ -4,7 +4,7 @@
 // which confirms that reset only, and says so.
 import { describe, expect, it } from 'vitest';
 
-import { amountText, messageFor, type ResetLink, type WaitingRequest } from './messages.ts';
+import { amountText, messageFor, type PaidRemittance, type ResetLink, type WaitingRequest } from './messages.ts';
 import {
   AGENT_NOTICE_KINDS,
   type ClaimedNotice,
@@ -417,6 +417,72 @@ describe('a notice’s email (B5-1b)', () => {
       [100_000n, 'AED 1,000.00'],
     ])('writes %s minor units as %s', (minor, text) => {
       expect(amountText(minor, 'AED')).toBe(text);
+    });
+  });
+
+  describe('C2b a payment to a supplier SUCCEEDED (0062, Phase 4; partner decisions 8 and 34a, 34c)', () => {
+    const payment = '0199a0f0-0000-7000-8000-0000000c2bc1';
+    const remittanceNotice: ClaimedNotice = {
+      ...NOTICE,
+      kind: 'payment_remittance',
+      recipientUserId: null,
+      membershipId: null,
+      role: null,
+      aboutId: payment,
+    };
+    const paid: PaidRemittance = {
+      payerName: 'Falcon Trading LLC',
+      invoiceNumber: 'INV-2026-0042',
+      bankReference: 'AGX INV-2026-0042',
+      amountMinor: 1_234_567_805n,
+      currency: 'AED',
+    };
+    const message = messageFor(remittanceNotice, 'accounts@supplier.example.test', undefined, undefined, paid);
+
+    it('tells the supplier who paid, the invoice number, the bank reference and the amount', () => {
+      expect(message).toMatchObject({ id: remittanceNotice.id, to: 'accounts@supplier.example.test' });
+      expect(message.subject).toBe('Payment sent to you by Falcon Trading LLC');
+      expect(message.text).toContain(
+        [
+          'Amount: AED 12,345,678.05',
+          'Invoice number: INV-2026-0042',
+          'Bank reference: AGX INV-2026-0042 (as your bank shows it)',
+        ].join('\n'),
+      );
+    });
+
+    it('carries nothing of ours to someone outside the organisation: no ID, no link, and it can change nothing', () => {
+      for (const id of [NOTICE.orgId, payment, NOTICE.recipientUserId ?? '']) expect(message.text).not.toContain(id);
+      expect(`${message.subject} ${message.text}`).not.toMatch(/https?:|www\.|token|#/i);
+      expect(message.text).toContain("it can't change anything");
+      expect(message.text).toContain('never by replying to this email');
+    });
+
+    it('is sent with its payment, and only it is', () => {
+      expect(() => messageFor(remittanceNotice, 'a@example.test')).toThrow(RangeError);
+      expect(() => messageFor(NOTICE, 'a@example.test', undefined, undefined, paid)).toThrow(RangeError);
+      expect(() =>
+        messageFor(
+          remittanceNotice,
+          'a@example.test',
+          { url: 'https://x.test', expiresAt: NOTICE.createdAt },
+          undefined,
+          paid,
+        ),
+      ).toThrow(RangeError);
+    });
+
+    it('tells every admin, by the payment’s ID, when the supplier had no email to tell (34c)', () => {
+      const told = messageFor(
+        { ...remittanceNotice, kind: 'payment_remittance_no_email', recipientUserId: NOTICE.recipientUserId },
+        'a@example.test',
+      );
+
+      expect(told.subject).toBe('Agent X: a supplier was paid but not emailed');
+      expect(told.text).toContain("it has no email address on file, so it wasn't told");
+      expect(told.text).toContain(`Payment: ${payment}`);
+      expect(told.text).toContain("You're told because you're an admin of this organisation.");
+      expect(told.text).toContain("This email can't approve or change anything.");
     });
   });
 

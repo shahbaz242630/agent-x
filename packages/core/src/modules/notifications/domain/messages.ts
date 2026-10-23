@@ -9,17 +9,24 @@
 // link, read at send time, to a page where confirming takes a press. It
 // confirms that one reset only, and says so; nothing it holds approves a
 // payment (SEC-HA-11 is untouched).
+//
+// The other (Phase 4 C2b, 0062): the email telling a paid supplier, someone
+// outside the organisation, carries the payment's own facts, read at send
+// time: who paid, the invoice number, the bank reference and the amount
+// (partner decisions 8 and 34a). Nothing else, and no ID of ours.
 import {
   type ClaimedNotice,
   isAboutAMandate,
   isAboutAnAgent,
   isAboutAnAuditEntry,
+  isAboutAPayment,
   isAboutAPerson,
   isAboutASupplier,
   isAboutASpendRequest,
   isAboutTheOrganization,
   isToAdminsAndApprovers,
   type NoticeKind,
+  REMITTANCE_KIND,
   RESET_LINK_KIND,
 } from './notice.ts';
 
@@ -60,6 +67,21 @@ export interface WaitingRequest {
   readonly consoleUrl: string;
   /** When it expires, unless a person decides first: its decision's time and its wait (E6, partner S119). */
   readonly expiresAt: Date;
+}
+
+/**
+ * A payment that succeeded, as the sender reads it at send time for its
+ * supplier's email (Phase 4 C2b; partner decisions 8 and 34a): who paid, the
+ * invoice it pays, the reference the supplier's bank shows and the amount.
+ * Nothing else of the organisation, the agent or the request goes to someone
+ * outside it.
+ */
+export interface PaidRemittance {
+  readonly payerName: string;
+  readonly invoiceNumber: string;
+  readonly bankReference: string;
+  readonly amountMinor: bigint;
+  readonly currency: string;
 }
 
 /** Minor units as an amount reads in an email: AED 12,500.00 (two decimals, ADR-006 §1's currencies). */
@@ -376,11 +398,25 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       "Agent X's own team resumed the hand-off of approved payments to the bank, for every organisation, one of yours among them. Each approved payment that waited is checked again before it goes.",
     check: HANDOFF_CHECK,
   },
+  // To a paid supplier (0062, Phase 4 C2b, partner decision 34a): its own email (remittanceMessage); only the subject here.
+  payment_remittance: {
+    subject: () => 'Payment sent to you',
+    firstLine: () => '',
+    check: '',
+  },
+  // About a payment (0062, decision 34c): its supplier had no email to tell, to every admin.
+  payment_remittance_no_email: {
+    subject: () => 'Agent X: a supplier was paid but not emailed',
+    firstLine: () =>
+      "A payment from one of your Agent X organisations to a supplier succeeded. The supplier is set to be emailed when it is paid, but it has no email address on file, so it wasn't told. The payment itself is not affected.",
+    check:
+      'Sign in to Agent X to see the payment, and let the supplier know it was paid if they need to. To have it emailed next time, add its email address in its details.',
+  },
 };
 
 const NEWLINE = '\n';
 
-/** What a notice is about, by its ID alone: a membership, a person, an agent, a mandate, the organisation, a spend request, an audit log entry, a supplier, or a registered contact. */
+/** What a notice is about, by its ID alone: a membership, a person, an agent, a mandate, the organisation, a spend request, an audit log entry, a payment, a supplier, or a registered contact. */
 function aboutLine(notice: ClaimedNotice): string {
   if (notice.membershipId !== null) return `Membership: ${notice.membershipId}`;
   const id = notice.aboutId ?? '';
@@ -390,6 +426,7 @@ function aboutLine(notice: ClaimedNotice): string {
   if (isAboutTheOrganization(notice.kind)) return `Organisation: ${id}`;
   if (isAboutASpendRequest(notice.kind)) return `Spend request: ${id}`;
   if (isAboutAnAuditEntry(notice.kind)) return `Audit log entry: ${id}`;
+  if (isAboutAPayment(notice.kind)) return `Payment: ${id}`;
   return isAboutASupplier(notice.kind) ? `Supplier: ${id}` : `Registered contact: ${id}`;
 }
 
@@ -445,6 +482,29 @@ function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): Notice
   };
 }
 
+/**
+ * The email telling a supplier it was paid (Phase 4 C2b): the payment's four
+ * facts alone, plain text, no link; never the organisation's or anyone's ID.
+ */
+function remittanceMessage(notice: ClaimedNotice, to: string, paid: PaidRemittance): NoticeMessage {
+  return {
+    id: notice.id,
+    to,
+    subject: `${WORDING[REMITTANCE_KIND].subject('')} by ${paid.payerName}`,
+    text: [
+      `${paid.payerName} sent you a payment through Agent X.`,
+      '',
+      `Amount: ${amountText(paid.amountMinor, paid.currency)}`,
+      `Invoice number: ${paid.invoiceNumber}`,
+      `Bank reference: ${paid.bankReference} (as your bank shows it)`,
+      '',
+      `If you didn't expect this payment, contact ${paid.payerName} by a way you already trust, never by replying to this email.`,
+      '',
+      "You're told because they chose to email you when they pay you. This email is for your records: it can't change anything, and Agent X never asks for a password, a code or bank details by email.",
+    ].join(NEWLINE),
+  };
+}
+
 /** Why the recipient is told: as a contact, as the person the login is, as an agent's new owner, as an admin or approver (a mandate, a policy, the organisation's freeze or a request waiting), or as an admin. */
 function whyTold(notice: ClaimedNotice): string {
   if (notice.recipientContactId !== null) {
@@ -462,15 +522,24 @@ function whyTold(notice: ClaimedNotice): string {
 
 /**
  * The email telling `to` of the notice. The notice asking a contact to
- * confirm a reset takes its link, and no other notice takes one: either
- * mismatch is a bug, and throws.
+ * confirm a reset takes its link, and a remittance the payment it tells of,
+ * and no other notice takes either: any mismatch is a bug, and throws.
  */
 export function messageFor(
   notice: ClaimedNotice,
   to: string,
   link?: ResetLink,
   request?: WaitingRequest,
+  paid?: PaidRemittance,
 ): NoticeMessage {
+  const remittance = notice.kind === REMITTANCE_KIND;
+  if (remittance !== (paid !== undefined)) {
+    throw new RangeError('a remittance, and only it, is sent with the payment it tells of');
+  }
+  if (paid !== undefined) {
+    if (link !== undefined || request !== undefined) throw new RangeError('a remittance carries its payment alone');
+    return remittanceMessage(notice, to, paid);
+  }
   if (notice.kind === RESET_LINK_KIND) {
     if (link === undefined) throw new RangeError("a reset's link notice is sent with its link");
     return linkMessage(notice, to, link);

@@ -241,8 +241,16 @@ export function spendWorld({
       return id;
     });
 
-  /** The supplier's details changed (a new version) with its event's `details`, then verified again: only its version differs. */
-  async function detailsChanged(w: World, supplierId: string, details?: Record<string, string>) {
+  /**
+   * The supplier's details changed (a new version) with its event's `details`, then verified again: only its version
+   * differs, and its email where one is given.
+   */
+  async function detailsChanged(
+    w: World,
+    supplierId: string,
+    details?: Record<string, string>,
+    email: string | null = null,
+  ) {
     await signed(w, async (tx, states) => {
       const found = await supplierOf(tx, states, { orgId: w.org, id: supplierId }, 'change');
       if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
@@ -255,7 +263,7 @@ export function spendWorld({
         version: await nextVersionNumber(tx, w.org, supplierId),
         supplier: {
           displayName: 'Gulf Office Supplies Trading LLC',
-          contacts: { phone: '+971501234567', email: null, tradeLicence: null },
+          contacts: { phone: '+971501234567', email, tradeLicence: null },
           source: { kind: 'registry', ref: 'DED-123456' },
         },
         enteredBy: ids.next(),

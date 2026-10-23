@@ -105,6 +105,16 @@ const AUDIT_LOG_NOTICE_KINDS = [
   'handoff_resumed',
 ] as const;
 
+/**
+ * The kind that tells a supplier it was paid (0062, Phase 4 C2b; partner
+ * decision 34a): `aboutId` the payment's transaction, to no person or
+ * contact; the sender reads the supplier's address, the setting and what the
+ * email carries at send time. One a payment.
+ */
+export const REMITTANCE_KIND = 'payment_remittance';
+/** The kind that tells every admin a paid supplier had no email to tell (0062, decision 34c), `aboutId` the transaction. */
+export const REMITTANCE_NO_EMAIL_KIND = 'payment_remittance_no_email';
+
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,
   ...CONTACT_NOTICE_KINDS,
@@ -118,6 +128,8 @@ export const NOTICE_KINDS = [
   ...SPEND_REQUEST_NOTICE_KINDS,
   ...SPEND_REQUEST_ADMIN_NOTICE_KINDS,
   ...AUDIT_LOG_NOTICE_KINDS,
+  REMITTANCE_KIND,
+  REMITTANCE_NO_EMAIL_KIND,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -152,6 +164,10 @@ export const isAboutASpendRequest = (kind: NoticeKind): boolean =>
 /** Whether a kind is about an entry of the audit log, `aboutId` its event ID (0050). */
 export const isAboutAnAuditEntry = (kind: NoticeKind): boolean => AUDIT_LOG_NOTICE_KINDS.some((each) => each === kind);
 
+/** Whether a kind is about a payment, `aboutId` its transaction's ID (0062). */
+export const isAboutAPayment = (kind: NoticeKind): boolean =>
+  kind === REMITTANCE_KIND || kind === REMITTANCE_NO_EMAIL_KIND;
+
 /** Whether a kind is told to every admin and approver: what lets an agent spend, and what waits on them (0036, 0038, 0045). */
 export const isToAdminsAndApprovers = (kind: NoticeKind): boolean =>
   isAboutAMandate(kind) || isAboutTheOrganization(kind) || SPEND_REQUEST_NOTICE_KINDS.some((each) => each === kind);
@@ -166,7 +182,8 @@ export interface Notice {
    * The person to tell, by their user ID; the sender finds their address.
    * Null, with no contact named and `toContacts` not set: the organisation's
    * active admins but the member the notice is about, found as it is sent
-   * (`fanOut`); for a notice about a mandate, its admins and approvers.
+   * (`fanOut`); for a notice about a mandate, its admins and approvers; for
+   * a remittance (0062), the paid supplier itself.
    */
   readonly recipientUserId: string | null;
   /** A registered contact to tell (B6-1b), by its ID; the sender reads its address. */
@@ -178,7 +195,7 @@ export interface Notice {
   readonly membershipId: string | null;
   /** The role that membership holds now; null for any other. */
   readonly role: NoticeRole | null;
-  /** What any other notice is about (B6-1b): a registered contact, a person, a reset (the link's), a supplier, an agent or an audit log entry. */
+  /** What any other notice is about (B6-1b): a registered contact, a person, a reset (the link's), a supplier, an agent, an audit log entry or a payment. */
   readonly aboutId?: string | null;
 }
 
