@@ -52,7 +52,27 @@ describe('the API’s log after a load run', () => {
         { requests: 500, mismatched: 0, tampered: 2 },
       ],
       decisions: { count: 2, p50: 12, p95: 40, p99: 40, max: 40 },
+      spikeDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
     });
+  });
+
+  it('times the spike’s decisions apart, by the capped agent’s organisation, and counts both against the run', () => {
+    const spikeOrg = '01a16d8a-a36a-7140-abc0-cd368b76d749';
+    const summary = summariseLogs(
+      [
+        checked(0),
+        checked(3),
+        decided(20),
+        decided(30),
+        line({ event: 'spend_request.decided', durationMs: 900, orgId: spikeOrg }),
+      ].join('\n'),
+      new Set([spikeOrg]),
+    );
+    expect(summary.decisions).toEqual({ count: 2, p50: 20, p95: 30, p99: 30, max: 30 });
+    expect(summary.spikeDecisions).toEqual({ count: 1, p50: 900, p95: 900, p99: 900, max: 900 });
+    // The spike's 900 ms is no steady decision's: the target holds; all three lines account for the three decisions.
+    expect(logFailures(summary, 3, 150)).toEqual([]);
+    expect(logFailures(summary, 4, 150)).toEqual(['The log has 3 decision line(s) for 4 decision(s).']);
   });
 
   it('finds nothing wrong with a clean run', () => {
