@@ -7,6 +7,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
+import { gzipSync, gunzipSync } from 'node:zlib';
 
 import { chromium, type Browser } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -17,12 +19,14 @@ import {
   addBackgroundExport,
   claimFile,
   fileReady,
+  storedName,
   type ActivityExportTables,
   type ActivityTables,
 } from '../../packages/core/src/modules/activity/index.ts';
 import { createAuditTrail } from '../../packages/core/src/modules/audit/index.ts';
 import { createSessions, type Role } from '../../packages/core/src/modules/identity/index.ts';
 import { tamperIdentityFixtures } from '../../packages/core/src/modules/identity/tamper-fixtures.helper.test.ts';
+import type { InstructionsTables } from '../../packages/core/src/modules/instructions/index.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/index.ts';
 import { createDatabase, withTenant } from '../../packages/platform/src/db/index.ts';
 import { loadKeys } from '../../packages/platform/src/keys/index.ts';
@@ -37,7 +41,7 @@ import {
 } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { APP_KEYS } from '../../deploy/compose/prepare.ts';
 import { apiAnswers } from './api-sign-in.ts';
-import { API_ORIGIN, localLogin, restartInPlace, SECRETS_DIR } from './compose.ts';
+import { API_ORIGIN, execIn, localLogin, restartInPlace, SECRETS_DIR } from './compose.ts';
 import { loginDriver, where } from './login-pages.ts';
 
 interface Schema extends z.core.JSONSchema.JSONSchema {
@@ -81,7 +85,7 @@ const cookieHeader = (cookie: string) => ({ cookie: `__Host-agentx-session=${coo
 const { password, users } = inject('e2e');
 // Reuse the driver's code history when recovery signs the same person in again.
 const personLogin = loginDriver({ password, callback: /^http:\/\/localhost:8080\/tamper-signed-in$/ });
-const database = createDatabase<MandateWorldTables & ActivityExportTables & ActivityTables>(
+const database = createDatabase<MandateWorldTables & ActivityExportTables & ActivityTables & InstructionsTables>(
   {
     host: '127.0.0.1',
     port: 56541,
@@ -125,6 +129,7 @@ let canaries: readonly string[] = [];
 let startedAt = 0;
 let needsReseed = false;
 let ownReseeds = 0;
+let denialPairs = 0;
 const requestCounts = { attack: 0, control: 0 };
 const covered = new Set<string>();
 interface Finding {
@@ -133,7 +138,8 @@ interface Finding {
   route: string;
   credential: string;
   attack: string;
-  answer: { status: number; code?: string; decision?: string; state?: string };
+  answer: { status: number; code?: string; decision?: string; state?: string; reasonCodes?: readonly string[] };
+  comparedAnswer?: Finding['answer'];
 }
 const findings: Finding[] = [];
 let currentAttack = '';
@@ -159,13 +165,13 @@ async function send(
   headers: Record<string, string>,
   body?: unknown,
   url = routeOf(op, own),
-  purpose: 'attack' | 'control' = 'attack',
+  purpose: 'attack' | 'control' | 'paired-denial' = 'attack',
 ) {
   const credential = headers.authorization ?? headers.cookie ?? '';
   await sleep(Math.max(0, lastSent + 250 - Date.now(), (credentialLastSent.get(credential) ?? 0) + 600 - Date.now()));
   lastSent = Date.now();
   credentialLastSent.set(credential, lastSent);
-  requestCounts[purpose] += 1;
+  requestCounts[purpose === 'control' ? 'control' : 'attack'] += 1;
   covered.add(`${op.method} ${op.route}`);
   const response = await fetch(`${API_ORIGIN}${url}`, {
     method: op.method,
@@ -185,11 +191,17 @@ async function send(
   lastAnswer = { op, headers, answer: answerSummary };
   const problems: string[] = [];
   // Record only credential labels and safe answer fields; a successful key-creation bug must not print its secret.
-  if (purpose === 'attack' && response.status >= 200 && response.status < 300) {
+  const pendingPair = purpose === 'paired-denial' && pairedDenialOperation(op);
+  if (purpose !== 'control' && !pendingPair && response.status >= 200 && response.status < 300) {
     needsReseed = true;
     problems.push('2xx to attack');
   }
-  const answer = [text, ...response.headers.values()].join('\n');
+  const download = downloadContents(op, response.status, text);
+  if (download.problem !== undefined) {
+    needsReseed = true;
+    problems.push(download.problem);
+  }
+  const answer = [text, download.decoded, ...response.headers.values()].join('\n');
   for (const value of canaries) {
     // A denied spend request can echo the IDs the attacker submitted. Those
     // are known inputs; other foreign identifiers and the private purpose aren't.
@@ -204,6 +216,17 @@ async function send(
   return { status: response.status, text };
 }
 
+/** Scan the gzip behind a download's JSON envelope; malformed bytes must retain the original attack finding too. */
+function downloadContents(op: Operation, status: number, text: string): { decoded: string; problem?: string } {
+  if (!op.route.includes('/parts/') || op.method !== 'GET' || status !== 200) return { decoded: '' };
+  try {
+    const part = z.object({ part: z.object({ content: z.string() }) }).parse(JSON.parse(text));
+    return { decoded: gunzipSync(Buffer.from(part.part.content, 'base64')).toString('utf8') };
+  } catch {
+    return { decoded: '', problem: 'unreadable download response' };
+  }
+}
+
 /** Positive controls may succeed; their responses still undergo the leak checks. */
 const controlSend = (op: Operation, headers: Record<string, string>, body?: unknown, url = routeOf(op, own)) =>
   send(op, headers, body, url, 'control');
@@ -211,17 +234,25 @@ const controlSend = (op: Operation, headers: Record<string, string>, body?: unkn
 /** Keep the finding useful without copying cookies, keys or arbitrary response content to logs. */
 function summaryOf(status: number, text: string): Finding['answer'] {
   if (text === '' || !text.startsWith('{')) return { status };
-  const body = JSON.parse(text) as { error?: { code?: string }; decision?: string; status?: string };
+  const body = JSON.parse(text) as { error?: { code?: string }; decision?: string; status?: string; reasons?: unknown };
+  const reasons = z.array(z.object({ code: z.string().regex(/^[A-Z0-9_]+$/) })).safeParse(body.reasons);
   return {
     status,
     ...(body.error?.code === undefined ? {} : { code: body.error.code }),
     ...(body.decision === undefined ? {} : { decision: body.decision }),
     ...(body.status === undefined ? {} : { state: body.status }),
+    ...(reasons.success ? { reasonCodes: reasons.data.map((reason) => reason.code) } : {}),
   };
 }
 
 /** One failure is reported at its source, then afterEach restores the attacking tenant. */
-function finding(op: Operation, headers: Record<string, string>, kind: string, answer: Finding['answer']): never {
+function finding(
+  op: Operation,
+  headers: Record<string, string>,
+  kind: string,
+  answer: Finding['answer'],
+  comparedAnswer?: Finding['answer'],
+): never {
   const credential =
     headers.authorization === undefined
       ? (Object.entries(people).find(([, cookie]) => headers.cookie === cookieHeader(cookie).cookie)?.[0] ??
@@ -229,7 +260,15 @@ function finding(op: Operation, headers: Record<string, string>, kind: string, a
       : headers.authorization === `Bearer ${own.key.text}`
         ? 'agent key'
         : 'forged bearer token';
-  const found = { kind, method: op.method, route: op.route, credential, attack: currentAttack, answer };
+  const found = {
+    kind,
+    method: op.method,
+    route: op.route,
+    credential,
+    attack: currentAttack,
+    answer,
+    ...(comparedAnswer === undefined ? {} : { comparedAnswer }),
+  };
   findings.push(found);
   throw new Error(`FINDING ${JSON.stringify(found)}`);
 }
@@ -346,7 +385,7 @@ const foreignChain = () =>
   });
 
 /** Positive controls prove the credentials and tenant records work before any attacks run. */
-async function controls(): Promise<void> {
+async function controls(foreignUserId: string): Promise<void> {
   const members = operations.find((op) => op.method === 'GET' && op.route === '/v1/members');
   if (members === undefined) throw new Error('positive-control operation missing');
   expect((await controlSend(members, cookieHeader(realCookie))).status).toBe(200);
@@ -365,6 +404,8 @@ async function controls(): Promise<void> {
   expect(full.text.includes(foreign.supplierName), 'private supplier is present for its own tenant').toBe(true);
   await bankControls(foreign, foreignCookie);
   const bankDetails = await payeeControls(foreign, foreignCookie);
+  // Read the foreign fixture with its own admin before activating its leak canaries.
+  await exportFixtures(foreign, foreignUserId, foreignCookie);
   canaries = [
     foreignPurpose,
     foreign.supplierName,
@@ -383,6 +424,9 @@ async function controls(): Promise<void> {
     foreign.request ?? '',
     foreign.link?.id ?? '',
     foreign.link?.sessionRef ?? '',
+    foreign.exportId ?? '',
+    foreign.downloadId ?? '',
+    ...Object.values(foreign.identity ?? {}),
   ];
 }
 
@@ -455,7 +499,7 @@ async function resetOwn(): Promise<void> {
   own.identity = await tamperIdentityFixtures(database, keys, uuidV7Ids, clock, admin, own.world.admin.membershipId);
   await bankControls(own, admin.cookie);
   await payeeControls(own, admin.cookie);
-  await exportFixtures(own, admin.userId);
+  await exportFixtures(own, admin.userId, admin.cookie);
   needsReseed = false;
 }
 
@@ -525,62 +569,228 @@ async function payeeControls(tenant: Tenant, adminCookie: string): Promise<strin
   return details;
 }
 
-/** Real export/file/download IDs cover ancillary routes too; ready records cannot be changed by a builder later. */
-async function exportFixtures(tenant: Tenant, requestedBy: string): Promise<void> {
+/** Seed a real gzip file from this tenant's activity, with matching signed facts and an API-created download. */
+async function exportFixtures(tenant: Tenant, requestedBy: string, adminCookie: string): Promise<void> {
   const org = tenant.world.org;
   const now = new Date();
   const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const id = uuidV7Ids.next();
-  await withTenant(database, org, async (tx) => {
+  const headers = { ...cookieHeader(adminCookie), 'agentx-organization': org };
+  const range = { from: from.toISOString(), to: now.toISOString(), format: 'ndjson' };
+  const instant = await controlSend(operation('POST', '/v1/access-log/exports'), headers, range);
+  expect(instant.status).toBe(201);
+  const exported = z
+    .object({ export: z.object({ content: z.string(), requests: z.int().positive() }) })
+    .parse(JSON.parse(instant.text)).export;
+  const newest = z.object({ id: z.uuid() }).parse(JSON.parse(exported.content.split('\n')[0] ?? '')).id;
+  const bytes = gzipSync(exported.content);
+  const facts = {
+    requests: exported.requests,
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
+  const prepared = await withTenant(database, org, async (tx) => {
+    const trail = createAuditTrail({ keys, ids: uuidV7Ids, correlationId: uuidV7Ids.next() });
+    const subject = { type: 'access_log', id: org, version: 1 };
+    const actor = { type: 'user' as const, id: requestedBy };
+    const requested = await trail.record(tx, org, {
+      actor,
+      action: 'access_log.export_requested',
+      subject,
+      details: { ...range, actor: null, months: 1, writtenUpTo: newest },
+    });
+    const id = requested.id;
     await addBackgroundExport(tx, org, {
       id,
       requestedBy,
       from,
-      to: new Date(from.getTime() + 1000),
+      to: now,
       format: 'ndjson',
-      writtenUpTo: null,
+      writtenUpTo: newest,
     });
     const claim = await claimFile(tx, org, { leaseMs: 60_000, mostTries: 3 });
-    if (claim.outcome !== 'claimed') throw new Error('foreign export file was not claimed');
+    if (claim.outcome !== 'claimed') throw new Error('export file was not claimed');
     const file = claim.file;
-    const facts = { requests: 0, bytes: 1, sha256: 'ab'.repeat(32) };
+    // Write through the same folder store as the API, as its unprivileged user; no host path or cloud is involved.
+    const written = await execIn(
+      'api',
+      [
+        'node',
+        '--input-type=module',
+        '-e',
+        `
+      import { folderBlockStore } from './packages/platform/src/storage/index.ts';
+      const store = folderBlockStore(process.env.AGENTX_ACTIVITY_DOWNLOADS_DIR);
+      const name = process.env.AGENTX_E2E_EXPORT_NAME;
+      await store.putBlock(name, 0, Buffer.from(process.env.AGENTX_E2E_EXPORT_PAYLOAD, 'base64'));
+      await store.commit(name, 1, { contentType: 'application/gzip', sha256: process.env.AGENTX_E2E_EXPORT_SHA256 });
+    `,
+      ],
+      {
+        AGENTX_E2E_EXPORT_NAME: storedName(org, { ...file, format: 'ndjson' }),
+        AGENTX_E2E_EXPORT_PAYLOAD: bytes.toString('base64'),
+        AGENTX_E2E_EXPORT_SHA256: facts.sha256,
+      },
+    );
+    expect(written.code, written.stderr).toBe(0);
     expect(await fileReady(tx, { orgId: org, exportId: id, month: file.month, lease: file.lease }, facts)).toBe(
       'ready',
     );
-    const trail = createAuditTrail({ keys, ids: uuidV7Ids, correlationId: uuidV7Ids.next() });
-    const subject = { type: 'access_log', id: org, version: 1 };
-    const actor = { type: 'user' as const, id: requestedBy };
     await trail.record(tx, org, {
       actor,
       action: 'access_log.export_file_made',
       subject,
       details: { exportId: id, month: file.month.slice(0, 7), attempt: file.attempt, ...facts },
     });
-    const downloaded = await trail.record(tx, org, {
-      actor,
-      action: 'access_log.export_downloaded',
-      subject,
-      details: {
-        exportId: id,
-        month: file.month.slice(0, 7),
-        attempt: file.attempt,
-        fileName: 'foreign.ndjson.gz',
-        bytes: 1,
-        sha256: facts.sha256,
-        parts: 1,
-        partBytes: 1,
-      },
-    });
-    tenant.exportId = id;
-    tenant.downloadId = downloaded.id;
-    tenant.exportMonth = file.month.slice(0, 7);
+    return { id, month: file.month.slice(0, 7) };
   });
-  if (tenant === foreign)
-    canaries = [...canaries, id, tenant.downloadId ?? '', ...Object.values(tenant.identity ?? {})];
+  tenant.exportId = prepared.id;
+  tenant.exportMonth = prepared.month;
+  const start = operation('POST', '/v1/access-log/background-exports/{id}/files/{month}/downloads');
+  const downloaded = await controlSend(start, headers, {}, routeOf(start, tenant));
+  expect(downloaded.status).toBe(201);
+  tenant.downloadId = z.object({ download: z.object({ id: z.uuid() }) }).parse(JSON.parse(downloaded.text)).download.id;
+  const part = operation('GET', '/v1/access-log/background-exports/{id}/downloads/{downloadId}/parts/{index}');
+  const read = await controlSend(part, headers, undefined, routeOf(part, tenant));
+  expect(read.status).toBe(200);
+  const content = z.object({ part: z.object({ content: z.string() }) }).parse(JSON.parse(read.text)).part.content;
+  expect(Buffer.from(content, 'base64')).toEqual(bytes);
+  expect(gunzipSync(Buffer.from(content, 'base64')).toString('utf8')).toBe(exported.content);
 }
 
 /** Foreign references in bodies must be refused too, including a recorded DENY for an agent's ask. */
 const referenceFields = ['agentId', 'fundingSourceId', 'supplierId', 'supplierIds', 'owner'] as const;
+
+/** Only these two contracts return successful HTTP responses for a recorded or simulated denial. */
+function pairedDenialOperation(op: Operation): boolean {
+  return (
+    op.method === 'POST' && (op.route === '/v1/spend-requests' || op.route === '/v1/mandates/{id}/policy/simulate')
+  );
+}
+
+/** Preserve every stable field and array order, replacing IDs/times and dropping request-specific references alone. */
+function comparableDenial(value: unknown): unknown {
+  if (typeof value === 'string') {
+    if (z.iso.datetime().safeParse(value).success) return '<timestamp>';
+    return value.replace(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/gi, '<uuid>');
+  }
+  if (Array.isArray(value)) return (value as unknown[]).map(comparableDenial);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([name]) => !['orderReference', 'bankReference', 'correlationId'].includes(name))
+      .map(([name, child]) => [name, comparableDenial(child)]),
+  );
+}
+
+/** A pending exception cannot let ALLOW, an empty reason list or another HTTP result escape the usual 2xx rule. */
+function deniedAnswer(
+  op: Operation,
+  headers: Record<string, string>,
+  answer: { status: number; text: string },
+): unknown {
+  let body: unknown;
+  try {
+    body = JSON.parse(answer.text);
+  } catch {
+    finding(op, headers, 'paired denial response was not JSON', { status: answer.status });
+  }
+  const denied = z
+    .object({
+      decision: z.literal('DENY'),
+      reasons: z.array(z.object({ code: z.string().regex(/^[A-Z0-9_]+$/) })).nonempty(),
+    })
+    .safeParse(body);
+  const spend = op.route === '/v1/spend-requests';
+  const request = z.object({ id: z.uuid(), status: z.literal('DENIED') }).safeParse(body);
+  if (answer.status !== (spend ? 201 : 200) || !denied.success || (spend && !request.success)) {
+    finding(op, headers, 'paired denial did not refuse the request', summaryOf(answer.status, answer.text));
+  }
+  return body;
+}
+
+/** A denied ask must have no capacity or payment authority, even if its HTTP response looks correct. */
+async function noDeniedAuthority(
+  op: Operation,
+  headers: Record<string, string>,
+  answer: { status: number; text: string },
+): Promise<void> {
+  const id = z.object({ id: z.uuid() }).parse(JSON.parse(answer.text)).id;
+  const left = await withTenant(database, own.world.org, async (tx) => ({
+    request: await tx
+      .selectFrom('spend_requests.requests')
+      .select(['status', 'decision'])
+      .where('org_id', '=', own.world.org)
+      .where('id', '=', id)
+      .executeTakeFirst(),
+    held: await tx
+      .selectFrom('limit_reservations.reservations')
+      .select('id')
+      .where('org_id', '=', own.world.org)
+      .where('request_id', '=', id)
+      .where('state', '=', 'HELD')
+      .executeTakeFirst(),
+    instruction: await tx
+      .selectFrom('instructions.instructions')
+      .select('id')
+      .where('org_id', '=', own.world.org)
+      .where('spend_request_id', '=', id)
+      .executeTakeFirst(),
+    handoff: await tx
+      .selectFrom('audit.events')
+      .select('id')
+      .where('org_id', '=', own.world.org)
+      .where('subject_id', '=', id)
+      .where('action', 'in', ['spend_request.made_ready', 'spend_request.handed_off'])
+      .executeTakeFirst(),
+  }));
+  if (
+    left.request?.status !== 'DENIED' ||
+    left.request.decision !== 'DENY' ||
+    left.held !== undefined ||
+    left.instruction !== undefined ||
+    left.handoff !== undefined
+  ) {
+    finding(
+      op,
+      headers,
+      'denied spend request retained capacity or payment authority',
+      summaryOf(answer.status, answer.text),
+    );
+  }
+}
+
+/** A foreign record must behave exactly like one that never existed, including denial reasons and stable answer fields. */
+async function pairedDenials(
+  op: Operation,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  field: 'fundingSourceId' | 'supplierId',
+): Promise<void> {
+  try {
+    const real = await send(op, headers, body, routeOf(op, own), 'paired-denial');
+    const realBody = deniedAnswer(op, headers, real);
+    const absent = await send(op, headers, { ...body, [field]: randomUUID() }, routeOf(op, own), 'paired-denial');
+    const absentBody = deniedAnswer(op, headers, absent);
+    const realSummary = summaryOf(real.status, real.text);
+    const absentSummary = summaryOf(absent.status, absent.text);
+    if (
+      real.status !== absent.status ||
+      !isDeepStrictEqual(realSummary.reasonCodes, absentSummary.reasonCodes) ||
+      !isDeepStrictEqual(comparableDenial(realBody), comparableDenial(absentBody))
+    ) {
+      finding(op, headers, 'existence oracle: foreign and absent denial answers differ', realSummary, absentSummary);
+    }
+    if (op.route === '/v1/spend-requests') {
+      await noDeniedAuthority(op, headers, real);
+      await noDeniedAuthority(op, headers, absent);
+    }
+    denialPairs += 1;
+  } catch (error) {
+    // Failed exceptions may have accepted a real write; restore authority before the next case.
+    needsReseed = true;
+    throw error;
+  }
+}
 
 /** Each foreign reference is a separate case, so a finding cannot hide the next field's attack. */
 async function foreignReference(op: Operation, body: unknown, field: (typeof referenceFields)[number]): Promise<void> {
@@ -596,7 +806,12 @@ async function foreignReference(op: Operation, body: unknown, field: (typeof ref
     ...allowedHeaders(op),
     ...(op.access.includes('agent') ? { 'agentx-organization': foreign.world.org } : {}),
   };
-  const answer = await send(op, headers, { ...(body as Record<string, unknown>), [field]: replacements[field] });
+  const changed = { ...(body as Record<string, unknown>), [field]: replacements[field] };
+  if (pairedDenialOperation(op) && (field === 'fundingSourceId' || field === 'supplierId')) {
+    await pairedDenials(op, headers, changed, field);
+    return;
+  }
+  const answer = await send(op, headers, changed);
   const parsed = summaryOf(answer.status, answer.text);
   const label = `${op.method} ${op.route}: foreign ${field}`;
   expect([403, 404, 409], label).toContain(answer.status);
@@ -634,8 +849,7 @@ beforeAll(async () => {
     foreign.world.admin.membershipId,
   );
   await resetOwn();
-  await controls();
-  await exportFixtures(foreign, admin.userId);
+  await controls(admin.userId);
   foreignBefore = await foreignChain();
   expect(foreignBefore.events).toBeGreaterThan(0);
 });
@@ -677,6 +891,7 @@ afterAll(async () => {
         requestsSent: requestCounts.attack + requestCounts.control,
         durationMs: Date.now() - startedAt,
         ownReseeds,
+        denialPairs,
         findings,
       },
       null,
