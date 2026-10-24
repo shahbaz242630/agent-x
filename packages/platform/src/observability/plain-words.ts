@@ -363,6 +363,11 @@ export const PLAIN_WORDS = {
     broke: 'Approved payments wait, their money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
+  'handoff.pause_unread': {
+    happened: "The hand-off pause couldn't be read, so no approved payments went to the bank this run.",
+    broke: 'Approved payments wait, their money still held.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
+  },
   'partner_event.refused': {
     happened:
       "A message sent as the payment partner's was refused: a bad signature, an old time or an unreadable body.",

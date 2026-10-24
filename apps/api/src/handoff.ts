@@ -71,7 +71,10 @@
 // as it is sent, after this, never here, out of the lock order.
 //
 // A run never throws: each failure is logged, naming the organisation and
-// request, and the run goes on to the next.
+// request, and the run goes on to the next. The platform pause is read once a
+// run first: while it holds every hand-off, no request is read (gate H5; Tx A
+// still reads it under its lock). A request left waiting is said once a
+// reason, not every run; the sweep takes every page of those past their wait.
 import {
   type AuditTables,
   type SignedStates,
@@ -276,6 +279,10 @@ export function createHandoff({
   // only a run that reads its organisations beats, so one failing every time reads as stopped.
   let beat = clock.now().getTime();
   let sweptAt = Number.NEGATIVE_INFINITY;
+  // Why hand-offs were held at the last run, and the reason each request waited for there (gate H5): said on change.
+  let heldWas: string | null = null;
+  let waitedFor = new Map<string, string>();
+  let waitingNow = new Map<string, string>();
   const beatNow = (): void => {
     beat = clock.now().getTime();
   };
@@ -512,7 +519,11 @@ export function createHandoff({
       return;
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
-    if (done.outcome === 'waiting') log.info('handoff.waiting', { requestId: id, why: done.why });
+    if (done.outcome === 'waiting') {
+      // Said once a reason, not every run it still waits (gate H5): a long hold is one line a request.
+      if (waitedFor.get(id) !== done.why) log.info('handoff.waiting', { requestId: id, why: done.why });
+      waitingNow.set(id, done.why);
+    }
     if (done.outcome !== 'handed_off') return;
     const { intent, transactionId } = done;
     const answer = await answerOf(intent, id, log);
@@ -559,6 +570,7 @@ export function createHandoff({
   const waitingSince = (
     orgId: string,
     before: Date,
+    after: string | undefined,
     log: Logger,
   ): Promise<{ readonly id: string; readonly requestId: string | null }[]> =>
     withSignedStates(database, orgId, services(log), (tx) =>
@@ -573,6 +585,7 @@ export function createHandoff({
         .where('t.org_id', '=', orgId)
         .where('t.status', '=', 'SUBMISSION_PENDING')
         .where('t.created_at', '<=', before)
+        .where((where) => (after === undefined ? where.lit(true) : where('t.id', '>', after)))
         .orderBy('t.id')
         .limit(page)
         .execute(),
@@ -580,45 +593,71 @@ export function createHandoff({
 
   /**
    * The organisation's transactions left waiting for their answer past
-   * unknownAfterMs marked UNKNOWN, a page a run (ADR-007 §10): each read for
-   * change, and moved only if it is still waiting then, so one Tx B recorded
-   * meanwhile is never undone. Never resent; reconciliation settles them.
+   * unknownAfterMs marked UNKNOWN, a page at a time, every page (ADR-007 §10;
+   * gate H5): each read for change, and moved only if it is still waiting
+   * then, so one Tx B recorded meanwhile is never undone. Never resent;
+   * reconciliation settles them. A page is read after the last one by its
+   * cursor, so one that can't be moved never holds the sweep on it.
    */
   const sweepIn = async (orgId: string, log: Logger): Promise<void> => {
-    let waiting: { readonly id: string; readonly requestId: string | null }[];
-    try {
-      waiting = await waitingSince(orgId, new Date(clock.now().getTime() - unknownAfterMs), log);
-    } catch (error) {
-      log.error('handoff.sweep_failed', { err: error });
-      return;
-    }
-    for (const transaction of waiting) {
-      beatNow();
+    const before = new Date(clock.now().getTime() - unknownAfterMs);
+    let after: string | undefined;
+    for (;;) {
+      let waiting: { readonly id: string; readonly requestId: string | null }[];
       try {
-        const marked = await withSignedStates(database, orgId, services(log), async (tx, states) => {
-          const key = { orgId, id: transaction.id };
-          // A transaction with no instruction is refused by lockedHoldings before anything is locked.
-          const requestId = transaction.requestId ?? '';
-          if ((await lockedHoldings(tx, states, key, requestId)) !== 'SUBMISSION_PENDING') return false;
-          const moved = await moveTransaction(tx, states, key, 'lose_track', NO_FACTS, {
-            actor: ACTOR,
-            details: { via: 'no_answer_in_time' },
-          });
-          // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
-          if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
-          await settlePayment(tx, outbox, {
-            orgId,
-            requestId,
-            transactionId: transaction.id,
-            status: moved.to,
-            at: clock.now(),
-          });
-          return true;
-        });
-        if (marked) log.warn('handoff.marked_unknown', { transactionId: transaction.id });
+        waiting = await waitingSince(orgId, before, after, log);
       } catch (error) {
-        log.error('handoff.sweep_failed', { transactionId: transaction.id, err: error });
+        log.error('handoff.sweep_failed', { err: error });
+        return;
       }
+      for (const transaction of waiting) await sweptOne(orgId, transaction, log);
+      if (waiting.length < page) return;
+      after = waiting.at(-1)?.id;
+    }
+  };
+
+  /** One transaction left waiting past its wait marked UNKNOWN, if it still is under its lock. */
+  const sweptOne = async (
+    orgId: string,
+    transaction: { readonly id: string; readonly requestId: string | null },
+    log: Logger,
+  ): Promise<void> => {
+    beatNow();
+    try {
+      const marked = await withSignedStates(database, orgId, services(log), async (tx, states) => {
+        const key = { orgId, id: transaction.id };
+        // A transaction with no instruction is refused by lockedHoldings before anything is locked.
+        const requestId = transaction.requestId ?? '';
+        if ((await lockedHoldings(tx, states, key, requestId)) !== 'SUBMISSION_PENDING') return false;
+        const moved = await moveTransaction(tx, states, key, 'lose_track', NO_FACTS, {
+          actor: ACTOR,
+          details: { via: 'no_answer_in_time' },
+        });
+        // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
+        if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
+        await settlePayment(tx, outbox, {
+          orgId,
+          requestId,
+          transactionId: transaction.id,
+          status: moved.to,
+          at: clock.now(),
+        });
+        return true;
+      });
+      if (marked) log.warn('handoff.marked_unknown', { transactionId: transaction.id });
+    } catch (error) {
+      log.error('handoff.sweep_failed', { transactionId: transaction.id, err: error });
+    }
+  };
+
+  /** Why every hand-off is held now (the platform pause, or a pause that can't be read), or null where none is. */
+  const heldNow = async (): Promise<string | null> => {
+    try {
+      const pause = await database.transaction().execute((tx) => handoffPauseOf(tx, 'share', { keys, logger }));
+      return pause.outcome === 'running' ? null : `pause_${pause.outcome}`;
+    } catch (error) {
+      logger.error('handoff.pause_unread', { err: error });
+      return 'pause_unread';
     }
   };
 
@@ -634,12 +673,23 @@ export function createHandoff({
       beatNow();
       const sweeping = clock.now().getTime() - sweptAt >= SWEEP_EVERY_MS;
       if (sweeping) sweptAt = clock.now().getTime();
-      for (const orgId of orgs) {
-        // Stopped between organisations too, so the process stops promptly however many there are.
-        if (signal?.aborted === true) return;
-        const log = logger.child({ orgId });
-        if (!(await handOffAll(orgId, log, signal))) return;
-        if (sweeping) await sweepIn(orgId, log);
+      // Read once a run (gate H5): while hand-offs are held, no request is read at all; Tx A still reads it again
+      // under its lock for each one it hands off.
+      const held = await heldNow();
+      if (held !== heldWas) logger.info(held === null ? 'handoff.running' : 'handoff.held', { why: held ?? 'none' });
+      heldWas = held;
+      try {
+        for (const orgId of orgs) {
+          // Stopped between organisations too, so the process stops promptly however many there are.
+          if (signal?.aborted === true) return;
+          const log = logger.child({ orgId });
+          if (held === null && !(await handOffAll(orgId, log, signal))) return;
+          if (sweeping) await sweepIn(orgId, log);
+        }
+      } finally {
+        // The reasons this run's requests wait for, said again only once one changes; one gone, forgotten.
+        if (held === null) waitedFor = waitingNow;
+        waitingNow = new Map();
       }
       beatNow();
     },
