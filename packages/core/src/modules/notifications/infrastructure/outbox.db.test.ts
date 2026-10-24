@@ -418,6 +418,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     }
     clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
     expect(await outbox.claimDue(app, 10)).toEqual([]);
+    expect(await outbox.endRemittanceLeases(app)).toHaveLength(1);
 
     expect(await outbox.passOn(app, slow?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(true);
     expect(await outbox.passOn(app, sent?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(false);
@@ -538,6 +539,34 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     expect(await outbox.claimDue(app, 10)).toEqual([]);
     expect(await rows()).toMatchObject([
       { attempts: MOST_ATTEMPTS, last_failure: 'lease_expired', given_up_at: clock.now(), sent_at: null },
+    ]);
+  });
+
+  it('H2 leaves a remittance whose last try’s lease ran out to endRemittanceLeases, which gives it up and says so once', async () => {
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [
+          aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT }),
+          aboutAContact({ kind: 'payment_remittance', aboutId: OTHER_PAYMENT }),
+        ]),
+      );
+    expect(await outbox.endRemittanceLeases(app)).toEqual([]);
+    for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
+      const claimed = await outbox.claimDue(app, 2);
+      // The second is sent on its last try; the first's sender dies every time.
+      if (tries === MOST_ATTEMPTS - 1)
+        await outbox.sent(app, claimed.find((n) => n.aboutId === OTHER_PAYMENT)?.id ?? '');
+      clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
+    }
+
+    expect(await outbox.claimDue(app, 10)).toEqual([]);
+    expect((await rows()).filter(({ given_up_at }) => given_up_at !== null)).toEqual([]);
+    const [ended] = (await rows()).filter(({ about_id }) => about_id === PAYMENT);
+    expect(await outbox.endRemittanceLeases(app)).toEqual([{ id: ended?.id, orgId: ORG, aboutId: PAYMENT }]);
+    expect(await outbox.endRemittanceLeases(app)).toEqual([]);
+    expect((await rows()).filter(({ given_up_at }) => given_up_at !== null)).toMatchObject([
+      { about_id: PAYMENT, last_failure: LEASE_EXPIRED, given_up_at: clock.now() },
     ]);
   });
 

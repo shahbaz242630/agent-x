@@ -31,9 +31,11 @@
 //   (`payment_unavailable`).
 //   Each remittance's end is kept in the organisation's audit log (partner
 //   S119): a skip by the read that decides it, one sent once the notifier has
-//   sent it, one given up (a send that can never succeed, or every try spent,
-//   gate H2) once the outbox gives it up; a failure to keep either of the
-//   last two is logged, and the email is never sent again.
+//   sent it, one given up (a send that can never succeed, every try spent, or
+//   its last try's lease run out, gate H2) once the outbox gives it up; a
+//   failure to keep either of the last two is logged, and the email is never
+//   sent again. A last try only slow past its lease may still be sent after,
+//   so the log can then hold both: given up, then emailed.
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
 // - A recipient with no address gives the notice up at once (`no_address`);
@@ -71,7 +73,7 @@ import {
   REMITTANCE_NO_EMAIL_KIND,
   RESET_LINK_KIND,
 } from '../domain/notice.ts';
-import { LEASE_EXPIRED, type Outbox } from './outbox.ts';
+import { LEASE_EXPIRED, type LeaseEnded, type Outbox } from './outbox.ts';
 import type { NotificationsTables } from './tables.ts';
 
 /** How a send went, as the notifier tells it. */
@@ -356,7 +358,7 @@ export function createNoticeSender({
   };
 
   /** A remittance the outbox gave up, kept in the audit log with why; a failure to keep it is logged. */
-  const givenUpLogged = async (notice: ClaimedNotice, why: string): Promise<void> => {
+  const givenUpLogged = async (notice: LeaseEnded, why: string): Promise<void> => {
     try {
       await remittances.givenUp(notice.orgId, notice.aboutId ?? '', why);
     } catch (error) {
@@ -420,6 +422,8 @@ export function createNoticeSender({
   /** Claims and sends batches until none is due or the signal is aborted. */
   async function runBatches(signal: AbortSignal | undefined): Promise<void> {
     const stopped = (): boolean => signal?.aborted === true;
+    // Remittances whose last try's lease ran out, given up and kept in the audit log first (gate H2).
+    for (const ended of await outbox.endRemittanceLeases(db)) await givenUpLogged(ended, LEASE_EXPIRED);
     for (;;) {
       if (stopped()) return;
       const due = await outbox.claimDue(db, NOTICES_A_RUN);

@@ -956,6 +956,42 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     ]);
   });
 
+  it('H2 logs a remittance given up because its last try’s lease ran out, once, and sends nothing (review)', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, notice(ADMIN)]));
+    // Both last tries' senders died: the leases ran out.
+    await sql`update notifications.outbox set attempts = ${MOST_ATTEMPTS}, next_attempt_at = ${START}`.execute(app);
+    const gaveUp: string[][] = [];
+    const { sent, service } = notifier(() => ({ outcome: 'sent' }));
+    const { run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(undefined, undefined, (id, why) => {
+        gaveUp.push([id, why]);
+        return undefined;
+      }),
+    );
+    await run.run();
+    await run.run();
+
+    expect(gaveUp).toEqual([[PAYMENT, 'lease_expired']]);
+    expect(sent).toEqual([]);
+    expect(
+      await app
+        .selectFrom('notifications.outbox')
+        .select(['kind', 'given_up_at', 'last_failure'])
+        .orderBy('kind')
+        .execute(),
+    ).toEqual([
+      { kind: 'payment_remittance', given_up_at: START, last_failure: 'lease_expired' },
+      { kind: 'role_granted', given_up_at: START, last_failure: 'lease_expired' },
+    ]);
+  });
+
   it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) =>
