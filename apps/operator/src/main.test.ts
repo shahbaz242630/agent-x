@@ -750,6 +750,7 @@ describe('Phase 4 E1c an UNKNOWN payment to mark failed, only ever from a file',
     ['its ID flag with no ID', words.slice(0, -1)],
     ['a word more', [...words, 'x']],
     ['a flag misnamed', words.map((word) => (word === '--payment' ? '--transaction' : word))],
+    ['its evidence flag misnamed', words.map((word) => (word === '--evidence' ? '--proof' : word))],
     ['the flags in another order', [words[0] ?? '', ...words.slice(3, 5), ...words.slice(1, 3), ...words.slice(5)]],
   ])('refuses %s, naming the shape', async (_what, wrong) => {
     const { events, line, text } = await run(['--request', requestFile(JSON.stringify(wrong))]);

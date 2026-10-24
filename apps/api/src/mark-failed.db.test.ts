@@ -450,6 +450,39 @@ describe('with the bank check at the same payment (forced, ADR-006 §6)', () => 
     }
   }
 
+  it('settles with its holdings locked before the head, so their holder never waits on it', async () => {
+    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
+    clock.advanceBy(MARK_FAILED_AFTER_MS);
+    // Something holding the request's reservation (as an ending or a holdings page would) as the mark is made.
+    const holder = await database.connect('owner');
+    let marking: Promise<unknown> = Promise.resolve();
+    try {
+      await holder.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+      await holder.query('begin');
+      await holder.query('select id from limit_reservations.reservations where request_id = $1 for no key update', [
+        request.id,
+      ]);
+      marking = mark(asking(w, transaction.id));
+      await waitUntilQueued(database.as('admin'), 1);
+      // The mark waits at the reservation (11) holding nothing of the head (12): the organisation's head is free.
+      const looker = await database.connect('owner');
+      try {
+        await looker.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+        await expect(
+          looker.query('select org_id from audit.heads where org_id = $1 for update nowait', [w.org]),
+        ).resolves.toHaveLength(1);
+      } finally {
+        await looker.end();
+      }
+      await holder.query('commit');
+    } finally {
+      await holder.end();
+    }
+    await marking;
+
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
+  });
+
   it('marked first: FAILED stands, and the bank’s later credit is said as a contradiction, never applied', async () => {
     const { w, request, transaction } = await handedOff(ANSWER_LOST, { checked: false });
     expect(transaction).toMatchObject({ status: 'UNKNOWN', providerStatus: null });
