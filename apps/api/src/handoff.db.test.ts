@@ -334,22 +334,25 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
   it('waits while the platform is paused, and goes on resume', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
+    const job = handoffOf(w);
     await pauseMoved(true);
     try {
-      await handoffOf(w).run();
+      await job.run();
+      await job.run();
       expect(await statusOf(w, request.id)).toBe('APPROVED');
-      expect(lines('handoff.waiting')).toEqual([
-        expect.objectContaining({ requestId: request.id, why: 'pause_paused' }),
-      ]);
+      // Read once a run, said once while it holds: no request read, none said waiting (gate H5).
+      expect(lines('handoff.held')).toEqual([expect.objectContaining({ why: 'pause_paused' })]);
+      expect(lines('handoff.waiting')).toEqual([]);
       // Waiting is no stop: no one is told.
       expect(await stoppedToldOf(w)).toEqual([]);
     } finally {
       await pauseMoved(false);
     }
 
-    await handoffOf(w).run();
+    await job.run();
 
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(lines('handoff.running')).toEqual([expect.objectContaining({ why: 'none' })]);
   });
 
   it('waits for a pause taken during its Tx A, and holds the request (forced)', async () => {
@@ -402,13 +405,16 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     const request = await ask(acting, w, { amount: ALLOWED() });
     const mandateId = await mandateIdOf(w);
     await moved(w, mandateId, which, 'pause');
+    const job = handoffOf(w);
 
-    await handoffOf(w).run();
+    await job.run();
+    await job.run();
     expect(await statusOf(w, request.id)).toBe('APPROVED');
+    // Said once a reason, not every run it still waits (gate H5).
     expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: request.id, why })]);
 
     await moved(w, mandateId, which, 'resume');
-    await handoffOf(w).run();
+    await job.run();
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
   });
 
@@ -421,6 +427,31 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
 
     expect(await statusOf(w, request.id)).toBe('APPROVED');
     expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: request.id, why: 'source' })]);
+  });
+
+  it('says a waiting request again when what it waits for changes, and once it waits again after a hold (gate H5)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const mandateId = await mandateIdOf(w);
+    const job = handoffOf(w);
+    await moved(w, mandateId, 'agent', 'pause');
+    await job.run();
+    await moved(w, mandateId, 'organization', 'pause');
+    await job.run();
+    await job.run();
+
+    expect(lines('handoff.waiting').map(({ why }) => why)).toEqual(['agent', 'organization,agent']);
+
+    // Held a run by the platform: its reason kept, never said again for it.
+    await pauseMoved(true);
+    try {
+      await job.run();
+    } finally {
+      await pauseMoved(false);
+    }
+    await job.run();
+    expect(lines('handoff.waiting')).toHaveLength(2);
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
   });
 
   it('waits for a supplier with no payee registered yet', async () => {
@@ -554,6 +585,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
   interface Limits {
     callTimeoutMs: number;
     unknownAfterMs: number;
+    page?: number;
   }
 
   /** The job with the given time limits, paying through `rail`. */
@@ -695,6 +727,24 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     expect(lines('handoff.marked_unknown')).toEqual([]);
     expect(lines('handoff.sweep_failed')).toEqual([]);
     await answered();
+  });
+
+  it('sweeps every page of those left waiting, not only the first (gate H5)', async () => {
+    const { w, acting } = await ready();
+    const first = await ask(acting, w, { amount: SMALL() });
+    const second = await ask(acting, w, { amount: SMALL() });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const one = await leftWaiting(w, first.id, limits);
+    const other = await leftWaiting(w, second.id, limits);
+    clock.advanceBy(60_001);
+
+    await timed(w, w.rail, { ...limits, page: 1 }).run();
+
+    for (const request of [first, second]) {
+      expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+    }
+    await one.answered();
+    await other.answered();
   });
 
   it('sweeps nothing once stopped, so the process stops promptly', async () => {
