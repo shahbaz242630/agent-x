@@ -176,23 +176,26 @@ export function mandateWorld({
    * An organisation with an admin, an active agent, a source linked through
    * the fake partner, and two suppliers (or `suppliers`); its monthly cap
    * chosen, AED 20,000, as its admin's policy change records it (E2), unless
-   * `capChosen` is false: no organisation policy at all.
+   * `capChosen` is false: no organisation policy at all. `orgName` lets the
+   * load test's organisations on staging be told apart from anyone else's.
    */
   async function world({
     capChosen = true,
     suppliers: supplierCount = 2,
     scopes = ['requests:write'],
     supplierName = 'Gulf Office Supplies LLC',
+    orgName = 'Acme Trading LLC',
   }: {
     readonly capChosen?: boolean;
     readonly suppliers?: number;
     readonly scopes?: readonly Scope[];
     readonly supplierName?: string;
+    readonly orgName?: string;
   } = {}): Promise<World> {
     const now = clock().now();
     const org = ids.next();
     await withSignedStates(app(), org, quiet(), (tx, states) =>
-      createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
+      createOrganization(tx, states, { id: org, name: orgName, actor: OPERATOR }),
     );
     const admin = await member(org, 'admin');
     if (capChosen) {

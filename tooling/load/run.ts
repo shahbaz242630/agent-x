@@ -124,7 +124,10 @@ function main(keep: boolean, apiCpus: number): number {
     // Built once: the set-up jobs and the API share the image, and building it for each at once races.
     must('The app image', 'docker', [...COMPOSE, 'build', 'api']);
     must('The database and the API', 'docker', [...COMPOSE, 'up', '--no-build', '--wait', 'api']);
-    must('The seed', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'seed'], login);
+    must('The seed', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'seed'], {
+      ...login,
+      AGENTX_LOAD_RUN_ID: `local ${at}`,
+    });
     const first = phase(1);
     must('The API restarted', 'docker', [...COMPOSE, 'restart', 'api']);
     must('The API back', 'docker', [...COMPOSE, 'up', '--wait', '--no-deps', 'api']);
@@ -147,6 +150,7 @@ function main(keep: boolean, apiCpus: number): number {
     const report = renderReport({
       at,
       commit,
+      site: 'local',
       apiCpus,
       phases: [first, second],
       logs,
