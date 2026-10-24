@@ -19,6 +19,15 @@ import {
   type SeededAgent,
 } from './plan.ts';
 
+/** The seeded world's helpers for one run's seed or keys: the API's clock is the real one, and sealed times are Postgres's. */
+function worldOf(database: Database<MandateWorldTables>, keyring: KeyProvider) {
+  const clock = new FixedClock(new Date());
+  return {
+    clock,
+    shared: mandateWorld({ app: () => database, clock: () => clock, ids: uuidV7Ids, name: 'load', keyring }),
+  };
+}
+
 /**
  * Seeds one run: the ample agents and the capped one, each in an organisation
  * of its own named for the run, with three verified suppliers, a mandate in
@@ -33,9 +42,7 @@ export async function seedRun({
   readonly keyring: KeyProvider;
   readonly runId: string;
 }): Promise<Seeded> {
-  // The API's clock is the real one, and sealed times are Postgres's: the seed's starts now.
-  const clock = new FixedClock(new Date());
-  const shared = mandateWorld({ app: () => database, clock: () => clock, ids: uuidV7Ids, name: 'load', keyring });
+  const { clock, shared } = worldOf(database, keyring);
   const registry = createMandateRegistry({ database, keys: keyring, ids: uuidV7Ids, clock, logger: testLogger() });
 
   async function seeded(kind: SeededAgent['kind']): Promise<SeededAgent> {
@@ -62,5 +69,26 @@ export async function seedRun({
   const agents: SeededAgent[] = [];
   for (let n = 0; n < AMPLE_AGENTS; n += 1) agents.push(await seeded('ample'));
   agents.push(await seeded('capped'));
+  return { agents };
+}
+
+/**
+ * A new key for each of the run's agents, in place of the seed's: on Azure
+ * the second phase runs in a job of its own, and keys never leave the job
+ * that made them, so it is given the run's IDs alone and makes its own. The
+ * laptop's run does the same between its phases, so Azure runs nothing the
+ * laptop hasn't. The old keys stay live until the clean-up revokes them all.
+ */
+export async function rekeyed(
+  database: Database<MandateWorldTables>,
+  keyring: KeyProvider,
+  seeded: Seeded,
+): Promise<Seeded> {
+  const { shared } = worldOf(database, keyring);
+  const agents: SeededAgent[] = [];
+  for (const agent of seeded.agents) {
+    const { text } = await shared.agentKey({ org: agent.orgId, agent: agent.agentId });
+    agents.push({ ...agent, key: text });
+  }
   return { agents };
 }

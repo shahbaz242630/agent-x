@@ -448,7 +448,7 @@ export function mandateWorld({
    * agent's key check finds it, with its text as the agent sends it.
    */
   async function agentKey(
-    w: World,
+    w: Pick<World, 'org' | 'agent'>,
     agentId = w.agent,
     scopes: readonly Scope[] = ['requests:write'],
   ): Promise<{ orgId: string; agentId: string; keyId: string; text: string }> {
