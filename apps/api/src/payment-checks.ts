@@ -42,6 +42,14 @@ import { type SignedStatesServices, withSignedStates } from '@agentx/core/module
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import {
+  AFTER_SUBMITTED,
+  factsOf,
+  type LockedPayment,
+  lockPayment,
+  NO_FACTS,
+  settlePayment,
+} from '@agentx/core/modules/outcomes';
+import {
   MOST_TRIES,
   type Nudge,
   type ProviderEvents,
@@ -71,14 +79,6 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { HEARTBEAT_STALE_MS, PARTNER_CALL_TIMEOUT_MS, PartnerTimedOut, withinTime } from './handoff.ts';
-import {
-  AFTER_SUBMITTED,
-  factsOf,
-  type LockedPayment,
-  lockPayment,
-  NO_FACTS,
-  settlePayment,
-} from './payment-outcome.ts';
 import type { VoidTables } from './request-voids.ts';
 
 /** How often the payments under way are checked, once the last run has ended. */

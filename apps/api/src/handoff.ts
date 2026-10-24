@@ -106,13 +106,13 @@ import {
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { mayFund } from '@agentx/core/modules/funding-sources';
+import { AFTER_SUBMITTED, factsOf, lockPayment, NO_FACTS, settlePayment } from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { AFTER_SUBMITTED, factsOf, lockPayment, NO_FACTS, settlePayment } from './payment-outcome.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */

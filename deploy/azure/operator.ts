@@ -7,6 +7,13 @@
 //   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
+//   node deploy/azure/operator.ts mark-payment-failed --org <organisation ID> --payment <transaction ID> --reason <case reference> --evidence <bank reference> [--id <ID>]
+//
+// The last (Phase 4 E1c; ADR-007 §10) marks an UNKNOWN payment failed, once
+// the bank has confirmed in writing that it never accepted it: its held money
+// and its order are given back, it is recorded on both chains, and the
+// organisation's admins are told. Its --id is the payment's move's: the same
+// command with it changes nothing twice.
 //
 // The last two (Phase 4 B1, SEC-OPS-03) pause or resume every hand-off of an
 // approved payment to the bank, for every organisation: the run records it
@@ -74,6 +81,8 @@ import {
   type HandoffCommand,
   handoffAskedOf,
   handoffRequest,
+  markFailedAskedOf,
+  markFailedRequest,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
@@ -156,7 +165,8 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
-The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
+  node deploy/azure/operator.ts mark-payment-failed --org <organisation ID> --payment <transaction ID> --reason <case reference> --evidence <bank reference> [--id <ID>]
+The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause, resume or mark. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's, resume's or mark's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -. A mark's evidence is the bank's own reference for its written statement that it never accepted the payment, in the same shape.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
 export interface Request {
@@ -293,6 +303,41 @@ export function parseHandoff(argv: readonly string[]): HandoffArguments {
   const asked = handoffAskedOf({ reason, id: id ?? SOME_ID });
   if ('problems' in asked) throw new UsageError(asked.problems.join('; '));
   return { command, reason: asked.reason, id };
+}
+
+/** An UNKNOWN payment to mark failed (Phase 4 E1c), and the ID of an earlier try if this is one. */
+export interface MarkFailedArguments {
+  readonly orgId: string;
+  readonly transactionId: string;
+  /** A case reference, never repeated in a problem. */
+  readonly reason: string;
+  /** The bank's reference for its written statement, never repeated in a problem. */
+  readonly evidence: string;
+  readonly id: string | undefined;
+}
+
+/**
+ * What was asked for, or a UsageError saying why it can't be done, by the
+ * operator's own rules (request.ts `markFailedAskedOf`), so a request it
+ * would refuse is never written. Neither reference is repeated in one.
+ */
+export function parseMarkFailed(argv: readonly string[]): MarkFailedArguments {
+  const [, orgFlag, orgId, paymentFlag, transactionId, reasonFlag, reason, evidenceFlag, evidence, ...rest] = argv;
+  const [idFlag, id, ...more] = rest;
+  const ided = rest.length === 0 || (idFlag === '--id' && id !== undefined && more.length === 0);
+  const shaped =
+    orgFlag === '--org' && paymentFlag === '--payment' && reasonFlag === '--reason' && evidenceFlag === '--evidence';
+  if (!shaped || evidence === undefined || !ided) {
+    throw new UsageError(
+      'say mark-payment-failed --org <organisation ID> --payment <transaction ID> --reason <case reference> --evidence <bank reference> [--id <ID>], and nothing else',
+    );
+  }
+  if (id !== undefined && !UUID_V7.test(id)) {
+    throw new UsageError('--id takes the ID an earlier run gave: a UUIDv7, in lower case');
+  }
+  const asked = markFailedAskedOf({ orgId, transactionId, reason, evidence, id: id ?? SOME_ID });
+  if ('problems' in asked) throw new UsageError(asked.problems.join('; '));
+  return { ...asked, id };
 }
 
 /** One of the job's secrets that the vault holds, as Azure gives it back: sent back just so. */
@@ -835,6 +880,55 @@ export function handoffChange(request: HandoffArguments, steps: JobSteps): Promi
   }));
 }
 
+/**
+ * What a mark's run did (Phase 4 E1c), from the command's own lines about
+ * this request's ID: 0 once the payment is FAILED by it, now or by an earlier
+ * run; 1 otherwise, saying what to do next.
+ */
+function markFailedOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: string): number {
+  const said = commandLines(lines);
+  const about = (event: string): Readonly<Record<string, unknown>> | undefined =>
+    said.find((line) => line.event === event && line.requestId === id);
+  const marked = about('operator.payment_marked_failed');
+  if (marked !== undefined) {
+    steps.say(
+      `The payment ${String(marked.transactionId)} is marked failed (request ${id}): its held money and its order are given back, it is recorded on both chains, and the organisation's admins are being told.`,
+    );
+    return 0;
+  }
+  if (about('operator.payment_marked_before') !== undefined) {
+    steps.say('Already done: an earlier run of this request marked the payment failed, and nothing changed again.');
+    return 0;
+  }
+  const refused = said.find((line) => line.event === 'operator.refused');
+  if (refusedFor(refused, NO_REQUEST_PROBLEM)) {
+    steps.say(noRequestFound(id));
+    return 1;
+  }
+  if (refusedAbout(refused, 'requestId', id)) {
+    steps.say(`The operator's command refused it, and nothing was changed: ${String(problemsSaid(refused))}.`);
+    return 1;
+  }
+  steps.say(
+    run.status === 'Succeeded'
+      ? `The run succeeded, but its lines don't show the payment marked failed by ${id}: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${id}, which changes nothing twice.`
+      : `The payment may not have been marked failed: read the lines above. If they leave it unclear, run the same command again with --id ${id}, which changes nothing twice.`,
+  );
+  return 1;
+}
+
+/** Marks an UNKNOWN payment failed on the job (Phase 4 E1c): 0 once it is FAILED by this request. */
+export function markFailed(request: MarkFailedArguments, steps: JobSteps): Promise<number> {
+  const id = request.id ?? uuidV7Ids.next();
+  return runRequest(steps, () => ({
+    text: markFailedRequest({ ...request, id }),
+    intro: `The mark's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it changes nothing twice, and it takes the request off the job at its end.`,
+    tryAgain: `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. If the payment is marked failed by it, that run ends "Already done"; nothing changes twice.`,
+    mayStillHold: mayStillHold(id, 'mark'),
+    judge: (ended, lines) => markFailedOutcome(steps, ended, lines, id),
+  }));
+}
+
 /** Writes a request, runs it, puts [] back, and says what the run did: 0 once what it makes exists. */
 async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
@@ -910,6 +1004,10 @@ export function main(
       if (argv[0] === 'handoff-pause' || argv[0] === 'handoff-resume') {
         const request = parseHandoff(argv);
         return (steps) => handoffChange(request, steps);
+      }
+      if (argv[0] === 'mark-payment-failed') {
+        const request = parseMarkFailed(argv);
+        return (steps) => markFailed(request, steps);
       }
       if (argv[0] === 'invite-first-admin') {
         const request = parseFirstAdmin(argv);

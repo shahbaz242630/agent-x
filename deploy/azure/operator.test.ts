@@ -14,6 +14,7 @@ import {
   auditExportRequest,
   createOrganizationRequest,
   handoffRequest,
+  markFailedRequest,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
@@ -29,12 +30,15 @@ import {
   type HandoffArguments,
   inviteFirstAdmin,
   main,
+  markFailed,
+  type MarkFailedArguments,
   NO_REQUEST,
   OPERATOR_JOB,
   parseArguments,
   parseAuditExport,
   parseFirstAdmin,
   parseHandoff,
+  parseMarkFailed,
   REQUEST_SECRET,
   restoreCheck,
   USAGE,
@@ -179,10 +183,17 @@ type Ending =
   | 'resumed-by-another'
   | 'paused-as-born'
   | 'resume-refused'
-  | 'resumed-other';
+  | 'resumed-other'
+  | 'marked'
+  | 'marked-before'
+  | 'mark-refused'
+  | 'marked-other';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
+
+/** The payment a mark is for. */
+const MARKED_PAYMENT = '0199a1b2-c3d4-7e5f-8a6b-00000000000f';
 
 /** Another request's ID, as if that request had run in this one's place. */
 const OTHER_ID = '0199a1b2-c3d4-7e5f-8a6b-000000000001';
@@ -353,6 +364,28 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
     TERMINATED,
   ],
+  marked: (id) => [
+    said({ event: 'operator.starting' }),
+    said({ event: 'operator.payment_marked_failed', transactionId: MARKED_PAYMENT, requestId: id, platformSeq: '12' }),
+    TERMINATED,
+  ],
+  'marked-before': (id) => [
+    said({ event: 'operator.payment_marked_before', transactionId: MARKED_PAYMENT, requestId: id }),
+    TERMINATED,
+  ],
+  'mark-refused': (id) => [
+    said({
+      event: 'operator.refused',
+      transactionId: MARKED_PAYMENT,
+      requestId: id,
+      problems: ["the payment is SUCCEEDED: only one whose outcome can't be known (UNKNOWN) is marked failed"],
+    }),
+    TERMINATED,
+  ],
+  'marked-other': () => [
+    said({ event: 'operator.payment_marked_failed', transactionId: MARKED_PAYMENT, requestId: OTHER_ID }),
+    TERMINATED,
+  ],
 };
 
 /** The endings whose command exits 0, so Azure ends the run Succeeded. */
@@ -371,6 +404,9 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'resumed-by-another',
   'paused-as-born',
   'resumed-other',
+  'marked',
+  'marked-before',
+  'marked-other',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -609,8 +645,11 @@ class FakeAzure implements Az {
   /** The run's lines, for the ID its request named when it started. */
   #log(): unknown {
     const words = JSON.parse(this.heldAtStart ?? '[]') as string[];
-    // The ID a request names: an organisation's fifth word, an invitation's seventh, an export's eleventh.
-    const at = { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10 }[String(words[0])] ?? 4;
+    // The ID a request names: an organisation's fifth word, an invitation's seventh, an export's or a mark's eleventh.
+    const at =
+      { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10, 'mark-payment-failed': 10 }[
+        String(words[0])
+      ] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
     return {
@@ -1809,5 +1848,154 @@ describe('a pause or resume of every hand-off to the bank (Phase 4 B1, SEC-OPS-0
       ),
     ).resolves.toBe(2);
     expect(lines).toEqual([`say handoff-pause --reason <case reference> [--id <ID>], and nothing else\n${USAGE}`]);
+  });
+});
+
+describe('an UNKNOWN payment marked failed on the bank’s written word (Phase 4 E1c)', () => {
+  /** References no test line repeats in a problem. */
+  const REASON = 'CASE-2026/0042';
+  const EVIDENCE = 'BANK-NACK-77311';
+  const mark = [
+    'mark-payment-failed',
+    '--org',
+    EXPORT_ORG,
+    '--payment',
+    MARKED_PAYMENT,
+    '--reason',
+    REASON,
+    '--evidence',
+    EVIDENCE,
+  ];
+  const asked: MarkFailedArguments = {
+    orgId: EXPORT_ORG,
+    transactionId: MARKED_PAYMENT,
+    reason: REASON,
+    evidence: EVIDENCE,
+    id: undefined,
+  };
+
+  async function markRun(script: Script = {}, request: Partial<MarkFailedArguments> = {}) {
+    const az = new FakeAzure({ ending: 'marked', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await markFailed(
+      { ...asked, ...request },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    );
+    const words = JSON.parse(az.heldAtStart ?? '[]') as string[];
+    return { status, az, said: lines, id: String(words[10]) };
+  }
+
+  it('reads the organisation, the payment, both references, and an earlier ID when one is given', () => {
+    expect(parseMarkFailed(mark)).toEqual(asked);
+    expect(parseMarkFailed([...mark, '--id', EARLIER_ID])).toEqual({ ...asked, id: EARLIER_ID });
+  });
+
+  it("refuses what the operator's command would, before writing anything, never repeating either reference", () => {
+    const refused = (argv: readonly string[]): string => {
+      try {
+        parseMarkFailed(argv);
+      } catch (error) {
+        expect(error).toBeInstanceOf(UsageError);
+        return (error as Error).message;
+      }
+      return 'read';
+    };
+    const shape =
+      'say mark-payment-failed --org <organisation ID> --payment <transaction ID> --reason <case reference> --evidence <bank reference> [--id <ID>], and nothing else';
+    for (const argv of [
+      mark.slice(0, 7),
+      mark.slice(0, 8),
+      mark.with(3, '--transaction'),
+      mark.with(7, '--proof'),
+      [...mark, '--id'],
+      [...mark, '--id', EARLIER_ID, 'more'],
+    ]) {
+      expect(refused(argv)).toBe(shape);
+    }
+    expect(refused([...mark, '--id', 'not-an-id'])).toBe(
+      '--id takes the ID an earlier run gave: a UUIDv7, in lower case',
+    );
+    const badEvidence = 'the bank said no';
+    const said = refused(mark.with(8, badEvidence).with(4, 'not-a-payment'));
+    expect(said).toBe(
+      "the payment's ID must be a UUIDv7, in lower case; the bank's evidence reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit",
+    );
+    expect(said).not.toContain(badEvidence);
+  });
+
+  it("writes the operator's request, runs it, puts [] back and says the payment is marked failed", async () => {
+    const done = await markRun();
+
+    expect(done.status).toBe(0);
+    expect(done.id).toMatch(UUID_V7);
+    expect(done.az.heldAtStart).toBe(markFailedRequest({ ...asked, id: done.id }));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said).toContain(
+      `The mark's ID is ${done.id}. If this run's end is unclear, run the same command again with --id ${done.id}: it changes nothing twice, and it takes the request off the job at its end.`,
+    );
+    expect(done.said.at(-1)).toBe(
+      `The payment ${MARKED_PAYMENT} is marked failed (request ${done.id}): its held money and its order are given back, it is recorded on both chains, and the organisation's admins are being told.`,
+    );
+  });
+
+  it('says a retry with the same ID found it done, changing nothing', async () => {
+    const done = await markRun({ ending: 'marked-before' }, { id: EARLIER_ID });
+
+    expect(done.status).toBe(0);
+    expect(done.az.heldAtStart).toBe(markFailedRequest({ ...asked, id: EARLIER_ID }));
+    expect(done.said.at(-1)).toBe(
+      'Already done: an earlier run of this request marked the payment failed, and nothing changed again.',
+    );
+  });
+
+  it('says a refusal and a run that found no request, each changing nothing', async () => {
+    const refused = await markRun({ ending: 'mark-refused', states: ['Failed'] });
+    expect(refused.status).toBe(1);
+    expect(refused.said.at(-1)).toBe(
+      "The operator's command refused it, and nothing was changed: the payment is SUCCEEDED: only one whose outcome can't be known (UNKNOWN) is marked failed.",
+    );
+    const empty = await markRun({ ending: 'no-request', states: ['Failed'] });
+    expect(empty.status).toBe(1);
+    expect(empty.said.at(-1)).toBe(
+      `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again with --id ${empty.id}.`,
+    );
+  });
+
+  it('never takes a line about another mark for this one, nor a run whose lines say nothing', async () => {
+    for (const ending of ['marked-other', 'silent'] as const) {
+      const done = await markRun({ ending });
+      expect({ ending, status: done.status }).toEqual({ ending, status: 1 });
+      expect(done.said.at(-1)).toBe(
+        `The run succeeded, but its lines don't show the payment marked failed by ${done.id}: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${done.id}, which changes nothing twice.`,
+      );
+    }
+    const stopped = await markRun({ ending: 'failed', states: ['Failed'] });
+    expect(stopped.status).toBe(1);
+    expect(stopped.said.at(-1)).toBe(
+      `The payment may not have been marked failed: read the lines above. If they leave it unclear, run the same command again with --id ${stopped.id}, which changes nothing twice.`,
+    );
+  });
+
+  it('is read by main as its own command, saying how to use it, and ending 2, when asked it wrongly', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        mark.slice(0, 3),
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([
+      `say mark-payment-failed --org <organisation ID> --payment <transaction ID> --reason <case reference> --evidence <bank reference> [--id <ID>], and nothing else\n${USAGE}`,
+    ]);
   });
 });
