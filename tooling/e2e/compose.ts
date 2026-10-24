@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { firstFileIn } from './tar.ts';
 
 const COMPOSE_FILE = fileURLToPath(new URL('../../deploy/compose/compose.yaml', import.meta.url));
+/** The suite's change to the stack: the database reachable from this machine, for the tamper pass's seed. */
+const E2E_FILE = fileURLToPath(new URL('compose.e2e.yaml', import.meta.url));
 const ENV_FILE = fileURLToPath(new URL('../../deploy/compose/.env', import.meta.url));
 
 /** The stack's gitignored secrets folder (deploy/compose/prepare.ts). */
@@ -58,9 +60,9 @@ function docker(args: readonly string[], timeoutMs = 120_000, env: Record<string
   });
 }
 
-/** `docker compose` against the stack's file. */
+/** `docker compose` against the stack's file and the suite's. */
 const compose = (args: readonly string[], timeoutMs?: number, env?: Record<string, string>): Promise<Run> =>
-  docker(['compose', '-f', COMPOSE_FILE, ...args], timeoutMs, env);
+  docker(['compose', '-f', COMPOSE_FILE, '-f', E2E_FILE, ...args], timeoutMs, env);
 
 /** Runs a compose command, or throws with Docker's own message. */
 async function composeRun(args: readonly string[], timeoutMs?: number): Promise<Run> {
@@ -165,7 +167,7 @@ const envEntries = (): [string, string][] =>
 export const localLogins = (): string[] => envEntries().map(([, value]) => value);
 
 /** One login prepare generated, by its name. Never printed. */
-function localLogin(name: string): string {
+export function localLogin(name: string): string {
   const found = envEntries().find(([entry]) => entry === name);
   if (found === undefined) throw new Error(`deploy/compose/.env has no ${name}`);
   return found[1];

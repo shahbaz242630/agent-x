@@ -338,3 +338,13 @@ describe('ADR-003 and ADR-013: the login service as Azure runs it', () => {
     expect(file.services.login?.environment?.OTEL_SDK_DISABLED).toBe('true');
   });
 });
+
+describe("the end-to-end suite's change to the stack (tooling/e2e/compose.e2e.yaml)", () => {
+  const e2e = parse(readFileSync('tooling/e2e/compose.e2e.yaml', 'utf8')) as ComposeFile;
+
+  it('publishes the database alone, on the loopback address, for the tamper pass to seed', () => {
+    expect(Object.keys(e2e.services)).toEqual(['db']);
+    expect(e2e.services.db?.ports).toEqual(['127.0.0.1:56541:5432']);
+    expect(networksOf(e2e.services.db ?? {}).sort()).toEqual(['internal', 'loopback']);
+  });
+});

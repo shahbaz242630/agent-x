@@ -1,0 +1,18 @@
+# The end-to-end suite's one change to the compose stack (F1's tamper pass):
+#
+#   docker compose -f deploy/compose/compose.yaml -f tooling/e2e/compose.e2e.yaml up --build --wait
+#
+# The tamper pass (tamper.e2e.test.ts) seeds two organisations straight into
+# the database as the app's own role, signed with the keys the stack's API
+# reads, as the load test does (tooling/load/compose.load.yaml). The database
+# is reached here, from this machine only; the API is still reached through
+# the edge alone. compose.ts runs every command with both files, so the stack
+# is never recreated without it. Paths are relative to deploy/compose.
+services:
+  db:
+    # An internal network can't publish a port, so it joins a second one.
+    ports: ['127.0.0.1:56541:5432']
+    networks: [internal, loopback]
+
+networks:
+  loopback: {}

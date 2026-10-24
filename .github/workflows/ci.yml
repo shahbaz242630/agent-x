@@ -297,7 +297,7 @@ jobs:
           exit 1
 
       - name: Build the image and start the stack
-        run: docker compose -f deploy/compose/compose.yaml up --build --wait --wait-timeout 420
+        run: docker compose -f deploy/compose/compose.yaml -f tooling/e2e/compose.e2e.yaml up --build --wait --wait-timeout 420
 
       # Chrome is on the runner already; Playwright drives it (channel: chrome).
       - name: End-to-end tests (SEC-HA-01, ADR-010 §7)
@@ -321,11 +321,11 @@ jobs:
 
       - name: Stack logs (only when something failed)
         if: failure()
-        run: docker compose -f deploy/compose/compose.yaml logs --no-color
+        run: docker compose -f deploy/compose/compose.yaml -f tooling/e2e/compose.e2e.yaml logs --no-color
 
       - name: Stop the stack
         if: always()
-        run: docker compose -f deploy/compose/compose.yaml down --volumes --remove-orphans
+        run: docker compose -f deploy/compose/compose.yaml -f tooling/e2e/compose.e2e.yaml down --volumes --remove-orphans
 
   # SEC-SC-02 and ADR-002 Amendment E2: the image every deployment runs. Built
   # from main once every other job has passed, pushed to GitHub's registry and
