@@ -67,49 +67,34 @@ const readLine = (text: string): Line | undefined => {
   }
 };
 
+/** A holdings check's line, as what it checked; a check stopped at its share of pages says what it checked so far. */
+const isHoldingsCheck = ({ event }: Line) => event === 'holdings_check.passed' || event === 'holdings_check.paused';
+const isProblem = ({ level }: Line) => level === 'warn' || level === 'error' || level === 'fatal';
+
 /**
  * The API's log, as `docker compose logs --no-log-prefix` prints it, summed
  * up; a decision in one of `spikeOrgs` (the capped agent's organisation) is
  * the spike's.
  */
 export function summariseLogs(text: string, spikeOrgs: ReadonlySet<string> = new Set()): LogSummary {
+  const raws = text.split(/\r?\n/).filter((raw) => raw.trim() !== '');
+  const lines = raws.map(readLine).filter((line) => line !== undefined);
   const problems: Record<string, number> = {};
-  const holdingsChecks: { requests: number; mismatched: number; tampered: number }[] = [];
-  const durations: number[] = [];
-  const spiked: number[] = [];
-  let suppressed = 0;
-  let unreadable = 0;
-  for (const raw of text.split(/\r?\n/)) {
-    if (raw.trim() === '') continue;
-    const line = readLine(raw);
-    if (line === undefined) {
-      unreadable += 1;
-      continue;
-    }
-    const event = line.event ?? '(no event)';
-    if (line.level === 'warn' || line.level === 'error' || line.level === 'fatal') {
-      problems[event] = (problems[event] ?? 0) + 1;
-    }
-    if (event === 'log.suppressed') suppressed += 1;
-    // A check stopped at its share of pages says what it checked so far; it goes on at the next run.
-    if (event === 'holdings_check.passed' || event === 'holdings_check.paused') {
-      holdingsChecks.push({
-        requests: line.requests ?? 0,
-        mismatched: line.mismatched ?? -1,
-        tampered: line.tampered ?? -1,
-      });
-    }
-    if (event === 'spend_request.decided' && typeof line.durationMs === 'number') {
-      (spikeOrgs.has(line.orgId ?? '') ? spiked : durations).push(line.durationMs);
-    }
-  }
+  for (const { event = '(no event)' } of lines.filter(isProblem)) problems[event] = (problems[event] ?? 0) + 1;
+  const decided = lines.filter((line) => line.event === 'spend_request.decided' && line.durationMs !== undefined);
+  const timesOf = (spike: boolean) =>
+    decided.filter(({ orgId = '' }) => spikeOrgs.has(orgId) === spike).map(({ durationMs = 0 }) => durationMs);
   return {
     problems,
-    suppressed,
-    unreadable,
-    holdingsChecks,
-    decisions: percentilesOf(durations),
-    spikeDecisions: percentilesOf(spiked),
+    suppressed: lines.filter(({ event }) => event === 'log.suppressed').length,
+    unreadable: raws.length - lines.length,
+    holdingsChecks: lines.filter(isHoldingsCheck).map(({ requests = 0, mismatched = -1, tampered = -1 }) => ({
+      requests,
+      mismatched,
+      tampered,
+    })),
+    decisions: percentilesOf(timesOf(false)),
+    spikeDecisions: percentilesOf(timesOf(true)),
   };
 }
 
