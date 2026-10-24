@@ -9,7 +9,14 @@
 // the name keeps it with the tests, which alone may import @agentx/testing.
 import { createHash, randomBytes } from 'node:crypto';
 
-import { addAgent, addAgentKey, agentKeyText, type AgentsTables, keySecretMessage } from '@agentx/core/modules/agents';
+import {
+  addAgent,
+  addAgentKey,
+  agentKeyText,
+  type AgentsTables,
+  keySecretMessage,
+  type Scope,
+} from '@agentx/core/modules/agents';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
@@ -122,20 +129,8 @@ export function mandateWorld({
   let people = 0;
   let keysUsed = 0;
 
-  /** A person with a session (signed in with a passkey) and a membership in the organisation. */
-  async function member(org: string, role: Role): Promise<Member> {
-    people += 1;
-    const userId = await userForSubject(
-      app(),
-      { issuer: 'https://auth.example.test', subject: `${name}-${String(people)}` },
-      { ids, clock: clock() },
-    );
-    const sessions = createSessions({ ids, clock: clock(), timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
-    const { sessionId } = await sessions.open(app(), userId, {
-      idpSessionId: 'V1_1',
-      authTime: clock().now(),
-      amr: [...PASSKEY],
-    });
+  /** The person's membership in the organisation, with this role, added by the operator. */
+  async function joined(org: string, userId: string, role: Role): Promise<string> {
     const membershipId = ids.next();
     await withSignedStates(app(), org, quiet(), (tx, states) =>
       addMembership(tx, states, {
@@ -147,7 +142,34 @@ export function mandateWorld({
         actor: OPERATOR,
       }),
     );
-    return { orgId: org, userId, sessionId, membershipId };
+    return membershipId;
+  }
+
+  /**
+   * A person with a session (signed in with a passkey) and a membership in the
+   * organisation, and the session's cookie: the tamper pass (tooling/e2e)
+   * sends it to a running stack, as a browser would.
+   */
+  async function signedInMember(org: string, role: Role): Promise<Member & { readonly cookie: string }> {
+    people += 1;
+    const userId = await userForSubject(
+      app(),
+      { issuer: 'https://auth.example.test', subject: `${name}-${String(people)}` },
+      { ids, clock: clock() },
+    );
+    const sessions = createSessions({ ids, clock: clock(), timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const { sessionId, cookie } = await sessions.open(app(), userId, {
+      idpSessionId: 'V1_1',
+      authTime: clock().now(),
+      amr: [...PASSKEY],
+    });
+    return { orgId: org, userId, sessionId, membershipId: await joined(org, userId, role), cookie };
+  }
+
+  /** A person with a session (signed in with a passkey) and a membership in the organisation. */
+  async function member(org: string, role: Role): Promise<Member> {
+    const { orgId, userId, sessionId, membershipId } = await signedInMember(org, role);
+    return { orgId, userId, sessionId, membershipId };
   }
 
   /**
@@ -159,7 +181,14 @@ export function mandateWorld({
   async function world({
     capChosen = true,
     suppliers: supplierCount = 2,
-  }: { readonly capChosen?: boolean; readonly suppliers?: number } = {}): Promise<World> {
+    scopes = ['requests:write'],
+    supplierName = 'Gulf Office Supplies LLC',
+  }: {
+    readonly capChosen?: boolean;
+    readonly suppliers?: number;
+    readonly scopes?: readonly Scope[];
+    readonly supplierName?: string;
+  } = {}): Promise<World> {
     const now = clock().now();
     const org = ids.next();
     await withSignedStates(app(), org, quiet(), (tx, states) =>
@@ -195,7 +224,7 @@ export function mandateWorld({
         id: agent,
         name: 'Purchasing agent',
         owner: admin.membershipId,
-        scopes: ['requests:write'],
+        scopes,
         createdAt: now,
         actor: OPERATOR,
       }),
@@ -239,7 +268,7 @@ export function mandateWorld({
           id,
           versionId: ids.next(),
           supplier: {
-            displayName: 'Gulf Office Supplies LLC',
+            displayName: supplierName,
             contacts: { phone: '+971501234567', email: null, tradeLicence: null },
             source: { kind: 'registry', ref: 'DED-123456' },
           },
@@ -418,6 +447,7 @@ export function mandateWorld({
   async function agentKey(
     w: World,
     agentId = w.agent,
+    scopes: readonly Scope[] = ['requests:write'],
   ): Promise<{ orgId: string; agentId: string; keyId: string; text: string }> {
     const keyId = ids.next();
     const secret = randomBytes(32);
@@ -427,7 +457,7 @@ export function mandateWorld({
         orgId: w.org,
         id: keyId,
         agentId,
-        scopes: ['requests:write'],
+        scopes,
         secretMac: mac,
         secretKeyVersion: keyVersion,
         expiresAt: new Date(clock().now().getTime() + 90 * DAY_MS),
@@ -449,7 +479,9 @@ export function mandateWorld({
 
   return {
     quiet,
+    joined,
     member,
+    signedInMember,
     world,
     termsOf,
     keyed,

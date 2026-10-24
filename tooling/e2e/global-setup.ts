@@ -65,6 +65,10 @@ export interface E2eFixtures {
     readonly member: TestUser & { readonly totpSecret: string };
     /** A password, an authenticator app and codes by email: every second factor removed by a reset (B6-3c). */
     readonly resetTarget: TestUser;
+    /** As `totp`, for the tamper pass (F1): a developer of its organisation, signed in through the API. */
+    readonly tamper: TestUser & { readonly totpSecret: string; readonly provisionedAt: number };
+    /** Registers a real passkey in the tamper file: admin confirms cannot be proved by TOTP alone. */
+    readonly tamperAdmin: TestUser;
   };
   /** The API as the login service's client. */
   readonly api: ApiSignIn;
@@ -116,6 +120,9 @@ export default async function setup(project: TestProject): Promise<() => Promise
     const firstAdmin = await newUser('first-admin');
     const [member, memberSecret] = await newUserWithApp('member');
     const [resetTarget] = await newUserWithApp('reset-target');
+    const [tamper, tamperSecret] = await newUserWithApp('tamper');
+    const tamperAdmin = await newUser('tamper-admin');
+    const tamperProvisionedAt = Date.now();
     await addOtpEmail(client, resetTarget.userId);
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, stepUpKey, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
@@ -124,6 +131,8 @@ export default async function setup(project: TestProject): Promise<() => Promise
     await loginSees(client, signIn, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, firstAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, member, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    await loginSees(client, tamper, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    await loginSees(client, tamperAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, resetTarget, [
       'AUTHENTICATION_METHOD_TYPE_PASSWORD',
       'AUTHENTICATION_METHOD_TYPE_TOTP',
@@ -145,6 +154,8 @@ export default async function setup(project: TestProject): Promise<() => Promise
         firstAdmin,
         member: { ...member, totpSecret: memberSecret },
         resetTarget,
+        tamper: { ...tamper, totpSecret: tamperSecret, provisionedAt: tamperProvisionedAt },
+        tamperAdmin,
       },
       api,
       policy: await loginPolicy(client),
