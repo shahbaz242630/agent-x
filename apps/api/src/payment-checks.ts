@@ -30,7 +30,8 @@
 // move its machine doesn't allow (an UNKNOWN said to be under way) keeps the
 // bank's facts alone. A payment already settled that the bank now contradicts
 // (credited, then Rejected) stays as it is, the facts kept, and an alert raised
-// (rail map §4): a paid one is checked every 30th run for 7 days after it was
+// (rail map §4): a paid or failed one (our team's mark among them, E1c) is
+// checked every 30th run for 7 days after it was
 // handed off. An answer older than the word kept is one already read, and
 // changes nothing. An UNKNOWN unresolved past a day is said each time it is
 // checked, for reconciliation (E1c).
@@ -41,6 +42,14 @@
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import {
+  AFTER_SUBMITTED,
+  factsOf,
+  type LockedPayment,
+  lockPayment,
+  NO_FACTS,
+  settlePayment,
+} from '@agentx/core/modules/outcomes';
 import {
   MOST_TRIES,
   type Nudge,
@@ -71,14 +80,6 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { HEARTBEAT_STALE_MS, PARTNER_CALL_TIMEOUT_MS, PartnerTimedOut, withinTime } from './handoff.ts';
-import {
-  AFTER_SUBMITTED,
-  factsOf,
-  type LockedPayment,
-  lockPayment,
-  NO_FACTS,
-  settlePayment,
-} from './payment-outcome.ts';
 import type { VoidTables } from './request-voids.ts';
 
 /** How often the payments under way are checked, once the last run has ended. */
@@ -111,6 +112,9 @@ const STILL_UNKNOWN_MS = DAY_MS;
 
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
+
+/** The settled ones still watched for PAID_WATCH_MS: paid, or failed (our team's mark among them, E1c). */
+const WATCHED = ['SUCCEEDED', 'FAILED'] as const;
 
 /** How many of the partner's messages a run takes, oldest first: the rest wait for the next. */
 const NUDGES_A_RUN = 100;
@@ -243,10 +247,10 @@ export function createPaymentChecks({
                 where.or([where('t.status', '!=', 'SUBMISSION_PENDING'), where('t.created_at', '<=', answerDue)]),
                 since === undefined ? where.lit(true) : where('t.created_at', '>=', since),
               ]),
-              // Paid ones too, every ALL_EVERY runs, for PAID_WATCH_MS: the bank going back on one is said (rail map §4).
+              // Paid and failed ones too, every ALL_EVERY runs, for PAID_WATCH_MS: the bank going back on one is said (rail map §4).
               watchPaid
                 ? where.and([
-                    where('t.status', '=', 'SUCCEEDED'),
+                    where('t.status', 'in', WATCHED),
                     where('t.created_at', '>=', new Date(clock.now().getTime() - PAID_WATCH_MS)),
                   ])
                 : where.lit(false),
@@ -263,7 +267,7 @@ export function createPaymentChecks({
    * The payments a partner's message names, by their rows, unverified (each
    * then read through its signed state): its instruction's, whatever its
    * status (one settled may be contradicted, rail map §4); or a consent's,
-   * a page of those under way or paid in PAID_WATCH_MS.
+   * a page of those under way or settled (paid or failed) in PAID_WATCH_MS.
    */
   const namedBy = (nudge: Nudge, log: Logger): Promise<Listed[]> =>
     withSignedStates(database, nudge.orgId, services(log), (tx) => {
@@ -286,7 +290,7 @@ export function createPaymentChecks({
                   where('i.account_consent_id', '=', reference.consentId),
                   where.or([
                     where('t.status', 'in', UNDER_WAY),
-                    where.and([where('t.status', '=', 'SUCCEEDED'), where('t.created_at', '>=', paidSince)]),
+                    where.and([where('t.status', 'in', WATCHED), where('t.created_at', '>=', paidSince)]),
                   ]),
                 ]),
           )

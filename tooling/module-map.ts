@@ -50,7 +50,19 @@ const DEPENDENCIES = {
     'directory',
   ],
   'provider-events': ['providers', 'directory'],
-  outcomes: ['transactions', 'limit-reservations', 'spend-requests', 'provider-events', 'providers'],
+  // Every move of a payment is locked and settled here, the operator's mark failed among them (Phase 4 E1c):
+  // its instruction read, the supplier's remittance and the admins' notice queued, both chains signed.
+  outcomes: [
+    'transactions',
+    'limit-reservations',
+    'spend-requests',
+    'provider-events',
+    'providers',
+    'instructions',
+    'notifications',
+    'organizations',
+    'platform-controls',
+  ],
   reconciliation: ['transactions', 'providers', 'outcomes'],
   audit: [],
 } as const satisfies Record<string, readonly string[]>;

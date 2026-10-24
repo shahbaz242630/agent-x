@@ -24,6 +24,8 @@ import {
   firstAdminRequest,
   handoffRequest,
   handoffUsage,
+  MARK_FAILED_USAGE,
+  markFailedRequest,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
   RESTORE_CHECK,
@@ -704,6 +706,87 @@ describe('Phase 4 B1 a pause or resume of every hand-off, only ever from a file'
       "the pause's ID must be a UUIDv7, in lower case",
     ]);
     expect(text).not.toContain(reason);
+  });
+});
+
+describe('Phase 4 E1c an UNKNOWN payment to mark failed, only ever from a file', () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-mark-failed-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const ORG = '0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a01';
+  const PAYMENT = '0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a02';
+  const REASON = 'CASE-2026/0042';
+  const EVIDENCE = 'BANK-NACK-77311';
+  const asked = { orgId: ORG, transactionId: PAYMENT, reason: REASON, evidence: EVIDENCE, id: NEW_ID };
+  const words = JSON.parse(markFailedRequest(asked)) as string[];
+  const neither = (text: string) => {
+    expect(text).not.toContain(REASON);
+    expect(text).not.toContain(EVIDENCE);
+  };
+
+  it('reads a well-formed one, then connects, never repeating either reference', async () => {
+    const { events, line, text } = await run(['--request', requestFile(markFailedRequest(asked))]);
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: 'mark-payment-failed' });
+    neither(text);
+  });
+
+  it('refuses it typed', async () => {
+    const { events, line, text } = await run(words);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `mark-payment-failed runs only from a request file: ${MARK_FAILED_USAGE}`,
+    ]);
+    neither(text);
+  });
+
+  it.each([
+    ['its evidence missing', words.filter((_word, at) => at !== 7 && at !== 8)],
+    ['its ID missing', words.slice(0, -2)],
+    ['its ID flag with no ID', words.slice(0, -1)],
+    ['a word more', [...words, 'x']],
+    ['a flag misnamed', words.map((word) => (word === '--payment' ? '--transaction' : word))],
+    ['its evidence flag misnamed', words.map((word) => (word === '--evidence' ? '--proof' : word))],
+    ['the flags in another order', [words[0] ?? '', ...words.slice(3, 5), ...words.slice(1, 3), ...words.slice(5)]],
+  ])('refuses %s, naming the shape', async (_what, wrong) => {
+    const { events, line, text } = await run(['--request', requestFile(JSON.stringify(wrong))]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `the request file holds ${MARK_FAILED_USAGE} as a JSON list, and nothing else`,
+    ]);
+    neither(text);
+  });
+
+  it('names each value that isn’t as it must be, never repeating either reference', async () => {
+    const reason = 'a note about the case';
+    const evidence = 'the bank said no';
+    const { line, text } = await run([
+      '--request',
+      requestFile(
+        markFailedRequest({
+          orgId: ORG.toUpperCase(),
+          transactionId: 'not-a-payment',
+          reason,
+          evidence,
+          id: NEW_ID.toUpperCase(),
+        }),
+      ),
+    ]);
+
+    expect(line('operator.refused')?.problems).toEqual([
+      "the organisation's ID must be a UUIDv7, in lower case",
+      "the payment's ID must be a UUIDv7, in lower case",
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+      "the bank's evidence reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit",
+      "the request's ID must be a UUIDv7, in lower case",
+    ]);
+    expect(text).not.toContain(reason);
+    expect(text).not.toContain(evidence);
   });
 });
 

@@ -8,6 +8,7 @@ import { amountText, messageFor, type PaidRemittance, type ResetLink, type Waiti
 import {
   AGENT_NOTICE_KINDS,
   type ClaimedNotice,
+  isAboutAPayment,
   isAboutASpendRequest,
   isToAdminsAndApprovers,
   MANDATE_NOTICE_KINDS,
@@ -483,6 +484,20 @@ describe('a notice’s email (B5-1b)', () => {
       expect(told.text).toContain(`Payment: ${payment}`);
       expect(told.text).toContain("You're told because you're an admin of this organisation.");
       expect(told.text).toContain("This email can't approve or change anything.");
+    });
+
+    it('tells every admin, by the payment’s ID, that our team marked it failed on the bank’s word (0064, E1c)', () => {
+      const told = messageFor(
+        { ...remittanceNotice, kind: 'payment_marked_failed', recipientUserId: NOTICE.recipientUserId },
+        'a@example.test',
+      );
+
+      expect(isAboutAPayment('payment_marked_failed')).toBe(true);
+      expect(told.subject).toBe('Agent X: a payment was marked failed');
+      expect(told.text).toContain('the bank confirmed in writing that it never accepted it');
+      expect(told.text).toContain('contact Agent X support before paying the invoice again');
+      expect(told.text).toContain(`Payment: ${payment}`);
+      expect(told.text).toContain("You're told because you're an admin of this organisation.");
     });
   });
 

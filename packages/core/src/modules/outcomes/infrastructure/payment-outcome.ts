@@ -3,25 +3,28 @@
 // transaction read for change, 10; its holdings, 11; the move, 12): what its
 // request holds settled as it now stands (the outcomes module), and, on
 // SUCCEEDED, its supplier's remittance email queued (partner decision 34a).
-// Every move of a payment goes through here (Tx B, the sweep and the bank
-// check, E1a), so neither is ever left out, each after `lockPayment`. The
-// email's setting and address are read as it is sent (`remittances.ts`),
-// never here: they sit at level 6, above the locks already held.
-import type { AuditTables, SignedStates } from '@agentx/core/modules/audit';
-import { instructionOf, type InstructionsTables } from '@agentx/core/modules/instructions';
-import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
-import { lockHoldingsOf, settleHoldings } from '@agentx/core/modules/outcomes';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import { type PaymentExecution, paymentStateOf } from '@agentx/core/modules/providers';
+// Every move of a payment goes through here (Tx B, the sweep, the bank check
+// and the operator marking one failed, E1a, E1c), so neither is ever left
+// out, each after `lockPayment`. Here in core, not the API, as the operator's
+// command moves payments too. The email's setting and address are read as it
+// is sent (`remittances.ts`), never here: they sit at level 6, above the
+// locks already held.
+import type { DatabaseTransaction } from '@agentx/platform/db';
+
+import type { AuditTables, SignedStates } from '../../audit/index.ts';
+import { instructionOf, type InstructionsTables } from '../../instructions/index.ts';
+import type { LimitReservationsTables } from '../../limit-reservations/index.ts';
+import type { Notice, NotificationsTables, Outbox } from '../../notifications/index.ts';
+import { type PaymentExecution, paymentStateOf } from '../../providers/index.ts';
+import type { SpendRequestsTables } from '../../spend-requests/index.ts';
 import {
   type ProviderFacts,
   type TransactionEvent,
   transactionOf,
   type TransactionsTables,
   type TransactionStatus,
-} from '@agentx/core/modules/transactions';
-import type { DatabaseTransaction } from '@agentx/platform/db';
+} from '../../transactions/index.ts';
+import { lockHoldingsOf, settleHoldings } from './outcomes.ts';
 
 type PaymentOutcomeTables = LimitReservationsTables & SpendRequestsTables & AuditTables & NotificationsTables;
 
@@ -59,21 +62,25 @@ export type LockedPayment = Readonly<{
  * The transaction read for change (10), then its request's reservation and
  * claim locked (11), before a move takes the head (12; ADR-006 §6); throws for
  * a transaction that can't be believed (its alarm raised), or one not its
- * request's.
+ * request's. With no request named (the operator's, which lists nothing), its
+ * signed instruction's.
  */
 export async function lockPayment(
   tx: DatabaseTransaction<PaymentOutcomeTables & InstructionsTables & TransactionsTables>,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
-  requestId: string,
+  requestId?: string,
 ): Promise<LockedPayment> {
   const read = await transactionOf(tx, states, key, 'change');
   if (read.outcome !== 'found') throw new Error(`A handed-off transaction can't be believed: ${key.id}`);
   const instruction = await instructionOf(tx, states, { orgId: key.orgId, id: read.transaction.instructionId });
-  if (instruction.outcome !== 'found' || instruction.instruction.spendRequestId !== requestId.toLowerCase()) {
+  if (
+    instruction.outcome !== 'found' ||
+    (requestId !== undefined && instruction.instruction.spendRequestId !== requestId.toLowerCase())
+  ) {
     throw new Error(`A handed-off transaction's instruction can't be believed: ${key.id}`);
   }
-  await lockHoldingsOf(tx, requestId);
+  await lockHoldingsOf(tx, requestId ?? instruction.instruction.spendRequestId);
   return { transaction: read.transaction, instruction: instruction.instruction };
 }
 

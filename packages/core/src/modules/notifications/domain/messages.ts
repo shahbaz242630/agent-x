@@ -412,6 +412,14 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       'Sign in to Agent X to see the payment, and let the supplier know it was paid if they need to. To have it emailed next time, add its email address in its details.',
   },
+  // About a payment (0064, Phase 4 E1c): Agent X's own team marked it failed on the bank's written word, to every admin.
+  payment_marked_failed: {
+    subject: () => 'Agent X: a payment was marked failed',
+    firstLine: () =>
+      "Agent X's own team marked a payment from one of your organisations as failed: the bank confirmed in writing that it never accepted it, so no money left your account. The amount it held against your limits is free again, and its invoice can be paid again.",
+    check:
+      "Sign in to Agent X to see the payment, and the bank's reference our team recorded in your audit log. If you think this is wrong, contact Agent X support before paying the invoice again.",
+  },
 };
 
 const NEWLINE = '\n';
