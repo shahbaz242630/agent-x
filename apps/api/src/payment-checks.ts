@@ -44,9 +44,10 @@ import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import {
   AFTER_SUBMITTED,
+  answerAbout,
   factsOf,
-  type LockedPayment,
   lockPayment,
+  moveDetails,
   NO_FACTS,
   settlePayment,
 } from '@agentx/core/modules/outcomes';
@@ -59,7 +60,6 @@ import {
 import {
   type ExecutionLookup,
   type FinancialRailAdapter,
-  type PaymentExecution,
   type PaymentState,
   paymentStateOf,
   RailUnavailable,
@@ -163,13 +163,6 @@ const contradicts = (status: TransactionStatus, state: PaymentState): boolean =>
   status === 'SUCCEEDED' || status === 'REVERSED'
     ? state === 'FAILED' || state === 'UNKNOWN'
     : state === 'SUCCEEDED' || state === 'PROCESSING';
-
-/** Whether the bank's answer is about this payment: its organisation, our instruction, its amount and currency. */
-const about = (execution: PaymentExecution, orgId: string, { instruction }: LockedPayment): boolean =>
-  execution.organizationId.toLowerCase() === orgId.toLowerCase() &&
-  execution.instructionId.toLowerCase() === instruction.id &&
-  execution.amountMinor === instruction.amountMinor &&
-  execution.currency === instruction.currency;
 
 export interface PaymentChecks {
   /** Checks each organisation's payments under way that are due, a page at a time, until the signal is aborted. Never throws. */
@@ -360,11 +353,7 @@ export function createPaymentChecks({
 
       /** The status it moved to, or null where its machine refused the move (its facts still kept). */
       const move = async (event: TransactionEvent, facts: ProviderFacts, via: string) => {
-        const details =
-          event === 'fail' && facts.rejectCode === null
-            ? // The bank's own word proved no debit with no code: its reference is the evidence (ADR-007 §9).
-              { via, evidenceRef: `bank_status:${facts.paymentInstructionRef ?? listed.instructionId}` }
-            : { via };
+        const details = moveDetails(event, facts, via, listed.instructionId);
         const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details });
         // Read for change under this lock: anything but a move or a refusal is something past the app.
         if (moved.outcome !== 'moved' && moved.outcome !== 'refused') {
@@ -376,7 +365,7 @@ export function createPaymentChecks({
       /** Where the bank's word takes it. */
       const movedBy = async (): Promise<TransactionStatus> => {
         if (word.kind === 'not_found') return from;
-        const found = word.kind === 'found' && about(word.execution, orgId, locked) ? word.execution : undefined;
+        const found = word.kind === 'found' && answerAbout(word.execution, orgId, locked) ? word.execution : undefined;
         if (found === undefined) {
           if (word.kind === 'found') {
             log.error('payment_check.unreadable', { transactionId: listed.id, why: 'not_this_payment' });

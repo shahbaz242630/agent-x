@@ -389,6 +389,16 @@ export const PLAIN_WORDS = {
     broke: 'A payment under way is marked unknown, its money held; it is never counted as paid.',
     next: "Check the payment against the bank's record. If this repeats, a developer should read the error.",
   },
+  'handoff.unreadable': {
+    happened: "The bank's answer to a payment just sent was about another payment, or another amount.",
+    broke: 'The payment is marked unknown, its money held; it is never counted as paid on that answer.',
+    next: "Check the payment against the bank's record; a developer should read the error, as answers may be mixed up.",
+  },
+  'handoff.refused_late': {
+    happened: 'The bank refused a payment after its own status check had already found it under way.',
+    broke: "Nothing: the bank's status stands and the payment is not marked failed on the late refusal.",
+    next: 'Ask the bank which answer is right. The regular bank check keeps following the payment.',
+  },
   'handoff.rejected_unproven': {
     happened: 'The bank answered a new payment as rejected, but not that the money stayed in the account.',
     broke: 'The payment is marked unknown and its money stays held until the bank proves what happened.',
