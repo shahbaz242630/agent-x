@@ -729,7 +729,13 @@ describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, S
     const mine = await ask(first.acting, first.w, { amount: ALLOWED() });
     const theirs = await ask(second.acting, second.w, { amount: ALLOWED() });
 
-    await handoffOf(first.w, first.w.rail, () => Promise.resolve([first.w.org, second.w.org])).run();
+    // One partner for both, each organisation's intent reaching its own world's fake, where its consent is.
+    const routed: FakeRail = {
+      ...first.w.rail,
+      submitApprovedIntent: (intent) =>
+        (intent.organizationId === second.w.org ? second.w.rail : first.w.rail).submitApprovedIntent(intent),
+    };
+    await handoffOf(first.w, routed, () => Promise.resolve([first.w.org, second.w.org])).run();
 
     for (const [w, request] of [
       [first.w, mine],
@@ -740,6 +746,7 @@ describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, S
       expect(await paymentOf(w, request.id)).toMatchObject({
         transactions: 1,
         instruction: { beneficiaryRef: payeeRefOf(w) },
+        transaction: { status: 'PROCESSING' },
       });
     }
   });

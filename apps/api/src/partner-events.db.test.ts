@@ -9,6 +9,8 @@
 // changing (-05); a malformed body is refused (-06); a bad signature or a
 // stale time is refused, counted, kept encrypted as evidence a few an hour
 // from an address, and alerted (-01).
+import { createHash } from 'node:crypto';
+
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { createProviderEvents } from '@agentx/core/modules/provider-events';
@@ -665,17 +667,35 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
     expect((await send({ ...forgedNow(), body: body('nobody-holds-this') })).statusCode).toBe(401);
     expect((await send(await w.rail.bank.signBody(body('nobody-holds-this')))).statusCode).toBe(202);
 
-    const rows = await database.as('admin').query<{ row: string }>(
-      `select row_to_json(e)::text as row from security.partner_event_evidence e
-         union all select row_to_json(i)::text from provider_events.inbox i`,
+    const kept = await database
+      .as('admin')
+      .query(
+        'select id from security.partner_event_evidence union all select id from provider_events.inbox where org_id is null',
+      );
+    expect(kept).toHaveLength(2);
+    // Every row of every table and every log line, searched for every form an IBAN could be kept in.
+    const rows = await database.as('admin').query<{ rows: string }>(
+      `select pg_catalog.query_to_xml(
+          pg_catalog.format('select pg_catalog.to_jsonb(t)::text as row from %I.%I t', table_schema, table_name),
+          true, false, '')::text as rows
+         from information_schema.tables
+        where table_type = 'BASE TABLE' and table_schema not in ('pg_catalog', 'information_schema')`,
     );
-    expect(rows).toHaveLength(2);
-    const stored = rows.map(({ row }) => row).join('\n');
     const logged = JSON.stringify(capture.lines());
+    const anywhere = [...rows.map((row) => row.rows), logged].join('\n').toLowerCase();
+    const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
     for (const iban of planted) {
-      expect(stored).not.toContain(iban);
-      expect(stored).not.toContain(Buffer.from(iban).toString('hex'));
-      expect(logged).not.toContain(iban);
+      const compact = iban.replaceAll(' ', '');
+      const forms = [
+        iban,
+        compact,
+        Buffer.from(compact).toString('hex'),
+        Buffer.from(compact).toString('base64'),
+        sha256(compact),
+        sha256(compact.toLowerCase()),
+        compact.slice(4),
+      ];
+      for (const form of forms) expect(anywhere, form).not.toContain(form.toLowerCase());
     }
     expect(findLeaks(logged, planted)).toEqual([]);
   });

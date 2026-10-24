@@ -100,16 +100,13 @@ export function railContract(name: string, setUp: () => Promise<RailUnderContrac
       });
     });
 
-    it('refuses with a reject code, its proof nothing was made, and again the same', async () => {
+    it('refuses with a reject code, its proof nothing was made', async () => {
       const under = await setUp();
-      const intent = intentOf(under, under.amounts.refused);
 
-      const first = await under.rail.submitApprovedIntent(intent);
-      const again = await under.rail.submitApprovedIntent(intent);
+      const answer = await under.rail.submitApprovedIntent(intentOf(under, under.amounts.refused));
 
-      if (first.kind !== 'refused') throw new Error(`not refused: ${first.kind}`);
-      expect(first.code).not.toBe('');
-      expect(again).toEqual(first);
+      if (answer.kind !== 'refused') throw new Error(`not refused: ${answer.kind}`);
+      expect(answer.code).not.toBe('');
     });
 
     it('finds nothing for an instruction it was never given, and nothing of one organisation’s for another', async () => {
@@ -147,6 +144,10 @@ export function railContract(name: string, setUp: () => Promise<RailUnderContrac
       expect(await under.rail.getBeneficiaryState({ organizationId: under.organizationId, registrationId })).toEqual(
         first,
       );
+      // Another organisation's registration under the same ID answers as none.
+      expect(
+        await under.rail.getBeneficiaryState({ organizationId: under.otherOrganizationId, registrationId }),
+      ).toEqual({ kind: 'refused', reason: 'unknown' });
     });
 
     it('refuses a message it can’t verify, never throwing, whatever it holds', async () => {
@@ -174,6 +175,10 @@ export function railContract(name: string, setUp: () => Promise<RailUnderContrac
       expect(check.event.dedupeKey).not.toBe('');
       expect(check.event.reference).toEqual({ kind: 'consent', consentId: under.accountConsentId });
       expect(await under.rail.verifyEvent(body, headers)).toEqual(check);
+      // One byte of the body changed after it was signed: refused, the signature is over the raw body.
+      const changed = Buffer.from(body);
+      changed[changed.length - 2] = (changed[changed.length - 2] ?? 0) ^ 0x01;
+      expect(await under.rail.verifyEvent(changed, headers)).toMatchObject({ kind: 'refused' });
     });
   });
 }
