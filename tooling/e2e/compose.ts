@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { firstFileIn } from './tar.ts';
 
 const COMPOSE_FILE = fileURLToPath(new URL('../../deploy/compose/compose.yaml', import.meta.url));
-/** The suite's change to the stack: the database reachable from this machine, for the tamper pass's seed. */
+/** The suite's database access for seeding and its ephemeral download store, for the real tamper controls. */
 const E2E_FILE = fileURLToPath(new URL('compose.e2e.yaml', import.meta.url));
 const ENV_FILE = fileURLToPath(new URL('../../deploy/compose/.env', import.meta.url));
 
