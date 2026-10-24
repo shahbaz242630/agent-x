@@ -122,7 +122,11 @@ async function cleanUpOrg(database: Database<MandateWorldTables>, keyring: KeyPr
  */
 const ORGS_AT_ONCE = 4;
 
-/** Cleans up each of the run's organisations, ORGS_AT_ONCE at a time; the first failure stops it, loudly. */
+/**
+ * Cleans up each of the run's organisations, ORGS_AT_ONCE at a time. The
+ * first failure stops new organisations being taken; it throws once those
+ * under way have finished, so nothing is still running when it answers.
+ */
 export async function cleanUpRun(
   database: Database<MandateWorldTables>,
   keyring: KeyProvider,
@@ -131,10 +135,18 @@ export async function cleanUpRun(
   const queue = [...orgIds];
   const worker = async (): Promise<void> => {
     for (let orgId = queue.shift(); orgId !== undefined; orgId = queue.shift()) {
-      await cleanUpOrg(database, keyring, orgId);
+      try {
+        await cleanUpOrg(database, keyring, orgId);
+      } catch (error) {
+        queue.length = 0;
+        throw error;
+      }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(ORGS_AT_ONCE, queue.length) }, worker));
+  const ends = await Promise.allSettled(Array.from({ length: Math.min(ORGS_AT_ONCE, queue.length) }, worker));
+  const failed = ends.flatMap((end) => (end.status === 'rejected' ? [end.reason as unknown] : []));
+  if (failed.length === 1) throw failed[0];
+  if (failed.length > 1) throw new AggregateError(failed, `${String(failed.length)} organisations' clean-up failed.`);
 }
 
 /** What the clean-up left undone, in plain words: none when every organisation is inert. */

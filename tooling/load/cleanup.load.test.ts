@@ -31,7 +31,7 @@ const chainLengths = () =>
     ),
   );
 
-// ~6,800 requests voided, four organisations at once: about 5 minutes on the laptop; room for a slower one.
+// ~6,800 requests voided, four organisations at once: under 3 minutes on the laptop; room for a slower database.
 it(
   'leaves every organisation of the run frozen, holding nothing, with no live key or member',
   { timeout: 1_800_000 },
