@@ -393,9 +393,9 @@ export function createHandoff({
    * Tx B: the partner's answer recorded on the transaction (ADR-007 §9):
    * `recorded`, or `late` when it had moved on meanwhile (marked UNKNOWN by a
    * run's sweep): the answer then kept as its facts, never a move (B3,
-   * ADR-007 §9). A refusal moves a pending or UNKNOWN one to FAILED: its
-   * reject code is the proof (§11); never one the bank check already found
-   * under way at the bank (the bank's word stands; said as a contradiction).
+   * ADR-007 §9). A refusal moves a pending one, or one UNKNOWN with no word
+   * of the bank's, to FAILED: its reject code is the proof (§11); never one
+   * the bank check already read at the bank (its word stands; said).
    * An answer not about this payment (SEC-PTR-09) is never its word: a
    * pending one UNKNOWN, its money held. Throws for a transaction that can't
    * be believed.
@@ -435,14 +435,16 @@ export function createHandoff({
         return from === 'SUBMISSION_PENDING' ? settled(await move('lose_track', NO_FACTS, 'no_answer')) : 'late';
       }
       if (answer.kind === 'refused') {
-        if (from === 'SUBMISSION_PENDING' || from === 'UNKNOWN') {
+        // UNKNOWN with no word of the bank's yet (the sweep's): one the bank check marked on the bank's word stays.
+        const noBankWord = from === 'UNKNOWN' && locked.transaction.providerStatus === null;
+        if (from === 'SUBMISSION_PENDING' || noBankWord) {
           return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
         }
         log.error('handoff.refused_late', { transactionId, status: from });
         return 'late';
       }
       if (!answerAbout(answer.execution, orgId, locked)) {
-        log.error('handoff.unreadable', { transactionId, why: 'not_this_payment' });
+        log.error('handoff.unreadable', { transactionId, status: from, why: 'not_this_payment' });
         return from === 'SUBMISSION_PENDING'
           ? settled(await move('lose_track', NO_FACTS, 'answer_unreadable'))
           : 'late';

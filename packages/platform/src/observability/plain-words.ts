@@ -391,7 +391,7 @@ export const PLAIN_WORDS = {
   },
   'handoff.unreadable': {
     happened: "The bank's answer to a payment just sent was about another payment, or another amount.",
-    broke: 'The payment is marked unknown, its money held; it is never counted as paid on that answer.',
+    broke: 'A payment still waiting is marked unknown, its money held; one already moved is left; never paid on it.',
     next: "Check the payment against the bank's record; a developer should read the error, as answers may be mixed up.",
   },
   'handoff.refused_late': {

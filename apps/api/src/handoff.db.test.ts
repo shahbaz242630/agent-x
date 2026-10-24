@@ -887,7 +887,11 @@ describe('the answer believed only about this payment, never undoing the bank’
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(await remittancesOf(w)).toEqual([]);
     expect(lines('handoff.unreadable')).toEqual([
-      expect.objectContaining({ transactionId: await transactionIdOf(w, request.id), why: 'not_this_payment' }),
+      expect.objectContaining({
+        transactionId: await transactionIdOf(w, request.id),
+        status: 'SUBMISSION_PENDING',
+        why: 'not_this_payment',
+      }),
     ]);
   });
 
@@ -911,6 +915,46 @@ describe('the answer believed only about this payment, never undoing the bank’
       expect.objectContaining({ transactionId: await transactionIdOf(w, request.id), status: 'SUBMITTED' }),
     ]);
     expect(lines('handoff.handed_off')).toEqual([expect.objectContaining({ answer: 'refused', recorded: 'late' })]);
+  });
+
+  it('keeps UNKNOWN, its money held, one the bank check marked on the bank’s word, when a refusal comes late', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: declined, after the bank check read it Rejected with no proof the money stayed (a partner's nudge).
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await settledBy(w, request.id, 'submitted', { providerStatus: 'Rejected' });
+        await settledBy(w, request.id, 'lose_track');
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN', rejectCode: null } });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(lines('handoff.refused_late')).toEqual([expect.objectContaining({ status: 'UNKNOWN' })]);
+  });
+
+  it('leaves as it found it one the bank check already moved, when the answer is about another payment: said', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const mixed = answeredAs(w, (e) => ({ ...credited(e), amountMinor: e.amountMinor + 1n }));
+    const rail: FakeRail = {
+      ...mixed,
+      submitApprovedIntent: async (intent) => {
+        await settledBy(w, request.id, 'submitted', { providerStatus: 'Pending' });
+        return mixed.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMITTED' } });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.PROCESSING);
+    expect(await remittancesOf(w)).toEqual([]);
+    expect(lines('handoff.unreadable')).toEqual([expect.objectContaining({ status: 'SUBMITTED' })]);
   });
 
   it('settles FAILED an accepted answer the bank rejected with no debit proven and no code: its reference the proof', async () => {
