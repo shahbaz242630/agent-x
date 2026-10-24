@@ -22,8 +22,10 @@ import {
 import { createDatabase, type Database } from '@agentx/platform/db';
 import {
   createTestDatabase,
+  findLeaks,
   FixedClock,
   LogCapture,
+  SENSITIVE_SAMPLES,
   SequentialIds,
   type TestDatabase,
   tamperAsOwner,
@@ -639,6 +641,43 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
     await send(forgedNow());
     expect(await kept()).toHaveLength(7);
     expect(lines('partner_event.refused')).toHaveLength(3);
+  });
+
+  it('SEC-PAY-05 keeps an IBAN in a refused or unknown message nowhere in plain words: encrypted, never logged', async () => {
+    const { w } = await ready();
+    const { send } = await door(w);
+    const planted = [SENSITIVE_SAMPLES.uaeIban, SENSITIVE_SAMPLES.spacedUaeIban];
+    // The rail's message with the accounts beside what names the payment, as a partner's might carry them.
+    const body = (consentId: string) =>
+      Buffer.from(
+        JSON.stringify({
+          Meta: {
+            EventType: 'payment.status',
+            EventDateTime: clock.now().toISOString(),
+            ConsentId: consentId,
+            DebtorAccount: planted[0],
+            CreditorAccount: planted[1],
+          },
+        }),
+      );
+
+    // Refused (no key signed it), and verified but naming a consent no organisation holds: both kept, encrypted.
+    expect((await send({ ...forgedNow(), body: body('nobody-holds-this') })).statusCode).toBe(401);
+    expect((await send(await w.rail.bank.signBody(body('nobody-holds-this')))).statusCode).toBe(202);
+
+    const rows = await database.as('admin').query<{ row: string }>(
+      `select row_to_json(e)::text as row from security.partner_event_evidence e
+         union all select row_to_json(i)::text from provider_events.inbox i`,
+    );
+    expect(rows).toHaveLength(2);
+    const stored = rows.map(({ row }) => row).join('\n');
+    const logged = JSON.stringify(capture.lines());
+    for (const iban of planted) {
+      expect(stored).not.toContain(iban);
+      expect(stored).not.toContain(Buffer.from(iban).toString('hex'));
+      expect(logged).not.toContain(iban);
+    }
+    expect(findLeaks(logged, planted)).toEqual([]);
   });
 
   it('keeps a refused body’s first 16 KiB alone, said as kept', async () => {

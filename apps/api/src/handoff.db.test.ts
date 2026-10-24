@@ -30,7 +30,7 @@ import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type FakeRail, type PaymentExecution, RailUnavailable } from '@agentx/core/modules/providers';
-import { cancelRequest, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { approveRequest, cancelRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import {
   REMITTANCE_SETTINGS,
   remittanceOf,
@@ -331,7 +331,7 @@ describe('an approved request handed to the partner once (B4)', () => {
 });
 
 describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-007 §14)', () => {
-  it('waits while the platform is paused, and goes on resume', async () => {
+  it('SEC-AV-02 waits while the platform is paused, no request read; goes on resume, re-checked', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     const job = handoffOf(w);
@@ -525,7 +525,7 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
     expect(await stoppedToldOf(w)).toEqual([request.id]);
   });
 
-  it('denies it once its agent key was ended at once (AGENT_KEY_ENDED, SEC-AG-12/13)', async () => {
+  it('SEC-AG-12 denies it once its agent key was ended at once (AGENT_KEY_ENDED)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await signed(w, (tx, states) =>
@@ -608,6 +608,183 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
     expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
     expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1 });
   });
+
+  it('SEC-AG-13 tracks a payment whose agent key was revoked after its hand-off, its money still held', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const { rail, submitted } = counted(w);
+    await handoffOf(w, rail).run();
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: acting.keyId }, 'revoke', {
+        actor: OPERATOR,
+        action: 'agent_key.revoked',
+        details: { reason: 'test' },
+      }),
+    );
+
+    await createRequestVoids({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    }).run();
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.PROCESSING);
+    expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1, transaction: { status: 'PROCESSING' } });
+    expect(submitted()).toBe(1);
+    // Tracked to its outcome all the same: the bank's word settles it.
+    await settledBy(w, request.id, 'succeed', { providerStatus: 'AcceptedCreditSettlementCompleted' });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
+  });
+});
+
+describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, SEC-PAY-02, decision 3)', () => {
+  /** Whether the request is handed off, read past the walls (the hand-off's own transaction is still open). */
+  const handedOff = async (requestId: string) =>
+    (
+      await database
+        .as('admin')
+        .query<{ status: string }>('select status from spend_requests.requests where id = $1', [requestId])
+    )[0]?.status === 'HANDED_OFF';
+
+  /** The world's database, but the transaction that hands `requestId` off commits, then reports its connection lost. */
+  const commitUnclear = (requestId: string) => {
+    let lost = false;
+    const wrapped = (builder: object): object =>
+      new Proxy(builder, {
+        get(target, name, receiver) {
+          const value: unknown = Reflect.get(target, name, receiver);
+          if (typeof value !== 'function') return value;
+          const bound = (value as (...args: unknown[]) => unknown).bind(target);
+          if (name === 'execute') {
+            return async (...args: unknown[]) => {
+              const done = await bound(...args);
+              if (!lost && (await handedOff(requestId))) {
+                lost = true;
+                throw new Error('the connection was lost at commit');
+              }
+              return done;
+            };
+          }
+          return (...args: unknown[]) => {
+            const made = bound(...args);
+            return typeof made === 'object' && made !== null ? wrapped(made) : made;
+          };
+        },
+      });
+    return new Proxy(app, {
+      get(target, name, receiver) {
+        const value: unknown = Reflect.get(target, name, receiver);
+        if (typeof value !== 'function') return value;
+        if (name !== 'transaction') return (value as (...args: unknown[]) => unknown).bind(target);
+        return () => wrapped((value as () => object).call(target));
+      },
+    });
+  };
+
+  /** The hand-off over the world alone, through `database`, its wait for an answer a minute. */
+  const minuteJob = (w: World, rail: FakeRail, database: typeof app) =>
+    createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database,
+      outbox: createOutbox({ ids, clock }),
+      rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      unknownAfterMs: 60_000,
+    });
+
+  it('SEC-DP-04 SEC-DP-03 calls no partner when Tx A’s commit is unclear; left waiting, it is UNKNOWN past its wait, never a second', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const { rail, submitted } = counted(w);
+
+    await minuteJob(w, rail, commitUnclear(request.id)).run();
+
+    expect(submitted()).toBe(0);
+    expect(lines('handoff.failed')).toEqual([expect.objectContaining({ requestId: request.id })]);
+    // Tx A had committed: handed off, its transaction waiting for an answer that never comes.
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(await paymentOf(w, request.id)).toMatchObject({
+      transactions: 1,
+      transaction: { status: 'SUBMISSION_PENDING' },
+    });
+
+    clock.advanceBy(60_001);
+    await minuteJob(w, rail, app).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1, transaction: { status: 'UNKNOWN' } });
+    expect(submitted()).toBe(0);
+  });
+
+  it('SEC-TEN-09 hands off each organisation’s requests under its own organisation alone', async () => {
+    const first = await ready();
+    const second = await ready();
+    const mine = await ask(first.acting, first.w, { amount: ALLOWED() });
+    const theirs = await ask(second.acting, second.w, { amount: ALLOWED() });
+
+    await handoffOf(first.w, first.w.rail, () => Promise.resolve([first.w.org, second.w.org])).run();
+
+    for (const [w, request] of [
+      [first.w, mine],
+      [second.w, theirs],
+    ] as const) {
+      expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+      // Read under the organisation's own wall, to its own payee.
+      expect(await paymentOf(w, request.id)).toMatchObject({
+        transactions: 1,
+        instruction: { beneficiaryRef: payeeRefOf(w) },
+      });
+    }
+  });
+
+  it('SEC-PAY-02 denies at the hand-off a request a person approved, its supplier’s details changed since', async () => {
+    const { w, acting } = await ready();
+    // Over the approval threshold: it waits for a person, then one approves it.
+    const request = await ask(acting, w, { amount: AED(150_000n) });
+    expect(await statusOf(w, request.id)).toBe('APPROVAL_REQUIRED');
+    await signed(w, async (tx, states) => {
+      await requestOf(tx, states, { orgId: w.org, id: request.id }, 'change');
+      return approveRequest(tx, states, keys, { orgId: w.org, id: request.id }, { userId: w.admin.userId, stepUp: {} });
+    });
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    await STOPS['the supplier’s details changed'](w);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(submitted()).toBe(0);
+    expect(lines('handoff.denied')).toEqual([
+      expect.objectContaining({ requestId: request.id, causes: 'SUPPLIER_NOT_VERIFIED,SUPPLIER_CHANGED' }),
+    ]);
+  });
+
+  it.each([
+    ['the agent suspended', 'agent', 'AGENT_SUSPENDED'],
+    ['the mandate suspended', 'mandate', 'MANDATE_NOT_IN_FORCE'],
+  ] as const)(
+    'denies at the hand-off one whose stop, %s, was chosen to cancel (decision 3)',
+    async (_name, which, causes) => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      await moved(w, await mandateIdOf(w), which, 'cancel');
+      const { rail, submitted } = counted(w);
+
+      await handoffOf(w, rail).run();
+
+      expect(await statusOf(w, request.id)).toBe('DENIED');
+      expect(submitted()).toBe(0);
+      expect(lines('handoff.denied')).toEqual([expect.objectContaining({ requestId: request.id, causes })]);
+      expect(await stoppedToldOf(w)).toEqual([request.id]);
+    },
+  );
 });
 
 /** An answer with nothing more to say than its move. */
@@ -665,7 +842,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     };
   }
 
-  it('marks UNKNOWN a transaction left waiting past its wait, never one within it; the late answer kept as facts', async () => {
+  it('SEC-AV-05 marks UNKNOWN a transaction left waiting past its wait, never one within it; the late answer kept as facts', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     // The call's limit runs on real time, the wait on the test's clock: the answer is held back well within both.
@@ -801,7 +978,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     await answered();
   });
 
-  it('gives the partner its time limit: no answer by then is UNKNOWN, said in plain words', async () => {
+  it('SEC-DP-05 gives the partner its time limit: no answer by then is UNKNOWN, said in plain words, never resent', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     const silent: FakeRail = { ...w.rail, submitApprovedIntent: () => new Promise(() => undefined) };

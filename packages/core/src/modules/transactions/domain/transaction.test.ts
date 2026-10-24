@@ -28,7 +28,7 @@ describe('the transaction’s machine (PRD §4.3)', () => {
     ['FAILED', 'lose_track'],
     ['UNKNOWN', 'lose_track'],
     ['REVERSED', 'reverse'],
-  ] as const)('refuses %s by %s', (from, event) => {
+  ] as const)('SEC-DP-13 refuses %s by %s', (from, event) => {
     expect(TRANSACTION.transition(from, event).ok).toBe(false);
   });
 
