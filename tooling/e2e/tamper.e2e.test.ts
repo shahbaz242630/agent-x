@@ -10,7 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
-import { chromium, type Browser } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 import { z } from 'zod';
 
@@ -23,10 +23,12 @@ import {
   type ActivityExportTables,
   type ActivityTables,
 } from '../../packages/core/src/modules/activity/index.ts';
-import { createAuditTrail } from '../../packages/core/src/modules/audit/index.ts';
+import { createAuditTrail, withSignedStates } from '../../packages/core/src/modules/audit/index.ts';
+import { mayFund, sourceOf } from '../../packages/core/src/modules/funding-sources/index.ts';
 import { createSessions, type Role } from '../../packages/core/src/modules/identity/index.ts';
 import { tamperIdentityFixtures } from '../../packages/core/src/modules/identity/tamper-fixtures.helper.test.ts';
 import type { InstructionsTables } from '../../packages/core/src/modules/instructions/index.ts';
+import { widerThanMandate } from '../../packages/core/src/modules/mandates/index.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/index.ts';
 import { createDatabase, withTenant } from '../../packages/platform/src/db/index.ts';
 import { loadKeys } from '../../packages/platform/src/keys/index.ts';
@@ -115,10 +117,15 @@ interface Tenant {
   downloadId?: string;
   registrationId?: string;
   exportMonth?: string;
+  nextOwner?: string;
 }
 let own: Tenant;
 let foreign: Tenant;
 let browser: Browser | undefined;
+let adminContext: BrowserContext | undefined;
+let adminPage: Page | undefined;
+let adminCookie: string;
+let adminUserId: string;
 let realCookie: string;
 let endedCookie: string;
 let foreignCookie: string;
@@ -130,6 +137,10 @@ let startedAt = 0;
 let needsReseed = false;
 let ownReseeds = 0;
 let denialPairs = 0;
+let referencePairs = 0;
+let freshStepUps = 0;
+let referenceBaselineChecks = 0;
+const stepUpGated: { method: string; route: string; field: string; reason: string }[] = [];
 const requestCounts = { attack: 0, control: 0 };
 const covered = new Set<string>();
 interface Finding {
@@ -255,8 +266,9 @@ function finding(
 ): never {
   const credential =
     headers.authorization === undefined
-      ? (Object.entries(people).find(([, cookie]) => headers.cookie === cookieHeader(cookie).cookie)?.[0] ??
-          'foreign or ended session') + ' cookie'
+      ? (Object.entries({ ...people, 'real admin': adminCookie }).find(
+          ([, cookie]) => headers.cookie === cookieHeader(cookie).cookie,
+        )?.[0] ?? 'foreign or ended session') + ' cookie'
       : headers.authorization === `Bearer ${own.key.text}`
         ? 'agent key'
         : 'forged bearer token';
@@ -361,6 +373,8 @@ function textSample(schema: Schema, tenant: Tenant, field: string): unknown {
     supplierId: tenant.world.suppliers[0],
     supplierIds: tenant.world.suppliers[0],
     owner: tenant.world.admin.membershipId,
+    // Credential/schema probes need a UUID shape only; reference confirms replace this with verified evidence.
+    stepUpChallengeId: randomUUID(),
     from: new Date(Date.now() - 3_600_000).toISOString(),
     to: new Date().toISOString(),
   };
@@ -484,6 +498,7 @@ async function resetOwn(): Promise<void> {
   clock.advanceBy(Math.max(0, Date.now() - clock.now().getTime()));
   own = await seed();
   const admin = await shared.signedInMember(own.world.org, 'admin');
+  own.nextOwner = admin.membershipId;
   people = { admin: admin.cookie } as Record<Role, string>;
   for (const role of roles.filter((role) => role !== 'developer' && role !== 'admin')) {
     people[role] = (await shared.signedInMember(own.world.org, role)).cookie;
@@ -494,6 +509,8 @@ async function resetOwn(): Promise<void> {
     endedCookie,
   );
   await signInPerson();
+  await signInAdmin();
+  await shared.joined(own.world.org, adminUserId, 'admin');
   await seedRequest(own, 'Own order');
   // Own-ID controls need the same ancillary record kinds as the foreign-ID probes.
   own.identity = await tamperIdentityFixtures(database, keys, uuidV7Ids, clock, admin, own.world.admin.membershipId);
@@ -526,6 +543,62 @@ async function signInPerson(): Promise<void> {
   } finally {
     await context.close();
   }
+}
+
+/** Admin powers require a passkey: give this file its own real WebAuthn user and keep Chrome's authenticator alive. */
+async function registerAdminKey(): Promise<number> {
+  if (browser === undefined) throw new Error('the tamper browser is not open');
+  adminContext = await browser.newContext();
+  adminContext.on('request', (request) => {
+    if (new URL(request.url()).origin === API_ORIGIN) requestCounts.control += 1;
+  });
+  adminPage = await adminContext.newPage();
+  const devtools = await adminContext.newCDPSession(adminPage);
+  await devtools.send('WebAuthn.enable');
+  await devtools.send('WebAuthn.addVirtualAuthenticator', {
+    options: {
+      protocol: 'ctap2',
+      transport: 'internal',
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+  await adminPage.goto(`${API_ORIGIN}/v1/auth/sign-in?returnTo=/tamper-signed-in`);
+  expect((await personLogin.drive(adminPage, users.tamperAdmin, ['factorSetup'])).stoppedAt, where(adminPage)).toBe(
+    'factorSetup',
+  );
+  await adminPage.locator('a[href*="/ui/v2/login/u2f/set"]').click();
+  await adminPage.waitForURL(/\/ui\/v2\/login\/u2f\/set/);
+  const name = adminPage.locator('input[name=name]');
+  if ((await name.count()) > 0) await name.fill('tamper admin key');
+  await adminPage.getByTestId('submit-button').click();
+  await adminPage.waitForURL(/^http:\/\/localhost:8080\/tamper-signed-in$/, { timeout: 60_000 });
+  return Date.now();
+}
+
+/** A replacement tenant gets a fresh real admin session too; the virtual authenticator stays in this context. */
+async function signInAdmin(): Promise<void> {
+  if (adminPage === undefined || adminContext === undefined) throw new Error('the admin browser is not open');
+  await adminContext.clearCookies({ name: '__Host-agentx-session' });
+  await adminPage.goto(`${API_ORIGIN}/v1/auth/sign-in?returnTo=/tamper-signed-in`);
+  expect((await personLogin.drive(adminPage, users.tamperAdmin, [])).stoppedAt, where(adminPage)).toBe('callback');
+  await adminSession();
+}
+
+/** Step-up rotates the cookie, so every later probe must use the browser's latest live session. */
+async function adminSession(): Promise<void> {
+  if (adminContext === undefined) throw new Error('the admin browser is not open');
+  const cookie = (await adminContext.cookies(API_ORIGIN)).find((one) => one.name === '__Host-agentx-session');
+  if (cookie === undefined) throw new Error('the real admin has no cookie');
+  adminCookie = cookie.value;
+  requestCounts.control += 1;
+  const session = await adminContext.request.get(`${API_ORIGIN}/v1/auth/session`);
+  expect(session.status()).toBe(200);
+  const person = z.object({ userId: z.uuid(), methods: z.array(z.string()) }).parse(await session.json());
+  expect(person.methods).toContain('user');
+  adminUserId = person.userId;
 }
 
 /** Both tenants have signed authority and a real agent key that the stack can authenticate. */
@@ -659,6 +732,199 @@ async function exportFixtures(tenant: Tenant, requestedBy: string, adminCookie: 
 
 /** Foreign references in bodies must be refused too, including a recorded DENY for an agent's ask. */
 const referenceFields = ['agentId', 'fundingSourceId', 'supplierId', 'supplierIds', 'owner'] as const;
+type ReferenceField = (typeof referenceFields)[number];
+const referenceCases = operations.flatMap((op) =>
+  referenceFields
+    .filter((field) => op.schema?.properties?.[field] !== undefined)
+    .map((field) => ({ op, field, method: op.method, route: op.route })),
+);
+
+/** Match the seed's accepted terms; avoid unrelated limits, existing owners and optional policy defaults masking a reference. */
+function ownReferenceBody(op: Operation, body: unknown): Record<string, unknown> {
+  const sent = Object.fromEntries(
+    Object.entries(body as Record<string, unknown>).filter(
+      ([name]) => name !== 'stepUpChallengeId' && name !== 'waitingRequests',
+    ),
+  );
+  if (op.schema?.properties?.orderReference !== undefined) sent.orderReference = randomUUID();
+  if (op.route.includes('/owner')) return { ...sent, owner: own.nextOwner };
+  if (op.route.includes('/change'))
+    return {
+      ...sent,
+      supplierIds: [...own.world.suppliers],
+      perOrderCap: null,
+      monthlyCapMinor: null,
+      approvalThresholdMinor: null,
+      ...(op.route.startsWith('/v1/policies/') ? { monthlyCapChoice: 'none' } : {}),
+    };
+  if (pairedDenialOperation(op)) return sent;
+  const terms = shared.termsOf(own.world, { approvalThreshold: AED(1n) });
+  return {
+    ...sent,
+    purpose: terms.purpose,
+    currency: terms.perOrderLimit.currency,
+    perOrderLimitMinor: Number(terms.perOrderLimit.minor),
+    monthlyLimitMinor: Number(terms.monthlyLimit.minor),
+    approvalThresholdMinor: Number(terms.approvalThreshold.minor),
+    supplierIds: [...terms.supplierIds],
+    fundingSourceId: terms.fundingSourceId,
+    splitCheck: terms.splitCheck,
+    consentLimits: terms.consentLimits,
+    endsAt: null,
+  };
+}
+
+/** Writes use known accepted seed terms and a currently usable source instead of creating/superseding a real mandate. */
+async function knownMandateBaseline(op: Operation, body: Record<string, unknown>): Promise<void> {
+  const terms = shared.termsOf(own.world, { approvalThreshold: AED(1n) });
+  expect(body).toMatchObject({
+    fundingSourceId: own.world.source,
+    supplierIds: [...terms.supplierIds],
+    perOrderLimitMinor: Number(terms.perOrderLimit.minor),
+    monthlyLimitMinor: Number(terms.monthlyLimit.minor),
+    approvalThresholdMinor: Number(terms.approvalThreshold.minor),
+    currency: terms.perOrderLimit.currency,
+    endsAt: null,
+  });
+  const source = await withSignedStates(
+    database,
+    own.world.org,
+    { keys, ids: uuidV7Ids, logger: testLogger() },
+    (tx, states) => sourceOf(tx, states, { orgId: own.world.org, id: own.world.source }, 'share'),
+  );
+  if (source.outcome !== 'found') throw new Error('the own baseline source is not available');
+  expect(mayFund(source.source, new Date()), 'own baseline source is usable now').toBe(true);
+  if (op.route === '/v1/mandates') {
+    expect(body.agentId).toBe(own.draftAgent);
+    const get = operation('GET', '/v1/agents/{id}');
+    const read = await controlSend(
+      get,
+      cookieHeader(adminCookie),
+      undefined,
+      get.route.replace('{id}', own.draftAgent),
+    );
+    expect(read.status).toBe(200);
+    expect(JSON.parse(read.text)).toMatchObject({ agent: { id: own.draftAgent, status: 'ACTIVE' } });
+  }
+}
+
+/** An accepted seed ask proves the write's reference values; simulations can safely run the unchanged own body. */
+async function denialBaseline(op: Operation, body: Record<string, unknown>): Promise<void> {
+  expect(body.fundingSourceId).toBe(own.world.source);
+  expect(body.supplierId).toBe(own.world.suppliers[0]);
+  if (op.route === '/v1/spend-requests') {
+    const requestId = own.request;
+    if (requestId === undefined) throw new Error('the positive spend control is missing');
+    const request = await withTenant(database, own.world.org, (tx) =>
+      tx
+        .selectFrom('spend_requests.requests')
+        .select(['status', 'funding_source_id', 'supplier_id', 'amount_minor', 'currency'])
+        .where('org_id', '=', own.world.org)
+        .where('id', '=', requestId)
+        .executeTakeFirstOrThrow(),
+    );
+    expect(request.status).toBe('APPROVAL_REQUIRED');
+    expect(request.funding_source_id).toBe(body.fundingSourceId);
+    expect(request.supplier_id).toBe(body.supplierId);
+    expect(Number(request.amount_minor)).toBe(body.amountMinor);
+    expect(request.currency).toBe(body.currency);
+    return;
+  }
+  const read = await controlSend(op, cookieHeader(adminCookie), body);
+  expect(read.status).toBe(200);
+  expect(JSON.parse(read.text)).toMatchObject({ decision: 'REQUIRE_APPROVAL' });
+}
+
+/** A successful own preview proves the policy is not failing for limits or another field before its supplier check. */
+async function policyBaseline(op: Operation, body: Record<string, unknown>): Promise<void> {
+  const preview = operation('POST', op.route.replace(/\/change(?:\/(?:preview|confirm))?$/, '/change/preview'));
+  const read = await controlSend(preview, cookieHeader(adminCookie), body, routeOf(preview, own));
+  expect(read.status).toBe(200);
+  expect(JSON.parse(read.text)).toMatchObject({ rejected: [] });
+}
+
+/** Open a legitimate own-body ask, then prove it through OIDC/WebAuthn rather than inventing evidence or IDs. */
+async function referenceStepUp(op: Operation, body: Record<string, unknown>): Promise<string> {
+  if (adminPage === undefined) throw new Error('the admin browser is not open');
+  const ask = operation('POST', op.route.replace(/\/confirm$/, ''));
+  const opened = await controlSend(ask, cookieHeader(adminCookie), body, routeOf(ask, own));
+  expect(opened.status).toBe(202);
+  const id = z.object({ stepUpChallengeId: z.uuid() }).parse(JSON.parse(opened.text)).stepUpChallengeId;
+  await adminPage.goto(`${API_ORIGIN}/v1/auth/step-up?challenge=${id}&returnTo=/tamper-signed-in`);
+  const signed = await personLogin.drive(adminPage, users.tamperAdmin, []);
+  expect(signed.stoppedAt, where(adminPage)).toBe('callback');
+  expect(signed.shown).toContain('u2f');
+  await adminSession();
+  const evidence = await database
+    .selectFrom('identity.step_up_challenges')
+    .select(['verified_at', 'amr', 'ends_at', 'created_at', 'auth_time'])
+    .where('id', '=', id)
+    .where('user_id', '=', adminUserId)
+    .executeTakeFirstOrThrow();
+  expect(evidence.verified_at).not.toBeNull();
+  expect(evidence.amr).toContain('user');
+  expect(evidence.ends_at.getTime()).toBeGreaterThan(Date.now());
+  expect(evidence.auth_time?.getTime() ?? 0).toBeGreaterThanOrEqual(evidence.created_at.getTime() - 6000);
+  freshStepUps += 1;
+  return id;
+}
+
+/** Read-only previews or safe challenge asks prove the own input; business-changing baselines are never sent. */
+async function referenceBaseline(op: Operation, body: unknown): Promise<Record<string, unknown>> {
+  const ownBody = ownReferenceBody(op, body);
+  if (pairedDenialOperation(op)) await denialBaseline(op, ownBody);
+  else if (op.route.includes('/change')) await policyBaseline(op, ownBody);
+  else if (op.route.endsWith('/owner')) {
+    expect((await controlSend(op, cookieHeader(adminCookie), ownBody)).status).toBe(202);
+  } else if (!op.route.includes('/owner/')) await knownMandateBaseline(op, ownBody);
+  if (op.route.endsWith('/confirm')) ownBody.stepUpChallengeId = await referenceStepUp(op, ownBody);
+  if (op.schema === undefined) throw new Error('a reference operation has no body schema');
+  expect(z.fromJSONSchema(op.schema).safeParse(ownBody).success, `${op.route}: own reference baseline`).toBe(true);
+  referenceBaselineChecks += 1;
+  return ownBody;
+}
+
+/** Mandate policies reject suppliers outside their terms before ownership lookup; prove that is the sole wider rule. */
+function mandateSupplierBoundary(body: Record<string, unknown>, suppliers: readonly string[]): void {
+  expect([body.perOrderCap, body.monthlyCapMinor, body.approvalThresholdMinor]).toEqual([null, null, null]);
+  const rules = {
+    currency: 'AED',
+    perOrderCap: null,
+    monthlyCap: null,
+    approvalThreshold: null,
+    supplierIds: suppliers,
+  };
+  const terms = shared.termsOf(own.world, { approvalThreshold: AED(1n) });
+  expect(widerThanMandate({ ...rules, supplierIds: [...own.world.suppliers] }, terms)).toEqual([]);
+  expect(widerThanMandate(rules, terms)).toEqual(['a supplier is not one the mandate names']);
+}
+
+/** Exact reasons are scoped to the mutated reference, never a generic status/code allowlist. */
+function referenceReason(op: Operation, field: ReferenceField): { status: number; code: string } {
+  if (field === 'owner') return { status: 409, code: 'AGENT_OWNER_NOT_ELIGIBLE' };
+  if (field === 'agentId') return { status: 404, code: 'NOT_FOUND' };
+  if (field === 'fundingSourceId') return { status: 409, code: 'SOURCE_NOT_USABLE' };
+  if (field !== 'supplierIds') throw new Error(`No reference refusal specified for ${op.route}: ${field}`);
+  if (op.route.includes('/policy/')) return { status: 409, code: 'POLICY_WIDER_THAN_MANDATE' };
+  if (op.route.startsWith('/v1/policies/')) return { status: 409, code: 'POLICY_SUPPLIER_UNKNOWN' };
+  return { status: 409, code: 'SUPPLIER_UNKNOWN' };
+}
+
+/** An earlier step-up failure is untested coverage, and must be counted and fail rather than masquerade as isolation. */
+function referenceRefused(
+  op: Operation,
+  field: ReferenceField,
+  headers: Record<string, string>,
+  answer: Finding['answer'],
+): void {
+  if (answer.code === 'STEP_UP_FAILED') {
+    finding(op, headers, 'reference check not reached: STEP_UP_FAILED', answer);
+  }
+  const expected = referenceReason(op, field);
+  if (answer.status !== expected.status || answer.code !== expected.code) {
+    finding(op, headers, `reference check masked: expected ${String(expected.status)} ${expected.code}`, answer);
+  }
+}
 
 /** Only these two contracts return successful HTTP responses for a recorded or simulated denial. */
 function pairedDenialOperation(op: Operation): boolean {
@@ -793,8 +1059,9 @@ async function pairedDenials(
 }
 
 /** Each foreign reference is a separate case, so a finding cannot hide the next field's attack. */
-async function foreignReference(op: Operation, body: unknown, field: (typeof referenceFields)[number]): Promise<void> {
-  const replacements: Record<(typeof referenceFields)[number], unknown> = {
+async function foreignReference(op: Operation, body: unknown, field: ReferenceField): Promise<void> {
+  const ownBody = await referenceBaseline(op, body);
+  const replacements: Record<ReferenceField, unknown> = {
     agentId: foreign.draftAgent,
     fundingSourceId: foreign.world.source,
     supplierId: foreign.world.suppliers[0],
@@ -803,40 +1070,48 @@ async function foreignReference(op: Operation, body: unknown, field: (typeof ref
   };
   currentAttack = `foreign ${field} in body`;
   const headers = {
-    ...allowedHeaders(op),
+    ...(op.access.includes('admin') ? cookieHeader(adminCookie) : allowedHeaders(op)),
     ...(op.access.includes('agent') ? { 'agentx-organization': foreign.world.org } : {}),
   };
-  const changed = { ...(body as Record<string, unknown>), [field]: replacements[field] };
+  const changed = { ...ownBody, [field]: replacements[field] };
   if (pairedDenialOperation(op) && (field === 'fundingSourceId' || field === 'supplierId')) {
     await pairedDenials(op, headers, changed, field);
     return;
   }
-  const answer = await send(op, headers, changed);
-  const parsed = summaryOf(answer.status, answer.text);
-  const label = `${op.method} ${op.route}: foreign ${field}`;
-  expect([403, 404, 409], label).toContain(answer.status);
-  expect(
-    [
-      'NOT_FOUND',
-      'SOURCE_NOT_USABLE',
-      'SUPPLIER_UNKNOWN',
-      'POLICY_SUPPLIER_UNKNOWN',
-      'POLICY_WIDER_THAN_MANDATE',
-      'AGENT_OWNER_NOT_ELIGIBLE',
-      'STEP_UP_FAILED',
-    ],
-    label,
-  ).toContain(parsed.code);
+  const absentIds = field === 'supplierIds' ? foreign.world.suppliers.map(() => randomUUID()) : randomUUID();
+  if (field === 'supplierIds' && op.route.includes('/policy/')) {
+    mandateSupplierBoundary(ownBody, foreign.world.suppliers);
+    mandateSupplierBoundary(ownBody, z.array(z.uuid()).parse(absentIds));
+  }
+  const real = await send(op, headers, changed);
+  const absent = await send(op, headers, { ...ownBody, [field]: absentIds });
+  const realAnswer = summaryOf(real.status, real.text);
+  const absentAnswer = summaryOf(absent.status, absent.text);
+  if (realAnswer.code === 'STEP_UP_FAILED' || absentAnswer.code === 'STEP_UP_FAILED') {
+    stepUpGated.push({
+      method: op.method,
+      route: op.route,
+      field,
+      reason: 'The confirm did not reach its reference check despite a fresh passkey challenge.',
+    });
+  }
+  if (realAnswer.status !== absentAnswer.status || realAnswer.code !== absentAnswer.code) {
+    finding(op, headers, 'existence oracle: foreign and absent body references differ', realAnswer, absentAnswer);
+  }
+  referenceRefused(op, field, headers, realAnswer);
+  referenceRefused(op, field, headers, absentAnswer);
+  referencePairs += 1;
 }
 
 beforeAll(async () => {
   startedAt = Date.now();
   expect(API_ORIGIN).toBe('http://localhost:8080');
-  // Account-setup events end sessions; drain their settle window before signing in.
-  await sleep(Math.max(0, users.tamper.provisionedAt + 61_000 - Date.now()));
+  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const registeredAt = await registerAdminKey();
+  // Account/factor setup ends sessions; drain both users' events before their lasting sign-ins.
+  await sleep(Math.max(0, Math.max(users.tamper.provisionedAt, registeredAt) + 61_000 - Date.now()));
   await restartInPlace('api');
   await apiAnswers();
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
   foreign = await seed();
   const admin = await shared.signedInMember(foreign.world.org, 'admin');
   foreignCookie = admin.cookie;
@@ -892,6 +1167,12 @@ afterAll(async () => {
         durationMs: Date.now() - startedAt,
         ownReseeds,
         denialPairs,
+        referencePairs,
+        referenceBaselineChecks,
+        bodyReferenceCases: referenceCases.length,
+        freshStepUps,
+        stepUpGatedCount: stepUpGated.length,
+        stepUpGated,
         findings,
       },
       null,
@@ -899,6 +1180,7 @@ afterAll(async () => {
     ),
   );
   try {
+    await adminContext?.close();
     await browser?.close();
   } finally {
     await database.destroy();
@@ -1024,12 +1306,7 @@ describe('F1 SEC-TEN-01: foreign IDs are indistinguishable from absent IDs', () 
 });
 
 describe('F1 SEC-TEN-01: foreign references in request bodies', () => {
-  const cases = operations.flatMap((op) =>
-    referenceFields
-      .filter((field) => op.schema?.properties?.[field] !== undefined)
-      .map((field) => ({ op, field, method: op.method, route: op.route })),
-  );
-  it.each(cases)('$method $route: $field', async ({ op, field }) => {
+  it.each(referenceCases)('$method $route: $field', async ({ op, field }) => {
     await foreignReference(op, baseline(op), field);
   });
 });
