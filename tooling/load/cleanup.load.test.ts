@@ -31,16 +31,17 @@ const chainLengths = () =>
     ),
   );
 
+// ~6,800 requests voided, four organisations at once: about 5 minutes on the laptop; room for a slower one.
 it(
   'leaves every organisation of the run frozen, holding nothing, with no live key or member',
-  { timeout: 600_000 },
+  { timeout: 1_800_000 },
   async () => {
     await cleanUpRun(database, keyring, orgIds);
     expect(await cleanUpFailures(database, orgIds)).toEqual([]);
   },
 );
 
-it('changes nothing when run again', { timeout: 600_000 }, async () => {
+it('changes nothing when run again', { timeout: 1_800_000 }, async () => {
   const before = await chainLengths();
   await cleanUpRun(database, keyring, orgIds);
   expect(await chainLengths()).toEqual(before);

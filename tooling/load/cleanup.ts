@@ -114,13 +114,27 @@ async function cleanUpOrg(database: Database<MandateWorldTables>, keyring: KeyPr
   });
 }
 
-/** Cleans up each of the run's organisations, one after another. */
+/**
+ * Organisations cleaned up at once. Voiding runs ~7 requests a second within
+ * one organisation (its lock and chain head serialise it), so the laptop's
+ * ~6,800 took 16 minutes one after another; organisations share neither, and
+ * four keep well inside the pool's ten connections and staging's database.
+ */
+const ORGS_AT_ONCE = 4;
+
+/** Cleans up each of the run's organisations, ORGS_AT_ONCE at a time; the first failure stops it, loudly. */
 export async function cleanUpRun(
   database: Database<MandateWorldTables>,
   keyring: KeyProvider,
   orgIds: readonly string[],
 ): Promise<void> {
-  for (const orgId of orgIds) await cleanUpOrg(database, keyring, orgId);
+  const queue = [...orgIds];
+  const worker = async (): Promise<void> => {
+    for (let orgId = queue.shift(); orgId !== undefined; orgId = queue.shift()) {
+      await cleanUpOrg(database, keyring, orgId);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(ORGS_AT_ONCE, queue.length) }, worker));
 }
 
 /** What the clean-up left undone, in plain words: none when every organisation is inert. */
