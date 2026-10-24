@@ -658,7 +658,7 @@ export function createHandoff({
       const pause = await database.transaction().execute((tx) => handoffPauseOf(tx, 'share', { keys, logger }));
       return pause.outcome === 'running' ? null : `pause_${pause.outcome}`;
     } catch (error) {
-      logger.error('handoff.run_failed', { err: error });
+      logger.error('handoff.pause_unread', { err: error });
       return 'pause_unread';
     }
   };

@@ -355,6 +355,43 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     expect(lines('handoff.running')).toEqual([expect.objectContaining({ why: 'none' })]);
   });
 
+  it('hands nothing off while the pause can’t be read, says so in plain words, and goes once it can (gate H5)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // The run's first transaction is its read of the pause: that one fails.
+    let first = true;
+    const unreadable = new Proxy(app, {
+      get(target, name, receiver) {
+        if (name === 'transaction' && first) {
+          first = false;
+          return () => {
+            throw new Error('the pause is unreadable');
+          };
+        }
+        const value: unknown = Reflect.get(target, name, receiver);
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const job = createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database: unreadable,
+      outbox: createOutbox({ ids, clock }),
+      rail: w.rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+
+    await job.run();
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    expect(lines('handoff.pause_unread')).toHaveLength(1);
+    expect(lines('handoff.held')).toEqual([expect.objectContaining({ why: 'pause_unread' })]);
+
+    await job.run();
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+  });
+
   it('waits for a pause taken during its Tx A, and holds the request (forced)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
