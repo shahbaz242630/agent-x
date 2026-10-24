@@ -613,6 +613,11 @@ export const PLAIN_WORDS = {
     broke: 'Its recipient has not been told yet; a notice that can never be sent is given up at once.',
     next: 'It is tried again later, up to 8 tries in all. If many fail, check the email service and the login service.',
   },
+  'notification.remittance_failure_unrecorded': {
+    happened: "A supplier's paid email was given up, but that couldn't be written into its organisation's audit log.",
+    broke: "The audit log won't show that this supplier was never emailed about its payment.",
+    next: 'Tell the organisation the supplier was not emailed. If it repeats, check the database.',
+  },
   'notification.remittance_unrecorded': {
     happened:
       "A supplier was emailed that it was paid, but the email couldn't be written into its organisation's audit log.",

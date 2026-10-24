@@ -31,7 +31,9 @@
 //   (`payment_unavailable`).
 //   Each remittance's end is kept in the organisation's audit log (partner
 //   S119): a skip by the read that decides it, one sent once the notifier has
-//   sent it (a failure to keep that is logged; the email is never sent again).
+//   sent it, one given up (a send that can never succeed, or every try spent,
+//   gate H2) once the outbox gives it up; a failure to keep either of the
+//   last two is logged, and the email is never sent again.
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
 // - A recipient with no address gives the notice up at once (`no_address`);
@@ -143,7 +145,18 @@ export interface Remittances {
   remittanceOf(orgId: string, transactionId: string): Promise<RemittanceRead>;
   /** Records in the audit log that the payment's supplier was emailed. Throws if it can't be recorded. */
   emailed(orgId: string, transactionId: string): Promise<void>;
+  /**
+   * Records in the audit log that the payment's remittance was given up, and
+   * why (the failure the outbox keeps): a send that can never succeed, or
+   * every try spent. Throws if it can't be recorded.
+   */
+  givenUp(orgId: string, transactionId: string, why: string): Promise<void>;
 }
+
+/** How a send ended: sent, or failed with the failure kept and what became of the notice. */
+type SendEnd =
+  | { readonly outcome: 'sent' }
+  | { readonly outcome: 'failed'; readonly failure: string; readonly became: 'retry' | 'given_up' | 'done' };
 
 /** Why a remittance is given up at once, as the outbox keeps it. */
 const REMITTANCE_SKIPPED = { off: 'remittance_off', not_succeeded: 'payment_not_succeeded' } as const;
@@ -201,8 +214,8 @@ export function createNoticeSender({
   readonly audience: Audience;
   readonly logger: Logger;
 }): NoticeSender {
-  /** Counts the try as failed, and logs how it went. */
-  const failed = async (notice: ClaimedNotice, failure: string, lasting: boolean): Promise<void> => {
+  /** Counts the try as failed, logs how it went, and says what became of the notice. */
+  const failed = async (notice: ClaimedNotice, failure: string, lasting: boolean) => {
     const became = await outbox.failed(db, notice.id, failure, lasting);
     logger.warn('notification.failed', {
       noticeId: notice.id,
@@ -211,6 +224,7 @@ export function createNoticeSender({
       failure,
       outcome: became,
     });
+    return became;
   };
 
   /**
@@ -315,23 +329,21 @@ export function createNoticeSender({
     await sendAndRecord(notice, messageFor(notice, address, extras.link, extras.request));
   };
 
-  /** Sends the notice's email and records how it went; says whether the notifier sent it. */
-  const sendAndRecord = async (notice: ClaimedNotice, message: NoticeMessage): Promise<boolean> => {
+  /** Sends the notice's email and records how it went: sent, or the failure kept and what became of the notice. */
+  const sendAndRecord = async (notice: ClaimedNotice, message: NoticeMessage): Promise<SendEnd> => {
     let sent: SendOutcome;
     try {
       sent = await notifier.send(message);
     } catch {
-      await failed(notice, 'send_error', false);
-      return false;
+      return { outcome: 'failed', failure: 'send_error', became: await failed(notice, 'send_error', false) };
     }
     if (sent.outcome === 'failed') {
       const keptAs = FAILURE.test(sent.failure) && sent.failure !== LEASE_EXPIRED ? sent.failure : 'send_failed';
-      await failed(notice, keptAs, sent.lasting);
-      return false;
+      return { outcome: 'failed', failure: keptAs, became: await failed(notice, keptAs, sent.lasting) };
     }
     await outbox.sent(db, notice.id);
     logger.info('notification.sent', { noticeId: notice.id, kind: notice.kind, attempt: notice.attempts + 1 });
-    return true;
+    return { outcome: 'sent' };
   };
 
   /** The remittance sent, kept in the audit log; a failure to keep it is logged, the email never sent again. */
@@ -340,6 +352,15 @@ export function createNoticeSender({
       await remittances.emailed(notice.orgId, notice.aboutId ?? '');
     } catch (error) {
       logger.error('notification.remittance_unrecorded', { noticeId: notice.id, err: error });
+    }
+  };
+
+  /** A remittance the outbox gave up, kept in the audit log with why; a failure to keep it is logged. */
+  const givenUpLogged = async (notice: ClaimedNotice, why: string): Promise<void> => {
+    try {
+      await remittances.givenUp(notice.orgId, notice.aboutId ?? '', why);
+    } catch (error) {
+      logger.error('notification.remittance_failure_unrecorded', { noticeId: notice.id, why, err: error });
     }
   };
 
@@ -354,12 +375,15 @@ export function createNoticeSender({
       // The outbox writes a remittance about its transaction only.
       read = await remittances.remittanceOf(notice.orgId, notice.aboutId ?? '');
     } catch {
-      await failed(notice, 'payment_unavailable', false);
+      if ((await failed(notice, 'payment_unavailable', false)) === 'given_up') {
+        await givenUpLogged(notice, 'payment_unavailable');
+      }
       return false;
     }
     if (read.outcome === 'send') {
-      const sent = await sendAndRecord(notice, messageFor(notice, read.to, undefined, undefined, read.paid));
-      if (sent) await emailedLogged(notice);
+      const end = await sendAndRecord(notice, messageFor(notice, read.to, undefined, undefined, read.paid));
+      if (end.outcome === 'sent') await emailedLogged(notice);
+      else if (end.became === 'given_up') await givenUpLogged(notice, end.failure);
       return false;
     }
     if (read.outcome === 'no_email') {

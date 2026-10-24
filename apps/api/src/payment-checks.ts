@@ -113,7 +113,10 @@ const STILL_UNKNOWN_MS = DAY_MS;
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
 
-/** The settled ones still watched for PAID_WATCH_MS: paid, or failed (our team's mark among them, E1c). */
+/**
+ * The settled ones still watched for PAID_WATCH_MS from their last move: paid,
+ * or failed (our team's mark among them, E1c: a week from the mark, gate H3).
+ */
 const WATCHED = ['SUCCEEDED', 'FAILED'] as const;
 
 /** How many of the partner's messages a run takes, oldest first: the rest wait for the next. */
@@ -230,6 +233,10 @@ export function createPaymentChecks({
           .leftJoin('instructions.instructions as i', (join) =>
             join.onRef('i.org_id', '=', 't.org_id').onRef('i.id', '=', 't.instruction_id'),
           )
+          // When it last moved (its signed state's newest event, Postgres's clock): a watch runs from there (gate H3).
+          .leftJoin('audit.events as e', (join) =>
+            join.onRef('e.org_id', '=', 't.org_id').onRef('e.id', '=', 't.state_event_id'),
+          )
           .select(['t.id as id', 't.instruction_id as instructionId', 'i.spend_request_id as requestId'])
           .where('t.org_id', '=', orgId)
           .where((where) =>
@@ -244,7 +251,7 @@ export function createPaymentChecks({
               watchPaid
                 ? where.and([
                     where('t.status', 'in', WATCHED),
-                    where('t.created_at', '>=', new Date(clock.now().getTime() - PAID_WATCH_MS)),
+                    where('e.recorded_at', '>=', new Date(clock.now().getTime() - PAID_WATCH_MS)),
                   ])
                 : where.lit(false),
             ]),
@@ -274,6 +281,10 @@ export function createPaymentChecks({
           .innerJoin('instructions.instructions as i', (join) =>
             join.onRef('i.org_id', '=', 't.org_id').onRef('i.id', '=', 't.instruction_id'),
           )
+          // When it last moved (its signed state's newest event, Postgres's clock): a watch runs from there (gate H3).
+          .leftJoin('audit.events as e', (join) =>
+            join.onRef('e.org_id', '=', 't.org_id').onRef('e.id', '=', 't.state_event_id'),
+          )
           .select(['t.id as id', 't.instruction_id as instructionId', 'i.spend_request_id as requestId'])
           .where('t.org_id', '=', nudge.orgId)
           .where((where) =>
@@ -283,7 +294,7 @@ export function createPaymentChecks({
                   where('i.account_consent_id', '=', reference.consentId),
                   where.or([
                     where('t.status', 'in', UNDER_WAY),
-                    where.and([where('t.status', 'in', WATCHED), where('t.created_at', '>=', paidSince)]),
+                    where.and([where('t.status', 'in', WATCHED), where('e.recorded_at', '>=', paidSince)]),
                   ]),
                 ]),
           )

@@ -16,7 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import type { NoticeMessage, PaidRemittance, ResetLink, WaitingRequest } from '../domain/messages.ts';
 import type { Notice } from '../domain/notice.ts';
-import { createOutbox } from './outbox.ts';
+import { createOutbox, MOST_ATTEMPTS } from './outbox.ts';
 import {
   type AddressBook,
   type Admin,
@@ -243,6 +243,7 @@ const remittances = (
     paid: PAID,
   }),
   emailed: (transactionId: string) => Error | undefined = () => undefined,
+  givenUp: (transactionId: string, why: string) => Error | undefined = () => undefined,
 ): Remittances => ({
   remittanceOf: (orgId, transactionId) => {
     expect(orgId).toBe(ORG);
@@ -252,6 +253,11 @@ const remittances = (
   emailed: (orgId, transactionId) => {
     expect(orgId).toBe(ORG);
     const failed = emailed(transactionId);
+    return failed === undefined ? Promise.resolve() : Promise.reject(failed);
+  },
+  givenUp: (orgId, transactionId, why) => {
+    expect(orgId).toBe(ORG);
+    const failed = givenUp(transactionId, why);
     return failed === undefined ? Promise.resolve() : Promise.reject(failed);
   },
 });
@@ -745,11 +751,12 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(JSON.stringify(capture.lines())).not.toContain(SUPPLIER_ADDRESS);
   });
 
-  it('C2b keeps a remittance the provider refused out of the audit log, and one it can’t log still sent once', async () => {
+  it('C2b logs a remittance the provider refused as given up, with why (gate H2), and one it can’t log still sent once', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b03';
     await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
     const logged: string[] = [];
+    const gaveUp: string[][] = [];
     // The first payment's supplier refused by the provider; the second's sent, its event not kept.
     const { sent, service } = notifier(({ text }) =>
       text.includes('INV-REFUSED')
@@ -774,12 +781,17 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
           logged.push(id);
           return new Error('the audit chain is held');
         },
+        (id, why) => {
+          gaveUp.push([id, why]);
+          return undefined;
+        },
       ),
     );
     await run.run();
 
     expect(sent).toHaveLength(2);
     expect(logged).toEqual([OTHER_PAYMENT]);
+    expect(gaveUp).toEqual([[PAYMENT, 'address_refused']]);
     const kept = await app
       .selectFrom('notifications.outbox')
       .select(['about_id', 'sent_at', 'given_up_at', 'last_failure'])
@@ -879,6 +891,69 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(
       await app.selectFrom('notifications.outbox').select(['sent_at', 'given_up_at', 'last_failure']).execute(),
     ).toEqual([{ sent_at: null, given_up_at: null, last_failure: 'payment_unavailable' }]);
+  });
+
+  it('H2 logs a remittance as given up only once its tries are spent: its payment unread on the last, or every send failed', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b04';
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
+    const gaveUp: string[][] = [];
+    // The provider away every time: a failure a later try could mend.
+    const { service } = notifier(() => ({ outcome: 'failed', failure: 'provider_unavailable', lasting: false }));
+    const run = () =>
+      sender(
+        service,
+        addressBook(),
+        audience(),
+        contactAddresses(),
+        resetLinks(),
+        waitingRequests(),
+        remittances(
+          (id) => (id === PAYMENT ? new Error('unread') : { outcome: 'send', to: SUPPLIER_ADDRESS, paid: PAID }),
+          () => undefined,
+          (id, why) => {
+            gaveUp.push([id, why]);
+            return undefined;
+          },
+        ),
+      ).run.run();
+
+    // Tries left: tried again later, nothing given up yet.
+    await run();
+    expect(gaveUp).toEqual([]);
+
+    // The last try: both given up, each kept with why.
+    await sql`update notifications.outbox set attempts = ${MOST_ATTEMPTS - 1}, next_attempt_at = ${START}`.execute(app);
+    await run();
+    expect(gaveUp.toSorted()).toEqual(
+      [
+        [PAYMENT, 'payment_unavailable'],
+        [OTHER_PAYMENT, 'provider_unavailable'],
+      ].sort(),
+    );
+  });
+
+  it('H2 says so when a remittance given up can’t be kept in the audit log, and never sends it again', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    const { sent, service } = notifier(() => ({ outcome: 'failed', failure: 'address_refused', lasting: true }));
+
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(undefined, undefined, () => new Error('the audit chain is held')),
+    );
+    await run.run();
+    await run.run();
+
+    expect(sent).toHaveLength(1);
+    expect(capture.lines().filter(({ event }) => event === 'notification.remittance_failure_unrecorded')).toEqual([
+      expect.objectContaining({ why: 'address_refused' }),
+    ]);
   });
 
   it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {

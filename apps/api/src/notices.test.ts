@@ -56,6 +56,7 @@ function senderWith(
     remittances: {
       remittanceOf: () => Promise.reject(new Error('not asked')),
       emailed: () => Promise.reject(new Error('not asked')),
+      givenUp: () => Promise.reject(new Error('not asked')),
     },
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
     logger,
