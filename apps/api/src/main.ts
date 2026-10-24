@@ -776,7 +776,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     fakeBank: rail?.bank,
     // The partner's messages, where its rail is built (E1b): checked by its signature, kept, then checked with the bank.
     partnerEvents:
-      rail && createPartnerEventIntake({ database, rail, events: providerEvents, securityEvents: recorder }),
+      rail &&
+      createPartnerEventIntake({
+        database,
+        rail,
+        events: providerEvents,
+        securityEvents: recorder,
+        clock: systemClock,
+      }),
   });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing({

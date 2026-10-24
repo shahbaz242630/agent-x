@@ -16,7 +16,13 @@
 //   PARTNER_EVENT_REFUSED, the same for both. A signed body that isn't a
 //   message: 400 PARTNER_EVENT_MALFORMED. Each is counted in the security
 //   events, and the first few an hour from an address kept, encrypted, as
-//   evidence, with an alert (SEC-PTR-01).
+//   evidence, with an alert (SEC-PTR-01). Which may still be kept is decided
+//   in memory first, by this process's hourly counts per network and in all
+//   (the store's caps): one past them never reaches the database, so a flood
+//   from rotating networks never queues on the store's one lock (gate H4).
+//   The store still decides under its lock, for every API process together.
+//   An IPv4 address written as IPv6 (`::ffff:a.b.c.d`) is kept as IPv4, its
+//   own network (gate H5b).
 // - Verified: 202, whether new, a replay, or naming a reference no
 //   organisation holds; that last is kept encrypted and alerted (SEC-PTR-05).
 import {
@@ -24,7 +30,12 @@ import {
   organizationOfInstruction,
   type InstructionsTables,
 } from '@agentx/core/modules/instructions';
-import type { ProviderEvents, ProviderEventsTables } from '@agentx/core/modules/provider-events';
+import {
+  MOST_KEPT_AN_HOUR,
+  MOST_KEPT_AN_HOUR_IN_ALL,
+  type ProviderEvents,
+  type ProviderEventsTables,
+} from '@agentx/core/modules/provider-events';
 import {
   type EventHeaders,
   type EventReference,
@@ -32,6 +43,7 @@ import {
   type FinancialRailAdapter,
   MOST_EVENT_BYTES,
 } from '@agentx/core/modules/providers';
+import { type Clock, HOUR_MS } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
@@ -40,6 +52,7 @@ import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import { clientAddress, clientKey, UNREADABLE_ADDRESS } from './rate-limit.ts';
 import type { SecurityEventSink } from './security-recorder.ts';
 
 declare module 'fastify' {
@@ -63,10 +76,12 @@ export function createPartnerEventIntake({
   rail,
   events,
   securityEvents,
+  clock,
 }: {
   readonly database: Database<ProviderEventsTables & InstructionsTables>;
   readonly rail: FinancialRailAdapter;
   readonly events: ProviderEvents;
+  readonly clock: Clock;
   /** Where a refused message is counted (security-recorder.ts). */
   readonly securityEvents: SecurityEventSink;
 }): PartnerEventIntake {
@@ -76,14 +91,35 @@ export function createPartnerEventIntake({
       ? organizationOfInstruction(database, reference.instructionId)
       : organizationOfConsent(database, reference.consentId);
 
+  // The refused messages this process sent on to be kept this clock hour, by network and in all (gate H4). At most
+  // MOST_KEPT_AN_HOUR_IN_ALL networks are held: only one sent on is counted.
+  const sentOn = { hour: Number.NaN, all: 0, byNetwork: new Map<string, number>() };
+  /** Whether one more from `network` may still be kept this hour, counted if so; past the caps, only counted. */
+  const mayBeKept = (network: string): boolean => {
+    const hour = Math.floor(clock.now().getTime() / HOUR_MS);
+    if (hour !== sentOn.hour) {
+      sentOn.hour = hour;
+      sentOn.all = 0;
+      sentOn.byNetwork.clear();
+    }
+    const fromNetwork = sentOn.byNetwork.get(network) ?? 0;
+    if (fromNetwork >= MOST_KEPT_AN_HOUR || sentOn.all >= MOST_KEPT_AN_HOUR_IN_ALL) return false;
+    sentOn.byNetwork.set(network, fromNetwork + 1);
+    sentOn.all += 1;
+    return true;
+  };
+
   return {
     async take(body, headers, ip, log) {
       const check = await rail.verifyEvent(body, headers);
       if (check.kind === 'refused') {
         const { reason } = check;
         securityEvents.note({ kind: 'partner_event_refused', reason, ip });
+        // Its network as the rate limit keys it; an IPv4 address written as IPv6 is its IPv4 address (H5b).
+        const network = clientKey(ip);
+        const address = network === UNREADABLE_ADDRESS || network.includes(':') ? clientAddress(ip) : network;
         // Said for the first kept from its network each hour: a flood is an alert or two, never one a message.
-        if ((await events.keepRefused(database, { reason, ip, body })) === 'first') {
+        if (mayBeKept(network) && (await events.keepRefused(database, { reason, ip: address, body })) === 'first') {
           log.error('partner_event.refused', { reason });
         }
         return reason;

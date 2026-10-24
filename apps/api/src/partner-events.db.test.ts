@@ -115,15 +115,24 @@ function counted(w: World) {
   return { rail, asked };
 }
 
-/** The front door over the world's partner, every security event noted. */
+/** The front door over the world's partner, every security event noted, each refused message sent to the store counted. */
 async function door(w: World) {
   const noted: SecurityEventNote[] = [];
+  const store = events();
+  let toStore = 0;
   const front = await routeServer({
     partnerEvents: createPartnerEventIntake({
       database: app,
       rail: w.rail,
-      events: events(),
+      events: {
+        ...store,
+        keepRefused: (db, refused) => {
+          toStore += 1;
+          return store.keepRefused(db, refused);
+        },
+      },
       securityEvents: { note: (event) => noted.push(event) },
+      clock,
     }),
     logger: testLogger(capture),
   });
@@ -138,7 +147,7 @@ async function door(w: World) {
       remoteAddress: ip,
     });
   };
-  return { send, noted };
+  return { send, noted, toStore: () => toStore };
 }
 
 /** The request's payment: its transaction and our instruction's ID. */
@@ -661,6 +670,38 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
     for (let n = 1; n <= 55; n += 1) await send(forgedNow(), `198.51.100.${String(n)}`);
 
     expect(await kept()).toHaveLength(50);
+  });
+
+  it('never takes the store past its caps: a flood from rotating networks is decided in memory (gate H4)', async () => {
+    const { w } = await ready();
+    const { send, noted, toStore } = await door(w);
+
+    // Seven from one network, then a flood from a new IPv6 /64 each time.
+    for (let n = 0; n < 7; n += 1) await send(forgedNow());
+    expect(toStore()).toBe(5);
+    for (let n = 1; n <= 60; n += 1) await send(forgedNow(), `2001:db8:${n.toString(16)}::1`);
+
+    expect(toStore()).toBe(50);
+    expect(await kept()).toHaveLength(50);
+    expect(noted).toHaveLength(67);
+
+    // The next clock hour, the store asked again.
+    clock.advanceBy(60 * STEP);
+    await send(forgedNow(), '198.51.100.77');
+    expect(toStore()).toBe(51);
+  });
+
+  it('keeps an IPv4 address written as IPv6 as its IPv4 address, its own network (gate H5b)', async () => {
+    const { w } = await ready();
+    const { send } = await door(w);
+
+    for (let n = 0; n < 6; n += 1) await send(forgedNow(), '::ffff:198.51.100.20');
+    await send(forgedNow(), '::ffff:198.51.100.21');
+
+    expect((await kept()).map(({ ip }) => ip).sort()).toEqual([
+      ...Array.from({ length: 5 }, () => '198.51.100.20'),
+      '198.51.100.21',
+    ]);
   });
 
   it('holds the cap under a burst at once: one lock, so none slips past (S102)', async () => {
