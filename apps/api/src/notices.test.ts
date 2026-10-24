@@ -159,6 +159,7 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     const done: string[] = [];
     let due = [notice];
     const outbox = {
+      endRemittanceLeases: () => Promise.resolve([]),
       claimDue: () => {
         const claimed = due;
         due = [];
