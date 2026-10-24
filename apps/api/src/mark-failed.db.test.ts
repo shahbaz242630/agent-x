@@ -455,7 +455,7 @@ describe('with the bank check at the same payment (forced, ADR-006 §6)', () => 
     clock.advanceBy(MARK_FAILED_AFTER_MS);
     // Something holding the request's reservation (as an ending or a holdings page would) as the mark is made.
     const holder = await database.connect('owner');
-    let marking: Promise<unknown> = Promise.resolve();
+    let marking: Promise<unknown> | undefined;
     try {
       await holder.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
       await holder.query('begin');
