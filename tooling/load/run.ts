@@ -30,6 +30,7 @@ import {
   optionsOf,
   OUT_DIR,
   POLICY_P95_MS,
+  readSeeded,
   REPORTS_DIR,
 } from './plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from './report.ts';
@@ -147,7 +148,8 @@ function main(keep: boolean, apiCpus: number): number {
     });
     const log = run('docker', [...COMPOSE, 'logs', '--no-log-prefix', '--no-color', 'api'], { shown: false });
     writeFileSync(path.join(OUT_DIR, 'api.log'), log.stdout);
-    const logs = summariseLogs(log.stdout);
+    const spikeOrgs = new Set(readSeeded().agents.flatMap(({ kind, orgId }) => (kind === 'capped' ? [orgId] : [])));
+    const logs = summariseLogs(log.stdout, spikeOrgs);
     const failures = [
       ...phaseFailures(first),
       ...phaseFailures(second),

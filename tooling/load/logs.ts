@@ -25,13 +25,17 @@ export interface LogSummary {
     readonly mismatched: number;
     readonly tampered: number;
   }[];
+  /** The steady traffic's decisions: the ones the decision target is for. */
   readonly decisions: Percentiles;
+  /** Phase 2's spike's: 50 at once on one agent's month, queued on its lock by design, so apart. */
+  readonly spikeDecisions: Percentiles;
 }
 
 interface Line {
   readonly level?: string;
   readonly event?: string;
   readonly durationMs?: number;
+  readonly orgId?: string;
   readonly requests?: number;
   readonly mismatched?: number;
   readonly tampered?: number;
@@ -63,11 +67,16 @@ const readLine = (text: string): Line | undefined => {
   }
 };
 
-/** The API's log, as `docker compose logs --no-log-prefix` prints it, summed up. */
-export function summariseLogs(text: string): LogSummary {
+/**
+ * The API's log, as `docker compose logs --no-log-prefix` prints it, summed
+ * up; a decision in one of `spikeOrgs` (the capped agent's organisation) is
+ * the spike's.
+ */
+export function summariseLogs(text: string, spikeOrgs: ReadonlySet<string> = new Set()): LogSummary {
   const problems: Record<string, number> = {};
   const holdingsChecks: { requests: number; mismatched: number; tampered: number }[] = [];
   const durations: number[] = [];
+  const spiked: number[] = [];
   let suppressed = 0;
   let unreadable = 0;
   for (const raw of text.split(/\r?\n/)) {
@@ -90,9 +99,18 @@ export function summariseLogs(text: string): LogSummary {
         tampered: line.tampered ?? -1,
       });
     }
-    if (event === 'spend_request.decided' && typeof line.durationMs === 'number') durations.push(line.durationMs);
+    if (event === 'spend_request.decided' && typeof line.durationMs === 'number') {
+      (spikeOrgs.has(line.orgId ?? '') ? spiked : durations).push(line.durationMs);
+    }
   }
-  return { problems, suppressed, unreadable, holdingsChecks, decisions: percentilesOf(durations) };
+  return {
+    problems,
+    suppressed,
+    unreadable,
+    holdingsChecks,
+    decisions: percentilesOf(durations),
+    spikeDecisions: percentilesOf(spiked),
+  };
 }
 
 /**
@@ -115,10 +133,9 @@ export function logFailures(summary: LogSummary, decided: number, policyP95Ms: n
   if (summary.holdingsChecks.some(({ mismatched, tampered }) => mismatched !== 0 || tampered !== 0)) {
     failures.push('A holdings check found a request whose money held did not match its decision.');
   }
-  if (summary.decisions.count !== decided) {
-    failures.push(
-      `The log has ${String(summary.decisions.count)} decision line(s) for ${String(decided)} decision(s).`,
-    );
+  const lines = summary.decisions.count + summary.spikeDecisions.count;
+  if (lines !== decided) {
+    failures.push(`The log has ${String(lines)} decision line(s) for ${String(decided)} decision(s).`);
   }
   if (summary.decisions.p95 >= policyP95Ms) {
     failures.push(
