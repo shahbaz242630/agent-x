@@ -27,6 +27,7 @@ interface Service {
   security_opt?: string[];
   stop_grace_period?: string;
   volumes?: string[];
+  tmpfs?: string[];
   env_file?: { path: string; required?: boolean }[];
   profiles?: string[];
   entrypoint?: string[];
@@ -343,8 +344,15 @@ describe("the end-to-end suite's change to the stack (tooling/e2e/compose.e2e.ya
   const e2e = parse(readFileSync('tooling/e2e/compose.e2e.yaml', 'utf8')) as ComposeFile;
 
   it('publishes the database alone, on the loopback address, for the tamper pass to seed', () => {
-    expect(Object.keys(e2e.services)).toEqual(['db']);
+    expect(Object.keys(e2e.services).sort()).toEqual(['api', 'db']);
     expect(e2e.services.db?.ports).toEqual(['127.0.0.1:56541:5432']);
     expect(networksOf(e2e.services.db ?? {}).sort()).toEqual(['internal', 'loopback']);
+  });
+
+  it('enables a writable ephemeral download store only for end-to-end tests', () => {
+    expect(e2e.services.api?.environment?.AGENTX_ACTIVITY_DOWNLOADS_DIR).toBe('/mnt/activity-downloads');
+    expect(e2e.services.api?.tmpfs).toEqual(['/mnt/activity-downloads:uid=1000,gid=1000,mode=0700,size=64m']);
+    expect(file.services.api?.environment?.AGENTX_ACTIVITY_DOWNLOADS_DIR).toBeUndefined();
+    expect(text).not.toContain('AGENTX_ACTIVITY_DOWNLOADS_DIR');
   });
 });

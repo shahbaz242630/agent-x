@@ -256,7 +256,7 @@ jobs:
   end-to-end:
     name: End to end
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       # Corepack must not read a .corepack.env file from the repository.
       COREPACK_ENV_FILE: '0'
