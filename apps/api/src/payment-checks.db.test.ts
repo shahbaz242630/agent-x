@@ -621,9 +621,10 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(lines('payment_check.checked').at(-1)).toMatchObject({ from: 'SUCCEEDED', to: 'SUCCEEDED' });
   });
 
-  it('says each check of an UNKNOWN payment unresolved past a day, for reconciliation; its admins told once (37b)', async () => {
+  it('says each check of an UNKNOWN payment unresolved past a day, for reconciliation; its admins told once each (37b)', async () => {
     const { w, acting } = await ready();
-    const request = await ask(acting, w, { amount: ALLOWED(4n) });
+    const first = await ask(acting, w, { amount: SMALL(4n) });
+    const second = await ask(acting, w, { amount: SMALL(4n) });
     await handoffOf(w).run();
     clock.advanceBy(2 * STEP);
     await checksOf(w).run();
@@ -633,16 +634,18 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     await checksOf(w).run();
     await checksOf(w).run();
 
-    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
-    expect(lines('payment_check.still_unknown')).toHaveLength(2);
-    // Its admins emailed once, kept once, beside the rejection that made it UNKNOWN (decision 37b).
-    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
-      kept: [
-        { action: 'payment.rejected_unproven', details: { bank: 'Rejected' } },
-        { action: 'payment.still_unknown', details: {} },
-      ],
-      emailed: ['payment_unproven', 'payment_still_unknown'],
-    });
+    expect(lines('payment_check.still_unknown')).toHaveLength(4);
+    // Each one's admins emailed once, kept once, beside the rejection that made it UNKNOWN (decision 37b).
+    for (const request of [first, second]) {
+      expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+      expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+        kept: [
+          { action: 'payment.rejected_unproven', details: { bank: 'Rejected' } },
+          { action: 'payment.still_unknown', details: {} },
+        ],
+        emailed: ['payment_unproven', 'payment_still_unknown'],
+      });
+    }
   });
 });
 
