@@ -94,17 +94,35 @@ export interface Seeded {
 
 export const readSeeded = (): Seeded => JSON.parse(readFileSync(SEED_FILE, 'utf8')) as Seeded;
 
-/** The app's login to the load stack's database, from the environment the runner gives the seed and verify steps. */
-export function loadConnection() {
-  const password = process.env.AGENTX_LOAD_DB_PASSWORD;
+/** Where a run happens: the laptop's compose stack, or staging on Azure (D2c), production-sized. */
+export type LoadSite = 'local' | 'azure';
+
+/**
+ * The name every organisation a run seeds is given: on staging the run's
+ * organisations stay (audit chains are append-only), so they must be told
+ * apart from anyone else's at a glance, and found again by the run's ID.
+ */
+export const loadOrgName = (runId: string): string => `Load test D2c ${runId}`;
+
+/**
+ * The app's login to the run's database, from the environment the runner
+ * gives the seed and verify steps: the load stack's loopback port with no TLS,
+ * or, when AGENTX_LOAD_DB_HOST names staging's private server (D2c, from a job
+ * inside its network), port 5432 with the server's certificate checked.
+ */
+export function loadConnection(env: NodeJS.ProcessEnv = process.env) {
+  const password = env.AGENTX_LOAD_DB_PASSWORD;
   if (password === undefined) throw new Error('Run the load test with `corepack pnpm load`, which sets its login.');
+  // Set but empty is not set: never an empty host with the certificate check on.
+  const named = env.AGENTX_LOAD_DB_HOST;
+  const azureHost = named === undefined || named === '' ? undefined : named;
   return {
-    host: '127.0.0.1',
-    port: LOAD_DB_PORT,
+    host: azureHost ?? '127.0.0.1',
+    port: azureHost === undefined ? LOAD_DB_PORT : 5432,
     database: 'agentx',
     user: 'agentx_app',
     password,
-    tls: 'disable' as const,
+    tls: azureHost === undefined ? ('disable' as const) : ('verify-full' as const),
     applicationName: 'agentx-load',
   };
 }
