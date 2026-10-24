@@ -661,6 +661,56 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
     await send(forgedNow(), '2001:db8:1:3::1');
 
     expect(await kept()).toHaveLength(6);
+    // Each kept by its whole address, never its network's.
+    expect((await kept()).map(({ ip }) => ip)).toContain('2001:db8:1:2::3');
+  });
+
+  // The store's own caps, every API process's together (SEC-PTR-01): each process's memory (H4) stops its own
+  // flood first, so these ask the store as many processes would.
+  describe('the store’s caps, for every process together', () => {
+    const body = Buffer.from('{}');
+    const keep = (ip: string | undefined) => events().keepRefused(app, { reason: 'signature', ip, body });
+
+    it('keeps the first 5 an hour from one network, the first of them said first, the rest capped', async () => {
+      const answers = [];
+      for (let n = 0; n < 7; n += 1) answers.push(await keep('203.0.113.7'));
+
+      expect(answers).toEqual(['first', 'kept', 'kept', 'kept', 'kept', 'capped', 'capped']);
+      expect(await keep('198.51.100.9')).toBe('first');
+    });
+
+    it('counts an IPv6 /64 as one network, and a message with no address as one more', async () => {
+      for (let n = 1; n <= 5; n += 1) await keep(`2001:db8:1:2::${String(n)}`);
+
+      expect(await keep('2001:db8:1:2::99')).toBe('capped');
+      expect(await keep('2001:db8:1:3::1')).toBe('first');
+      // No address: a network of its own, never counted with the rest.
+      expect(await keep(undefined)).toBe('first');
+      for (let n = 0; n < 4; n += 1) await keep(undefined);
+      expect(await keep(undefined)).toBe('capped');
+    });
+
+    it('keeps at most 50 an hour from every network together', async () => {
+      for (let n = 1; n <= 50; n += 1) expect(await keep(`198.51.100.${String(n)}`)).toBe('first');
+
+      expect(await keep('198.51.100.51')).toBe('capped');
+      expect(await kept()).toHaveLength(50);
+    });
+
+    it('holds the cap under a burst at once: one lock, so none slips past (S102)', async () => {
+      const answers = await Promise.all(Array.from({ length: 20 }, () => keep('203.0.113.7')));
+
+      expect(answers.filter((answer) => answer !== 'capped')).toHaveLength(5);
+      expect(answers.filter((answer) => answer === 'first')).toHaveLength(1);
+      expect(await kept()).toHaveLength(5);
+    });
+
+    it('keeps again an hour on', async () => {
+      for (let n = 0; n < 5; n += 1) await keep('203.0.113.7');
+      clock.advanceBy(60 * STEP + 1);
+
+      expect(await keep('203.0.113.7')).toBe('first');
+    });
   });
 
   it('keeps at most 50 an hour from every network together', async () => {
