@@ -103,7 +103,7 @@ const shared = spendWorld({
   decisions: () => decisions,
 });
 const { quiet, ask, statusOf, holdingsOf, spentOf, signed, moved, STOPS, mandateIdOf } = shared;
-const { ready, paymentOf } = handoffWorld({
+const { ready, paymentOf, alertsOf } = handoffWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -915,6 +915,13 @@ describe('the answer believed only about this payment, never undoing the bank’
       expect.objectContaining({ transactionId: await transactionIdOf(w, request.id), status: 'SUBMITTED' }),
     ]);
     expect(lines('handoff.handed_off')).toEqual([expect.objectContaining({ answer: 'refused', recorded: 'late' })]);
+    // Kept in the organisation's audit log and its admins emailed (decision 37b).
+    expect(await alertsOf(w, await transactionIdOf(w, request.id))).toEqual({
+      kept: [
+        { action: 'payment.contradicted', details: { status: 'SUBMITTED', refused: expect.any(String) as unknown } },
+      ],
+      emailed: ['payment_contradicted'],
+    });
   });
 
   it('keeps UNKNOWN, its money held, one the bank check marked on the bank’s word, when a refusal comes late', async () => {

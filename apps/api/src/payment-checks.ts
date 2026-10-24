@@ -31,10 +31,13 @@
 // bank's facts alone. A payment already settled that the bank now contradicts
 // (credited, then Rejected) stays as it is, the facts kept, and an alert raised
 // (rail map §4): a paid or failed one (our team's mark among them, E1c) is
-// checked every 30th run for 7 days after it was
-// handed off. An answer older than the word kept is one already read, and
-// changes nothing. An UNKNOWN unresolved past a day is said each time it is
-// checked, for reconciliation (E1c).
+// checked every 30th run for 7 days from its last move (gate H3). An answer
+// older than the word kept is one already read, and changes nothing. An
+// UNKNOWN unresolved past a day is said each time it is checked, for
+// reconciliation (E1c). A contradiction, a rejection without proof and an
+// UNKNOWN past a day are each also kept in the organisation's audit log and
+// emailed to its admins (decision 37b, `alertAdmins`), the first two as the
+// bank first says them, the last once.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // transaction, and the run goes on to the next. Its heartbeat is read by
@@ -80,6 +83,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { HEARTBEAT_STALE_MS, PARTNER_CALL_TIMEOUT_MS, PartnerTimedOut, withinTime } from './handoff.ts';
+import { alertAdmins, type PaymentAlert } from './payment-alerts.ts';
 import type { VoidTables } from './request-voids.ts';
 
 /** How often the payments under way are checked, once the last run has ended. */
@@ -361,6 +365,8 @@ export function createPaymentChecks({
       const locked = await lockPayment(tx, states, key, listed.requestId ?? '');
       const { transaction } = locked;
       const from = transaction.status;
+      /** What the bank's word raised for the organisation's admins (decision 37b), told once it is applied. */
+      const alerts: { readonly alert: PaymentAlert; readonly details: Record<string, string> }[] = [];
 
       /** The status it moved to, or null where its machine refused the move (its facts still kept). */
       const move = async (event: TransactionEvent, facts: ProviderFacts, via: string) => {
@@ -399,11 +405,15 @@ export function createPaymentChecks({
               status: from,
               bank: found.providerStatus,
             });
+            alerts.push({ alert: 'contradicted', details: { status: from, bank: found.providerStatus } });
           }
           return from;
         }
         // Rejected with no proof the money stayed: reconciliation's (rail map §4).
-        if (state === 'UNKNOWN' && newly) log.error('payment_check.rejected_unproven', { transactionId: listed.id });
+        if (state === 'UNKNOWN' && newly) {
+          log.error('payment_check.rejected_unproven', { transactionId: listed.id });
+          alerts.push({ alert: 'rejected_unproven', details: { bank: found.providerStatus } });
+        }
         // Its run died before Tx B: both steps here, each in its history (ADR-007 §13).
         const submitted = from === 'SUBMISSION_PENDING' ? await move('submitted', facts, 'bank_check') : null;
         return (await move(AFTER_SUBMITTED[state], facts, 'bank_check')) ?? submitted ?? from;
@@ -421,6 +431,10 @@ export function createPaymentChecks({
       }
       if (to === 'UNKNOWN' && clock.now().getTime() - transaction.createdAt.getTime() > STILL_UNKNOWN_MS) {
         log.warn('payment_check.still_unknown', { transactionId: listed.id });
+        alerts.push({ alert: 'still_unknown', details: {} });
+      }
+      for (const { alert, details } of alerts) {
+        await alertAdmins(tx, { keys, ids, outbox }, { orgId, transactionId: listed.id, alert, details });
       }
       return { from, to };
     });

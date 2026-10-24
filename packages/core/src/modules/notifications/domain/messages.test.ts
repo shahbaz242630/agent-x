@@ -499,6 +499,31 @@ describe('a notice’s email (B5-1b)', () => {
       expect(told.text).toContain(`Payment: ${payment}`);
       expect(told.text).toContain("You're told because you're an admin of this organisation.");
     });
+
+    it.each([
+      ['payment_contradicted', "Agent X: the bank's answer on a payment changed", 'went back on what it said before'],
+      ['payment_unproven', 'Agent X: a payment was rejected without proof', "didn't confirm the money stayed"],
+      [
+        'payment_still_unknown',
+        'Agent X: a payment still has no final answer',
+        'no final answer from the bank for over a day',
+      ],
+    ] as const)(
+      'tells every admin, by the payment’s ID, of a %s payment our team checks (0065, decision 37b)',
+      (kind, subject, line) => {
+        const told = messageFor(
+          { ...remittanceNotice, kind, recipientUserId: NOTICE.recipientUserId },
+          'a@example.test',
+        );
+
+        expect(isAboutAPayment(kind)).toBe(true);
+        expect(told.subject).toBe(subject);
+        expect(told.text).toContain(line);
+        expect(told.text).toContain("Don't pay its invoice again until our team confirms");
+        expect(told.text).toContain(`Payment: ${payment}`);
+        expect(told.text).toContain("You're told because you're an admin of this organisation.");
+      },
+    );
   });
 
   describe('E2-1 a change to a supplier (0033)', () => {

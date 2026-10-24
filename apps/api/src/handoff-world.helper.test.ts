@@ -168,5 +168,29 @@ export function handoffWorld({
     });
   }
 
-  return { ready, paymentOf };
+  /** The payment's alerts to its admins (decision 37b): each kept in its audit log, and each email queued. */
+  async function alertsOf(w: World, transactionId: string) {
+    return {
+      kept: (await shared.eventsAbout(w.org, transactionId, 'payment_alert')).map(({ action, details }) => ({
+        action,
+        details,
+      })),
+      emailed: (
+        await withSignedStates(app(), w.org, quiet(), (tx) =>
+          tx
+            // A global table (0021): the world's own organisation's notices alone.
+            .selectFrom('notifications.outbox')
+            .select('kind')
+            .where('org_id', '=', w.org)
+            .where('about_id', '=', transactionId)
+            .where('kind', 'in', ['payment_contradicted', 'payment_unproven', 'payment_still_unknown'])
+            .orderBy('created_at')
+            .orderBy('id')
+            .execute(),
+        )
+      ).map(({ kind }) => kind),
+    };
+  }
+
+  return { ready, paymentOf, alertsOf };
 }

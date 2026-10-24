@@ -65,7 +65,7 @@ const shared = spendWorld({
   decisions: () => decisions,
 });
 const { ask, holdingsOf } = shared;
-const { ready, paymentOf } = handoffWorld({
+const { ready, paymentOf, alertsOf } = handoffWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -249,6 +249,11 @@ describe('a payment finished by the bank’s word (E1a; rail map §4)', () => {
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(lines('payment_check.rejected_unproven')).toHaveLength(1);
     expect(await remittancesOf(w)).toEqual([]);
+    // Kept in the organisation's audit log and its admins emailed, once (decision 37b).
+    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+      kept: [{ action: 'payment.rejected_unproven', details: { bank: 'Rejected' } }],
+      emailed: ['payment_unproven'],
+    });
   });
 
   it.each([
@@ -352,6 +357,13 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN', providerStatus: 'Rejected' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(lines('handoff.rejected_unproven')).toHaveLength(1);
+    // Kept and its admins emailed once (decision 37b): the bank check finding it as it was says nothing more.
+    clock.advanceBy(2 * STEP);
+    await checksOf(w, rejecting).run();
+    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+      kept: [{ action: 'payment.rejected_unproven', details: { bank: 'Rejected' } }],
+      emailed: ['payment_unproven'],
+    });
   });
 
   it('leaves one the bank doesn’t find as it was: not found proves nothing', async () => {
@@ -478,6 +490,10 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
       expect.objectContaining({ status: 'SUCCEEDED', bank: 'Rejected' }),
     ]);
     expect(await remittancesOf(w)).toHaveLength(1);
+    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+      kept: [{ action: 'payment.contradicted', details: { status: 'SUCCEEDED', bank: 'Rejected' } }],
+      emailed: ['payment_contradicted'],
+    });
   });
 
   it('keeps checking a paid one for 7 days: the bank going back on it leaves it paid, said once (rail map §4)', async () => {
@@ -605,7 +621,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(lines('payment_check.checked').at(-1)).toMatchObject({ from: 'SUCCEEDED', to: 'SUCCEEDED' });
   });
 
-  it('says each check of an UNKNOWN payment unresolved past a day, for reconciliation', async () => {
+  it('says each check of an UNKNOWN payment unresolved past a day, for reconciliation; its admins told once (37b)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED(4n) });
     await handoffOf(w).run();
@@ -615,9 +631,18 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
 
     clock.advanceBy(24 * 60 * STEP);
     await checksOf(w).run();
+    await checksOf(w).run();
 
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
-    expect(lines('payment_check.still_unknown')).toHaveLength(1);
+    expect(lines('payment_check.still_unknown')).toHaveLength(2);
+    // Its admins emailed once, kept once, beside the rejection that made it UNKNOWN (decision 37b).
+    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+      kept: [
+        { action: 'payment.rejected_unproven', details: { bank: 'Rejected' } },
+        { action: 'payment.still_unknown', details: {} },
+      ],
+      emailed: ['payment_unproven', 'payment_still_unknown'],
+    });
   });
 });
 

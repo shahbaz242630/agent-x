@@ -420,6 +420,28 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       "Sign in to Agent X to see the payment, and the bank's reference our team recorded in your audit log. If you think this is wrong, contact Agent X support before paying the invoice again.",
   },
+  // About a payment (0065, partner decision 37b): each needs our team's check with the bank, told to every admin.
+  payment_contradicted: {
+    subject: () => "Agent X: the bank's answer on a payment changed",
+    firstLine: () =>
+      "The bank's answer about a payment from one of your organisations went back on what it said before. Agent X keeps the payment as it was, and our team is checking it with the bank.",
+    check:
+      "Sign in to Agent X to see the payment and the bank's answers in your audit log. Don't pay its invoice again until our team confirms what happened.",
+  },
+  payment_unproven: {
+    subject: () => 'Agent X: a payment was rejected without proof',
+    firstLine: () =>
+      "The bank rejected a payment from one of your organisations but didn't confirm the money stayed in your account. Its amount stays held against your limits until our team confirms it with the bank.",
+    check:
+      "Sign in to Agent X to see the payment in your audit log. Don't pay its invoice again until our team confirms the money stayed.",
+  },
+  payment_still_unknown: {
+    subject: () => 'Agent X: a payment still has no final answer',
+    firstLine: () =>
+      'A payment from one of your organisations has had no final answer from the bank for over a day. Its amount stays held against your limits, and our team is checking it with the bank.',
+    check:
+      "Sign in to Agent X to see the payment in your audit log. Don't pay its invoice again until our team confirms what happened.",
+  },
 };
 
 const NEWLINE = '\n';
