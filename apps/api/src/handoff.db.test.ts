@@ -1483,6 +1483,20 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
       ]);
     });
 
+    it('keeps a remittance given up in the audit log, with why, by the API (gate H2)', async () => {
+      const { w, transactionId } = await paid();
+      await remittances().givenUp(w.org, transactionId, 'address_refused');
+      expect(await remittanceEvents(w)).toEqual([
+        {
+          actor_type: 'system',
+          actor_id: 'api',
+          action: 'payment.remittance_failed',
+          subject_id: transactionId,
+          details: { reason: 'address_refused' },
+        },
+      ]);
+    });
+
     it('says no email when the version paid holds none (34c), and off once the setting is turned off since (34b)', async () => {
       const bare = await paid(null);
       expect(await remittances().remittanceOf(bare.w.org, bare.transactionId)).toEqual({ outcome: 'no_email' });

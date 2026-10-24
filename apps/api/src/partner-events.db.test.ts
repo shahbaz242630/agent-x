@@ -195,8 +195,9 @@ afterAll(async () => {
   await database.drop();
 });
 
-beforeEach(async () => {
-  clock = new FixedClock(new Date());
+/** The test's clock started at `at`, and what reads it made again with it. */
+function startClock(at: Date): void {
+  clock = new FixedClock(at);
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
@@ -208,6 +209,10 @@ beforeEach(async () => {
     clock,
     logger,
   });
+}
+
+beforeEach(async () => {
+  startClock(new Date());
   // Each test sees only its own messages.
   await database.as('admin').query('truncate provider_events.inbox, security.partner_event_evidence');
 });
@@ -314,6 +319,31 @@ describe('a message names a payment: it is checked with the bank, ahead of its t
 
     expect(asked).toEqual([]);
     expect((await inbox())[0]?.taken_at).not.toBeNull();
+  });
+
+  it('checks a paid one it names a week from its last move, not from its hand-off (gate H3)', async () => {
+    // Handed off 8 days ago by the test's clock, found paid by the database's: today.
+    const DAY = 24 * 60 * STEP;
+    startClock(new Date(Date.now() - 8 * DAY));
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await handoffOf(w).run();
+    clock.advanceBy(2 * STEP);
+    await checksOf(w).run();
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUCCEEDED' });
+    await consentOnlyOurs(w);
+    clock.advanceBy(8 * DAY);
+    const { send } = await door(w);
+    const { rail, asked } = counted(w);
+    const checks = checksOf(w, rail);
+    // Its own turn taken first: only the message brings it forward now.
+    await checks.run();
+    asked.length = 0;
+
+    expect((await send({ eventType: 'consent.payments', consentId: w.state.accountConsentId })).statusCode).toBe(202);
+    await checks.run();
+
+    expect(asked).toEqual([(await transactionOf(w, request.id)).instructionId]);
   });
 
   it('SEC-PTR-02: the message’s word never moves a payment: the bank says Pending, and it stays under way', async () => {

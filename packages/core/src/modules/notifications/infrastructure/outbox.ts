@@ -14,7 +14,9 @@
 //   given up (`lease_expired`) rather than taken again, so one that brings its
 //   sender down every time is still tried MOST_ATTEMPTS times at most
 //   (review). A last try merely slow past its lease can so be given up while
-//   it sends; `sent` still marks it sent (confirmation review). A notice may
+//   it sends; `sent` still marks it sent (confirmation review). A remittance is
+//   never given up there: `endRemittanceLeases` gives those up and says which,
+//   so each is kept in its organisation's audit log (gate H2). A notice may
 //   be sent twice after a crash; the provider is given its ID to tell (B5-3).
 // - `fanOut` turns a notice to the organisation's admins (no recipient) into
 //   one notice to each admin the sender found, and a notice to its registered
@@ -55,6 +57,16 @@ export const MOST_ATTEMPTS = 8;
 /** How long a claimed notice is left to its sender before it is due again. */
 export const CLAIM_LEASE_MS = 10 * 60_000;
 
+/** Gives up the notices whose last try's lease ran out by `now`; the caller picks which kinds. */
+const leaseEnded = (tx: Kysely<NotificationsTables>, now: Date) =>
+  tx
+    .updateTable('notifications.outbox')
+    .set({ given_up_at: now, last_failure: LEASE_EXPIRED })
+    .where('sent_at', 'is', null)
+    .where('given_up_at', 'is', null)
+    .where('next_attempt_at', '<=', now)
+    .where('attempts', '>=', MOST_ATTEMPTS);
+
 /** The waits after each failed try but the last: a minute, then longer, to six hours. */
 const BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, HOUR_MS, 2 * HOUR_MS, 4 * HOUR_MS, 6 * HOUR_MS];
 
@@ -70,11 +82,20 @@ export const OUTBOX_RETENTION_DAYS = 30;
 /** The most notices one `add` writes, or one `claimDue` takes. */
 export const MOST_NOTICES_A_BATCH = 100;
 
+/** A remittance given up because its last try's lease ran out. */
+export interface LeaseEnded {
+  readonly id: string;
+  readonly orgId: string;
+  readonly aboutId: string | null;
+}
+
 export interface Outbox {
   /** Writes these notices in the change's own transaction, at most MOST_NOTICES_A_BATCH. Throws RangeError for anything malformed, writing nothing. */
   add(tx: Transaction<NotificationsTables>, notices: readonly Notice[]): Promise<void>;
   /** Starts a try of up to `most` due notices, soonest due first, each held for the lease; gives up any whose last try's lease ran out. */
   claimDue(db: Kysely<NotificationsTables>, most: number): Promise<ClaimedNotice[]>;
+  /** Gives up every remittance whose last try's lease ran out (claimDue leaves them), and says which (gate H2). */
+  endRemittanceLeases(db: Kysely<NotificationsTables>): Promise<LeaseEnded[]>;
   /**
    * Turns a notice to the organisation's admins into one notice to each of
    * `recipients` (at most MOST_RECIPIENTS), user IDs, due at once, and marks
@@ -204,14 +225,8 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
       const now = clock.now();
       return limited(db, async (tx) => {
         // A notice due again after its last try: that try's lease ran out, its sender gone.
-        await tx
-          .updateTable('notifications.outbox')
-          .set({ given_up_at: now, last_failure: LEASE_EXPIRED })
-          .where('sent_at', 'is', null)
-          .where('given_up_at', 'is', null)
-          .where('next_attempt_at', '<=', now)
-          .where('attempts', '>=', MOST_ATTEMPTS)
-          .execute();
+        // A remittance is left to endRemittanceLeases, which says which it gave up (gate H2).
+        await leaseEnded(tx, now).where('kind', '!=', REMITTANCE_KIND).execute();
         const due = tx
           .selectFrom('notifications.outbox')
           .select('id')
@@ -267,6 +282,14 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
           })
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
       });
+    },
+
+    async endRemittanceLeases(db) {
+      const now = clock.now();
+      const rows = await limited(db, (tx) =>
+        leaseEnded(tx, now).where('kind', '=', REMITTANCE_KIND).returning(['id', 'org_id', 'about_id']).execute(),
+      );
+      return rows.map((row) => ({ id: row.id, orgId: row.org_id, aboutId: row.about_id }));
     },
 
     async fanOut(db, id, recipients) {

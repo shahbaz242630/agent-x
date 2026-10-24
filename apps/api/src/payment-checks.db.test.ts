@@ -17,6 +17,7 @@
 // its payment ended.
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { markPaymentFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type ExecutionLookup, type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
 import { TRANSACTIONS } from '@agentx/core/modules/transactions';
@@ -38,7 +39,7 @@ import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { heartbeatChecks } from './health.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { AED, keys, type World } from './mandate-world.helper.test.ts';
+import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createPaymentChecks } from './payment-checks.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
@@ -160,9 +161,9 @@ afterAll(async () => {
   await database.drop();
 });
 
-beforeEach(() => {
-  // The audit chain seals each event's time by the database's clock, so the tests start from now.
-  clock = new FixedClock(new Date());
+/** The test's clock started at `at`, and what reads it made again with it. */
+function startClock(at: Date): void {
+  clock = new FixedClock(at);
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
@@ -174,6 +175,11 @@ beforeEach(() => {
     clock,
     logger,
   });
+}
+
+// The audit chain seals each event's time by the database's clock, so the tests start from now.
+beforeEach(() => {
+  startClock(new Date());
 });
 
 describe('a payment finished by the bank’s word (E1a; rail map §4)', () => {
@@ -521,6 +527,51 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     clock.advanceBy(7 * 24 * 60 * STEP);
     await checksOf(w, rejectedAfter).run();
     expect(asked).toBe(2);
+  });
+
+  it('watches one marked failed a week from the mark, not from its hand-off (gate H3; E1c)', async () => {
+    // Its hand-off 8 days ago (the database seals the mark at its own now, so the test's clock starts back then).
+    const DAY = 24 * 60 * STEP;
+    startClock(new Date(Date.now() - 8 * DAY));
+    const { w, acting } = await ready();
+    // .04 fils: Rejected with no proof the money stayed: UNKNOWN.
+    const request = await ask(acting, w, { amount: ALLOWED(4n) });
+    await handoffOf(w).run();
+    clock.advanceBy(2 * STEP);
+    await checksOf(w).run();
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+
+    // Today our team marks it failed on the bank's written word.
+    clock.advanceBy(8 * DAY - 4 * STEP);
+    await markPaymentFailed(
+      app,
+      { keys, ids, logger: testLogger(capture), clock },
+      {
+        actor: OPERATOR,
+        orgId: w.org,
+        transactionId: (await transactionOf(w, request.id)).id,
+        reason: 'CASE-2026/0043',
+        evidence: 'BANK-NACK-77312',
+        id: ids.next(),
+        release: 'r-test',
+        run: null,
+      },
+    );
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
+
+    let asked = 0;
+    const counted = answering(w, (found) => {
+      asked += 1;
+      return found;
+    });
+    // A run's first pass asks every one watched: this one, its hand-off 8 days back, its mark today.
+    await checksOf(w, counted).run();
+    expect(asked).toBe(1);
+
+    // A week past the mark (with room for the minutes the test's clock runs behind the database's), no longer asked.
+    clock.advanceBy(7 * DAY + 5 * STEP);
+    await checksOf(w, counted).run();
+    expect(asked).toBe(1);
   });
 
   it('changes nothing for an answer older than the word kept: already read, never an alert (forced)', async () => {
