@@ -121,7 +121,11 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { alertAdmins } from './payment-alerts.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
+
+/** The statuses a late refusal goes back on: the bank's word read as under way, or paid (decision 37b). */
+const UNDER_WAY_OR_PAID: ReadonlySet<TransactionStatus> = new Set(['SUBMITTED', 'PROCESSING', 'SUCCEEDED']);
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
 export const HANDOFF_EVERY_MS = 10_000;
@@ -441,6 +445,15 @@ export function createHandoff({
           return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
         }
         log.error('handoff.refused_late', { transactionId, status: from });
+        // Refused where the bank's word was read as under way or paid: our team's check, its admins told (decision
+        // 37b). Failed or UNKNOWN, its word was already a rejection (or unreadable): nothing it goes back on (review).
+        if (UNDER_WAY_OR_PAID.has(from)) {
+          await alertAdmins(
+            tx,
+            { keys, ids, outbox },
+            { orgId, transactionId, alert: 'contradicted', details: { status: from, refused: answer.code } },
+          );
+        }
         return 'late';
       }
       if (!answerAbout(answer.execution, orgId, locked)) {
@@ -455,7 +468,16 @@ export function createHandoff({
       if (state === 'UNKNOWN') log.error('handoff.rejected_unproven', { transactionId });
       const submitted = await move('submitted', facts, 'accepted');
       if (submitted === null) return 'late';
-      return settled((await move(AFTER_SUBMITTED[state], facts, 'accepted')) ?? submitted);
+      const recorded = await settled((await move(AFTER_SUBMITTED[state], facts, 'accepted')) ?? submitted);
+      // Kept and its admins told once recorded (decision 37b): a late one the bank check already told.
+      if (state === 'UNKNOWN') {
+        await alertAdmins(
+          tx,
+          { keys, ids, outbox },
+          { orgId, transactionId, alert: 'rejected_unproven', details: { bank: answer.execution.providerStatus } },
+        );
+      }
+      return recorded;
     });
 
   /** The transaction and its holdings locked (`lockPayment`), its status as read. */

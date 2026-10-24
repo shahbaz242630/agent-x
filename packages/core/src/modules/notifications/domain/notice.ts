@@ -119,6 +119,13 @@ export const REMITTANCE_NO_EMAIL_KIND = 'payment_remittance_no_email';
  * on the bank's written word (0064, Phase 4 E1c), `aboutId` the transaction.
  */
 const MARKED_FAILED_KIND = 'payment_marked_failed';
+/**
+ * The kinds that tell every admin a payment needs our team's check (0065,
+ * partner decision 37b), `aboutId` the transaction: the bank went back on its
+ * word, rejected it without proof the money stayed, or left it unresolved past
+ * a day.
+ */
+const PAYMENT_ALERT_KINDS = ['payment_contradicted', 'payment_unproven', 'payment_still_unknown'] as const;
 
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,
@@ -136,6 +143,7 @@ export const NOTICE_KINDS = [
   REMITTANCE_KIND,
   REMITTANCE_NO_EMAIL_KIND,
   MARKED_FAILED_KIND,
+  ...PAYMENT_ALERT_KINDS,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -170,9 +178,12 @@ export const isAboutASpendRequest = (kind: NoticeKind): boolean =>
 /** Whether a kind is about an entry of the audit log, `aboutId` its event ID (0050). */
 export const isAboutAnAuditEntry = (kind: NoticeKind): boolean => AUDIT_LOG_NOTICE_KINDS.some((each) => each === kind);
 
-/** Whether a kind is about a payment, `aboutId` its transaction's ID (0062, 0064). */
+/** Whether a kind is about a payment, `aboutId` its transaction's ID (0062, 0064, 0065). */
 export const isAboutAPayment = (kind: NoticeKind): boolean =>
-  kind === REMITTANCE_KIND || kind === REMITTANCE_NO_EMAIL_KIND || kind === MARKED_FAILED_KIND;
+  kind === REMITTANCE_KIND ||
+  kind === REMITTANCE_NO_EMAIL_KIND ||
+  kind === MARKED_FAILED_KIND ||
+  PAYMENT_ALERT_KINDS.some((each) => each === kind);
 
 /** Whether a kind is told to every admin and approver: what lets an agent spend, and what waits on them (0036, 0038, 0045). */
 export const isToAdminsAndApprovers = (kind: NoticeKind): boolean =>

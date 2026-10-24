@@ -103,7 +103,7 @@ const shared = spendWorld({
   decisions: () => decisions,
 });
 const { quiet, ask, statusOf, holdingsOf, spentOf, signed, moved, STOPS, mandateIdOf } = shared;
-const { ready, paymentOf } = handoffWorld({
+const { ready, paymentOf, alertsOf } = handoffWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -915,6 +915,13 @@ describe('the answer believed only about this payment, never undoing the bank’
       expect.objectContaining({ transactionId: await transactionIdOf(w, request.id), status: 'SUBMITTED' }),
     ]);
     expect(lines('handoff.handed_off')).toEqual([expect.objectContaining({ answer: 'refused', recorded: 'late' })]);
+    // Kept in the organisation's audit log and its admins emailed (decision 37b).
+    expect(await alertsOf(w, await transactionIdOf(w, request.id))).toEqual({
+      kept: [
+        { action: 'payment.contradicted', details: { status: 'SUBMITTED', refused: expect.any(String) as unknown } },
+      ],
+      emailed: ['payment_contradicted'],
+    });
   });
 
   it('keeps UNKNOWN, its money held, one the bank check marked on the bank’s word, when a refusal comes late', async () => {
@@ -935,6 +942,28 @@ describe('the answer believed only about this payment, never undoing the bank’
     expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN', rejectCode: null } });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(lines('handoff.refused_late')).toEqual([expect.objectContaining({ status: 'UNKNOWN' })]);
+    // The bank's word was already a rejection: nothing gone back on, no alert to its admins (decision 37b; review).
+    expect(await alertsOf(w, await transactionIdOf(w, request.id))).toEqual({ kept: [], emailed: [] });
+  });
+
+  it('tells no admin of a late refusal of one the bank check already failed on the bank’s word (decision 37b; review)', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: declined, after the bank check read it Rejected with the proof the money stayed.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await settledBy(w, request.id, 'submitted', { providerStatus: 'Rejected' });
+        await settledBy(w, request.id, 'fail', { providerStatus: 'Rejected', rejectCode: 'AANI.AM04' });
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'FAILED' } });
+    expect(lines('handoff.refused_late')).toEqual([expect.objectContaining({ status: 'FAILED' })]);
+    expect(await alertsOf(w, await transactionIdOf(w, request.id))).toEqual({ kept: [], emailed: [] });
   });
 
   it('leaves as it found it one the bank check already moved, when the answer is about another payment: said', async () => {
