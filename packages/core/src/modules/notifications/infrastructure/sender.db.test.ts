@@ -933,6 +933,29 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     );
   });
 
+  it('H2 logs a remittance given up once its last send threw, as a send error', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    await sql`update notifications.outbox set attempts = ${MOST_ATTEMPTS - 1}`.execute(app);
+    const gaveUp: string[][] = [];
+    const { service } = notifier(() => new Error('the provider dropped the connection'));
+
+    await sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(undefined, undefined, (id, why) => {
+        gaveUp.push([id, why]);
+        return undefined;
+      }),
+    ).run.run();
+
+    expect(gaveUp).toEqual([[PAYMENT, 'send_error']]);
+  });
+
   it('H2 says so when a remittance given up can’t be kept in the audit log, and never sends it again', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
