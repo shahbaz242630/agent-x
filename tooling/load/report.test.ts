@@ -19,6 +19,7 @@ const phase = (n: number, overrides: Partial<PhaseResult> = {}): PhaseResult => 
 const clean: RunResult = {
   at: '2026-10-22T12:00:00.000Z',
   commit: 'abc1234',
+  site: 'local',
   apiCpus: 0.5,
   phases: [phase(1), phase(2)],
   logs: summariseLogs(
@@ -68,6 +69,15 @@ describe('the report', () => {
     const report = renderReport({ ...clean, apiCpus: 2 });
     expect(report).toContain('# Load test, 2026-10-22 (local, API 2 CPU)');
     expect(report).toContain('the API\ngiven 2 CPU(s) (staging has half), 1 GiB and ten connections as staging, k6');
+  });
+
+  it('says an Azure run is the one PL-38 closes on, sized up on staging', () => {
+    const report = renderReport({ ...clean, site: 'azure', apiCpus: 2 });
+    expect(report).toContain('# Load test, 2026-10-22 (azure, API 2 CPU)\n\n**Passed.**');
+    expect(report).toContain('on staging in Azure UAE North, sized up for the run: the API\ngiven 2 CPU(s)');
+    expect(report).toContain('This is the run PL-38 closes on (D2c).');
+    expect(report).not.toContain('laptop');
+    expect(report).toContain('| 1 | 3300 | 3150 | 0 | 21.3 | 88.5 | 140.0 | 310.8 | 0 | 0 | 0 |');
   });
 
   it('lists what failed', () => {

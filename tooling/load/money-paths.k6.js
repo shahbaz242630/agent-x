@@ -9,6 +9,9 @@
 // agent, whose month (AED 100) stops at 25.
 // Every request must be answered 201, quickly, never 5xx or 429. k6's own
 // result goes to /out for the runner, which checks the database and the log.
+// On Azure (D2c) the run's job names the API's internal address, the seed's
+// file and the results folder (API, SEED, OUT), and the summary's JSON line
+// on stdout is how the result reaches the report: the job keeps no files.
 import { check } from 'k6';
 import exec from 'k6/execution';
 import http from 'k6/http';
@@ -17,9 +20,10 @@ import { Counter } from 'k6/metrics';
 const PHASE = __ENV.PHASE;
 if (PHASE !== '1' && PHASE !== '2') throw new Error('PHASE must be 1 or 2');
 
-const API = 'http://api:8080';
+const API = __ENV.API ?? 'http://api:8080';
+const OUT = __ENV.OUT ?? '/out';
 const SECONDS = 120;
-const { agents } = JSON.parse(open('/out/seed.json'));
+const { agents } = JSON.parse(open(__ENV.SEED ?? `${OUT}/seed.json`));
 const ample = agents.filter((agent) => agent.kind === 'ample');
 const capped = agents.find((agent) => agent.kind === 'capped');
 
@@ -139,7 +143,9 @@ export function handleSummary(data) {
     thresholds,
   };
   return {
-    [`/out/k6-phase-${PHASE}.json`]: JSON.stringify(result),
-    stdout: `Phase ${PHASE}: ${result.requests} requests, ${result.created} new, p95 ${asks['p(95)'].toFixed(1)} ms\n`,
+    [`${OUT}/k6-phase-${PHASE}.json`]: JSON.stringify(result),
+    stdout:
+      `Phase ${PHASE}: ${result.requests} requests, ${result.created} new, p95 ${asks['p(95)'].toFixed(1)} ms\n` +
+      `${JSON.stringify({ event: 'load.k6_summary', ...result })}\n`,
   };
 }
