@@ -106,7 +106,15 @@ import {
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { mayFund } from '@agentx/core/modules/funding-sources';
-import { AFTER_SUBMITTED, factsOf, lockPayment, NO_FACTS, settlePayment } from '@agentx/core/modules/outcomes';
+import {
+  AFTER_SUBMITTED,
+  answerAbout,
+  factsOf,
+  lockPayment,
+  moveDetails,
+  NO_FACTS,
+  settlePayment,
+} from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
@@ -385,8 +393,12 @@ export function createHandoff({
    * Tx B: the partner's answer recorded on the transaction (ADR-007 §9):
    * `recorded`, or `late` when it had moved on meanwhile (marked UNKNOWN by a
    * run's sweep): the answer then kept as its facts, never a move (B3,
-   * ADR-007 §9). A refusal moves even an UNKNOWN one to FAILED: its reject
-   * code is the proof (§11). Throws for a transaction that can't be believed.
+   * ADR-007 §9). A refusal moves a pending one, or one UNKNOWN with no word
+   * of the bank's, to FAILED: its reject code is the proof (§11); never one
+   * the bank check already read at the bank (its word stands; said).
+   * An answer not about this payment (SEC-PTR-09) is never its word: a
+   * pending one UNKNOWN, its money held. Throws for a transaction that can't
+   * be believed.
    */
   const txB = (
     orgId: string,
@@ -397,14 +409,16 @@ export function createHandoff({
   ): Promise<'recorded' | 'late'> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
       const key = { orgId, id: transactionId };
-      const from = await lockedHoldings(tx, states, key, requestId);
+      const locked = await lockPayment(tx, states, key, requestId);
+      const from = locked.transaction.status;
       /** The status it moved to, or null where its machine refused the move. */
       const move = async (
         event: TransactionEvent,
         facts: ProviderFacts,
         via: string,
       ): Promise<TransactionStatus | null> => {
-        const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details: { via } });
+        const details = moveDetails(event, facts, via, locked.instruction.id);
+        const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details });
         // Tampered (its alarm raised): the answer isn't on the record, so not "handed off".
         if (moved.outcome !== 'moved' && moved.outcome !== 'refused') {
           throw new Error(`A transaction didn't move by ${event}: ${moved.outcome}`);
@@ -420,8 +434,21 @@ export function createHandoff({
       if (answer.kind === 'unknown') {
         return from === 'SUBMISSION_PENDING' ? settled(await move('lose_track', NO_FACTS, 'no_answer')) : 'late';
       }
-      if (answer.kind === 'refused')
-        return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
+      if (answer.kind === 'refused') {
+        // UNKNOWN with no word of the bank's yet (the sweep's): one the bank check marked on the bank's word stays.
+        const noBankWord = from === 'UNKNOWN' && locked.transaction.providerStatus === null;
+        if (from === 'SUBMISSION_PENDING' || noBankWord) {
+          return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
+        }
+        log.error('handoff.refused_late', { transactionId, status: from });
+        return 'late';
+      }
+      if (!answerAbout(answer.execution, orgId, locked)) {
+        log.error('handoff.unreadable', { transactionId, status: from, why: 'not_this_payment' });
+        return from === 'SUBMISSION_PENDING'
+          ? settled(await move('lose_track', NO_FACTS, 'answer_unreadable'))
+          : 'late';
+      }
       const facts = factsOf(answer.execution);
       const state = paymentStateOf(answer.execution);
       // Rejected with no proof the money stayed, in the answer itself: reconciliation's, as the bank check says it.

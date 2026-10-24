@@ -9,9 +9,11 @@ export { type Settlement, settlementOf } from './infrastructure/settlement.ts';
 export { lockHoldingsOf, paymentHoldsOf, settleHoldings } from './infrastructure/outcomes.ts';
 export {
   AFTER_SUBMITTED,
+  answerAbout,
   factsOf,
   type LockedPayment,
   lockPayment,
+  moveDetails,
   NO_FACTS,
   type PaymentMoved,
   settlePayment,

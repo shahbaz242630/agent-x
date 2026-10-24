@@ -59,6 +59,32 @@ export type LockedPayment = Readonly<{
 }>;
 
 /**
+ * Whether the bank's answer is about this payment: its organisation, our
+ * instruction, its amount and currency (SEC-PTR-09). One that isn't is never
+ * read as the payment's word, by the hand-off's Tx B or the bank check.
+ */
+export const answerAbout = (execution: PaymentExecution, orgId: string, { instruction }: LockedPayment): boolean =>
+  execution.organizationId.toLowerCase() === orgId.toLowerCase() &&
+  execution.instructionId.toLowerCase() === instruction.id &&
+  execution.amountMinor === instruction.amountMinor &&
+  execution.currency === instruction.currency;
+
+/**
+ * A move's details: a `fail` on the bank's word with no reject code takes the
+ * bank's own reference as its evidence (ADR-007 §9), as the move's proof rule
+ * asks; any other, the path alone.
+ */
+export const moveDetails = (
+  event: TransactionEvent,
+  facts: ProviderFacts,
+  via: string,
+  instructionId: string,
+): Readonly<Record<string, string>> =>
+  event === 'fail' && facts.rejectCode === null
+    ? { via, evidenceRef: `bank_status:${facts.paymentInstructionRef ?? instructionId}` }
+    : { via };
+
+/**
  * The transaction read for change (10), then its request's reservation and
  * claim locked (11), before a move takes the head (12; ADR-006 §6); throws for
  * a transaction that can't be believed (its alarm raised), or one not its
