@@ -5,7 +5,9 @@
 // naming both references, its admins told, the platform chain's record; a
 // request run again changes nothing; refused, with nothing changed, unless
 // the payment is UNKNOWN past a day, or for a request ID naming another
-// record, or a payment or organisation that isn't there. With the bank check
+// record, or a payment or organisation that isn't there; a record that can't
+// be believed holds the organisation, the hold under an ID of its own. The
+// bank check still watches it a week: paid after all, it is said. With the bank check
 // at the same payment (forced), whichever takes it first settles it and the
 // other finds it settled. The operator's command around it, from its request
 // file, is apps/operator's main.db.test.ts.
@@ -123,7 +125,7 @@ async function handedOff(fils: bigint, { checked = true } = {}) {
   await handoffOf(w).run();
   clock.advanceBy(2 * STEP);
   if (checked) await checksOf(w).run();
-  return { w, request, transaction: await transactionOf(w, request.id) };
+  return { w, acting, request, transaction: await transactionOf(w, request.id) };
 }
 
 /** What the operator's request asks, for the world's payment. */
@@ -168,6 +170,14 @@ const markNoticesOf = (w: World) =>
         .execute()
     ).map(({ about_id, recipient_user_id }) => ({ aboutId: about_id, to: recipient_user_id })),
   );
+
+/** The IDs of the organisation's integrity holds, on its chain. */
+const holdsOf = async (w: World) =>
+  (
+    await withTenant(app, w.org, (tx) =>
+      tx.selectFrom('audit.events').select('id').where('action', '=', 'integrity_hold.set').execute(),
+    )
+  ).map(({ id }) => id);
 
 /** The ID of the event that opened the transaction, on its organisation's chain. */
 const openedEventOf = async (w: World, transactionId: string) => {
@@ -248,18 +258,33 @@ describe('an UNKNOWN payment marked failed by our team (E1c; ADR-007 §10)', () 
     expect(await platformMarked(asked)).toBe(true);
   });
 
-  it('is left FAILED by the bank check after it: no longer under way, so never asked again', async () => {
+  it('is still watched by the bank check: the bank paying it after all is said, never applied (rail map §4)', async () => {
+    const { w, request, transaction } = await handedOff(ANSWER_LOST, { checked: false });
+    clock.advanceBy(MARK_FAILED_AFTER_MS);
+    await mark(asking(w, transaction.id));
+
+    // A new check's first run checks every one, the watched among them.
+    await checksOf(w).run();
+
+    expect(await transactionOf(w, request.id)).toMatchObject({
+      status: 'FAILED',
+      providerStatus: 'AcceptedCreditSettlementCompleted',
+    });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
+    expect(lines('payment_check.contradicts')).toEqual([
+      expect.objectContaining({ transactionId: transaction.id, status: 'FAILED' }),
+    ]);
+  });
+
+  it('says nothing more of one the bank still calls rejected', async () => {
     const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
     clock.advanceBy(MARK_FAILED_AFTER_MS);
     await mark(asking(w, transaction.id));
-    const moves = (await movesOf(w, transaction.id)).length;
-    const checked = lines('payment_check.checked').length;
 
     await checksOf(w).run();
 
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
-    expect(await movesOf(w, transaction.id)).toHaveLength(moves);
-    expect(lines('payment_check.checked')).toHaveLength(checked);
+    expect(lines('payment_check.contradicts')).toEqual([]);
   });
 
   it('changes nothing for the same request run again: one move, one notice, one platform record', async () => {
@@ -313,6 +338,13 @@ describe('an UNKNOWN payment marked failed by our team (E1c; ADR-007 §10)', () 
     await mark(asked);
     const another = 'the ID names another record: write a new request';
 
+    // Another payment of the same organisation, with the first's ID.
+    const third = await ask(first.acting, first.w, { amount: ALLOWED(REJECTED_UNPROVEN) });
+    await handoffOf(first.w).run();
+    const thirdPayment = await transactionOf(first.w, third.id);
+    clock.advanceBy(MARK_FAILED_AFTER_MS);
+    expect(await refusal({ ...asking(first.w, thirdPayment.id), id: asked.id })).toEqual([another]);
+    expect(await transactionOf(first.w, third.id)).toMatchObject({ status: thirdPayment.status });
     // Another organisation's payment, with the first's ID.
     expect(await refusal({ ...asking(second.w, second.transaction.id), id: asked.id })).toEqual([another]);
     expect(await transactionOf(second.w, second.request.id)).toMatchObject({ status: 'UNKNOWN' });
@@ -353,6 +385,11 @@ describe('records that can’t be believed (their alarm raised): refused, nothin
     expect(await refusal(asked)).toEqual([problem]);
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(await platformMarked(asked)).toBe(false);
+    // The hold is kept on the chain, under an ID of its own: the same request run again is still told why.
+    const holds = await holdsOf(w);
+    expect(holds).toHaveLength(1);
+    expect(holds).not.toContain(asked.id);
+    expect(await refusal(asked)).toEqual([problem]);
   });
 
   it('refuses a request ID naming an event that can’t be believed: the audit log can’t be verified', async () => {
@@ -372,6 +409,8 @@ describe('records that can’t be believed (their alarm raised): refused, nothin
       "the organisation's audit log can't be verified",
     ]);
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    // Its hold is kept, though the request's ID names an event already on the chain.
+    expect(await holdsOf(w)).toHaveLength(1);
   });
 
   it('fails, changing nothing, for one whose instruction can’t be believed', async () => {

@@ -3,7 +3,7 @@
 -- bank's statement comes to us). An UNKNOWN payment the bank has confirmed in
 -- writing it never accepted is moved to FAILED by the operator's command
 -- (`mark-payment-failed`), with a case reference and the bank's evidence
--- reference, signed on the organisation's chain (`transaction.failed`) and the
+-- reference, signed on the organisation's chain (`transaction.fail`) and the
 -- platform's (`operator.payment_marked_failed`); its held money and its order
 -- are given back in the same transaction.
 --

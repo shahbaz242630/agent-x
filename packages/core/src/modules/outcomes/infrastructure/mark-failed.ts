@@ -7,15 +7,19 @@
 // leaves it without the bank's own status query.
 //
 // One transaction, withSignedStates' for the organisation, in ADR-006 §6's
-// lock order: the organisation verified; the payment read for change (10) and
-// refused unless it is UNKNOWN and was handed off more than MARK_FAILED_AFTER_MS
+// lock order: the organisation verified; the payment read for change (10), an
+// earlier run of the same request found (its move's ID); the payment refused
+// unless it is UNKNOWN and was handed off more than MARK_FAILED_AFTER_MS
 // ago (the bank's longest time to settle, until the partner's answer to STA-4);
 // its request's holdings locked (11); `transaction.fail` on its chain (12,
 // the operator its actor, its ID the request's, naming the case reference and
 // the bank's evidence reference); its held money and its order given back
 // (`settlePayment`); a notice to every admin (0064); and
 // `operator.payment_marked_failed` on the platform chain, locked last (13).
-// All of it, or none.
+// All of it, or none. The bank check keeps checking it for 7 days, as it does
+// a paid one, so the bank paying it after all is said (E1a's contradiction).
+// The payment is read twice, here and by `lockPayment`, under the same lock:
+// once for the refusals named here, once for the settling every move shares.
 //
 // The request's ID is made where it was written, so a request run again finds
 // its own event and changes nothing. The case reference and the evidence
@@ -91,8 +95,26 @@ export type MarkedFailed =
 /** Refused for a request ID that names any other record. */
 const ANOTHER_RECORD = 'the ID names another record: write a new request';
 
-/** The one ID the payment's move takes: the request's. */
-const theRequestId = (id: string): IdGenerator => ({ next: () => id });
+/**
+ * IDs as the caller's, but the request's for the one taken while `armed`: the
+ * payment's move, so a run again finds it. Every other event (an integrity
+ * hold above all, recorded after the work rolls back) takes one of its own.
+ */
+function requestIdOnce(ids: IdGenerator, id: string) {
+  let armed = false;
+  return {
+    ids: {
+      next: () => {
+        if (!armed) return ids.next();
+        armed = false;
+        return id;
+      },
+    } satisfies IdGenerator,
+    arm: () => {
+      armed = true;
+    },
+  };
+}
 
 /** Marks the payment failed, or finds an earlier run's mark; throws MarkFailedRefused for one it may not. */
 export function markPaymentFailed(
@@ -105,74 +127,80 @@ export function markPaymentFailed(
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
   const outbox = createOutbox({ ids: uuidV7Ids, clock });
   const key = { orgId, id: transactionId };
-  // The payment's one move takes the request's ID, so a run again finds it.
-  const signing = { ...services, ids: theRequestId(id) };
-  return withSignedStates(database, orgId, signing, async (tx, states): Promise<MarkedFailed> => {
-    const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
-    if (organization.outcome === 'missing') throw new MarkFailedRefused('no organisation has this ID');
-    if (organization.outcome === 'tampered')
-      throw new MarkFailedRefused("the organisation's records can't be verified");
-    // Through the signed states: a record that can't be believed raises the alarm and the hold.
-    const before = await states.eventOf(tx, orgId, { eventId: id });
-    if (before.outcome === 'tampered') throw new MarkFailedRefused("the organisation's audit log can't be verified");
-    if (before.event !== undefined) {
-      const { event } = before.event;
-      const same =
-        event.action === MARKED_FAILED &&
-        event.subject.id === transactionId &&
-        event.actor.type === actor.type &&
-        event.actor.id === actor.id;
-      if (!same) throw new MarkFailedRefused(ANOTHER_RECORD);
-      return { outcome: 'marked_before' };
-    }
-    // Another organisation's mark of this ID: one request ID names one mark.
-    if (await platformEventWith(tx, PLATFORM_MARKED_FAILED, { requestId: id })) {
-      throw new MarkFailedRefused(ANOTHER_RECORD);
-    }
-
-    const read = await transactionOf(tx, states, key, 'change');
-    if (read.outcome === 'missing') throw new MarkFailedRefused('no payment of this organisation has this ID');
-    if (read.outcome === 'tampered') throw new MarkFailedRefused("the payment's records can't be verified");
-    const { status, createdAt } = read.transaction;
-    if (status !== 'UNKNOWN') {
-      throw new MarkFailedRefused(
-        `the payment is ${status}: only one whose outcome can't be known (UNKNOWN) is marked failed`,
-      );
-    }
-    if (clock.now().getTime() - createdAt.getTime() <= MARK_FAILED_AFTER_MS) {
-      throw new MarkFailedRefused(
-        'the payment was handed off less than 24 hours ago: the bank may still settle it, so wait past that',
-      );
-    }
-    const locked = await lockPayment(tx, states, key);
-    const moved = await moveTransaction(tx, states, key, 'fail', NO_FACTS, {
-      actor,
-      details: { via: 'operator', reason, evidenceRef: evidence },
-    });
-    // Read for change under this lock, and UNKNOWN: anything but a move is something past the app.
-    if (moved.outcome !== 'moved') throw new Error(`An UNKNOWN payment didn't move to FAILED: ${moved.outcome}`);
-    await settlePayment(tx, outbox, {
-      orgId,
-      requestId: locked.instruction.spendRequestId,
-      transactionId,
-      status: 'FAILED',
-      at: clock.now(),
-    });
-    await outbox.add(tx, [
-      {
+  const moveIds = requestIdOnce(services.ids, id);
+  return withSignedStates(
+    database,
+    orgId,
+    { ...services, ids: moveIds.ids },
+    async (tx, states): Promise<MarkedFailed> => {
+      const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
+      if (organization.outcome === 'missing') throw new MarkFailedRefused('no organisation has this ID');
+      if (organization.outcome === 'tampered')
+        throw new MarkFailedRefused("the organisation's records can't be verified");
+      // Read for change first (10): a run of the same request at once waits here, then finds the first's move below.
+      const read = await transactionOf(tx, states, key, 'change');
+      if (read.outcome === 'missing') throw new MarkFailedRefused('no payment of this organisation has this ID');
+      if (read.outcome === 'tampered') throw new MarkFailedRefused("the payment's records can't be verified");
+      // Through the signed states: a record that can't be believed raises the alarm and the hold.
+      const before = await states.eventOf(tx, orgId, { eventId: id });
+      if (before.outcome === 'tampered') throw new MarkFailedRefused("the organisation's audit log can't be verified");
+      if (before.event !== undefined) {
+        const { event } = before.event;
+        const same =
+          event.action === MARKED_FAILED &&
+          event.subject.id === transactionId &&
+          event.actor.type === actor.type &&
+          event.actor.id === actor.id;
+        if (!same) throw new MarkFailedRefused(ANOTHER_RECORD);
+        return { outcome: 'marked_before' };
+      }
+      // Another organisation's mark of this ID: one request ID names one mark.
+      if (await platformEventWith(tx, PLATFORM_MARKED_FAILED, { requestId: id })) {
+        throw new MarkFailedRefused(ANOTHER_RECORD);
+      }
+      const { status, createdAt } = read.transaction;
+      if (status !== 'UNKNOWN') {
+        throw new MarkFailedRefused(
+          `the payment is ${status}: only one whose outcome can't be known (UNKNOWN) is marked failed`,
+        );
+      }
+      if (clock.now().getTime() - createdAt.getTime() <= MARK_FAILED_AFTER_MS) {
+        throw new MarkFailedRefused(
+          'the payment was handed off less than 24 hours ago: the bank may still settle it, so wait past that',
+        );
+      }
+      const locked = await lockPayment(tx, states, key);
+      // Its one event, its status's change (no facts are new), takes the request's ID.
+      moveIds.arm();
+      const moved = await moveTransaction(tx, states, key, 'fail', NO_FACTS, {
+        actor,
+        details: { via: 'operator', reason, evidenceRef: evidence },
+      });
+      // Read for change under this lock, and UNKNOWN: anything but a move is something past the app.
+      if (moved.outcome !== 'moved') throw new Error(`An UNKNOWN payment didn't move to FAILED: ${moved.outcome}`);
+      await settlePayment(tx, outbox, {
         orgId,
-        recipientUserId: null,
-        kind: 'payment_marked_failed',
-        membershipId: null,
-        role: null,
-        aboutId: transactionId,
-      },
-    ]);
-    const recorded = await platform.record(tx, {
-      actor,
-      action: PLATFORM_MARKED_FAILED,
-      details: { orgId, transactionId, requestId: id, reason, evidenceRef: evidence, release, run },
-    });
-    return { outcome: 'marked', platformSeq: recorded.seq };
-  });
+        requestId: locked.instruction.spendRequestId,
+        transactionId,
+        status: 'FAILED',
+        at: clock.now(),
+      });
+      await outbox.add(tx, [
+        {
+          orgId,
+          recipientUserId: null,
+          kind: 'payment_marked_failed',
+          membershipId: null,
+          role: null,
+          aboutId: transactionId,
+        },
+      ]);
+      const recorded = await platform.record(tx, {
+        actor,
+        action: PLATFORM_MARKED_FAILED,
+        details: { orgId, transactionId, requestId: id, reason, evidenceRef: evidence, release, run },
+      });
+      return { outcome: 'marked', platformSeq: recorded.seq };
+    },
+  );
 }
