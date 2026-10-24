@@ -596,9 +596,10 @@ export function createHandoff({
    * unknownAfterMs marked UNKNOWN, a page at a time, every page (ADR-007 §10;
    * gate H5): each read for change, and moved only if it is still waiting
    * then, so one Tx B recorded meanwhile is never undone. Never resent;
-   * reconciliation settles them. False if the signal stopped it.
+   * reconciliation settles them. A page is read after the last one by its
+   * cursor, so one that can't be moved never holds the sweep on it.
    */
-  const sweepIn = async (orgId: string, log: Logger, signal: AbortSignal | undefined): Promise<boolean> => {
+  const sweepIn = async (orgId: string, log: Logger): Promise<void> => {
     const before = new Date(clock.now().getTime() - unknownAfterMs);
     let after: string | undefined;
     for (;;) {
@@ -607,13 +608,10 @@ export function createHandoff({
         waiting = await waitingSince(orgId, before, after, log);
       } catch (error) {
         log.error('handoff.sweep_failed', { err: error });
-        return true;
+        return;
       }
-      for (const transaction of waiting) {
-        if (signal?.aborted === true) return false;
-        await sweptOne(orgId, transaction, log);
-      }
-      if (waiting.length < page) return true;
+      for (const transaction of waiting) await sweptOne(orgId, transaction, log);
+      if (waiting.length < page) return;
       after = waiting.at(-1)?.id;
     }
   };
@@ -686,7 +684,7 @@ export function createHandoff({
           if (signal?.aborted === true) return;
           const log = logger.child({ orgId });
           if (held === null && !(await handOffAll(orgId, log, signal))) return;
-          if (sweeping && !(await sweepIn(orgId, log, signal))) return;
+          if (sweeping) await sweepIn(orgId, log);
         }
       } finally {
         // The reasons this run's requests wait for, said again only once one changes; one gone, forgotten.
