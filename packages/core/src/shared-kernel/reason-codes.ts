@@ -89,7 +89,7 @@ export const REASON_CODES = {
   FAILURE_PROPOSAL_CONFIRMER_TOO_NEW:
     "You've been a member of this organisation for less than 14 days, so you can't be the second admin to confirm a payment marked failed yet. Nothing was changed. Ask another admin.",
   FAILURE_PROPOSAL_GRANTED_BY_PROPOSER:
-    "Your admin role was given or approved by the admin who proposed marking this payment failed, so you can't be their second person. Nothing was changed. Ask another admin.",
+    "Your admin role was given or approved by the admin who proposed marking this payment failed, so you can't be their second person. Nothing was changed. Ask another admin; if no other admin can, the proposer can confirm it themselves a day after proposing.",
   FAILURE_PROPOSAL_OPEN:
     "An admin has already proposed marking this payment failed, and it waits for a second admin to confirm it, so another proposal isn't made. Nothing was changed. Confirm or withdraw the one open.",
   FAILURE_PROPOSAL_TOO_RECENT:

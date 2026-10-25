@@ -222,7 +222,7 @@
                   {
                     "type": "string",
                     "const": "FAILURE_PROPOSAL_GRANTED_BY_PROPOSER",
-                    "description": "Your admin role was given or approved by the admin who proposed marking this payment failed, so you can't be their second person. Nothing was changed. Ask another admin."
+                    "description": "Your admin role was given or approved by the admin who proposed marking this payment failed, so you can't be their second person. Nothing was changed. Ask another admin; if no other admin can, the proposer can confirm it themselves a day after proposing."
                   },
                   {
                     "type": "string",
