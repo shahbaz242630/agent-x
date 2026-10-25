@@ -29,6 +29,7 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { MARK_FAILED_AFTER_MS, markFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
+import type { FakeRail } from '@agentx/core/modules/providers';
 import { FAILURE_PROPOSALS, noteTransactionFacts, TRANSACTIONS } from '@agentx/core/modules/transactions';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
@@ -111,12 +112,12 @@ const REJECTED_UNPROVEN = 4n;
 /** The fils that lose the hand-off's answer, the bank crediting it after two steps: UNKNOWN until then. */
 const ANSWER_LOST = 2n;
 
-const handoffOf = (w: World) =>
+const handoffOf = (w: World, rail: FakeRail = w.rail) =>
   createHandoff({
     list: () => Promise.resolve([w.org]),
     database: app,
     outbox: createOutbox({ ids, clock }),
-    rail: w.rail,
+    rail,
     keys,
     ids,
     clock,
@@ -801,6 +802,41 @@ describe('refused, changing nothing', () => {
     expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed', 'payment_mark_ended']);
     expect(await withdrawing(first, transaction.id)).toEqual(refused(409, 'NO_FAILURE_PROPOSAL'));
     expect(await proposing(first, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
+  });
+
+  it('a refusal the hand-off hears late, once the sweep made it UNKNOWN: FAILED, the open proposal ENDED, all told', async () => {
+    const { w, acting } = await ready();
+    const first = await adminOf(w);
+    await adminOf(w);
+    // .01 fils: the fake declines it, its answer heard only after the sweep and an admin's proposal.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        // While the call is out: past the day (and the admins' 14), another run's sweep marks it UNKNOWN.
+        clock.advanceBy(ESTABLISHED_MS);
+        await handoffOf(w).run();
+        const { id, status } = await transactionOf(w, request.id);
+        expect(status).toBe('UNKNOWN');
+        proposalIdOf(await proposed(await signedInAgain(first), id));
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await transactionOf(w, request.id)).toMatchObject({
+      status: 'FAILED',
+      rejectCode: expect.any(String) as unknown,
+    });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
+    expect(lines('handoff.refused_late')).toEqual([]);
+    // Ended by Tx B's move, in its transaction (handoff.ts passes `locked.openProposal`): nothing left open.
+    expect((await proposalEventsOf(w)).map(({ action, actorId }) => ({ action, actorId }))).toEqual([
+      { action: 'failure_proposal.made', actorId: first.userId },
+      { action: 'failure_proposal.ended', actorId: 'api' },
+    ]);
+    expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed', 'payment_mark_ended']);
   });
 });
 
