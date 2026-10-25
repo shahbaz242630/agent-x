@@ -355,9 +355,13 @@ export async function authorityOf(
   ) {
     throw new Error(`What a pending request names can't be believed: ${key.id}`);
   }
-  // Pending, it was decided (signRequest); none is a history that can't be believed (its alarm raised) or a bug.
+  // Pending, it was decided (signRequest): none is a history that can't be believed, its decision's event gone
+  // from the log (a chain wound back past it: gate H7, SEC-DB-11), so the alarm is raised and the organisation held.
   const decision = await decisionOf(tx, states, key);
-  if (decision === null) throw new Error(`A pending request has no decision to read: ${key.id}`);
+  if (decision === null) {
+    states.mismatch(SPEND_REQUESTS.subject, key);
+    throw new Error(`A pending request has no decision to read: ${key.id}`);
+  }
   const cancelledBy = await cancelledSinceOf(tx, states, orgId, decision.seq, {
     organization: orgId,
     agent: named.agentId,
