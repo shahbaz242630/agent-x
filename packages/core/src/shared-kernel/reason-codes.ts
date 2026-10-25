@@ -84,6 +84,12 @@ export const REASON_CODES = {
     "An amount weighed is not in the mandate's currency: the request's, or a limit the organisation's policies set (AED 20,000 a month per agent is the default in AED only). Amounts are never converted, so the request is refused. Nothing was reserved.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
+  FAILURE_PROPOSAL_OPEN:
+    "An admin has already proposed marking this payment failed, and it waits for a second admin to confirm it, so another proposal isn't made. Nothing was changed. Confirm or withdraw the one open.",
+  FAILURE_PROPOSAL_TOO_RECENT:
+    "You proposed marking this payment failed less than 24 hours ago. With one admin only in the organisation, you can confirm your own proposal a day after making it, so it isn't confirmed yet. Nothing was changed.",
+  FAILURE_PROPOSAL_YOURS:
+    'You proposed marking this payment failed, so a second admin of the organisation must confirm it, not you. Nothing was changed. Ask another admin to check with your bank and confirm it.',
   FORBIDDEN:
     "You're signed in, or an agent with its key, but this address answers other roles or callers only, so the request is refused.",
   HEADERS_TOO_LARGE:
@@ -147,6 +153,8 @@ export const REASON_CODES = {
     "The organisation isn't on its integrity hold, so there is no hold to investigate or clear. Nothing was changed.",
   NO_COUNTING_CONTACTS:
     'The organisation has no registered contact that counts yet (a contact counts 7 days after it is added), so no one can confirm a reset of a second factor. Add a contact, or wait until one counts.',
+  NO_FAILURE_PROPOSAL:
+    'No proposal to mark this payment failed is open, so there is nothing to confirm or withdraw. Nothing was changed. An admin proposes it first.',
   NO_INVESTIGATION:
     'The integrity hold can only be cleared after its investigation is recorded, and there is no investigation by this ID of the hold as it now stands. Record the investigation first.',
   ORGANIZATION_INVALID:

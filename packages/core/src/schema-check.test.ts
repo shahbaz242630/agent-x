@@ -94,6 +94,8 @@ describe('at start-up', () => {
         'spend_requests.requests': SPEND_REQUESTS_FIXED,
         // Phase 4 B3: a transaction's instruction and when it was opened.
         'transactions.transactions': ['instruction_id', 'created_at'],
+        // Gate H10 (0066): a proposal's payment, reference, proposer and when it was made.
+        'transactions.failure_proposals': ['transaction_id', 'evidence_ref', 'proposed_by', 'created_at'],
       },
     });
   });

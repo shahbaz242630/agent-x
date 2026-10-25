@@ -523,5 +523,13 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['org_id', 'about_id'],
       predicate: "(kind = 'payment_remittance'::text)",
     },
+    {
+      reason:
+        "One open proposal to mark a payment failed (Phase 4 gate H10; 0066): a second admin confirms the one open, never one of two. Partial as a payment's withdrawn and confirmed proposals stay for good",
+      table: 'transactions.failure_proposals',
+      name: 'one_open_proposal_a_payment',
+      columns: ['org_id', 'transaction_id'],
+      predicate: "(status = 'OPEN'::text)",
+    },
   ],
 };

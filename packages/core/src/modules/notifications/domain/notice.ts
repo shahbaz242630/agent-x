@@ -126,6 +126,12 @@ const MARKED_FAILED_KIND = 'payment_marked_failed';
  * a day.
  */
 const PAYMENT_ALERT_KINDS = ['payment_contradicted', 'payment_unproven', 'payment_still_unknown'] as const;
+/**
+ * The kinds that tell every admin an admin proposed marking a payment failed,
+ * a second admin to confirm it, or withdrew that (0066, gate H10), `aboutId`
+ * the transaction.
+ */
+const MARK_PROPOSAL_KINDS = ['payment_mark_proposed', 'payment_mark_withdrawn'] as const;
 
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,
@@ -144,6 +150,7 @@ export const NOTICE_KINDS = [
   REMITTANCE_NO_EMAIL_KIND,
   MARKED_FAILED_KIND,
   ...PAYMENT_ALERT_KINDS,
+  ...MARK_PROPOSAL_KINDS,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -183,7 +190,8 @@ export const isAboutAPayment = (kind: NoticeKind): boolean =>
   kind === REMITTANCE_KIND ||
   kind === REMITTANCE_NO_EMAIL_KIND ||
   kind === MARKED_FAILED_KIND ||
-  PAYMENT_ALERT_KINDS.some((each) => each === kind);
+  PAYMENT_ALERT_KINDS.some((each) => each === kind) ||
+  MARK_PROPOSAL_KINDS.some((each) => each === kind);
 
 /** Whether a kind is told to every admin and approver: what lets an agent spend, and what waits on them (0036, 0038, 0045). */
 export const isToAdminsAndApprovers = (kind: NoticeKind): boolean =>

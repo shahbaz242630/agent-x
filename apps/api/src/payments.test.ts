@@ -1,17 +1,20 @@
-// Phase 4 gate H10 (partner decision 38): the mark-failed routes over HTTP,
-// their use case a stub: what each hands it (the member, the idempotency
-// request, the payment's ID, the bank's evidence reference and the step-up),
-// the answers, who may call them before the use case runs, a body that can't
-// be one (no consequence confirmed among them), and the use case's own
-// refusals. What the use case does is mark-failed.db.test.ts.
+// Phase 4 gate H10 (partner decision 38 and its S145 heads-up): the
+// two-admin mark-failed routes over HTTP, their use case a stub: what each
+// hands it (the member, the idempotency request, the payment's ID, the bank's
+// evidence reference and the step-up), the answers, who may call them before
+// the use case runs, a body that can't be one (no consequence confirmed among
+// them), and the use case's own refusals. What the use case does is
+// mark-failed.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession } from '@agentx/core/modules/identity';
+import type { FailureProposalRecord } from '@agentx/core/modules/transactions';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import type { MarkAsked, Marked, PaymentMarks } from './payment-marks.ts';
+import type { PaymentMarks } from './payment-marks.ts';
+import type { Refused } from './refused.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { SessionMember } from './use-case-work.ts';
@@ -19,8 +22,10 @@ import type { SessionMember } from './use-case-work.ts';
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const KEY_ID = '0199a0f0-0000-7000-8000-0000000000b1';
 const PAYMENT_ID = '0199a0f0-0000-7000-8000-0000000000c1';
+const PROPOSAL_ID = '0199a0f0-0000-7000-8000-0000000000c2';
 const CHALLENGE_ID = '0199a0f0-0000-7000-8000-0000000000c9';
 const MEMBERSHIP_ID = '0199a0f0-0000-7000-8000-000000000033';
+const PROPOSER = '0199a0f0-0000-7000-8000-000000000044';
 const EVIDENCE = 'BANK-NACK-77311';
 const CONFIRMED = 'invoice_can_be_paid_again';
 
@@ -38,29 +43,65 @@ const LIVE: LiveSession = {
   idleEndsAt: new Date('2099-10-07T08:40:00.000Z'),
 };
 
+const PROPOSAL: FailureProposalRecord = {
+  id: PROPOSAL_ID,
+  transactionId: PAYMENT_ID,
+  evidenceRef: EVIDENCE,
+  proposedBy: PROPOSER,
+  status: 'OPEN',
+  createdAt: new Date('2026-10-14T09:00:00.000Z'),
+};
+const PROPOSAL_SHOWN = {
+  id: PROPOSAL_ID,
+  paymentId: PAYMENT_ID,
+  evidenceRef: EVIDENCE,
+  proposedBy: PROPOSER,
+  status: 'OPEN',
+  proposedAt: '2026-10-14T09:00:00.000Z',
+};
+
 type Role = 'admin' | 'approver' | 'developer' | 'viewer';
 
 interface Asked {
+  readonly step: string;
   readonly member: SessionMember;
   readonly idempotent: IdempotentRequest;
   readonly paymentId: string;
-  readonly evidenceRef: string;
+  readonly evidenceRef?: string;
   readonly stepUpChallengeId?: string;
 }
 
 afterEach(closeServers);
 
-/** A server whose use case answers `ask` and `confirm`, recording what it was asked, the member signed in as `role`. */
-async function withMarks(answers: { readonly ask?: MarkAsked; readonly confirm?: Marked } = {}, role: Role = 'admin') {
+const ASKED = { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID } as const;
+
+/** A server whose use case answers each step as given (or as it would), recording what it was asked, the member `role`. */
+async function withMarks(refusal?: Refused | { readonly outcome: 'conflict' | 'busy' }, role: Role = 'admin') {
   const asked: Asked[] = [];
   const marks: PaymentMarks = {
-    ask: (member, idempotent, paymentId, evidenceRef) => {
-      asked.push({ member, idempotent, paymentId, evidenceRef });
-      return Promise.resolve(answers.ask ?? { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID });
+    propose: (member, idempotent, paymentId, evidenceRef) => {
+      asked.push({ step: 'propose', member, idempotent, paymentId, evidenceRef });
+      return Promise.resolve(refusal ?? ASKED);
     },
-    confirm: (member, idempotent, paymentId, { evidenceRef, stepUpChallengeId }) => {
-      asked.push({ member, idempotent, paymentId, evidenceRef, stepUpChallengeId });
-      return Promise.resolve(answers.confirm ?? { outcome: 'marked', paymentId });
+    confirmProposal: (member, idempotent, paymentId, { evidenceRef, stepUpChallengeId }) => {
+      asked.push({ step: 'confirmProposal', member, idempotent, paymentId, evidenceRef, stepUpChallengeId });
+      return Promise.resolve(refusal ?? { outcome: 'proposed', proposal: PROPOSAL });
+    },
+    approve: (member, idempotent, paymentId) => {
+      asked.push({ step: 'approve', member, idempotent, paymentId });
+      return Promise.resolve(refusal ?? { ...ASKED, proposal: PROPOSAL });
+    },
+    confirmApproval: (member, idempotent, paymentId, stepUpChallengeId) => {
+      asked.push({ step: 'confirmApproval', member, idempotent, paymentId, stepUpChallengeId });
+      return Promise.resolve(refusal ?? { outcome: 'marked', paymentId });
+    },
+    withdraw: (member, idempotent, paymentId) => {
+      asked.push({ step: 'withdraw', member, idempotent, paymentId });
+      return Promise.resolve(refusal ?? ASKED);
+    },
+    confirmWithdrawal: (member, idempotent, paymentId, stepUpChallengeId) => {
+      asked.push({ step: 'confirmWithdrawal', member, idempotent, paymentId, stepUpChallengeId });
+      return Promise.resolve(refusal ?? { outcome: 'withdrawn', proposal: { ...PROPOSAL, status: 'WITHDRAWN' } });
     },
   };
   const app = await routeServer({
@@ -87,89 +128,123 @@ async function withMarks(answers: { readonly ask?: MarkAsked; readonly confirm?:
 }
 
 /** A signed-in member's JSON post, from our own origin. */
-const post = (url: string, idempotencyKey: string, payload: unknown): InjectOptions => ({
+const post = (path: string, payload: unknown, id = PAYMENT_ID): InjectOptions => ({
   method: 'POST',
-  url,
+  url: `/v1/payments/${id}/failure-proposal${path}`,
   headers: {
     cookie: `${SESSION_COOKIE}=${COOKIE}`,
     [ORGANIZATION_HEADER]: ORG,
     origin: PUBLIC_ORIGIN,
-    'idempotency-key': idempotencyKey,
+    'idempotency-key': `mark${path.replaceAll('/', '-')}`,
     'content-type': 'application/json',
   },
   payload: JSON.stringify(payload),
 });
 
-const BODY = { evidenceRef: EVIDENCE, confirmed: CONFIRMED };
+const PROPOSE = { evidenceRef: EVIDENCE, confirmed: CONFIRMED };
+const STEPPED = { stepUpChallengeId: CHALLENGE_ID };
 
-const ask = (payload: unknown, id = PAYMENT_ID) => post(`/v1/payments/${id}/mark-failed`, 'mark-1', payload);
+/** Every step, with a body each takes. */
+const STEPS = [
+  ['propose', '', PROPOSE],
+  ['confirm a proposal', '/confirm', { ...PROPOSE, ...STEPPED }],
+  ['approve', '/approve', { confirmed: CONFIRMED }],
+  ['confirm an approval', '/approve/confirm', { confirmed: CONFIRMED, ...STEPPED }],
+  ['withdraw', '/withdraw', {}],
+  ['confirm a withdrawal', '/withdraw/confirm', STEPPED],
+] as const;
 
-const confirm = (payload: unknown) => post(`/v1/payments/${PAYMENT_ID}/mark-failed/confirm`, 'mark-2', payload);
-
-describe('POST /v1/payments/{id}/mark-failed and …/confirm: an admin marks a payment failed (H10; decision 38)', () => {
-  it('hands the admin’s ask and confirm to the use case, and answers 202 then 200 with the payment FAILED', async () => {
+describe('POST /v1/payments/{id}/failure-proposal…: two admins mark a payment failed (H10; decision 38)', () => {
+  it('hands each step to the use case, and answers 202, 201, 202 with the proposal, 200 FAILED, 202, 200', async () => {
     const { app, asked } = await withMarks();
 
-    const asking = await app.inject(ask(BODY));
-    expect(asking.statusCode).toBe(202);
-    expect(asking.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID });
-    const confirming = await app.inject(confirm({ ...BODY, stepUpChallengeId: CHALLENGE_ID }));
-    expect(confirming.statusCode).toBe(200);
-    expect(confirming.json()).toEqual({ id: PAYMENT_ID, status: 'FAILED' });
+    const answers = [];
+    for (const [, path, body] of STEPS) answers.push(await app.inject(post(path, body)));
 
-    expect(asked).toEqual([
-      expect.objectContaining({ paymentId: PAYMENT_ID, evidenceRef: EVIDENCE }),
-      expect.objectContaining({ evidenceRef: EVIDENCE, stepUpChallengeId: CHALLENGE_ID }),
+    expect(answers.map((answer) => answer.statusCode)).toEqual([202, 201, 202, 200, 202, 200]);
+    expect(answers.map((answer) => answer.json<unknown>())).toEqual([
+      STEPPED,
+      PROPOSAL_SHOWN,
+      { ...STEPPED, proposal: PROPOSAL_SHOWN },
+      { id: PAYMENT_ID, status: 'FAILED' },
+      STEPPED,
+      { ...PROPOSAL_SHOWN, status: 'WITHDRAWN' },
+    ]);
+    expect(
+      asked.map(({ step, paymentId, evidenceRef, stepUpChallengeId }) => ({
+        step,
+        paymentId,
+        evidenceRef,
+        stepUpChallengeId,
+      })),
+    ).toEqual([
+      { step: 'propose', paymentId: PAYMENT_ID, evidenceRef: EVIDENCE, stepUpChallengeId: undefined },
+      { step: 'confirmProposal', paymentId: PAYMENT_ID, evidenceRef: EVIDENCE, stepUpChallengeId: CHALLENGE_ID },
+      { step: 'approve', paymentId: PAYMENT_ID, evidenceRef: undefined, stepUpChallengeId: undefined },
+      { step: 'confirmApproval', paymentId: PAYMENT_ID, evidenceRef: undefined, stepUpChallengeId: CHALLENGE_ID },
+      { step: 'withdraw', paymentId: PAYMENT_ID, evidenceRef: undefined, stepUpChallengeId: undefined },
+      { step: 'confirmWithdrawal', paymentId: PAYMENT_ID, evidenceRef: undefined, stepUpChallengeId: CHALLENGE_ID },
     ]);
     expect(asked[0]?.member).toMatchObject({ orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId });
     expect(asked.map(({ idempotent }) => idempotent.operation)).toEqual([
-      'payments.mark-failed',
-      'payments.mark-failed.confirm',
+      'payments.failure-proposal',
+      'payments.failure-proposal.confirm',
+      'payments.failure-proposal.approve',
+      'payments.failure-proposal.approve.confirm',
+      'payments.failure-proposal.withdraw',
+      'payments.failure-proposal.withdraw.confirm',
     ]);
   });
 
-  it.each(['approver', 'developer', 'viewer'] as const)('refuses a %s before the use case runs', async (role) => {
-    const { app, asked } = await withMarks({}, role);
+  it.each(['approver', 'developer', 'viewer'] as const)(
+    'refuses a %s on every step before the use case runs',
+    async (role) => {
+      const { app, asked } = await withMarks(undefined, role);
 
-    expect((await app.inject(ask(BODY))).statusCode).toBe(403);
-    expect((await app.inject(confirm({ ...BODY, stepUpChallengeId: CHALLENGE_ID }))).statusCode).toBe(403);
-    expect(asked).toEqual([]);
-  });
+      for (const [, path, body] of STEPS) expect((await app.inject(post(path, body))).statusCode).toBe(403);
+      expect(asked).toEqual([]);
+    },
+  );
 
-  it('refuses an agent’s key on either, before the use case runs (an agent never marks a payment)', async () => {
+  it('refuses an agent’s key on every step before the use case runs (an agent never marks a payment)', async () => {
     const { app, asked } = await withMarks();
     const headers = { authorization: `Bearer ${KEY}`, 'idempotency-key': 'x' };
 
-    expect([401, 403]).toContain((await app.inject({ ...ask(BODY), headers })).statusCode);
-    const confirming = await app.inject({ ...confirm({ ...BODY, stepUpChallengeId: CHALLENGE_ID }), headers });
-    expect([401, 403]).toContain(confirming.statusCode);
+    for (const [, path, body] of STEPS) {
+      expect([401, 403]).toContain((await app.inject({ ...post(path, body), headers })).statusCode);
+    }
     expect(asked).toEqual([]);
   });
 
   it.each([
-    ['nothing', {}],
-    ['no consequence confirmed', { evidenceRef: EVIDENCE }],
-    ['another consequence', { evidenceRef: EVIDENCE, confirmed: 'yes' }],
-    ['no evidence reference', { confirmed: CONFIRMED }],
-    ['a reference too short', { ...BODY, evidenceRef: 'AB' }],
-    ['a reference over 64', { ...BODY, evidenceRef: `A${'b'.repeat(64)}` }],
-    ['a reference with a space', { ...BODY, evidenceRef: 'BANK NACK 1' }],
-    ['a reference starting with a mark', { ...BODY, evidenceRef: '-BANK-1' }],
-    ['another field', { ...BODY, amount: 1 }],
-  ])('refuses %s before the use case runs', async (_what, body) => {
+    ['nothing', '', {}],
+    ['no consequence confirmed', '', { evidenceRef: EVIDENCE }],
+    ['another consequence', '', { evidenceRef: EVIDENCE, confirmed: 'yes' }],
+    ['no evidence reference', '', { confirmed: CONFIRMED }],
+    ['a reference too short', '', { ...PROPOSE, evidenceRef: 'AB' }],
+    ['a reference over 64', '', { ...PROPOSE, evidenceRef: `A${'b'.repeat(64)}` }],
+    ['a reference with a space', '', { ...PROPOSE, evidenceRef: 'BANK NACK 1' }],
+    ['a reference starting with a mark', '', { ...PROPOSE, evidenceRef: '-BANK-1' }],
+    ['another field', '', { ...PROPOSE, amount: 1 }],
+    ['a proposal’s confirm without its step-up', '/confirm', PROPOSE],
+    ['an approval without the consequence', '/approve', {}],
+    ['an approval with a reference of its own', '/approve', { confirmed: CONFIRMED, evidenceRef: EVIDENCE }],
+    ['an approval’s confirm without its step-up', '/approve/confirm', { confirmed: CONFIRMED }],
+    ['an approval’s confirm without the consequence', '/approve/confirm', STEPPED],
+    ['a withdrawal with a field', '/withdraw', { evidenceRef: EVIDENCE }],
+    ['a withdrawal’s confirm without its step-up', '/withdraw/confirm', {}],
+  ])('refuses %s before the use case runs', async (_what, path, body) => {
     const { app, asked } = await withMarks();
 
-    expect((await app.inject(ask(body))).statusCode).toBe(400);
-    expect((await app.inject(confirm({ ...body, stepUpChallengeId: CHALLENGE_ID }))).statusCode).toBe(400);
+    expect((await app.inject(post(path, body))).statusCode).toBe(400);
     expect(asked).toEqual([]);
   });
 
-  it('takes a reference of 64, and refuses a confirm without its step-up or a payment ID that isn’t one', async () => {
+  it('takes a reference of 64 of every mark allowed, and refuses a payment ID that isn’t one', async () => {
     const { app, asked } = await withMarks();
 
-    expect((await app.inject(ask({ ...BODY, evidenceRef: `A.b_c/d-${'e'.repeat(56)}` }))).statusCode).toBe(202);
-    expect((await app.inject(confirm(BODY))).statusCode).toBe(400);
-    expect((await app.inject(ask(BODY, 'not-an-id'))).statusCode).toBe(400);
+    expect((await app.inject(post('', { ...PROPOSE, evidenceRef: `A.b_c/d-${'e'.repeat(56)}` }))).statusCode).toBe(202);
+    expect((await app.inject(post('', PROPOSE, 'not-an-id'))).statusCode).toBe(400);
     expect(asked).toHaveLength(1);
   });
 
@@ -177,27 +252,29 @@ describe('POST /v1/payments/{id}/mark-failed and …/confirm: an admin marks a p
     [404, 'NOT_FOUND'],
     [409, 'PAYMENT_NOT_UNKNOWN'],
     [409, 'PAYMENT_TOO_RECENT'],
+    [409, 'FAILURE_PROPOSAL_OPEN'],
+    [409, 'NO_FAILURE_PROPOSAL'],
+    [409, 'FAILURE_PROPOSAL_TOO_RECENT'],
+    [403, 'FAILURE_PROPOSAL_YOURS'],
     [403, 'STEP_UP_FAILED'],
     [503, 'INTEGRITY_FAILED'],
-  ] as const)('answers the use case’s refusal of either: %i %s', async (status, code) => {
-    const { app } = await withMarks({
-      ask: { outcome: 'refused', status, code },
-      confirm: { outcome: 'refused', status, code },
-    });
+  ] as const)('answers the use case’s refusal of every step: %i %s', async (status, code) => {
+    const { app } = await withMarks({ outcome: 'refused', status, code });
 
-    for (const sent of [ask(BODY), confirm({ ...BODY, stepUpChallengeId: CHALLENGE_ID })]) {
-      const response = await app.inject(sent);
+    for (const [, path, body] of STEPS) {
+      const response = await app.inject(post(path, body));
       expect(response.statusCode).toBe(status);
       expect(response.json()).toMatchObject({ error: { code } });
     }
   });
 
-  it('answers a key used for another request, and one still being done, as the idempotency store says', async () => {
-    const reused = await withMarks({ ask: { outcome: 'conflict' }, confirm: { outcome: 'conflict' } });
-    expect((await reused.app.inject(ask(BODY))).json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_REUSED' } });
-    const busy = await withMarks({ confirm: { outcome: 'busy' } });
-    expect((await busy.app.inject(confirm({ ...BODY, stepUpChallengeId: CHALLENGE_ID }))).json()).toMatchObject({
-      error: { code: 'IDEMPOTENCY_KEY_BUSY' },
-    });
+  it.each([
+    ['conflict', 'IDEMPOTENCY_KEY_REUSED'],
+    ['busy', 'IDEMPOTENCY_KEY_BUSY'],
+  ] as const)('answers a key %s on every step as the idempotency store says', async (outcome, code) => {
+    const { app } = await withMarks({ outcome });
+
+    for (const [, path, body] of STEPS)
+      expect((await app.inject(post(path, body))).json()).toMatchObject({ error: { code } });
   });
 });

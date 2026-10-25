@@ -30,7 +30,7 @@
 // move its machine doesn't allow (an UNKNOWN said to be under way) keeps the
 // bank's facts alone. A payment already settled that the bank now contradicts
 // (credited, then Rejected) stays as it is, the facts kept, and an alert raised
-// (rail map §4): a paid or failed one (our team's mark among them, E1c) is
+// (rail map §4): a paid or failed one (two admins' mark among them, H10) is
 // checked every 30th run for 7 days from its last move (gate H3). An answer
 // older than the word kept is one already read, and changes nothing. An
 // UNKNOWN unresolved past a day is said each time it is checked, for
@@ -119,7 +119,7 @@ const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] a
 
 /**
  * The settled ones still watched for PAID_WATCH_MS from their last move: paid,
- * or failed (our team's mark among them, E1c: a week from the mark, gate H3).
+ * or failed (two admins' mark among them, H10: a week from the mark, gate H3).
  */
 const WATCHED = ['SUCCEEDED', 'FAILED'] as const;
 

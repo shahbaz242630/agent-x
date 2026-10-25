@@ -1,28 +1,35 @@
-// Phase 4 gate H10 (partner decision 38, replacing decision 35; ADR-007 §10;
-// Rule Book §1.9): an admin marks an UNKNOWN payment failed on their bank's
-// written word, through the use cases the routes call, on the real migrated
-// schema as the app role. Asked with the bank's evidence reference, signed in
-// again with a passkey and confirmed: FAILED, its held money and its order
-// given back, `transaction.fail` on the organisation's chain as the admin's,
-// naming the reference, the statement confirmed and the step-up's evidence,
-// every admin told. A frozen organisation still marks. A payment not UNKNOWN
-// is PAYMENT_NOT_UNKNOWN; within a day of its hand-off PAYMENT_TOO_RECENT;
-// another organisation's or none NOT_FOUND; an approver, a developer or a
-// viewer FORBIDDEN; one that can't be believed INTEGRITY_FAILED, its alarm
-// raised. A step-up signed in with an app code, asked for another payment or
-// another reference is STEP_UP_FAILED; one settled since its ask is refused. The
-// key answers its own replay. The bank check still watches it a week: paid
-// after all, it is said. With the bank check at the same payment (forced),
-// whichever takes it first settles it and the other finds it settled. The
-// routes' answers are payments.test.ts.
+// Phase 4 gate H10 (partner decision 38, replacing decision 35, and its S145
+// heads-up; ADR-007 §10; Rule Book §1.9): two admins mark an UNKNOWN payment
+// failed on their bank's written word, through the use cases the routes call,
+// on the real migrated schema as the app role.
+// - One admin proposes, with the bank's reference and a passkey: the proposal
+//   OPEN and signed as theirs, every admin told, the payment as it was.
+// - A second admin confirms with their own passkey: FAILED, its held money
+//   and its order given back, `transaction.fail` naming the reference, both
+//   admins, the statement confirmed and the step-up's evidence; the proposal
+//   CONFIRMED; every admin told. The proposer can't confirm while another
+//   admin is active (FAILURE_PROPOSAL_YOURS); a lone admin can, a day on
+//   (FAILURE_PROPOSAL_TOO_RECENT before).
+// - Any admin withdraws one, every admin told; one open a payment
+//   (FAILURE_PROPOSAL_OPEN); none open is NO_FAILURE_PROPOSAL.
+// - A payment not UNKNOWN is PAYMENT_NOT_UNKNOWN; within a day of its hand-off
+//   PAYMENT_TOO_RECENT; another organisation's or none NOT_FOUND; an approver,
+//   a developer or a viewer FORBIDDEN; a record that can't be believed
+//   INTEGRITY_FAILED, its alarm raised. A step-up signed in with an app code,
+//   or asked for another payment, another reference, another proposal or the
+//   payment as it stood before the bank's word since, is STEP_UP_FAILED.
+// - A frozen organisation still marks. The key answers its own replay. The
+//   bank check still watches it a week. With the bank check at the same
+//   payment (forced), whichever takes it first settles it.
+// The routes' answers are payments.test.ts.
 import { withSignedStates } from '@agentx/core/modules/audit';
+import { createSessions, createStepUpChallenges } from '@agentx/core/modules/identity';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
-import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { MARK_FAILED_AFTER_MS, markFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
-import { TRANSACTIONS } from '@agentx/core/modules/transactions';
+import { FAILURE_PROPOSALS, noteTransactionFacts, TRANSACTIONS } from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -39,15 +46,20 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import { createHandoff } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { askedFor, keys, type Member, OPERATOR, refused, type World } from './mandate-world.helper.test.ts';
+import { askedFor, keys, type Member, OPERATOR, PASSKEY, refused, type World } from './mandate-world.helper.test.ts';
 import { createPaymentChecks } from './payment-checks.ts';
 import {
+  APPROVE_CONFIRM_OPERATION,
+  APPROVE_OPERATION,
   createPaymentMarks,
-  MARK_FAILED_CONFIRM_OPERATION,
+  LONE_ADMIN_WAIT_MS,
   MARK_FAILED_CONFIRMED,
-  MARK_FAILED_OPERATION,
   MARK_FAILED_STATEMENT_VERSION,
   type PaymentMarks,
+  PROPOSE_CONFIRM_OPERATION,
+  PROPOSE_OPERATION,
+  WITHDRAW_CONFIRM_OPERATION,
+  WITHDRAW_OPERATION,
 } from './payment-marks.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
@@ -139,49 +151,100 @@ async function handedOff(fils: bigint, { checked = true } = {}) {
   return { w, acting, request, transaction: await transactionOf(w, request.id) };
 }
 
-/** An admin signed in now: a session opened before the day the mark waits for has ended (12 hours at most). */
+/** A new admin signed in now: a session opened before the day the mark waits for has ended (12 hours at most). */
 const adminOf = (w: World) => member(w.org, 'admin');
 
-const asking = (who: Member, paymentId: string, evidenceRef = EVIDENCE) =>
-  marks.ask(who, keyed(who, MARK_FAILED_OPERATION), paymentId, evidenceRef, CORRELATION);
+/** The same person signed in again now, with a passkey: a new session, their membership as it was. */
+async function signedInAgain(who: Member): Promise<Member> {
+  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const { sessionId } = await sessions.open(app, who.userId, {
+    idpSessionId: 'V1_9',
+    authTime: clock.now(),
+    amr: [...PASSKEY],
+  });
+  return { ...who, sessionId };
+}
 
-const confirming = (
-  who: Member,
-  paymentId: string,
-  stepUpChallengeId: string,
-  evidenceRef = EVIDENCE,
-  key?: IdempotentRequest,
-) =>
-  marks.confirm(
+/** An UNKNOWN payment past the day, and two of its organisation's admins signed in now. */
+async function markable(fils = REJECTED_UNPROVEN) {
+  const handed = await handedOff(fils, { checked: fils === REJECTED_UNPROVEN });
+  clock.advanceBy(MARK_FAILED_AFTER_MS);
+  return { ...handed, first: await adminOf(handed.w), second: await adminOf(handed.w) };
+}
+
+const proposing = (who: Member, paymentId: string, evidenceRef = EVIDENCE) =>
+  marks.propose(who, keyed(who, PROPOSE_OPERATION), paymentId, evidenceRef, CORRELATION);
+const confirmingProposal = (who: Member, paymentId: string, challengeId: string, evidenceRef = EVIDENCE) =>
+  marks.confirmProposal(
     who,
-    key ?? keyed(who, MARK_FAILED_CONFIRM_OPERATION),
+    keyed(who, PROPOSE_CONFIRM_OPERATION),
     paymentId,
-    { evidenceRef, stepUpChallengeId },
+    { evidenceRef, stepUpChallengeId: challengeId },
     CORRELATION,
   );
+const approving = (who: Member, paymentId: string) =>
+  marks.approve(who, keyed(who, APPROVE_OPERATION), paymentId, CORRELATION);
+const confirmingApproval = (who: Member, paymentId: string, challengeId: string, key?: IdempotentRequest) =>
+  marks.confirmApproval(who, key ?? keyed(who, APPROVE_CONFIRM_OPERATION), paymentId, challengeId, CORRELATION);
+const withdrawing = (who: Member, paymentId: string) =>
+  marks.withdraw(who, keyed(who, WITHDRAW_OPERATION), paymentId, CORRELATION);
+const confirmingWithdrawal = (who: Member, paymentId: string, challengeId: string) =>
+  marks.confirmWithdrawal(who, keyed(who, WITHDRAW_CONFIRM_OPERATION), paymentId, challengeId, CORRELATION);
 
-/** Asks, signs in again with `amr` and confirms: the confirm's answer. */
-async function marked(who: Member, paymentId: string, amr?: readonly string[]) {
-  const challengeId = askedFor(await asking(who, paymentId));
+/** Proposed as the route makes it: asked, signed in again with `amr` (a passkey), confirmed. */
+async function proposed(who: Member, paymentId: string, amr?: readonly string[]) {
+  const challengeId = askedFor(await proposing(who, paymentId));
   await stepUp(who, challengeId, amr);
-  return confirming(who, paymentId, challengeId);
+  return confirmingProposal(who, paymentId, challengeId);
+}
+
+/** Approved as the route makes it: asked, signed in again with `amr` (a passkey), confirmed. */
+async function approved(who: Member, paymentId: string, amr?: readonly string[]) {
+  const challengeId = askedFor(await approving(who, paymentId));
+  await stepUp(who, challengeId, amr);
+  return confirmingApproval(who, paymentId, challengeId);
+}
+
+/** Withdrawn as the route makes it. */
+async function withdrawn(who: Member, paymentId: string) {
+  const challengeId = askedFor(await withdrawing(who, paymentId));
+  await stepUp(who, challengeId);
+  return confirmingWithdrawal(who, paymentId, challengeId);
 }
 
 /** The signed moves of the transaction, in order, with their actors and details. */
 const movesOf = (w: World, transactionId: string) => shared.eventsAbout(w.org, transactionId, TRANSACTIONS.subject);
 
-/** The world's notices that a payment was marked failed, by the transaction each is about. */
+/** The organisation's proposals' events, oldest first. */
+const proposalEventsOf = (w: World) =>
+  withTenant(app, w.org, async (tx) =>
+    (
+      await tx
+        .selectFrom('audit.events')
+        .select(['action', 'actor_id', 'details'])
+        .where('subject_type', '=', FAILURE_PROPOSALS.subject)
+        .orderBy('seq')
+        .execute()
+    ).map(({ action, actor_id, details }) => ({
+      action,
+      actorId: actor_id,
+      details: JSON.parse(details) as Record<string, unknown>,
+    })),
+  );
+
+/** The world's notices about payments marked, proposed or withdrawn, by kind and the transaction each is about. */
 const markNoticesOf = (w: World) =>
   withTenant(app, w.org, async (tx) =>
     (
       await tx
         // A global table (0021): the world's own organisation's notices alone.
         .selectFrom('notifications.outbox')
-        .select(['about_id', 'recipient_user_id'])
+        .select(['kind', 'about_id', 'recipient_user_id'])
         .where('org_id', '=', w.org)
-        .where('kind', '=', 'payment_marked_failed')
+        .where('kind', 'in', ['payment_marked_failed', 'payment_mark_proposed', 'payment_mark_withdrawn'])
+        .orderBy('id')
         .execute()
-    ).map(({ about_id, recipient_user_id }) => ({ aboutId: about_id, to: recipient_user_id })),
+    ).map(({ kind, about_id, recipient_user_id }) => ({ kind, aboutId: about_id, to: recipient_user_id })),
   );
 
 /** The IDs of the organisation's integrity holds, on its chain. */
@@ -200,6 +263,12 @@ const freeze = (w: World) =>
       details: {},
     }),
   );
+
+/** The proposal's ID, from its answer. */
+const proposalIdOf = (answer: Awaited<ReturnType<PaymentMarks['confirmProposal']>>): string => {
+  if (answer.outcome !== 'proposed') throw new Error(`not proposed: ${JSON.stringify(answer)}`);
+  return answer.proposal.id;
+};
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -246,14 +315,47 @@ beforeEach(() => {
   });
 });
 
-describe('an UNKNOWN payment marked failed by an admin (H10; decision 38; ADR-007 §10)', () => {
-  it('moves it to FAILED, gives back its money and its order, signs it as the admin’s and tells every admin', async () => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    expect(transaction).toMatchObject({ status: 'UNKNOWN', providerStatus: 'Rejected' });
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
+describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)', () => {
+  it('a proposal leaves the payment as it was, signs it as the proposer’s and tells every admin', async () => {
+    const { w, request, transaction, first } = await markable();
 
-    expect(await marked(admin, transaction.id)).toEqual({ outcome: 'marked', paymentId: transaction.id });
+    const answer = await proposed(first, transaction.id);
+
+    expect(answer).toMatchObject({
+      outcome: 'proposed',
+      proposal: { transactionId: transaction.id, evidenceRef: EVIDENCE, proposedBy: first.userId, status: 'OPEN' },
+    });
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(await proposalEventsOf(w)).toEqual([
+      {
+        action: 'failure_proposal.made',
+        actorId: first.userId,
+        details: expect.objectContaining({
+          transactionId: transaction.id,
+          confirmed: MARK_FAILED_CONFIRMED,
+          statementVersion: String(MARK_FAILED_STATEMENT_VERSION),
+          methods: 'pwd user mfa',
+        }) as unknown,
+      },
+    ]);
+    expect(await markNoticesOf(w)).toEqual([{ kind: 'payment_mark_proposed', aboutId: transaction.id, to: null }]);
+  });
+
+  it('a second admin sees the proposal, confirms it, and the payment is FAILED, its money and its order given back', async () => {
+    const { w, request, transaction, first, second } = await markable();
+    const proposal = proposalIdOf(await proposed(first, transaction.id));
+
+    const asked = await approving(second, transaction.id);
+    expect(asked).toMatchObject({
+      outcome: 'asked',
+      proposal: { id: proposal, evidenceRef: EVIDENCE, proposedBy: first.userId, status: 'OPEN' },
+    });
+    await stepUp(second, askedFor(asked));
+    expect(await confirmingApproval(second, transaction.id, askedFor(asked))).toEqual({
+      outcome: 'marked',
+      paymentId: transaction.id,
+    });
 
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED', providerStatus: 'Rejected' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
@@ -263,31 +365,136 @@ describe('an UNKNOWN payment marked failed by an admin (H10; decision 38; ADR-00
       details: {
         via: 'admin',
         evidenceRef: EVIDENCE,
+        proposalId: proposal,
+        proposedBy: first.userId,
         confirmed: MARK_FAILED_CONFIRMED,
         statementVersion: String(MARK_FAILED_STATEMENT_VERSION),
         methods: 'pwd user mfa',
         statusFrom: 'UNKNOWN',
       },
     });
-    // To no one person: every admin, found as it is sent.
-    expect(await markNoticesOf(w)).toEqual([{ aboutId: transaction.id, to: null }]);
+    expect((await proposalEventsOf(w)).map(({ action, actorId }) => ({ action, actorId }))).toEqual([
+      { action: 'failure_proposal.made', actorId: first.userId },
+      { action: 'failure_proposal.confirmed', actorId: second.userId },
+    ]);
+    expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual([
+      'payment_mark_proposed',
+      'payment_marked_failed',
+    ]);
   });
 
-  it('is marked while the organisation is frozen: a mark only gives capacity back (as a reject, decision 3)', async () => {
+  it('refuses the proposer’s own confirm while another admin is active: FAILURE_PROPOSAL_YOURS, a day on too', async () => {
+    const { w, request, transaction, first } = await markable();
+    await proposed(first, transaction.id);
+
+    expect(await approving(first, transaction.id)).toEqual(refused(403, 'FAILURE_PROPOSAL_YOURS'));
+    clock.advanceBy(LONE_ADMIN_WAIT_MS + 1);
+    const again = await signedInAgain(first);
+    expect(await approving(again, transaction.id)).toEqual(refused(403, 'FAILURE_PROPOSAL_YOURS'));
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+  });
+
+  it('lets a lone admin confirm their own proposal a day after making it, never before (partner S113)', async () => {
     const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
     clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
+    // The world's admin is its only one.
+    const lone = await signedInAgain(w.admin);
+    await proposed(lone, transaction.id);
+
+    clock.advanceBy(LONE_ADMIN_WAIT_MS);
+    const early = await signedInAgain(lone);
+    expect(await approving(early, transaction.id)).toEqual(refused(409, 'FAILURE_PROPOSAL_TOO_RECENT'));
+
+    clock.advanceBy(1);
+    const due = await signedInAgain(lone);
+    expect(await approved(due, transaction.id)).toMatchObject({ outcome: 'marked' });
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
+  });
+
+  it('counts only active admins: an approver joining doesn’t stop a lone admin', async () => {
+    const { w, transaction } = await handedOff(REJECTED_UNPROVEN);
+    clock.advanceBy(MARK_FAILED_AFTER_MS);
+    const lone = await signedInAgain(w.admin);
+    await member(w.org, 'approver');
+    await proposed(lone, transaction.id);
+    clock.advanceBy(LONE_ADMIN_WAIT_MS + 1);
+
+    expect(await approved(await signedInAgain(lone), transaction.id)).toMatchObject({ outcome: 'marked' });
+  });
+
+  it('keeps one proposal open a payment: a second is FAILURE_PROPOSAL_OPEN, until it is withdrawn', async () => {
+    const { w, request, transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+
+    expect(await proposing(second, transaction.id)).toEqual(refused(409, 'FAILURE_PROPOSAL_OPEN'));
+
+    expect(await withdrawn(second, transaction.id)).toMatchObject({
+      outcome: 'withdrawn',
+      proposal: { status: 'WITHDRAWN' },
+    });
+    expect(await proposed(second, transaction.id)).toMatchObject({
+      outcome: 'proposed',
+      proposal: { proposedBy: second.userId, status: 'OPEN' },
+    });
+    expect(await approved(first, transaction.id)).toMatchObject({ outcome: 'marked' });
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
+  });
+
+  it('is withdrawn by its proposer or another admin, every admin told, the payment as it was', async () => {
+    const { w, request, transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+    expect(await withdrawn(first, transaction.id)).toMatchObject({ outcome: 'withdrawn' });
+    await proposed(first, transaction.id);
+    expect(await withdrawn(second, transaction.id)).toMatchObject({ outcome: 'withdrawn' });
+
+    expect(await approving(second, transaction.id)).toEqual(refused(409, 'NO_FAILURE_PROPOSAL'));
+    expect(await withdrawing(second, transaction.id)).toEqual(refused(409, 'NO_FAILURE_PROPOSAL'));
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual([
+      'payment_mark_proposed',
+      'payment_mark_withdrawn',
+      'payment_mark_proposed',
+      'payment_mark_withdrawn',
+    ]);
+    expect((await proposalEventsOf(w)).map(({ action, actorId }) => ({ action, actorId }))).toEqual([
+      { action: 'failure_proposal.made', actorId: first.userId },
+      { action: 'failure_proposal.withdrawn', actorId: first.userId },
+      { action: 'failure_proposal.made', actorId: first.userId },
+      { action: 'failure_proposal.withdrawn', actorId: second.userId },
+    ]);
+  });
+
+  it('marks while the organisation is frozen: nothing here spends (as a reject, decision 3)', async () => {
+    const { w, request, transaction, first, second } = await markable();
     await freeze(w);
 
-    expect(await marked(admin, transaction.id)).toMatchObject({ outcome: 'marked' });
+    await proposed(first, transaction.id);
+    expect(await approved(second, transaction.id)).toMatchObject({ outcome: 'marked' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
   });
 
+  it('answers the confirm’s key’s replay as before: one move, one notice; asked again, PAYMENT_NOT_UNKNOWN', async () => {
+    const { w, transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+    const challengeId = askedFor(await approving(second, transaction.id));
+    await stepUp(second, challengeId);
+    const key = keyed(second, APPROVE_CONFIRM_OPERATION, 'approve-once');
+
+    const once = await confirmingApproval(second, transaction.id, challengeId, key);
+    expect(once).toEqual({ outcome: 'marked', paymentId: transaction.id });
+    expect(await confirmingApproval(second, transaction.id, challengeId, key)).toEqual(once);
+
+    expect((await movesOf(w, transaction.id)).filter(({ action }) => action === 'transaction.fail')).toHaveLength(1);
+    expect((await markNoticesOf(w)).filter(({ kind }) => kind === 'payment_marked_failed')).toHaveLength(1);
+    expect(await approving(first, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
+    expect(await proposing(first, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
+  });
+
   it('is still watched by the bank check: the bank paying it after all is said, never applied (rail map §4)', async () => {
-    const { w, request, transaction } = await handedOff(ANSWER_LOST, { checked: false });
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
-    await marked(admin, transaction.id);
+    const { w, request, transaction, first, second } = await markable(ANSWER_LOST);
+    await proposed(first, transaction.id);
+    await approved(second, transaction.id);
 
     // A new check's first run checks every one, the watched among them.
     await checksOf(w).run();
@@ -301,159 +508,165 @@ describe('an UNKNOWN payment marked failed by an admin (H10; decision 38; ADR-00
       expect.objectContaining({ transactionId: transaction.id, status: 'FAILED' }),
     ]);
   });
+});
 
-  it('says nothing more of one the bank still calls rejected', async () => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
-    await marked(admin, transaction.id);
-
-    await checksOf(w).run();
-
-    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
-    expect(lines('payment_check.contradicts')).toEqual([]);
-  });
-
-  it('answers its key’s replay as before, one move and one notice; asked again, it is PAYMENT_NOT_UNKNOWN', async () => {
-    const { w, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
-    const challengeId = askedFor(await asking(admin, transaction.id));
-    await stepUp(admin, challengeId);
-    const key = keyed(admin, MARK_FAILED_CONFIRM_OPERATION, 'mark-once');
-
-    const once = await confirming(admin, transaction.id, challengeId, EVIDENCE, key);
-    expect(once).toEqual({ outcome: 'marked', paymentId: transaction.id });
-    expect(await confirming(admin, transaction.id, challengeId, EVIDENCE, key)).toEqual(once);
-
-    expect((await movesOf(w, transaction.id)).filter(({ action }) => action === 'transaction.fail')).toHaveLength(1);
-    expect(await markNoticesOf(w)).toHaveLength(1);
-    expect(await asking(admin, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
-  });
-
-  it('refuses one not UNKNOWN as PAYMENT_NOT_UNKNOWN, before any step-up, changing nothing', async () => {
+describe('refused, changing nothing', () => {
+  it('a payment not UNKNOWN: PAYMENT_NOT_UNKNOWN, before any step-up', async () => {
     const { w, request, transaction } = await handedOff(0n, { checked: false });
     expect(transaction.status).toBe('PROCESSING');
     clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
 
-    expect(await asking(admin, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
-
-    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });
+    expect(await proposing(await adminOf(w), transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.PROCESSING);
     expect(await markNoticesOf(w)).toEqual([]);
   });
 
-  it('refuses one within a day of its hand-off as PAYMENT_TOO_RECENT, and marks it just past', async () => {
+  it('a payment within a day of its hand-off: PAYMENT_TOO_RECENT, proposed just past it', async () => {
     const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
     // Its hand-off was two steps ago: a day on from it, to the millisecond, is still within.
     clock.advanceBy(MARK_FAILED_AFTER_MS - 2 * STEP);
     const admin = await adminOf(w);
 
-    expect(await asking(admin, transaction.id)).toEqual(refused(409, 'PAYMENT_TOO_RECENT'));
+    expect(await proposing(admin, transaction.id)).toEqual(refused(409, 'PAYMENT_TOO_RECENT'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
-    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
 
     clock.advanceBy(1);
-    expect(await marked(admin, transaction.id)).toMatchObject({ outcome: 'marked' });
+    expect(await proposed(admin, transaction.id)).toMatchObject({ outcome: 'proposed' });
   });
 
-  it('refuses another organisation’s payment and none as NOT_FOUND', async () => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
+  it('another organisation’s payment, or none: NOT_FOUND, on every step', async () => {
+    const { w, request, transaction, first } = await markable();
+    await proposed(first, transaction.id);
     const other = await ready();
+    const stranger = await adminOf(other.w);
 
-    expect(await asking(other.w.admin, transaction.id)).toEqual(refused(404, 'NOT_FOUND'));
-    expect(await asking(admin, ids.next())).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await proposing(stranger, transaction.id)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await approving(stranger, transaction.id)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await withdrawing(stranger, transaction.id)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await proposing(first, ids.next())).toEqual(refused(404, 'NOT_FOUND'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
   });
 
-  it.each(['approver', 'developer', 'viewer'] as const)('refuses a %s, and changes nothing', async (role) => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
+  it.each(['approver', 'developer', 'viewer'] as const)('a %s, on every step', async (role) => {
+    const { w, request, transaction, first } = await markable();
     const who = await member(w.org, role);
 
-    expect(await asking(who, transaction.id)).toEqual(refused(403, 'FORBIDDEN'));
-    const challengeId = askedFor(await asking(admin, transaction.id));
-    await stepUp(admin, challengeId);
-    expect(await confirming(who, transaction.id, challengeId)).toEqual(refused(403, 'FORBIDDEN'));
+    expect(await proposing(who, transaction.id)).toEqual(refused(403, 'FORBIDDEN'));
+    await proposed(first, transaction.id);
+    expect(await approving(who, transaction.id)).toEqual(refused(403, 'FORBIDDEN'));
+    expect(await withdrawing(who, transaction.id)).toEqual(refused(403, 'FORBIDDEN'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
   });
 
-  it('refuses a step-up signed in with an app code: STEP_UP_FAILED, nothing moved', async () => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
+  it('a step-up signed in with an app code: STEP_UP_FAILED, to propose and to confirm', async () => {
+    const { w, request, transaction, first, second } = await markable();
 
-    expect(await marked(admin, transaction.id, APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await proposed(first, transaction.id, APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    await proposed(first, transaction.id);
+    expect(await approved(second, transaction.id, APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
   });
 
-  it('refuses a step-up asked for another payment, or another reference: STEP_UP_FAILED', async () => {
-    const first = await handedOff(REJECTED_UNPROVEN);
+  it('a step-up asked for another payment or another reference: STEP_UP_FAILED', async () => {
+    const { w, acting, transaction, first } = await markable();
     // Small: two of ALLOWED to one supplier would together need an approval (the split check).
-    const second = await ask(first.acting, first.w, { amount: SMALL(REJECTED_UNPROVEN) });
-    await handoffOf(first.w).run();
+    const other = await ask(acting, w, { amount: SMALL(REJECTED_UNPROVEN) });
+    await handoffOf(w).run();
     clock.advanceBy(2 * STEP);
-    await checksOf(first.w).run();
-    const secondPayment = await transactionOf(first.w, second.id);
+    await checksOf(w).run();
+    const otherPayment = await transactionOf(w, other.id);
     clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(first.w);
-    const challengeId = askedFor(await asking(admin, first.transaction.id));
+    const admin = await signedInAgain(first);
+    const challengeId = askedFor(await proposing(admin, transaction.id));
     await stepUp(admin, challengeId);
 
-    expect(await confirming(admin, secondPayment.id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
-    expect(await confirming(admin, first.transaction.id, challengeId, 'BANK-NACK-00000')).toEqual(
+    expect(await confirmingProposal(admin, otherPayment.id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await confirmingProposal(admin, transaction.id, challengeId, 'BANK-NACK-00000')).toEqual(
       refused(403, 'STEP_UP_FAILED'),
     );
-    expect(await transactionOf(first.w, first.request.id)).toMatchObject({ status: 'UNKNOWN' });
-    expect(await transactionOf(first.w, second.id)).toMatchObject({ status: 'UNKNOWN' });
   });
 
-  it('refuses a confirm once the bank’s word settled it since the ask: PAYMENT_NOT_UNKNOWN', async () => {
-    const { w, request, transaction } = await handedOff(ANSWER_LOST, { checked: false });
-    expect(transaction).toMatchObject({ status: 'UNKNOWN', providerStatus: null });
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
-    const challengeId = askedFor(await asking(admin, transaction.id));
-    await stepUp(admin, challengeId);
-    // The bank's credit is read: no longer UNKNOWN, and its latest event another.
+  it('a confirm asked for a proposal since withdrawn and made again: STEP_UP_FAILED', async () => {
+    const { transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+    const challengeId = askedFor(await approving(second, transaction.id));
+    await stepUp(second, challengeId);
+    await withdrawn(first, transaction.id);
+    await proposed(first, transaction.id);
+
+    expect(await confirmingApproval(second, transaction.id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+  });
+
+  it('a confirm asked before the bank’s word on the payment changed, still UNKNOWN: STEP_UP_FAILED', async () => {
+    const { w, request, transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+    const challengeId = askedFor(await approving(second, transaction.id));
+    await stepUp(second, challengeId);
+    // The bank's word, read since: the payment still UNKNOWN, its latest signed event another.
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      noteTransactionFacts(
+        tx,
+        states,
+        { orgId: w.org, id: transaction.id },
+        {
+          providerStatus: 'Rejected',
+          paymentInstructionRef: 'PI-NEW-1',
+          rejectCode: null,
+          providerChangedAt: clock.now(),
+        },
+        { actor: OPERATOR, details: { via: 'test' } },
+      ),
+    );
+
+    expect(await confirmingApproval(second, transaction.id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+  });
+
+  it('a confirm once the bank’s word settled the payment since: PAYMENT_NOT_UNKNOWN; the proposal still withdrawn', async () => {
+    const { w, request, transaction, first, second } = await markable(ANSWER_LOST);
+    // UNKNOWN until the bank's credit is read: its check left until now.
+    expect(transaction).toMatchObject({ status: 'UNKNOWN' });
+    await proposed(first, transaction.id);
+    const challengeId = askedFor(await approving(second, transaction.id));
+    await stepUp(second, challengeId);
     await checksOf(w).run();
 
-    expect(await confirming(admin, transaction.id, challengeId)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
+    expect(await confirmingApproval(second, transaction.id, challengeId)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUCCEEDED' });
+    expect(await withdrawn(first, transaction.id)).toMatchObject({ outcome: 'withdrawn' });
   });
 });
 
 describe('records that can’t be believed (their alarm raised): refused, nothing changed (FX-TAMPER)', () => {
-  it('refuses a payment that can’t be believed as INTEGRITY_FAILED, holding the organisation', async () => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
-    const challengeId = askedFor(await asking(admin, transaction.id));
-    await stepUp(admin, challengeId);
-    const owner = await tamperAsOwner(database, TRANSACTIONS, w.org);
-    try {
-      await owner.stripSeals(transaction.id);
-    } finally {
-      await owner.end();
-    }
+  it.each([
+    ['the payment', TRANSACTIONS],
+    ['its proposal', FAILURE_PROPOSALS],
+  ] as const)(
+    'refuses a confirm for which %s can’t be believed: INTEGRITY_FAILED, the organisation held',
+    async (_name, table) => {
+      const { w, request, transaction, first, second } = await markable();
+      const proposal = proposalIdOf(await proposed(first, transaction.id));
+      const challengeId = askedFor(await approving(second, transaction.id));
+      await stepUp(second, challengeId);
+      const owner = await tamperAsOwner(database, table, w.org);
+      try {
+        await owner.stripSeals(table === TRANSACTIONS ? transaction.id : proposal);
+      } finally {
+        await owner.end();
+      }
 
-    expect(await confirming(admin, transaction.id, challengeId)).toEqual(refused(503, 'INTEGRITY_FAILED'));
-    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
-    expect(await holdsOf(w)).toHaveLength(1);
-    expect(await markNoticesOf(w)).toEqual([]);
-  });
+      expect(await confirmingApproval(second, transaction.id, challengeId)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+      expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+      expect(await holdsOf(w)).toHaveLength(1);
+    },
+  );
 
   it('fails, changing nothing, for one whose instruction can’t be believed', async () => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const admin = await adminOf(w);
-    const challengeId = askedFor(await asking(admin, transaction.id));
-    await stepUp(admin, challengeId);
+    const { w, request, transaction, first, second } = await markable();
+    await proposed(first, transaction.id);
+    const challengeId = askedFor(await approving(second, transaction.id));
+    await stepUp(second, challengeId);
     const owner = await tamperAsOwner(database, INSTRUCTIONS, w.org);
     try {
       await owner.stripSeals(transaction.instructionId);
@@ -461,7 +674,9 @@ describe('records that can’t be believed (their alarm raised): refused, nothin
       await owner.end();
     }
 
-    await expect(confirming(admin, transaction.id, challengeId)).rejects.toThrow("instruction can't be believed");
+    await expect(confirmingApproval(second, transaction.id, challengeId)).rejects.toThrow(
+      "instruction can't be believed",
+    );
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
   });
 });
@@ -487,7 +702,7 @@ describe('core’s markFailed, for a caller that didn’t check (its use case re
   });
 });
 
-describe('with the bank check at the same payment (forced, ADR-006 §6)', () => {
+describe('with the bank check or another admin at the same payment (forced, ADR-006 §6)', () => {
   /**
    * The payment's row held as by another writer, the two queued behind it in
    * the order given, then let go: each in its turn.
@@ -509,18 +724,18 @@ describe('with the bank check at the same payment (forced, ADR-006 §6)', () => 
     }
   }
 
-  /** Asked and signed in again for: the confirm, ready to run. */
-  async function readyToConfirm(w: World, transactionId: string) {
-    const admin = await adminOf(w);
-    const challengeId = askedFor(await asking(admin, transactionId));
-    await stepUp(admin, challengeId);
-    return () => confirming(admin, transactionId, challengeId);
+  /** Proposed, the second admin asked and signed in again for: their confirm, ready to run. */
+  async function readyToConfirm(handed: Awaited<ReturnType<typeof markable>>) {
+    await proposed(handed.first, handed.transaction.id);
+    const challengeId = askedFor(await approving(handed.second, handed.transaction.id));
+    await stepUp(handed.second, challengeId);
+    return () => confirmingApproval(handed.second, handed.transaction.id, challengeId);
   }
 
   it('settles with its holdings locked before the head, so their holder never waits on it', async () => {
-    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const confirm = await readyToConfirm(w, transaction.id);
+    const handed = await markable();
+    const { w, request } = handed;
+    const confirm = await readyToConfirm(handed);
     // Something holding the request's reservation (as an ending or a holdings page would) as the mark is made.
     const holder = await database.connect('owner');
     let marking: Promise<unknown> | undefined;
@@ -552,10 +767,10 @@ describe('with the bank check at the same payment (forced, ADR-006 §6)', () => 
   });
 
   it('marked first: FAILED stands, and the bank’s later credit is said as a contradiction, never applied', async () => {
-    const { w, request, transaction } = await handedOff(ANSWER_LOST, { checked: false });
+    const handed = await markable(ANSWER_LOST);
+    const { w, request, transaction } = handed;
     expect(transaction).toMatchObject({ status: 'UNKNOWN', providerStatus: null });
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const confirm = await readyToConfirm(w, transaction.id);
+    const confirm = await readyToConfirm(handed);
 
     const [mark] = await queued(w, transaction.id, confirm, () => checksOf(w).run());
 
@@ -569,15 +784,34 @@ describe('with the bank check at the same payment (forced, ADR-006 §6)', () => 
   });
 
   it('checked first: the bank’s credit settles it, and the mark is refused, changing nothing', async () => {
-    const { w, request, transaction } = await handedOff(ANSWER_LOST, { checked: false });
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const confirm = await readyToConfirm(w, transaction.id);
+    const handed = await markable(ANSWER_LOST);
+    const { w, request, transaction } = handed;
+    const confirm = await readyToConfirm(handed);
 
     const [, mark] = await queued(w, transaction.id, () => checksOf(w).run(), confirm);
 
     expect(mark).toEqual({ status: 'fulfilled', value: refused(409, 'PAYMENT_NOT_UNKNOWN') });
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUCCEEDED' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
-    expect(await markNoticesOf(w)).toEqual([]);
+    expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed']);
+  });
+
+  it('two admins proposing at once: one proposal, the other FAILURE_PROPOSAL_OPEN', async () => {
+    const { w, transaction, first, second } = await markable();
+    const confirms = [];
+    for (const who of [first, second]) {
+      const challengeId = askedFor(await proposing(who, transaction.id));
+      await stepUp(who, challengeId);
+      confirms.push(() => confirmingProposal(who, transaction.id, challengeId));
+    }
+    const [one, two] = confirms;
+    if (one === undefined || two === undefined) throw new Error('two confirms');
+
+    const answers = await queued(w, transaction.id, one, two);
+
+    expect(answers).toEqual([
+      { status: 'fulfilled', value: expect.objectContaining({ outcome: 'proposed' }) as unknown },
+      { status: 'fulfilled', value: refused(409, 'FAILURE_PROPOSAL_OPEN') },
+    ]);
   });
 });
