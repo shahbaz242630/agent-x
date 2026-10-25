@@ -550,9 +550,24 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
 
     expect(await approving(second, transaction.id)).toEqual(refused(409, 'NO_FAILURE_PROPOSAL'));
     expect(await withdrawing(second, transaction.id)).toEqual(refused(409, 'NO_FAILURE_PROPOSAL'));
+    // Both asked to withdraw the next: the second confirm finds none open.
+    await proposed(first, transaction.id);
+    const asks = [];
+    for (const who of [first, second]) {
+      const challengeId = askedFor(await withdrawing(who, transaction.id));
+      await stepUp(who, challengeId);
+      asks.push({ who, challengeId });
+    }
+    for (const [index, { who, challengeId }] of asks.entries()) {
+      expect(await confirmingWithdrawal(who, transaction.id, challengeId)).toMatchObject(
+        index === 0 ? { outcome: 'withdrawn' } : refused(409, 'NO_FAILURE_PROPOSAL'),
+      );
+    }
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual([
+      'payment_mark_proposed',
+      'payment_mark_withdrawn',
       'payment_mark_proposed',
       'payment_mark_withdrawn',
       'payment_mark_proposed',
@@ -563,6 +578,8 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
       { action: 'failure_proposal.withdrawn', actorId: first.userId },
       { action: 'failure_proposal.made', actorId: first.userId },
       { action: 'failure_proposal.withdrawn', actorId: second.userId },
+      { action: 'failure_proposal.made', actorId: first.userId },
+      { action: 'failure_proposal.withdrawn', actorId: first.userId },
     ]);
   });
 
@@ -590,6 +607,19 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
     expect((await markNoticesOf(w)).filter(({ kind }) => kind === 'payment_marked_failed')).toHaveLength(1);
     expect(await approving(first, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
     expect(await proposing(first, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
+  });
+
+  it('answers the approve ask’s key’s replay with its challenge and the proposal as it now stands', async () => {
+    const { transaction, first, second } = await markable();
+    const proposal = proposalIdOf(await proposed(first, transaction.id));
+    const key = keyed(second, APPROVE_OPERATION, 'ask-once');
+
+    const once = await marks.approve(second, key, transaction.id, CORRELATION);
+    expect(once).toMatchObject({ outcome: 'asked', proposal: { id: proposal, evidenceRef: EVIDENCE } });
+    expect(await marks.approve(second, key, transaction.id, CORRELATION)).toEqual(once);
+    // Replayed once the proposal is withdrawn: a refusal, never the first answer's proposal.
+    await withdrawn(first, transaction.id);
+    expect(await marks.approve(second, key, transaction.id, CORRELATION)).toEqual(refused(409, 'NO_FAILURE_PROPOSAL'));
   });
 
   it('is still watched by the bank check: the bank paying it after all is said, never applied (rail map §4)', async () => {
@@ -753,6 +783,7 @@ describe('records that can’t be believed (their alarm raised): refused, nothin
   it.each([
     ['the payment', TRANSACTIONS],
     ['its proposal', FAILURE_PROPOSALS],
+    ['the proposer’s membership', MEMBERSHIPS],
   ] as const)(
     'refuses a confirm for which %s can’t be believed: INTEGRITY_FAILED, the organisation held',
     async (_name, table) => {
@@ -762,7 +793,12 @@ describe('records that can’t be believed (their alarm raised): refused, nothin
       await stepUp(second, challengeId);
       const owner = await tamperAsOwner(database, table, w.org);
       try {
-        await owner.stripSeals(table === TRANSACTIONS ? transaction.id : proposal);
+        const tampered: Record<string, string> = {
+          [TRANSACTIONS.table]: transaction.id,
+          [FAILURE_PROPOSALS.table]: proposal,
+          [MEMBERSHIPS.table]: first.membershipId,
+        };
+        await owner.stripSeals(String(tampered[table.table]));
       } finally {
         await owner.end();
       }
@@ -772,6 +808,59 @@ describe('records that can’t be believed (their alarm raised): refused, nothin
       expect(await holdsOf(w)).toHaveLength(1);
     },
   );
+
+  it.each([
+    ['its proposal, signed', true],
+    ['a proposal planted past the app, never signed', false],
+  ] as const)(
+    'refuses one where %s is deleted as it is read: INTEGRITY_FAILED, the alarm raised and the organisation held',
+    async (_name, signed) => {
+      const { w, request, transaction, first, second } = await markable();
+      const deleter = await database.connect('owner');
+      let withdrawal: Promise<unknown> | undefined;
+      try {
+        await deleter.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+        // A row with no signed state reads as missing, not deleted: only the open index found it.
+        const proposal = signed ? proposalIdOf(await proposed(first, transaction.id)) : ids.next();
+        if (!signed) {
+          await deleter.query(
+            `insert into transactions.failure_proposals (org_id, id, transaction_id, evidence_ref, proposed_by, status, created_at)
+             values ($1, $2, $3, $4, $5, 'OPEN', now())`,
+            [w.org, proposal, transaction.id, EVIDENCE, first.userId],
+          );
+        }
+        // Found by the open index, then gone as the read waits on its lock (forced: the deleter holds the row).
+        await deleter.query('begin');
+        await deleter.query('delete from transactions.failure_proposals where id = $1', [proposal]);
+        withdrawal = withdrawing(second, transaction.id);
+        await waitUntilQueued(database.as('admin'), 1);
+        await deleter.query('commit');
+
+        expect(await withdrawal).toEqual(refused(503, 'INTEGRITY_FAILED'));
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ subjectType: FAILURE_PROPOSALS.subject, objectId: proposal }),
+        ]);
+      } finally {
+        await deleter.end();
+      }
+      expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+      expect(await holdsOf(w)).toHaveLength(1);
+    },
+  );
+
+  it('refuses a second proposal while the open one can’t be believed: INTEGRITY_FAILED, the organisation held', async () => {
+    const { w, transaction, first, second } = await markable();
+    const proposal = proposalIdOf(await proposed(first, transaction.id));
+    const owner = await tamperAsOwner(database, FAILURE_PROPOSALS, w.org);
+    try {
+      await owner.stripSeals(proposal);
+    } finally {
+      await owner.end();
+    }
+
+    expect(await proposing(second, transaction.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await holdsOf(w)).toHaveLength(1);
+  });
 
   it('fails, changing nothing, for one whose instruction can’t be believed', async () => {
     const { w, request, transaction, first, second } = await markable();

@@ -33,7 +33,7 @@
 // change, so waiting on nothing), the step-up challenge, the pending requests
 // (8) and their holdings (11), the chain head with the first event recorded,
 // then the notices, new rows that wait on nothing.
-import { type SignedStates, TooManyEventsToRead } from '@agentx/core/modules/audit';
+import type { SignedStates } from '@agentx/core/modules/audit';
 import {
   changeHashOf,
   type StepUpChallenges,
@@ -188,19 +188,9 @@ export function createSupplierVerifications({
     return { verifier, found, current, nameCheck, path: verdict.outcome, leftByItsStop };
   };
 
-  /** The write, a history past its cap answered as a refusal like any other. */
-  const write = async (...args: Parameters<typeof work.write>) => {
-    try {
-      return await work.write(...args);
-    } catch (error) {
-      if (!(error instanceof TooManyEventsToRead)) throw error;
-      return { outcome: 'refused' as const, status: 409, code: 'HISTORY_TOO_LONG' as const };
-    }
-  };
-
   return {
     async verify(member, idempotent, supplierId, callBack, correlationId) {
-      const done = await write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await work.historyBounded(member, idempotent, correlationId, async (tx, states) => {
         const { current } = await verifiable(tx, states, member, supplierId, callBack, 'share', correlationId);
         return stepUps.ask(tx, member, {
           action: VERIFY_OPERATION,
@@ -211,7 +201,7 @@ export function createSupplierVerifications({
     },
 
     async verifyConfirm(member, idempotent, supplierId, confirm, correlationId) {
-      const done = await write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await work.historyBounded(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         const { orgId } = member;
         const { verifier, found, current, nameCheck, path, leftByItsStop } = await verifiable(

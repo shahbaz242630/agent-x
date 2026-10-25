@@ -34,7 +34,7 @@
 // a confirm's), the admin's membership and, to approve, every admin's (2a),
 // the payment (10), its proposal (10, after it), the challenge consumed, its
 // holdings (11), the chain head (12), then the notice.
-import { type SignedStates, TooManyEventsToRead } from '@agentx/core/modules/audit';
+import type { SignedStates } from '@agentx/core/modules/audit';
 import {
   changeHashOf,
   type StepUpChallenges,
@@ -252,16 +252,6 @@ export function createPaymentMarks({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MarkRefused });
   const stepUps = createStepUps({ challenges, Refusal: MarkRefused });
 
-  /** An approval's write, a membership history past its cap answered as a refusal like any other (as a supplier's). */
-  const historyBounded = async (...args: Parameters<typeof work.write>) => {
-    try {
-      return await work.write(...args);
-    } catch (error) {
-      if (!(error instanceof TooManyEventsToRead)) throw error;
-      return { outcome: 'refused' as const, status: 409, code: 'HISTORY_TOO_LONG' as const };
-    }
-  };
-
   /** A proposal one may propose for: the payment markable and none open. */
   const proposable = async (
     tx: MarkTx,
@@ -395,7 +385,7 @@ export function createPaymentMarks({
 
     async approve(member, idempotent, paymentId, correlationId) {
       let shown: FailureProposalRecord | undefined;
-      const done = await historyBounded(member, idempotent, correlationId, async (tx, states) => {
+      const done = await work.historyBounded(member, idempotent, correlationId, async (tx, states) => {
         const { open, hash } = await approvable(tx, states, member, paymentId, 'share');
         shown = open.proposal;
         return stepUps.ask(tx, member, { action: APPROVE_OPERATION, changeHash: hash });
@@ -414,7 +404,7 @@ export function createPaymentMarks({
     },
 
     async confirmApproval(member, idempotent, paymentId, stepUpChallengeId, correlationId) {
-      const done = await historyBounded(member, idempotent, correlationId, async (tx, states) => {
+      const done = await work.historyBounded(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         const { read, open, hash } = await approvable(tx, states, member, paymentId, 'change');
         const consumed = await stepUps.consumed(

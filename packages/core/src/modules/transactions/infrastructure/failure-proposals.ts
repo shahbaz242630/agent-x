@@ -133,8 +133,11 @@ export async function openProposalOf(
     .executeTakeFirst();
   if (row === undefined) return { outcome: 'none' };
   const read = await proposalOf(tx, states, { orgId: key.orgId, id: row.id }, lock);
-  // Found by its ID a moment ago, and never deleted (0066's grants): one gone is past the app, so tampered.
-  return read.outcome === 'missing' ? { outcome: 'tampered', sign: 'deleted' } : read;
+  // Found by its ID a moment ago, and never deleted (0066's grants): one gone since (deleted past the app as this
+  // read waited on its lock) is a tamper sign, its alarm raised and the organisation held.
+  if (read.outcome !== 'missing') return read;
+  states.mismatch(FAILURE_PROPOSALS.subject, { orgId: key.orgId, id: row.id });
+  return { outcome: 'tampered', sign: 'deleted' };
 }
 
 /** A proposal by its ID, read through its signed state and locked as `lock` asks: found, missing or tampered with. */

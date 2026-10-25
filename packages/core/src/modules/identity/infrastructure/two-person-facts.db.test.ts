@@ -190,8 +190,21 @@ describe(`the two-person rule's facts, from the log (E3-1, Postgres ${server.ver
   it('raises the alarm on a member the log made but the list no longer holds: never one admin fewer (H10)', async () => {
     const alice = await add('admin');
     await add('admin');
-    // Its row deleted past the app (its directory entry can't be: 0015's foreign key holds it to the row).
+    // Its row deleted past the app: its signed state finds it, before the history is read.
     await attacker.query('delete from identity.memberships where org_id = $1 and id = $2', [org, alice.id]);
+
+    expect(await facts()).toEqual({ outcome: 'tampered', sign: 'deleted' });
+    expect(alarms()).toEqual([expect.objectContaining({ subjectType: 'membership', objectId: alice.id })]);
+  });
+
+  it('raises the alarm on a member whose directory entry went past the app, its row and seal intact (H10)', async () => {
+    const alice = await add('admin');
+    await add('admin');
+    // The list is read through the directory, so a member it no longer names is skipped there, seal and all:
+    // only the history's check finds them. The foreign key that holds the entry is the server's own trigger.
+    await attacker.query('alter table directory.members disable trigger all');
+    await attacker.query('delete from directory.members where org_id = $1 and membership_id = $2', [org, alice.id]);
+    await attacker.query('alter table directory.members enable trigger all');
 
     expect(await facts()).toEqual({ outcome: 'tampered', sign: 'deleted' });
     expect(alarms()).toEqual([expect.objectContaining({ subjectType: 'membership', objectId: alice.id })]);
