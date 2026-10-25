@@ -800,7 +800,10 @@ describe('refused, changing nothing', () => {
 
     await handoffOf(w, rail).run();
 
-    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED', rejectCode: expect.any(String) });
+    expect(await transactionOf(w, request.id)).toMatchObject({
+      status: 'FAILED',
+      rejectCode: expect.any(String) as unknown,
+    });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
     expect(lines('handoff.refused_late')).toEqual([]);
     // Ended by Tx B's move, in its transaction (handoff.ts passes `locked.openProposal`): nothing left open.
