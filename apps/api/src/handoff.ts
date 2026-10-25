@@ -120,7 +120,7 @@ import {
 } from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import { type AnchorStore, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
+import type { AnchorStore } from '@agentx/platform/audit-chain';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -253,7 +253,7 @@ export function createHandoff({
   page = HANDOFF_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
   unknownAfterMs = UNKNOWN_AFTER_MS,
-  anchors = createMemoryAnchorStore(),
+  anchoring,
 }: {
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -271,8 +271,15 @@ export function createHandoff({
   readonly callTimeoutMs?: number;
   /** How long a transaction waits for its answer before UNKNOWN (UNKNOWN_AFTER_MS unless a test names less). */
   readonly unknownAfterMs?: number;
-  /** The anchor check's last anchors (main.ts passes its store): Tx A refuses a chain behind its own (ADR-012 §2). */
-  readonly anchors?: AnchorStore;
+  /**
+   * The anchor check's last anchors, and its check of one organisation (main.ts
+   * passes both): Tx A refuses a chain behind its anchor (ADR-012 §2, H11).
+   * None given (some tests), nothing is compared.
+   */
+  readonly anchoring?: {
+    readonly anchors: AnchorStore;
+    readonly anchorFirst: (orgId: string, signal?: AbortSignal) => Promise<void>;
+  };
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
   if (unknownAfterMs <= callTimeoutMs) {
@@ -359,10 +366,14 @@ export function createHandoff({
     }
     const hold = await states.integrityHold(tx, orgId, 'head');
     if (hold.outcome !== 'clear') return { outcome: 'waiting', why: `hold_${hold.outcome}` };
-    // A chain wound back since its last anchor (SEC-DB-11) is refused now, not at the anchor check's next run.
-    const anchor = anchors.latest({ kind: 'organisation', orgId });
-    if (anchor !== undefined && (await states.anchorKept(tx, orgId, anchor)).outcome !== 'kept') {
-      return { outcome: 'waiting', why: 'hold_tampered' };
+    // A chain wound back since its last anchor (SEC-DB-11) is refused now, not at the anchor check's next run; with
+    // no anchor yet (the run's anchorFirst couldn't make one), it waits rather than go uncompared (partner S146).
+    if (anchoring !== undefined) {
+      const anchor = anchoring.anchors.latest({ kind: 'organisation', orgId });
+      if (anchor === undefined) return { outcome: 'waiting', why: 'anchor_pending' };
+      if ((await states.anchorKept(tx, orgId, anchor)).outcome !== 'kept') {
+        return { outcome: 'waiting', why: 'hold_tampered' };
+      }
     }
     if (request.status === 'APPROVED') await moveRequest(tx, states, key, 'make_ready');
     await moveRequest(tx, states, key, 'hand_off');
@@ -568,6 +579,11 @@ export function createHandoff({
       } catch (error) {
         log.error('handoff.failed', { err: error });
         return true;
+      }
+      // A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first.
+      const chain = { kind: 'organisation', orgId } as const;
+      if (approved.length > 0 && anchoring !== undefined && anchoring.anchors.latest(chain) === undefined) {
+        await anchoring.anchorFirst(orgId, signal);
       }
       for (const id of approved) {
         if (signal?.aborted === true) return false;

@@ -133,15 +133,13 @@ const stoppedToldOf = (w: World) =>
     ).map(({ about_id }) => about_id),
   );
 
-/** The job over the world alone, paying through `rail` (the world's own fake unless given), with `anchors` if given. */
-const handoffOf = (
-  w: World,
-  rail: FakeRail = w.rail,
-  list = () => Promise.resolve([w.org]),
-  anchors: AnchorStore = createMemoryAnchorStore(),
-) =>
+/** How Tx A is given its anchors (H11): the store, and what anchors a chain it finds none for. */
+type Anchoring = NonNullable<Parameters<typeof createHandoff>[0]['anchoring']>;
+
+/** The job over the world alone, paying through `rail` (the world's own fake unless given), comparing anchors if given. */
+const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resolve([w.org]), anchoring?: Anchoring) =>
   createHandoff({
-    anchors,
+    ...(anchoring === undefined ? {} : { anchoring }),
     list,
     database: app,
     outbox: createOutbox({ ids, clock }),
@@ -1893,9 +1891,11 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
   type Owner = Awaited<ReturnType<typeof tamperAsOwner>>;
 
   /** The run once, by a rail that counts its calls; then what it made and whether the organisation is held. */
-  async function handedOnce(w: World, requestId: string, anchors?: AnchorStore) {
+  async function handedOnce(w: World, requestId: string, anchors?: AnchorStore | Anchoring) {
     const { rail, submitted } = counted(w);
-    await handoffOf(w, rail, undefined, anchors).run();
+    // A store alone: its anchors as given, none made at the run.
+    const anchoring = anchors === undefined || 'anchors' in anchors ? anchors : { anchors, anchorFirst: noAnchorMade };
+    await handoffOf(w, rail, undefined, anchoring).run();
     const hold = await signed(w, (tx, states) => states.holdRecord(tx, w.org));
     return {
       submitted: submitted(),
@@ -2075,6 +2075,9 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     refusedWithTheHold(await handedOnce(w, request.id));
   });
 
+  /** An anchorFirst that anchors nothing (the database unreachable, say). */
+  const noAnchorMade = () => Promise.resolve();
+
   /** The organisation's chain anchored where its head is now, as the anchor check anchors it (H11). */
   async function anchoredNow(w: World): Promise<AnchorStore> {
     let head: Awaited<ReturnType<Owner['saveHead']>> | undefined;
@@ -2170,13 +2173,10 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     expect(anchorAlarms()).toEqual([]);
   });
 
-  it('hands off after the real anchor check anchored the chain, grown honestly since: no false alarm (H11)', async () => {
-    const { w, acting } = await ready();
-    await ask(acting, w, { amount: ALLOWED() });
-    // The anchor check as main.ts makes it, over this organisation alone, keeping its anchors where Tx A reads them.
-    const anchors = createMemoryAnchorStore();
+  /** The anchor check as main.ts makes it, over this organisation alone, its anchors in `anchors`. */
+  const anchorCheckOf = (w: World, anchors: AnchorStore) => {
     const trail = createAuditTrail({ keys, ids });
-    await createAnchorCheck({
+    return createAnchorCheck({
       chains: [],
       organizations: {
         list: () => Promise.resolve([w.org]),
@@ -2190,7 +2190,30 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
       staleAfterMs: 60_000,
       deadlineMs: 30_000,
       anchors,
-    }).run();
+    });
+  };
+
+  it('anchors a chain it holds no anchor for first, as a process just started, then hands off: no false alarm (S146)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const anchors = createMemoryAnchorStore();
+    const check = anchorCheckOf(w, anchors);
+
+    const made = await handedOnce(w, request.id, {
+      anchors,
+      anchorFirst: (orgId, signal) => check.anchorOrganisation(orgId, signal),
+    });
+
+    expect(made).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+    expect(anchors.latest({ kind: 'organisation', orgId: w.org })).toBeDefined();
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('hands off after the real anchor check anchored the chain, grown honestly since: no false alarm (H11)', async () => {
+    const { w, acting } = await ready();
+    await ask(acting, w, { amount: ALLOWED() });
+    const anchors = createMemoryAnchorStore();
+    await anchorCheckOf(w, anchors).run();
     expect(anchors.latest({ kind: 'organisation', orgId: w.org })).toBeDefined();
     const later = await ask(acting, w, { amount: ALLOWED() });
 
@@ -2200,6 +2223,18 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
       hold: { outcome: 'clear' },
     });
     expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('waits, never handing off uncompared, while no anchor could be made: APPROVED, no call, no hold (S146)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+
+    const made = await handedOnce(w, request.id, createMemoryAnchorStore());
+
+    expect(made).toMatchObject({ submitted: 0, status: 'APPROVED', hold: { outcome: 'clear' } });
+    expect(lines('handoff.waiting')).toEqual([
+      expect.objectContaining({ requestId: request.id, why: 'anchor_pending' }),
+    ]);
   });
 
   it('holds an empty chain’s anchor (seq 0) as kept: nothing to compare, nothing alarmed (H11)', async () => {

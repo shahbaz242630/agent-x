@@ -491,7 +491,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       logger,
-      anchors: anchorStore,
+      // The anchor check is made below and started before the hand-off's first run (scheduleRunsIfAny).
+      anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
     });
   // The partner's messages as kept (E1b): the inbox, and the refused ones as evidence, for the security events' retention.
   const providerEvents = createProviderEvents({
