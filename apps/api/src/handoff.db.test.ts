@@ -2133,7 +2133,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     });
 
     refusedWithTheHold(await handedOnce(w, request.id, anchors));
-    expect(anchorAlarms()).toEqual([expect.objectContaining({ reason: 'anchor', orgId: w.org })]);
+    expect(anchorAlarms()).toEqual([expect.objectContaining({ level: 'error', reason: 'anchor', orgId: w.org })]);
   });
 
   it('SEC-DB-11 (H11) refuses a chain grown again on a wound-back head, past its anchor: no call, the hold', async () => {
@@ -2153,7 +2153,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     await grown(w, 2);
 
     refusedWithTheHold(await handedOnce(w, request.id, anchors));
-    expect(anchorAlarms()).toEqual([expect.objectContaining({ reason: 'anchor', orgId: w.org })]);
+    expect(anchorAlarms()).toEqual([expect.objectContaining({ level: 'error', reason: 'anchor', orgId: w.org })]);
   });
 
   it('hands off a request whose chain holds its anchor, at the head or grown past it (H11)', async () => {
