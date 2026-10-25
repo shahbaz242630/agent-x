@@ -74,7 +74,7 @@ import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/mod
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { ChainBroken } from '@agentx/platform/audit-chain';
+import { ChainBroken, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import {
   type Config,
   ConfigError,
@@ -476,6 +476,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
   // ADR-014 §4: the fake, over its own records in this database, where the config says so; no other rail is built yet.
   const rail = railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids });
+  // The audit chains' last anchors, in this process's memory (ADR-012 §2): the anchor check keeps them, Tx A reads them.
+  const anchorStore = createMemoryAnchorStore();
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
   const handoff =
@@ -489,6 +491,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       logger,
+      anchors: anchorStore,
     });
   // The partner's messages as kept (E1b): the inbox, and the refused ones as evidence, for the security events' retention.
   const providerEvents = createProviderEvents({
@@ -838,6 +841,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     // Three missed checks in a row are the alarm, not just a warning.
     staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+    anchors: anchorStore,
   });
   const retention = createRetentionSweep({
     list: () => listedOrganizations(database),

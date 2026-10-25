@@ -120,6 +120,7 @@ import {
 } from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import { type AnchorStore, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -252,6 +253,7 @@ export function createHandoff({
   page = HANDOFF_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
   unknownAfterMs = UNKNOWN_AFTER_MS,
+  anchors = createMemoryAnchorStore(),
 }: {
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -269,6 +271,8 @@ export function createHandoff({
   readonly callTimeoutMs?: number;
   /** How long a transaction waits for its answer before UNKNOWN (UNKNOWN_AFTER_MS unless a test names less). */
   readonly unknownAfterMs?: number;
+  /** The anchor check's last anchors (main.ts passes its store): Tx A refuses a chain behind its own (ADR-012 §2). */
+  readonly anchors?: AnchorStore;
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
   if (unknownAfterMs <= callTimeoutMs) {
@@ -355,6 +359,11 @@ export function createHandoff({
     }
     const hold = await states.integrityHold(tx, orgId, 'head');
     if (hold.outcome !== 'clear') return { outcome: 'waiting', why: `hold_${hold.outcome}` };
+    // A chain wound back since its last anchor (SEC-DB-11) is refused now, not at the anchor check's next run.
+    const anchor = anchors.latest({ kind: 'organisation', orgId });
+    if (anchor !== undefined && (await states.anchorKept(tx, orgId, anchor)).outcome !== 'kept') {
+      return { outcome: 'waiting', why: 'hold_tampered' };
+    }
     if (request.status === 'APPROVED') await moveRequest(tx, states, key, 'make_ready');
     await moveRequest(tx, states, key, 'hand_off');
     const intent: ApprovedPaymentIntent = {
