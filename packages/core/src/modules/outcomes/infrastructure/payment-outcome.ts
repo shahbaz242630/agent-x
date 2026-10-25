@@ -4,9 +4,8 @@
 // request holds settled as it now stands (the outcomes module), and, on
 // SUCCEEDED, its supplier's remittance email queued (partner decision 34a).
 // Every move of a payment goes through here (Tx B, the sweep, the bank check
-// and the operator marking one failed, E1a, E1c), so neither is ever left
-// out, each after `lockPayment`. Here in core, not the API, as the operator's
-// command moves payments too. The email's setting and address are read as it
+// and an admin marking one failed, E1a, E1c), so neither is ever left
+// out, each after `lockPayment`. The email's setting and address are read as it
 // is sent (`remittances.ts`), never here: they sit at level 6, above the
 // locks already held.
 import type { DatabaseTransaction } from '@agentx/platform/db';
@@ -88,7 +87,7 @@ export const moveDetails = (
  * The transaction read for change (10), then its request's reservation and
  * claim locked (11), before a move takes the head (12; ADR-006 §6); throws for
  * a transaction that can't be believed (its alarm raised), or one not its
- * request's. With no request named (the operator's, which lists nothing), its
+ * request's. With no request named (an admin's mark, by the payment's ID), its
  * signed instruction's.
  */
 export async function lockPayment(

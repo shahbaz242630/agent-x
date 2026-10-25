@@ -486,7 +486,7 @@ describe('a notice’s email (B5-1b)', () => {
       expect(told.text).toContain("This email can't approve or change anything.");
     });
 
-    it('tells every admin, by the payment’s ID, that our team marked it failed on the bank’s word (0064, E1c)', () => {
+    it('tells every admin, by the payment’s ID, that an admin marked it failed on their bank’s word (0064; H10)', () => {
       const told = messageFor(
         { ...remittanceNotice, kind: 'payment_marked_failed', recipientUserId: NOTICE.recipientUserId },
         'a@example.test',
@@ -494,8 +494,9 @@ describe('a notice’s email (B5-1b)', () => {
 
       expect(isAboutAPayment('payment_marked_failed')).toBe(true);
       expect(told.subject).toBe('Agent X: a payment was marked failed');
-      expect(told.text).toContain('the bank confirmed in writing that it never accepted it');
-      expect(told.text).toContain('contact Agent X support before paying the invoice again');
+      expect(told.text).toContain('An admin of one of your organisations marked a payment as failed');
+      expect(told.text).toContain('contact your bank quoting the payment');
+      expect(told.text).not.toMatch(/our team|Agent X support/);
       expect(told.text).toContain(`Payment: ${payment}`);
       expect(told.text).toContain("You're told because you're an admin of this organisation.");
     });

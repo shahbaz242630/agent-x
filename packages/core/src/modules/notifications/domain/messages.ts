@@ -418,13 +418,13 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       'Sign in to Agent X to see the payment, and let the supplier know it was paid if they need to. To have it emailed next time, add its email address in its details.',
   },
-  // About a payment (0064, Phase 4 E1c): Agent X's own team marked it failed on the bank's written word, to every admin.
+  // About a payment (0064; gate H10, decision 38): one of the organisation's admins marked it failed, to every admin.
   payment_marked_failed: {
     subject: () => 'Agent X: a payment was marked failed',
     firstLine: () =>
-      "Agent X's own team marked a payment from one of your organisations as failed: the bank confirmed in writing that it never accepted it, so no money left your account. The amount it held against your limits is free again, and its invoice can be paid again.",
+      "An admin of one of your organisations marked a payment as failed, on their bank's written word that it never accepted it. The amount it held against your limits is free again, and its invoice can be paid again.",
     check:
-      "Sign in to Agent X to see the payment, and the bank's reference our team recorded in your audit log. If you think this is wrong, contact Agent X support before paying the invoice again.",
+      "Sign in to Agent X to see who marked it and the bank's reference they gave, in your audit log. If you think it is wrong, check your bank statement and contact your bank quoting the payment's reference before the invoice is paid again.",
   },
   // About a payment (0065, partner decision 37b), to every admin: between them and their bank (decision 38).
   payment_contradicted: {

@@ -115,13 +115,13 @@ export const REMITTANCE_KIND = 'payment_remittance';
 /** The kind that tells every admin a paid supplier had no email to tell (0062, decision 34c), `aboutId` the transaction. */
 export const REMITTANCE_NO_EMAIL_KIND = 'payment_remittance_no_email';
 /**
- * The kind that tells every admin Agent X's own team marked a payment failed
- * on the bank's written word (0064, Phase 4 E1c), `aboutId` the transaction.
+ * The kind that tells every admin one of them marked a payment failed on
+ * their bank's written word (0064; gate H10), `aboutId` the transaction.
  */
 const MARKED_FAILED_KIND = 'payment_marked_failed';
 /**
- * The kinds that tell every admin a payment needs our team's check (0065,
- * partner decision 37b), `aboutId` the transaction: the bank went back on its
+ * The kinds that tell every admin a payment the bank left unclear (0065,
+ * partner decisions 37b, 38), `aboutId` the transaction: the bank went back on its
  * word, rejected it without proof the money stayed, or left it unresolved past
  * a day.
  */

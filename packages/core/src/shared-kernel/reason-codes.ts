@@ -177,6 +177,10 @@ export const REASON_CODES = {
   PAYEE_ROUTE_NOT_OFFERED:
     "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
+  PAYMENT_NOT_UNKNOWN:
+    "The payment isn't waiting for a final answer from the bank (its outcome is known, or it is still under way), so it can't be marked failed. Nothing was changed. Look at the payment in your audit log.",
+  PAYMENT_TOO_RECENT:
+    "The payment was handed to the bank less than 24 hours ago, and the bank may still settle it, so it can't be marked failed yet. Nothing was changed. Try again once a day has passed since its hand-off.",
   PENDING_CHOICE_NOT_OFFERED:
     'This is the mandate’s first version, so no requests are pending under it and there is nothing to cancel or carry over: leave the choice out. Nothing was changed.',
   PENDING_CHOICE_REQUIRED:

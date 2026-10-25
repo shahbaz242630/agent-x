@@ -240,6 +240,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/organization/unfreeze',
       'POST /v1/organization/unfreeze/confirm',
       'POST /v1/partner/events',
+      'POST /v1/payments/{id}/mark-failed',
+      'POST /v1/payments/{id}/mark-failed/confirm',
       'POST /v1/policies/organization/change',
       'POST /v1/policies/organization/change/confirm',
       'POST /v1/policies/organization/change/preview',
@@ -1248,8 +1250,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), with each GET's HEAD.
-    expect(answers).toHaveLength(160);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's mark-failed and its confirm (gate H10), with each GET's HEAD.
+    expect(answers).toHaveLength(162);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1310,6 +1312,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'OrganizationPolicyChangeAsked',
       'OrganizationUnfreezeAsked',
       'PayeeRegistration',
+      'PaymentMarkFailedAsked',
+      'PaymentMarkedFailed',
       'Policy',
       'PolicySimulation',
       'PolicyVersion',

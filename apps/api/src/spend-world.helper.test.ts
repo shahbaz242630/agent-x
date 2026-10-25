@@ -3,7 +3,7 @@
 // above AED 1,000) and both suppliers verified; the agent's requests decided
 // through decideAndReserve; and reads of where a request stands, what it
 // holds and the agent's month.
-import type { FixedClock, SequentialIds, TestDatabase } from '@agentx/testing';
+import type { FixedClock, TestDatabase } from '@agentx/testing';
 import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
@@ -25,12 +25,14 @@ import {
   suspendSupplier,
   versionOf,
 } from '@agentx/core/modules/suppliers';
+import type { IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 
 import { waitChoiceDetails } from './approval-wait-choice.ts';
 import { type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { capChoiceDetails, SUGGESTED_MONTHLY_CAP_MINOR } from './monthly-cap-choice.ts';
-import { AED, keys, mandateWorld, type MandateWorldTables, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { AED, mandateWorld, type MandateWorldTables, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import {
   type AgentActing,
   DECIDE_OPERATION,
@@ -90,15 +92,18 @@ export function spendWorld({
   name,
   registry,
   decisions,
+  keyring,
 }: {
   readonly app: () => Database<SpendWorldTables>;
   readonly clock: () => FixedClock;
-  readonly ids: SequentialIds;
+  readonly ids: IdGenerator;
   readonly name: string;
   readonly registry: () => MandateRegistry;
   readonly decisions: () => SpendRequestDecisions;
+  /** The keys the records are signed with: a running stack's for the tamper suite (mandateWorld's `keyring`). */
+  readonly keyring?: KeyProvider;
 }) {
-  const shared = mandateWorld({ app, clock, ids, name });
+  const shared = mandateWorld({ app, clock, ids, name, ...(keyring === undefined ? {} : { keyring }) });
 
   /** A world whose agent has a key and a mandate in force (approval above AED 1,000), both suppliers verified. */
   async function ready() {
@@ -256,7 +261,7 @@ export function spendWorld({
       if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
       const current = await versionOf(tx, states, { orgId: w.org, id: found.supplier.currentVersionId }, supplierId);
       if (current.outcome !== 'found') throw new Error(`no version: ${current.outcome}`);
-      await changeDetails(tx, states, keys, { orgId: w.org, id: supplierId }, found, {
+      await changeDetails(tx, states, shared.quiet().keys, { orgId: w.org, id: supplierId }, found, {
         orgId: w.org,
         id: ids.next(),
         supplierId,
