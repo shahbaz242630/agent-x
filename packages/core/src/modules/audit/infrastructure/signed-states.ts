@@ -101,7 +101,8 @@ import {
  *   its alarm line names how), found by no read of a row
  * - `holding`: what a verified object holds elsewhere (a request's
  *   reservation or order claim, Phase 2 E1) isn't what its signed state
- *   says it must be (`mismatch`)
+ *   says it must be (`mismatch`), or the log lacks an event its signed
+ *   state stands on (a pending request's decision: a chain wound back, H7)
  */
 export type TamperSign =
   'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status' | 'chain' | 'holding';

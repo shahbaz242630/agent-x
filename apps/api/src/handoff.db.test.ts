@@ -1916,13 +1916,17 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     }
   }
 
-  /** The requests' own triggers off while `run` changes a row as no app write could (its status guard would refuse). */
-  async function guardsOff(run: () => Promise<void>, owner: Owner) {
-    await owner.query('alter table spend_requests.requests disable trigger user');
+  /** The two guards a decision flipped would meet off while `run` flips it: its status move, and its decision fixed at creation. */
+  async function decisionGuardsOff(run: () => Promise<void>, owner: Owner) {
+    await owner.query(
+      'alter table spend_requests.requests disable trigger status_guard, disable trigger fixed_at_creation',
+    );
     try {
       await run();
     } finally {
-      await owner.query('alter table spend_requests.requests enable trigger user');
+      await owner.query(
+        'alter table spend_requests.requests enable trigger status_guard, enable trigger fixed_at_creation',
+      );
     }
   }
 
@@ -1942,7 +1946,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     const denied = await ask(acting, w, { amount: AED(10_000_000n) });
     expect(await statusOf(w, denied.id)).toBe('DENIED');
     await asOwner(w, SPEND_REQUESTS, (owner) =>
-      guardsOff(async () => {
+      decisionGuardsOff(async () => {
         // In one statement: an ALLOW carries no reasons (0039's reasons_with_the_decision).
         await owner.query(
           "update spend_requests.requests set status = 'APPROVED', decision = 'ALLOW', reason_codes = null where id = $1",
@@ -1958,13 +1962,10 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     expect(await statusOf(w, request.id)).toBe('APPROVED');
-    // Its signed state as approved: the status, and the event and version that signed it.
-    let saved: { status: string; state_version: number; state_event_id: string } | undefined;
+    // Its row as approved, whole: an older state its own signed event still seals.
+    let saved: Awaited<ReturnType<Owner['saveRow']>> | undefined;
     await asOwner(w, SPEND_REQUESTS, async (owner) => {
-      [saved] = await owner.query<{ status: string; state_version: number; state_event_id: string }>(
-        'select status, state_version, state_event_id from spend_requests.requests where id = $1',
-        [request.id],
-      );
+      saved = await owner.saveRow(request.id);
     });
     await signed(w, (tx, states) =>
       cancelRequest(
@@ -1978,13 +1979,10 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     );
     expect(await statusOf(w, request.id)).toBe('CANCELLED');
     await asOwner(w, SPEND_REQUESTS, (owner) =>
-      guardsOff(async () => {
+      owner.withoutStatusGuard(async () => {
         if (saved === undefined) throw new Error('no saved row');
-        await owner.query(
-          'update spend_requests.requests set status = $2, state_version = $3, state_event_id = $4 where id = $1',
-          [request.id, saved.status, saved.state_version, saved.state_event_id],
-        );
-      }, owner),
+        await owner.restoreRow(saved);
+      }),
     );
 
     refusedWithTheHold(await handedOnce(w, request.id));
@@ -1994,6 +1992,29 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await asOwner(w, SUPPLIERS, (owner) => owner.setColumn(w.suppliers[0] ?? '', 'payee_key', 'planted-payee'));
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  it('SEC-DB-02 refuses the payee’s bank reference changed past the app after the approval: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // The supplier's version in force: its beneficiary reference is what Tx A sends the partner to pay.
+    let versionId: string | undefined;
+    await asOwner(w, SUPPLIERS, async (owner) => {
+      [{ current_version_id: versionId } = { current_version_id: undefined }] = await owner.query<{
+        current_version_id: string;
+      }>('select current_version_id from suppliers.suppliers where id = $1', [w.suppliers[0]]);
+    });
+    // Past the database's own guard too (a version is made once): only the seal is left to find it.
+    await asOwner(w, SUPPLIER_VERSIONS, async (owner) => {
+      await owner.query('alter table suppliers.supplier_versions disable trigger made_once');
+      try {
+        await owner.setColumn(versionId ?? '', 'beneficiary_ref', 'planted-beneficiary');
+      } finally {
+        await owner.query('alter table suppliers.supplier_versions enable trigger made_once');
+      }
+    });
 
     refusedWithTheHold(await handedOnce(w, request.id));
   });
