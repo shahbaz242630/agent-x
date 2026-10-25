@@ -701,6 +701,7 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
         `function ${routine}: runs with its owner's rights (SECURITY DEFINER), which would let its callers act as the owner and reach past the tenant walls (ADR-005)`,
     ),
     ...facts.grants.flatMap((grant) => grantProblems(grant, policy, roles)),
+    ...unheldRightProblems(policy, facts, roles),
     ...facts.roles
       .filter((role) => role.bypass_rls && role.name !== roles.backup)
       .map((role) => `role ${role.name} has BYPASSRLS; only ${roles.backup} may (ADR-005 §3)`),
@@ -742,6 +743,37 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
     }
     problems.push(...appMayUpdateProblems(name, table, appendOnly));
     return problems;
+  });
+}
+
+/**
+ * Each right a global table's entry lists, held by the app (Phase 4 gate,
+ * S147): the list is the ceiling the grants are held under, so a right listed
+ * but never granted would let a later migration grant it unreviewed.
+ */
+function unheldRightProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames): string[] {
+  return Object.entries(policy.globalTables).flatMap(([name, table]) => {
+    // An append-only schema's table may list no rights at all (globalListProblems).
+    if (policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) return [];
+    const held = facts.grants.filter((grant) => grant.relation === name && grant.grantee === roles.app);
+    const onTable = (privilege: string) =>
+      held.some((grant) => grant.kind === 'relation' && grant.privilege === privilege);
+    const onColumn = (column: string) =>
+      held.some((grant) => grant.kind === 'column' && grant.privilege === 'UPDATE' && grant.attribute === column);
+    return [
+      ...[...new Set(table.appMay ?? [])]
+        .filter((privilege) => !onTable(privilege))
+        .map(
+          (privilege) =>
+            `${name}: the global-table list lets the app ${privilege} it, but the app is granted no such right`,
+        ),
+      ...(table.appMayUpdate ?? [])
+        .filter((column) => !onColumn(column))
+        .map(
+          (column) =>
+            `${name}: the global-table list lets the app change column ${column}, but the app is granted no such right`,
+        ),
+    ];
   });
 }
 

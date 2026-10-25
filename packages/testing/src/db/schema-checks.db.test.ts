@@ -149,6 +149,7 @@ describe(`CI-06 what passes (Postgres ${server.version})`, () => {
       ...TENANT_TABLE,
       'create schema g',
       'create table g.people (id uuid primary key, joined_at timestamptz not null)',
+      'grant select on g.people to agentx_app',
       `create table t.notes (
          org_id uuid not null, id uuid not null, item_id uuid not null,
          author uuid not null references g.people (id), body text not null,
@@ -1170,6 +1171,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
 
       expect(await problemsWith({ ...SESSIONS, appMay: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] })).toEqual([
         'identity.sessions: the global-table list lets the app UPDATE it whole and names the columns it may change',
+        'identity.sessions: the global-table list lets the app UPDATE it, but the app is granted no such right',
       ]);
       const once =
         'identity.sessions: the global-table list must name each column the app may change once, and at least one';
@@ -1231,6 +1233,24 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         "directory.orgs: the global-table list doesn't name the app's rights on it (B1d-1)",
         "migrations.applied: the global-table list names one of the app's rights twice",
         "platform_controls.audit_head: the global-table list names the app's rights, but its schema is append-only",
+        'migrations.applied: the global-table list lets the app SELECT it, but the app is granted no such right',
+      ]);
+    });
+
+    it('fails a right the list names that the app was never granted, whole or on a column (Phase 4 gate)', async () => {
+      const keysEntry = POLICY.globalTables['fake_partner.event_keys'] ?? { reason: '', columns: [] };
+      const inbox = POLICY.globalTables['provider_events.inbox'] ?? { reason: '', columns: [] };
+      const policy: SchemaPolicy = {
+        ...POLICY,
+        globalTables: {
+          ...POLICY.globalTables,
+          'fake_partner.event_keys': { ...keysEntry, appMay: ['SELECT', 'INSERT', 'UPDATE'] },
+          'provider_events.inbox': { ...inbox, appMayUpdate: ['taken_at', 'attempts', 'org_id'] },
+        },
+      };
+      expect(await problemsAfter([], policy)).toEqual([
+        'provider_events.inbox: the global-table list lets the app change column org_id, but the app is granted no such right',
+        'fake_partner.event_keys: the global-table list lets the app UPDATE it, but the app is granted no such right',
       ]);
     });
 

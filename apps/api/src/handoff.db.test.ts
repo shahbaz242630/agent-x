@@ -247,21 +247,24 @@ describe('an approved request handed to the partner once (B4)', () => {
     ['the answer lost (.02): UNKNOWN, never resent', 2n, { status: 'UNKNOWN', rejectCode: null }],
     ['the rail’s 409 (.03): UNKNOWN, never resent', 3n, { status: 'UNKNOWN', rejectCode: null }],
     ['rejected after the debit (.04): under way at first', 4n, { status: 'PROCESSING', rejectCode: null }],
-  ] as const)('records the fake’s answer: %s', async (_name, fils, transaction) => {
-    const { w, acting } = await ready();
-    const request = await ask(acting, w, { amount: ALLOWED(fils) });
-    const { rail, submitted } = counted(w);
+  ] as const)(
+    'SEC-DP-02 records the fake’s answer, run again making nothing more: %s',
+    async (_name, fils, transaction) => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED(fils) });
+      const { rail, submitted } = counted(w);
 
-    await handoffOf(w, rail).run();
-    await handoffOf(w, rail).run();
+      await handoffOf(w, rail).run();
+      await handoffOf(w, rail).run();
 
-    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
-    expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1, transaction });
-    // Once, whatever it answered: an answer not known is never resent (ADR-007 §10).
-    expect(submitted()).toBe(1);
-    // Its holdings follow its payment (C3): released only after a proven refusal, blocked while unknown.
-    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER[transaction.status]);
-  });
+      expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+      expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1, transaction });
+      // Once, whatever it answered: an answer not known is never resent (ADR-007 §10).
+      expect(submitted()).toBe(1);
+      // Its holdings follow its payment (C3): released only after a proven refusal, blocked while unknown.
+      expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER[transaction.status]);
+    },
+  );
 
   it('makes one instruction and calls the partner once, though two runs reach the request at once (forced, SEC-DP-01)', async () => {
     const { w, acting } = await ready();

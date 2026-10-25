@@ -206,6 +206,24 @@ describe('B3 the instruction (one a request, made once)', () => {
       instructionOfRequest(tx, states, { orgId: world.orgId, spendRequestId: world.request }),
     );
     expect(byRequest).toMatchObject({ outcome: 'found', instruction: { id: instruction.id } });
+    // Its signed event names the request it pays and the intent's hash, for the audit log and the evidence.
+    const made = await withTenant(app, world.orgId, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select(['action', 'details'])
+        .where('subject_type', '=', 'instruction')
+        .where('subject_id', '=', instruction.id)
+        .execute(),
+    );
+    expect(made.map(({ action, details }) => ({ action, details: JSON.parse(details) as unknown }))).toEqual([
+      {
+        action: 'instruction.made',
+        details: expect.objectContaining({
+          spendRequestId: world.request.toLowerCase(),
+          intentHash: intentHashOf(instruction),
+        }) as unknown,
+      },
+    ]);
     expect(await organizationOfInstruction(app, instruction.id)).toBe(world.orgId);
     expect(await organizationOfInstruction(app, ids.next())).toBeUndefined();
   });

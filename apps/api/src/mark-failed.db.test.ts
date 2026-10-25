@@ -542,6 +542,31 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
   });
 
+  it('keeps each payment’s proposal its own: another payment’s open one neither blocks nor is confirmed by it', async () => {
+    const { w, acting } = await ready();
+    // Two under the approval threshold together (SMALL): both handed off in one run.
+    const oneRequest = await ask(acting, w, { amount: SMALL(REJECTED_UNPROVEN) });
+    const otherRequest = await ask(acting, w, { amount: SMALL(REJECTED_UNPROVEN) });
+    await handoffOf(w).run();
+    clock.advanceBy(2 * STEP);
+    await checksOf(w).run();
+    const one = (await transactionOf(w, oneRequest.id)).id;
+    const other = (await transactionOf(w, otherRequest.id)).id;
+    const first = await adminOf(w);
+    const second = await adminOf(w);
+    clock.advanceBy(ESTABLISHED_MS);
+    const proposer = await signedInAgain(first);
+    const confirmer = await signedInAgain(second);
+    await proposed(proposer, other);
+
+    // The other payment's open proposal is not this one's: proposed and confirmed on its own.
+    expect(await proposed(proposer, one)).toMatchObject({ outcome: 'proposed', proposal: { transactionId: one } });
+    expect(await approved(confirmer, one)).toMatchObject({ outcome: 'marked' });
+    expect(await transactionOf(w, oneRequest.id)).toMatchObject({ status: 'FAILED' });
+    expect(await transactionOf(w, otherRequest.id)).toMatchObject({ status: 'UNKNOWN' });
+    expect(await approved(confirmer, other)).toMatchObject({ outcome: 'marked' });
+  });
+
   it('is withdrawn by its proposer or another admin, every admin told, the payment as it was', async () => {
     const { w, request, transaction, first, second } = await markable();
     await proposed(first, transaction.id);
