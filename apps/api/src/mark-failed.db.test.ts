@@ -23,13 +23,14 @@
 //   payment (forced), whichever takes it first settles it.
 // The routes' answers are payments.test.ts.
 import { withSignedStates } from '@agentx/core/modules/audit';
-import { createSessions, createStepUpChallenges } from '@agentx/core/modules/identity';
+import { createSessions, createStepUpChallenges, ESTABLISHED_DAYS, MEMBERSHIPS } from '@agentx/core/modules/identity';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { MARK_FAILED_AFTER_MS, markFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { FAILURE_PROPOSALS, noteTransactionFacts, TRANSACTIONS } from '@agentx/core/modules/transactions';
+import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -168,9 +169,45 @@ async function signedInAgain(who: Member): Promise<Member> {
 /** An UNKNOWN payment past the day, and two of its organisation's admins signed in now. */
 async function markable(fils = REJECTED_UNPROVEN) {
   const handed = await handedOff(fils, { checked: fils === REJECTED_UNPROVEN });
-  clock.advanceBy(MARK_FAILED_AFTER_MS);
-  return { ...handed, first: await adminOf(handed.w), second: await adminOf(handed.w) };
+  const first = await adminOf(handed.w);
+  const second = await adminOf(handed.w);
+  // Members long enough to be each other's second person (ADR-012 §1), and the payment past its day.
+  clock.advanceBy(ESTABLISHED_MS);
+  return { ...handed, first: await signedInAgain(first), second: await signedInAgain(second) };
 }
+
+/** How long a member must have been one to be a second person (ADR-012 §1), and a step past it. */
+const ESTABLISHED_MS = ESTABLISHED_DAYS * DAY_MS + 1;
+
+/** The member's role changed to admin by `by`, as membership-changes.ts records it: a role `by` granted. */
+const madeAdminBy = (w: World, who: Member, by: Member) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const key = { orgId: w.org, id: who.membershipId };
+    const state = await states.verifiedState(tx, MEMBERSHIPS, key, 'change');
+    if (state.outcome !== 'verified') throw new Error('not verified');
+    await states.record(
+      tx,
+      MEMBERSHIPS,
+      key,
+      state,
+      { role: 'admin' },
+      {
+        actor: { type: 'user', id: by.userId },
+        action: 'membership.role_changed',
+        details: { roleFrom: 'approver', roleTo: 'admin' },
+      },
+    );
+  });
+
+/** The member removed by `by`, as membership-changes.ts records it. */
+const deactivatedBy = (w: World, who: Member, by: Member) =>
+  withSignedStates(app, w.org, quiet(), (tx, states) =>
+    states.changeStatus(tx, MEMBERSHIPS, { orgId: w.org, id: who.membershipId }, 'deactivate', {
+      actor: { type: 'user', id: by.userId },
+      action: 'membership.deactivated',
+      details: { role: 'admin' },
+    }),
+  );
 
 const proposing = (who: Member, paymentId: string, evidenceRef = EVIDENCE) =>
   marks.propose(who, keyed(who, PROPOSE_OPERATION), paymentId, evidenceRef, CORRELATION);
@@ -241,7 +278,12 @@ const markNoticesOf = (w: World) =>
         .selectFrom('notifications.outbox')
         .select(['kind', 'about_id', 'recipient_user_id'])
         .where('org_id', '=', w.org)
-        .where('kind', 'in', ['payment_marked_failed', 'payment_mark_proposed', 'payment_mark_withdrawn'])
+        .where('kind', 'in', [
+          'payment_marked_failed',
+          'payment_mark_proposed',
+          'payment_mark_withdrawn',
+          'payment_mark_ended',
+        ])
         .orderBy('id')
         .execute()
     ).map(({ kind, about_id, recipient_user_id }) => ({ kind, aboutId: about_id, to: recipient_user_id })),
@@ -400,12 +442,56 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
     // The world's admin, and this one: two in all.
     const proposer = await adminOf(w);
     await proposed(proposer, transaction.id);
-    clock.advanceBy(LONE_ADMIN_WAIT_MS + 1);
+    // The world's admin a member long enough to be the second person.
+    clock.advanceBy(ESTABLISHED_MS);
 
     expect(await approving(await signedInAgain(proposer), transaction.id)).toEqual(
       refused(403, 'FAILURE_PROPOSAL_YOURS'),
     );
     expect(await approved(await signedInAgain(w.admin), transaction.id)).toMatchObject({ outcome: 'marked' });
+  });
+
+  it('refuses a second admin who joined in the last 14 days: FAILURE_PROPOSAL_CONFIRMER_TOO_NEW (ADR-012 §1)', async () => {
+    const { w, request, transaction, first } = await markable();
+    await proposed(first, transaction.id);
+    const newcomer = await adminOf(w);
+
+    expect(await approving(newcomer, transaction.id)).toEqual(refused(403, 'FAILURE_PROPOSAL_CONFIRMER_TOO_NEW'));
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+  });
+
+  it('refuses a second admin the proposer made admin: FAILURE_PROPOSAL_GRANTED_BY_PROPOSER (ADR-012 §1)', async () => {
+    const { w, transaction } = await handedOff(REJECTED_UNPROVEN);
+    const first = await adminOf(w);
+    const second = await adminOf(w);
+    const raised = await member(w.org, 'approver');
+    await madeAdminBy(w, raised, first);
+    clock.advanceBy(ESTABLISHED_MS);
+    const proposer = await signedInAgain(first);
+    await proposed(proposer, transaction.id);
+
+    expect(await approving(await signedInAgain(raised), transaction.id)).toEqual(
+      refused(403, 'FAILURE_PROPOSAL_GRANTED_BY_PROPOSER'),
+    );
+    expect(await approved(await signedInAgain(second), transaction.id)).toMatchObject({ outcome: 'marked' });
+  });
+
+  it('keeps the one-admin path shut 14 days after an admin is removed: FAILURE_PROPOSAL_ALONE_LOCKED', async () => {
+    const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
+    const other = await adminOf(w);
+    clock.advanceBy(MARK_FAILED_AFTER_MS);
+    const lone = await signedInAgain(w.admin);
+    await deactivatedBy(w, other, lone);
+    await proposed(lone, transaction.id);
+    clock.advanceBy(LONE_ADMIN_WAIT_MS + 1);
+
+    expect(await approving(await signedInAgain(lone), transaction.id)).toEqual(
+      refused(409, 'FAILURE_PROPOSAL_ALONE_LOCKED'),
+    );
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+
+    clock.advanceBy(ESTABLISHED_MS);
+    expect(await approved(await signedInAgain(lone), transaction.id)).toMatchObject({ outcome: 'marked' });
   });
 
   it('lets a lone admin confirm their own proposal a day after making it, never before (partner S113)', async () => {
@@ -506,9 +592,12 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
   });
 
   it('is still watched by the bank check: the bank paying it after all is said, never applied (rail map §4)', async () => {
-    const { w, request, transaction, first, second } = await markable(ANSWER_LOST);
-    await proposed(first, transaction.id);
-    await approved(second, transaction.id);
+    // The lone admin's path, so the fake still answers about it: within days of its hand-off, not weeks.
+    const { w, request, transaction } = await handedOff(ANSWER_LOST, { checked: false });
+    clock.advanceBy(MARK_FAILED_AFTER_MS);
+    await proposed(await signedInAgain(w.admin), transaction.id);
+    clock.advanceBy(LONE_ADMIN_WAIT_MS + 1);
+    await approved(await signedInAgain(w.admin), transaction.id);
 
     // A new check's first run checks every one, the watched among them.
     await checksOf(w).run();
@@ -637,7 +726,7 @@ describe('refused, changing nothing', () => {
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
   });
 
-  it('a confirm once the bank’s word settled the payment since: PAYMENT_NOT_UNKNOWN; the proposal still withdrawn', async () => {
+  it('a confirm once the bank’s word settled the payment since: PAYMENT_NOT_UNKNOWN; the proposal ENDED, all told', async () => {
     const { w, request, transaction, first, second } = await markable(ANSWER_LOST);
     // UNKNOWN until the bank's credit is read: its check left until now.
     expect(transaction).toMatchObject({ status: 'UNKNOWN' });
@@ -648,7 +737,14 @@ describe('refused, changing nothing', () => {
 
     expect(await confirmingApproval(second, transaction.id, challengeId)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUCCEEDED' });
-    expect(await withdrawn(first, transaction.id)).toMatchObject({ outcome: 'withdrawn' });
+    // Ended by the bank check's move, in its transaction (partner S145): nothing left open.
+    expect((await proposalEventsOf(w)).map(({ action, actorId }) => ({ action, actorId }))).toEqual([
+      { action: 'failure_proposal.made', actorId: first.userId },
+      { action: 'failure_proposal.ended', actorId: 'api' },
+    ]);
+    expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed', 'payment_mark_ended']);
+    expect(await withdrawing(first, transaction.id)).toEqual(refused(409, 'NO_FAILURE_PROPOSAL'));
+    expect(await proposing(first, transaction.id)).toEqual(refused(409, 'PAYMENT_NOT_UNKNOWN'));
   });
 });
 
@@ -807,7 +903,7 @@ describe('with the bank check or another admin at the same payment (forced, ADR-
     expect(mark).toEqual({ status: 'fulfilled', value: refused(409, 'PAYMENT_NOT_UNKNOWN') });
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUCCEEDED' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
-    expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed']);
+    expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed', 'payment_mark_ended']);
   });
 
   it('two admins proposing at once: one proposal, the other FAILURE_PROPOSAL_OPEN', async () => {

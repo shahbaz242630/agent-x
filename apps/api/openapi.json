@@ -211,6 +211,21 @@
                   },
                   {
                     "type": "string",
+                    "const": "FAILURE_PROPOSAL_ALONE_LOCKED",
+                    "description": "No other admin can confirm this proposal, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be confirmed by one person alone until then. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "FAILURE_PROPOSAL_CONFIRMER_TOO_NEW",
+                    "description": "You've been a member of this organisation for less than 14 days, so you can't be the second admin to confirm a payment marked failed yet. Nothing was changed. Ask another admin."
+                  },
+                  {
+                    "type": "string",
+                    "const": "FAILURE_PROPOSAL_GRANTED_BY_PROPOSER",
+                    "description": "Your admin role was given or approved by the admin who proposed marking this payment failed, so you can't be their second person. Nothing was changed. Ask another admin."
+                  },
+                  {
+                    "type": "string",
                     "const": "FAILURE_PROPOSAL_OPEN",
                     "description": "An admin has already proposed marking this payment failed, and it waits for a second admin to confirm it, so another proposal isn't made. Nothing was changed. Confirm or withdraw the one open."
                   },
@@ -3543,7 +3558,8 @@
             "enum": [
               "OPEN",
               "WITHDRAWN",
-              "CONFIRMED"
+              "CONFIRMED",
+              "ENDED"
             ]
           },
           "proposedAt": {

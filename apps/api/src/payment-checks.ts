@@ -421,12 +421,13 @@ export function createPaymentChecks({
 
       const to = await movedBy();
       if (to !== from) {
-        await settlePayment(tx, outbox, {
+        await settlePayment(tx, states, outbox, {
           orgId,
           requestId: locked.instruction.spendRequestId,
           transactionId: listed.id,
           status: to,
           at: clock.now(),
+          openProposal: locked.openProposal,
         });
       }
       if (to === 'UNKNOWN' && clock.now().getTime() - transaction.createdAt.getTime() > STILL_UNKNOWN_MS) {

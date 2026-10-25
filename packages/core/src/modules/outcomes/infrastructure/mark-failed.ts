@@ -64,12 +64,14 @@ export async function markFailed(
     actor: { type: 'user', id: userId },
     details: { via: 'admin', ...details },
   });
-  await settlePayment(tx, outbox, {
+  await settlePayment(tx, states, outbox, {
     orgId,
     requestId: locked.instruction.spendRequestId,
     transactionId,
     status: 'FAILED',
     at,
+    // The proposal this confirms: its caller moves it CONFIRMED, never ended.
+    openProposal: null,
   });
   await outbox.add(tx, [
     {

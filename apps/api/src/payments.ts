@@ -15,7 +15,7 @@
 // 409 PAYMENT_NOT_UNKNOWN, PAYMENT_TOO_RECENT, FAILURE_PROPOSAL_OPEN,
 // NO_FAILURE_PROPOSAL, FAILURE_PROPOSAL_TOO_RECENT; 403 FAILURE_PROPOSAL_YOURS;
 // 404 for none of the organisation's.
-import type { FailureProposalRecord } from '@agentx/core/modules/transactions';
+import { FAILURE_PROPOSAL, type FailureProposalRecord } from '@agentx/core/modules/transactions';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -73,8 +73,10 @@ const PROPOSAL = z
     evidenceRef: z.string().describe('The bank’s reference the proposing admin gave.'),
     proposedBy: z.uuid().describe('The proposing admin, by their user ID.'),
     status: z
-      .enum(['OPEN', 'WITHDRAWN', 'CONFIRMED'])
-      .describe('OPEN, waiting for a second admin; WITHDRAWN; or CONFIRMED, the payment FAILED.'),
+      .enum(FAILURE_PROPOSAL.states)
+      .describe(
+        'OPEN, waiting for a second admin; WITHDRAWN; CONFIRMED, the payment FAILED; or ENDED, the bank’s answer came first.',
+      ),
     proposedAt: z.iso.datetime().describe('When it was proposed.'),
   })
   .register(API_SCHEMAS, { id: 'FailureProposal', description: 'An admin’s proposal to mark a payment failed.' });

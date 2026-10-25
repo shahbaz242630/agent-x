@@ -6,15 +6,18 @@
 // - `withdraw`: an admin, the proposer among them, takes it back.
 // - `confirm`: a second admin (or a lone admin a day on) confirms it, and the
 //   payment moves to FAILED in the same transaction.
+// - `end`: the bank's answer settled the payment first (partner S145): closed
+//   with that move, every admin told.
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 
 export const FAILURE_PROPOSAL = defineStateMachine({
   name: 'failure_proposal',
-  states: ['OPEN', 'WITHDRAWN', 'CONFIRMED'],
+  states: ['OPEN', 'WITHDRAWN', 'CONFIRMED', 'ENDED'],
   initial: 'OPEN',
   events: {
     withdraw: { from: ['OPEN'], to: 'WITHDRAWN' },
     confirm: { from: ['OPEN'], to: 'CONFIRMED' },
+    end: { from: ['OPEN'], to: 'ENDED' },
   },
 });
 

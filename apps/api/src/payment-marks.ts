@@ -34,8 +34,15 @@
 // a confirm's), the admin's membership and, to approve, every admin's (2a),
 // the payment (10), its proposal (10, after it), the challenge consumed, its
 // holdings (11), the chain head (12), then the notice.
-import type { SignedStates } from '@agentx/core/modules/audit';
-import { changeHashOf, membersOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
+import { type SignedStates, TooManyEventsToRead } from '@agentx/core/modules/audit';
+import {
+  changeHashOf,
+  type StepUpChallenges,
+  stepUpDetails,
+  twoPersonFactsOf,
+  type VerifierRefusal,
+  verifierVerdict,
+} from '@agentx/core/modules/identity';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
@@ -50,7 +57,7 @@ import {
   transactionOf,
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import type { Clock, IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -155,6 +162,15 @@ export interface PaymentMarks {
   ): Promise<Withdrawn>;
 }
 
+/** Each refusal of the confirming admin by the two-person rule, as answered. */
+const CONFIRMER_REFUSALS: Readonly<Record<VerifierRefusal, readonly [number, ReasonCode]>> = {
+  NOT_A_VERIFIER: [403, 'FORBIDDEN'],
+  SAME_PERSON: [403, 'FAILURE_PROPOSAL_YOURS'],
+  VERIFIER_GRANTED_BY_ENTERER: [403, 'FAILURE_PROPOSAL_GRANTED_BY_PROPOSER'],
+  VERIFIER_TOO_NEW: [403, 'FAILURE_PROPOSAL_CONFIRMER_TOO_NEW'],
+  SOLO_PATH_LOCKED: [409, 'FAILURE_PROPOSAL_ALONE_LOCKED'],
+};
+
 /** Refused inside a mark's write, so its transaction ends there. */
 class MarkRefused extends UseCaseRefused {}
 
@@ -236,6 +252,16 @@ export function createPaymentMarks({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MarkRefused });
   const stepUps = createStepUps({ challenges, Refusal: MarkRefused });
 
+  /** An approval's write, a membership history past its cap answered as a refusal like any other (as a supplier's). */
+  const historyBounded = async (...args: Parameters<typeof work.write>) => {
+    try {
+      return await work.write(...args);
+    } catch (error) {
+      if (!(error instanceof TooManyEventsToRead)) throw error;
+      return { outcome: 'refused' as const, status: 409, code: 'HISTORY_TOO_LONG' as const };
+    }
+  };
+
   /** A proposal one may propose for: the payment markable and none open. */
   const proposable = async (
     tx: MarkTx,
@@ -254,8 +280,12 @@ export function createPaymentMarks({
 
   /**
    * The proposal this admin may approve: the payment markable, its proposal
-   * open, and the admin not its proposer, unless the only active admin, a day
-   * after proposing. Every admin is read at 2a, before the payment.
+   * open, and the admin a second person by the two-person rule (ADR-012 §1,
+   * partner S145: as a supplier's verifier, among the admins): not the
+   * proposer, a member 14 days, not made admin by them. Where no admin is,
+   * the one-person path, a day after proposing, unless an admin or approver
+   * was removed or had their role changed in the last 14 days. The members and
+   * their history are read at 2a, before the payment.
    */
   const approvable = async (
     tx: MarkTx,
@@ -264,18 +294,24 @@ export function createPaymentMarks({
     paymentId: string,
     lock: 'share' | 'change',
   ) => {
-    await work.memberIn(tx, states, member, MARKING_ROLES);
-    const members = await membersOf(tx, states, member.orgId);
-    if (members.outcome === 'tampered') throw new MarkRefused(503, 'INTEGRITY_FAILED');
-    const admins = members.members.filter(({ role, status }) => role === 'admin' && status === 'ACTIVE');
+    const confirmer = await work.memberIn(tx, states, member, MARKING_ROLES);
+    const facts = await twoPersonFactsOf(tx, states, member.orgId);
+    if (facts.outcome === 'tampered') throw new MarkRefused(503, 'INTEGRITY_FAILED');
     const now = clock.now();
     const read = await markable(tx, states, { orgId: member.orgId, id: paymentId }, lock, now);
     const open = await openIn(tx, states, member.orgId, read.transaction.id, lock);
-    if (open.proposal.proposedBy === member.userId.toLowerCase()) {
-      if (admins.length > 1) throw new MarkRefused(403, 'FAILURE_PROPOSAL_YOURS');
-      if (now.getTime() - open.proposal.createdAt.getTime() <= LONE_ADMIN_WAIT_MS) {
-        throw new MarkRefused(409, 'FAILURE_PROPOSAL_TOO_RECENT');
-      }
+    // A membership is never deleted (deactivated, it stays): a proposer with none is past the app.
+    const proposer = facts.members.find(({ userId }) => userId.toLowerCase() === open.proposal.proposedBy);
+    if (proposer === undefined) throw new MarkRefused(503, 'INTEGRITY_FAILED');
+    // Among the admins alone (only they confirm a mark), and the proposer whatever their role now.
+    const amongAdmins = {
+      ...facts,
+      members: facts.members.filter(({ id, role }) => role === 'admin' || id === proposer.id),
+    };
+    const verdict = verifierVerdict(amongAdmins, { enteredById: proposer.id, verifierId: confirmer.id }, now);
+    if (verdict.outcome === 'refused') throw new MarkRefused(...CONFIRMER_REFUSALS[verdict.reason]);
+    if (verdict.outcome === 'single_user' && now.getTime() - open.proposal.createdAt.getTime() <= LONE_ADMIN_WAIT_MS) {
+      throw new MarkRefused(409, 'FAILURE_PROPOSAL_TOO_RECENT');
     }
     return { read, open, hash: hashOf(APPROVE_OPERATION, member.orgId, read.state.eventId, open.state.eventId) };
   };
@@ -359,7 +395,7 @@ export function createPaymentMarks({
 
     async approve(member, idempotent, paymentId, correlationId) {
       let shown: FailureProposalRecord | undefined;
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await historyBounded(member, idempotent, correlationId, async (tx, states) => {
         const { open, hash } = await approvable(tx, states, member, paymentId, 'share');
         shown = open.proposal;
         return stepUps.ask(tx, member, { action: APPROVE_OPERATION, changeHash: hash });
@@ -378,7 +414,7 @@ export function createPaymentMarks({
     },
 
     async confirmApproval(member, idempotent, paymentId, stepUpChallengeId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await historyBounded(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         const { read, open, hash } = await approvable(tx, states, member, paymentId, 'change');
         const consumed = await stepUps.consumed(

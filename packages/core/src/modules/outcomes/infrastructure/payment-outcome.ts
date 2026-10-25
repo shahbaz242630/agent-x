@@ -1,8 +1,10 @@
 // What a payment's move does beyond itself (Phase 4 C3, C2b), in the
 // transaction that moved it, once its holdings are locked (ADR-006 §6: the
 // transaction read for change, 10; its holdings, 11; the move, 12): what its
-// request holds settled as it now stands (the outcomes module), and, on
-// SUCCEEDED, its supplier's remittance email queued (partner decision 34a).
+// request holds settled as it now stands (the outcomes module); on
+// SUCCEEDED, its supplier's remittance email queued (partner decision 34a);
+// and, out of UNKNOWN, an admin's open proposal to mark it failed ended, every
+// admin told (0066, gate H10; locked at 10 by `lockPayment`).
 // Every move of a payment goes through here (Tx B, the sweep, the bank check
 // and an admin marking one failed, E1a, E1c), so neither is ever left
 // out, each after `lockPayment`. The email's setting and address are read as it
@@ -17,6 +19,9 @@ import type { Notice, NotificationsTables, Outbox } from '../../notifications/in
 import { type PaymentExecution, paymentStateOf } from '../../providers/index.ts';
 import type { SpendRequestsTables } from '../../spend-requests/index.ts';
 import {
+  type FailureProposalRecord,
+  moveProposal,
+  openProposalOf,
   type ProviderFacts,
   type TransactionEvent,
   transactionOf,
@@ -51,10 +56,14 @@ export const NO_FACTS: ProviderFacts = {
   providerChangedAt: null,
 };
 
-/** The transaction and its instruction, both verified, as `lockPayment` read them. */
+/**
+ * The transaction and its instruction, both verified, and an admin's open
+ * proposal to mark it failed (0066, gate H10), if any, as `lockPayment` read them.
+ */
 export type LockedPayment = Readonly<{
   transaction: Extract<Awaited<ReturnType<typeof transactionOf>>, { outcome: 'found' }>['transaction'];
   instruction: Extract<Awaited<ReturnType<typeof instructionOf>>, { outcome: 'found' }>['instruction'];
+  openProposal: FailureProposalRecord | null;
 }>;
 
 /**
@@ -105,17 +114,27 @@ export async function lockPayment(
   ) {
     throw new Error(`A handed-off transaction's instruction can't be believed: ${key.id}`);
   }
+  // An admin's open proposal to mark it failed, at its transaction's level (10), before the holdings (11).
+  const proposal = await openProposalOf(tx, states, { orgId: key.orgId, transactionId: read.transaction.id }, 'change');
+  if (proposal.outcome === 'tampered')
+    throw new Error(`A handed-off transaction's proposal can't be believed: ${key.id}`);
   await lockHoldingsOf(tx, requestId ?? instruction.instruction.spendRequestId);
-  return { transaction: read.transaction, instruction: instruction.instruction };
+  return {
+    transaction: read.transaction,
+    instruction: instruction.instruction,
+    openProposal: proposal.outcome === 'found' ? proposal.proposal : null,
+  };
 }
 
-/** The payment just moved, and when. */
+/** The payment just moved, and when; and the proposal `lockPayment` found open, which a move out of UNKNOWN ends. */
 export interface PaymentMoved {
   readonly orgId: string;
   readonly requestId: string;
   readonly transactionId: string;
   readonly status: TransactionStatus;
   readonly at: Date;
+  /** Null for none, and for the move that confirms it (two admins' mark, which moves the proposal itself). */
+  readonly openProposal: FailureProposalRecord | null;
 }
 
 /** The supplier's remittance email for the payment, to the supplier itself (0062). */
@@ -137,10 +156,29 @@ const remittanceOf = (orgId: string, transactionId: string): Notice => ({
  * move with it.
  */
 export async function settlePayment(
-  tx: DatabaseTransaction<PaymentOutcomeTables>,
+  tx: DatabaseTransaction<PaymentOutcomeTables & TransactionsTables>,
+  states: SignedStates,
   outbox: Outbox,
-  { orgId, requestId, transactionId, status, at }: PaymentMoved,
+  { orgId, requestId, transactionId, status, at, openProposal }: PaymentMoved,
 ): Promise<void> {
   await settleHoldings(tx, { requestId, status, at });
   if (status === 'SUCCEEDED') await outbox.add(tx, [remittanceOf(orgId, transactionId)]);
+  // The bank's answer came first (partner S145): an admin's proposal to mark it failed ends with the move, all told.
+  if (openProposal !== null && status !== 'UNKNOWN') {
+    await moveProposal(tx, states, { orgId, id: openProposal.id }, 'end', {
+      actor: { type: 'system', id: 'api' },
+      details: { status },
+    });
+    await outbox.add(tx, [endedOf(orgId, transactionId)]);
+  }
 }
+
+/** Every admin told that the bank's answer ended a proposal to mark the payment failed (0066). */
+const endedOf = (orgId: string, transactionId: string): Notice => ({
+  orgId,
+  recipientUserId: null,
+  kind: 'payment_mark_ended',
+  membershipId: null,
+  role: null,
+  aboutId: transactionId,
+});

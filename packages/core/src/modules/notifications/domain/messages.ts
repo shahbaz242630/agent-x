@@ -434,6 +434,12 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       "Sign in to Agent X to see the payment and the bank's reference given. Confirm it only once you have checked with your bank: marking it failed frees the invoice, so it could be paid twice. Any admin can withdraw the proposal.",
   },
+  payment_mark_ended: {
+    subject: () => 'Agent X: the bank answered about a payment proposed to be marked failed',
+    firstLine: () =>
+      "The bank gave its final answer about a payment from one of your organisations that an admin had proposed marking as failed. Agent X has updated the payment with the bank's answer, so the proposal is closed and nothing more is needed to confirm it.",
+    check: "Sign in to Agent X to see the payment and the bank's answer in your audit log.",
+  },
   payment_mark_withdrawn: {
     subject: () => 'Agent X: a proposal to mark a payment failed was withdrawn',
     firstLine: () =>

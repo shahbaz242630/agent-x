@@ -158,7 +158,13 @@ export async function proposalOf(
   return { outcome: 'found', proposal, state: { eventId: state.eventId } };
 }
 
-/** Withdraws or confirms the proposal, verified for change in this transaction; throws if its machine refuses. */
+/** Each move's action, as the organisation's log names it. */
+const MOVED_AS = { withdraw: 'withdrawn', confirm: 'confirmed', end: 'ended' } as const satisfies Record<
+  FailureProposalEvent,
+  string
+>;
+
+/** Withdraws, confirms or ends the proposal, verified for change in this transaction; throws if its machine refuses. */
 export async function moveProposal(
   tx: ProposalsTransaction,
   states: SignedStates,
@@ -168,7 +174,7 @@ export async function moveProposal(
 ): Promise<void> {
   const moved = await states.changeStatus(tx, FAILURE_PROPOSALS, key, event, {
     actor: change.actor,
-    action: `failure_proposal.${event === 'confirm' ? 'confirmed' : 'withdrawn'}`,
+    action: `failure_proposal.${MOVED_AS[event]}`,
     details: change.details,
   });
   // Read OPEN for change by its caller under this lock: anything but a change is something past the app.

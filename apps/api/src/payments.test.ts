@@ -256,6 +256,10 @@ describe('POST /v1/payments/{id}/failure-proposal…: two admins mark a payment 
     [409, 'NO_FAILURE_PROPOSAL'],
     [409, 'FAILURE_PROPOSAL_TOO_RECENT'],
     [403, 'FAILURE_PROPOSAL_YOURS'],
+    [403, 'FAILURE_PROPOSAL_CONFIRMER_TOO_NEW'],
+    [403, 'FAILURE_PROPOSAL_GRANTED_BY_PROPOSER'],
+    [409, 'FAILURE_PROPOSAL_ALONE_LOCKED'],
+    [409, 'HISTORY_TOO_LONG'],
     [403, 'STEP_UP_FAILED'],
     [503, 'INTEGRITY_FAILED'],
   ] as const)('answers the use case’s refusal of every step: %i %s', async (status, code) => {

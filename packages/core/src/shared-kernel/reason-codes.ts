@@ -84,6 +84,12 @@ export const REASON_CODES = {
     "An amount weighed is not in the mandate's currency: the request's, or a limit the organisation's policies set (AED 20,000 a month per agent is the default in AED only). Amounts are never converted, so the request is refused. Nothing was reserved.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
+  FAILURE_PROPOSAL_ALONE_LOCKED:
+    "No other admin can confirm this proposal, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be confirmed by one person alone until then. Nothing was changed.",
+  FAILURE_PROPOSAL_CONFIRMER_TOO_NEW:
+    "You've been a member of this organisation for less than 14 days, so you can't be the second admin to confirm a payment marked failed yet. Nothing was changed. Ask another admin.",
+  FAILURE_PROPOSAL_GRANTED_BY_PROPOSER:
+    "Your admin role was given or approved by the admin who proposed marking this payment failed, so you can't be their second person. Nothing was changed. Ask another admin.",
   FAILURE_PROPOSAL_OPEN:
     "An admin has already proposed marking this payment failed, and it waits for a second admin to confirm it, so another proposal isn't made. Nothing was changed. Confirm or withdraw the one open.",
   FAILURE_PROPOSAL_TOO_RECENT:

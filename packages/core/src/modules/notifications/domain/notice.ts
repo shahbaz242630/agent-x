@@ -128,10 +128,10 @@ const MARKED_FAILED_KIND = 'payment_marked_failed';
 const PAYMENT_ALERT_KINDS = ['payment_contradicted', 'payment_unproven', 'payment_still_unknown'] as const;
 /**
  * The kinds that tell every admin an admin proposed marking a payment failed,
- * a second admin to confirm it, or withdrew that (0066, gate H10), `aboutId`
- * the transaction.
+ * a second admin to confirm it, or withdrew that, or the bank's answer ended
+ * it (0066, gate H10), `aboutId` the transaction.
  */
-const MARK_PROPOSAL_KINDS = ['payment_mark_proposed', 'payment_mark_withdrawn'] as const;
+const MARK_PROPOSAL_KINDS = ['payment_mark_proposed', 'payment_mark_withdrawn', 'payment_mark_ended'] as const;
 
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,

@@ -513,6 +513,11 @@ describe('a notice’s email (B5-1b)', () => {
         'Agent X: a proposal to mark a payment failed was withdrawn',
         'withdrew the proposal to mark a payment as failed',
       ],
+      [
+        'payment_mark_ended',
+        'Agent X: the bank answered about a payment proposed to be marked failed',
+        'so the proposal is closed',
+      ],
     ] as const)('tells every admin, by the payment’s ID, of a %s (0066, H10)', (kind, subject, line) => {
       const told = messageFor({ ...remittanceNotice, kind, recipientUserId: NOTICE.recipientUserId }, 'a@example.test');
 

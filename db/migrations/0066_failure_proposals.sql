@@ -13,10 +13,10 @@
 --              organisation has one admin only, that admin a day on);
 --   WITHDRAWN  taken back by an admin, the proposer among them;
 --   CONFIRMED  confirmed: the payment moved to FAILED in the same transaction.
--- A proposal left OPEN when the bank's answer settles the payment first ends
--- with it: its confirm is refused, and a new one can't be made (the payment
--- is no longer UNKNOWN). One OPEN proposal a payment
--- (`one_open_proposal_a_payment`); the WITHDRAWN and CONFIRMED stay, so the
+--   ENDED      the bank's answer settled the payment first: closed in the
+--              same transaction as that move, every admin told (S145).
+-- One OPEN proposal a payment (`one_open_proposal_a_payment`); the others
+-- stay, so the
 -- organisation's audit log and these rows agree for good.
 --
 -- The app adds rows and reads them, and changes only the status and the two
@@ -25,8 +25,8 @@
 -- backup role reads everything.
 --
 -- Notice kinds, to every admin, `aboutId` the payment's transaction:
--- `payment_mark_proposed` (a second admin must confirm) and
--- `payment_mark_withdrawn`.
+-- `payment_mark_proposed` (a second admin must confirm),
+-- `payment_mark_withdrawn` and `payment_mark_ended`.
 
 CREATE TABLE transactions.failure_proposals (
   org_id uuid NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE transactions.failure_proposals (
   transaction_id uuid NOT NULL,
   evidence_ref text NOT NULL CHECK (evidence_ref ~ '^[A-Za-z0-9][A-Za-z0-9._/-]{2,63}$'),
   proposed_by uuid NOT NULL,
-  status text NOT NULL CHECK (status IN ('OPEN', 'WITHDRAWN', 'CONFIRMED')),
+  status text NOT NULL CHECK (status IN ('OPEN', 'WITHDRAWN', 'CONFIRMED', 'ENDED')),
   created_at timestamptz NOT NULL CHECK (pg_catalog.isfinite(created_at)),
   state_version integer NOT NULL DEFAULT 1,
   state_event_id uuid,
@@ -55,7 +55,7 @@ CREATE TRIGGER fixed_at_creation BEFORE UPDATE ON transactions.failure_proposals
   FOR EACH ROW EXECUTE FUNCTION state_rules.guard_fixed('transaction_id', 'evidence_ref', 'proposed_by', 'created_at');
 
 CREATE TRIGGER status_guard BEFORE INSERT OR UPDATE ON transactions.failure_proposals
-  FOR EACH ROW EXECUTE FUNCTION state_rules.guard_status('OPEN', 'OPEN>WITHDRAWN', 'OPEN>CONFIRMED');
+  FOR EACH ROW EXECUTE FUNCTION state_rules.guard_status('OPEN', 'OPEN>WITHDRAWN', 'OPEN>CONFIRMED', 'OPEN>ENDED');
 
 GRANT SELECT, INSERT ON transactions.failure_proposals TO agentx_app;
 -- Every sealed column, as the signed state writes them all with the seal when
@@ -121,6 +121,7 @@ ALTER TABLE notifications.outbox
         'payment_unproven',
         'payment_still_unknown',
         'payment_mark_proposed',
-        'payment_mark_withdrawn'
+        'payment_mark_withdrawn',
+        'payment_mark_ended'
       )
     );
