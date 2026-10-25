@@ -131,7 +131,7 @@ type HoldCheck =
 export const CHAIN_SUBJECT = 'audit_chain';
 
 /** The chain against its last anchor: still holding it, or wound back (the alarm raised). */
-export type AnchorKept = { readonly outcome: 'kept' } | { readonly outcome: 'tampered'; readonly sign: 'chain' };
+type AnchorKept = { readonly outcome: 'kept' } | { readonly outcome: 'tampered'; readonly sign: 'chain' };
 
 /** The row's state, matched with its latest signed event. */
 export interface VerifiedState {
