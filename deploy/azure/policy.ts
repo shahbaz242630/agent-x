@@ -55,6 +55,7 @@ export type RuleId =
   | 'token-refused-alert'
   | 'denial-surge-alert'
   | 'holdings-check-alert'
+  | 'handoff-queue-alert'
   | 'integrity-runs-alert'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'

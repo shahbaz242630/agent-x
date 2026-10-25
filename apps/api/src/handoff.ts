@@ -291,6 +291,8 @@ export function createHandoff({
   let heldWas: string | null = null;
   let waitedFor = new Map<string, string>();
   let waitingNow = new Map<string, string>();
+  // This run's waiting requests by organisation, left out of its stale count (gate H8).
+  const waitingIn = new Map<string, string[]>();
   // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
   const staleSaid = new Map<string, number>();
   const beatNow = (): void => {
@@ -331,7 +333,8 @@ export function createHandoff({
         .where('r.org_id', '=', orgId)
         .where('r.status', 'in', HANDED_FROM)
         .where('e.recorded_at', '<', before)
-        .where((where) => (waiting.length === 0 ? where.lit(true) : where('r.id', 'not in', waiting)))
+        // One array, however many wait: never a parameter a request (review).
+        .where((eb) => eb.not(eb('r.id', '=', eb.fn.any(eb.val(waiting)))))
         .executeTakeFirstOrThrow(),
     );
 
@@ -344,7 +347,7 @@ export function createHandoff({
     const now = clock.now().getTime();
     if (now - (staleSaid.get(orgId) ?? Number.NEGATIVE_INFINITY) < QUEUE_STALE_MS) return;
     try {
-      const waiting = [...waitingNow.keys()];
+      const waiting = waitingIn.get(orgId) ?? [];
       const { count, oldest } = await staleOf(orgId, new Date(now - QUEUE_STALE_MS), waiting, log);
       if (Number(count) === 0 || oldest === null) return;
       staleSaid.set(orgId, now);
@@ -576,6 +579,7 @@ export function createHandoff({
       // Said once a reason, not every run it still waits (gate H5): a long hold is one line a request.
       if (waitedFor.get(id) !== done.why) log.info('handoff.waiting', { requestId: id, why: done.why });
       waitingNow.set(id, done.why);
+      waitingIn.set(orgId, [...(waitingIn.get(orgId) ?? []), id]);
     }
     if (done.outcome !== 'handed_off') return;
     const { intent, transactionId } = done;
@@ -744,6 +748,7 @@ export function createHandoff({
         // The reasons this run's requests wait for, said again only once one changes; one gone, forgotten.
         if (held === null) waitedFor = waitingNow;
         waitingNow = new Map();
+        waitingIn.clear();
       }
       beatNow();
     },
