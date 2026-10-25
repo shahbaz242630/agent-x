@@ -1234,7 +1234,6 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         "migrations.applied: the global-table list names one of the app's rights twice",
         "platform_controls.audit_head: the global-table list names the app's rights, but its schema is append-only",
         'migrations.applied: the global-table list lets the app SELECT it, but the app is granted no such right',
-        'migrations.applied: the global-table list lets the app SELECT it, but the app is granted no such right',
       ]);
     });
 

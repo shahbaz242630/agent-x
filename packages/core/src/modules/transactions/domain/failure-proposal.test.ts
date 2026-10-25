@@ -1,9 +1,13 @@
 // Phase 4 gate H10 (decision 38; 0066): a proposal to mark a payment failed, as 0066's status guard holds it.
 import { describe, expect, it } from 'vitest';
 
-import { FAILURE_PROPOSAL } from './failure-proposal.ts';
+import { FAILURE_PROPOSAL, type FailureProposalEvent } from './failure-proposal.ts';
 
-const EVENTS = ['withdraw', 'confirm', 'end'] as const;
+// A record of every event, so one added to the machine can't be left out here.
+const EVENTS = Object.keys({ withdraw: true, confirm: true, end: true } satisfies Record<
+  FailureProposalEvent,
+  true
+>) as FailureProposalEvent[];
 
 describe('a failure proposal’s machine (H10)', () => {
   it('is born OPEN', () => {

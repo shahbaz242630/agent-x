@@ -761,7 +761,7 @@ function unheldRightProblems(policy: SchemaPolicy, facts: Facts, roles: RoleName
     const onColumn = (column: string) =>
       held.some((grant) => grant.kind === 'column' && grant.privilege === 'UPDATE' && grant.attribute === column);
     return [
-      ...(table.appMay ?? [])
+      ...[...new Set(table.appMay ?? [])]
         .filter((privilege) => !onTable(privilege))
         .map(
           (privilege) =>

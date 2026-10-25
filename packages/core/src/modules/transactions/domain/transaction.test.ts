@@ -1,7 +1,7 @@
 // PRD §4.3 (Phase 4 B3): a transaction's machine, as 0058's status guard holds it.
 import { describe, expect, it } from 'vitest';
 
-import { isSettled, TRANSACTION } from './transaction.ts';
+import { isSettled, TRANSACTION, type TransactionEvent } from './transaction.ts';
 
 describe('the transaction’s machine (PRD §4.3)', () => {
   it('is born SUBMISSION_PENDING, never CREATED: the instruction and its transaction are made together', () => {
@@ -33,7 +33,16 @@ describe('the transaction’s machine (PRD §4.3)', () => {
   });
 
   // Every event, from where nothing more is expected: a paid one only reversed, never lost track of again.
-  const EVENTS = ['submitted', 'processing', 'succeed', 'fail', 'cancel', 'lose_track', 'reverse'] as const;
+  // A record of every event, so one added to the machine can't be left out here.
+  const EVENTS = Object.keys({
+    submitted: true,
+    processing: true,
+    succeed: true,
+    fail: true,
+    cancel: true,
+    lose_track: true,
+    reverse: true,
+  } satisfies Record<TransactionEvent, true>) as TransactionEvent[];
   it.each([
     ['SUBMISSION_PENDING', ['submitted', 'fail', 'lose_track']],
     ['SUCCEEDED', ['reverse']],
