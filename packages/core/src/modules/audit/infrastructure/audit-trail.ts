@@ -250,6 +250,14 @@ export interface AuditTrail {
    */
   verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
   /**
+   * Whether the organisation's chain still holds its last anchor, in one read:
+   * its head not behind it, and the event anchored there the one anchored (not
+   * a chain grown again on a wound-back head). Not the whole check (`verify`):
+   * for a decision that must not pass a chain wound back (Tx A, ADR-012 §2),
+   * in withTenant's transaction for the organisation, its head locked.
+   */
+  keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean>;
+  /**
    * The object's latest signed state (ADR-012 §2): of the events about it,
    * the newest whose details carry a state seal, with every later event about
    * it sealed and no event of the chain past the head (see the file's comment
@@ -808,6 +816,23 @@ export function createAuditTrail({
         await limitStatements(tx);
         return trail.verify(tx, orgId, anchor);
       });
+    },
+
+    async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {
+      await assertTenant(tx, orgId);
+      // An empty chain's anchor (seq 0, the genesis hash) is held by every chain grown from it: no event to compare.
+      if (anchor.seq === 0n) return true;
+      const chain = chainOf(orgId);
+      const { rows } = await sql<{ head_seq: bigint | null; anchored: Buffer | null }>`
+        select h.seq as head_seq,
+               (select e.hash from audit.events e where e.org_id = ${chain.orgId} and e.seq = ${anchor.seq}) as anchored
+        from (values (1)) as one (x)
+        left join audit.heads h on h.org_id = ${chain.orgId}
+      `.execute(tx);
+      const head = rows[0]?.head_seq ?? null;
+      const anchored = rows[0]?.anchored ?? null;
+      // No head, a head behind the anchor, or another event where the anchored one was: wound back.
+      return head !== null && head >= anchor.seq && anchored?.equals(anchor.hash) === true;
     },
 
     async latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState> {

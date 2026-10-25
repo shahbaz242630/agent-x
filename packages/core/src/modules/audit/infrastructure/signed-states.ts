@@ -36,7 +36,7 @@
 // tampered with before it can't be changed and sealed as if it were real.
 // Events about an authority object are its state changes only: activity goes
 // against other subjects.
-import { sealState, stateSealDetails, stateSealMatches } from '@agentx/platform/audit-chain';
+import { type AnchorPoint, sealState, stateSealDetails, stateSealMatches } from '@agentx/platform/audit-chain';
 import {
   createStatusChanger,
   type FieldText,
@@ -126,6 +126,12 @@ export interface TamperFinding {
 type HoldCheck =
   | { readonly outcome: 'clear' | 'held'; readonly version: number; readonly eventId: string }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/** The subject a chain's own failure is held under: the organisation's chain, by its ID (anchorKept, holdOrganisation). */
+export const CHAIN_SUBJECT = 'audit_chain';
+
+/** The chain against its last anchor: still holding it, or wound back (the alarm raised). */
+type AnchorKept = { readonly outcome: 'kept' } | { readonly outcome: 'tampered'; readonly sign: 'chain' };
 
 /** The row's state, matched with its latest signed event. */
 export interface VerifiedState {
@@ -484,6 +490,16 @@ export interface SignedStates {
    */
   integrityHold(tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck>;
   /**
+   * Whether the organisation's chain still holds its last anchor (ADR-012 §2:
+   * Tx A refuses a head behind it), read after integrityHold's `head` lock in
+   * this transaction, so the chain can't move between the two. One wound back
+   * raises the alarm and holds the organisation as the anchor check would
+   * (the sign `chain`), and reads `tampered`. The anchor is the caller's, held
+   * apart from the database; with none yet (a process just started), there is
+   * nothing to compare and the anchor check's next run decides.
+   */
+  anchorKept(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<AnchorKept>;
+  /**
    * Records a new organisation's integrity hold, CLEAR, as its first state, in
    * the transaction that creates the organisation: after `record(…, 'new')`
    * of the organisation's own row (its ID the organisation's) with these
@@ -683,6 +699,7 @@ export function createSignedStates({
   const created = new WeakMap<AuditTransaction, Set<string>>();
   /** Transactions holding their chain head's lock, after which no row is locked (ADR-006 §6). */
   const headLocked = new WeakSet<AuditTransaction>();
+  const KEPT: AnchorKept = Object.freeze({ outcome: 'kept' });
   /** Organisations verifyAll found whole in each transaction, whose hold it may clear. */
   const verifiedWhole = new WeakMap<AuditTransaction, Set<string>>();
 
@@ -1261,6 +1278,29 @@ export function createSignedStates({
     },
 
     integrityHold,
+
+    async anchorKept(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<AnchorKept> {
+      if (!headLocked.has(tx))
+        throw new Error("The anchor is compared only once integrityHold has locked the chain's head");
+      if (await trail.keepsAnchor(tx, orgId, anchor)) return KEPT;
+      const held = orgId.toLowerCase();
+      logger.child({ orgId: held }).error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'anchor',
+        reason: 'anchor',
+        anchorSeq: anchor.seq,
+      });
+      onTamper(
+        Object.freeze({
+          orgId: held,
+          subjectType: CHAIN_SUBJECT,
+          objectId: held,
+          sign: 'chain',
+          chainFailure: 'anchor',
+        }),
+      );
+      return Object.freeze({ outcome: 'tampered', sign: 'chain' });
+    },
 
     async startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState> {
       if (created.get(tx)?.delete(orgId.toLowerCase()) !== true) {

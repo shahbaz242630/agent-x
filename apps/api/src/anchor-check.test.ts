@@ -1093,7 +1093,7 @@ describe('the anchor check schedule', () => {
   });
 
   /** A check that counts its runs, each taking as long as the test says unless it is stopped first. */
-  function counting(runMs = 0): AnchorCheck & { runs: number; signals: AbortSignal[] } {
+  function counting(runMs = 0): Pick<AnchorCheck, 'run'> & { runs: number; signals: AbortSignal[] } {
     const check = {
       runs: 0,
       signals: [] as AbortSignal[],
@@ -1167,7 +1167,7 @@ describe('the anchor check schedule', () => {
   it('stops: waits for a run in flight that is slow to end', async () => {
     vi.useFakeTimers();
     let end: () => void = () => undefined;
-    const check: AnchorCheck = {
+    const check: Pick<AnchorCheck, 'run'> = {
       run: () =>
         new Promise<void>((resolve) => {
           end = resolve;
@@ -1184,5 +1184,48 @@ describe('the anchor check schedule', () => {
     await stopping;
 
     expect(stopped).toBe(true);
+  });
+});
+
+describe('one organisation anchored now, for the hand-off after a restart (gate H11, partner S146)', () => {
+  /** One organisation's chain giving `report`, every hold it is put on recorded. */
+  const oneOrganisation = (report: ChainReport) => {
+    const holds: [string, string | undefined][] = [];
+    const organizations: OrganisationChains = {
+      list: () => Promise.resolve([ORG]),
+      recorded: () => Promise.resolve([ORG]),
+      verify: () => Promise.resolve(report),
+      hold: (orgId, failure) => {
+        holds.push([orgId, failure]);
+        return Promise.resolve();
+      },
+    };
+    return { holds, ...checking([], createMemoryAnchorStore(), organizations) };
+  };
+
+  it('anchors its chain as a run would, holding nothing', async () => {
+    const { check, anchors, holds, events } = oneOrganisation(ok(5n));
+    await check.anchorOrganisation(ORG.toUpperCase());
+
+    expect(anchors.latest({ kind: 'organisation', orgId: ORG })).toMatchObject({ seq: 5n, keyVersion: 1 });
+    expect(events()).toEqual([expect.objectContaining({ level: 'info', event: 'audit.anchored', orgId: ORG })]);
+    expect(holds).toEqual([]);
+  });
+
+  it('raises the alarm on a chain that fails, and holds the organisation for why', async () => {
+    const { check, anchors, holds, events } = oneOrganisation({ ok: false, problem: { reason: 'hash', seq: 2n } });
+    await check.anchorOrganisation(ORG);
+
+    expect(anchors.latest({ kind: 'organisation', orgId: ORG })).toBeUndefined();
+    expect(events()).toEqual([alarm('hash', { chain: 'organisation', seq: '2', orgId: ORG })]);
+    expect(holds).toEqual([[ORG, 'hash']]);
+  });
+
+  it('does nothing where the check was given no organisations', async () => {
+    const { check, anchors, events } = checking([]);
+    await check.anchorOrganisation(ORG);
+
+    expect(anchors.latest({ kind: 'organisation', orgId: ORG })).toBeUndefined();
+    expect(events()).toEqual([]);
   });
 });
