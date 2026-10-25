@@ -2225,6 +2225,21 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
+  it('anchors first only a chain it holds no anchor for: one it holds is compared, never checked whole again (S146)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    let checkedWhole = 0;
+    const anchorFirst = () => {
+      checkedWhole += 1;
+      return Promise.resolve();
+    };
+
+    const made = await handedOnce(w, request.id, { anchors: await anchoredNow(w), anchorFirst });
+
+    expect(made).toMatchObject({ submitted: 1, status: 'HANDED_OFF' });
+    expect(checkedWhole).toBe(0);
+  });
+
   it('waits, never handing off uncompared, while no anchor could be made: APPROVED, no call, no hold (S146)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
