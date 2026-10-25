@@ -6,9 +6,14 @@
 // - duplicates: an order asked for twice under two keys, the second denied
 // - replays: a request sent twice under one key, answered with the same one
 // and, in phase 2, a spike: 50 requests of AED 4 at once from the capped
-// agent, whose month (AED 100) stops at 25.
+// agent, whose month (AED 100) stops at 25. They queue on that one month's
+// lock by design, so they are timed apart (kind:spike) from the steady
+// traffic the request target is for, and reported on their own.
 // Every request must be answered 201, quickly, never 5xx or 429. k6's own
 // result goes to /out for the runner, which checks the database and the log.
+// On Azure (D2c) the run's job names the API's internal address, the seed's
+// file and the results folder (API, SEED, OUT), and the summary's JSON line
+// on stdout is how the result reaches the report: the job keeps no files.
 import { check } from 'k6';
 import exec from 'k6/execution';
 import http from 'k6/http';
@@ -17,9 +22,10 @@ import { Counter } from 'k6/metrics';
 const PHASE = __ENV.PHASE;
 if (PHASE !== '1' && PHASE !== '2') throw new Error('PHASE must be 1 or 2');
 
-const API = 'http://api:8080';
+const API = __ENV.API ?? 'http://api:8080';
+const OUT = __ENV.OUT ?? '/out';
 const SECONDS = 120;
-const { agents } = JSON.parse(open('/out/seed.json'));
+const { agents } = JSON.parse(open(__ENV.SEED ?? `${OUT}/seed.json`));
 const ample = agents.filter((agent) => agent.kind === 'ample');
 const capped = agents.find((agent) => agent.kind === 'capped');
 
@@ -40,7 +46,8 @@ const steadily = (rate, run, vus) => ({
 export const options = {
   summaryTrendStats: ['med', 'p(95)', 'p(99)', 'max'],
   scenarios: {
-    steady: steadily(25, 'steady', 20),
+    // Enough VUs ready for the spike's ten seconds, when each steady request takes longer: none left unsent.
+    steady: steadily(25, 'steady', 60),
     duplicates: steadily(1, 'duplicate', 4),
     replays: steadily(1, 'replay', 4),
     ...(PHASE === '2'
@@ -50,6 +57,8 @@ export const options = {
   thresholds: {
     // The Pilot's request target (PRD §8).
     'http_req_duration{kind:ask}': ['p(95)<500'],
+    // No target of its own (it queues by design): named so k6 times it apart, as it does only a metric a threshold names.
+    'http_req_duration{kind:spike}': ['max>=0'],
     // An arrival k6 had no free VU for is a request never sent: the run then sent less than it says.
     dropped_iterations: ['count==0'],
     server_errors: ['count==0'],
@@ -58,8 +67,8 @@ export const options = {
   },
 };
 
-/** The agent asks to pay its `n`th supplier (round the three) `amountMinor` fils for the order. */
-function ask(agent, key, orderReference, amountMinor, n) {
+/** The agent asks to pay its `n`th supplier (round the three) `amountMinor` fils for the order, timed as `kind`. */
+function ask(agent, key, orderReference, amountMinor, n, kind = 'ask') {
   const body = {
     amountMinor,
     currency: 'AED',
@@ -70,7 +79,7 @@ function ask(agent, key, orderReference, amountMinor, n) {
   };
   return http.post(`${API}/v1/spend-requests`, JSON.stringify(body), {
     headers: { authorization: `Bearer ${agent.key}`, 'idempotency-key': key, 'content-type': 'application/json' },
-    tags: { kind: 'ask' },
+    tags: { kind },
   });
 }
 
@@ -113,7 +122,7 @@ export function replay() {
 
 export function spike() {
   const order = `P${PHASE}-X-${exec.scenario.iterationInTest}`;
-  const answer = counted(ask(capped, order, order, 400, exec.scenario.iterationInTest), true);
+  const answer = counted(ask(capped, order, order, 400, exec.scenario.iterationInTest, 'spike'), true);
   check(answer, { 'decided (201)': decided });
 }
 
@@ -121,6 +130,7 @@ export function spike() {
 export function handleSummary(data) {
   const { metrics } = data;
   const asks = metrics['http_req_duration{kind:ask}'].values;
+  const spike = metrics['http_req_duration{kind:spike}']?.values;
   const count = (name) => metrics[name]?.values.count ?? 0;
   const thresholds = Object.fromEntries(
     Object.entries(metrics).flatMap(([name, metric]) =>
@@ -136,10 +146,13 @@ export function handleSummary(data) {
     checksFailed: metrics.checks.values.fails,
     dropped: count('dropped_iterations'),
     asksMs: { p50: asks.med, p95: asks['p(95)'], p99: asks['p(99)'], max: asks.max },
+    spikeMs: PHASE === '2' && spike !== undefined ? { p50: spike.med, p95: spike['p(95)'], max: spike.max } : null,
     thresholds,
   };
   return {
-    [`/out/k6-phase-${PHASE}.json`]: JSON.stringify(result),
-    stdout: `Phase ${PHASE}: ${result.requests} requests, ${result.created} new, p95 ${asks['p(95)'].toFixed(1)} ms\n`,
+    [`${OUT}/k6-phase-${PHASE}.json`]: JSON.stringify(result),
+    stdout:
+      `Phase ${PHASE}: ${result.requests} requests, ${result.created} new, p95 ${asks['p(95)'].toFixed(1)} ms\n` +
+      `${JSON.stringify({ event: 'load.k6_summary', ...result })}\n`,
   };
 }

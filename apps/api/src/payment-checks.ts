@@ -30,11 +30,14 @@
 // move its machine doesn't allow (an UNKNOWN said to be under way) keeps the
 // bank's facts alone. A payment already settled that the bank now contradicts
 // (credited, then Rejected) stays as it is, the facts kept, and an alert raised
-// (rail map §4): a paid or failed one (our team's mark among them, E1c) is
-// checked every 30th run for 7 days after it was
-// handed off. An answer older than the word kept is one already read, and
-// changes nothing. An UNKNOWN unresolved past a day is said each time it is
-// checked, for reconciliation (E1c).
+// (rail map §4): a paid or failed one (two admins' mark among them, H10) is
+// checked every 30th run for 7 days from its last move (gate H3). An answer
+// older than the word kept is one already read, and changes nothing. An
+// UNKNOWN unresolved past a day is said each time it is checked, for
+// reconciliation (E1c). A contradiction, a rejection without proof and an
+// UNKNOWN past a day are each also kept in the organisation's audit log and
+// emailed to its admins (decision 37b, `alertAdmins`), the first two as the
+// bank first says them, the last once.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // transaction, and the run goes on to the next. Its heartbeat is read by
@@ -44,9 +47,10 @@ import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import {
   AFTER_SUBMITTED,
+  answerAbout,
   factsOf,
-  type LockedPayment,
   lockPayment,
+  moveDetails,
   NO_FACTS,
   settlePayment,
 } from '@agentx/core/modules/outcomes';
@@ -59,7 +63,6 @@ import {
 import {
   type ExecutionLookup,
   type FinancialRailAdapter,
-  type PaymentExecution,
   type PaymentState,
   paymentStateOf,
   RailUnavailable,
@@ -80,6 +83,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { HEARTBEAT_STALE_MS, PARTNER_CALL_TIMEOUT_MS, PartnerTimedOut, withinTime } from './handoff.ts';
+import { alertAdmins, type PaymentAlert } from './payment-alerts.ts';
 import type { VoidTables } from './request-voids.ts';
 
 /** How often the payments under way are checked, once the last run has ended. */
@@ -113,7 +117,10 @@ const STILL_UNKNOWN_MS = DAY_MS;
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
 
-/** The settled ones still watched for PAID_WATCH_MS: paid, or failed (our team's mark among them, E1c). */
+/**
+ * The settled ones still watched for PAID_WATCH_MS from their last move: paid,
+ * or failed (two admins' mark among them, H10: a week from the mark, gate H3).
+ */
 const WATCHED = ['SUCCEEDED', 'FAILED'] as const;
 
 /** How many of the partner's messages a run takes, oldest first: the rest wait for the next. */
@@ -163,13 +170,6 @@ const contradicts = (status: TransactionStatus, state: PaymentState): boolean =>
   status === 'SUCCEEDED' || status === 'REVERSED'
     ? state === 'FAILED' || state === 'UNKNOWN'
     : state === 'SUCCEEDED' || state === 'PROCESSING';
-
-/** Whether the bank's answer is about this payment: its organisation, our instruction, its amount and currency. */
-const about = (execution: PaymentExecution, orgId: string, { instruction }: LockedPayment): boolean =>
-  execution.organizationId.toLowerCase() === orgId.toLowerCase() &&
-  execution.instructionId.toLowerCase() === instruction.id &&
-  execution.amountMinor === instruction.amountMinor &&
-  execution.currency === instruction.currency;
 
 export interface PaymentChecks {
   /** Checks each organisation's payments under way that are due, a page at a time, until the signal is aborted. Never throws. */
@@ -237,6 +237,10 @@ export function createPaymentChecks({
           .leftJoin('instructions.instructions as i', (join) =>
             join.onRef('i.org_id', '=', 't.org_id').onRef('i.id', '=', 't.instruction_id'),
           )
+          // When it last moved (its signed state's newest event, Postgres's clock): a watch runs from there (gate H3).
+          .leftJoin('audit.events as e', (join) =>
+            join.onRef('e.org_id', '=', 't.org_id').onRef('e.id', '=', 't.state_event_id'),
+          )
           .select(['t.id as id', 't.instruction_id as instructionId', 'i.spend_request_id as requestId'])
           .where('t.org_id', '=', orgId)
           .where((where) =>
@@ -251,7 +255,7 @@ export function createPaymentChecks({
               watchPaid
                 ? where.and([
                     where('t.status', 'in', WATCHED),
-                    where('t.created_at', '>=', new Date(clock.now().getTime() - PAID_WATCH_MS)),
+                    where('e.recorded_at', '>=', new Date(clock.now().getTime() - PAID_WATCH_MS)),
                   ])
                 : where.lit(false),
             ]),
@@ -281,6 +285,10 @@ export function createPaymentChecks({
           .innerJoin('instructions.instructions as i', (join) =>
             join.onRef('i.org_id', '=', 't.org_id').onRef('i.id', '=', 't.instruction_id'),
           )
+          // When it last moved (its signed state's newest event, Postgres's clock): a watch runs from there (gate H3).
+          .leftJoin('audit.events as e', (join) =>
+            join.onRef('e.org_id', '=', 't.org_id').onRef('e.id', '=', 't.state_event_id'),
+          )
           .select(['t.id as id', 't.instruction_id as instructionId', 'i.spend_request_id as requestId'])
           .where('t.org_id', '=', nudge.orgId)
           .where((where) =>
@@ -290,7 +298,7 @@ export function createPaymentChecks({
                   where('i.account_consent_id', '=', reference.consentId),
                   where.or([
                     where('t.status', 'in', UNDER_WAY),
-                    where.and([where('t.status', 'in', WATCHED), where('t.created_at', '>=', paidSince)]),
+                    where.and([where('t.status', 'in', WATCHED), where('e.recorded_at', '>=', paidSince)]),
                   ]),
                 ]),
           )
@@ -357,14 +365,12 @@ export function createPaymentChecks({
       const locked = await lockPayment(tx, states, key, listed.requestId ?? '');
       const { transaction } = locked;
       const from = transaction.status;
+      /** What the bank's word raised for the organisation's admins (decision 37b), told once it is applied. */
+      const alerts: { readonly alert: PaymentAlert; readonly details: Record<string, string> }[] = [];
 
       /** The status it moved to, or null where its machine refused the move (its facts still kept). */
       const move = async (event: TransactionEvent, facts: ProviderFacts, via: string) => {
-        const details =
-          event === 'fail' && facts.rejectCode === null
-            ? // The bank's own word proved no debit with no code: its reference is the evidence (ADR-007 §9).
-              { via, evidenceRef: `bank_status:${facts.paymentInstructionRef ?? listed.instructionId}` }
-            : { via };
+        const details = moveDetails(event, facts, via, listed.instructionId);
         const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details });
         // Read for change under this lock: anything but a move or a refusal is something past the app.
         if (moved.outcome !== 'moved' && moved.outcome !== 'refused') {
@@ -376,7 +382,7 @@ export function createPaymentChecks({
       /** Where the bank's word takes it. */
       const movedBy = async (): Promise<TransactionStatus> => {
         if (word.kind === 'not_found') return from;
-        const found = word.kind === 'found' && about(word.execution, orgId, locked) ? word.execution : undefined;
+        const found = word.kind === 'found' && answerAbout(word.execution, orgId, locked) ? word.execution : undefined;
         if (found === undefined) {
           if (word.kind === 'found') {
             log.error('payment_check.unreadable', { transactionId: listed.id, why: 'not_this_payment' });
@@ -399,11 +405,15 @@ export function createPaymentChecks({
               status: from,
               bank: found.providerStatus,
             });
+            alerts.push({ alert: 'contradicted', details: { status: from, bank: found.providerStatus } });
           }
           return from;
         }
         // Rejected with no proof the money stayed: reconciliation's (rail map §4).
-        if (state === 'UNKNOWN' && newly) log.error('payment_check.rejected_unproven', { transactionId: listed.id });
+        if (state === 'UNKNOWN' && newly) {
+          log.error('payment_check.rejected_unproven', { transactionId: listed.id });
+          alerts.push({ alert: 'rejected_unproven', details: { bank: found.providerStatus } });
+        }
         // Its run died before Tx B: both steps here, each in its history (ADR-007 §13).
         const submitted = from === 'SUBMISSION_PENDING' ? await move('submitted', facts, 'bank_check') : null;
         return (await move(AFTER_SUBMITTED[state], facts, 'bank_check')) ?? submitted ?? from;
@@ -411,16 +421,21 @@ export function createPaymentChecks({
 
       const to = await movedBy();
       if (to !== from) {
-        await settlePayment(tx, outbox, {
+        await settlePayment(tx, states, outbox, {
           orgId,
           requestId: locked.instruction.spendRequestId,
           transactionId: listed.id,
           status: to,
           at: clock.now(),
+          openProposal: locked.openProposal,
         });
       }
       if (to === 'UNKNOWN' && clock.now().getTime() - transaction.createdAt.getTime() > STILL_UNKNOWN_MS) {
         log.warn('payment_check.still_unknown', { transactionId: listed.id });
+        alerts.push({ alert: 'still_unknown', details: {} });
+      }
+      for (const { alert, details } of alerts) {
+        await alertAdmins(tx, { keys, ids, outbox }, { orgId, transactionId: listed.id, alert, details });
       }
       return { from, to };
     });

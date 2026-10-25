@@ -74,7 +74,7 @@ import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/mod
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { ChainBroken } from '@agentx/platform/audit-chain';
+import { ChainBroken, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import {
   type Config,
   ConfigError,
@@ -140,6 +140,7 @@ import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
 import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
 import { heartbeatChecks } from './health.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
+import { createPaymentMarks } from './payment-marks.ts';
 import { createPartnerEventIntake } from './partner-events.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
@@ -475,6 +476,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
   // ADR-014 §4: the fake, over its own records in this database, where the config says so; no other rail is built yet.
   const rail = railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids });
+  // The audit chains' last anchors, in this process's memory (ADR-012 §2): the anchor check keeps them, Tx A reads them.
+  const anchorStore = createMemoryAnchorStore();
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
   const handoff =
@@ -488,6 +491,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       logger,
+      // The anchor check is made below and started before the hand-off's first run (scheduleRunsIfAny).
+      anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
     });
   // The partner's messages as kept (E1b): the inbox, and the refused ones as evidence, for the security events' retention.
   const providerEvents = createProviderEvents({
@@ -689,6 +694,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       challenges,
       logger,
     }),
+    paymentMarks: createPaymentMarks({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,
@@ -776,7 +790,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     fakeBank: rail?.bank,
     // The partner's messages, where its rail is built (E1b): checked by its signature, kept, then checked with the bank.
     partnerEvents:
-      rail && createPartnerEventIntake({ database, rail, events: providerEvents, securityEvents: recorder }),
+      rail &&
+      createPartnerEventIntake({
+        database,
+        rail,
+        events: providerEvents,
+        securityEvents: recorder,
+        clock: systemClock,
+      }),
   });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing({
@@ -821,6 +842,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     // Three missed checks in a row are the alarm, not just a warning.
     staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+    anchors: anchorStore,
   });
   const retention = createRetentionSweep({
     list: () => listedOrganizations(database),

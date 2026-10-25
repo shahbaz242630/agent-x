@@ -40,6 +40,7 @@ param integrityRunsAlertName string
 param agentCancelsAlertName string
 param agentCancelCapAlertName string
 param dailyWordsAlertName string
+param handoffQueueAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -432,6 +433,49 @@ resource holdingsCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "holdings_check.failed" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// Approved payments left standing (Phase 4 gate H8, the hand-off queue-age
+// alert): the hand-off says `handoff.queue_stale`, at most once in 15 minutes
+// an organisation, when approved requests have stood past 15 minutes neither
+// handed off nor waiting for a reason it knows (a pause, a freeze, a payee).
+// Any one line tells someone. Stateful, as above.
+resource handoffQueueAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: handoffQueueAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Hand-off: approved payments left standing'
+    description: 'SEV-2. Approved payments have stood over 15 minutes without being handed to the bank, for no reason the hand-off knows: their money is held and the suppliers are not paid. Runbook: Incident-Response-Playbook.md section E.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "handoff.queue_stale" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

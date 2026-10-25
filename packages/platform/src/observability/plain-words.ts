@@ -343,6 +343,16 @@ export const PLAIN_WORDS = {
     broke: 'That payment was not sent and waits, its money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
   },
+  'handoff.queue_stale': {
+    happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',
+    broke: 'Those payments are not sent; their money stays held.',
+    next: 'Check the hand-off errors in the log and the database. It is said again in 15 minutes if they still wait.',
+  },
+  'handoff.queue_unread': {
+    happened: "The hand-off couldn't count the approved payments left waiting.",
+    broke: 'A payment stuck before the bank may go unnoticed until it can.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
+  },
   'handoff.partner_timeout': {
     happened: "The bank didn't answer a payment handed to it within 30 seconds.",
     broke: 'Whether the bank took it is not known, so it is marked unknown and never sent again.',
@@ -360,6 +370,11 @@ export const PLAIN_WORDS = {
   },
   'handoff.run_failed': {
     happened: 'The list of organisations could not be read, so no approved payments were handed to the bank.',
+    broke: 'Approved payments wait, their money still held.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
+  },
+  'handoff.pause_unread': {
+    happened: "The hand-off pause couldn't be read, so no approved payments went to the bank this run.",
     broke: 'Approved payments wait, their money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
@@ -388,6 +403,16 @@ export const PLAIN_WORDS = {
     happened: "The bank's answer about a payment could not be read, or was about another payment.",
     broke: 'A payment under way is marked unknown, its money held; it is never counted as paid.',
     next: "Check the payment against the bank's record. If this repeats, a developer should read the error.",
+  },
+  'handoff.unreadable': {
+    happened: "The bank's answer to a payment just sent was about another payment, or another amount.",
+    broke: 'A payment still waiting is marked unknown, its money held; one already moved is left; never paid on it.',
+    next: "Check the payment against the bank's record; a developer should read the error, as answers may be mixed up.",
+  },
+  'handoff.refused_late': {
+    happened: 'The bank refused a payment after its own status check had already found it under way.',
+    broke: "Nothing: the bank's status stands and the payment is not marked failed on the late refusal.",
+    next: 'Ask the bank which answer is right. The regular bank check keeps following the payment.',
   },
   'handoff.rejected_unproven': {
     happened: 'The bank answered a new payment as rejected, but not that the money stayed in the account.',
@@ -602,6 +627,11 @@ export const PLAIN_WORDS = {
     happened: 'An email notice could not be sent this time.',
     broke: 'Its recipient has not been told yet; a notice that can never be sent is given up at once.',
     next: 'It is tried again later, up to 8 tries in all. If many fail, check the email service and the login service.',
+  },
+  'notification.remittance_failure_unrecorded': {
+    happened: "A supplier's paid email was given up, but that couldn't be written into its organisation's audit log.",
+    broke: "The audit log won't show that this supplier was never emailed about its payment.",
+    next: 'Tell the organisation the supplier was not emailed. If it repeats, check the database.',
   },
   'notification.remittance_unrecorded': {
     happened:

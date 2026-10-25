@@ -24,19 +24,21 @@
 // what it holds follows its payment (spent, blocked while unknown, given back
 // after a proven failure), refused past the app (0060) and alarmed by the
 // holdings check where it gets past.
-import { AGENT_KEYS } from '@agentx/core/modules/agents';
-import { holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
+import { AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
+import { createAuditTrail, holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
-import { type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
-import { cancelRequest, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { type FakeRail, type PaymentExecution, RailUnavailable } from '@agentx/core/modules/providers';
+import { approveRequest, cancelRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import {
   REMITTANCE_SETTINGS,
   remittanceOf,
   setRemittance,
   SUPPLIER_VERSIONS,
   supplierOf,
+  SUPPLIERS,
 } from '@agentx/core/modules/suppliers';
 import { lockHoldingsOf, settleHoldings } from '@agentx/core/modules/outcomes';
 import {
@@ -46,6 +48,7 @@ import {
   TRANSACTIONS,
   transactionOf,
 } from '@agentx/core/modules/transactions';
+import { type AnchorStore, createMemoryAnchorStore, signAnchor } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -62,7 +65,8 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
+import { createAnchorCheck } from './anchor-check.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, QUEUE_STALE_MS } from './handoff.ts';
 import {
   ALLOWED,
   handoffWorld,
@@ -103,7 +107,7 @@ const shared = spendWorld({
   decisions: () => decisions,
 });
 const { quiet, ask, statusOf, holdingsOf, spentOf, signed, moved, STOPS, mandateIdOf } = shared;
-const { ready, paymentOf } = handoffWorld({
+const { ready, paymentOf, alertsOf } = handoffWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -129,9 +133,13 @@ const stoppedToldOf = (w: World) =>
     ).map(({ about_id }) => about_id),
   );
 
-/** The job over the world alone, paying through `rail` (the world's own fake unless given). */
-const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resolve([w.org])) =>
+/** How Tx A is given its anchors (H11): the store, and what anchors a chain it finds none for. */
+type Anchoring = NonNullable<Parameters<typeof createHandoff>[0]['anchoring']>;
+
+/** The job over the world alone, paying through `rail` (the world's own fake unless given), comparing anchors if given. */
+const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resolve([w.org]), anchoring?: Anchoring) =>
   createHandoff({
+    ...(anchoring === undefined ? {} : { anchoring }),
     list,
     database: app,
     outbox: createOutbox({ ids, clock }),
@@ -331,24 +339,64 @@ describe('an approved request handed to the partner once (B4)', () => {
 });
 
 describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-007 §14)', () => {
-  it('waits while the platform is paused, and goes on resume', async () => {
+  it('SEC-AV-02 waits while the platform is paused, no request read; goes on resume, re-checked', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
+    const job = handoffOf(w);
     await pauseMoved(true);
     try {
-      await handoffOf(w).run();
+      await job.run();
+      await job.run();
       expect(await statusOf(w, request.id)).toBe('APPROVED');
-      expect(lines('handoff.waiting')).toEqual([
-        expect.objectContaining({ requestId: request.id, why: 'pause_paused' }),
-      ]);
+      // Read once a run, said once while it holds: no request read, none said waiting (gate H5).
+      expect(lines('handoff.held')).toEqual([expect.objectContaining({ why: 'pause_paused' })]);
+      expect(lines('handoff.waiting')).toEqual([]);
       // Waiting is no stop: no one is told.
       expect(await stoppedToldOf(w)).toEqual([]);
     } finally {
       await pauseMoved(false);
     }
 
-    await handoffOf(w).run();
+    await job.run();
 
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(lines('handoff.running')).toEqual([expect.objectContaining({ why: 'none' })]);
+  });
+
+  it('hands nothing off while the pause can’t be read, says so in plain words, and goes once it can (gate H5)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // The run's first transaction is its read of the pause: that one fails.
+    let first = true;
+    const unreadable = new Proxy(app, {
+      get(target, name, receiver) {
+        if (name === 'transaction' && first) {
+          first = false;
+          return () => {
+            throw new Error('the pause is unreadable');
+          };
+        }
+        const value: unknown = Reflect.get(target, name, receiver);
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const job = createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database: unreadable,
+      outbox: createOutbox({ ids, clock }),
+      rail: w.rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+
+    await job.run();
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    expect(lines('handoff.pause_unread')).toHaveLength(1);
+    expect(lines('handoff.held')).toEqual([expect.objectContaining({ why: 'pause_unread' })]);
+
+    await job.run();
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
   });
 
@@ -402,13 +450,16 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     const request = await ask(acting, w, { amount: ALLOWED() });
     const mandateId = await mandateIdOf(w);
     await moved(w, mandateId, which, 'pause');
+    const job = handoffOf(w);
 
-    await handoffOf(w).run();
+    await job.run();
+    await job.run();
     expect(await statusOf(w, request.id)).toBe('APPROVED');
+    // Said once a reason, not every run it still waits (gate H5).
     expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: request.id, why })]);
 
     await moved(w, mandateId, which, 'resume');
-    await handoffOf(w).run();
+    await job.run();
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
   });
 
@@ -421,6 +472,31 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
 
     expect(await statusOf(w, request.id)).toBe('APPROVED');
     expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: request.id, why: 'source' })]);
+  });
+
+  it('says a waiting request again when what it waits for changes, and once it waits again after a hold (gate H5)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const mandateId = await mandateIdOf(w);
+    const job = handoffOf(w);
+    await moved(w, mandateId, 'agent', 'pause');
+    await job.run();
+    await moved(w, mandateId, 'organization', 'pause');
+    await job.run();
+    await job.run();
+
+    expect(lines('handoff.waiting').map(({ why }) => why)).toEqual(['agent', 'organization,agent']);
+
+    // Held a run by the platform: its reason kept, never said again for it.
+    await pauseMoved(true);
+    try {
+      await job.run();
+    } finally {
+      await pauseMoved(false);
+    }
+    await job.run();
+    expect(lines('handoff.waiting')).toHaveLength(2);
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
   });
 
   it('waits for a supplier with no payee registered yet', async () => {
@@ -457,7 +533,7 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
     expect(await stoppedToldOf(w)).toEqual([request.id]);
   });
 
-  it('denies it once its agent key was ended at once (AGENT_KEY_ENDED, SEC-AG-12/13)', async () => {
+  it('SEC-AG-12 denies it once its agent key was ended at once (AGENT_KEY_ENDED)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await signed(w, (tx, states) =>
@@ -540,6 +616,190 @@ describe('handed off, tracked to its outcome, never voided (the in-flight rule)'
     expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'HELD', released: false });
     expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1 });
   });
+
+  it('SEC-AG-13 tracks a payment whose agent key was revoked after its hand-off, its money still held', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const { rail, submitted } = counted(w);
+    await handoffOf(w, rail).run();
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: acting.keyId }, 'revoke', {
+        actor: OPERATOR,
+        action: 'agent_key.revoked',
+        details: { reason: 'test' },
+      }),
+    );
+
+    await createRequestVoids({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    }).run();
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.PROCESSING);
+    expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1, transaction: { status: 'PROCESSING' } });
+    expect(submitted()).toBe(1);
+    // Tracked to its outcome all the same: the bank's word settles it.
+    await settledBy(w, request.id, 'succeed', { providerStatus: 'AcceptedCreditSettlementCompleted' });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
+  });
+});
+
+describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, SEC-PAY-02, decision 3)', () => {
+  /** Whether the request is handed off, read past the walls (the hand-off's own transaction is still open). */
+  const handedOff = async (requestId: string) =>
+    (
+      await database
+        .as('admin')
+        .query<{ status: string }>('select status from spend_requests.requests where id = $1', [requestId])
+    )[0]?.status === 'HANDED_OFF';
+
+  /** The world's database, but the transaction that hands `requestId` off commits, then reports its connection lost. */
+  const commitUnclear = (requestId: string) => {
+    let lost = false;
+    const wrapped = (builder: object): object =>
+      new Proxy(builder, {
+        get(target, name, receiver) {
+          const value: unknown = Reflect.get(target, name, receiver);
+          if (typeof value !== 'function') return value;
+          const bound = (value as (...args: unknown[]) => unknown).bind(target);
+          if (name === 'execute') {
+            return async (...args: unknown[]) => {
+              const done = await bound(...args);
+              if (!lost && (await handedOff(requestId))) {
+                lost = true;
+                throw new Error('the connection was lost at commit');
+              }
+              return done;
+            };
+          }
+          return (...args: unknown[]) => {
+            const made = bound(...args);
+            return typeof made === 'object' && made !== null ? wrapped(made) : made;
+          };
+        },
+      });
+    return new Proxy(app, {
+      get(target, name, receiver) {
+        const value: unknown = Reflect.get(target, name, receiver);
+        if (typeof value !== 'function') return value;
+        if (name !== 'transaction') return (value as (...args: unknown[]) => unknown).bind(target);
+        return () => wrapped((value as () => object).call(target));
+      },
+    });
+  };
+
+  /** The hand-off over the world alone, through `database`, its wait for an answer a minute. */
+  const minuteJob = (w: World, rail: FakeRail, database: typeof app) =>
+    createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database,
+      outbox: createOutbox({ ids, clock }),
+      rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      unknownAfterMs: 60_000,
+    });
+
+  it('SEC-DP-04 SEC-DP-03 calls no partner when Tx A’s commit is unclear; left waiting, it is UNKNOWN past its wait, never a second', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const { rail, submitted } = counted(w);
+
+    await minuteJob(w, rail, commitUnclear(request.id)).run();
+
+    expect(submitted()).toBe(0);
+    expect(lines('handoff.failed')).toEqual([expect.objectContaining({ requestId: request.id })]);
+    // Tx A had committed: handed off, its transaction waiting for an answer that never comes.
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(await paymentOf(w, request.id)).toMatchObject({
+      transactions: 1,
+      transaction: { status: 'SUBMISSION_PENDING' },
+    });
+
+    clock.advanceBy(60_001);
+    await minuteJob(w, rail, app).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transactions: 1, transaction: { status: 'UNKNOWN' } });
+    expect(submitted()).toBe(0);
+  });
+
+  it('SEC-TEN-09 hands off each organisation’s requests under its own organisation alone', async () => {
+    const first = await ready();
+    const second = await ready();
+    const mine = await ask(first.acting, first.w, { amount: ALLOWED() });
+    const theirs = await ask(second.acting, second.w, { amount: ALLOWED() });
+
+    // One partner for both, each organisation's intent reaching its own world's fake, where its consent is.
+    const routed: FakeRail = {
+      ...first.w.rail,
+      submitApprovedIntent: (intent) =>
+        (intent.organizationId === second.w.org ? second.w.rail : first.w.rail).submitApprovedIntent(intent),
+    };
+    await handoffOf(first.w, routed, () => Promise.resolve([first.w.org, second.w.org])).run();
+
+    for (const [w, request] of [
+      [first.w, mine],
+      [second.w, theirs],
+    ] as const) {
+      expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+      // Read under the organisation's own wall, to its own payee.
+      expect(await paymentOf(w, request.id)).toMatchObject({
+        transactions: 1,
+        instruction: { beneficiaryRef: payeeRefOf(w) },
+        transaction: { status: 'PROCESSING' },
+      });
+    }
+  });
+
+  it('SEC-PAY-02 denies at the hand-off a request a person approved, its supplier’s details changed since', async () => {
+    const { w, acting } = await ready();
+    // Over the approval threshold: it waits for a person, then one approves it.
+    const request = await ask(acting, w, { amount: AED(150_000n) });
+    expect(await statusOf(w, request.id)).toBe('APPROVAL_REQUIRED');
+    await signed(w, async (tx, states) => {
+      await requestOf(tx, states, { orgId: w.org, id: request.id }, 'change');
+      return approveRequest(tx, states, keys, { orgId: w.org, id: request.id }, { userId: w.admin.userId, stepUp: {} });
+    });
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    await STOPS['the supplier’s details changed'](w);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(submitted()).toBe(0);
+    expect(lines('handoff.denied')).toEqual([
+      expect.objectContaining({ requestId: request.id, causes: 'SUPPLIER_NOT_VERIFIED,SUPPLIER_CHANGED' }),
+    ]);
+  });
+
+  it.each([
+    ['the agent suspended', 'agent', 'AGENT_SUSPENDED'],
+    ['the mandate suspended', 'mandate', 'MANDATE_NOT_IN_FORCE'],
+  ] as const)(
+    'denies at the hand-off one whose stop, %s, was chosen to cancel (decision 3)',
+    async (_name, which, causes) => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      await moved(w, await mandateIdOf(w), which, 'cancel');
+      const { rail, submitted } = counted(w);
+
+      await handoffOf(w, rail).run();
+
+      expect(await statusOf(w, request.id)).toBe('DENIED');
+      expect(submitted()).toBe(0);
+      expect(lines('handoff.denied')).toEqual([expect.objectContaining({ requestId: request.id, causes })]);
+      expect(await stoppedToldOf(w)).toEqual([request.id]);
+    },
+  );
 });
 
 /** An answer with nothing more to say than its move. */
@@ -554,6 +814,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
   interface Limits {
     callTimeoutMs: number;
     unknownAfterMs: number;
+    page?: number;
   }
 
   /** The job with the given time limits, paying through `rail`. */
@@ -596,7 +857,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     };
   }
 
-  it('marks UNKNOWN a transaction left waiting past its wait, never one within it; the late answer kept as facts', async () => {
+  it('SEC-AV-05 marks UNKNOWN a transaction left waiting past its wait, never one within it; the late answer kept as facts', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     // The call's limit runs on real time, the wait on the test's clock: the answer is held back well within both.
@@ -697,6 +958,24 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     await answered();
   });
 
+  it('sweeps every page of those left waiting, not only the first (gate H5)', async () => {
+    const { w, acting } = await ready();
+    const first = await ask(acting, w, { amount: SMALL() });
+    const second = await ask(acting, w, { amount: SMALL() });
+    const limits = { callTimeoutMs: 20_000, unknownAfterMs: 60_000 };
+    const one = await leftWaiting(w, first.id, limits);
+    const other = await leftWaiting(w, second.id, limits);
+    clock.advanceBy(60_001);
+
+    await timed(w, w.rail, { ...limits, page: 1 }).run();
+
+    for (const request of [first, second]) {
+      expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN' } });
+    }
+    await one.answered();
+    await other.answered();
+  });
+
   it('sweeps nothing once stopped, so the process stops promptly', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
@@ -714,7 +993,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     await answered();
   });
 
-  it('gives the partner its time limit: no answer by then is UNKNOWN, said in plain words', async () => {
+  it('SEC-DP-05 gives the partner its time limit: no answer by then is UNKNOWN, said in plain words, never resent', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     const silent: FakeRail = { ...w.rail, submitApprovedIntent: () => new Promise(() => undefined) };
@@ -771,6 +1050,84 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     await failing.run();
 
     expect(failing.beating()).toBe(false);
+  });
+});
+
+describe('approved requests left standing, said for the queue-age alert (gate H8)', () => {
+  /**
+   * The world's database, the `failing`-th transaction of each run rolled back by an error before its work, as a
+   * bug or a lost database would; a run starts the count again as it lists its organisations.
+   */
+  const failingInEachRun = (failing: number) => {
+    const run = { opened: 0 };
+    const database = new Proxy(app, {
+      get(target, name, receiver) {
+        const value: unknown = Reflect.get(target, name, receiver);
+        if (typeof value !== 'function') return value;
+        if (name !== 'transaction') return (value as (...args: unknown[]) => unknown).bind(target);
+        return () => {
+          run.opened += 1;
+          if (run.opened === failing) throw new Error('the database is away');
+          return (value as () => unknown).call(target);
+        };
+      },
+    });
+    return { database, run };
+  };
+
+  it('says once in 15 minutes the approved requests standing past 15 minutes, never one waiting for a reason', async () => {
+    const { w, acting } = await ready();
+    // First, one waiting for its supplier's payee (a reason the run knows); then one whose Tx A fails every run.
+    const waiting = await ask(acting, w, { amount: ALLOWED(), supplierId: w.suppliers[1] ?? '' });
+    const stuck = await ask(acting, w, { amount: ALLOWED() });
+    // A run's transactions: the pause (1), the approved requests (2), each one's Tx A (3, 4), then the stale count.
+    const failing = failingInEachRun(4);
+    const job = createHandoff({
+      list: () => {
+        failing.run.opened = 0;
+        return Promise.resolve([w.org]);
+      },
+      database: failing.database,
+      outbox: createOutbox({ ids, clock }),
+      rail: w.rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+
+    await job.run();
+    expect(lines('handoff.failed')).toEqual([expect.objectContaining({ requestId: stuck.id })]);
+    expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: waiting.id, why: 'payee' })]);
+    expect(lines('handoff.queue_stale')).toEqual([]);
+
+    clock.advanceBy(QUEUE_STALE_MS + 60_000);
+    await job.run();
+    await job.run();
+    expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 1 })]);
+    // Approved by the database's clock, aged by the test's: 16 minutes, give or take the seconds between them.
+    expect([15, 16]).toContain(lines('handoff.queue_stale')[0]?.oldestMinutes);
+
+    // Said again once 15 minutes have passed, while it still stands.
+    clock.advanceBy(QUEUE_STALE_MS);
+    await job.run();
+    expect(lines('handoff.queue_stale')).toHaveLength(2);
+    expect(await statusOf(w, stuck.id)).toBe('APPROVED');
+  });
+
+  it('says nothing while hand-offs are held: the pause is a reason', async () => {
+    const { w, acting } = await ready();
+    await ask(acting, w, { amount: ALLOWED() });
+    const job = handoffOf(w);
+    await pauseMoved(true);
+    try {
+      clock.advanceBy(QUEUE_STALE_MS + 60_000);
+      await job.run();
+    } finally {
+      await pauseMoved(false);
+    }
+
+    expect(lines('handoff.queue_stale')).toEqual([]);
   });
 });
 
@@ -865,6 +1222,142 @@ describe('failures logged, the run going on', () => {
 
     expect(lines('handoff.failed')).toHaveLength(1);
     expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+  });
+});
+
+describe('the answer believed only about this payment, never undoing the bank’s word (gate H1; SEC-PTR-09)', () => {
+  it.each([
+    ['another organisation', (e: PaymentExecution) => ({ ...e, organizationId: ids.next() })],
+    ['another instruction', (e: PaymentExecution) => ({ ...e, instructionId: ids.next() })],
+    ['another amount', (e: PaymentExecution) => ({ ...e, amountMinor: e.amountMinor + 1n })],
+    ['another currency', (e: PaymentExecution) => ({ ...e, currency: 'USD' })],
+  ])('never counts as paid a credit about %s: UNKNOWN, its money held, no remittance, said', async (_, other) => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+
+    await handoffOf(
+      w,
+      answeredAs(w, (e) => other(credited(e))),
+    ).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN', providerStatus: null } });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(await remittancesOf(w)).toEqual([]);
+    expect(lines('handoff.unreadable')).toEqual([
+      expect.objectContaining({
+        transactionId: await transactionIdOf(w, request.id),
+        status: 'SUBMISSION_PENDING',
+        why: 'not_this_payment',
+      }),
+    ]);
+  });
+
+  it('leaves a payment the bank check found under way as it found it, when a refusal comes late: said, never FAILED', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: the fake declines it, after the bank check has already seen it Pending at the bank.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await settledBy(w, request.id, 'submitted', { providerStatus: 'Pending' });
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMITTED', rejectCode: null } });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.PROCESSING);
+    expect(lines('handoff.refused_late')).toEqual([
+      expect.objectContaining({ transactionId: await transactionIdOf(w, request.id), status: 'SUBMITTED' }),
+    ]);
+    expect(lines('handoff.handed_off')).toEqual([expect.objectContaining({ answer: 'refused', recorded: 'late' })]);
+    // Kept in the organisation's audit log and its admins emailed (decision 37b).
+    expect(await alertsOf(w, await transactionIdOf(w, request.id))).toEqual({
+      kept: [
+        { action: 'payment.contradicted', details: { status: 'SUBMITTED', refused: expect.any(String) as unknown } },
+      ],
+      emailed: ['payment_contradicted'],
+    });
+  });
+
+  it('keeps UNKNOWN, its money held, one the bank check marked on the bank’s word, when a refusal comes late', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: declined, after the bank check read it Rejected with no proof the money stayed (a partner's nudge).
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await settledBy(w, request.id, 'submitted', { providerStatus: 'Rejected' });
+        await settledBy(w, request.id, 'lose_track');
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'UNKNOWN', rejectCode: null } });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(lines('handoff.refused_late')).toEqual([expect.objectContaining({ status: 'UNKNOWN' })]);
+    // The bank's word was already a rejection: nothing gone back on, no alert to its admins (decision 37b; review).
+    expect(await alertsOf(w, await transactionIdOf(w, request.id))).toEqual({ kept: [], emailed: [] });
+  });
+
+  it('tells no admin of a late refusal of one the bank check already failed on the bank’s word (decision 37b; review)', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: declined, after the bank check read it Rejected with the proof the money stayed.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await settledBy(w, request.id, 'submitted', { providerStatus: 'Rejected' });
+        await settledBy(w, request.id, 'fail', { providerStatus: 'Rejected', rejectCode: 'AANI.AM04' });
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'FAILED' } });
+    expect(lines('handoff.refused_late')).toEqual([expect.objectContaining({ status: 'FAILED' })]);
+    expect(await alertsOf(w, await transactionIdOf(w, request.id))).toEqual({ kept: [], emailed: [] });
+  });
+
+  it('leaves as it found it one the bank check already moved, when the answer is about another payment: said', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const mixed = answeredAs(w, (e) => ({ ...credited(e), amountMinor: e.amountMinor + 1n }));
+    const rail: FakeRail = {
+      ...mixed,
+      submitApprovedIntent: async (intent) => {
+        await settledBy(w, request.id, 'submitted', { providerStatus: 'Pending' });
+        return mixed.submitApprovedIntent(intent);
+      },
+    };
+
+    await handoffOf(w, rail).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'SUBMITTED' } });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.PROCESSING);
+    expect(await remittancesOf(w)).toEqual([]);
+    expect(lines('handoff.unreadable')).toEqual([expect.objectContaining({ status: 'SUBMITTED' })]);
+  });
+
+  it('settles FAILED an accepted answer the bank rejected with no debit proven and no code: its reference the proof', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const rejected = (e: PaymentExecution): PaymentExecution => ({
+      ...e,
+      providerStatus: 'Rejected',
+      noDebitProven: true,
+      rejectCode: null,
+    });
+
+    await handoffOf(w, answeredAs(w, rejected)).run();
+
+    expect(await paymentOf(w, request.id)).toMatchObject({ transaction: { status: 'FAILED', rejectCode: null } });
+    expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.FAILED);
+    expect(lines('handoff.answer_unrecorded')).toEqual([]);
   });
 });
 
@@ -992,31 +1485,69 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
   }, 300_000);
 });
 
-describe('what a handed-off request holds follows its payment (C3; ADR-006 §10–§11, SEC-LIM-02)', () => {
-  /** The partner's later word on the payment, applied as the outcomes module applies it: in lock order, then settled. */
-  const settledBy = (w: World, requestId: string, event: TransactionEvent, facts: Partial<ProviderFacts> = {}) =>
-    withSignedStates(app, w.org, quiet(), async (tx, states) => {
-      const [row] = await tx
-        .selectFrom('transactions.transactions as t')
-        .innerJoin('instructions.instructions as i', 'i.id', 't.instruction_id')
-        .select('t.id')
-        .where('i.spend_request_id', '=', requestId)
-        .execute();
-      const key = { orgId: w.org, id: row?.id ?? '' };
-      await transactionOf(tx, states, key, 'change');
-      await lockHoldingsOf(tx, requestId);
-      const moved = await moveTransaction(
-        tx,
-        states,
-        key,
-        event,
-        { ...NO_ANSWER_FACTS, ...facts },
-        { actor: { type: 'system', id: 'test' }, details: {} },
-      );
-      if (moved.outcome !== 'moved') throw new Error(`not moved by ${event}: ${moved.outcome}`);
-      await settleHoldings(tx, { requestId, status: moved.to, at: clock.now() });
-    });
+/** The world's remittances, by the transaction each is about. */
+const remittancesOf = (w: World) =>
+  withTenant(app, w.org, async (tx) =>
+    (
+      await tx
+        // A global table (0021): the world's own organisation's notices alone.
+        .selectFrom('notifications.outbox')
+        .select(['about_id', 'recipient_user_id', 'recipient_contact_id', 'to_contacts'])
+        .where('org_id', '=', w.org)
+        .where('kind', '=', 'payment_remittance')
+        .orderBy('id')
+        .execute()
+    ).map((row) => ({ ...row })),
+  );
 
+/** The request's transaction's ID, through its instruction. */
+const transactionIdOf = (w: World, requestId: string) =>
+  withTenant(app, w.org, async (tx) => {
+    const row = await tx
+      .selectFrom('transactions.transactions as t')
+      .innerJoin('instructions.instructions as i', 'i.id', 't.instruction_id')
+      .select('t.id')
+      .where('i.spend_request_id', '=', requestId)
+      .executeTakeFirstOrThrow();
+    return row.id;
+  });
+
+/** The world's fake, its accepted answers changed as a mixed-up or garbled connection might give them. */
+const answeredAs = (w: World, change: (execution: PaymentExecution) => PaymentExecution): FakeRail => ({
+  ...w.rail,
+  submitApprovedIntent: async (intent) => {
+    const answer = await w.rail.submitApprovedIntent(intent);
+    return answer.kind === 'accepted' ? { ...answer, execution: change(answer.execution) } : answer;
+  },
+});
+const credited = (execution: PaymentExecution): PaymentExecution => ({
+  ...execution,
+  providerStatus: 'AcceptedCreditSettlementCompleted',
+});
+
+/** The world's fake, its accepted answers the creditor's account credited at once, as a faster rail might answer. */
+const creditedAtOnce = (w: World): FakeRail => answeredAs(w, credited);
+
+/** The partner's later word on the payment, applied as the outcomes module applies it: in lock order, then settled. */
+const settledBy = async (w: World, requestId: string, event: TransactionEvent, facts: Partial<ProviderFacts> = {}) => {
+  const key = { orgId: w.org, id: await transactionIdOf(w, requestId) };
+  await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    await transactionOf(tx, states, key, 'change');
+    await lockHoldingsOf(tx, requestId);
+    const moved = await moveTransaction(
+      tx,
+      states,
+      key,
+      event,
+      { ...NO_ANSWER_FACTS, ...facts },
+      { actor: { type: 'system', id: 'test' }, details: {} },
+    );
+    if (moved.outcome !== 'moved') throw new Error(`not moved by ${event}: ${moved.outcome}`);
+    await settleHoldings(tx, { requestId, status: moved.to, at: clock.now() });
+  });
+};
+
+describe('what a handed-off request holds follows its payment (C3; ADR-006 §10–§11, SEC-LIM-02)', () => {
   /** The world's holdings checked as the API's job checks them, its pass logged. */
   const holdingsChecked = async (w: World) => {
     await createHoldingsCheck({
@@ -1243,44 +1774,6 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 §10�
 });
 
 describe('a payment that SUCCEEDED queues its supplier’s remittance email, once (C2b; partner decision 34a)', () => {
-  /** The world's remittances, by the transaction each is about. */
-  const remittancesOf = (w: World) =>
-    withTenant(app, w.org, async (tx) =>
-      (
-        await tx
-          // A global table (0021): the world's own organisation's notices alone.
-          .selectFrom('notifications.outbox')
-          .select(['about_id', 'recipient_user_id', 'recipient_contact_id', 'to_contacts'])
-          .where('org_id', '=', w.org)
-          .where('kind', '=', 'payment_remittance')
-          .orderBy('id')
-          .execute()
-      ).map((row) => ({ ...row })),
-    );
-
-  /** The request's transaction's ID, through its instruction. */
-  const transactionIdOf = (w: World, requestId: string) =>
-    withTenant(app, w.org, async (tx) => {
-      const row = await tx
-        .selectFrom('transactions.transactions as t')
-        .innerJoin('instructions.instructions as i', 'i.id', 't.instruction_id')
-        .select('t.id')
-        .where('i.spend_request_id', '=', requestId)
-        .executeTakeFirstOrThrow();
-      return row.id;
-    });
-
-  /** The world's fake, its accepted answers the creditor's account credited at once, as a faster rail might answer. */
-  const creditedAtOnce = (w: World): FakeRail => ({
-    ...w.rail,
-    submitApprovedIntent: async (intent) => {
-      const answer = await w.rail.submitApprovedIntent(intent);
-      return answer.kind === 'accepted'
-        ? { ...answer, execution: { ...answer.execution, providerStatus: 'AcceptedCreditSettlementCompleted' } }
-        : answer;
-    },
-  });
-
   it('queues one remittance to the supplier itself, about the transaction, in the Tx B that records SUCCEEDED', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
@@ -1376,6 +1869,20 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
       ]);
     });
 
+    it('keeps a remittance given up in the audit log, with why, by the API (gate H2)', async () => {
+      const { w, transactionId } = await paid();
+      await remittances().givenUp(w.org, transactionId, 'address_refused');
+      expect(await remittanceEvents(w)).toEqual([
+        {
+          actor_type: 'system',
+          actor_id: 'api',
+          action: 'payment.remittance_failed',
+          subject_id: transactionId,
+          details: { reason: 'address_refused' },
+        },
+      ]);
+    });
+
     it('says no email when the version paid holds none (34c), and off once the setting is turned off since (34b)', async () => {
       const bare = await paid(null);
       expect(await remittances().remittanceOf(bare.w.org, bare.transactionId)).toEqual({ outcome: 'no_email' });
@@ -1455,5 +1962,391 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
 
       await expect(remittances().remittanceOf(w.org, transactionId)).rejects.toThrow("can't be believed");
     });
+  });
+});
+
+describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', () => {
+  type Owner = Awaited<ReturnType<typeof tamperAsOwner>>;
+
+  /** The run once, by a rail that counts its calls; then what it made and whether the organisation is held. */
+  async function handedOnce(w: World, requestId: string, anchors?: AnchorStore | Anchoring) {
+    const { rail, submitted } = counted(w);
+    // A store alone: its anchors as given, none made at the run.
+    const anchoring = anchors === undefined || 'anchors' in anchors ? anchors : { anchors, anchorFirst: noAnchorMade };
+    await handoffOf(w, rail, undefined, anchoring).run();
+    const hold = await signed(w, (tx, states) => states.holdRecord(tx, w.org));
+    return {
+      submitted: submitted(),
+      payment: await paymentOf(w, requestId),
+      status: await statusOf(w, requestId),
+      hold,
+    };
+  }
+
+  /** What every row asks of Tx A: no call, no instruction, not handed off, the organisation held, the alarm said. */
+  function refusedWithTheHold(made: Awaited<ReturnType<typeof handedOnce>>) {
+    expect(made.submitted).toBe(0);
+    expect(made.payment).toEqual({ instruction: 'missing' });
+    expect(made.status).not.toBe('HANDED_OFF');
+    expect(made.hold).toMatchObject({ outcome: 'held' });
+    expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
+  }
+
+  /** The owner's own statements on one of the world's tables, the connection ended after. */
+  async function asOwner(w: World, table: Parameters<typeof tamperAsOwner>[1], run: (owner: Owner) => Promise<void>) {
+    const owner = await tamperAsOwner(database, table, w.org);
+    try {
+      await run(owner);
+    } finally {
+      await owner.end();
+    }
+  }
+
+  /** The two guards a decision flipped would meet off while `run` flips it: its status move, and its decision fixed at creation. */
+  async function decisionGuardsOff(run: () => Promise<void>, owner: Owner) {
+    await owner.query(
+      'alter table spend_requests.requests disable trigger status_guard, disable trigger fixed_at_creation',
+    );
+    try {
+      await run();
+    } finally {
+      await owner.query(
+        'alter table spend_requests.requests enable trigger status_guard, enable trigger fixed_at_creation',
+      );
+    }
+  }
+
+  it('SEC-DB-05 refuses a request set APPROVED past the app, with no signed approval: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    // Over the approval threshold (AED 1,000): it waits for an admin's approval.
+    const waiting = await ask(acting, w, { amount: AED(150_000n) });
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    await asOwner(w, SPEND_REQUESTS, (owner) => owner.setColumn(waiting.id, 'status', 'APPROVED'));
+
+    refusedWithTheHold(await handedOnce(w, waiting.id));
+  });
+
+  it('SEC-DB-07 refuses a request whose decision is flipped past the app, DENIED to APPROVED: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    // Past the source's consent: denied at once.
+    const denied = await ask(acting, w, { amount: AED(10_000_000n) });
+    expect(await statusOf(w, denied.id)).toBe('DENIED');
+    await asOwner(w, SPEND_REQUESTS, (owner) =>
+      decisionGuardsOff(async () => {
+        // In one statement: an ALLOW carries no reasons (0039's reasons_with_the_decision).
+        await owner.query(
+          "update spend_requests.requests set status = 'APPROVED', decision = 'ALLOW', reason_codes = null where id = $1",
+          [denied.id],
+        );
+      }, owner),
+    );
+
+    refusedWithTheHold(await handedOnce(w, denied.id));
+  });
+
+  it('SEC-DB-07 refuses a request put back to its older signed state, approved, after its cancel: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    // Its row as approved, whole: an older state its own signed event still seals.
+    let saved: Awaited<ReturnType<Owner['saveRow']>> | undefined;
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      saved = await owner.saveRow(request.id);
+    });
+    await signed(w, (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: request.id },
+        { kind: 'user', userId: w.admin.userId },
+        clock.now(),
+      ),
+    );
+    expect(await statusOf(w, request.id)).toBe('CANCELLED');
+    await asOwner(w, SPEND_REQUESTS, (owner) =>
+      owner.withoutStatusGuard(async () => {
+        if (saved === undefined) throw new Error('no saved row');
+        await owner.restoreRow(saved);
+      }),
+    );
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  it('SEC-DB-02 refuses a verified payee’s key changed past the app after the approval: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await asOwner(w, SUPPLIERS, (owner) => owner.setColumn(w.suppliers[0] ?? '', 'payee_key', 'planted-payee'));
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  it('SEC-DB-02 refuses the payee’s bank reference changed past the app after the approval: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // The supplier's version in force: its beneficiary reference is what Tx A sends the partner to pay.
+    let versionId: string | undefined;
+    await asOwner(w, SUPPLIERS, async (owner) => {
+      [{ current_version_id: versionId } = { current_version_id: undefined }] = await owner.query<{
+        current_version_id: string;
+      }>('select current_version_id from suppliers.suppliers where id = $1', [w.suppliers[0]]);
+    });
+    // Past the database's own guard too (a version is made once): only the seal is left to find it.
+    await asOwner(w, SUPPLIER_VERSIONS, async (owner) => {
+      await owner.query('alter table suppliers.supplier_versions disable trigger made_once');
+      try {
+        await owner.setColumn(versionId ?? '', 'beneficiary_ref', 'planted-beneficiary');
+      } finally {
+        await owner.query('alter table suppliers.supplier_versions enable trigger made_once');
+      }
+    });
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  it('SEC-DB-08 refuses the organisation unfrozen past the app after the approval: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, ORGANIZATIONS, { orgId: w.org, id: w.org }, 'freeze', {
+        actor: OPERATOR,
+        action: 'organization.freeze',
+        details: {},
+      }),
+    );
+    await database
+      .as('admin')
+      .query(`update organizations.organizations set status = 'ACTIVE' where org_id = $1`, [w.org]);
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  it('SEC-DB-08 refuses the agent reactivated past the app after the approval: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: {},
+      }),
+    );
+    await asOwner(w, AGENTS, (owner) => owner.setColumn(w.agent, 'status', 'ACTIVE'));
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  it('SEC-DB-11 refuses once the organisation’s audit chain is wound back after the approval: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    let head: Awaited<ReturnType<Owner['saveHead']>> | undefined;
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      head = await owner.saveHead();
+    });
+    // Approved, then the chain put back to before it: the approval's events gone, the row still approved.
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      if (head === undefined) throw new Error('no saved head');
+      await owner.windBack(head);
+    });
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  /** An anchorFirst that anchors nothing (the database unreachable, say). */
+  const noAnchorMade = () => Promise.resolve();
+
+  /** The organisation's chain anchored where its head is now, as the anchor check anchors it (H11). */
+  async function anchoredNow(w: World): Promise<AnchorStore> {
+    let head: Awaited<ReturnType<Owner['saveHead']>> | undefined;
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      head = await owner.saveHead();
+    });
+    if (head === undefined) throw new Error('no head');
+    const anchors = createMemoryAnchorStore();
+    const chain = { kind: 'organisation', orgId: w.org } as const;
+    anchors.keep(signAnchor(keys, chain, { seq: BigInt(head.seq), hash: head.hash }, clock.now()));
+    return anchors;
+  }
+
+  /** Events of the organisation's own, sealed by the app's keys and naming no state: the chain grows, nothing else. */
+  const grown = (w: World, times: number) =>
+    withTenant(app, w.org, async (tx) => {
+      const trail = createAuditTrail({ keys, ids });
+      for (let time = 0; time < times; time += 1) {
+        await trail.record(tx, w.org, {
+          actor: OPERATOR,
+          action: 'invitation.drafted',
+          subject: { type: 'invitation', id: ids.next(), version: 1 },
+          details: {},
+        });
+      }
+    });
+
+  const anchorAlarms = () => lines('audit.integrity_failed').filter((line) => line.check === 'anchor');
+
+  it('SEC-DB-11 (H11) refuses a cancelled request put back approved, its chain wound back behind its anchor: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    // The approved state, the row and the head, kept; then cancelled, and anchored as the anchor check would.
+    let saved: Awaited<ReturnType<Owner['saveRow']>> | undefined;
+    let head: Awaited<ReturnType<Owner['saveHead']>> | undefined;
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      saved = await owner.saveRow(request.id);
+      head = await owner.saveHead();
+    });
+    await signed(w, (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: request.id },
+        { kind: 'user', userId: w.admin.userId },
+        clock.now(),
+      ),
+    );
+    const anchors = await anchoredNow(w);
+    // Both put back: the chain and the row agree, the cancel gone from each. Only the anchor, held apart, shows it.
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      const [row, back] = [saved, head];
+      if (row === undefined || back === undefined) throw new Error('nothing saved');
+      await owner.windBack(back);
+      await owner.withoutStatusGuard(() => owner.restoreRow(row));
+    });
+
+    refusedWithTheHold(await handedOnce(w, request.id, anchors));
+    expect(anchorAlarms()).toEqual([expect.objectContaining({ level: 'error', reason: 'anchor', orgId: w.org })]);
+  });
+
+  it('SEC-DB-11 (H11) refuses a chain grown again on a wound-back head, past its anchor: no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    let head: Awaited<ReturnType<Owner['saveHead']>> | undefined;
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      head = await owner.saveHead();
+    });
+    await grown(w, 1);
+    const anchors = await anchoredNow(w);
+    // Wound back past the anchored event, and grown again beyond it: the head is ahead, the anchored event another.
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      if (head === undefined) throw new Error('no head');
+      await owner.windBack(head);
+    });
+    await grown(w, 2);
+
+    refusedWithTheHold(await handedOnce(w, request.id, anchors));
+    expect(anchorAlarms()).toEqual([expect.objectContaining({ level: 'error', reason: 'anchor', orgId: w.org })]);
+  });
+
+  it('hands off a request whose chain holds its anchor, at the head or grown past it (H11)', async () => {
+    const { w, acting } = await ready();
+    const first = await ask(acting, w, { amount: ALLOWED() });
+    const atTheHead = await handedOnce(w, first.id, await anchoredNow(w));
+    expect(atTheHead).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+
+    const anchors = await anchoredNow(w);
+    const second = await ask(acting, w, { amount: ALLOWED() });
+    const grownPast = await handedOnce(w, second.id, anchors);
+    expect(grownPast).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+    expect(anchorAlarms()).toEqual([]);
+  });
+
+  /** The anchor check as main.ts makes it, over this organisation alone, its anchors in `anchors`. */
+  const anchorCheckOf = (w: World, anchors: AnchorStore) => {
+    const trail = createAuditTrail({ keys, ids });
+    return createAnchorCheck({
+      chains: [],
+      organizations: {
+        list: () => Promise.resolve([w.org]),
+        recorded: () => Promise.resolve([w.org]),
+        verify: (orgId, anchor) => trail.verifyAlone(app, orgId, anchor),
+        hold: (orgId, failure) => holdOrganisation(app, orgId, { keys, ids, logger: testLogger(capture) }, failure),
+      },
+      keys,
+      clock,
+      logger: testLogger(capture),
+      staleAfterMs: 60_000,
+      deadlineMs: 30_000,
+      anchors,
+    });
+  };
+
+  it('anchors a chain it holds no anchor for first, as a process just started, then hands off: no false alarm (S146)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const anchors = createMemoryAnchorStore();
+    const check = anchorCheckOf(w, anchors);
+
+    const made = await handedOnce(w, request.id, {
+      anchors,
+      anchorFirst: (orgId, signal) => check.anchorOrganisation(orgId, signal),
+    });
+
+    expect(made).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+    expect(anchors.latest({ kind: 'organisation', orgId: w.org })).toBeDefined();
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('hands off after the real anchor check anchored the chain, grown honestly since: no false alarm (H11)', async () => {
+    const { w, acting } = await ready();
+    await ask(acting, w, { amount: ALLOWED() });
+    const anchors = createMemoryAnchorStore();
+    await anchorCheckOf(w, anchors).run();
+    expect(anchors.latest({ kind: 'organisation', orgId: w.org })).toBeDefined();
+    const later = await ask(acting, w, { amount: ALLOWED() });
+
+    expect(await handedOnce(w, later.id, anchors)).toMatchObject({
+      submitted: 2,
+      status: 'HANDED_OFF',
+      hold: { outcome: 'clear' },
+    });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('anchors first only a chain it holds no anchor for: one it holds is compared, never checked whole again (S146)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    let checkedWhole = 0;
+    const anchorFirst = () => {
+      checkedWhole += 1;
+      return Promise.resolve();
+    };
+
+    const made = await handedOnce(w, request.id, { anchors: await anchoredNow(w), anchorFirst });
+
+    expect(made).toMatchObject({ submitted: 1, status: 'HANDED_OFF' });
+    expect(checkedWhole).toBe(0);
+  });
+
+  it('waits, never handing off uncompared, while no anchor could be made: APPROVED, no call, no hold (S146)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+
+    const made = await handedOnce(w, request.id, createMemoryAnchorStore());
+
+    expect(made).toMatchObject({ submitted: 0, status: 'APPROVED', hold: { outcome: 'clear' } });
+    expect(lines('handoff.waiting')).toEqual([
+      expect.objectContaining({ requestId: request.id, why: 'anchor_pending' }),
+    ]);
+  });
+
+  it('holds an empty chain’s anchor (seq 0) as kept: nothing to compare, nothing alarmed (H11)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const anchors = createMemoryAnchorStore();
+    const chain = { kind: 'organisation', orgId: w.org } as const;
+    anchors.keep(signAnchor(keys, chain, { seq: 0n, hash: Buffer.alloc(32) }, clock.now()));
+
+    expect(await handedOnce(w, request.id, anchors)).toMatchObject({ submitted: 1, status: 'HANDED_OFF' });
+    expect(anchorAlarms()).toEqual([]);
+  });
+
+  it('compares the anchor only under the head’s lock: asked before integrityHold took it, it throws', async () => {
+    const { w } = await ready();
+    const anchor = { seq: 1n, hash: Buffer.alloc(32) };
+
+    await expect(signed(w, (tx, states) => states.anchorKept(tx, w.org, anchor))).rejects.toThrow(
+      "integrityHold has locked the chain's head",
+    );
   });
 });

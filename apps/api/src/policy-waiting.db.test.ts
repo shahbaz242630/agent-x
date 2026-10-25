@@ -529,7 +529,8 @@ describe('the requests waiting for approval a policy change would reject (E5d, d
     expect(shown).toMatchObject({ more: true, rejected: [{ id: made[0] }] });
     expect(await versionEvent(w, done)).toMatchObject({ details: { waitingListed: 1, waitingMore: true } });
     expect(await statusOf(w, made[0] ?? '')).toBe('APPROVAL_REQUIRED');
-  });
+    // 101 requests made one by one: past the 30 s default on a busy machine, three times in a week (S138–S144).
+  }, 90_000);
 
   it('refuses a member who isn’t an admin, and rules the change itself would refuse', async () => {
     const { w } = await threeWaiting();

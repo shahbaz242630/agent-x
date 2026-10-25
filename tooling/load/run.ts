@@ -4,9 +4,12 @@
  * 1. a clean `agentx-load` stack, the database and the API alone (compose.load.yaml)
  * 2. the seed: organisations, agents with mandates and keys (seed.load.test.ts)
  * 3. phase 1 of k6 (money-paths.k6.js)
- * 4. the API restarted, so its holdings check runs over phase 1's requests
+ * 4. the API restarted, so its holdings check runs over phase 1's requests,
+ *    and a new key for each agent (keys.load.test.ts), as Azure's second job makes its own
  * 5. phase 2 of k6, with the spike
- * 6. the database checked (verify.load.test.ts) and the API's log read (logs.ts)
+ * 6. the database checked (verify.load.test.ts), the run's organisations
+ *    made inert (cleanup.load.test.ts), as Azure's run leaves them on
+ *    staging, and the API's log read (logs.ts)
  * 7. the report, numbers only, into tooling/load/reports; the stack removed.
  * It fails if any check does. `--keep` leaves the stack up to look at;
  * `--cpus 2` gives the API two CPUs instead of staging's half.
@@ -27,6 +30,7 @@ import {
   optionsOf,
   OUT_DIR,
   POLICY_P95_MS,
+  readSeeded,
   REPORTS_DIR,
 } from './plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from './report.ts';
@@ -124,29 +128,40 @@ function main(keep: boolean, apiCpus: number): number {
     // Built once: the set-up jobs and the API share the image, and building it for each at once races.
     must('The app image', 'docker', [...COMPOSE, 'build', 'api']);
     must('The database and the API', 'docker', [...COMPOSE, 'up', '--no-build', '--wait', 'api']);
-    must('The seed', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'seed'], login);
+    must('The seed', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'seed'], {
+      ...login,
+      AGENTX_LOAD_RUN_ID: `local ${at}`,
+    });
     const first = phase(1);
     must('The API restarted', 'docker', [...COMPOSE, 'restart', 'api']);
     must('The API back', 'docker', [...COMPOSE, 'up', '--wait', '--no-deps', 'api']);
+    must('New keys', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'keys'], login);
     const second = phase(2);
     const created = first.created + second.created;
     console.log('\n== The database after the run');
     const verified = run(process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'verify'], {
       env: { ...login, AGENTX_LOAD_CREATED: String(created) },
     });
+    console.log('\n== The clean-up');
+    const cleaned = run(process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'cleanup'], {
+      env: login,
+    });
     const log = run('docker', [...COMPOSE, 'logs', '--no-log-prefix', '--no-color', 'api'], { shown: false });
     writeFileSync(path.join(OUT_DIR, 'api.log'), log.stdout);
-    const logs = summariseLogs(log.stdout);
+    const spikeOrgs = new Set(readSeeded().agents.flatMap(({ kind, orgId }) => (kind === 'capped' ? [orgId] : [])));
+    const logs = summariseLogs(log.stdout, spikeOrgs);
     const failures = [
       ...phaseFailures(first),
       ...phaseFailures(second),
       ...(verified.code === 0 ? [] : ['The database checks failed: their output is above.']),
+      ...(cleaned.code === 0 ? [] : ["The clean-up didn't leave every organisation inert: its output is above."]),
       ...logFailures(logs, created, POLICY_P95_MS),
     ];
     const file = reportFile(at, apiCpus);
     const report = renderReport({
       at,
       commit,
+      site: 'local',
       apiCpus,
       phases: [first, second],
       logs,

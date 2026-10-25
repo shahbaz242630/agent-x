@@ -105,8 +105,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), and its instruction and transaction (Phase 4 B3)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions.
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), its instruction and transaction (Phase 4 B3), and a proposal to mark that failed (gate H10)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions, then the proposals to mark those failed.
     const [
       organizations,
       invitations,
@@ -128,6 +128,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
       requests,
       instructionRows,
       transactionRows,
+      proposalRows,
       ...others
     ] = PRODUCT_AUTHORITY_TABLES;
 
@@ -151,6 +152,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(requests).toBe(spendRequests.SPEND_REQUESTS);
     expect(instructionRows).toBe(instructions.INSTRUCTIONS);
     expect(transactionRows).toBe(transactions.TRANSACTIONS);
+    expect(proposalRows).toBe(transactions.FAILURE_PROPOSALS);
     expect(others).toEqual([]);
     // CI's view of them takes the same fields and the same machine, as `status`.
     expect(AUTHORITY_TABLES).toEqual([
@@ -308,6 +310,15 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fixedAtCreation: ['instruction_id', 'created_at'],
         liveStatuses: ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN', 'SUCCEEDED'],
       },
+      // A proposal moves by its machine; its payment, reference, proposer and making fixed.
+      {
+        table: transactions.FAILURE_PROPOSALS.table,
+        subject: transactions.FAILURE_PROPOSALS.subject,
+        fields: transactions.FAILURE_PROPOSALS.fields,
+        status: transactions.FAILURE_PROPOSAL,
+        fixedAtCreation: ['transaction_id', 'evidence_ref', 'proposed_by', 'created_at'],
+        liveStatuses: ['OPEN'],
+      },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
     expect(AUTHORITY_TABLES[0]?.status).toBe(ORGANIZATION);
@@ -349,6 +360,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[18]?.status).toBeUndefined();
     expect(AUTHORITY_TABLES[19]?.fields).toBe(transactions.TRANSACTIONS.fields);
     expect(AUTHORITY_TABLES[19]?.status).toBe(transactions.TRANSACTION);
+    expect(AUTHORITY_TABLES[20]?.fields).toBe(transactions.FAILURE_PROPOSALS.fields);
+    expect(AUTHORITY_TABLES[20]?.status).toBe(transactions.FAILURE_PROPOSAL);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

@@ -39,7 +39,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
-import { createSignedStates, type SignedStates, type TamperFinding } from './signed-states.ts';
+import { CHAIN_SUBJECT, createSignedStates, type SignedStates, type TamperFinding } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
 
 /** What the work's signed states are built from. */
@@ -65,9 +65,6 @@ const unrecorded = new Map<string, Found>();
  * one is tried only while none is, so by one request at a time.
  */
 const recording = new Map<string, number>();
-
-/** What a hold names as found tampered with when the organisation's whole chain failed the anchor check. */
-const CHAIN_SUBJECT = 'audit_chain';
 
 /** The first finding for each organisation, with how many there were. */
 function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {

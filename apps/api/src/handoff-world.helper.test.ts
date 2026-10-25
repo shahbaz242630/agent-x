@@ -19,10 +19,11 @@ import {
 } from '@agentx/core/modules/suppliers';
 import { transactionOf, type TransactionsTables } from '@agentx/core/modules/transactions';
 import type { Database } from '@agentx/platform/db';
-import type { FixedClock, SequentialIds } from '@agentx/testing';
+import type { IdGenerator } from '@agentx/core/shared-kernel';
+import type { FixedClock } from '@agentx/testing';
 
 import type { MandateRegistry } from './mandate-registry.ts';
-import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { AED, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import type { spendWorld, SpendWorldTables } from './spend-world.helper.test.ts';
 
 export type HandoffWorldTables = SpendWorldTables &
@@ -57,7 +58,7 @@ export function handoffWorld({
 }: {
   readonly app: () => Database<HandoffWorldTables>;
   readonly clock: () => FixedClock;
-  readonly ids: SequentialIds;
+  readonly ids: IdGenerator;
   readonly registry: () => MandateRegistry;
   readonly shared: ReturnType<typeof spendWorld>;
 }) {
@@ -110,7 +111,7 @@ export function handoffWorld({
       if (found.outcome !== 'found') throw new Error(`no supplier: ${found.outcome}`);
       const current = await versionOf(tx, states, { orgId: w.org, id: found.supplier.currentVersionId }, supplierId);
       if (current.outcome !== 'found') throw new Error(`no version: ${current.outcome}`);
-      await addVersion(tx, states, keys, {
+      await addVersion(tx, states, quiet().keys, {
         orgId: w.org,
         id: versionId,
         supplierId,
@@ -168,5 +169,29 @@ export function handoffWorld({
     });
   }
 
-  return { ready, paymentOf };
+  /** The payment's alerts to its admins (decision 37b): each kept in its audit log, and each email queued. */
+  async function alertsOf(w: World, transactionId: string) {
+    return {
+      kept: (await shared.eventsAbout(w.org, transactionId, 'payment_alert')).map(({ action, details }) => ({
+        action,
+        details,
+      })),
+      emailed: (
+        await withSignedStates(app(), w.org, quiet(), (tx) =>
+          tx
+            // A global table (0021): the world's own organisation's notices alone.
+            .selectFrom('notifications.outbox')
+            .select('kind')
+            .where('org_id', '=', w.org)
+            .where('about_id', '=', transactionId)
+            .where('kind', 'in', ['payment_contradicted', 'payment_unproven', 'payment_still_unknown'])
+            .orderBy('created_at')
+            .orderBy('id')
+            .execute(),
+        )
+      ).map(({ kind }) => kind),
+    };
+  }
+
+  return { ready, paymentOf, alertsOf };
 }

@@ -12,6 +12,7 @@ const phase = (n: number, overrides: Partial<PhaseResult> = {}): PhaseResult => 
   checksFailed: 0,
   dropped: 0,
   asksMs: { p50: 21.25, p95: 88.5, p99: 140, max: 310.75 },
+  spikeMs: null,
   thresholds: { 'checks rate==1': true, 'http_req_duration{kind:ask} p(95)<500': true },
   ...overrides,
 });
@@ -19,6 +20,7 @@ const phase = (n: number, overrides: Partial<PhaseResult> = {}): PhaseResult => 
 const clean: RunResult = {
   at: '2026-10-22T12:00:00.000Z',
   commit: 'abc1234',
+  site: 'local',
   apiCpus: 0.5,
   phases: [phase(1), phase(2)],
   logs: summariseLogs(
@@ -56,7 +58,9 @@ describe('the report', () => {
     expect(report).toContain("the API\nsized as staging's (half a CPU, 1 GiB, ten connections)");
     expect(report).toContain('| 1 | 3300 | 3150 | 0 | 21.3 | 88.5 | 140.0 | 310.8 | 0 | 0 | 0 |');
     expect(report).toContain('the hand-off is\npaused');
-    expect(report).toContain('| 1 | 31 | 31 | 31 | 31 |');
+    expect(report).toContain('| Steady | 1 | 31 | 31 | 31 | 31 |');
+    expect(report).not.toContain('spike, 50 requests');
+    expect(report).not.toContain('| The spike |');
     expect(report).toContain('they do not close PL-38');
     expect(report).toContain('The database after the run: passed');
     expect(report).toContain('The holdings check at the restart: 1 run(s) over 3150 request(s).');
@@ -64,10 +68,33 @@ describe('the report', () => {
     expect(report).not.toContain('What failed');
   });
 
+  it('gives phase 2’s spike its own numbers, apart from the steady traffic’s targets', () => {
+    const spikeDecided = JSON.stringify({ level: 'info', event: 'spend_request.decided', durationMs: 640, orgId: 'o' });
+    const report = renderReport({
+      ...clean,
+      phases: [phase(1), phase(2, { spikeMs: { p50: 410.25, p95: 757.5, max: 812 } })],
+      logs: summariseLogs(spikeDecided, new Set(['o'])),
+    });
+    expect(report).toContain(
+      "Phase 2's spike, 50 requests at once from the capped agent, queued on its month's lock by design: " +
+        'p50 410.3 ms, p95 757.5 ms, max 812.0 ms.',
+    );
+    expect(report).toContain('| The spike | 1 | 640 | 640 | 640 | 640 |');
+  });
+
   it('says when the API was given more than staging’s half a CPU', () => {
     const report = renderReport({ ...clean, apiCpus: 2 });
     expect(report).toContain('# Load test, 2026-10-22 (local, API 2 CPU)');
     expect(report).toContain('the API\ngiven 2 CPU(s) (staging has half), 1 GiB and ten connections as staging, k6');
+  });
+
+  it('says an Azure run is the one PL-38 closes on, sized up on staging', () => {
+    const report = renderReport({ ...clean, site: 'azure', apiCpus: 2 });
+    expect(report).toContain('# Load test, 2026-10-22 (azure, API 2 CPU)\n\n**Passed.**');
+    expect(report).toContain('on staging in Azure UAE North, sized up for the run: the API\ngiven 2 CPU(s)');
+    expect(report).toContain('This is the run PL-38 closes on (D2c).');
+    expect(report).not.toContain('laptop');
+    expect(report).toContain('| 1 | 3300 | 3150 | 0 | 21.3 | 88.5 | 140.0 | 310.8 | 0 | 0 | 0 |');
   });
 
   it('lists what failed', () => {

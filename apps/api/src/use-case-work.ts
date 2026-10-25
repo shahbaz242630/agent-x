@@ -6,7 +6,7 @@
 // the area's own UseCaseRefused subclass, so everything the write did rolls
 // back and the same key may be sent again, and only that area's refusals are
 // answered as a plain outcome.
-import { type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import { type AuditTables, type SignedStates, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
   type ConsumedStepUp,
@@ -99,26 +99,37 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
     }
   };
 
+  /**
+   * The write with its key claimed first; a refusal is answered, with
+   * everything it did rolled back. A member's or an agent's: only its
+   * organisation is read.
+   */
+  const write = (
+    member: Pick<Member, 'orgId'>,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+  ): Promise<Written> => {
+    const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
+    return orRefused(() =>
+      inOrganisation(member.orgId, correlationId, (tx, states) =>
+        idempotency.run(tx, idempotent, () => work(tx, states)),
+      ),
+    );
+  };
+
   return {
     inOrganisation,
+    write,
 
-    /**
-     * The write with its key claimed first; a refusal is answered, with
-     * everything it did rolled back. A member's or an agent's: only its
-     * organisation is read.
-     */
-    write: (
-      member: Pick<Member, 'orgId'>,
-      idempotent: IdempotentRequest,
-      correlationId: string,
-      work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-    ): Promise<Written> => {
-      const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
-      return orRefused(() =>
-        inOrganisation(member.orgId, correlationId, (tx, states) =>
-          idempotency.run(tx, idempotent, () => work(tx, states)),
-        ),
-      );
+    /** The write, a history past its read's cap (the two-person rule's, a supplier's versions) answered HISTORY_TOO_LONG. */
+    historyBounded: async (...args: Parameters<typeof write>): Promise<Written> => {
+      try {
+        return await write(...args);
+      } catch (error) {
+        if (!(error instanceof TooManyEventsToRead)) throw error;
+        return refused(409, 'HISTORY_TOO_LONG');
+      }
     },
 
     /** A read in the organisation's transaction, a refusal inside it answered. */

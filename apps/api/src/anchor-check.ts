@@ -57,6 +57,13 @@ export interface AnchorCheck {
    * aborts. Never throws: every outcome is logged.
    */
   run(signal?: AbortSignal): Promise<void>;
+  /**
+   * One organisation's chain checked and anchored now, as a run would (its
+   * alarm and hold too): for the hand-off, which compares every payment with
+   * the chain's anchor and so can't wait for the next run after a restart
+   * (gate H11, partner S146). Never throws.
+   */
+  anchorOrganisation(orgId: string, signal?: AbortSignal): Promise<void>;
 }
 
 /** Where the organisations' chains come from (B1d-2). */
@@ -354,6 +361,16 @@ export function createAnchorCheck({
   };
 
   return Object.freeze({
+    async anchorOrganisation(orgId: string, signal?: AbortSignal): Promise<void> {
+      if (organizations === undefined) return;
+      const id = orgId.toLowerCase();
+      const outcome = await checkOne(
+        { chain: { kind: 'organisation', orgId: id }, verify: (anchor) => organizations.verify(id, anchor) },
+        signal,
+      );
+      if (outcome === 'failed') await settle(organizations, id, signal);
+    },
+
     async run(signal?: AbortSignal): Promise<void> {
       const outcomes: Outcome[] = [];
       for (const one of chains) {
@@ -384,6 +401,6 @@ export function createAnchorCheck({
  * Runs the check now and then `intervalMs` after each run ends (scheduleRuns):
  * runs never overlap, and `stop` ends a run in flight at once and waits for it.
  */
-export function scheduleAnchorCheck(check: AnchorCheck, intervalMs: number): { stop(): Promise<void> } {
+export function scheduleAnchorCheck(check: Pick<AnchorCheck, 'run'>, intervalMs: number): { stop(): Promise<void> } {
   return scheduleRuns(check, intervalMs);
 }

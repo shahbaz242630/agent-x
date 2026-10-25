@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { API_CPUS_VARIABLE, LOAD_DB_PORT, optionsOf, STAGING_API_CPUS } from './plan.ts';
+import { API_CPUS_VARIABLE, LOAD_DB_PORT, loadConnection, loadOrgName, optionsOf, STAGING_API_CPUS } from './plan.ts';
 
 interface Service {
   ports?: string[];
@@ -95,5 +95,46 @@ describe('the load stack (compose.load.yaml)', () => {
     ])('refuses %s, never a run at another size than asked', (...bad) => {
       expect(optionsOf(bad)).toBeUndefined();
     });
+  });
+});
+
+describe("the run's database login (plan.ts)", () => {
+  it('reaches the load stack on its loopback port with no TLS on the laptop', () => {
+    expect(loadConnection({ AGENTX_LOAD_DB_PASSWORD: 'p' })).toMatchObject({
+      host: '127.0.0.1',
+      port: LOAD_DB_PORT,
+      user: 'agentx_app',
+      password: 'p',
+      tls: 'disable',
+    });
+  });
+
+  it("reaches staging's private server on 5432 with its certificate checked when a host is named (D2c)", () => {
+    expect(
+      loadConnection({
+        AGENTX_LOAD_DB_PASSWORD: 'p',
+        AGENTX_LOAD_DB_HOST: 'psql-agentx-stg.postgres.database.azure.com',
+      }),
+    ).toMatchObject({
+      host: 'psql-agentx-stg.postgres.database.azure.com',
+      port: 5432,
+      user: 'agentx_app',
+      tls: 'verify-full',
+    });
+  });
+
+  it('takes a host set but empty as none: the laptop, never an empty host', () => {
+    expect(loadConnection({ AGENTX_LOAD_DB_PASSWORD: 'p', AGENTX_LOAD_DB_HOST: '' })).toMatchObject({
+      host: '127.0.0.1',
+      tls: 'disable',
+    });
+  });
+
+  it('refuses to start with no password', () => {
+    expect(() => loadConnection({})).toThrow('corepack pnpm load');
+  });
+
+  it("names a run's organisations so they stand out on staging", () => {
+    expect(loadOrgName('local 2026-10-24T10:00:00.000Z')).toBe('Load test D2c local 2026-10-24T10:00:00.000Z');
   });
 });

@@ -29,20 +29,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
-import {
-  auditExportRequest,
-  firstAdminRequest,
-  handoffRequest,
-  markFailedRequest,
-  restoreCheckRequest,
-} from './request.ts';
+import { auditExportRequest, firstAdminRequest, handoffRequest, restoreCheckRequest } from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({
   create: undefined as Error | undefined,
   readOnly: [] as boolean[],
-  /** What marking a payment failed comes to, in place of the real one (which needs a payment handed off, E1c). */
-  mark: undefined as (() => Promise<unknown>) | undefined,
 }));
 
 vi.mock('./create-organization.ts', async (importOriginal) => {
@@ -53,15 +45,6 @@ vi.mock('./create-organization.ts', async (importOriginal) => {
       if (faults.create !== undefined) return Promise.reject(faults.create);
       return actual.createOrganizationAsOperator(...args);
     },
-  };
-});
-
-vi.mock('@agentx/core/modules/outcomes', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@agentx/core/modules/outcomes')>();
-  return {
-    ...actual,
-    markPaymentFailed: (...args: Parameters<typeof actual.markPaymentFailed>) =>
-      faults.mark === undefined ? actual.markPaymentFailed(...args) : faults.mark(),
   };
 });
 
@@ -80,7 +63,6 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 afterEach(() => {
   faults.create = undefined;
   faults.readOnly = [];
-  faults.mark = undefined;
 });
 
 const server = inject('postgres');
@@ -700,62 +682,6 @@ describe(`Phase 4 B1 the operator resumes every hand-off, as the job runs it (Po
       .query<{ details: string }>('select details from platform_controls.audit_events where id = $1', [id]);
     expect(JSON.parse(String(event?.details))).toEqual({ reason: REASON, release: 'r-operator', run: null });
     expect(text).not.toContain(REASON);
-  });
-});
-
-describe(`Phase 4 E1c the operator marks a payment failed, as the job runs it (Postgres ${server.version})`, () => {
-  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-mark-failed-'));
-  afterAll(() => {
-    rmSync(folder, { recursive: true, force: true });
-  });
-  const REASON = 'CASE-2026/0042';
-  const EVIDENCE = 'BANK-NACK-77311';
-
-  /** A run of a request to mark a payment failed, from its file. */
-  async function marking(orgId = uuidV7Ids.next()) {
-    const asked = { orgId, transactionId: uuidV7Ids.next(), reason: REASON, evidence: EVIDENCE, id: uuidV7Ids.next() };
-    const file = path.join(folder, `mark-${asked.id}`);
-    writeFileSync(file, markFailedRequest(asked));
-    const ran = await run(['--request', file]);
-    expect(ran.text).not.toContain(REASON);
-    expect(ran.text).not.toContain(EVIDENCE);
-    return { ...ran, asked };
-  }
-
-  it('checks the schema first, then refuses one for an organisation that isn’t there, changing nothing, naming the request', async () => {
-    const { code, events, line, asked } = await marking();
-
-    expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.refused']);
-    expect(code).toBe(1);
-    expect(line('operator.refused')).toMatchObject({
-      orgId: asked.orgId,
-      transactionId: asked.transactionId,
-      requestId: asked.id,
-      problems: ['no organisation has this ID'],
-    });
-  });
-
-  it.each([
-    ['marked now', { outcome: 'marked', platformSeq: 7n }, 'operator.payment_marked_failed', { platformSeq: '7' }],
-    ['marked by an earlier run', { outcome: 'marked_before' }, 'operator.payment_marked_before', {}],
-  ] as const)('says the payment %s, exiting 0', async (_what, outcome, event, more) => {
-    faults.mark = () => Promise.resolve(outcome);
-
-    const { code, events, line, asked } = await marking();
-
-    expect(events).toEqual(['operator.starting', 'db.schema_checked', event]);
-    expect(code).toBe(0);
-    expect(line(event)).toMatchObject({ transactionId: asked.transactionId, requestId: asked.id, ...more });
-  });
-
-  it('says it failed, naming the request, for anything but a refusal: run again to find out', async () => {
-    faults.mark = () => Promise.reject(new Error('connection lost'));
-
-    const { code, events, line, asked } = await marking();
-
-    expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.failed']);
-    expect(code).toBe(1);
-    expect(line('operator.failed')).toMatchObject({ command: 'mark-payment-failed', requestId: asked.id });
   });
 });
 

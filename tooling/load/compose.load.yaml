@@ -16,6 +16,9 @@ services:
     restart: 'no'
 
   api:
+    # Never the sign-in settings the end-to-end suite leaves behind: with them the API's email sender and
+    # login-service feed start, and fail here, where neither runs (a run then logs thousands of warnings).
+    env_file: !reset []
     environment:
       # Room for the load: k6 is one client, and each agent sends thousands a minute.
       AGENTX_RATE_LIMIT_PER_MINUTE: '50000'

@@ -71,7 +71,10 @@
 // as it is sent, after this, never here, out of the lock order.
 //
 // A run never throws: each failure is logged, naming the organisation and
-// request, and the run goes on to the next.
+// request, and the run goes on to the next. The platform pause is read once a
+// run first: while it holds every hand-off, no request is read (gate H5; Tx A
+// still reads it under its lock). A request left waiting is said once a
+// reason, not every run; the sweep takes every page of those past their wait.
 import {
   type AuditTables,
   type SignedStates,
@@ -106,14 +109,27 @@ import {
   type TransactionsTables,
 } from '@agentx/core/modules/transactions';
 import { mayFund } from '@agentx/core/modules/funding-sources';
-import { AFTER_SUBMITTED, factsOf, lockPayment, NO_FACTS, settlePayment } from '@agentx/core/modules/outcomes';
+import {
+  AFTER_SUBMITTED,
+  answerAbout,
+  factsOf,
+  lockPayment,
+  moveDetails,
+  NO_FACTS,
+  settlePayment,
+} from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import type { AnchorStore } from '@agentx/platform/audit-chain';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { alertAdmins } from './payment-alerts.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
+
+/** The statuses a late refusal goes back on: the bank's word read as under way, or paid (decision 37b). */
+const UNDER_WAY_OR_PAID: ReadonlySet<TransactionStatus> = new Set(['SUBMITTED', 'PROCESSING', 'SUCCEEDED']);
 
 /** How often the approved requests are looked for, once the last run has ended: handed off within this. */
 export const HANDOFF_EVERY_MS = 10_000;
@@ -139,6 +155,14 @@ const HANDOFF_PAGE = 50;
  * the same, so a request moved there by anything else is never stranded.
  */
 const HANDED_FROM = ['APPROVED', 'INSTRUCTION_READY'] as const;
+
+/**
+ * How long an approved request may stand, not handed off and waiting for no
+ * reason the run knows, before it is said (gate H8, the queue-age alert): a
+ * run every 10 s hands one off within seconds, so this is a run that never
+ * reaches it, or one failing every time.
+ */
+export const QUEUE_STALE_MS = 15 * 60_000;
 
 /** The route the Pilot takes (BR-12: one partner rail, a push payment), and why, as the instruction keeps it. */
 const ROUTE = { route: 'push', reason: 'mandate_source_push_rail' } as const;
@@ -237,6 +261,7 @@ export function createHandoff({
   page = HANDOFF_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
   unknownAfterMs = UNKNOWN_AFTER_MS,
+  anchoring,
 }: {
   /** The organisations to look in: the directory's list, which main.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -254,6 +279,15 @@ export function createHandoff({
   readonly callTimeoutMs?: number;
   /** How long a transaction waits for its answer before UNKNOWN (UNKNOWN_AFTER_MS unless a test names less). */
   readonly unknownAfterMs?: number;
+  /**
+   * The anchor check's last anchors, and its check of one organisation (main.ts
+   * passes both): Tx A refuses a chain behind its anchor (ADR-012 §2, H11).
+   * None given (some tests), nothing is compared.
+   */
+  readonly anchoring?: {
+    readonly anchors: AnchorStore;
+    readonly anchorFirst: (orgId: string, signal?: AbortSignal) => Promise<void>;
+  };
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
   if (unknownAfterMs <= callTimeoutMs) {
@@ -264,6 +298,14 @@ export function createHandoff({
   // only a run that reads its organisations beats, so one failing every time reads as stopped.
   let beat = clock.now().getTime();
   let sweptAt = Number.NEGATIVE_INFINITY;
+  // Why hand-offs were held at the last run, and the reason each request waited for there (gate H5): said on change.
+  let heldWas: string | null = null;
+  let waitedFor = new Map<string, string>();
+  let waitingNow = new Map<string, string>();
+  // This run's waiting requests by organisation, left out of its stale count (gate H8).
+  const waitingIn = new Map<string, string[]>();
+  // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
+  const staleSaid = new Map<string, number>();
   const beatNow = (): void => {
     beat = clock.now().getTime();
   };
@@ -285,11 +327,72 @@ export function createHandoff({
       ).map(({ id }) => id),
     );
 
+  /**
+   * The organisation's approved requests approved before `before` (by their
+   * signed state's newest event, Postgres's clock) and not among `waiting`:
+   * how many, and when the oldest was approved.
+   */
+  const staleOf = (orgId: string, before: Date, waiting: readonly string[], log: Logger) =>
+    withSignedStates(database, orgId, services(log), (tx) =>
+      tx
+        // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count for an alert alone, nothing moves on it
+        .selectFrom(`${SPEND_REQUESTS.table} as r`)
+        .innerJoin('audit.events as e', (join) =>
+          join.onRef('e.org_id', '=', 'r.org_id').onRef('e.id', '=', 'r.state_event_id'),
+        )
+        .select((select) => [select.fn.countAll<string>().as('count'), select.fn.min('e.recorded_at').as('oldest')])
+        .where('r.org_id', '=', orgId)
+        .where('r.status', 'in', HANDED_FROM)
+        .where('e.recorded_at', '<', before)
+        // One array, however many wait: never a parameter a request (review).
+        .where((eb) => eb.not(eb('r.id', '=', eb.fn.any(eb.val(waiting)))))
+        .executeTakeFirstOrThrow(),
+    );
+
+  /**
+   * Says, at most once in QUEUE_STALE_MS an organisation, approved requests
+   * left standing past QUEUE_STALE_MS that this run neither handed off nor
+   * found waiting for a reason (gate H8): the queue-age alert reads it.
+   */
+  const staleIn = async (orgId: string, log: Logger): Promise<void> => {
+    const now = clock.now().getTime();
+    if (now - (staleSaid.get(orgId) ?? Number.NEGATIVE_INFINITY) < QUEUE_STALE_MS) return;
+    try {
+      const waiting = waitingIn.get(orgId) ?? [];
+      const { count, oldest } = await staleOf(orgId, new Date(now - QUEUE_STALE_MS), waiting, log);
+      // None standing: the oldest is none too.
+      if (Number(count) === 0) return;
+      staleSaid.set(orgId, now);
+      log.warn('handoff.queue_stale', {
+        requests: Number(count),
+        oldestMinutes: Math.floor((now - new Date(oldest).getTime()) / 60_000),
+      });
+    } catch (error) {
+      log.error('handoff.queue_unread', { err: error });
+    }
+  };
+
   /** Tx A for one request, in the lock order above; a denial tells the admins in it (decision 3). */
   const txA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
     const done = await judgedA(tx, states, orgId, id, log);
     if (done.outcome === 'denied') await outbox.add(tx, stoppedNotice(orgId, id));
     return done;
+  };
+
+  /**
+   * Why the organisation's chain stops a hand-off now, read last of all under
+   * its head's lock (ADR-006 §6): its integrity hold, then a chain wound back
+   * since its last anchor (SEC-DB-11, H11), refused now rather than at the
+   * anchor check's next run; with no anchor yet (the run's anchorFirst couldn't
+   * make one), it waits rather than go uncompared (partner S146).
+   */
+  const chainStops = async (tx: HandoffTx, states: SignedStates, orgId: string): Promise<string | undefined> => {
+    const hold = await states.integrityHold(tx, orgId, 'head');
+    if (hold.outcome !== 'clear') return `hold_${hold.outcome}`;
+    if (anchoring === undefined) return undefined;
+    const anchor = anchoring.anchors.latest({ kind: 'organisation', orgId });
+    if (anchor === undefined) return 'anchor_pending';
+    return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
   };
 
   /** Tx A's checks and moves for one request, in the lock order above. */
@@ -334,8 +437,8 @@ export function createHandoff({
       await voidedWith(tx, states, keys, key, ['SUPPLIER_CHANGED'], now);
       return { outcome: 'denied', causes: 'SUPPLIER_CHANGED' };
     }
-    const hold = await states.integrityHold(tx, orgId, 'head');
-    if (hold.outcome !== 'clear') return { outcome: 'waiting', why: `hold_${hold.outcome}` };
+    const stopped = await chainStops(tx, states, orgId);
+    if (stopped !== undefined) return { outcome: 'waiting', why: stopped };
     if (request.status === 'APPROVED') await moveRequest(tx, states, key, 'make_ready');
     await moveRequest(tx, states, key, 'hand_off');
     const intent: ApprovedPaymentIntent = {
@@ -385,8 +488,12 @@ export function createHandoff({
    * Tx B: the partner's answer recorded on the transaction (ADR-007 §9):
    * `recorded`, or `late` when it had moved on meanwhile (marked UNKNOWN by a
    * run's sweep): the answer then kept as its facts, never a move (B3,
-   * ADR-007 §9). A refusal moves even an UNKNOWN one to FAILED: its reject
-   * code is the proof (§11). Throws for a transaction that can't be believed.
+   * ADR-007 §9). A refusal moves a pending one, or one UNKNOWN with no word
+   * of the bank's, to FAILED: its reject code is the proof (§11); never one
+   * the bank check already read at the bank (its word stands; said).
+   * An answer not about this payment (SEC-PTR-09) is never its word: a
+   * pending one UNKNOWN, its money held. Throws for a transaction that can't
+   * be believed.
    */
   const txB = (
     orgId: string,
@@ -397,14 +504,16 @@ export function createHandoff({
   ): Promise<'recorded' | 'late'> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
       const key = { orgId, id: transactionId };
-      const from = await lockedHoldings(tx, states, key, requestId);
+      const locked = await lockPayment(tx, states, key, requestId);
+      const from = locked.transaction.status;
       /** The status it moved to, or null where its machine refused the move. */
       const move = async (
         event: TransactionEvent,
         facts: ProviderFacts,
         via: string,
       ): Promise<TransactionStatus | null> => {
-        const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details: { via } });
+        const details = moveDetails(event, facts, via, locked.instruction.id);
+        const moved = await moveTransaction(tx, states, key, event, facts, { actor: ACTOR, details });
         // Tampered (its alarm raised): the answer isn't on the record, so not "handed off".
         if (moved.outcome !== 'moved' && moved.outcome !== 'refused') {
           throw new Error(`A transaction didn't move by ${event}: ${moved.outcome}`);
@@ -413,22 +522,61 @@ export function createHandoff({
       };
       const settled = async (status: TransactionStatus | null): Promise<'recorded' | 'late'> => {
         if (status === null) return 'late';
-        await settlePayment(tx, outbox, { orgId, requestId, transactionId, status, at: clock.now() });
+        const at = clock.now();
+        await settlePayment(tx, states, outbox, {
+          orgId,
+          requestId,
+          transactionId,
+          status,
+          at,
+          openProposal: locked.openProposal,
+        });
         return 'recorded';
       };
       // No answer is no word at all: one the bank check (E1a) or the sweep moved meanwhile is left as they moved it.
       if (answer.kind === 'unknown') {
         return from === 'SUBMISSION_PENDING' ? settled(await move('lose_track', NO_FACTS, 'no_answer')) : 'late';
       }
-      if (answer.kind === 'refused')
-        return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
+      if (answer.kind === 'refused') {
+        // UNKNOWN with no word of the bank's yet (the sweep's): one the bank check marked on the bank's word stays.
+        const noBankWord = from === 'UNKNOWN' && locked.transaction.providerStatus === null;
+        if (from === 'SUBMISSION_PENDING' || noBankWord) {
+          return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
+        }
+        log.error('handoff.refused_late', { transactionId, status: from });
+        // Refused where the bank's word was read as under way or paid: kept and its admins told (decision
+        // 37b). Failed or UNKNOWN, its word was already a rejection (or unreadable): nothing it goes back on (review).
+        if (UNDER_WAY_OR_PAID.has(from)) {
+          await alertAdmins(
+            tx,
+            { keys, ids, outbox },
+            { orgId, transactionId, alert: 'contradicted', details: { status: from, refused: answer.code } },
+          );
+        }
+        return 'late';
+      }
+      if (!answerAbout(answer.execution, orgId, locked)) {
+        log.error('handoff.unreadable', { transactionId, status: from, why: 'not_this_payment' });
+        return from === 'SUBMISSION_PENDING'
+          ? settled(await move('lose_track', NO_FACTS, 'answer_unreadable'))
+          : 'late';
+      }
       const facts = factsOf(answer.execution);
       const state = paymentStateOf(answer.execution);
       // Rejected with no proof the money stayed, in the answer itself: reconciliation's, as the bank check says it.
       if (state === 'UNKNOWN') log.error('handoff.rejected_unproven', { transactionId });
       const submitted = await move('submitted', facts, 'accepted');
       if (submitted === null) return 'late';
-      return settled((await move(AFTER_SUBMITTED[state], facts, 'accepted')) ?? submitted);
+      const recorded = await settled((await move(AFTER_SUBMITTED[state], facts, 'accepted')) ?? submitted);
+      // Kept and its admins told once recorded (decision 37b): a late one the bank check already told.
+      if (state === 'UNKNOWN') {
+        await alertAdmins(
+          tx,
+          { keys, ids, outbox },
+          { orgId, transactionId, alert: 'rejected_unproven', details: { bank: answer.execution.providerStatus } },
+        );
+      }
+      return recorded;
     });
 
   /** The transaction and its holdings locked (`lockPayment`), its status as read. */
@@ -463,7 +611,12 @@ export function createHandoff({
       return;
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
-    if (done.outcome === 'waiting') log.info('handoff.waiting', { requestId: id, why: done.why });
+    if (done.outcome === 'waiting') {
+      // Said once a reason, not every run it still waits (gate H5): a long hold is one line a request.
+      if (waitedFor.get(id) !== done.why) log.info('handoff.waiting', { requestId: id, why: done.why });
+      waitingNow.set(id, done.why);
+      waitingIn.set(orgId, [...(waitingIn.get(orgId) ?? []), id]);
+    }
     if (done.outcome !== 'handed_off') return;
     const { intent, transactionId } = done;
     const answer = await answerOf(intent, id, log);
@@ -492,6 +645,11 @@ export function createHandoff({
         log.error('handoff.failed', { err: error });
         return true;
       }
+      // A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first.
+      const chain = { kind: 'organisation', orgId } as const;
+      if (approved.length > 0 && anchoring !== undefined && anchoring.anchors.latest(chain) === undefined) {
+        await anchoring.anchorFirst(orgId, signal);
+      }
       for (const id of approved) {
         if (signal?.aborted === true) return false;
         await handOff(orgId, id, log);
@@ -510,6 +668,7 @@ export function createHandoff({
   const waitingSince = (
     orgId: string,
     before: Date,
+    after: string | undefined,
     log: Logger,
   ): Promise<{ readonly id: string; readonly requestId: string | null }[]> =>
     withSignedStates(database, orgId, services(log), (tx) =>
@@ -524,6 +683,7 @@ export function createHandoff({
         .where('t.org_id', '=', orgId)
         .where('t.status', '=', 'SUBMISSION_PENDING')
         .where('t.created_at', '<=', before)
+        .where((where) => (after === undefined ? where.lit(true) : where('t.id', '>', after)))
         .orderBy('t.id')
         .limit(page)
         .execute(),
@@ -531,46 +691,90 @@ export function createHandoff({
 
   /**
    * The organisation's transactions left waiting for their answer past
-   * unknownAfterMs marked UNKNOWN, a page a run (ADR-007 §10): each read for
-   * change, and moved only if it is still waiting then, so one Tx B recorded
-   * meanwhile is never undone. Never resent; reconciliation settles them.
+   * unknownAfterMs marked UNKNOWN, a page at a time, every page (ADR-007 §10;
+   * gate H5): each read for change, and moved only if it is still waiting
+   * then, so one Tx B recorded meanwhile is never undone. Never resent;
+   * reconciliation settles them. A page is read after the last one by its
+   * cursor, so one that can't be moved never holds the sweep on it.
    */
   const sweepIn = async (orgId: string, log: Logger): Promise<void> => {
-    let waiting: { readonly id: string; readonly requestId: string | null }[];
-    try {
-      waiting = await waitingSince(orgId, new Date(clock.now().getTime() - unknownAfterMs), log);
-    } catch (error) {
-      log.error('handoff.sweep_failed', { err: error });
-      return;
-    }
-    for (const transaction of waiting) {
-      beatNow();
+    const before = new Date(clock.now().getTime() - unknownAfterMs);
+    let after: string | undefined;
+    for (;;) {
+      let waiting: { readonly id: string; readonly requestId: string | null }[];
       try {
-        const marked = await withSignedStates(database, orgId, services(log), async (tx, states) => {
-          const key = { orgId, id: transaction.id };
-          // A transaction with no instruction is refused by lockedHoldings before anything is locked.
-          const requestId = transaction.requestId ?? '';
-          if ((await lockedHoldings(tx, states, key, requestId)) !== 'SUBMISSION_PENDING') return false;
-          const moved = await moveTransaction(tx, states, key, 'lose_track', NO_FACTS, {
-            actor: ACTOR,
-            details: { via: 'no_answer_in_time' },
-          });
-          // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
-          if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
-          await settlePayment(tx, outbox, {
-            orgId,
-            requestId,
-            transactionId: transaction.id,
-            status: moved.to,
-            at: clock.now(),
-          });
-          return true;
-        });
-        if (marked) log.warn('handoff.marked_unknown', { transactionId: transaction.id });
+        waiting = await waitingSince(orgId, before, after, log);
       } catch (error) {
-        log.error('handoff.sweep_failed', { transactionId: transaction.id, err: error });
+        log.error('handoff.sweep_failed', { err: error });
+        return;
       }
+      for (const transaction of waiting) await sweptOne(orgId, transaction, log);
+      if (waiting.length < page) return;
+      after = waiting.at(-1)?.id;
     }
+  };
+
+  /** One transaction left waiting past its wait marked UNKNOWN, if it still is under its lock. */
+  const sweptOne = async (
+    orgId: string,
+    transaction: { readonly id: string; readonly requestId: string | null },
+    log: Logger,
+  ): Promise<void> => {
+    beatNow();
+    try {
+      const marked = await withSignedStates(database, orgId, services(log), async (tx, states) => {
+        const key = { orgId, id: transaction.id };
+        // A transaction with no instruction is refused by lockedHoldings before anything is locked.
+        const requestId = transaction.requestId ?? '';
+        if ((await lockedHoldings(tx, states, key, requestId)) !== 'SUBMISSION_PENDING') return false;
+        const moved = await moveTransaction(tx, states, key, 'lose_track', NO_FACTS, {
+          actor: ACTOR,
+          details: { via: 'no_answer_in_time' },
+        });
+        // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
+        if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
+        await settlePayment(tx, states, outbox, {
+          orgId,
+          requestId,
+          transactionId: transaction.id,
+          status: moved.to,
+          at: clock.now(),
+          // Waiting SUBMISSION_PENDING under this lock: only an UNKNOWN payment is ever proposed failed.
+          openProposal: null,
+        });
+        return true;
+      });
+      if (marked) log.warn('handoff.marked_unknown', { transactionId: transaction.id });
+    } catch (error) {
+      log.error('handoff.sweep_failed', { transactionId: transaction.id, err: error });
+    }
+  };
+
+  /** Why every hand-off is held now (the platform pause, or a pause that can't be read), or null where none is. */
+  const heldNow = async (): Promise<string | null> => {
+    try {
+      const pause = await database.transaction().execute((tx) => handoffPauseOf(tx, 'share', { keys, logger }));
+      return pause.outcome === 'running' ? null : `pause_${pause.outcome}`;
+    } catch (error) {
+      logger.error('handoff.pause_unread', { err: error });
+      return 'pause_unread';
+    }
+  };
+
+  /** One organisation's turn of a run: its hand-offs and stale count unless held, its sweep when due; false if stopped. */
+  const runIn = async (
+    orgId: string,
+    handingOff: boolean,
+    sweeping: boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> => {
+    const log = logger.child({ orgId });
+    if (handingOff) {
+      if (!(await handOffAll(orgId, log, signal))) return false;
+      await staleIn(orgId, log);
+    }
+    if (sweeping) await sweepIn(orgId, log);
+    return true;
   };
 
   return {
@@ -585,12 +789,21 @@ export function createHandoff({
       beatNow();
       const sweeping = clock.now().getTime() - sweptAt >= SWEEP_EVERY_MS;
       if (sweeping) sweptAt = clock.now().getTime();
-      for (const orgId of orgs) {
-        // Stopped between organisations too, so the process stops promptly however many there are.
-        if (signal?.aborted === true) return;
-        const log = logger.child({ orgId });
-        if (!(await handOffAll(orgId, log, signal))) return;
-        if (sweeping) await sweepIn(orgId, log);
+      // Read once a run (gate H5): while hand-offs are held, no request is read at all; Tx A still reads it again
+      // under its lock for each one it hands off.
+      const held = await heldNow();
+      if (held !== heldWas) logger.info(held === null ? 'handoff.running' : 'handoff.held', { why: held ?? 'none' });
+      heldWas = held;
+      try {
+        for (const orgId of orgs) {
+          // Stopped between organisations too, so the process stops promptly however many there are.
+          if (signal?.aborted === true || !(await runIn(orgId, held === null, sweeping, signal))) return;
+        }
+      } finally {
+        // The reasons this run's requests wait for, said again only once one changes; one gone, forgotten.
+        if (held === null) waitedFor = waitingNow;
+        waitingNow = new Map();
+        waitingIn.clear();
       }
       beatNow();
     },

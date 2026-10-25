@@ -56,6 +56,7 @@ function senderWith(
     remittances: {
       remittanceOf: () => Promise.reject(new Error('not asked')),
       emailed: () => Promise.reject(new Error('not asked')),
+      givenUp: () => Promise.reject(new Error('not asked')),
     },
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
     logger,
@@ -158,6 +159,7 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     const done: string[] = [];
     let due = [notice];
     const outbox = {
+      endRemittanceLeases: () => Promise.resolve([]),
       claimDue: () => {
         const claimed = due;
         due = [];

@@ -15,8 +15,10 @@
 // checked by runs racing each other, the clock moving: each payment sent
 // once, settled once, one remittance for each that SUCCEEDED, its holdings as
 // its payment ended.
+import { withSignedStates } from '@agentx/core/modules/audit';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { markFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type ExecutionLookup, type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
 import { TRANSACTIONS } from '@agentx/core/modules/transactions';
@@ -64,7 +66,7 @@ const shared = spendWorld({
   decisions: () => decisions,
 });
 const { ask, holdingsOf } = shared;
-const { ready, paymentOf } = handoffWorld({
+const { ready, paymentOf, alertsOf } = handoffWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -160,9 +162,9 @@ afterAll(async () => {
   await database.drop();
 });
 
-beforeEach(() => {
-  // The audit chain seals each event's time by the database's clock, so the tests start from now.
-  clock = new FixedClock(new Date());
+/** The test's clock started at `at`, and what reads it made again with it. */
+function startClock(at: Date): void {
+  clock = new FixedClock(at);
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
@@ -174,6 +176,11 @@ beforeEach(() => {
     clock,
     logger,
   });
+}
+
+// The audit chain seals each event's time by the database's clock, so the tests start from now.
+beforeEach(() => {
+  startClock(new Date());
 });
 
 describe('a payment finished by the bank’s word (E1a; rail map §4)', () => {
@@ -243,6 +250,11 @@ describe('a payment finished by the bank’s word (E1a; rail map §4)', () => {
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(lines('payment_check.rejected_unproven')).toHaveLength(1);
     expect(await remittancesOf(w)).toEqual([]);
+    // Kept in the organisation's audit log and its admins emailed, once (decision 37b).
+    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+      kept: [{ action: 'payment.rejected_unproven', details: { bank: 'Rejected' } }],
+      emailed: ['payment_unproven'],
+    });
   });
 
   it.each([
@@ -346,6 +358,13 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN', providerStatus: 'Rejected' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(lines('handoff.rejected_unproven')).toHaveLength(1);
+    // Kept and its admins emailed once (decision 37b): the bank check finding it as it was says nothing more.
+    clock.advanceBy(2 * STEP);
+    await checksOf(w, rejecting).run();
+    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+      kept: [{ action: 'payment.rejected_unproven', details: { bank: 'Rejected' } }],
+      emailed: ['payment_unproven'],
+    });
   });
 
   it('leaves one the bank doesn’t find as it was: not found proves nothing', async () => {
@@ -472,6 +491,10 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
       expect.objectContaining({ status: 'SUCCEEDED', bank: 'Rejected' }),
     ]);
     expect(await remittancesOf(w)).toHaveLength(1);
+    expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+      kept: [{ action: 'payment.contradicted', details: { status: 'SUCCEEDED', bank: 'Rejected' } }],
+      emailed: ['payment_contradicted'],
+    });
   });
 
   it('keeps checking a paid one for 7 days: the bank going back on it leaves it paid, said once (rail map §4)', async () => {
@@ -523,6 +546,47 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(asked).toBe(2);
   });
 
+  it('watches one marked failed a week from the mark, not from its hand-off (gate H3; E1c)', async () => {
+    // Its hand-off 8 days ago (the database seals the mark at its own now, so the test's clock starts back then).
+    const DAY = 24 * 60 * STEP;
+    startClock(new Date(Date.now() - 8 * DAY));
+    const { w, acting } = await ready();
+    // .04 fils: Rejected with no proof the money stayed: UNKNOWN.
+    const request = await ask(acting, w, { amount: ALLOWED(4n) });
+    await handoffOf(w).run();
+    clock.advanceBy(2 * STEP);
+    await checksOf(w).run();
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+
+    // Today an admin marks it failed on their bank's written word (its route: mark-failed.db.test.ts).
+    clock.advanceBy(8 * DAY - 4 * STEP);
+    const transactionId = (await transactionOf(w, request.id)).id;
+    await withSignedStates(app, w.org, { keys, ids, logger: testLogger(capture) }, (tx, states) =>
+      markFailed(tx, states, createOutbox({ ids, clock }), {
+        orgId: w.org,
+        transactionId,
+        userId: w.admin.userId,
+        details: { evidenceRef: 'BANK-NACK-77312' },
+        at: clock.now(),
+      }),
+    );
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
+
+    let asked = 0;
+    const counted = answering(w, (found) => {
+      asked += 1;
+      return found;
+    });
+    // A run's first pass asks every one watched: this one, its hand-off 8 days back, its mark today.
+    await checksOf(w, counted).run();
+    expect(asked).toBe(1);
+
+    // A week past the mark (with room for the minutes the test's clock runs behind the database's), no longer asked.
+    clock.advanceBy(7 * DAY + 5 * STEP);
+    await checksOf(w, counted).run();
+    expect(asked).toBe(1);
+  });
+
   it('changes nothing for an answer older than the word kept: already read, never an alert (forced)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
@@ -554,9 +618,10 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(lines('payment_check.checked').at(-1)).toMatchObject({ from: 'SUCCEEDED', to: 'SUCCEEDED' });
   });
 
-  it('says each check of an UNKNOWN payment unresolved past a day, for reconciliation', async () => {
+  it('says each check of an UNKNOWN payment unresolved past a day, for reconciliation; its admins told once each (37b)', async () => {
     const { w, acting } = await ready();
-    const request = await ask(acting, w, { amount: ALLOWED(4n) });
+    const first = await ask(acting, w, { amount: SMALL(4n) });
+    const second = await ask(acting, w, { amount: SMALL(4n) });
     await handoffOf(w).run();
     clock.advanceBy(2 * STEP);
     await checksOf(w).run();
@@ -564,9 +629,20 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
 
     clock.advanceBy(24 * 60 * STEP);
     await checksOf(w).run();
+    await checksOf(w).run();
 
-    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
-    expect(lines('payment_check.still_unknown')).toHaveLength(1);
+    expect(lines('payment_check.still_unknown')).toHaveLength(4);
+    // Each one's admins emailed once, kept once, beside the rejection that made it UNKNOWN (decision 37b).
+    for (const request of [first, second]) {
+      expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+      expect(await alertsOf(w, (await transactionOf(w, request.id)).id)).toEqual({
+        kept: [
+          { action: 'payment.rejected_unproven', details: { bank: 'Rejected' } },
+          { action: 'payment.still_unknown', details: {} },
+        ],
+        emailed: ['payment_unproven', 'payment_still_unknown'],
+      });
+    }
   });
 });
 
@@ -815,7 +891,7 @@ describe('in the lock order, racing the hand-off (ADR-006 §6; PL-38)', () => {
     expect(lines('handoff.handed_off')).toEqual([expect.objectContaining({ answer: 'unknown', recorded: 'late' })]);
   });
 
-  it('settles once though the check and the hand-off’s sweep reach a payment left waiting at once (forced)', async () => {
+  it('SEC-DP-13 settles once though the check and the hand-off’s sweep reach a payment left waiting at once (forced)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     const handoff = answerHeld(w);

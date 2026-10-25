@@ -1,9 +1,10 @@
 // A load run's report (D2, PL-38), numbers only: kept in tooling/load/reports
 // so runs can be compared version to version. A laptop's numbers show the
 // answers stay right under load and how one version compares with another;
-// PL-38 closes only on the same run against a production-sized Azure stack.
-import type { LogSummary } from './logs.ts';
-import { STAGING_API_CPUS } from './plan.ts';
+// PL-38 closes only on the same run against a production-sized Azure stack
+// (D2c), whose report says so.
+import type { LogSummary, Percentiles } from './logs.ts';
+import { type LoadSite, STAGING_API_CPUS } from './plan.ts';
 
 /** One phase as k6 sums it up (money-paths.k6.js, handleSummary). */
 export interface PhaseResult {
@@ -16,6 +17,8 @@ export interface PhaseResult {
   /** Requests k6 never sent, having no free VU: the load fell short of the plan. */
   readonly dropped: number;
   readonly asksMs: { readonly p50: number; readonly p95: number; readonly p99: number; readonly max: number };
+  /** Phase 2's spike, timed apart from the steady traffic (money-paths.k6.js); null in phase 1. */
+  readonly spikeMs: { readonly p50: number; readonly p95: number; readonly max: number } | null;
   /** Each threshold, as `metric rule`, and whether it held. */
   readonly thresholds: Readonly<Record<string, boolean>>;
 }
@@ -25,6 +28,8 @@ export interface RunResult {
   readonly at: string;
   /** The commit it ran. */
   readonly commit: string;
+  /** The laptop's compose stack, or staging on Azure sized up for the run. */
+  readonly site: LoadSite;
   /** The CPUs the API was given: staging's half unless the run said otherwise. */
   readonly apiCpus: number;
   readonly phases: readonly PhaseResult[];
@@ -44,22 +49,43 @@ export function phaseFailures(phase: PhaseResult): string[] {
   return phase.created === 0 ? [...failed, `Phase ${String(phase.phase)}: no request was made.`] : failed;
 }
 
-export function renderReport(run: RunResult): string {
-  const { decisions } = run.logs;
-  const checked = run.logs.holdingsChecks.reduce((sum, { requests }) => sum + requests, 0);
+/** Where a laptop run ran, and why its numbers don't close PL-38. */
+function onTheLaptop(run: RunResult): string[] {
   const size =
     run.apiCpus === STAGING_API_CPUS
       ? "sized as staging's (half a CPU, 1 GiB, ten connections)"
       : `given ${String(run.apiCpus)} CPU(s) (staging has half), 1 GiB and ten connections as staging`;
-  const lines = [
-    `# Load test, ${run.at.slice(0, 10)} (local, API ${String(run.apiCpus)} CPU)`,
-    '',
-    run.failures.length === 0 ? '**Passed.**' : `**Failed: ${String(run.failures.length)} check(s).**`,
-    '',
+  return [
     `Commit \`${run.commit}\`, run at ${run.at}, on a laptop: the compose stack's database and API only, the API`,
     `${size}, k6 straight to it. As on staging today, the hand-off is`,
     'paused: its timer re-checks the approved requests each run, and that work is in these numbers. Laptop numbers compare versions;',
     'they do not close PL-38, which closes on the same run on Azure, production-sized, before live.',
+  ];
+}
+
+/** Where an Azure run ran: the run PL-38 closes on. */
+function onAzure(run: RunResult): string[] {
+  return [
+    `Commit \`${run.commit}\`, run at ${run.at}, on staging in Azure UAE North, sized up for the run: the API`,
+    `given ${String(run.apiCpus)} CPU(s) and ten connections, the database a General Purpose server, k6 in a job inside`,
+    "staging's own network, through the API's internal address. The hand-off is paused, as on staging today: its timer",
+    're-checks the approved requests each run, and that work is in these numbers. This is the run PL-38 closes on (D2c).',
+  ];
+}
+
+const decisionRow = (traffic: string, { count, p50, p95, p99, max }: Percentiles) =>
+  `| ${traffic} | ${String(count)} | ${String(p50)} | ${String(p95)} | ${String(p99)} | ${String(max)} |`;
+
+export function renderReport(run: RunResult): string {
+  const { decisions, spikeDecisions } = run.logs;
+  const spiked = run.phases.flatMap(({ phase, spikeMs }) => (spikeMs === null ? [] : [{ phase, spikeMs }]));
+  const checked = run.logs.holdingsChecks.reduce((sum, { requests }) => sum + requests, 0);
+  const lines = [
+    `# Load test, ${run.at.slice(0, 10)} (${run.site}, API ${String(run.apiCpus)} CPU)`,
+    '',
+    run.failures.length === 0 ? '**Passed.**' : `**Failed: ${String(run.failures.length)} check(s).**`,
+    '',
+    ...(run.site === 'local' ? onTheLaptop(run) : onAzure(run)),
     '',
     '## Requests (k6)',
     '',
@@ -71,15 +97,21 @@ export function renderReport(run: RunResult): string {
         `${ms(p.asksMs.p99)} | ${ms(p.asksMs.max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} |`,
     ),
     '',
-    'Target: a request p95 under 500 ms, with every planned request sent.',
+    'Target: a request p95 under 500 ms, with every planned request sent: the steady traffic, not the spike.',
+    ...spiked.map(
+      ({ phase, spikeMs }) =>
+        `Phase ${String(phase)}'s spike, 50 requests at once from the capped agent, queued on its month's lock by design: ` +
+        `p50 ${ms(spikeMs.p50)} ms, p95 ${ms(spikeMs.p95)} ms, max ${ms(spikeMs.max)} ms.`,
+    ),
     '',
     '## Decisions (the API’s log)',
     '',
-    '| Decisions | p50 ms | p95 ms | p99 ms | Max ms |',
-    '| --- | --- | --- | --- | --- |',
-    `| ${String(decisions.count)} | ${String(decisions.p50)} | ${String(decisions.p95)} | ${String(decisions.p99)} | ${String(decisions.max)} |`,
+    '| Traffic | Decisions | p50 ms | p95 ms | p99 ms | Max ms |',
+    '| --- | --- | --- | --- | --- | --- |',
+    decisionRow('Steady', decisions),
+    ...(spikeDecisions.count === 0 ? [] : [decisionRow('The spike', spikeDecisions)]),
     '',
-    'Target: a decision p95 under 150 ms, timed over its whole transaction (lock waits, retries, the reservation, signing).',
+    'Target: a steady decision p95 under 150 ms, timed over its whole transaction (lock waits, retries, the reservation, signing).',
     '',
     '## Checks',
     '',

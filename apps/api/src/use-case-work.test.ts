@@ -1,4 +1,5 @@
-import type { Database } from '@agentx/platform/db';
+import { TooManyEventsToRead } from '@agentx/core/modules/audit';
+import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { SequentialIds, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
@@ -53,5 +54,27 @@ describe('a use case answers its own area’s refusals alone', () => {
   it('throws another area’s, never answering it', async () => {
     const other = new OtherRefused(403, 'FORBIDDEN');
     await expect(refusingWith(other).answered(ORG, ORG, () => Promise.resolve({}))).rejects.toBe(other);
+  });
+});
+
+describe('a write bounded by the history it reads (the two-person rule, a supplier’s versions)', () => {
+  const key = {} as IdempotentRequest;
+  const noWork = () => Promise.resolve({ status: 201, resourceId: ORG });
+
+  it('answers a history past its read’s cap as HISTORY_TOO_LONG', async () => {
+    const work = refusingWith(new TooManyEventsToRead(10_000));
+    expect(await work.historyBounded({ orgId: ORG }, key, ORG, noWork)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'HISTORY_TOO_LONG',
+    });
+  });
+
+  it('answers its own refusal as the write does, and throws anything else', async () => {
+    expect(
+      await refusingWith(new OwnRefused(403, 'FORBIDDEN')).historyBounded({ orgId: ORG }, key, ORG, noWork),
+    ).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
+    const broken = new Error('the connection dropped');
+    await expect(refusingWith(broken).historyBounded({ orgId: ORG }, key, ORG, noWork)).rejects.toBe(broken);
   });
 });
