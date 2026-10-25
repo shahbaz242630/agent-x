@@ -894,7 +894,7 @@ describe('in the lock order, racing the hand-off (ADR-006 §6; PL-38)', () => {
     expect(lines('handoff.handed_off')).toEqual([expect.objectContaining({ answer: 'unknown', recorded: 'late' })]);
   });
 
-  it('settles once though the check and the hand-off’s sweep reach a payment left waiting at once (forced)', async () => {
+  it('SEC-DP-13 settles once though the check and the hand-off’s sweep reach a payment left waiting at once (forced)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     const handoff = answerHeld(w);

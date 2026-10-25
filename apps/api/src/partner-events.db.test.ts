@@ -9,6 +9,8 @@
 // changing (-05); a malformed body is refused (-06); a bad signature or a
 // stale time is refused, counted, kept encrypted as evidence a few an hour
 // from an address, and alerted (-01).
+import { createHash } from 'node:crypto';
+
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { createProviderEvents } from '@agentx/core/modules/provider-events';
@@ -22,8 +24,10 @@ import {
 import { createDatabase, type Database } from '@agentx/platform/db';
 import {
   createTestDatabase,
+  findLeaks,
   FixedClock,
   LogCapture,
+  SENSITIVE_SAMPLES,
   SequentialIds,
   type TestDatabase,
   tamperAsOwner,
@@ -639,6 +643,61 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
     await send(forgedNow());
     expect(await kept()).toHaveLength(7);
     expect(lines('partner_event.refused')).toHaveLength(3);
+  });
+
+  it('SEC-PAY-05 keeps an IBAN in a refused or unknown message nowhere in plain words: encrypted, never logged', async () => {
+    const { w } = await ready();
+    const { send } = await door(w);
+    const planted = [SENSITIVE_SAMPLES.uaeIban, SENSITIVE_SAMPLES.spacedUaeIban];
+    // The rail's message with the accounts beside what names the payment, as a partner's might carry them.
+    const body = (consentId: string) =>
+      Buffer.from(
+        JSON.stringify({
+          Meta: {
+            EventType: 'payment.status',
+            EventDateTime: clock.now().toISOString(),
+            ConsentId: consentId,
+            DebtorAccount: planted[0],
+            CreditorAccount: planted[1],
+          },
+        }),
+      );
+
+    // Refused (no key signed it), and verified but naming a consent no organisation holds: both kept, encrypted.
+    expect((await send({ ...forgedNow(), body: body('nobody-holds-this') })).statusCode).toBe(401);
+    expect((await send(await w.rail.bank.signBody(body('nobody-holds-this')))).statusCode).toBe(202);
+
+    const kept = await database
+      .as('admin')
+      .query(
+        'select id from security.partner_event_evidence union all select id from provider_events.inbox where org_id is null',
+      );
+    expect(kept).toHaveLength(2);
+    // Every row of every table and every log line, searched for every form an IBAN could be kept in.
+    const rows = await database.as('admin').query<{ rows: string }>(
+      `select pg_catalog.query_to_xml(
+          pg_catalog.format('select pg_catalog.to_jsonb(t)::text as row from %I.%I t', table_schema, table_name),
+          true, false, '')::text as rows
+         from information_schema.tables
+        where table_type = 'BASE TABLE' and table_schema not in ('pg_catalog', 'information_schema')`,
+    );
+    const logged = JSON.stringify(capture.lines());
+    const anywhere = [...rows.map((row) => row.rows), logged].join('\n').toLowerCase();
+    const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+    for (const iban of planted) {
+      const compact = iban.replaceAll(' ', '');
+      const forms = [
+        iban,
+        compact,
+        Buffer.from(compact).toString('hex'),
+        Buffer.from(compact).toString('base64'),
+        sha256(compact),
+        sha256(compact.toLowerCase()),
+        compact.slice(4),
+      ];
+      for (const form of forms) expect(anywhere, form).not.toContain(form.toLowerCase());
+    }
+    expect(findLeaks(logged, planted)).toEqual([]);
   });
 
   it('keeps a refused body’s first 16 KiB alone, said as kept', async () => {
