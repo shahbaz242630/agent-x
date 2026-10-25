@@ -349,7 +349,8 @@ export function createHandoff({
     try {
       const waiting = waitingIn.get(orgId) ?? [];
       const { count, oldest } = await staleOf(orgId, new Date(now - QUEUE_STALE_MS), waiting, log);
-      if (Number(count) === 0 || oldest === null) return;
+      // None standing: the oldest is none too.
+      if (Number(count) === 0) return;
       staleSaid.set(orgId, now);
       log.warn('handoff.queue_stale', {
         requests: Number(count),
@@ -718,6 +719,22 @@ export function createHandoff({
     }
   };
 
+  /** One organisation's turn of a run: its hand-offs and stale count unless held, its sweep when due; false if stopped. */
+  const runIn = async (
+    orgId: string,
+    handingOff: boolean,
+    sweeping: boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> => {
+    const log = logger.child({ orgId });
+    if (handingOff) {
+      if (!(await handOffAll(orgId, log, signal))) return false;
+      await staleIn(orgId, log);
+    }
+    if (sweeping) await sweepIn(orgId, log);
+    return true;
+  };
+
   return {
     async run(signal) {
       let orgs: readonly string[];
@@ -738,11 +755,7 @@ export function createHandoff({
       try {
         for (const orgId of orgs) {
           // Stopped between organisations too, so the process stops promptly however many there are.
-          if (signal?.aborted === true) return;
-          const log = logger.child({ orgId });
-          if (held === null && !(await handOffAll(orgId, log, signal))) return;
-          if (held === null) await staleIn(orgId, log);
-          if (sweeping) await sweepIn(orgId, log);
+          if (signal?.aborted === true || !(await runIn(orgId, held === null, sweeping, signal))) return;
         }
       } finally {
         // The reasons this run's requests wait for, said again only once one changes; one gone, forgotten.
