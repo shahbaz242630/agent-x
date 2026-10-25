@@ -343,6 +343,16 @@ export const PLAIN_WORDS = {
     broke: 'That payment was not sent and waits, its money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
   },
+  'handoff.queue_stale': {
+    happened: 'Approved payments have waited over 15 minutes without being handed to the bank, for no known reason.',
+    broke: 'Those payments are not sent; their money stays held.',
+    next: 'Check the hand-off errors in the log and the database. It is said again in 15 minutes if they still wait.',
+  },
+  'handoff.queue_unread': {
+    happened: "The hand-off couldn't count the approved payments left waiting.",
+    broke: 'A payment stuck before the bank may go unnoticed until it can.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
+  },
   'handoff.partner_timeout': {
     happened: "The bank didn't answer a payment handed to it within 30 seconds.",
     broke: 'Whether the bank took it is not known, so it is marked unknown and never sent again.',

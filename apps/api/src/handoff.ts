@@ -155,6 +155,14 @@ const HANDOFF_PAGE = 50;
  */
 const HANDED_FROM = ['APPROVED', 'INSTRUCTION_READY'] as const;
 
+/**
+ * How long an approved request may stand, not handed off and waiting for no
+ * reason the run knows, before it is said (gate H8, the queue-age alert): a
+ * run every 10 s hands one off within seconds, so this is a run that never
+ * reaches it, or one failing every time.
+ */
+export const QUEUE_STALE_MS = 15 * 60_000;
+
 /** The route the Pilot takes (BR-12: one partner rail, a push payment), and why, as the instruction keeps it. */
 const ROUTE = { route: 'push', reason: 'mandate_source_push_rail' } as const;
 
@@ -283,6 +291,10 @@ export function createHandoff({
   let heldWas: string | null = null;
   let waitedFor = new Map<string, string>();
   let waitingNow = new Map<string, string>();
+  // This run's waiting requests by organisation, left out of its stale count (gate H8).
+  const waitingIn = new Map<string, string[]>();
+  // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
+  const staleSaid = new Map<string, number>();
   const beatNow = (): void => {
     beat = clock.now().getTime();
   };
@@ -303,6 +315,51 @@ export function createHandoff({
           .execute()
       ).map(({ id }) => id),
     );
+
+  /**
+   * The organisation's approved requests approved before `before` (by their
+   * signed state's newest event, Postgres's clock) and not among `waiting`:
+   * how many, and when the oldest was approved.
+   */
+  const staleOf = (orgId: string, before: Date, waiting: readonly string[], log: Logger) =>
+    withSignedStates(database, orgId, services(log), (tx) =>
+      tx
+        // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count for an alert alone, nothing moves on it
+        .selectFrom(`${SPEND_REQUESTS.table} as r`)
+        .innerJoin('audit.events as e', (join) =>
+          join.onRef('e.org_id', '=', 'r.org_id').onRef('e.id', '=', 'r.state_event_id'),
+        )
+        .select((select) => [select.fn.countAll<string>().as('count'), select.fn.min('e.recorded_at').as('oldest')])
+        .where('r.org_id', '=', orgId)
+        .where('r.status', 'in', HANDED_FROM)
+        .where('e.recorded_at', '<', before)
+        // One array, however many wait: never a parameter a request (review).
+        .where((eb) => eb.not(eb('r.id', '=', eb.fn.any(eb.val(waiting)))))
+        .executeTakeFirstOrThrow(),
+    );
+
+  /**
+   * Says, at most once in QUEUE_STALE_MS an organisation, approved requests
+   * left standing past QUEUE_STALE_MS that this run neither handed off nor
+   * found waiting for a reason (gate H8): the queue-age alert reads it.
+   */
+  const staleIn = async (orgId: string, log: Logger): Promise<void> => {
+    const now = clock.now().getTime();
+    if (now - (staleSaid.get(orgId) ?? Number.NEGATIVE_INFINITY) < QUEUE_STALE_MS) return;
+    try {
+      const waiting = waitingIn.get(orgId) ?? [];
+      const { count, oldest } = await staleOf(orgId, new Date(now - QUEUE_STALE_MS), waiting, log);
+      // None standing: the oldest is none too.
+      if (Number(count) === 0) return;
+      staleSaid.set(orgId, now);
+      log.warn('handoff.queue_stale', {
+        requests: Number(count),
+        oldestMinutes: Math.floor((now - new Date(oldest).getTime()) / 60_000),
+      });
+    } catch (error) {
+      log.error('handoff.queue_unread', { err: error });
+    }
+  };
 
   /** Tx A for one request, in the lock order above; a denial tells the admins in it (decision 3). */
   const txA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
@@ -531,6 +588,7 @@ export function createHandoff({
       // Said once a reason, not every run it still waits (gate H5): a long hold is one line a request.
       if (waitedFor.get(id) !== done.why) log.info('handoff.waiting', { requestId: id, why: done.why });
       waitingNow.set(id, done.why);
+      waitingIn.set(orgId, [...(waitingIn.get(orgId) ?? []), id]);
     }
     if (done.outcome !== 'handed_off') return;
     const { intent, transactionId } = done;
@@ -671,6 +729,22 @@ export function createHandoff({
     }
   };
 
+  /** One organisation's turn of a run: its hand-offs and stale count unless held, its sweep when due; false if stopped. */
+  const runIn = async (
+    orgId: string,
+    handingOff: boolean,
+    sweeping: boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> => {
+    const log = logger.child({ orgId });
+    if (handingOff) {
+      if (!(await handOffAll(orgId, log, signal))) return false;
+      await staleIn(orgId, log);
+    }
+    if (sweeping) await sweepIn(orgId, log);
+    return true;
+  };
+
   return {
     async run(signal) {
       let orgs: readonly string[];
@@ -691,15 +765,13 @@ export function createHandoff({
       try {
         for (const orgId of orgs) {
           // Stopped between organisations too, so the process stops promptly however many there are.
-          if (signal?.aborted === true) return;
-          const log = logger.child({ orgId });
-          if (held === null && !(await handOffAll(orgId, log, signal))) return;
-          if (sweeping) await sweepIn(orgId, log);
+          if (signal?.aborted === true || !(await runIn(orgId, held === null, sweeping, signal))) return;
         }
       } finally {
         // The reasons this run's requests wait for, said again only once one changes; one gone, forgotten.
         if (held === null) waitedFor = waitingNow;
         waitingNow = new Map();
+        waitingIn.clear();
       }
       beatNow();
     },

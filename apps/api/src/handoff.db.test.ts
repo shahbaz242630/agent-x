@@ -64,7 +64,7 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, QUEUE_STALE_MS } from './handoff.ts';
 import {
   ALLOWED,
   handoffWorld,
@@ -1044,6 +1044,84 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     await failing.run();
 
     expect(failing.beating()).toBe(false);
+  });
+});
+
+describe('approved requests left standing, said for the queue-age alert (gate H8)', () => {
+  /**
+   * The world's database, the `failing`-th transaction of each run rolled back by an error before its work, as a
+   * bug or a lost database would; a run starts the count again as it lists its organisations.
+   */
+  const failingInEachRun = (failing: number) => {
+    const run = { opened: 0 };
+    const database = new Proxy(app, {
+      get(target, name, receiver) {
+        const value: unknown = Reflect.get(target, name, receiver);
+        if (typeof value !== 'function') return value;
+        if (name !== 'transaction') return (value as (...args: unknown[]) => unknown).bind(target);
+        return () => {
+          run.opened += 1;
+          if (run.opened === failing) throw new Error('the database is away');
+          return (value as () => unknown).call(target);
+        };
+      },
+    });
+    return { database, run };
+  };
+
+  it('says once in 15 minutes the approved requests standing past 15 minutes, never one waiting for a reason', async () => {
+    const { w, acting } = await ready();
+    // First, one waiting for its supplier's payee (a reason the run knows); then one whose Tx A fails every run.
+    const waiting = await ask(acting, w, { amount: ALLOWED(), supplierId: w.suppliers[1] ?? '' });
+    const stuck = await ask(acting, w, { amount: ALLOWED() });
+    // A run's transactions: the pause (1), the approved requests (2), each one's Tx A (3, 4), then the stale count.
+    const failing = failingInEachRun(4);
+    const job = createHandoff({
+      list: () => {
+        failing.run.opened = 0;
+        return Promise.resolve([w.org]);
+      },
+      database: failing.database,
+      outbox: createOutbox({ ids, clock }),
+      rail: w.rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+
+    await job.run();
+    expect(lines('handoff.failed')).toEqual([expect.objectContaining({ requestId: stuck.id })]);
+    expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: waiting.id, why: 'payee' })]);
+    expect(lines('handoff.queue_stale')).toEqual([]);
+
+    clock.advanceBy(QUEUE_STALE_MS + 60_000);
+    await job.run();
+    await job.run();
+    expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 1 })]);
+    // Approved by the database's clock, aged by the test's: 16 minutes, give or take the seconds between them.
+    expect([15, 16]).toContain(lines('handoff.queue_stale')[0]?.oldestMinutes);
+
+    // Said again once 15 minutes have passed, while it still stands.
+    clock.advanceBy(QUEUE_STALE_MS);
+    await job.run();
+    expect(lines('handoff.queue_stale')).toHaveLength(2);
+    expect(await statusOf(w, stuck.id)).toBe('APPROVED');
+  });
+
+  it('says nothing while hand-offs are held: the pause is a reason', async () => {
+    const { w, acting } = await ready();
+    await ask(acting, w, { amount: ALLOWED() });
+    const job = handoffOf(w);
+    await pauseMoved(true);
+    try {
+      clock.advanceBy(QUEUE_STALE_MS + 60_000);
+      await job.run();
+    } finally {
+      await pauseMoved(false);
+    }
+
+    expect(lines('handoff.queue_stale')).toEqual([]);
   });
 });
 
