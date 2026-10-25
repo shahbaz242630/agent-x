@@ -32,6 +32,18 @@ describe('the transaction’s machine (PRD §4.3)', () => {
     expect(TRANSACTION.transition(from, event).ok).toBe(false);
   });
 
+  // Every event, from where nothing more is expected: a paid one only reversed, never lost track of again.
+  const EVENTS = ['submitted', 'processing', 'succeed', 'fail', 'cancel', 'lose_track', 'reverse'] as const;
+  it.each([
+    ['SUBMISSION_PENDING', ['submitted', 'fail', 'lose_track']],
+    ['SUCCEEDED', ['reverse']],
+    ['FAILED', []],
+    ['CANCELLED', []],
+    ['REVERSED', []],
+  ] as const)('SEC-DP-13 moves %s only by %j', (from, allowed) => {
+    expect(EVENTS.filter((event) => TRANSACTION.transition(from, event).ok)).toEqual(allowed);
+  });
+
   it('calls settled only an outcome nothing more is expected of but a reversal', () => {
     expect(TRANSACTION.states.filter(isSettled)).toEqual(['SUCCEEDED', 'FAILED', 'CANCELLED', 'REVERSED']);
   });
