@@ -3,8 +3,8 @@
 // deploy/azure/operator.ts, which writes it onto the job before a run
 // (B1c-2b). A JSON list of the command's words and the new organisation's ID,
 // or of the first admin's invitation (B4-6b), an export for a case (E10c,
-// L7), a pause or resume of every hand-off (Phase 4 B1), or a payment to mark
-// failed (E1c), at most REQUEST_LIMIT_BYTES of UTF-8. Nothing here logs anything: a name or an address never is, and
+// L7), or a pause or resume of every hand-off (Phase 4 B1), at most
+// REQUEST_LIMIT_BYTES of UTF-8. Nothing here logs anything: a name or an address never is, and
 // nothing here imports anything, so the deploy tool reads it as it is.
 
 /** The most a request file may hold: a command and one name, with room to spare. */
@@ -175,62 +175,3 @@ export function handoffAskedOf({
 /** The request to pause or resume every hand-off, as its file holds it. */
 export const handoffRequest = (command: HandoffCommand, reason: string, id: string): string =>
   JSON.stringify([command, '--reason', reason, '--id', id]);
-
-/** What a request file holds to mark an UNKNOWN payment failed on the bank's written word (Phase 4 E1c): only ever a file. */
-export const MARK_FAILED_USAGE =
-  'mark-payment-failed --org <organisation ID> --payment <transaction ID> --reason <case reference> --evidence <bank reference> --id <new ID>';
-
-/** A payment to mark failed, asked for: both references are sealed on the chains and repeated in no problem. */
-export interface MarkFailedAsked {
-  readonly orgId: string;
-  readonly transactionId: string;
-  readonly reason: string;
-  readonly evidence: string;
-  readonly id: string;
-}
-
-/**
- * The payment to mark failed these words ask for, or the problems, by the
- * rules both sides hold it to: the operator's command reading its file
- * (main.ts), and deploy/azure/operator.ts before it writes one. The reason is
- * a case reference; the evidence is the bank's own reference for its written
- * statement that it never accepted the payment (ADR-007 §10), in the same
- * shape. Neither is repeated in a problem.
- */
-export function markFailedAskedOf(words: {
-  readonly orgId: string | undefined;
-  readonly transactionId: string | undefined;
-  readonly reason: string | undefined;
-  readonly evidence: string | undefined;
-  readonly id: string;
-}): MarkFailedAsked | { readonly problems: readonly string[] } {
-  const { orgId, transactionId, reason, evidence, id } = words;
-  const problems = [
-    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
-    ...(UUID_V7.test(String(transactionId)) ? [] : ["the payment's ID must be a UUIDv7, in lower case"]),
-    // None given is refused, never read as the text `undefined`, which has the shape of a reference.
-    ...(reason !== undefined && CASE_REFERENCE.test(reason) ? [] : [CASE_REFERENCE_PROBLEM]),
-    ...(evidence !== undefined && CASE_REFERENCE.test(evidence)
-      ? []
-      : ["the bank's evidence reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit"]),
-    ...(UUID_V7.test(id) ? [] : ["the request's ID must be a UUIDv7, in lower case"]),
-  ];
-  if (problems.length > 0 || reason === undefined || evidence === undefined) return { problems };
-  return { orgId: String(orgId), transactionId: String(transactionId), reason, evidence, id };
-}
-
-/** The request to mark a payment failed, as its file holds it. */
-export const markFailedRequest = ({ orgId, transactionId, reason, evidence, id }: MarkFailedAsked): string =>
-  JSON.stringify([
-    'mark-payment-failed',
-    '--org',
-    orgId,
-    '--payment',
-    transactionId,
-    '--reason',
-    reason,
-    '--evidence',
-    evidence,
-    '--id',
-    id,
-  ]);

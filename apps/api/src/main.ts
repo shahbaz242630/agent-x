@@ -140,6 +140,7 @@ import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
 import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
 import { heartbeatChecks } from './health.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
+import { createPaymentMarks } from './payment-marks.ts';
 import { createPartnerEventIntake } from './partner-events.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
@@ -687,6 +688,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       challenges,
+      logger,
+    }),
+    paymentMarks: createPaymentMarks({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
       logger,
     }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),

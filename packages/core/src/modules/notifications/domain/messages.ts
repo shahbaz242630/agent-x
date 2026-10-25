@@ -418,13 +418,34 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       'Sign in to Agent X to see the payment, and let the supplier know it was paid if they need to. To have it emailed next time, add its email address in its details.',
   },
-  // About a payment (0064, Phase 4 E1c): Agent X's own team marked it failed on the bank's written word, to every admin.
+  // About a payment (0064; gate H10, decision 38): two of the organisation's admins marked it failed, to every admin.
   payment_marked_failed: {
     subject: () => 'Agent X: a payment was marked failed',
     firstLine: () =>
-      "Agent X's own team marked a payment from one of your organisations as failed: the bank confirmed in writing that it never accepted it, so no money left your account. The amount it held against your limits is free again, and its invoice can be paid again.",
+      "A payment from one of your organisations was marked as failed: one admin proposed it on their bank's written word that it never accepted it, and a second admin confirmed it (or, with one admin only, they confirmed it a day on). The amount it held against your limits is free again, and its invoice can be paid again.",
     check:
-      "Sign in to Agent X to see the payment, and the bank's reference our team recorded in your audit log. If you think this is wrong, contact Agent X support before paying the invoice again.",
+      "Sign in to Agent X to see who proposed and confirmed it and the bank's reference given, in your audit log. If you think it is wrong, check your bank statement and contact your bank quoting the payment's reference before the invoice is paid again.",
+  },
+  // About a payment (0066, gate H10): an admin proposed marking it failed, a second admin to confirm, to every admin.
+  payment_mark_proposed: {
+    subject: () => 'Agent X: a second admin is needed to mark a payment failed',
+    firstLine: () =>
+      "An admin of one of your organisations proposed marking a payment as failed, on their bank's written word that it never accepted it. Agent X can't check the bank's reference itself, so it stays as it is until a second admin confirms it. If your organisation has one admin only, that admin can confirm it a day after proposing.",
+    check:
+      "Sign in to Agent X to see the payment and the bank's reference given. Confirm it only once you have checked with your bank: marking it failed frees the invoice, so it could be paid twice. Any admin can withdraw the proposal.",
+  },
+  payment_mark_ended: {
+    subject: () => 'Agent X: the bank answered about a payment proposed to be marked failed',
+    firstLine: () =>
+      "The bank gave its final answer about a payment from one of your organisations that an admin had proposed marking as failed. Agent X has updated the payment with the bank's answer, so the proposal is closed and nothing more is needed to confirm it.",
+    check: "Sign in to Agent X to see the payment and the bank's answer in your audit log.",
+  },
+  payment_mark_withdrawn: {
+    subject: () => 'Agent X: a proposal to mark a payment failed was withdrawn',
+    firstLine: () =>
+      'An admin of one of your organisations withdrew the proposal to mark a payment as failed. The payment stays as it was, and Agent X keeps checking it with the bank automatically.',
+    check:
+      "Sign in to Agent X to see who withdrew it, in your audit log. Don't pay its invoice again until your bank confirms the money didn't leave your account.",
   },
   // About a payment (0065, partner decision 37b), to every admin: between them and their bank (decision 38).
   payment_contradicted: {

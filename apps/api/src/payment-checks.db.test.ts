@@ -15,9 +15,10 @@
 // checked by runs racing each other, the clock moving: each payment sent
 // once, settled once, one remittance for each that SUCCEEDED, its holdings as
 // its payment ended.
+import { withSignedStates } from '@agentx/core/modules/audit';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { markPaymentFailed } from '@agentx/core/modules/outcomes';
+import { markFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type ExecutionLookup, type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
 import { TRANSACTIONS } from '@agentx/core/modules/transactions';
@@ -39,7 +40,7 @@ import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { heartbeatChecks } from './health.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { AED, keys, type World } from './mandate-world.helper.test.ts';
 import { createPaymentChecks } from './payment-checks.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
@@ -557,21 +558,17 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     await checksOf(w).run();
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
 
-    // Today our team marks it failed on the bank's written word.
+    // Today an admin marks it failed on their bank's written word (its route: mark-failed.db.test.ts).
     clock.advanceBy(8 * DAY - 4 * STEP);
-    await markPaymentFailed(
-      app,
-      { keys, ids, logger: testLogger(capture), clock },
-      {
-        actor: OPERATOR,
+    const transactionId = (await transactionOf(w, request.id)).id;
+    await withSignedStates(app, w.org, { keys, ids, logger: testLogger(capture) }, (tx, states) =>
+      markFailed(tx, states, createOutbox({ ids, clock }), {
         orgId: w.org,
-        transactionId: (await transactionOf(w, request.id)).id,
-        reason: 'CASE-2026/0043',
-        evidence: 'BANK-NACK-77312',
-        id: ids.next(),
-        release: 'r-test',
-        run: null,
-      },
+        transactionId,
+        userId: w.admin.userId,
+        details: { evidenceRef: 'BANK-NACK-77312' },
+        at: clock.now(),
+      }),
     );
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
 
