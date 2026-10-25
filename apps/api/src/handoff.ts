@@ -322,6 +322,22 @@ export function createHandoff({
     return done;
   };
 
+  /**
+   * Why the organisation's chain stops a hand-off now, read last of all under
+   * its head's lock (ADR-006 §6): its integrity hold, then a chain wound back
+   * since its last anchor (SEC-DB-11, H11), refused now rather than at the
+   * anchor check's next run; with no anchor yet (the run's anchorFirst couldn't
+   * make one), it waits rather than go uncompared (partner S146).
+   */
+  const chainStops = async (tx: HandoffTx, states: SignedStates, orgId: string): Promise<string | undefined> => {
+    const hold = await states.integrityHold(tx, orgId, 'head');
+    if (hold.outcome !== 'clear') return `hold_${hold.outcome}`;
+    if (anchoring === undefined) return undefined;
+    const anchor = anchoring.anchors.latest({ kind: 'organisation', orgId });
+    if (anchor === undefined) return 'anchor_pending';
+    return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
+  };
+
   /** Tx A's checks and moves for one request, in the lock order above. */
   const judgedA = async (tx: HandoffTx, states: SignedStates, orgId: string, id: string, log: Logger): Promise<TxA> => {
     const key = { orgId, id };
@@ -364,17 +380,8 @@ export function createHandoff({
       await voidedWith(tx, states, keys, key, ['SUPPLIER_CHANGED'], now);
       return { outcome: 'denied', causes: 'SUPPLIER_CHANGED' };
     }
-    const hold = await states.integrityHold(tx, orgId, 'head');
-    if (hold.outcome !== 'clear') return { outcome: 'waiting', why: `hold_${hold.outcome}` };
-    // A chain wound back since its last anchor (SEC-DB-11) is refused now, not at the anchor check's next run; with
-    // no anchor yet (the run's anchorFirst couldn't make one), it waits rather than go uncompared (partner S146).
-    if (anchoring !== undefined) {
-      const anchor = anchoring.anchors.latest({ kind: 'organisation', orgId });
-      if (anchor === undefined) return { outcome: 'waiting', why: 'anchor_pending' };
-      if ((await states.anchorKept(tx, orgId, anchor)).outcome !== 'kept') {
-        return { outcome: 'waiting', why: 'hold_tampered' };
-      }
-    }
+    const stopped = await chainStops(tx, states, orgId);
+    if (stopped !== undefined) return { outcome: 'waiting', why: stopped };
     if (request.status === 'APPROVED') await moveRequest(tx, states, key, 'make_ready');
     await moveRequest(tx, states, key, 'hand_off');
     const intent: ApprovedPaymentIntent = {
