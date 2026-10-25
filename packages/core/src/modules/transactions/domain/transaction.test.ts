@@ -1,7 +1,7 @@
 // PRD §4.3 (Phase 4 B3): a transaction's machine, as 0058's status guard holds it.
 import { describe, expect, it } from 'vitest';
 
-import { isSettled, TRANSACTION } from './transaction.ts';
+import { isSettled, TRANSACTION, type TransactionEvent } from './transaction.ts';
 
 describe('the transaction’s machine (PRD §4.3)', () => {
   it('is born SUBMISSION_PENDING, never CREATED: the instruction and its transaction are made together', () => {
@@ -30,6 +30,27 @@ describe('the transaction’s machine (PRD §4.3)', () => {
     ['REVERSED', 'reverse'],
   ] as const)('SEC-DP-13 refuses %s by %s', (from, event) => {
     expect(TRANSACTION.transition(from, event).ok).toBe(false);
+  });
+
+  // Every event, from where nothing more is expected: a paid one only reversed, never lost track of again.
+  // A record of every event, so one added to the machine can't be left out here.
+  const EVENTS = Object.keys({
+    submitted: true,
+    processing: true,
+    succeed: true,
+    fail: true,
+    cancel: true,
+    lose_track: true,
+    reverse: true,
+  } satisfies Record<TransactionEvent, true>) as TransactionEvent[];
+  it.each([
+    ['SUBMISSION_PENDING', ['submitted', 'fail', 'lose_track']],
+    ['SUCCEEDED', ['reverse']],
+    ['FAILED', []],
+    ['CANCELLED', []],
+    ['REVERSED', []],
+  ] as const)('SEC-DP-13 moves %s only by %j', (from, allowed) => {
+    expect(EVENTS.filter((event) => TRANSACTION.transition(from, event).ok)).toEqual(allowed);
   });
 
   it('calls settled only an outcome nothing more is expected of but a reversal', () => {
