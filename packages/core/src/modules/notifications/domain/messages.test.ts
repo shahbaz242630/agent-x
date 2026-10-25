@@ -509,7 +509,7 @@ describe('a notice’s email (B5-1b)', () => {
         'no final answer from the bank for over a day',
       ],
     ] as const)(
-      'tells every admin, by the payment’s ID, of a %s payment our team checks (0065, decision 37b)',
+      'tells every admin, by the payment’s ID, of a %s payment to follow up with their own bank (0065, decisions 37b, 38)',
       (kind, subject, line) => {
         const told = messageFor(
           { ...remittanceNotice, kind, recipientUserId: NOTICE.recipientUserId },
@@ -519,7 +519,10 @@ describe('a notice’s email (B5-1b)', () => {
         expect(isAboutAPayment(kind)).toBe(true);
         expect(told.subject).toBe(subject);
         expect(told.text).toContain(line);
-        expect(told.text).toContain("Don't pay its invoice again until our team confirms");
+        expect(told.text).toContain('Agent X keeps checking it with the bank automatically');
+        expect(told.text).toContain('contact your bank quoting that payment reference');
+        expect(told.text).toContain("Don't pay its invoice again until your bank confirms the money didn't leave");
+        expect(told.text).not.toMatch(/our team|Agent X support/);
         expect(told.text).toContain(`Payment: ${payment}`);
         expect(told.text).toContain("You're told because you're an admin of this organisation.");
       },

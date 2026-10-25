@@ -452,7 +452,7 @@ export function createHandoff({
           return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
         }
         log.error('handoff.refused_late', { transactionId, status: from });
-        // Refused where the bank's word was read as under way or paid: our team's check, its admins told (decision
+        // Refused where the bank's word was read as under way or paid: kept and its admins told (decision
         // 37b). Failed or UNKNOWN, its word was already a rejection (or unreadable): nothing it goes back on (review).
         if (UNDER_WAY_OR_PAID.has(from)) {
           await alertAdmins(

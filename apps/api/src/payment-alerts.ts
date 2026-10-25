@@ -1,4 +1,4 @@
-// A payment that needs our team's check, told to its organisation (Phase 4
+// A payment the bank left unclear, told to its organisation (Phase 4
 // gate; partner decision 37b, S143): the bank went back on its word about a
 // settled payment, or refused one after its word was read (`contradicted`);
 // rejected one with no proof the money stayed (`rejected_unproven`); or left
@@ -16,7 +16,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 
 export type PaymentAlertTables = AuditTables & NotificationsTables;
 
-/** What about the payment needs our team's check. */
+/** What the bank left unclear about the payment (its admins follow it up with their bank, decision 38). */
 export type PaymentAlert = 'contradicted' | 'rejected_unproven' | 'still_unknown';
 
 /** The email each alert sends its admins. */
