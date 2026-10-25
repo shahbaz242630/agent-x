@@ -15,9 +15,8 @@
 // file to the evidence store alone. Or pause or resume every hand-off of an
 // approved payment to the bank, for every organisation (Phase 4 B1,
 // handoff-pause.ts): only from a file, its reason never logged, every
-// organisation's admins told. Or mark an UNKNOWN payment failed on the bank's
-// written word (Phase 4 E1c, core's outcomes module): only from a file, both
-// references never logged, the organisation's admins told.
+// organisation's admins told. (An UNKNOWN payment is marked failed by the
+// customer's admin, not here: partner decision 38.)
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -44,9 +43,8 @@ import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
-import { MarkFailedRefused, type MarkFailedTables, markPaymentFailed } from '@agentx/core/modules/outcomes';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
-import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
+import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
   assertRuntimeRole,
@@ -70,7 +68,7 @@ import { azureBlobOrigins } from '@agentx/platform/storage';
 import { type ActivityExportTables, exportActivityLog } from './activity-export.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
-import { createOrganizationAsOperator, OPERATOR } from './create-organization.ts';
+import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { changeHandoffPauseAsOperator, type HandoffPauseTables } from './handoff-pause.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
@@ -82,9 +80,6 @@ import {
   type HandoffCommand,
   handoffAskedOf,
   handoffUsage,
-  MARK_FAILED_USAGE,
-  type MarkFailedAsked,
-  markFailedAskedOf,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
@@ -96,11 +91,7 @@ import {
 import { checkRestoredCopy } from './restore-check.ts';
 
 /** Every table the commands reach. */
-type CommandTables = FirstAdminTables &
-  AuditExportTables &
-  ActivityExportTables &
-  HandoffPauseTables &
-  MarkFailedTables;
+type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables & HandoffPauseTables;
 
 const SERVICE = 'operator';
 
@@ -171,11 +162,7 @@ type Request =
       readonly id: string;
     }
   | HandoffRequest
-  | MarkFailedRequest
   | { readonly command: typeof RESTORE_CHECK };
-
-/** An UNKNOWN payment to mark failed (Phase 4 E1c): both references sealed on the chains; never logged, nor repeated in a problem. */
-type MarkFailedRequest = { readonly command: 'mark-payment-failed' } & MarkFailedAsked;
 
 /** A pause or resume of every hand-off, one shape for each command, so a check of the command narrows to its own. */
 type HandoffRequest = {
@@ -264,7 +251,6 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['activity-export', (words, fromFile) => caseExportAsked('activity-export', ACTIVITY_EXPORT_USAGE, words, fromFile)],
   ['handoff-pause', (words, fromFile) => handoffAsked('handoff-pause', words, fromFile)],
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
-  ['mark-payment-failed', markFailedAsked],
   [RESTORE_CHECK, restoreCheckAsked],
 ]);
 
@@ -376,36 +362,6 @@ function handoffAsked(command: HandoffCommand, words: readonly string[], fromFil
   return 'problems' in asked ? asked : { command, ...asked };
 }
 
-/** An UNKNOWN payment to mark failed a request file asks for (Phase 4 E1c), or the problems; never typed. */
-function markFailedAsked(words: readonly string[], fromFile: boolean): Request | Problems {
-  const [
-    ,
-    orgFlag,
-    orgId,
-    paymentFlag,
-    transactionId,
-    reasonFlag,
-    reason,
-    evidenceFlag,
-    evidence,
-    idFlag,
-    id,
-    ...more
-  ] = words;
-  if (!fromFile) return problem(`mark-payment-failed runs only from a request file: ${MARK_FAILED_USAGE}`);
-  const shaped =
-    orgFlag === '--org' &&
-    paymentFlag === '--payment' &&
-    reasonFlag === '--reason' &&
-    evidenceFlag === '--evidence' &&
-    idFlag === '--id' &&
-    id !== undefined &&
-    more.length === 0;
-  if (!shaped) return problem(`the request file holds ${MARK_FAILED_USAGE} as a JSON list, and nothing else`);
-  const asked = markFailedAskedOf({ orgId, transactionId, reason, evidence, id });
-  return 'problems' in asked ? asked : { command: 'mark-payment-failed', ...asked };
-}
-
 /**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
@@ -482,7 +438,6 @@ async function run(
   if (request.command === 'handoff-pause' || request.command === 'handoff-resume') {
     return handoff(config, keys, request, database, logger);
   }
-  if (request.command === 'mark-payment-failed') return markFailed(config, keys, request, database, logger);
   // The request file's, or made here, by the server: known before the work, so a failure can name it.
   const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
@@ -580,42 +535,6 @@ async function handoff(
         run: config.run,
       },
     );
-  } finally {
-    await database.destroy();
-  }
-}
-
-/** Marks an UNKNOWN payment failed on the bank's written word (Phase 4 E1c): the exit code. Neither reference is logged. */
-async function markFailed(
-  config: OperatorConfig,
-  keys: KeyProvider,
-  request: MarkFailedRequest,
-  database: Database<MarkFailedTables>,
-  logger: Logger,
-): Promise<number> {
-  const { transactionId, id: requestId } = request;
-  const log = logger.child({ orgId: request.orgId });
-  try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
-    const marked = await markPaymentFailed(
-      database,
-      { keys, ids: uuidV7Ids, logger, clock: systemClock },
-      { ...request, actor: OPERATOR, release: config.release, run: config.run },
-    );
-    if (marked.outcome === 'marked_before') {
-      log.info('operator.payment_marked_before', { transactionId, requestId });
-    } else {
-      log.info('operator.payment_marked_failed', { transactionId, requestId, platformSeq: marked.platformSeq });
-    }
-    return 0;
-  } catch (error) {
-    if (error instanceof MarkFailedRefused) {
-      log.error('operator.refused', { transactionId, requestId, problems: error.problems });
-      return 1;
-    }
-    // One transaction: nothing was changed, unless the connection was lost as it committed. Run again to find out.
-    log.error('operator.failed', { command: request.command, transactionId, requestId, err: error });
-    return 1;
   } finally {
     await database.destroy();
   }
