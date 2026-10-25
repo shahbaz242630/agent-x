@@ -41,7 +41,8 @@ export async function twoPersonFactsOf(
   if (history.outcome === 'tampered') return history;
   // Every membership the log says was made is a member, deactivated or not (none is ever deleted): one missing
   // from the list, its row deleted or its directory entry pointed elsewhere, would make the organisation look
-  // smaller than it is and open the one-person path (H10's review), so it is a tamper sign.
+  // smaller than it is and open the one-person path (H10's review), so it is a tamper sign. A second line: the
+  // signed state already reads a deleted row as tampered (H10's mutation pass), and this holds whatever the list.
   const listed = new Set(members.members.map(({ id }) => id.toLowerCase()));
   const vanished = history.events.find(
     ({ event }) =>

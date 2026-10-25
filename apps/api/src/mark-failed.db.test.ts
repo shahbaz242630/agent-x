@@ -511,11 +511,12 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'FAILED' });
   });
 
-  it('counts only active admins: an approver joining doesn’t stop a lone admin', async () => {
+  it('counts only admins: an established approver, who could verify a supplier, doesn’t stop a lone admin', async () => {
     const { w, transaction } = await handedOff(REJECTED_UNPROVEN);
-    clock.advanceBy(MARK_FAILED_AFTER_MS);
-    const lone = await signedInAgain(w.admin);
     await member(w.org, 'approver');
+    // A member long enough to be a supplier's second person: never a payment mark's.
+    clock.advanceBy(ESTABLISHED_MS);
+    const lone = await signedInAgain(w.admin);
     await proposed(lone, transaction.id);
     clock.advanceBy(LONE_ADMIN_WAIT_MS + 1);
 
