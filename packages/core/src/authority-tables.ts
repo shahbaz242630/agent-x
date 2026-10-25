@@ -27,7 +27,7 @@ import {
   SUPPLIER_VERSIONS,
   SUPPLIERS,
 } from './modules/suppliers/index.ts';
-import { TRANSACTIONS } from './modules/transactions/index.ts';
+import { FAILURE_PROPOSALS, TRANSACTIONS } from './modules/transactions/index.ts';
 
 /**
  * What an entry's status machine must show: its states, the one a new row
@@ -75,7 +75,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * reference, E1-1) and their remittance settings (6, after the versions,
  * Phase 4 C2a), then its agents' month zones (7, with the agent's month,
  * 0054), then its spend requests (8, Phase 2 D1), then a handed-off one's
- * instruction and transaction (10, Phase 4 B3). Clearing the
+ * instruction and transaction (10, Phase 4 B3), then an admin's proposal to
+ * mark the transaction failed (10, after it: 0066, gate H10). Clearing the
  * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
  * table with `liveStatuses`, its live rows), so a new table goes in at its
  * level.
@@ -101,4 +102,5 @@ export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   SPEND_REQUESTS,
   INSTRUCTIONS,
   TRANSACTIONS,
+  FAILURE_PROPOSALS,
 ];

@@ -562,6 +562,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
           'spend_requests.order_claims: the partial unique index list gives no reason for one_open_claim_a_supplier_order',
           'spend_requests.order_claims: the partial unique index list gives no reason for one_open_claim_a_payee_order',
           'notifications.outbox: the partial unique index list gives no reason for one_remittance_a_payment',
+          'transactions.failure_proposals: the partial unique index list gives no reason for one_open_proposal_a_payment',
         ]);
       });
     });

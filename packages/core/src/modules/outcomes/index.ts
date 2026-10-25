@@ -2,9 +2,9 @@
 // outcome applied to what its request holds, its monthly capacity and its
 // order claim, in the transaction that moves the payment; and what each
 // payment must hold, for the holdings check; and every move of a payment
-// locked and settled the one way (`lockPayment`, `settlePayment`: the API's
-// and the operator's, E1c); and an UNKNOWN payment marked failed by Agent X's
-// own team on the bank's written word (E1c).
+// locked and settled the one way (`lockPayment`, `settlePayment`); and an
+// UNKNOWN payment marked failed by the customer's admin on the bank's written
+// word (E1c; partner decision 38).
 export { type Settlement, settlementOf } from './infrastructure/settlement.ts';
 export { lockHoldingsOf, paymentHoldsOf, settleHoldings } from './infrastructure/outcomes.ts';
 export {
@@ -20,10 +20,7 @@ export {
 } from './infrastructure/payment-outcome.ts';
 export {
   MARK_FAILED_AFTER_MS,
-  type MarkedFailed,
-  MarkFailedRefused,
-  type MarkFailedRequest,
+  type MarkFailed,
+  markFailed,
   type MarkFailedTables,
-  markPaymentFailed,
-  PLATFORM_MARKED_FAILED,
 } from './infrastructure/mark-failed.ts';

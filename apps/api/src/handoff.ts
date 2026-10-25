@@ -495,7 +495,15 @@ export function createHandoff({
       };
       const settled = async (status: TransactionStatus | null): Promise<'recorded' | 'late'> => {
         if (status === null) return 'late';
-        await settlePayment(tx, outbox, { orgId, requestId, transactionId, status, at: clock.now() });
+        const at = clock.now();
+        await settlePayment(tx, states, outbox, {
+          orgId,
+          requestId,
+          transactionId,
+          status,
+          at,
+          openProposal: locked.openProposal,
+        });
         return 'recorded';
       };
       // No answer is no word at all: one the bank check (E1a) or the sweep moved meanwhile is left as they moved it.
@@ -509,7 +517,7 @@ export function createHandoff({
           return settled(await move('fail', { ...NO_FACTS, rejectCode: answer.code }, 'refused'));
         }
         log.error('handoff.refused_late', { transactionId, status: from });
-        // Refused where the bank's word was read as under way or paid: our team's check, its admins told (decision
+        // Refused where the bank's word was read as under way or paid: kept and its admins told (decision
         // 37b). Failed or UNKNOWN, its word was already a rejection (or unreadable): nothing it goes back on (review).
         if (UNDER_WAY_OR_PAID.has(from)) {
           await alertAdmins(
@@ -693,12 +701,14 @@ export function createHandoff({
         });
         // Read as waiting under this lock, so anything but a move is a tampered row (its alarm raised).
         if (moved.outcome !== 'moved') throw new Error(`A waiting transaction didn't lose track: ${moved.outcome}`);
-        await settlePayment(tx, outbox, {
+        await settlePayment(tx, states, outbox, {
           orgId,
           requestId,
           transactionId: transaction.id,
           status: moved.to,
           at: clock.now(),
+          // Waiting SUBMISSION_PENDING under this lock: only an UNKNOWN payment is ever proposed failed.
+          openProposal: null,
         });
         return true;
       });

@@ -28,19 +28,25 @@ import { mayFund, sourceOf } from '../../packages/core/src/modules/funding-sourc
 import { createSessions, type Role } from '../../packages/core/src/modules/identity/index.ts';
 import { tamperIdentityFixtures } from '../../packages/core/src/modules/identity/tamper-fixtures.helper.test.ts';
 import type { InstructionsTables } from '../../packages/core/src/modules/instructions/index.ts';
+import { createOutbox } from '../../packages/core/src/modules/notifications/index.ts';
+import {
+  changeHandoffPause,
+  createPlatformChain,
+  handoffPauseOf,
+  PAUSE_ACTOR,
+} from '../../packages/core/src/modules/platform-controls/index.ts';
 import { widerThanMandate } from '../../packages/core/src/modules/mandates/index.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/index.ts';
 import { createDatabase, withTenant } from '../../packages/platform/src/db/index.ts';
 import { loadKeys } from '../../packages/platform/src/keys/index.ts';
 import { FixedClock, testLogger } from '../../packages/testing/src/index.ts';
 
+import { createHandoff } from '../../apps/api/src/handoff.ts';
+import { ALLOWED, handoffWorld, type HandoffWorldTables } from '../../apps/api/src/handoff-world.helper.test.ts';
 import { createMandateRegistry } from '../../apps/api/src/mandate-registry.ts';
-import {
-  AED,
-  mandateWorld,
-  type MandateWorldTables,
-  type World,
-} from '../../apps/api/src/mandate-world.helper.test.ts';
+import { AED, mandateWorld, type World } from '../../apps/api/src/mandate-world.helper.test.ts';
+import { createSpendRequestDecisions } from '../../apps/api/src/spend-request-decisions.ts';
+import { spendWorld } from '../../apps/api/src/spend-world.helper.test.ts';
 import { APP_KEYS } from '../../deploy/compose/prepare.ts';
 import { apiAnswers } from './api-sign-in.ts';
 import { API_ORIGIN, execIn, localLogin, restartInPlace, SECRETS_DIR } from './compose.ts';
@@ -87,7 +93,7 @@ const cookieHeader = (cookie: string) => ({ cookie: `__Host-agentx-session=${coo
 const { password, users } = inject('e2e');
 // Reuse the driver's code history when recovery signs the same person in again.
 const personLogin = loginDriver({ password, callback: /^http:\/\/localhost:8080\/tamper-signed-in$/ });
-const database = createDatabase<MandateWorldTables & ActivityExportTables & ActivityTables & InstructionsTables>(
+const database = createDatabase<HandoffWorldTables & ActivityExportTables & ActivityTables & InstructionsTables>(
   {
     host: '127.0.0.1',
     port: 56541,
@@ -103,6 +109,32 @@ const clock = new FixedClock(new Date());
 const keys = loadKeys({ directory: path.join(SECRETS_DIR, APP_KEYS), current: {} });
 const shared = mandateWorld({ app: () => database, clock: () => clock, ids: uuidV7Ids, name: 'tamper', keyring: keys });
 const registry = createMandateRegistry({ database, keys, ids: uuidV7Ids, clock, logger: testLogger() });
+const decisions = createSpendRequestDecisions({
+  database,
+  outbox: createOutbox({ ids: uuidV7Ids, clock }),
+  keys,
+  ids: uuidV7Ids,
+  clock,
+  logger: testLogger(),
+});
+const spend = spendWorld({
+  app: () => database,
+  clock: () => clock,
+  ids: uuidV7Ids,
+  name: 'tamper-payment',
+  registry: () => registry,
+  decisions: () => decisions,
+  keyring: keys,
+});
+const paying = handoffWorld({
+  app: () => database,
+  clock: () => clock,
+  ids: uuidV7Ids,
+  registry: () => registry,
+  shared: spend,
+});
+/** A real payment of a third organisation's (gate H10), foreign to both tenants: see seedPayment. */
+let payment: string;
 
 interface Tenant {
   readonly world: World;
@@ -306,6 +338,8 @@ function routeOf(op: Operation, tenant: Tenant, missing = false): string {
     'registered-contacts': tenant.identity?.contact,
     'factor-resets': tenant.identity?.reset,
     'access-log': tenant.exportId,
+    // Neither tenant has a payment of its own (their requests wait for approval): a third organisation's.
+    payments: payment,
   };
   const resource = op.route.includes('/members/invitations/')
     ? tenant.identity?.invitation
@@ -397,6 +431,49 @@ const foreignChain = () =>
     );
     return { events: events.length, digest: createHash('sha256').update(bytes).digest('hex') };
   });
+
+/**
+ * A real payment, in an organisation of its own (gate H10's routes name a
+ * payment): its request allowed at once, handed off here through the hand-off
+ * itself, the pause lifted for that run alone and put back as it was. The
+ * fake declines .01 at once, so it ends FAILED and nothing moves it again.
+ */
+async function seedPayment(): Promise<string> {
+  const { w, acting } = await paying.ready();
+  const request = await spend.ask(acting, w, { amount: ALLOWED(1n) });
+  const chain = createPlatformChain({ keys, ids: uuidV7Ids });
+  const pause = (paused: boolean) =>
+    database
+      .transaction()
+      .execute((tx) =>
+        changeHandoffPause(
+          tx,
+          { chain, keys, logger: testLogger() },
+          { paused, reason: 'TAMPER-E2E-PAYMENT', actor: PAUSE_ACTOR, release: 'tamper-e2e', run: null },
+        ),
+      );
+  const before = await database
+    .transaction()
+    .execute((tx) => handoffPauseOf(tx, 'share', { keys, logger: testLogger() }));
+  if (before.outcome === 'paused') await pause(false);
+  try {
+    await createHandoff({
+      list: () => Promise.resolve([w.org]),
+      database,
+      outbox: createOutbox({ ids: uuidV7Ids, clock }),
+      rail: w.rail,
+      keys,
+      ids: uuidV7Ids,
+      clock,
+      logger: testLogger(),
+    }).run();
+  } finally {
+    if (before.outcome === 'paused') await pause(true);
+  }
+  const made = await paying.paymentOf(w, request.id);
+  if (typeof made.transaction !== 'object') throw new Error(`no payment was made: ${JSON.stringify(made)}`);
+  return made.transaction.id;
+}
 
 /** Positive controls prove the credentials and tenant records work before any attacks run. */
 async function controls(foreignUserId: string): Promise<void> {
@@ -1124,6 +1201,7 @@ beforeAll(async () => {
     foreign.world.admin.membershipId,
   );
   await resetOwn();
+  payment = await seedPayment();
   await controls(admin.userId);
   foreignBefore = await foreignChain();
   expect(foreignBefore.events).toBeGreaterThan(0);

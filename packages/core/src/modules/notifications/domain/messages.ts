@@ -120,6 +120,12 @@ const FREEZE_CHECK =
 /** What an admin can check of a pause or resume of every hand-off to the bank (0057): its entry, with its reason. */
 const HANDOFF_CHECK =
   "Sign in to Agent X and open the audit log to see this entry and its reason. If you have questions about it, tell the organisation's other admins and contact us.";
+/** A payment the bank left unclear: what Agent X does by itself (partner decision 38). */
+const KEEPS_CHECKING =
+  "Agent X keeps checking it with the bank automatically and updates the payment if the bank's answer changes.";
+/** What the admin takes to their own bank about it (decision 38: never our team's check). */
+const WITH_YOUR_BANK =
+  "Sign in to Agent X to see the payment, its reference and the bank's answers in your audit log, where you can download them. Check your bank statement and, if you need to, contact your bank quoting that payment reference. Don't pay its invoice again until your bank confirms the money didn't leave your account.";
 /** What a person's second factor is, as the emails name it. */
 const SECOND_FACTOR = 'second factor (an authenticator app, a security key or a passkey)';
 
@@ -412,35 +418,53 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check:
       'Sign in to Agent X to see the payment, and let the supplier know it was paid if they need to. To have it emailed next time, add its email address in its details.',
   },
-  // About a payment (0064, Phase 4 E1c): Agent X's own team marked it failed on the bank's written word, to every admin.
+  // About a payment (0064; gate H10, decision 38): two of the organisation's admins marked it failed, to every admin.
   payment_marked_failed: {
     subject: () => 'Agent X: a payment was marked failed',
     firstLine: () =>
-      "Agent X's own team marked a payment from one of your organisations as failed: the bank confirmed in writing that it never accepted it, so no money left your account. The amount it held against your limits is free again, and its invoice can be paid again.",
+      "A payment from one of your organisations was marked as failed: one admin proposed it on their bank's written word that it never accepted it, and a second admin confirmed it (or, with one admin only, they confirmed it a day on). The amount it held against your limits is free again, and its invoice can be paid again.",
     check:
-      "Sign in to Agent X to see the payment, and the bank's reference our team recorded in your audit log. If you think this is wrong, contact Agent X support before paying the invoice again.",
+      "Sign in to Agent X to see who proposed and confirmed it and the bank's reference given, in your audit log. If you think it is wrong, check your bank statement and contact your bank quoting the payment's reference before the invoice is paid again.",
   },
-  // About a payment (0065, partner decision 37b): each needs our team's check with the bank, told to every admin.
+  // About a payment (0066, gate H10): an admin proposed marking it failed, a second admin to confirm, to every admin.
+  payment_mark_proposed: {
+    subject: () => 'Agent X: a second admin is needed to mark a payment failed',
+    firstLine: () =>
+      "An admin of one of your organisations proposed marking a payment as failed, on their bank's written word that it never accepted it. Agent X can't check the bank's reference itself, so it stays as it is until a second admin confirms it. If your organisation has one admin only, that admin can confirm it a day after proposing.",
+    check:
+      "Sign in to Agent X to see the payment and the bank's reference given. Confirm it only once you have checked with your bank: marking it failed frees the invoice, so it could be paid twice. Any admin can withdraw the proposal.",
+  },
+  payment_mark_ended: {
+    subject: () => 'Agent X: the bank answered about a payment proposed to be marked failed',
+    firstLine: () =>
+      "The bank gave its final answer about a payment from one of your organisations that an admin had proposed marking as failed. Agent X has updated the payment with the bank's answer, so the proposal is closed and nothing more is needed to confirm it.",
+    check: "Sign in to Agent X to see the payment and the bank's answer in your audit log.",
+  },
+  payment_mark_withdrawn: {
+    subject: () => 'Agent X: a proposal to mark a payment failed was withdrawn',
+    firstLine: () =>
+      'An admin of one of your organisations withdrew the proposal to mark a payment as failed. The payment stays as it was, and Agent X keeps checking it with the bank automatically.',
+    check:
+      "Sign in to Agent X to see who withdrew it, in your audit log. Don't pay its invoice again until your bank confirms the money didn't leave your account.",
+  },
+  // About a payment (0065, partner decision 37b), to every admin: between them and their bank (decision 38).
   payment_contradicted: {
     subject: () => "Agent X: the bank's answer on a payment changed",
     firstLine: () =>
-      "The bank's answer about a payment from one of your organisations went back on what it said before. Agent X keeps the payment as it was, and our team is checking it with the bank.",
-    check:
-      "Sign in to Agent X to see the payment and the bank's answers in your audit log. Don't pay its invoice again until our team confirms what happened.",
+      `The bank's answer about a payment from one of your organisations went back on what it said before. Agent X keeps the payment as it was. ${KEEPS_CHECKING}`,
+    check: WITH_YOUR_BANK,
   },
   payment_unproven: {
     subject: () => 'Agent X: a payment was rejected without proof',
     firstLine: () =>
-      "The bank rejected a payment from one of your organisations but didn't confirm the money stayed in your account. Its amount stays held against your limits until our team confirms it with the bank.",
-    check:
-      "Sign in to Agent X to see the payment in your audit log. Don't pay its invoice again until our team confirms the money stayed.",
+      `The bank rejected a payment from one of your organisations but didn't confirm the money stayed in your account. Its amount stays held against your limits. ${KEEPS_CHECKING}`,
+    check: WITH_YOUR_BANK,
   },
   payment_still_unknown: {
     subject: () => 'Agent X: a payment still has no final answer',
     firstLine: () =>
-      'A payment from one of your organisations has had no final answer from the bank for over a day. Its amount stays held against your limits, and our team is checking it with the bank.',
-    check:
-      "Sign in to Agent X to see the payment in your audit log. Don't pay its invoice again until our team confirms what happened.",
+      `A payment from one of your organisations has had no final answer from the bank for over a day. Its amount stays held against your limits. ${KEEPS_CHECKING}`,
+    check: WITH_YOUR_BANK,
   },
 };
 

@@ -133,9 +133,19 @@ export async function tamperAsOwner(database: TestDatabase, target: TamperTarget
     },
 
     async restoreRow(saved: SavedRow) {
+      // Generated columns (an order's key) follow the others, and can't be written.
+      const generated = new Set(
+        (
+          await owner.query<{ name: string }>(
+            `select attname as name from pg_catalog.pg_attribute
+             where attrelid = $1::regclass and attgenerated <> ''`,
+            [target.table],
+          )
+        ).map(({ name }) => name),
+      );
       // Only the names are read here; the values go back as the text Postgres gave.
       const columns = Object.keys(JSON.parse(saved.json) as Record<string, unknown>)
-        .filter((column) => column !== 'org_id' && column !== 'id')
+        .filter((column) => column !== 'org_id' && column !== 'id' && !generated.has(column))
         .map((column) => pg.escapeIdentifier(column));
       const list = columns.join(', ');
       const from = columns.map((column) => `r.${column}`).join(', ');
