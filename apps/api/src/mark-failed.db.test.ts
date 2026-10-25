@@ -394,6 +394,20 @@ describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
   });
 
+  it('counts two admins as two: with exactly one other active admin, the proposer’s confirm is theirs to refuse', async () => {
+    const { w, transaction } = await handedOff(REJECTED_UNPROVEN);
+    clock.advanceBy(MARK_FAILED_AFTER_MS);
+    // The world's admin, and this one: two in all.
+    const proposer = await adminOf(w);
+    await proposed(proposer, transaction.id);
+    clock.advanceBy(LONE_ADMIN_WAIT_MS + 1);
+
+    expect(await approving(await signedInAgain(proposer), transaction.id)).toEqual(
+      refused(403, 'FAILURE_PROPOSAL_YOURS'),
+    );
+    expect(await approved(await signedInAgain(w.admin), transaction.id)).toMatchObject({ outcome: 'marked' });
+  });
+
   it('lets a lone admin confirm their own proposal a day after making it, never before (partner S113)', async () => {
     const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
     clock.advanceBy(MARK_FAILED_AFTER_MS);
