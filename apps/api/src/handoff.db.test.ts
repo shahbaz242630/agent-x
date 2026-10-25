@@ -65,6 +65,7 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { createAnchorCheck } from './anchor-check.ts';
 import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
 import {
   ALLOWED,
@@ -2166,6 +2167,49 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     const second = await ask(acting, w, { amount: ALLOWED() });
     const grownPast = await handedOnce(w, second.id, anchors);
     expect(grownPast).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+    expect(anchorAlarms()).toEqual([]);
+  });
+
+  it('hands off after the real anchor check anchored the chain, grown honestly since: no false alarm (H11)', async () => {
+    const { w, acting } = await ready();
+    await ask(acting, w, { amount: ALLOWED() });
+    // The anchor check as main.ts makes it, over this organisation alone, keeping its anchors where Tx A reads them.
+    const anchors = createMemoryAnchorStore();
+    const trail = createAuditTrail({ keys, ids });
+    await createAnchorCheck({
+      chains: [],
+      organizations: {
+        list: () => Promise.resolve([w.org]),
+        recorded: () => Promise.resolve([w.org]),
+        verify: (orgId, anchor) => trail.verifyAlone(app, orgId, anchor),
+        hold: (orgId, failure) => holdOrganisation(app, orgId, { keys, ids, logger: testLogger(capture) }, failure),
+      },
+      keys,
+      clock,
+      logger: testLogger(capture),
+      staleAfterMs: 60_000,
+      deadlineMs: 30_000,
+      anchors,
+    }).run();
+    expect(anchors.latest({ kind: 'organisation', orgId: w.org })).toBeDefined();
+    const later = await ask(acting, w, { amount: ALLOWED() });
+
+    expect(await handedOnce(w, later.id, anchors)).toMatchObject({
+      submitted: 2,
+      status: 'HANDED_OFF',
+      hold: { outcome: 'clear' },
+    });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('holds an empty chain’s anchor (seq 0) as kept: nothing to compare, nothing alarmed (H11)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const anchors = createMemoryAnchorStore();
+    const chain = { kind: 'organisation', orgId: w.org } as const;
+    anchors.keep(signAnchor(keys, chain, { seq: 0n, hash: Buffer.alloc(32) }, clock.now()));
+
+    expect(await handedOnce(w, request.id, anchors)).toMatchObject({ submitted: 1, status: 'HANDED_OFF' });
     expect(anchorAlarms()).toEqual([]);
   });
 

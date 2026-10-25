@@ -820,6 +820,8 @@ export function createAuditTrail({
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {
       await assertTenant(tx, orgId);
+      // An empty chain's anchor (seq 0, the genesis hash) is held by every chain grown from it: no event to compare.
+      if (anchor.seq === 0n) return true;
       const chain = chainOf(orgId);
       const { rows } = await sql<{ head_seq: bigint | null; anchored: Buffer | null }>`
         select h.seq as head_seq,
