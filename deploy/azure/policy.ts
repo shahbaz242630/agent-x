@@ -278,6 +278,9 @@ const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
 
+/** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
+const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
+
 /**
  * An integrity job that skipped a whole run, its organisation list unread
  * (Phase 2 E2c), or a run of the activity log's daily seal (Phase 3 L6b) or
@@ -2605,6 +2608,30 @@ const holdingsCheckAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on any approved request said left standing (Phase 4 gate H8). */
+const handoffQueueAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [HANDOFF_QUEUE_STALE_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'handoff-queue-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any handoff.queue_stale line, watching every window and firing on the first",
+      });
+    }
+  }
+};
+
 /**
  * An enabled alert on the workspace fires on any run of the integrity jobs
  * skipped whole (Phase 2 E2c; request expiry, D7), or of the activity log's
@@ -3585,6 +3612,7 @@ const CHECKS: readonly Check[] = [
   tokenRefusedAlert,
   denialSurgeAlert,
   holdingsCheckAlert,
+  handoffQueueAlert,
   integrityRunsAlert,
   agentCancelsAlert,
   agentCancelCapAlert,
