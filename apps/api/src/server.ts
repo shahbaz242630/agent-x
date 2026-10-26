@@ -21,6 +21,8 @@
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
 // serves nothing its OpenAPI document doesn't hold (contract.ts, SEC-WEB-06).
+// The console's own files are answered before any of this, by a layer in front
+// of Fastify that serves only its build (console-files.ts, 6A1).
 import type {
   AcceptanceConfirmations,
   ContactChanges,
@@ -51,6 +53,7 @@ import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type AuditLogExports, registerAuditLogExports } from './audit-log-exports.ts';
 import type { PlaceOf } from './client-clues.ts';
 import { answerClientError } from './client-errors.ts';
+import { type ConsoleFiles, consoleServer } from './console-files.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { responseFor, sendErrorBody } from './errors.ts';
@@ -229,6 +232,8 @@ export interface ServerOptions {
   readonly fakeBank?: FakeBank | undefined;
   /** Taking in the partner's messages (partner-events.ts, E1b); without it, that route answers 404. */
   readonly partnerEvents?: PartnerEventIntake | undefined;
+  /** The console's build (console-files.ts), served in front of Fastify; without it, the API alone. */
+  readonly consoleFiles?: ConsoleFiles | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -307,6 +312,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     clientErrorHandler: (error, socket) => {
       answerClientError(error, socket, logger, ids);
     },
+    ...(options.consoleFiles === undefined ? {} : { serverFactory: consoleServer(options.consoleFiles) }),
   });
 
   // First, so no route escapes it.
