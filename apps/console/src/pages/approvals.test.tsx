@@ -238,6 +238,16 @@ describe('one request’s page (6B1)', () => {
     expect(await screen.findByText('Choose an organisation')).toBeDefined();
   });
 
+  it('keeps the organisation remembered when a link names one the person isn’t in', async () => {
+    localStorage.setItem('agentx.organization', OTHER.id);
+    signedIn([ORG, OTHER]);
+    answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details() });
+    open(`/approvals/${ID}?org=0199a0f0-0000-7000-8000-00000000cccc`);
+    expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    expect(sentTo('GET', `/v1/spend-requests/${ID}`)[0]?.headers.get('agentx-organization')).toBe(OTHER.id);
+    expect(localStorage.getItem('agentx.organization')).toBe(OTHER.id);
+  });
+
   it('says a request this organisation doesn’t have can’t be found', async () => {
     signedIn();
     open(`/approvals/${ID}`);
