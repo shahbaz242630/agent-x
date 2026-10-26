@@ -24,7 +24,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { isPagePath } from './console-files.ts';
+import { PAGE_PATH } from './console-files.ts';
 import { cookieValue, SESSION_COOKIE } from './sign-in.ts';
 
 export const BROWSER_ERROR = 'console.browser_error';
@@ -42,7 +42,8 @@ const BODY = z
     page: z
       .string()
       .max(200)
-      .refine(isPagePath, { error: 'must be a console page' })
+      // A pattern, not a refinement, so the contract states the rule (Schemathesis sent pages a refinement refused).
+      .regex(PAGE_PATH, { error: 'must be a console page' })
       .describe('The console page it happened on: its path, no query.'),
     stack: z.string().max(4000).optional().describe('Where in the console’s code, if the browser said.'),
     build: z

@@ -44,11 +44,12 @@ const TYPES: Readonly<Record<string, string>> = {
 /** An asset's published name, as Vite writes it: letters, digits, `-` and `_`, one dot, a known extension. */
 const ASSET_NAME = /^[A-Za-z0-9_-]+\.[a-z0-9]+$/;
 
-/** A console page's path: `/`, or segments of lower-case letters, digits and hyphens. The path part, never a dot. */
-const PAGE_PATH = /^\/(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
-
-/** The first segments that are the API's own, never a console page. */
-const API_SEGMENTS: ReadonlySet<string> = new Set(['v1', 'health']);
+/**
+ * A console page's path: `/`, or segments of lower-case letters, digits and
+ * hyphens, the first never one of the API's own (`v1`, `health`). The path
+ * part, never a dot. One pattern, so browser-errors.ts's contract states it.
+ */
+export const PAGE_PATH = /^\/(?!(?:v1|health)(?:\/|$))(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
 
 /** Hashed assets: their name changes with their bytes, so a browser may keep them. */
 const KEPT = 'public, max-age=31536000, immutable';
@@ -112,16 +113,11 @@ export async function loadConsoleFiles(
 /** A page's query: the filters a console page keeps in its address, in the characters a URL needs no escaping for. */
 const PAGE_QUERY = /^[A-Za-z0-9\-._~%=&+]{0,512}$/;
 
-/** Whether a path, with no query, names a console page, not an API address (browser-errors.ts checks reports by it). */
-export function isPagePath(path: string): boolean {
-  return PAGE_PATH.test(path) && !API_SEGMENTS.has(path.split('/')[1] ?? '');
-}
-
 /** Whether an address names a console page, not an API address: its path, and its query if any. */
 function isPage(url: string): boolean {
   const [path = '', query, ...rest] = url.split('?');
   if (rest.length > 0 || (query !== undefined && !PAGE_QUERY.test(query))) return false;
-  return isPagePath(path);
+  return PAGE_PATH.test(path);
 }
 
 function send(response: ServerResponse, file: ConsoleFile, cacheControl?: string): void {

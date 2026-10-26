@@ -5865,7 +5865,8 @@
                   },
                   "page": {
                     "type": "string",
-                    "maxLength": 200
+                    "maxLength": 200,
+                    "pattern": "^\\/(?!(?:v1|health)(?:\\/|$))(?:[a-z0-9-]+(?:\\/[a-z0-9-]+)*)?$"
                   },
                   "stack": {
                     "type": "string",
