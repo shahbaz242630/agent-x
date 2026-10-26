@@ -2,18 +2,21 @@
 // real server listening (the layer is the server's own handler, so Fastify's
 // inject never reaches it). A page and an asset answer with the security
 // headers; an API address, a write, a dot or a query on an asset go on to
-// Fastify's JSON 404. Fastify's own timeouts reach the server it is handed.
+// Fastify's JSON 404. Requests go through the outbound client, allowed this
+// one local origin, as all of our HTTP does (SEC-WEB-05).
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { createOutboundFetch } from '@agentx/platform/outbound';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { type ConsoleFiles, consoleServer, loadConsoleFiles, readConsoleFiles } from './console-files.ts';
+import { type ConsoleFiles, loadConsoleFiles, putConsoleInFront, readConsoleFiles } from './console-files.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 import { buildServer } from './server.ts';
 
@@ -58,7 +61,7 @@ afterEach(async () => {
 });
 
 /** The API with the console's files, listening on a port of its own; its address. */
-async function listening(files: ConsoleFiles): Promise<{ base: string; app: FastifyInstance }> {
+async function listening(files: ConsoleFiles) {
   const { logger } = logged();
   const app = await buildServer({
     config: {
@@ -81,12 +84,16 @@ async function listening(files: ConsoleFiles): Promise<{ base: string; app: Fast
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });
   const [address] = app.addresses();
-  return { base: `http://127.0.0.1:${String(address?.port)}`, app };
+  const base = `http://127.0.0.1:${String(address?.port)}`;
+  const fetch = createOutboundFetch([base]);
+  return { base, app, fetch };
 }
 
 describe('the console’s files (6A1)', () => {
   it('serves the page at the root and at any console path, never kept, with the security headers', async () => {
-    const { base } = await listening(await readConsoleFiles(await build('pages', { 'index-Ab12_c.js': SCRIPT })));
+    const { base, fetch } = await listening(
+      await readConsoleFiles(await build('pages', { 'index-Ab12_c.js': SCRIPT })),
+    );
     for (const path of [
       '/',
       '/approvals',
@@ -102,7 +109,9 @@ describe('the console’s files (6A1)', () => {
   });
 
   it('serves an asset by its exact path, kept for a year, and a HEAD with no body', async () => {
-    const { base } = await listening(await readConsoleFiles(await build('assets', { 'index-Ab12_c.js': SCRIPT })));
+    const { base, fetch } = await listening(
+      await readConsoleFiles(await build('assets', { 'index-Ab12_c.js': SCRIPT })),
+    );
     const answer = await fetch(`${base}/assets/index-Ab12_c.js`);
     expect(answer.status).toBe(200);
     expect(await answer.text()).toBe(SCRIPT);
@@ -116,8 +125,10 @@ describe('the console’s files (6A1)', () => {
   });
 
   it('leaves everything else to Fastify: API addresses, writes, unknown assets, dots, capitals and odd queries', async () => {
-    const { base } = await listening(await readConsoleFiles(await build('others', { 'index-Ab12_c.js': SCRIPT })));
-    const notOurs: Array<[string, RequestInit?]> = [
+    const { base, fetch } = await listening(
+      await readConsoleFiles(await build('others', { 'index-Ab12_c.js': SCRIPT })),
+    );
+    const notOurs: [string, RequestInit?][] = [
       ['/v1'],
       ['/v1/agents'],
       ['/health/deep'],
@@ -137,24 +148,23 @@ describe('the console’s files (6A1)', () => {
     }
   });
 
-  it('hands the server Fastify’s own timeouts', async () => {
+  it('keeps Fastify’s own server and its timeouts', async () => {
     const { app } = await listening(await readConsoleFiles(await build('timeouts', {})));
-    const server = app.server as Server;
-    expect(server.requestTimeout).toBe(30_000);
-    expect(server.keepAliveTimeout).toBe(72_000);
+    expect(app.server.requestTimeout).toBe(30_000);
+    expect(app.server.listeners('request')).toHaveLength(1);
   });
 
-  it('sets each of Fastify’s settings it is given, and refuses a Fastify that gives it none', () => {
-    const factory = consoleServer({ page: Buffer.from(PAGE), assets: new Map() });
-    const handler = () => undefined;
-    const settings = { keepAliveTimeout: 1000, requestTimeout: 2000, connectionTimeout: 3000, maxRequestsPerSocket: 4 };
-    const server = factory(handler, settings) as Server;
-    expect([server.keepAliveTimeout, server.requestTimeout, server.timeout, server.maxRequestsPerSocket]).toEqual([
-      1000, 2000, 3000, 4,
-    ]);
-    expect(() => factory(handler, { ...settings, requestTimeout: undefined })).toThrow(
-      'Fastify gave the server factory no requestTimeout',
-    );
+  it('refuses a server without exactly one request listener to stand in front of', () => {
+    const files = { page: Buffer.from(PAGE), assets: new Map() };
+    const bare = new EventEmitter() as unknown as Server;
+    expect(() => {
+      putConsoleInFront(bare, files);
+    }).toThrow("Fastify's one request listener on its server, not 0");
+    bare.on('request', () => undefined);
+    bare.on('request', () => undefined);
+    expect(() => {
+      putConsoleInFront(bare, files);
+    }).toThrow('not 2');
   });
 
   it('refuses a build holding a file it can’t serve, or one named unlike a hashed asset', async () => {

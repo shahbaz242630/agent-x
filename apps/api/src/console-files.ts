@@ -18,24 +18,24 @@
 // (`default-src 'self'; script-src 'self'`) holds the console to its own
 // files, so the build inlines nothing (vite.config.ts).
 import { readdir, readFile } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { IncomingMessage, RequestListener, Server, ServerResponse } from 'node:http';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { type Environment, LOCAL_ONLY } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
-import type { FastifyServerFactory } from 'fastify';
 
 import { SECURITY_HEADERS } from './security-headers.ts';
 
 /** Where the image keeps the console's build (Dockerfile), beside the API's own files. */
-export const CONSOLE_DIR = fileURLToPath(new URL('../../console/dist', import.meta.url));
+const CONSOLE_DIR = fileURLToPath(new URL('../../console/dist', import.meta.url));
 
 /** The kinds of file the build may hold, by extension. Any other file in it stops the API starting. */
 const TYPES: Readonly<Record<string, string>> = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
@@ -133,7 +133,7 @@ function send(request: IncomingMessage, response: ServerResponse, file: ConsoleF
  * Answers a request for the console's files and says true, or leaves it
  * untouched and says false, for Fastify to answer.
  */
-export function answerConsoleFile(files: ConsoleFiles, request: IncomingMessage, response: ServerResponse): boolean {
+function answerConsoleFile(files: ConsoleFiles, request: IncomingMessage, response: ServerResponse): boolean {
   if (request.method !== 'GET' && request.method !== 'HEAD') return false;
   const url = request.url ?? '';
   const asset = files.assets.get(url);
@@ -146,41 +146,22 @@ export function answerConsoleFile(files: ConsoleFiles, request: IncomingMessage,
   return true;
 }
 
-/** Fastify's settings for the server it makes, each filled in by Fastify with its default when not given. */
-const TIMEOUTS = ['keepAliveTimeout', 'requestTimeout', 'connectionTimeout', 'maxRequestsPerSocket'] as const;
-
-/** The settings, each a number: Fastify fills every one in, so a missing one is a Fastify we don't know. */
-function timeoutsOf(options: object): Record<(typeof TIMEOUTS)[number], number> {
-  const read = (name: (typeof TIMEOUTS)[number]): number => {
-    const value: unknown = (options as Record<string, unknown>)[name];
-    if (typeof value !== 'number') throw new Error(`Fastify gave the server factory no ${name}`);
-    return value;
-  };
-  return {
-    keepAliveTimeout: read('keepAliveTimeout'),
-    requestTimeout: read('requestTimeout'),
-    connectionTimeout: read('connectionTimeout'),
-    maxRequestsPerSocket: read('maxRequestsPerSocket'),
-  };
-}
-
 /**
- * Fastify's server factory with the console's layer in front. Fastify sets its
- * timeouts only on a server it makes itself (lib/server.js), so this sets the
- * same ones from the options it is given: a slow client is cut off here as on
- * any other server of ours.
+ * Puts the console's layer in front of Fastify on the server Fastify made: its
+ * one request listener (lib/server.js) is answered only for what the layer
+ * leaves. Fastify's own server keeps its own timeouts, and no network module
+ * is imported here (SEC-WEB-05's boundary rule).
  */
-export function consoleServer(files: ConsoleFiles): FastifyServerFactory {
-  return (handler, options): Server => {
-    const timeouts = timeoutsOf(options);
-    const server = createServer((request, response) => {
-      if (!answerConsoleFile(files, request, response)) handler(request, response);
-    });
-    server.keepAliveTimeout = timeouts.keepAliveTimeout;
-    server.requestTimeout = timeouts.requestTimeout;
-    server.setTimeout(timeouts.connectionTimeout);
-    // Fastify's zero is Node's default, no limit (lib/server.js).
-    if (timeouts.maxRequestsPerSocket > 0) server.maxRequestsPerSocket = timeouts.maxRequestsPerSocket;
-    return server;
-  };
+export function putConsoleInFront(server: Server, files: ConsoleFiles): void {
+  const listeners = server.listeners('request') as RequestListener[];
+  const [fastify] = listeners;
+  if (listeners.length !== 1 || fastify === undefined) {
+    throw new Error(
+      `The console expects Fastify's one request listener on its server, not ${String(listeners.length)}`,
+    );
+  }
+  server.removeListener('request', fastify);
+  server.on('request', (request: IncomingMessage, response: ServerResponse) => {
+    if (!answerConsoleFile(files, request, response)) fastify(request, response);
+  });
 }

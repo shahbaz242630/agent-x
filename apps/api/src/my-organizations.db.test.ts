@@ -72,11 +72,20 @@ const add = (orgId: string, userId: string, role: Role) =>
     return id;
   });
 
-const move = (orgId: string, table: typeof MEMBERSHIPS | typeof ORGANIZATIONS, id: string, event: string) =>
+const freeze = (orgId: string) =>
   withSignedStates(app, orgId, services(), (tx, states) =>
-    states.changeStatus(tx, table, { orgId, id }, event as never, {
+    states.changeStatus(tx, ORGANIZATIONS, { orgId, id: orgId }, 'freeze', {
       actor: OPERATOR,
-      action: `test.${event}`,
+      action: 'organization.freeze',
+      details: {},
+    }),
+  );
+
+const deactivate = (orgId: string, id: string) =>
+  withSignedStates(app, orgId, services(), (tx, states) =>
+    states.changeStatus(tx, MEMBERSHIPS, { orgId, id }, 'deactivate', {
+      actor: OPERATOR,
+      action: 'membership.deactivate',
       details: {},
     }),
   );
@@ -105,7 +114,7 @@ describe(`a person’s own organisations (6A1, Postgres ${server.version})`, () 
     const someone = await person();
     await add(first, someone, 'admin');
     await add(second, someone, 'viewer');
-    await move(second, ORGANIZATIONS, second, 'freeze');
+    await freeze(second);
 
     expect(await listed()(someone, '0199a0f0-0000-7000-8000-00000000c001')).toEqual({
       organizations: [
@@ -122,7 +131,7 @@ describe(`a person’s own organisations (6A1, Postgres ${server.version})`, () 
     const someone = await person();
     await add(kept, someone, 'approver');
     const membership = await add(left, someone, 'developer');
-    await move(left, MEMBERSHIPS, membership, 'deactivate');
+    await deactivate(left, membership);
 
     expect(await listed()(someone, '0199a0f0-0000-7000-8000-00000000c002')).toEqual({
       organizations: [{ id: kept, name: 'Kept LLC', role: 'approver', frozen: false }],

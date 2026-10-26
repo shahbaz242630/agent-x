@@ -15,6 +15,9 @@ const LOAD_TESTS = '**/*.load.test.ts';
 /** Helpers several test files share: named as tests, which alone may import @agentx/testing, but holding none. */
 const TEST_HELPERS = '**/*.helper.test.ts';
 
+/** The console's tests: browser code, run in a browser-like page (jsdom), never with Node's own globals alone. */
+const CONSOLE_TESTS = 'apps/console/src/**/*.test.{ts,tsx}';
+
 export default defineConfig({
   test: {
     projects: [
@@ -22,7 +25,14 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['packages/*/src/**/*.test.{ts,tsx}', 'apps/*/src/**/*.test.{ts,tsx}'],
-          exclude: [...configDefaults.exclude, DATABASE_TESTS, TEST_HELPERS],
+          exclude: [...configDefaults.exclude, DATABASE_TESTS, TEST_HELPERS, CONSOLE_TESTS],
+        },
+      },
+      {
+        test: {
+          name: 'console',
+          include: [CONSOLE_TESTS],
+          environment: 'jsdom',
         },
       },
       {

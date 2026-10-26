@@ -26,7 +26,7 @@ import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 
 /** One of the person's organisations, as their verified membership and its verified status say. */
-export interface MyOrganization {
+interface MyOrganization {
   readonly id: string;
   readonly name: string;
   readonly role: Role;

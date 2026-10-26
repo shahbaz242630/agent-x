@@ -53,7 +53,7 @@ import { type AuditLog, registerAuditLog } from './audit-log.ts';
 import { type AuditLogExports, registerAuditLogExports } from './audit-log-exports.ts';
 import type { PlaceOf } from './client-clues.ts';
 import { answerClientError } from './client-errors.ts';
-import { type ConsoleFiles, consoleServer } from './console-files.ts';
+import { type ConsoleFiles, putConsoleInFront } from './console-files.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { responseFor, sendErrorBody } from './errors.ts';
@@ -315,9 +315,9 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     clientErrorHandler: (error, socket) => {
       answerClientError(error, socket, logger, ids);
     },
-    ...(options.consoleFiles === undefined ? {} : { serverFactory: consoleServer(options.consoleFiles) }),
   });
 
+  if (options.consoleFiles !== undefined) putConsoleInFront(app.server, options.consoleFiles);
   // First, so no route escapes it.
   await registerContract(app);
   await registerRateLimit(app, config.http.rateLimitPerMinute, trust);

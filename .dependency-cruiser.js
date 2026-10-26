@@ -19,6 +19,8 @@ const CORE = `${ROOT}packages/core/src/`;
 const MODULES = `${CORE}modules/`;
 /** Test files may also import the test framework, so the purity rules skip them. */
 const TEST_FILE = '\\.test\\.tsx?$';
+/** A build tool's own config beside the app it builds (the console's vite.config.ts): it runs at build time, never ships. */
+const BUILD_CONFIG = '(?:^|/)apps/[^/]+/vite\\.config\\.ts$';
 /**
  * Matches an npm package by name, whether installed (pnpm's resolved path
  * ends in `…/node_modules/<name>/…`) or unresolvable (the bare name).
@@ -219,7 +221,7 @@ export default {
       comment:
         "Product code imports only packages in its own package.json dependencies: not a devDependency, and not a tool that only resolves from the repository root's devDependencies.",
       severity: 'error',
-      from: { path: `${ROOT}(?:packages|apps)/`, pathNot: TEST_FILE },
+      from: { path: `${ROOT}(?:packages|apps)/`, pathNot: [TEST_FILE, BUILD_CONFIG] },
       to: { dependencyTypes: ['npm-dev', 'npm-no-pkg', 'npm-unknown'] },
     },
   ],
