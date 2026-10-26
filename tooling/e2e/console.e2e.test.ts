@@ -25,17 +25,34 @@ const { drive } = loginDriver({
 let browser: Browser;
 let context: BrowserContext;
 let page: Page;
-/** What the page reported: console errors (a CSP refusal is one) and requests that failed. */
+/**
+ * What went wrong on the console's own origin: a console error other than a
+ * failed load (a CSP refusal is one), a request that failed, and an answer
+ * over 399 the console doesn't expect. Expected: the 401 its first "who is
+ * signed in?" gets before sign-in, and the browser's own /favicon.ico, which
+ * the API answers 404. The login service's own pages are its own.
+ */
 const problems: string[] = [];
+const EXPECTED = new Set([`401 ${API_ORIGIN}/v1/auth/session`, `404 ${API_ORIGIN}/favicon.ico`]);
+const ours = (url: string): boolean => url.startsWith(`${API_ORIGIN}/`);
 
 beforeAll(async () => {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   context = await browser.newContext();
   page = await context.newPage();
   page.on('console', (message) => {
-    if (message.type() === 'error') problems.push(`console: ${message.text()}`);
+    // A failed load is Chrome's echo of an answer, judged by its status below.
+    if (message.type() === 'error' && ours(page.url()) && !message.text().startsWith('Failed to load resource')) {
+      problems.push(`console: ${message.text()}`);
+    }
   });
-  page.on('requestfailed', (request) => problems.push(`failed: ${request.url()}`));
+  page.on('requestfailed', (request) => {
+    if (ours(request.url())) problems.push(`failed: ${request.url()}`);
+  });
+  page.on('response', (response) => {
+    const seen = `${String(response.status())} ${response.url()}`;
+    if (ours(response.url()) && response.status() >= 400 && !EXPECTED.has(seen)) problems.push(`answer: ${seen}`);
+  });
 });
 
 afterAll(async () => {
@@ -56,7 +73,7 @@ describe('6A1 the console in a real browser, served by the API', () => {
     const headers = response?.headers() ?? {};
     expect(headers['content-security-policy']).toContain("script-src 'self'");
     expect(headers['cache-control']).toBe('no-store');
-    expect(await page.getByRole('heading', { name: 'Sign in to Agent X' }).isVisible()).toBe(true);
+    await page.getByRole('heading', { name: 'Sign in to Agent X' }).waitFor({ timeout: 15_000 });
     expect(assets.length).toBeGreaterThan(0);
     for (const asset of assets) expect(asset.cacheControl, asset.url).toBe('public, max-age=31536000, immutable');
     expect(problems).toEqual([]);

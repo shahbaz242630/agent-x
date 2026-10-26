@@ -543,10 +543,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
         userId,
       ),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
-    myOrganizations: createMyOrganizations({
-      database,
-      services: (correlationId) => ({ keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId }),
-    }),
+    myOrganizations: createMyOrganizations({ database, keys, ids: uuidV7Ids, logger }),
     listMembers: (orgId, correlationId) =>
       membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId }, orgId),
     acceptanceConfirmations: createAcceptanceConfirmations({

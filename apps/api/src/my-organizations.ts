@@ -17,7 +17,10 @@ import { withSignedStates } from '@agentx/core/modules/audit';
 import { type DirectoryTables, organizationsOf } from '@agentx/core/modules/directory';
 import { type IdentityTables, membershipOf, type Role, ROLES } from '@agentx/core/modules/identity';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
+import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -50,13 +53,18 @@ type Read =
 /** The use case: the directory's entries, then each organisation read in its own transaction. */
 export function createMyOrganizations({
   database,
-  services,
+  keys,
+  ids,
+  logger,
 }: {
   readonly database: Database<MyOrganizationsTables>;
-  readonly services: (correlationId: string) => SignedStatesServices;
+  readonly keys: KeyProvider;
+  readonly ids: IdGenerator;
+  readonly logger: Logger;
 }): ListMyOrganizations {
   function readIn(orgId: string, userId: string, correlationId: string): Promise<Read> {
-    return withSignedStates(database, orgId, services(correlationId), async (tx, states): Promise<Read> => {
+    const services: SignedStatesServices = { keys, ids, logger: logger.child({ correlationId }), correlationId };
+    return withSignedStates(database, orgId, services, async (tx, states): Promise<Read> => {
       // The organisation (level 2) before the membership (2a), the lock order every path keeps (ADR-006 §6).
       const status = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
       const membership = await membershipOf(tx, states, orgId, userId);

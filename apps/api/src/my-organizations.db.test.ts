@@ -90,8 +90,7 @@ const deactivate = (orgId: string, id: string) =>
     }),
   );
 
-const listed = () =>
-  createMyOrganizations({ database: app, services: (correlationId) => ({ ...services(), correlationId }) });
+const listed = () => createMyOrganizations({ database: app, keys, ids, logger: testLogger(capture) });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
