@@ -12,13 +12,12 @@ import { join } from 'node:path';
 
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance } from 'fastify';
+import { LogCapture } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { type ConsoleFiles, loadConsoleFiles, putConsoleInFront, readConsoleFiles } from './console-files.ts';
+import { closeServers, routeServer } from './route-server.helper.test.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
-import { buildServer } from './server.ts';
 
 const PAGE = '<!doctype html><title>Agent X</title><script type="module" src="/assets/index-Ab12_c.js"></script>';
 const SCRIPT = 'console.log("console")';
@@ -33,12 +32,12 @@ afterAll(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-/** A build in a folder of its own: the page, and the assets named. */
-async function build(name: string, assets: Readonly<Record<string, string>>): Promise<string> {
+/** A build in a folder of its own: the page, and the assets named (no assets folder at all when none are given). */
+async function build(name: string, assets?: Readonly<Record<string, string>>): Promise<string> {
   const dir = join(directory, name);
-  await mkdir(join(dir, 'assets'), { recursive: true });
+  await mkdir(assets === undefined ? dir : join(dir, 'assets'), { recursive: true });
   await writeFile(join(dir, 'index.html'), PAGE, { mode: 0o600 });
-  for (const [file, text] of Object.entries(assets)) {
+  for (const [file, text] of Object.entries(assets ?? {})) {
     await writeFile(join(dir, 'assets', file), text, { mode: 0o600 });
   }
   return dir;
@@ -54,39 +53,15 @@ const logged = () => {
   return { capture, logger: createLogger({ service: 'api', config, destination: capture }) };
 };
 
-const servers: FastifyInstance[] = [];
+afterEach(closeServers);
 
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
-
-/** The API with the console's files, listening on a port of its own; its address. */
+/** The API with the console's files, listening on a port of its own; its address, and a client for it. */
 async function listening(files: ConsoleFiles) {
-  const { logger } = logged();
-  const app = await buildServer({
-    config: {
-      http: {
-        host: '127.0.0.1',
-        port: 0,
-        publicOrigin: 'https://app.agentx.example',
-        trustedProxies: [],
-        rateLimitPerMinute: 1000,
-        rateLimitPerUserPerMinute: 1000,
-        rateLimitPerAgentPerMinute: 1000,
-      },
-      log: { level: 'info', eventCapPerMinute: 10_000 },
-    },
-    logger,
-    ids: new SequentialIds(),
-    healthChecks: [],
-    consoleFiles: files,
-  });
-  servers.push(app);
+  const app = await routeServer({ consoleFiles: files });
   await app.listen({ host: '127.0.0.1', port: 0 });
   const [address] = app.addresses();
   const base = `http://127.0.0.1:${String(address?.port)}`;
-  const fetch = createOutboundFetch([base]);
-  return { base, app, fetch };
+  return { base, app, fetch: createOutboundFetch([base]) };
 }
 
 describe('the console’s files (6A1)', () => {
@@ -149,7 +124,7 @@ describe('the console’s files (6A1)', () => {
   });
 
   it('keeps Fastify’s own server and its timeouts', async () => {
-    const { app } = await listening(await readConsoleFiles(await build('timeouts', {})));
+    const { app } = await listening(await readConsoleFiles(await build('timeouts')));
     expect(app.server.requestTimeout).toBe(30_000);
     expect(app.server.listeners('request')).toHaveLength(1);
   });
@@ -175,10 +150,7 @@ describe('the console’s files (6A1)', () => {
   });
 
   it('serves a page alone when the build has no assets folder', async () => {
-    const dir = join(directory, 'page-only');
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'index.html'), PAGE, { mode: 0o600 });
-    const files = await readConsoleFiles(dir);
+    const files = await readConsoleFiles(await build('page-only'));
     expect(files.assets.size).toBe(0);
     expect(files.page.toString()).toBe(PAGE);
   });

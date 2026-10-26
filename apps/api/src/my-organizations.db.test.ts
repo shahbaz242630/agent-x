@@ -165,10 +165,12 @@ describe(`a person’s own organisations (6A1, Postgres ${server.version})`, () 
     ]);
   });
 
-  it('answers an organisation whose own status was tampered with as unreadable', async () => {
+  it('answers an organisation whose own status was tampered with as unreadable, to its members alone', async () => {
     const forged = await organization('Status LLC');
     const someone = await person();
+    const removed = await person();
     await add(forged, someone, 'admin');
+    await deactivate(forged, await add(forged, removed, 'viewer'));
     const owner = await tamperAsOwner(database, ORGANIZATIONS, forged);
     try {
       await owner.withoutStatusGuard(() => owner.setColumn(forged, 'status', 'FROZEN'));
@@ -179,6 +181,11 @@ describe(`a person’s own organisations (6A1, Postgres ${server.version})`, () 
     expect(await listed()(someone, '0199a0f0-0000-7000-8000-00000000c005')).toEqual({
       organizations: [],
       unreadable: [forged],
+    });
+    // Someone no longer a member learns nothing of it, its state included.
+    expect(await listed()(removed, '0199a0f0-0000-7000-8000-00000000c006')).toEqual({
+      organizations: [],
+      unreadable: [],
     });
   });
 });

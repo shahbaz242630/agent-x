@@ -15,7 +15,7 @@
 import type { AuditTables, SignedStatesServices } from '@agentx/core/modules/audit';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { type DirectoryTables, organizationsOf } from '@agentx/core/modules/directory';
-import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
+import { type IdentityTables, membershipOf, type Role, ROLES } from '@agentx/core/modules/identity';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import type { Database } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
@@ -55,12 +55,14 @@ export function createMyOrganizations({
   readonly database: Database<MyOrganizationsTables>;
   readonly services: (correlationId: string) => SignedStatesServices;
 }): ListMyOrganizations {
-  const readIn = (orgId: string, userId: string, correlationId: string): Promise<Read> =>
-    withSignedStates(database, orgId, services(correlationId), async (tx, states): Promise<Read> => {
+  function readIn(orgId: string, userId: string, correlationId: string): Promise<Read> {
+    return withSignedStates(database, orgId, services(correlationId), async (tx, states): Promise<Read> => {
+      // The organisation (level 2) before the membership (2a), the lock order every path keeps (ADR-006 §6).
+      const status = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
       const membership = await membershipOf(tx, states, orgId, userId);
       if (membership.outcome === 'tampered') return { outcome: 'tampered' };
+      // Not an active member: nothing about the organisation is theirs to see, its state included.
       if (membership.outcome !== 'active') return { outcome: 'none' };
-      const status = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
       if (status.outcome !== 'verified') return { outcome: 'tampered' };
       const row = await tx
         // eslint-disable-next-line agentx/authority-tables-through-signed-state -- its name alone: not sealed, and fixed when it is made (0008); its status is read through its signed state just above
@@ -79,6 +81,7 @@ export function createMyOrganizations({
         },
       };
     });
+  }
 
   return async (userId, correlationId) => {
     const organizations: MyOrganization[] = [];
@@ -101,14 +104,14 @@ const MY_ORGANIZATIONS_SCHEMA = {
           z.object({
             id: z.uuid().describe('The organisation, by its ID: what the agentx-organization header names.'),
             name: z.string().describe("The organisation's name."),
-            role: z.enum(['admin', 'approver', 'developer', 'viewer']).describe('Your role in it.'),
+            role: z.enum(ROLES).describe('Your role in it.'),
             frozen: z.boolean().describe('Whether it is frozen: no agent spends while it is.'),
           }),
         ),
         unreadable: z
           .array(z.uuid())
           .describe(
-            "Organisations you are listed in whose records can't be checked right now. Their admins are alerted and nothing in them can be changed until it is resolved.",
+            "Organisations you are listed in whose records failed their integrity check, so they can't be opened until it is resolved.",
           ),
       })
       .register(API_SCHEMAS, {
@@ -129,6 +132,7 @@ export function registerMyOrganizations(app: FastifyInstance, list: ListMyOrgani
       const session = request.person;
       // The access hook lets no one else through; a route that runs without a person is a bug.
       if (session === null) throw new Error('the organisations route ran without a person');
+      // Copied: the answer's schema types its arrays as mutable, the use case's are read-only.
       const { organizations, unreadable } = await list(session.userId, request.id);
       return { organizations: [...organizations], unreadable: [...unreadable] };
     },

@@ -44,7 +44,7 @@ const TYPES: Readonly<Record<string, string>> = {
 /** An asset's published name, as Vite writes it: letters, digits, `-` and `_`, one dot, a known extension. */
 const ASSET_NAME = /^[A-Za-z0-9_-]+\.[a-z0-9]+$/;
 
-/** A console page's path: `/`, or segments of lower-case letters, digits and hyphens. No dot, no query. */
+/** A console page's path: `/`, or segments of lower-case letters, digits and hyphens. The path part, never a dot. */
 const PAGE_PATH = /^\/(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
 
 /** The first segments that are the API's own, never a console page. */
@@ -62,6 +62,10 @@ interface ConsoleFile {
 export interface ConsoleFiles {
   readonly page: Buffer;
   readonly assets: ReadonlyMap<string, ConsoleFile>;
+}
+
+function notThere(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }
 
 /** Reads the console's build from `dir`: its page and every asset, each of a kind TYPES names. */
@@ -82,8 +86,6 @@ export async function readConsoleFiles(dir: string): Promise<ConsoleFiles> {
   }
   return { page, assets };
 }
-
-const notThere = (error: unknown): boolean => error instanceof Error && 'code' in error && error.code === 'ENOENT';
 
 /**
  * The console's build, or undefined where it isn't there and needn't be: a
@@ -119,10 +121,10 @@ function isPage(url: string): boolean {
   return !API_SEGMENTS.has(first);
 }
 
-function send(request: IncomingMessage, response: ServerResponse, file: ConsoleFile, keep: boolean): void {
+function send(request: IncomingMessage, response: ServerResponse, file: ConsoleFile, cacheControl?: string): void {
   response.writeHead(200, {
     ...SECURITY_HEADERS,
-    ...(keep ? { 'cache-control': KEPT } : {}),
+    ...(cacheControl !== undefined && { 'cache-control': cacheControl }),
     'content-type': file.type,
     'content-length': file.body.length,
   });
@@ -138,11 +140,11 @@ function answerConsoleFile(files: ConsoleFiles, request: IncomingMessage, respon
   const url = request.url ?? '';
   const asset = files.assets.get(url);
   if (asset !== undefined) {
-    send(request, response, asset, true);
+    send(request, response, asset, KEPT);
     return true;
   }
   if (!isPage(url)) return false;
-  send(request, response, { body: files.page, type: 'text/html; charset=utf-8' }, false);
+  send(request, response, { body: files.page, type: 'text/html; charset=utf-8' });
   return true;
 }
 
@@ -150,7 +152,9 @@ function answerConsoleFile(files: ConsoleFiles, request: IncomingMessage, respon
  * Puts the console's layer in front of Fastify on the server Fastify made: its
  * one request listener (lib/server.js) is answered only for what the layer
  * leaves. Fastify's own server keeps its own timeouts, and no network module
- * is imported here (SEC-WEB-05's boundary rule).
+ * is imported here (SEC-WEB-05's boundary rule). A host naming several
+ * addresses (`localhost`) gets Fastify's extra servers without the layer: a
+ * local run only, as a deployed API binds one address.
  */
 export function putConsoleInFront(server: Server, files: ConsoleFiles): void {
   const listeners = server.listeners('request') as RequestListener[];

@@ -105,18 +105,18 @@ describe('the console’s frame (6A1)', () => {
     expect(screen.getByText('Every payment and its timeline will appear here.')).toBeDefined();
   });
 
-  it('says how to join when the person is in none, and that one can’t be checked when it can’t', async () => {
+  it('says how to join when the person is in none, and that one can’t be opened when it can’t', async () => {
     signedIn([], ['0199a0f0-0000-7000-8000-00000000dead']);
     open('/');
     expect(await screen.findByText("You're not in an organisation yet")).toBeDefined();
-    expect(screen.getByText(/can't be checked right now/)).toBeDefined();
+    expect(screen.getByText(/can't be opened right now/)).toBeDefined();
   });
 
   it('shows an unreadable organisation beside those to choose from', async () => {
     signedIn([ORG_A, ORG_B], ['0199a0f0-0000-7000-8000-00000000dead']);
     open('/');
     expect(await screen.findByText('Choose an organisation')).toBeDefined();
-    expect(screen.getByText(/can't be checked right now/)).toBeDefined();
+    expect(screen.getByText(/can't be opened right now/)).toBeDefined();
     expect(screen.getByText('Frozen')).toBeDefined();
   });
 
@@ -163,11 +163,14 @@ describe('the console’s frame (6A1)', () => {
     expect(signOut?.method).toBe('POST');
   });
 
-  it('starts afresh even when signing out fails', async () => {
+  it('says the person is still signed in when signing out fails, and stays, so they can try again', async () => {
     signedIn([ORG_A]);
-    answers['POST /v1/auth/sign-out'] = { status: 503 };
+    answers['POST /v1/auth/sign-out'] = [{ status: 503 }, { status: 200, body: {} }];
     open('/more');
     await userEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText(/You're still signed in/)).toBeDefined();
+    expect(goTo).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await waitFor(() => {
       expect(goTo).toHaveBeenCalledWith('/');
     });

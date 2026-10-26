@@ -13,12 +13,18 @@ export function More() {
   const { session } = useActing();
   const queries = useQueryClient();
   const [leaving, setLeaving] = useState(false);
+  const [failed, setFailed] = useState(false);
   const signOut = async () => {
     setLeaving(true);
+    setFailed(false);
     try {
       await api.post('/v1/auth/sign-out');
     } catch {
-      // Signed out or not, this page forgets the session and starts afresh: the API ends an unused session by itself.
+      // Still signed in (the cookie holds a live session), so a fresh start would sign them straight back in:
+      // the page says so instead, for someone leaving a shared computer.
+      setLeaving(false);
+      setFailed(true);
+      return;
     }
     queries.clear();
     goTo('/');
@@ -30,6 +36,11 @@ export function More() {
       <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>
         {t('more.signOut')}
       </button>
+      {failed && (
+        <p className="notice" role="alert">
+          {t('more.signOutFailed')}
+        </p>
+      )}
     </section>
   );
 }
