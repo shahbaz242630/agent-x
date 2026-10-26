@@ -115,6 +115,7 @@ import { registerFactorResets } from './factor-resets.ts';
 import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
 import { registerMemberChanges } from './member-changes.ts';
 import { type ListMembers, registerMembers } from './members.ts';
+import { type ListMyOrganizations, registerMyOrganizations } from './my-organizations.ts';
 import { registerIdempotencyKeys } from './write-operations.ts';
 
 export interface ServerOptions {
@@ -232,6 +233,8 @@ export interface ServerOptions {
   readonly fakeBank?: FakeBank | undefined;
   /** Taking in the partner's messages (partner-events.ts, E1b); without it, that route answers 404. */
   readonly partnerEvents?: PartnerEventIntake | undefined;
+  /** A signed-in person's own organisations (my-organizations.ts); without it, that route answers 404. */
+  readonly myOrganizations?: ListMyOrganizations | undefined;
   /** The console's build (console-files.ts), served in front of Fastify; without it, the API alone. */
   readonly consoleFiles?: ConsoleFiles | undefined;
 }
@@ -386,6 +389,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     logger,
     securityEvents,
   });
+  registerMyOrganizations(app, options.myOrganizations);
   registerMembers(app, options.listMembers);
   registerMemberChanges(app, options.membershipChanges);
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });

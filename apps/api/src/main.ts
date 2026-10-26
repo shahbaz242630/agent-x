@@ -151,6 +151,7 @@ import { loadPlaces } from './client-clues.ts';
 import { loadConsoleFiles } from './console-files.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
+import { createMyOrganizations } from './my-organizations.ts';
 import { contactFillFrom, directoryNamesFrom } from './kept-names.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
@@ -542,6 +543,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
         userId,
       ),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
+    myOrganizations: createMyOrganizations({
+      database,
+      services: (correlationId) => ({ keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId }),
+    }),
     listMembers: (orgId, correlationId) =>
       membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId }, orgId),
     acceptanceConfirmations: createAcceptanceConfirmations({
