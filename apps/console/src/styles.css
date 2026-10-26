@@ -376,3 +376,128 @@ button:disabled {
 .stepped p {
   margin: 0;
 }
+
+/* Approvals (6B1): the lists and one request's page, as a statement reads. */
+.subtabs {
+  display: flex;
+  gap: 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.subtabs a {
+  padding: 6px 0;
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: 0.88rem;
+  border-bottom: 2px solid transparent;
+}
+
+.subtabs a.on {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--ink);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.row-main {
+  display: grid;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.row-main .muted {
+  font-size: 0.84rem;
+}
+
+.amount {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.amount.big {
+  font-size: 1.85rem;
+}
+
+.kicker {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+.back {
+  font-size: 0.88rem;
+  justify-self: start;
+}
+
+.facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 16px;
+  border-top: 1px solid var(--rule);
+  padding-top: 12px;
+}
+
+.facts dt {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.facts dd {
+  margin: 0;
+  text-align: right;
+  font-size: 0.9rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.facts .reason {
+  display: block;
+}
+
+.decide {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.fine {
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.field {
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+textarea {
+  font: inherit;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  resize: vertical;
+}

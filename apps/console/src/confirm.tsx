@@ -6,6 +6,8 @@
 // change offers a choice, each is shown with its words and
 // none is picked for them (decisions 8, 11): Confirm waits for one. Words that
 // can't be loaded are said, and nothing can be confirmed without them.
+// A change the API states no words for (a reject: one outcome, no signed
+// statement) is confirmed with the console's own words instead (6B1).
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 
@@ -24,9 +26,10 @@ interface Statement {
 }
 
 /** The words of one change, as the API confirms changes with them now: read again on each opening. */
-function useStatement(id: string) {
+function useStatement(id: string | undefined) {
   return useQuery({
     queryKey: ['statements'],
+    enabled: id !== undefined,
     queryFn: () => api.get<{ readonly statements: readonly Statement[] }>('/v1/statements'),
     staleTime: 0,
     refetchOnMount: 'always',
@@ -35,8 +38,10 @@ function useStatement(id: string) {
 }
 
 export interface ConfirmProps {
-  /** The statement set, as GET /v1/statements names it. */
-  readonly statement: string;
+  /** The statement set, as GET /v1/statements names it; or `text` instead, for a change the API states no words for. */
+  readonly statement?: string;
+  /** The console's own words for a change with one outcome and no statement (a reject). */
+  readonly text?: string;
   readonly title: string;
   /** What the change is, for this one thing (its supplier, amount…), above the consequence. */
   readonly children?: ReactNode;
@@ -46,9 +51,21 @@ export interface ConfirmProps {
   readonly onCancel: () => void;
   /** While the change is being sent: nothing can be pressed twice. */
   readonly busy?: boolean;
+  /** False while what the change needs isn't given yet (a reject's reason): Confirm waits. */
+  readonly ready?: boolean;
 }
 
-export function Confirm({ statement, title, children, confirmLabel, onConfirm, onCancel, busy = false }: ConfirmProps) {
+export function Confirm({
+  statement,
+  text,
+  title,
+  children,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  busy = false,
+  ready = true,
+}: ConfirmProps) {
   const words = useStatement(statement);
   const [chosen, setChosen] = useState<string | null>(null);
   const titleId = useId();
@@ -57,8 +74,11 @@ export function Confirm({ statement, title, children, confirmLabel, onConfirm, o
     cancel.current?.focus();
   }, []);
   // Words only once read afresh, and none after a failed read (whatever was read before).
+  const fetching = statement !== undefined && words.isFetching;
+  const unloaded = statement !== undefined && !words.isFetching && (words.isError || words.data === undefined);
   const read = !words.isFetching && !words.isError;
-  const choices = read ? (words.data?.words ?? []) : [];
+  const served = read ? (words.data?.words ?? []) : [];
+  const choices = text === undefined ? served : [{ choice: 'confirm', text }];
   const single = choices.length === 1 ? choices[0] : undefined;
   const picked = single?.choice ?? chosen;
   return (
@@ -74,8 +94,8 @@ export function Confirm({ statement, title, children, confirmLabel, onConfirm, o
       >
         <h2 id={titleId}>{title}</h2>
         {children}
-        {words.isFetching && <p role="status">{t('loading')}</p>}
-        {!words.isFetching && (words.isError || words.data === undefined) && (
+        {fetching && <p role="status">{t('loading')}</p>}
+        {unloaded && (
           <p className="notice" role="alert">
             {t('confirm.unloaded')}
           </p>
@@ -107,7 +127,7 @@ export function Confirm({ statement, title, children, confirmLabel, onConfirm, o
           <button
             type="button"
             className="primary"
-            disabled={busy || picked === null}
+            disabled={busy || !ready || picked === null}
             onClick={() => {
               if (picked !== null) onConfirm(picked);
             }}

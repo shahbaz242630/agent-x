@@ -15,6 +15,18 @@ export function Failed({ onRetry }: { readonly onRetry: () => void }) {
   );
 }
 
+/** A part of a page that couldn't load, inside the shell: said in place, with a retry. */
+export function Retry({ onRetry }: { readonly onRetry: () => void }) {
+  return (
+    <div className="notice" role="alert">
+      <p>{t('error.body')}</p>
+      <button type="button" className="secondary" onClick={onRetry}>
+        {t('error.retry')}
+      </button>
+    </div>
+  );
+}
+
 export function NotFound() {
   return (
     <section className="stack">
