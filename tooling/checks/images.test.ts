@@ -56,7 +56,8 @@ const OUR_IMAGE = 'agentx-app:local';
 describe('SEC-SC-02 container images are pinned by digest', () => {
   it('finds the images (so the checks below are not vacuous)', () => {
     expect(Object.keys(compose).length).toBeGreaterThanOrEqual(5);
-    expect(dockerfile).toHaveLength(3);
+    // The dependencies, the console's build, the place file and the image itself (Dockerfile).
+    expect(dockerfile).toHaveLength(4);
   });
 
   it('pins every third-party image in the compose stack', () => {

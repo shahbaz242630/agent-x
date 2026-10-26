@@ -1,8 +1,8 @@
 # The one image for the API, the migration job, the database set-up job, the
 # operator's command and, later, the worker (ADR-001): the same files, different start commands. Node
-# 24 runs the TypeScript source itself (type stripping), so there is no build
-# step and the image holds exactly the files the repository holds, and one
-# data file beside them: DB-IP's place file (below).
+# 24 runs the TypeScript source itself (type stripping), so the server has no build
+# step and the image holds exactly the files the repository holds, plus two
+# things made beside them: DB-IP's place file and the console's build (below).
 #
 # Everything that goes in is pinned: the base image by digest (SEC-SC-02), pnpm
 # by the sha512 in package.json (Corepack checks it), every dependency by the
@@ -29,6 +29,20 @@ COPY packages/platform/package.json packages/platform/
 # The apps and what they depend on inside the workspace (the `...` suffix), production dependencies only.
 RUN corepack enable pnpm \
   && pnpm install --frozen-lockfile --prod --filter "@agentx/api..." --filter "@agentx/migrate..." --filter "@agentx/db-setup..." --filter "@agentx/operator..."
+
+# The console (Phase 6 6A1): built here from its sources and the lockfile, its
+# build tools (Vite) installed in this stage alone. Only the built files, the
+# page and its hashed assets, reach the image (console-files.ts serves them).
+FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS console
+
+ENV COREPACK_ENV_FILE=0
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps/console/package.json apps/console/
+RUN corepack enable pnpm && pnpm install --frozen-lockfile --filter "@agentx/console"
+COPY apps/console apps/console
+RUN pnpm --filter "@agentx/console" run build
 
 # The activity log's place file (Phase 3 L4, client-clues.ts): DB-IP's IP to
 # City Lite, October 2026, unchanged. IP Geolocation by DB-IP
@@ -72,6 +86,7 @@ COPY packages/platform packages/platform
 COPY db db
 # The file keeps its mode; COPY's --chmod would set the new geo folder's too, and nothing could open it.
 COPY --from=places /places/dbip-city-lite.mmdb geo/dbip-city-lite.mmdb
+COPY --from=console /app/apps/console/dist apps/console/dist
 
 # Every AGENTX_ setting but the release comes from the deployment (compose,
 # Azure): each job refuses the others' settings, so the image sets none.
