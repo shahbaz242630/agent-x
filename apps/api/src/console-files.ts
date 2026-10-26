@@ -121,14 +121,15 @@ function isPage(url: string): boolean {
   return !API_SEGMENTS.has(first);
 }
 
-function send(request: IncomingMessage, response: ServerResponse, file: ConsoleFile, cacheControl?: string): void {
+function send(response: ServerResponse, file: ConsoleFile, cacheControl?: string): void {
   response.writeHead(200, {
     ...SECURITY_HEADERS,
     ...(cacheControl !== undefined && { 'cache-control': cacheControl }),
     'content-type': file.type,
     'content-length': file.body.length,
   });
-  response.end(request.method === 'HEAD' ? undefined : file.body);
+  // Node itself sends no body on an answer to a HEAD (the mutation pass, S149), only these headers.
+  response.end(file.body);
 }
 
 /**
@@ -140,11 +141,11 @@ function answerConsoleFile(files: ConsoleFiles, request: IncomingMessage, respon
   const url = request.url ?? '';
   const asset = files.assets.get(url);
   if (asset !== undefined) {
-    send(request, response, asset, KEPT);
+    send(response, asset, KEPT);
     return true;
   }
   if (!isPage(url)) return false;
-  send(request, response, { body: files.page, type: 'text/html; charset=utf-8' });
+  send(response, { body: files.page, type: 'text/html; charset=utf-8' });
   return true;
 }
 
