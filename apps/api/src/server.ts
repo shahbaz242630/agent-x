@@ -116,6 +116,8 @@ import { type ListContacts, registerRegisteredContacts } from './registered-cont
 import { registerMemberChanges } from './member-changes.ts';
 import { type ListMembers, registerMembers } from './members.ts';
 import { type ListMyOrganizations, registerMyOrganizations } from './my-organizations.ts';
+import { registerStatements } from './statements.ts';
+import { registerBrowserErrors } from './browser-errors.ts';
 import { registerIdempotencyKeys } from './write-operations.ts';
 
 export interface ServerOptions {
@@ -390,6 +392,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     securityEvents,
   });
   registerMyOrganizations(app, options.myOrganizations);
+  registerStatements(app);
+  registerBrowserErrors(app, logger, signIn === undefined ? undefined : (cookie) => signIn.holderOf(cookie));
   registerMembers(app, options.listMembers);
   registerMemberChanges(app, options.membershipChanges);
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });

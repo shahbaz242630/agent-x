@@ -15,12 +15,12 @@ import { APPROVAL_WAITS, type ApprovalWaitHours } from '@agentx/core/modules/spe
 import { z } from 'zod';
 
 /** The words the choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
-const APPROVAL_WAIT_STATEMENT =
+export const APPROVAL_WAIT_STATEMENT =
   'Requests asked from now on wait this many hours for an approver; past it each expires and the money held for it ' +
   'is freed. Requests already waiting keep the wait they were asked under.';
 
 /** The version of APPROVAL_WAIT_STATEMENT each event names: raised with any change to its words. */
-const APPROVAL_WAIT_STATEMENT_VERSION = 1;
+export const APPROVAL_WAIT_STATEMENT_VERSION = 1;
 
 /** The choice as an organisation policy's body names it. */
 export const APPROVAL_WAIT_HOURS = z

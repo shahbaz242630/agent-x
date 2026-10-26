@@ -141,7 +141,7 @@ const WAITING_CHOICES = ['reject', 'leave'] as const;
 export type WaitingChoice = (typeof WAITING_CHOICES)[number];
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the policy's event keeps the version. */
-const WAITING_STATEMENTS = {
+export const WAITING_STATEMENTS = {
   reject:
     'Once you confirm, each request listed is rejected at once and the money held for it freed, with the rules that ' +
     'refuse it kept on its record; the agent learns only that a person rejected it, and asks again. Up to 20 are ' +
@@ -153,7 +153,7 @@ const WAITING_STATEMENTS = {
 } as const satisfies Record<WaitingChoice, string>;
 
 /** The version of WAITING_STATEMENTS each change names: raised with any change to their words. */
-const WAITING_STATEMENT_VERSION = 4;
+export const WAITING_STATEMENT_VERSION = 4;
 
 /** A change's choice, as its bodies name it: only when the change would reject a waiting request. */
 export const WAITING_REQUESTS = z

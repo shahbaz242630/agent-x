@@ -285,3 +285,94 @@ button:disabled {
     animation: none !important;
   }
 }
+
+/* The shared confirm (6A2): the consequence in the API's words, over the page. */
+.veil {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(15 23 32 / 0.45);
+  z-index: 10;
+}
+
+.dialog {
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.dialog h2,
+.stepped h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.statement {
+  margin: 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+.options {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.options legend {
+  padding: 0 0 6px;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.option:has(input:checked) {
+  border-color: var(--ink);
+}
+
+.option input {
+  margin: 3px 0 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* Back from signing in again: the change to confirm, above the page. */
+.stepped {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+.stepped p {
+  margin: 0;
+}

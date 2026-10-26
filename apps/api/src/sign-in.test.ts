@@ -99,6 +99,10 @@ class StandIn implements SignIn {
     if (this.lookupFails !== undefined) return Promise.reject(this.lookupFails);
     return Promise.resolve(this.live.get(cookie));
   }
+
+  holderOf(cookie: string) {
+    return Promise.resolve(this.live.get(cookie)?.userId);
+  }
 }
 
 const servers: FastifyInstance[] = [];

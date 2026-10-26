@@ -70,7 +70,7 @@ import { CONSENT_LAPSED } from './consent-lapses.ts';
 import { IntegrityFailure } from './errors.ts';
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
-const STATEMENTS = {
+export const STATEMENTS = {
   cancel:
     'Every request waiting for approval, approved or ready under it is cancelled now and the money held for it freed. ' +
     'This can’t be undone: the agent asks again once it is resumed.',
@@ -85,7 +85,7 @@ const STATEMENTS = {
  * The version of STATEMENTS each event names: raised with any change to their
  * words (2: an earlier stop's cancel; 3: a supplier's fresh start; S113).
  */
-const STATEMENT_VERSION = 4;
+export const STATEMENT_VERSION = 4;
 
 /** A suspend's choice, as its body names it. */
 const PENDING_REQUESTS = z
@@ -102,7 +102,7 @@ export const SUSPEND_BODY = z.strictObject({ pendingRequests: PENDING_REQUESTS }
  * The words a supplier's reactivation is confirmed with (decision 9, C3d),
  * by version, as STATEMENTS: a fresh start cancels, an un-pause keeps them.
  */
-const REACTIVATE_STATEMENTS = {
+export const REACTIVATE_STATEMENTS = {
   cancel:
     'A fresh start: every request to this supplier waiting for approval, approved or ready is cancelled now and ' +
     'the money held for it freed. This can’t be undone: the agent asks again.',
@@ -117,7 +117,7 @@ const REACTIVATE_STATEMENTS = {
  * The version of REACTIVATE_STATEMENTS each event names: raised with any
  * change to their words (2: new details may carry them, E3).
  */
-const REACTIVATE_STATEMENT_VERSION = 3;
+export const REACTIVATE_STATEMENT_VERSION = 3;
 
 /** A supplier's reactivation: the reactivator's choice alone (decision 9). */
 export const REACTIVATE_BODY = z
@@ -139,7 +139,7 @@ export const reactivationChoiceDetails = (choice: PendingChoice) =>
  * The words an organisation's freeze is confirmed with (decision 10, D1), by
  * version, as STATEMENTS: the console's confirm (decision 11) shows them.
  */
-const FREEZE_STATEMENTS = {
+export const FREEZE_STATEMENTS = {
   cancel:
     'Every spend request of the organisation waiting for approval, approved or ready is cancelled now and the money ' +
     'held for it freed. This can’t be undone: the agents ask again once it is unfrozen.',
@@ -150,7 +150,7 @@ const FREEZE_STATEMENTS = {
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of FREEZE_STATEMENTS each event names: raised with any change to their words (2: a fresh start, D2). */
-const FREEZE_STATEMENT_VERSION = 3;
+export const FREEZE_STATEMENT_VERSION = 3;
 
 /** A freeze's body: the member's choice, and their confirmation (decision 11: the console's are-you-sure). */
 export const FREEZE_BODY = z
@@ -175,7 +175,7 @@ export const freezeChoiceDetails = (choice: PendingChoice) =>
  * The words an unfreeze is confirmed with (decision 14, D2), by version, as
  * REACTIVATE_STATEMENTS: a fresh start cancels, an un-pause keeps them.
  */
-const UNFREEZE_STATEMENTS = {
+export const UNFREEZE_STATEMENTS = {
   cancel:
     'A fresh start: every spend request of the organisation waiting for approval, approved or ready is cancelled ' +
     'now and the money held for it freed. This can’t be undone: the agents ask again.',
@@ -185,7 +185,7 @@ const UNFREEZE_STATEMENTS = {
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of UNFREEZE_STATEMENTS each event names: raised with any change to their words. */
-const UNFREEZE_STATEMENT_VERSION = 2;
+export const UNFREEZE_STATEMENT_VERSION = 2;
 
 /** An unfreeze's choice, as its bodies name it (decision 14). */
 export const UNFREEZE_PENDING_REQUESTS = z
@@ -203,7 +203,7 @@ export const unfreezeChoiceDetails = (choice: PendingChoice) =>
 export const CHOICE_BODY_LIMIT = 64;
 
 /** The words a payee registration's choice is confirmed with (decision 8), by version, as STATEMENTS. */
-const PAYEE_STATEMENTS = {
+export const PAYEE_STATEMENTS = {
   cancel:
     'Once the partner confirms the new bank details, every request to this supplier waiting for approval, approved ' +
     'or ready is cancelled and the money held for it freed. This can’t be undone: the agent asks again once the ' +
@@ -216,7 +216,7 @@ const PAYEE_STATEMENTS = {
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of PAYEE_STATEMENTS each event names: raised with any change to their words (2: cancel always, C3c). */
-const PAYEE_STATEMENT_VERSION = 3;
+export const PAYEE_STATEMENT_VERSION = 3;
 
 /** A payee registration's choice, as its body names it (decision 8). */
 export const PAYEE_PENDING_REQUESTS = z
@@ -240,7 +240,7 @@ export const payeeChoiceDetails = (choice: PendingChoice) =>
  * isn't approved under the old ones (decision 16, S115: the approver
  * re-checks it, E5).
  */
-const DETAILS_STATEMENTS = {
+export const DETAILS_STATEMENTS = {
   cancel:
     'Once you confirm the new details, every request to this supplier waiting for approval, approved or ready is ' +
     'cancelled and the money held for it freed, whatever the supplier’s status. This can’t be undone: the agent ' +

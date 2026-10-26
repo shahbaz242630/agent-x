@@ -103,6 +103,7 @@ async function server(
     beginStepUp: () => Promise.reject(new Error('not here')),
     complete: () => Promise.reject(new Error('not here')),
     signOut: () => Promise.resolve(undefined),
+    holderOf: () => Promise.resolve(undefined),
     signedIn: (cookie) => {
       asked.cookies.push(cookie);
       return Promise.resolve(cookie === COOKIE ? SESSION : undefined);

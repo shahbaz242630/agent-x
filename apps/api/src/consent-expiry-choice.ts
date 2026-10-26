@@ -25,7 +25,7 @@ export const CONSENT_EXPIRY_CHOSEN = 'funding_source.consent_expiry_chosen';
 export const CONSENT_EXPIRY_EVENTS = { type: SOURCES.subject, actions: [CONSENT_EXPIRY_CHOSEN] } as const;
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
-const CONSENT_EXPIRY_STATEMENTS = {
+export const CONSENT_EXPIRY_STATEMENTS = {
   cancel:
     'When this account’s bank consent runs out, every request waiting for approval, approved or ready on it is ' +
     'cancelled and the money held for it freed. The agents ask again once the account is linked or renewed.',
@@ -36,7 +36,7 @@ const CONSENT_EXPIRY_STATEMENTS = {
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of CONSENT_EXPIRY_STATEMENTS each event names: raised with any change to their words. */
-const CONSENT_EXPIRY_STATEMENT_VERSION = 1;
+export const CONSENT_EXPIRY_STATEMENT_VERSION = 1;
 
 /** The choice as a body names it: confirmed by the admin, no default. */
 export const CONSENT_EXPIRY = z

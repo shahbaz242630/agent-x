@@ -304,8 +304,11 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
       idleEndsAt: new Date(START.getTime() + 1800 * 1000),
     });
     expect(await signIn.signedIn('A'.repeat(43))).toBeUndefined();
+    expect(await signIn.holderOf(done.cookie)).toBe(done.userId);
+    expect(await signIn.holderOf('A'.repeat(43))).toBeUndefined();
     await signIn.signOut(done.cookie);
     expect(await signIn.signedIn(done.cookie)).toBeUndefined();
+    expect(await signIn.holderOf(done.cookie)).toBeUndefined();
   });
 
   it('gives up looking a session up after 10 seconds, a wait for a lock included, rather than hang', async () => {

@@ -53,15 +53,23 @@ export interface RequestOptions {
   readonly organization?: string | undefined;
   /** A write's JSON body; a write with none sends no body at all. */
   readonly body?: unknown;
+  /** A write's idempotency key, when a retry must be the same write (a step-up's confirm); a fresh one otherwise. */
+  readonly idempotencyKey?: string | undefined;
 }
 
-/** Sends one request and gives back its JSON answer, or throws ApiError. */
-async function send<T>(method: 'GET' | 'POST', path: string, options: RequestOptions): Promise<T> {
+/** An answer the API gave with a success status, and that status: a step-up's ask is told apart by its 202. */
+export interface Answered<T> {
+  readonly status: number;
+  readonly body: T;
+}
+
+/** Sends one request and gives back its status and JSON answer, or throws ApiError. */
+async function send<T>(method: 'GET' | 'POST', path: string, options: RequestOptions): Promise<Answered<T>> {
   const headers = new Headers({ accept: 'application/json' });
   const zone = timeZone();
   if (zone !== undefined) headers.set('x-time-zone', zone);
   if (options.organization !== undefined) headers.set('agentx-organization', options.organization);
-  if (method === 'POST') headers.set('idempotency-key', crypto.randomUUID());
+  if (method === 'POST') headers.set('idempotency-key', options.idempotencyKey ?? crypto.randomUUID());
   let body: string | null = null;
   if (options.body !== undefined) {
     headers.set('content-type', 'application/json');
@@ -69,12 +77,16 @@ async function send<T>(method: 'GET' | 'POST', path: string, options: RequestOpt
   }
   const response = await fetch(path, { method, headers, body, credentials: 'same-origin', cache: 'no-store' });
   if (!response.ok) throw new ApiError(response.status, await codeOf(response));
-  return (await response.json()) as T;
+  return { status: response.status, body: (await response.json()) as T };
 }
 
+const bodyOf = async <T>(answered: Promise<Answered<T>>): Promise<T> => (await answered).body;
+
 export const api = {
-  get: <T>(path: string, options: RequestOptions = {}): Promise<T> => send<T>('GET', path, options),
-  post: <T>(path: string, options: RequestOptions = {}): Promise<T> => send<T>('POST', path, options),
+  get: <T>(path: string, options: RequestOptions = {}): Promise<T> => bodyOf(send<T>('GET', path, options)),
+  post: <T>(path: string, options: RequestOptions = {}): Promise<T> => bodyOf(send<T>('POST', path, options)),
+  /** A write whose status matters: 202 is a step-up's ask, not the change (step-up.ts). */
+  write: <T>(path: string, options: RequestOptions = {}): Promise<Answered<T>> => send<T>('POST', path, options),
 };
 
 /** Whether an error means the person isn't signed in (any more): their session ended, or never was. */

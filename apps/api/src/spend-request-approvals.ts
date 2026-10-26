@@ -118,7 +118,7 @@ export const RECHECK_STATEMENT =
   'the month its money is held in are unchanged.';
 
 /** The version of RECHECK_STATEMENT each re-check names: raised with any change to its words. */
-const RECHECK_STATEMENT_VERSION = 1;
+export const RECHECK_STATEMENT_VERSION = 1;
 
 /** Past the mandate's own limits only an admin approves, as only an admin sets them (decision 23): ADMIN_APPROVAL_ONLY. */
 const adminPastTheLimits = (approver: { readonly role: string }, reasons: readonly ReasonCode[]): void => {

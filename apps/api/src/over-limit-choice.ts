@@ -14,7 +14,7 @@ import type { ReasonCode } from '@agentx/core/shared-kernel';
 import { z } from 'zod';
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
-const OVER_LIMIT_STATEMENTS = {
+export const OVER_LIMIT_STATEMENTS = {
   refuse:
     'A request above this mandate’s per-order or monthly limit is refused. The agent needs a new version of the ' +
     'mandate to spend more.',
@@ -25,7 +25,7 @@ const OVER_LIMIT_STATEMENTS = {
 } as const satisfies Record<OverLimit, string>;
 
 /** The version of OVER_LIMIT_STATEMENTS each event names: raised with any change to their words. */
-const OVER_LIMIT_STATEMENT_VERSION = 1;
+export const OVER_LIMIT_STATEMENT_VERSION = 1;
 
 /** The choice as a draft's body names it. */
 export const OVER_LIMIT_CHOICE = z

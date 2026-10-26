@@ -112,13 +112,16 @@ export async function loadConsoleFiles(
 /** A page's query: the filters a console page keeps in its address, in the characters a URL needs no escaping for. */
 const PAGE_QUERY = /^[A-Za-z0-9\-._~%=&+]{0,512}$/;
 
+/** Whether a path, with no query, names a console page, not an API address (browser-errors.ts checks reports by it). */
+export function isPagePath(path: string): boolean {
+  return PAGE_PATH.test(path) && !API_SEGMENTS.has(path.split('/')[1] ?? '');
+}
+
 /** Whether an address names a console page, not an API address: its path, and its query if any. */
 function isPage(url: string): boolean {
   const [path = '', query, ...rest] = url.split('?');
   if (rest.length > 0 || (query !== undefined && !PAGE_QUERY.test(query))) return false;
-  if (!PAGE_PATH.test(path)) return false;
-  const first = path.split('/')[1] ?? '';
-  return !API_SEGMENTS.has(first);
+  return isPagePath(path);
 }
 
 function send(response: ServerResponse, file: ConsoleFile, cacheControl?: string): void {

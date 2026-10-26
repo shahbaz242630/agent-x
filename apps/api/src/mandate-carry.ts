@@ -83,7 +83,7 @@ const SUPERSEDE_CHOICES = ['cancel', 'carry'] as const;
 export type SupersedeChoice = (typeof SUPERSEDE_CHOICES)[number];
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
-const SUPERSEDE_STATEMENTS = {
+export const SUPERSEDE_STATEMENTS = {
   cancel:
     'Once you accept the new version, every request under the version in force that is waiting for approval, ' +
     'approved or ready is cancelled and the money held for it freed. This can’t be undone: the agent asks again ' +
@@ -100,7 +100,7 @@ const SUPERSEDE_STATEMENTS = {
 } as const satisfies Record<SupersedeChoice, string>;
 
 /** The version of SUPERSEDE_STATEMENTS each acceptance names: raised with any change to their words. */
-const SUPERSEDE_STATEMENT_VERSION = 2;
+export const SUPERSEDE_STATEMENT_VERSION = 2;
 
 /** The choice as an acceptance's event keeps it, with its words' version (none for a first version). */
 export const supersedeChoiceDetails = (choice: SupersedeChoice | null) =>

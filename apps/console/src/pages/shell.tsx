@@ -2,6 +2,7 @@ import { Link, Outlet } from '@tanstack/react-router';
 
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
+import { SteppedUp } from './stepped-up.tsx';
 
 const TABS = [
   { to: '/approvals', label: 'nav.approvals' },
@@ -45,6 +46,7 @@ export function Shell() {
         </p>
       )}
       <main className="body">
+        <SteppedUp />
         <Outlet />
       </main>
     </div>
