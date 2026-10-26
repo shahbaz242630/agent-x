@@ -7,6 +7,7 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { api } from './api.ts';
+import { t } from './text.ts';
 
 export type Status =
   | 'VALIDATING'
@@ -18,10 +19,12 @@ export type Status =
   | 'EXPIRED'
   | 'CANCELLED';
 
-interface Reason {
+export interface Reason {
   readonly code: string;
   readonly message: string;
 }
+
+type Decision = 'DENY' | 'REQUIRE_NEW_MANDATE' | 'REQUIRE_APPROVAL' | 'ALLOW';
 
 interface Named {
   readonly id: string;
@@ -31,7 +34,7 @@ interface Named {
 export interface ListedRequest {
   readonly id: string;
   readonly status: Status;
-  readonly decision: 'DENY' | 'REQUIRE_NEW_MANDATE' | 'REQUIRE_APPROVAL' | 'ALLOW';
+  readonly decision: Decision;
   readonly reasons: readonly Reason[];
   readonly amountMinor: number;
   readonly currency: string;
@@ -53,6 +56,21 @@ export interface RequestDetails extends ListedRequest {
   readonly voiding: { readonly at: string; readonly reasons: readonly Reason[] } | null;
 }
 
+/**
+ * What an approve's ask answered (SpendRequestApproveAsked): with `recheck`,
+ * how it was decided and how it is weighed now; with `rejection`, the rules
+ * that stop it now (decision 18), so that confirming rejects it instead.
+ */
+export interface ApproveAsked {
+  readonly recheck: {
+    readonly decidedAs: Decision;
+    readonly decidedReasons: readonly Reason[];
+    readonly decision: Decision;
+    readonly reasons: readonly Reason[];
+  } | null;
+  readonly rejection: readonly (Reason & { readonly whatToDo: string })[] | null;
+}
+
 interface Page {
   readonly requests: readonly ListedRequest[];
   readonly next: string | null;
@@ -61,6 +79,15 @@ interface Page {
 
 /** The contract's page size cap: 50 a page. */
 const PAGE = 50;
+
+/** Each list's address, and the key its answer holds the requests under. */
+const LISTS = {
+  waiting: { path: '/v1/approvals', key: 'waiting' },
+  all: { path: '/v1/spend-requests', key: 'spendRequests' },
+} as const;
+
+type Listed = Readonly<Record<'waiting' | 'spendRequests', readonly ListedRequest[] | undefined>> &
+  Omit<Page, 'requests'>;
 
 const pageQuery = (after: string | undefined): string =>
   new URLSearchParams({ limit: String(PAGE), ...(after !== undefined && { after }) }).toString();
@@ -72,21 +99,9 @@ export function useRequestList(list: 'waiting' | 'all', organization: string) {
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last: Page) => last.next ?? undefined,
     queryFn: async ({ pageParam }): Promise<Page> => {
-      const query = pageQuery(pageParam);
-      if (list === 'waiting') {
-        const { waiting, next, unchecked } = await api.get<{
-          readonly waiting: readonly ListedRequest[];
-          readonly next: string | null;
-          readonly unchecked: readonly string[];
-        }>(`/v1/approvals?${query}`, { organization });
-        return { requests: waiting, next, unchecked };
-      }
-      const { spendRequests, next, unchecked } = await api.get<{
-        readonly spendRequests: readonly ListedRequest[];
-        readonly next: string | null;
-        readonly unchecked: readonly string[];
-      }>(`/v1/spend-requests?${query}`, { organization });
-      return { requests: spendRequests, next, unchecked };
+      const { path, key } = LISTS[list];
+      const answer = await api.get<Listed>(`${path}?${pageQuery(pageParam)}`, { organization });
+      return { requests: answer[key] ?? [], next: answer.next, unchecked: answer.unchecked };
     },
   });
 }
@@ -141,3 +156,16 @@ export function leftText(
   const minutes = Math.floor(left / 60_000);
   return minutes >= 60 ? { hours: Math.floor(minutes / 60) } : { minutes: Math.max(minutes, 1) };
 }
+
+/** What's left before a waiting request expires, as its row and page say it. */
+function leftWords(expiresAt: string): string {
+  const left = leftText(expiresAt);
+  if (left === null) return t('approvals.left.past');
+  return 'hours' in left
+    ? t('approvals.left.hours', { n: String(left.hours) })
+    : t('approvals.left.minutes', { n: String(left.minutes) });
+}
+
+/** The time left on a request still waiting for approval; none for any other. */
+export const waitingLeft = (request: ListedRequest): string | null =>
+  request.status === 'APPROVAL_REQUIRED' && request.expiresAt !== null ? leftWords(request.expiresAt) : null;

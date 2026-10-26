@@ -37,11 +37,11 @@ function useStatement(id: string | undefined) {
   });
 }
 
-export interface ConfirmProps {
-  /** The statement set, as GET /v1/statements names it; or `text` instead, for a change the API states no words for. */
-  readonly statement?: string;
-  /** The console's own words for a change with one outcome and no statement (a reject). */
-  readonly text?: string;
+/** Where the words come from: the API's set by its id, or the console's own for a change the API states none for (a reject). */
+type WordsFrom =
+  { readonly statement: string; readonly text?: never } | { readonly text: string; readonly statement?: never };
+
+export type ConfirmProps = WordsFrom & {
   readonly title: string;
   /** What the change is, for this one thing (its supplier, amount…), above the consequence. */
   readonly children?: ReactNode;
@@ -53,7 +53,7 @@ export interface ConfirmProps {
   readonly busy?: boolean;
   /** False while what the change needs isn't given yet (a reject's reason): Confirm waits. */
   readonly ready?: boolean;
-}
+};
 
 export function Confirm({
   statement,
@@ -74,11 +74,12 @@ export function Confirm({
     cancel.current?.focus();
   }, []);
   // Words only once read afresh, and none after a failed read (whatever was read before).
-  const fetching = statement !== undefined && words.isFetching;
-  const unloaded = statement !== undefined && !words.isFetching && (words.isError || words.data === undefined);
-  const read = !words.isFetching && !words.isError;
-  const served = read ? (words.data?.words ?? []) : [];
-  const choices = text === undefined ? served : [{ choice: 'confirm', text }];
+  const served = statement !== undefined;
+  const fetching = served && words.isFetching;
+  const unloaded = served && !words.isFetching && (words.isError || words.data === undefined);
+  let choices: readonly Words[] = [];
+  if (text !== undefined) choices = [{ choice: 'confirm', text }];
+  else if (!words.isFetching && !words.isError) choices = words.data?.words ?? [];
   const single = choices.length === 1 ? choices[0] : undefined;
   const picked = single?.choice ?? chosen;
   return (

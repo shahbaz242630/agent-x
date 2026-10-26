@@ -7,7 +7,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useMemo, useState } from 'react';
 
-import { ApiError } from '../api.ts';
+import { isRefusal } from '../api.ts';
 import { confirm, forget, pendingFor, STEPPED } from '../step-up.ts';
 import { t } from '../text.ts';
 
@@ -45,7 +45,7 @@ export function SteppedUp() {
       // Whatever the change touched reads again.
       await queries.invalidateQueries();
     } catch (error) {
-      setSent(error instanceof ApiError && error.status < 500 ? 'refused' : 'failed');
+      setSent(isRefusal(error) ? 'refused' : 'failed');
     }
   };
   if (sent === 'done' || sent === 'refused') {

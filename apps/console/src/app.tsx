@@ -13,10 +13,10 @@ import {
   useRouterState,
 } from '@tanstack/react-router';
 import type { ReactElement } from 'react';
-import { ApiError, isSignedOut } from './api.ts';
+import { isRefusal, isSignedOut } from './api.ts';
 import { Approvals } from './pages/approvals.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
-import { Failed, NotFound } from './pages/failed.tsx';
+import { Failed, Loading, NotFound } from './pages/failed.tsx';
 import { More } from './pages/more.tsx';
 import { RequestPage } from './pages/request.tsx';
 import { Shell } from './pages/shell.tsx';
@@ -31,15 +31,6 @@ import {
   useOrganizations,
   useSession,
 } from './session.tsx';
-import { t } from './text.ts';
-
-function Loading() {
-  return (
-    <p className="loading" role="status">
-      {t('loading')}
-    </p>
-  );
-}
 
 function SignedIn({ session }: { readonly session: Session }) {
   const organizations = useOrganizations();
@@ -97,9 +88,6 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
 ]);
 
-/** A refusal (4xx) answers the same however often it is asked: only a failure on the way is read again. */
-const refused = (error: unknown): boolean => error instanceof ApiError && error.status < 500;
-
 /** The console's queries: a 401 anywhere means the session is gone, so the session reads as none. */
 export function createQueries(): QueryClient {
   const queries: QueryClient = new QueryClient({
@@ -109,7 +97,7 @@ export function createQueries(): QueryClient {
       },
     }),
     defaultOptions: {
-      queries: { retry: (count, error) => !refused(error) && count < 2, staleTime: 30_000 },
+      queries: { retry: (count, error) => !isRefusal(error) && count < 2, staleTime: 30_000 },
     },
   });
   return queries;

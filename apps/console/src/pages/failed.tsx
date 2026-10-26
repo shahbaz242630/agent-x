@@ -3,6 +3,15 @@ import { Link } from '@tanstack/react-router';
 import { t } from '../text.ts';
 import { Panel } from './panel.tsx';
 
+/** A page, or a part of one, still loading. */
+export function Loading() {
+  return (
+    <p className="loading" role="status">
+      {t('loading')}
+    </p>
+  );
+}
+
 /** A page that couldn't load: say so plainly, and offer the one thing to do. */
 export function Failed({ onRetry }: { readonly onRetry: () => void }) {
   return (

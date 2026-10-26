@@ -4,25 +4,13 @@
 // cancelled. Look A "Statement": amounts in a column, nothing shouts.
 import { Link } from '@tanstack/react-router';
 
-import { amountText, leftText, type ListedRequest, timeText, useRequestList } from '../requests.ts';
+import { amountText, type ListedRequest, timeText, useRequestList, waitingLeft } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
-import { Retry } from './failed.tsx';
-
-/** What's left before a waiting request expires, as its row and page say it. */
-export function leftWords(expiresAt: string): string {
-  const left = leftText(expiresAt);
-  if (left === null) return t('approvals.left.past');
-  return 'hours' in left
-    ? t('approvals.left.hours', { n: String(left.hours) })
-    : t('approvals.left.minutes', { n: String(left.minutes) });
-}
+import { Loading, Retry } from './failed.tsx';
 
 function Row({ request }: { readonly request: ListedRequest }) {
-  const when =
-    request.status === 'APPROVAL_REQUIRED' && request.expiresAt !== null
-      ? leftWords(request.expiresAt)
-      : [t(`status.${request.status}`), timeText(request.changedAt)].join(' · ');
+  const when = waitingLeft(request) ?? [t(`status.${request.status}`), timeText(request.changedAt)].join(' · ');
   return (
     <li>
       <Link to="/approvals/$id" params={{ id: request.id }} className="row">
@@ -55,11 +43,7 @@ export function Approvals({ list }: { readonly list: 'waiting' | 'all' }) {
           {t('approvals.all')}
         </Link>
       </nav>
-      {requests.isPending && (
-        <p className="loading" role="status">
-          {t('loading')}
-        </p>
-      )}
+      {requests.isPending && <Loading />}
       {requests.isError && <Retry onRetry={() => void requests.refetch()} />}
       {requests.isSuccess && shown.length === 0 && (
         <p className="muted">{t(list === 'waiting' ? 'approvals.none' : 'approvals.noneAll')}</p>

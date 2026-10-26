@@ -99,5 +99,20 @@
   "request.refused.ORG_FROZEN": "This organisation is frozen, so nothing can be approved until an admin unfreezes it. Rejecting and cancelling still work.",
   "request.refused.FORBIDDEN": "Your role in this organisation can't do this. Ask an admin.",
   "request.refused.other": "Agent X didn't make this change (reason {code}). Nothing was changed.",
-  "request.failed": "Agent X couldn't be reached, so nothing was changed. Try again in a moment."
+  "request.failed": "Agent X couldn't be reached, so nothing was changed. Try again in a moment.",
+  "decision.DENY": "Denied",
+  "decision.REQUIRE_NEW_MANDATE": "Needs a new mandate",
+  "decision.REQUIRE_APPROVAL": "Needs approval",
+  "decision.ALLOW": "Allowed",
+  "request.decidedAs": "When it was decided",
+  "request.weighedNow": "Weighed now",
+  "request.cannotApproveTitle": "Approving can't go ahead",
+  "request.cannotApproveText": "Your organisation's rules as they are now stop this payment, so it can't be approved:",
+  "request.cannotApproveConfirmText": "Confirming rejects this request instead: nothing is paid, and the money held for it is freed. What stopped it is kept on record as the reason.",
+  "request.cannotApproveConfirm": "Reject it instead",
+  "request.rejectInsteadLabel": "Reject {amount} to {supplier}, as your rules now stop it",
+  "request.storageBlocked": "This browser keeps no site storage (a private window, or a policy), which signing in again for a change needs. Nothing was changed. Try a normal window.",
+  "request.refused.RECHECK_REQUIRED": "The supplier's details changed after this request was decided and were verified again, so it is approved only checked again. Its page now shows it: press Approve again to see how it is weighed now.",
+  "request.refused.RECHECK_NOT_OFFERED": "Nothing this request was decided on has changed in a way that needs a re-check. Its page now shows it: press Approve again.",
+  "request.refused.NOT_FOUND": "This request can't be found in this organisation any more. Nothing was changed."
 }

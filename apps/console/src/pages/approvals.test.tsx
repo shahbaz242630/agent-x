@@ -24,6 +24,25 @@ const OTHER = {
 const ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const SECOND = '0199a0f0-0000-7000-8000-0000000000b2';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000c0ffe';
+/** An approve's ask, waiting for the passkey: nothing re-weighed, nothing stopping it. */
+const ASKED = { stepUpChallengeId: CHALLENGE, recheck: null, rejection: null };
+const RECHECKED = {
+  ...ASKED,
+  recheck: {
+    fromSupplierVersionId: '0199a0f0-0000-7000-8000-0000000000d2',
+    supplierVersionId: '0199a0f0-0000-7000-8000-0000000000d3',
+    decidedAs: 'REQUIRE_APPROVAL',
+    decidedReasons: [{ code: 'APPROVAL_THRESHOLD', message: 'Over the approval line.' }],
+    decision: 'REQUIRE_APPROVAL',
+    reasons: [{ code: 'NEW_PAYEE', message: 'A new payee, verified by a second person.' }],
+  },
+};
+const STOPPED = {
+  ...ASKED,
+  rejection: [
+    { code: 'MONTHLY_CAP', message: 'Over the monthly cap as it is now.', whatToDo: 'Raise the cap, then ask again.' },
+  ],
+};
 const IN_A_DAY = new Date(Date.now() + 22 * 3_600_000 + 60_000).toISOString();
 
 const listed = (id: string, overrides: Record<string, unknown> = {}) => ({
@@ -244,7 +263,7 @@ describe('one request’s page (6B1)', () => {
   it('approves by step-up: asks, keeps the change, and goes to sign in again', async () => {
     signedIn();
     answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details() });
-    answer(`POST /v1/spend-requests/${ID}/approve`, { status: 202, body: { stepUpChallengeId: CHALLENGE } });
+    answer(`POST /v1/spend-requests/${ID}/approve`, { status: 202, body: ASKED });
     open(`/approvals/${ID}`);
 
     await userEvent.click(await screen.findByRole('button', { name: 'Approve' }));
@@ -261,23 +280,76 @@ describe('one request’s page (6B1)', () => {
     });
   });
 
-  it('approves one whose supplier changed only re-checked, after its words are confirmed', async () => {
+  it('approves one whose supplier changed re-checked: as decided and as weighed now, in the API words', async () => {
     signedIn();
     answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details({ needsRecheck: true }) });
-    answer(`POST /v1/spend-requests/${ID}/approve`, { status: 202, body: { stepUpChallengeId: CHALLENGE } });
+    answer(`POST /v1/spend-requests/${ID}/approve`, { status: 202, body: RECHECKED });
     open(`/approvals/${ID}`);
     expect(await screen.findByText(/The supplier's details changed after this request was decided/)).toBeDefined();
 
     await userEvent.click(screen.getByRole('button', { name: 'Approve' }));
     const dialog = await screen.findByRole('dialog', { name: 'Approve it, checked again?' });
     expect(await within(dialog).findByText('Approving it checks it again.')).toBeDefined();
-    expect(sentTo('POST', `/v1/spend-requests/${ID}/approve`)).toHaveLength(0);
+    expect(within(dialog).getByText('When it was decided')).toBeDefined();
+    expect(within(dialog).getByText('A new payee, verified by a second person.')).toBeDefined();
+    expect(sentTo('POST', `/v1/spend-requests/${ID}/approve`)[0]?.body).toEqual({ recheck: true });
+    // Nothing kept, and no sign-in, until the person confirms what they were shown.
+    expect(goTo).not.toHaveBeenCalled();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Check again and approve' }));
+
+    await waitFor(() => {
+      expect(goTo).toHaveBeenCalledWith(expect.stringContaining(`challenge=${CHALLENGE}`));
+    });
+    expect(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`)).toContain('Approve AED 2,500.00');
+  });
+
+  it('says an approve its rules now stop would reject it, with each rule, and keeps it as a reject', async () => {
+    signedIn();
+    answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details() });
+    answer(`POST /v1/spend-requests/${ID}/approve`, { status: 202, body: STOPPED });
+    open(`/approvals/${ID}`);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    const dialog = await screen.findByRole('dialog', { name: "Approving can't go ahead" });
+    expect(within(dialog).getByText(/Over the monthly cap as it is now. Raise the cap, then ask again./)).toBeDefined();
+    expect(within(dialog).getByText(/Confirming rejects this request instead/)).toBeDefined();
+    expect(goTo).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Reject it instead' }));
 
     await waitFor(() => {
       expect(goTo).toHaveBeenCalled();
     });
-    expect(sentTo('POST', `/v1/spend-requests/${ID}/approve`)[0]?.body).toEqual({ recheck: true });
+    const kept: unknown = JSON.parse(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`) ?? 'null');
+    expect(kept).toMatchObject({ label: 'Reject AED 2,500.00 to Gulf Office Supplies LLC, as your rules now stop it' });
+  });
+
+  it('keeps nothing when the person backs out of an approve answer', async () => {
+    signedIn();
+    answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details() });
+    answer(`POST /v1/spend-requests/${ID}/approve`, { status: 202, body: STOPPED });
+    open(`/approvals/${ID}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(sessionStorage).toHaveLength(0);
+    expect(goTo).not.toHaveBeenCalled();
+  });
+
+  it('says a browser that keeps no storage can not step up, and changes nothing', async () => {
+    signedIn();
+    answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details() });
+    answer(`POST /v1/spend-requests/${ID}/approve`, { status: 202, body: ASKED });
+    open(`/approvals/${ID}`);
+    const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    try {
+      await userEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+      expect(await screen.findByText(/This browser keeps no site storage/)).toBeDefined();
+      expect(goTo).not.toHaveBeenCalled();
+    } finally {
+      blocked.mockRestore();
+    }
   });
 
   it('rejects only with a reason, by step-up', async () => {
@@ -326,6 +398,7 @@ describe('one request’s page (6B1)', () => {
   it.each([
     ['REQUEST_NOT_WAITING', 409, /no longer waiting for approval/],
     ['ADMIN_APPROVAL_ONLY', 403, /only an admin can approve it/],
+    ['RECHECK_REQUIRED', 409, /approved only checked again/],
     ['ORG_FROZEN', 409, /This organisation is frozen, so nothing can be approved/],
     ['SOMETHING_NEW', 409, /didn't make this change \(reason SOMETHING_NEW\)/],
     ['UNREADABLE', 503, /couldn't be reached/],
@@ -337,6 +410,10 @@ describe('one request’s page (6B1)', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     expect(await screen.findByText(words)).toBeDefined();
     expect(goTo).not.toHaveBeenCalled();
+    // A refusal says the request moved on: its page reads it again; a failure on the way does not.
+    await waitFor(() => {
+      expect(sentTo('GET', `/v1/spend-requests/${ID}`)).toHaveLength(status < 500 ? 2 : 1);
+    });
   });
 
   it('goes to sign-in, saying the session ended, when a change is answered 401', async () => {
