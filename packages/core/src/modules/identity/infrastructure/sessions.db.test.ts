@@ -182,6 +182,9 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
 
       expect(await sessions.holder(app, cookie)).toBe(userId);
       expect((await rowOf(sessionId))?.last_seen_at).toEqual(START);
+      // Its idle timeout, not moved by the look, ends it a second later, long before its absolute end.
+      clock.advanceBy(SECOND);
+      expect(await sessions.holder(app, cookie)).toBeUndefined();
     });
 
     it('names no one for a session past either timeout, a cookie ID it never gave, or text that is none', async () => {

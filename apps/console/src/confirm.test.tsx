@@ -119,6 +119,29 @@ describe('the shared confirm', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('shows the words read before only once read afresh: never the old ones while the new are on their way', async () => {
+    const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    shown('mark_failed', false, queries);
+    expect(await screen.findByText('Marking this payment failed frees it.')).toBeDefined();
+    cleanup();
+    const changed = {
+      statements: [{ id: 'mark_failed', version: 2, words: [{ choice: 'confirm', text: 'New words, version 2.' }] }],
+    };
+    let arrive: (response: Response) => void = () => undefined;
+    answer = () =>
+      new Promise((resolve) => {
+        arrive = resolve;
+      });
+
+    shown('mark_failed', false, queries);
+
+    expect(await screen.findByRole('status')).toHaveProperty('textContent', 'Loading…');
+    expect(screen.queryByText('Marking this payment failed frees it.')).toBeNull();
+    expect(confirmButton()).toHaveProperty('disabled', true);
+    arrive(new Response(JSON.stringify(changed)));
+    expect(await screen.findByText('New words, version 2.')).toBeDefined();
+  });
+
   it('cancels by its button or Escape, and starts on Cancel', async () => {
     const { onCancel } = shown('mark_failed');
 
