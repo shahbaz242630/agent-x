@@ -116,6 +116,10 @@ describe('text the secret scanners mistake for a secret', () => {
     ],
     ['the same in lower case', join('pick(sec', 'ret(', q, 'db-', '2', q, '));')],
     [
+      'a password-named variable beside a quoted word in a call (PR #480)',
+      join('      writeFileSync(pass', 'word, ', q, 'not-a-', 'real-one', q, ');'),
+    ],
+    [
       'a quoted reader keying a list of password-named secrets (PR #28)',
       join('  ', q, 'zitadel-init', q, ': [', q, 'db-zitadel-pass', 'word', q, '],'),
     ],
@@ -164,6 +168,11 @@ describe('text the secret scanners mistake for a secret', () => {
       join('READS(', q, 'migrate', q, ', ', q, 'db-owner-pass', 'word', q, ')'),
     ],
     ['a short word under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, 'none', q, ',')],
+    ['a password-named variable beside a short word', join('  check(pass', 'word, ', q, 'utf8', q, ');')],
+    [
+      'the file a login is in, beside a quoted word',
+      join('  writeFileSync(loginFile, ', q, 'not-a-', 'real-one', q, ');'),
+    ],
     [
       'a call named for a secret given a name without a digit',
       join('    SEC', 'RET(', q, 'db-app-pass', 'word', q, '),'),

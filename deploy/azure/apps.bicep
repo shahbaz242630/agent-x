@@ -123,6 +123,16 @@ param appMinReplicas int
 @minLength(6)
 param zitadelAdminEmail string
 
+@description('Whether this is the load test\'s run (D2c, PL-38): the API at the size it is measured at, its limits out of the way and email off, and the load test\'s three jobs. The deploy tool sets it for `apps --load-run` alone, so a plain `apps` puts the API back.')
+param loadRun bool
+
+@description('Where the load test\'s image is published (D2c), without a tag or digest.')
+param loadImageRepository string
+
+@description('The digest of the load test\'s image for the same commit as ours, which `deploy/image/verify.ts` has checked a signature for; empty unless `loadRun`.')
+@maxLength(71)
+param loadImageDigest string
+
 var names = resourceNames(environment, nameSuffix)
 
 // The restore drill's copy (S78): a point-in-time restore made under this name,
@@ -163,6 +173,13 @@ var appsEnvironmentId = appsEnvironment.id
 // certificate serves, and peer-to-peer encryption covers it besides (G2b).
 var zitadelInternalUrl = 'https://${appName(environment, 'zitadel')}.internal.${appsEnvironment.properties.defaultDomain}'
 
+// Where the load test's traffic goes (D2c): the API inside the environment, as
+// Zitadel is reached, never out and back in through the public door.
+var loadApiSetting = {
+  name: 'AGENTX_LOAD_API'
+  value: 'https://${appName(environment, 'api')}.internal.${appsEnvironment.properties.defaultDomain}'
+}
+
 // Email (B5-3): the foundation's Communication Services and the domain it
 // sends from (communication.bicep). Azure names both: the service's host, in
 // its data location's geography, and the domain's, a GUID under azurecomm.net.
@@ -180,6 +197,15 @@ resource emailDomain 'Microsoft.Communication/emailServices/domains@2026-03-18' 
 }
 
 var emailEndpoint = 'https://${communication.properties.hostName}'
+
+// The API's one origin to call out to when it sends no email (the load run):
+// Zitadel inside the environment, for sign-in.
+var zitadelOrigins = [
+  {
+    name: 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'
+    value: zitadelInternalUrl
+  }
+]
 
 // What an app that sends the admins' notices is told (B5-3), known only once
 // the deployment reads the email resources, so added to its container
@@ -505,8 +531,9 @@ var activityDownloadsSettings = [
 // writes to the evidence store (`evidenceSettings`). `secretRef`
 // entries in `settings` name a secret too; `policy.ts` checks that the secrets a
 // job is given are exactly the ones `GRANTS` says it reads, however they reach
-// it, and what it may hold (`HELD`).
-var jobs = [
+// it, and what it may hold (`HELD`). A job runs as its own identity unless it
+// says `runsAs` (the load test's), and at the smallest size unless it says `cpu`.
+var jobs = concat([
   {
     // The roles and databases of a server, as the server admin (G2a). Safe to
     // run again, and run again on every deployment.
@@ -650,6 +677,109 @@ var jobs = [
       }
     ])
   }
+], loadRun ? loadJobs : [])
+
+// The load test's run request (D2c): what changes from one run to the next (the
+// run's ID, then its agents and phase 1's count), written onto each job by
+// deploy/azure/load.ts before it starts one, as the operator's request is
+// (above), and for the same reason: a run started with settings of its own
+// loses every mounted file. Deployed as no request, which the jobs refuse.
+var loadRequest = {
+  name: 'load-request'
+  value: '{}'
+}
+
+// The load test's three jobs (D2c, PL-38; tooling/load/job.ts), only with
+// `loadRun`: seed and k6's phase 1, then new keys, k6's phase 2, the checks and
+// the clean-up, and the clean-up alone for a run that stopped half-way. Each
+// runs inside the network, where the database is, as the API's identity (no
+// identity of its own, so no foundation or secrets deploy) and the app's role,
+// with the app's keys and nothing else of the API's mounted; the identity could
+// still be asked for every secret the API reads, which the partner accepted for
+// the test day, the jobs deleted after it (S154, PL-61). The first two send the
+// traffic, so they get k6's room: the API's size, so k6 is never what is
+// measured. `callsApi` adds the API's internal address in the job's body, since
+// Azure names the environment's domain.
+var loadJobs = map(
+  [
+    {
+      part: 'first'
+      timeoutSeconds: 1800
+      callsApi: true
+    }
+    {
+      part: 'second'
+      timeoutSeconds: 1800
+      callsApi: true
+    }
+    {
+      part: 'cleanup'
+      timeoutSeconds: 900
+      callsApi: false
+    }
+  ],
+  load => {
+    workload: 'load-${load.part}'
+    runsAs: 'api'
+    image: '${loadImageRepository}@${loadImageDigest}'
+    command: ['node', 'tooling/load/job.ts']
+    args: [load.part]
+    timeoutSeconds: load.timeoutSeconds
+    cpu: load.callsApi ? '2' : '0.5'
+    memory: load.callsApi ? '4Gi' : '1Gi'
+    callsApi: load.callsApi
+    evidence: false
+    files: concat(
+      [
+        {
+          reads: 'db-app-password'
+          setting: 'AGENTX_DB_PASSWORD_FILE'
+        }
+      ],
+      map(appKeys, key => {
+        reads: key
+        setting: ''
+      })
+    )
+    held: [loadRequest]
+    settings: concat(ourSettings, [
+      {
+        name: 'AGENTX_KEYS_DIR'
+        value: secretsPath
+      }
+      {
+        name: 'AGENTX_LOAD_DB_HOST'
+        value: names.databaseHost
+      }
+      {
+        name: 'AGENTX_LOAD_REQUEST_FILE'
+        value: '${secretsPath}/${loadRequest.name}'
+      }
+    ])
+  }
+)
+
+// The API's limits in the load run (D2c), as the laptop's run sets them
+// (tooling/load/compose.load.yaml): every client's, person's and agent's allowance
+// far above what k6 sends, so what is measured is the API rather than a 429,
+// and the log's cap at four times one, where the API's config needs twice.
+var loadApiSettings = [
+  {
+    name: 'AGENTX_RATE_LIMIT_PER_MINUTE'
+    value: '50000'
+  }
+  {
+    name: 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE'
+    value: '50000'
+  }
+  {
+    name: 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE'
+    value: '50000'
+  }
+  {
+    name: 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'
+    value: '200000'
+  }
 ]
 
 // The three apps that serve traffic (ADR-002 Amendment G2d). Each is shaped
@@ -672,9 +802,13 @@ var apps = [
     // Sign-in (B2-6): the API calls Zitadel inside the environment, as the
     // login pages do, naming the issuer's host in Zitadel's headers. That
     // internal address and the email endpoint (B5-3) are the two origins it
-    // may call out to (AGENTX_OUTBOUND_ALLOWED_ORIGINS, `emailSettings`).
+    // may call out to (AGENTX_OUTBOUND_ALLOWED_ORIGINS, `emailSettings`), and
+    // the internal address alone in the load run (`zitadelOrigins`).
     zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN']
-    sendsEmail: true
+    // The load run sends no email (D2c): its seeded admins have no address,
+    // and each notice would end as a warning. Zitadel stays its one origin.
+    sendsEmail: !loadRun
+    signsIn: true
     // Keeps the activity log's background downloads (`activityDownloadsSettings`).
     keepsDownloads: true
     // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
@@ -684,6 +818,10 @@ var apps = [
     // Longer than the API's own 25-second stop deadline (API.md), so the log's
     // held-back counts are still written.
     stopSeconds: 30
+    // The smallest pair the Consumption profile offers above its minimum, as
+    // the jobs take; the load run measures it at two CPUs (D2c), one copy as ever.
+    cpu: loadRun ? '2' : '0.5'
+    memory: loadRun ? '4Gi' : '1Gi'
     // Its login, and each of the app's keys (ADR-011 §2), which it finds by
     // name in the folder AGENTX_KEYS_DIR names rather than one setting each.
     files: concat(
@@ -696,16 +834,6 @@ var apps = [
           reads: 'api-oidc-client-secret'
           setting: 'AGENTX_OIDC_CLIENT_SECRET_FILE'
         }
-        // B5-3: the email service's key, copied in by the secrets deployment,
-        // and Zitadel's read-only token for the admins' addresses.
-        {
-          reads: 'acs-access-key'
-          setting: 'AGENTX_EMAIL_ACCESS_KEY_FILE'
-        }
-        {
-          reads: 'zitadel-directory-token'
-          setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
-        }
         // B6-3c: Zitadel's token for removing a person's second factors once
         // a reset has cooled off, its own service user's (Org User Manager).
         {
@@ -713,6 +841,21 @@ var apps = [
           setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
         }
       ],
+      // B5-3: the email service's key, copied in by the secrets deployment,
+      // and Zitadel's read-only token for the admins' addresses. The four
+      // email settings are all or none, so neither in the load run.
+      loadRun
+        ? []
+        : [
+            {
+              reads: 'acs-access-key'
+              setting: 'AGENTX_EMAIL_ACCESS_KEY_FILE'
+            }
+            {
+              reads: 'zitadel-directory-token'
+              setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
+            }
+          ],
       map(appKeys, key => {
         reads: key
         setting: ''
@@ -775,7 +918,7 @@ var apps = [
         name: 'AGENTX_PARTNER_MODE'
         value: partnerMode
       }
-    ])
+    ], loadRun ? loadApiSettings : [])
   }
   {
     // Zitadel itself, already set up by the two jobs above: this only starts it.
@@ -791,11 +934,16 @@ var apps = [
     transport: 'http2'
     zitadelSettings: []
     sendsEmail: false
+    signsIn: false
     keepsDownloads: false
     // Its projections and its cache are one replica's; a second would also take
     // ten more of the server's connections.
     maxReplicas: 1
     stopSeconds: 30
+    // The smallest pair the Consumption profile offers above its minimum, as
+    // the jobs take.
+    cpu: '0.5'
+    memory: '1Gi'
     files: [
       {
         reads: 'zitadel-masterkey'
@@ -832,6 +980,8 @@ var apps = [
     // keeps the deployment's shape the same everywhere.
     maxReplicas: 1
     stopSeconds: 30
+    cpu: '0.5'
+    memory: '1Gi'
     files: [
       {
         reads: 'login-client-private-key'
@@ -843,6 +993,7 @@ var apps = [
     // list settled before the deployment starts.
     zitadelSettings: ['ZITADEL_API_URL']
     sendsEmail: false
+    signsIn: false
     keepsDownloads: false
     settings: [
       // The host the browser uses, which Zitadel reads before the Host header
@@ -895,7 +1046,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
     identity: {
       type: 'UserAssigned'
       userAssignedIdentities: {
-        '${identityIds[job.workload]}': {}
+        '${identityIds[job.?runsAs ?? job.workload]}': {}
       }
     }
     properties: {
@@ -917,7 +1068,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
           map(secretsOf(job), secret => {
             name: secret
             keyVaultUrl: uri(vault.properties.vaultUri, 'secrets/${secret}')
-            identity: identityIds[job.workload]
+            identity: identityIds[job.?runsAs ?? job.workload]
           }),
           job.held
         )
@@ -930,10 +1081,11 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
             command: job.command
             args: job.args
             // The smallest pair the Consumption profile offers above its
-            // minimum: enough for a short Node or Go process.
+            // minimum, enough for a short Node or Go process, unless the job says its
+            // own (the load test's, which send k6's traffic).
             resources: {
-              cpu: json('0.5')
-              memory: '1Gi'
+              cpu: json(job.?cpu ?? '0.5')
+              memory: job.?memory ?? '1Gi'
             }
             env: concat(
               job.settings,
@@ -941,7 +1093,8 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 name: file.setting
                 value: '${secretsPath}/${file.reads}'
               }),
-              job.evidence ? evidenceSettings : []
+              job.evidence ? evidenceSettings : [],
+              (job.?callsApi ?? false) ? [loadApiSetting] : []
             )
             volumeMounts: empty(concat(job.files, job.held))
               ? []
@@ -1029,11 +1182,9 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
             image: app.image
             command: app.command
             args: app.args
-            // The smallest pair the Consumption profile offers above its
-            // minimum, as the jobs take.
             resources: {
-              cpu: json('0.5')
-              memory: '1Gi'
+              cpu: json(app.cpu)
+              memory: app.memory
             }
             env: concat(
               app.settings,
@@ -1047,7 +1198,7 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
                 name: setting
                 value: zitadelInternalUrl
               }),
-              app.sendsEmail ? emailSettings : [],
+              app.sendsEmail ? emailSettings : app.signsIn ? zitadelOrigins : [],
               app.keepsDownloads ? activityDownloadsSettings : []
             )
             volumeMounts: empty(app.files)

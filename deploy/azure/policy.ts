@@ -31,6 +31,7 @@ export type RuleId =
   | 'database-tls'
   | 'database-backup'
   | 'database-size'
+  | 'load-run'
   | 'vault'
   | 'evidence-store'
   | 'activity-downloads'
@@ -395,6 +396,9 @@ const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init',
  * arguments: a request written into either would sit in the deployment and
  * every run's record.
  */
+/** The load test's three jobs (D2c; tooling/load/job.ts), by the part each runs. */
+const LOAD_PARTS: readonly string[] = ['first', 'second', 'cleanup'];
+
 const HELD: Readonly<
   Record<
     string,
@@ -412,7 +416,41 @@ const HELD: Readonly<
     command: ['node', 'apps/operator/src/main.ts'],
     args: ['--request', '/mnt/secrets/operator-request'],
   },
+  // The load test's run request (D2c; apps.bicep `loadRequest`), written by load.ts before each run.
+  ...Object.fromEntries(
+    LOAD_PARTS.map((part) => [
+      `load-${part}`,
+      { name: 'load-request', value: '{}', command: ['node', 'tooling/load/job.ts'], args: [part] },
+    ]),
+  ),
 };
+
+/**
+ * The load test's run (D2c, PL-38; apps.bicep `loadRun`): staging's alone,
+ * and all of it or none. Its three jobs run the load image, as the API's
+ * identity (none of their own, so no foundation or secrets deploy), and are
+ * given the app's login and keys alone of what the API reads. The API, while
+ * they are there and only then, runs at the size it is measured at, with its
+ * limits out of k6's way and without the email service's key and the
+ * directory token, so it sends no email (the four email settings are all or
+ * none).
+ */
+const LOAD_RUN = {
+  jobs: LOAD_PARTS.map((part) => `load-${part}`),
+  runsAs: 'api',
+  image: 'ghcr.io/shahbaz242630/agent-x-load@',
+  reads: new Set(['db-app-password', ...APP_KEYS]),
+  apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
+  apiSize: { cpu: 2, memory: '4Gi' },
+  apiSettings: {
+    AGENTX_RATE_LIMIT_PER_MINUTE: '50000',
+    AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '50000',
+    AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '50000',
+    AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000',
+  } as Readonly<Record<string, string>>,
+};
+
+const isLoadJob = (workload: string): boolean => LOAD_RUN.jobs.includes(workload);
 
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): the API, Zitadel and
@@ -3023,6 +3061,10 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
 /** The work a job or an app does, from its name (`job-agentx-stg-migrate`, `ca-agentx-stg-api`). */
 const jobWorkloadOf = (name: string): string => name.replace(/^(?:job|ca)-agentx-[a-z]+-/, '');
 
+/** The settings a container is given, by name. */
+const settingsIn = (container: unknown): ReadonlyMap<string, unknown> =>
+  new Map(list(at(container, 'env')).map((entry) => [text(at(entry, 'name')), at(entry, 'value')] as const));
+
 /** The containers a job or an app runs. */
 const containersOf = (job: PredictedResource): readonly unknown[] => list(at(job.properties, 'template', 'containers'));
 
@@ -3227,6 +3269,74 @@ const apps: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** The load test's jobs in the deployment (D2c). */
+const loadJobsIn = (snapshot: Snapshot): readonly PredictedResource[] =>
+  ofType(snapshot, TYPES.job).filter((job) => isLoadJob(jobWorkloadOf(job.name)));
+
+/** The API in a load run (`LOAD_RUN`) or out of one: its size, its limits and its email, either way. */
+function loadApiProblems(api: PredictedResource, loadRun: boolean, problem: (message: string) => void): void {
+  for (const container of containersOf(api)) {
+    const settings = settingsIn(container);
+    const size = { cpu: at(container, 'resources', 'cpu'), memory: at(container, 'resources', 'memory') };
+    const limits = Object.entries(LOAD_RUN.apiSettings);
+    if (!loadRun) {
+      for (const [name] of limits.filter(([setting]) => settings.has(setting))) {
+        problem(`sets ${name}, which only the load run's API does (D2c): out of it the API keeps its own limits`);
+      }
+      if (size.cpu === LOAD_RUN.apiSize.cpu) {
+        problem("runs at the load run's size out of a load run (D2c): apps --load-run alone sets it");
+      }
+      continue;
+    }
+    if (size.cpu !== LOAD_RUN.apiSize.cpu || size.memory !== LOAD_RUN.apiSize.memory) {
+      problem(
+        `must run at ${String(LOAD_RUN.apiSize.cpu)} CPUs and ${LOAD_RUN.apiSize.memory} in the load run (D2c), the size it is measured at`,
+      );
+    }
+    for (const [name, wanted] of limits.filter(([setting, value]) => settings.get(setting) !== value)) {
+      problem(`must set ${name} to ${wanted} in the load run (D2c), so k6 meets the API rather than its limits`);
+    }
+    for (const name of [...settings.keys()].filter((setting) => setting.startsWith('AGENTX_EMAIL_'))) {
+      problem(`sets ${name} in the load run (D2c): its seeded admins have no address, so it sends no email`);
+    }
+  }
+}
+
+/**
+ * The load test's run (D2c, PL-38), as `LOAD_RUN` says: on staging alone,
+ * its three jobs together or none, each on the load image, and the API at the
+ * load run's size and limits exactly while they are there, never otherwise.
+ * Who the jobs run as and what they are given is `workload-secrets`'s, with
+ * their commands and request (`HELD`).
+ */
+const loadTest: Check = (snapshot, expected, add) => {
+  const found = loadJobsIn(snapshot);
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'load-run', resource, message });
+  };
+  if (found.length > 0 && expected.environment !== 'staging') {
+    problem('the deployment', `runs the load test's jobs on ${expected.environment}: the load run is staging's alone`);
+  }
+  for (const workload of LOAD_RUN.jobs) {
+    const count = found.filter((job) => jobWorkloadOf(job.name) === workload).length;
+    if (found.length > 0 && count !== 1) {
+      problem('the deployment', `needs the ${workload} job once in a load run; the snapshot has ${String(count)}`);
+    }
+  }
+  for (const job of found) {
+    for (const container of containersOf(job)) {
+      if (!text(at(container, 'image')).startsWith(LOAD_RUN.image)) {
+        problem(job.name, `must run the load image (${LOAD_RUN.image}…), which carries k6 and the load test alone`);
+      }
+    }
+  }
+  for (const api of ofType(snapshot, TYPES.app).filter((app) => jobWorkloadOf(app.name) === LOAD_RUN.runsAs)) {
+    loadApiProblems(api, found.length > 0, (message) => {
+      problem(api.name, message);
+    });
+  }
+};
+
 /** A door by the part of its name after the environment's (`doorName`): `cae-…/rtagentxstgapp` is `app`. */
 const publicDoorOf = (name: string): string =>
   name.slice(name.lastIndexOf('/') + 1).replace(/^rtagentx(?:stg|prd)/, '');
@@ -3417,19 +3527,20 @@ const secretsUsed = (job: PredictedResource): { readonly environment: string[]; 
  */
 const workloadSecrets: Check = (snapshot, _expected, add) => {
   const vaults = new Set(ofType(snapshot, TYPES.vault).map((vault) => vault.id));
+  const loadRun = loadJobsIn(snapshot).length > 0;
   for (const job of workloadsIn(snapshot)) {
     const workload = jobWorkloadOf(job.name);
     const problem = (message: string): void => {
       add({ rule: 'workload-secrets', resource: job.name, message });
     };
-    const assigned = identityProblems(job, workload, problem);
+    const assigned = identityProblems(job, isLoadJob(workload) ? LOAD_RUN.runsAs : workload, problem);
     const all = list(at(job.properties, 'configuration', 'secrets'));
     const held = HELD[workload];
     const holding = all.filter((secret) => text(at(secret, 'name')) === held?.name);
     if (held !== undefined) heldProblems(job, held, holding, problem);
     const declared = all.filter((secret) => !holding.includes(secret));
     const given = all.map((secret) => text(at(secret, 'name')));
-    const needed = secretsRead(workload);
+    const needed = secretsNeeded(workload, loadRun);
     for (const name of declared.map((secret) => text(at(secret, 'name'))).filter((secret) => !needed.has(secret))) {
       problem(`is given ${name}, which GRANTS doesn't let ${workload} read`);
     }
@@ -3440,6 +3551,14 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
     secretUseProblems(job, given, problem);
   }
 };
+
+/** What a workload is given (GRANTS), but a load job's (`LOAD_RUN.reads`) and the API's in a load run. */
+function secretsNeeded(workload: string, loadRun: boolean): ReadonlySet<string> {
+  if (isLoadJob(workload)) return LOAD_RUN.reads;
+  const read = secretsRead(workload);
+  if (!loadRun || workload !== LOAD_RUN.runsAs) return read;
+  return new Set([...read].filter((secret) => !LOAD_RUN.apiLeavesOut.has(secret)));
+}
 
 /** The identity a job or an app runs as: user-assigned, and its own alone. Gives back the ids it is assigned. */
 function identityProblems(
@@ -3547,9 +3666,7 @@ const containerTelemetry: Check = (snapshot, _expected, add) => {
       add({ rule: 'container-telemetry', resource: job.name, message });
     };
     for (const container of containersOf(job)) {
-      const settings = new Map(
-        list(at(container, 'env')).map((entry) => [text(at(entry, 'name')), at(entry, 'value')] as const),
-      );
+      const settings = settingsIn(container);
       for (const [name] of [...settings].filter(
         ([setting, value]) => setting.startsWith('OTEL_') && value !== 'true',
       )) {
@@ -3645,6 +3762,7 @@ const CHECKS: readonly Check[] = [
   secretAccess,
   jobs,
   apps,
+  loadTest,
   publicDoors,
   doorCertificates,
   workloadSecrets,
