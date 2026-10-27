@@ -67,7 +67,7 @@ param postgresAdminPassword string
   'normal'
   'load'
 ])
-param databaseSize string = 'normal'
+param databaseSize string
 
 // The load size: 2 vCores, General Purpose (D2c: offered in UAE North and within quota, S152). Its storage, backups and
 // network stay the server's own; only the compute changes, with a restart of a few minutes.
