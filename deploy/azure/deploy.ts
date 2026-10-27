@@ -152,6 +152,8 @@ export const APP_KEYS_VARIABLE = 'AGENTX_AZURE_APP_KEYS';
 
 const ADMIN_PASSWORD = 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD';
 const ALERT_EMAIL = 'AGENTX_AZURE_ALERT_EMAIL';
+/** staging.bicepparam's databaseSize: always set by the foundation, so a value left in the shell is never what's sent. */
+const DATABASE_SIZE = 'AGENTX_AZURE_DATABASE_SIZE';
 
 /** Every variable that carries a secret: the ones the policy check replaces with stand-ins. */
 const SECRET_VARIABLES: ReadonlySet<string> = new Set(Object.values(VAULT_SECRETS).map((secret) => secret.variable));
@@ -172,7 +174,7 @@ export type SecretPlan =
   | { readonly kind: 'keys' };
 
 export type Request =
-  | { readonly command: 'foundation' }
+  | { readonly command: 'foundation'; readonly loadSize: boolean }
   | { readonly command: 'secrets'; readonly plan: SecretPlan }
   | { readonly command: 'apps'; readonly commit: string | undefined; readonly keepRunning: boolean }
   | { readonly command: 'alerts' }
@@ -187,7 +189,7 @@ export class UsageError extends Error {
 }
 
 export const USAGE = `Usage, from your own terminal window:
-  node deploy/azure/deploy.ts foundation
+  node deploy/azure/deploy.ts foundation [--load-size]
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
   node deploy/azure/deploy.ts secrets --keys
@@ -217,7 +219,12 @@ function parseApps(options: readonly string[]): Request {
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, ...rest] = argv;
-  if (command === 'foundation' || command === 'alerts' || command === 'dns' || command === 'certificates') {
+  if (command === 'foundation') {
+    if (rest.length === 0) return { command, loadSize: false };
+    if (rest.length === 1 && rest[0] === '--load-size') return { command, loadSize: true };
+    throw new UsageError(`foundation takes only --load-size (the load run's database size), not ${rest.join(' ')}`);
+  }
+  if (command === 'alerts' || command === 'dns' || command === 'certificates') {
     if (rest.length > 0) throw new UsageError(`${command} takes no options, not ${rest.join(' ')}`);
     return { command };
   }
@@ -884,7 +891,7 @@ function leaveRecord(steps: Steps, subscription: string, deployment: Recorded, c
   return true;
 }
 
-async function deployFoundation(steps: Steps): Promise<number> {
+async function deployFoundation(steps: Steps, loadSize: boolean): Promise<number> {
   const commit = sentFrom(steps, 'foundation');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
@@ -899,7 +906,12 @@ async function deployFoundation(steps: Steps): Promise<number> {
     "The database admin's password is set on the server by this run. It must be the one in the password manager: a different one replaces it.",
   );
   const admin = await askPassword(steps.terminal, PERSON_LABELS['db-admin-password'] ?? 'the password');
-  const values = { [ALERT_EMAIL]: email, [ADMIN_PASSWORD]: admin };
+  const values = { [ALERT_EMAIL]: email, [ADMIN_PASSWORD]: admin, [DATABASE_SIZE]: loadSize ? 'load' : 'normal' };
+  steps.terminal.say(
+    loadSize
+      ? "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes. Run foundation again without --load-size the same day to size it back."
+      : 'The database stays at (or goes back to) its normal size, B1ms; a change of size restarts it for a few minutes.',
+  );
   checkPolicy(steps, values);
   const outputs = sendWithWhatIf(steps, subscription, 'foundation', values);
   if (outputs === undefined) return 1;
@@ -1491,7 +1503,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
 export async function deploy(request: Request, steps: Steps): Promise<number> {
   switch (request.command) {
     case 'foundation':
-      return deployFoundation(steps);
+      return deployFoundation(steps, request.loadSize);
     case 'secrets':
       return deploySecrets(steps, request.plan);
     case 'apps':

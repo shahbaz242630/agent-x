@@ -19,6 +19,8 @@ param budgetAmount = 60
 param budgetStartDate = '2026-09-01'
 
 param postgresAdminPassword = readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')
+// Set by deploy.ts on every foundation run: load only with --load-size (D2c), normal otherwise.
+param databaseSize = readEnvironmentVariable('AGENTX_AZURE_DATABASE_SIZE', 'normal')
 param postgresBackupRetentionDays = 7
 param postgresGeoRedundantBackup = false
 

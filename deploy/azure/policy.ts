@@ -30,6 +30,7 @@ export type RuleId =
   | 'owner-login-alert'
   | 'database-tls'
   | 'database-backup'
+  | 'database-size'
   | 'vault'
   | 'evidence-store'
   | 'activity-downloads'
@@ -148,6 +149,9 @@ export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
 
 /** The one role besides the server admin whose login raises the alert (ADR-012 §2). */
 const BACKUP_ROLE = 'agentx_backup';
+
+/** Staging's database sizes, name/tier: normal (B1ms), and load for the load run alone (main.bicep's databaseSize, D2c). */
+const STAGING_DATABASE_SIZES = ['Standard_B1ms/Burstable', 'Standard_D2ads_v5/GeneralPurpose'];
 
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
 const LOG_LINE_PREFIX = '%t-%c-';
@@ -1215,6 +1219,12 @@ const database: Check = (snapshot, expected, add) => {
     const minimum = expected.environment === 'production' ? 35 : 7;
     if (typeof retention !== 'number' || retention < minimum) {
       problem('database-backup', `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002)`);
+    }
+    // Staging's two sizes (main.bicep): no other is ever sent there by mistake.
+    // Production's waits on the load run's answer (PL-38).
+    const size = `${String(at(server, 'sku', 'name'))}/${String(at(server, 'sku', 'tier'))}`;
+    if (expected.environment === 'staging' && !STAGING_DATABASE_SIZES.includes(size)) {
+      problem('database-size', `runs ${STAGING_DATABASE_SIZES.join(' or ')} on staging (ADR-002; the load run, D2c)`);
     }
     const settings = new Map(
       ofType(snapshot, TYPES.setting)
