@@ -694,7 +694,9 @@ var loadRequest = {
 // the clean-up, and the clean-up alone for a run that stopped half-way. Each
 // runs inside the network, where the database is, as the API's identity (no
 // identity of its own, so no foundation or secrets deploy) and the app's role,
-// with the app's keys and nothing else of the API's. The first two send the
+// with the app's keys and nothing else of the API's mounted; the identity could
+// still be asked for every secret the API reads, which the partner accepted for
+// the test day, the jobs deleted after it (S154, PL-61). The first two send the
 // traffic, so they get k6's room: the API's size, so k6 is never what is
 // measured. `callsApi` adds the API's internal address in the job's body, since
 // Azure names the environment's domain.
@@ -758,7 +760,7 @@ var loadJobs = map(
 )
 
 // The API's limits in the load run (D2c), as the laptop's run sets them
-// (tooling/load/compose.yaml): every client's, person's and agent's allowance
+// (tooling/load/compose.load.yaml): every client's, person's and agent's allowance
 // far above what k6 sends, so what is measured is the API rather than a 429,
 // and the log's cap at four times one, where the API's config needs twice.
 var loadApiSettings = [
@@ -800,7 +802,8 @@ var apps = [
     // Sign-in (B2-6): the API calls Zitadel inside the environment, as the
     // login pages do, naming the issuer's host in Zitadel's headers. That
     // internal address and the email endpoint (B5-3) are the two origins it
-    // may call out to (AGENTX_OUTBOUND_ALLOWED_ORIGINS, `emailSettings`).
+    // may call out to (AGENTX_OUTBOUND_ALLOWED_ORIGINS, `emailSettings`), and
+    // the internal address alone in the load run (`zitadelOrigins`).
     zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN']
     // The load run sends no email (D2c): its seeded admins have no address,
     // and each notice would end as a warning. Zitadel stays its one origin.
@@ -1078,7 +1081,8 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
             command: job.command
             args: job.args
             // The smallest pair the Consumption profile offers above its
-            // minimum: enough for a short Node or Go process.
+            // minimum, enough for a short Node or Go process, unless the job says its
+            // own (the load test's, which send k6's traffic).
             resources: {
               cpu: json(job.?cpu ?? '0.5')
               memory: job.?memory ?? '1Gi'
