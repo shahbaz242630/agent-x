@@ -222,6 +222,7 @@ const K6_THRESHOLD_FAILED = 99;
 export function runK6(
   api: string,
   k6: readonly [string, ...string[]] = ['k6'],
+  smoke = false,
 ): (phase: 1 | 2, seeded: Seeded) => PhaseRun {
   const [command, ...first] = k6;
   return (phase, seeded) => {
@@ -230,7 +231,7 @@ export function runK6(
       const seed = path.join(dir, 'seed.json');
       writeFileSync(seed, JSON.stringify(seeded), { mode: 0o600 });
       const done = spawnSync(command, [...first, 'run', '--quiet', K6_SCRIPT], {
-        env: { ...process.env, PHASE: String(phase), API: api, SEED: seed, OUT: dir },
+        env: { ...process.env, PHASE: String(phase), API: api, SEED: seed, OUT: dir, SMOKE: smoke ? '1' : '0' },
         stdio: 'inherit',
         windowsHide: true,
       });
@@ -293,6 +294,8 @@ const REQUEST_FIELDS: ReadonlySet<string> = new Set([
   'AGENTX_LOAD_RUN_ID',
   'AGENTX_LOAD_SEEDED',
   'AGENTX_LOAD_CREATED_FIRST',
+  // '1' for the wiring run's short k6 (load.ts run --smoke): it measures nothing.
+  'AGENTX_LOAD_SMOKE',
 ]);
 
 /**
@@ -339,7 +342,10 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
       database,
       keyring: loadKeys({ directory: needed(env, 'AGENTX_KEYS_DIR'), current: {} }),
       // The clean-up sends no traffic, so it needs no API.
-      k6: job === 'cleanup' ? () => ({ finished: false, result: undefined }) : runK6(needed(env, 'AGENTX_LOAD_API')),
+      k6:
+        job === 'cleanup'
+          ? () => ({ finished: false, result: undefined })
+          : runK6(needed(env, 'AGENTX_LOAD_API'), ['k6'], run.AGENTX_LOAD_SMOKE === '1'),
       print: (line) => {
         console.log(JSON.stringify(line));
       },

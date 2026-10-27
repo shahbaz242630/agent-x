@@ -39,8 +39,16 @@ const FIRST_DEPLOY = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'] as
 export const JOBS = [...FIRST_DEPLOY, 'operator'] as const;
 export type Job = (typeof JOBS)[number];
 
+/**
+ * The load test's jobs (D2c; apps.bicep `loadJobs`), there only for a load
+ * run: never started from here, but by deploy/azure/load.ts, which writes each
+ * run's request onto them first, as operator.ts does.
+ */
+export const LOAD_JOBS = ['load-first', 'load-second', 'load-cleanup'] as const;
+export type LoadJob = (typeof LOAD_JOBS)[number];
+
 /** A job's name in Azure (names.bicep `jobName`). */
-export const jobName = (job: Job): string => `job-agentx-stg-${job}`;
+export const jobName = (job: Job | LoadJob): string => `job-agentx-stg-${job}`;
 
 /** How a run can end (Container Apps' execution states); any other state hasn't ended. */
 export const ENDED: ReadonlySet<string> = new Set(['Succeeded', 'Failed', 'Stopped', 'Degraded']);
@@ -104,7 +112,7 @@ const RUN_SUFFIX = /^[a-z0-9]+$/;
  * Whether a name is one of the job's runs. A fixed pattern and a prefix, never
  * a pattern built from what was typed (CodeQL js/regex-injection).
  */
-export const isRunOf = (job: Job, execution: string): boolean => {
+export const isRunOf = (job: Job | LoadJob, execution: string): boolean => {
   const prefix = `${jobName(job)}-`;
   return execution.startsWith(prefix) && RUN_SUFFIX.test(execution.slice(prefix.length));
 };
@@ -152,7 +160,7 @@ export const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 /** A job in the subscription the operator is signed in to. */
 export interface Target {
   readonly subscription: string;
-  readonly job: Job;
+  readonly job: Job | LoadJob;
 }
 
 /**
@@ -377,7 +385,7 @@ export async function waitFor(
 }
 
 /** The workspace's own ID, which the query API takes. */
-function workspaceId(steps: JobSteps, subscription: string): string {
+export function workspaceId(steps: JobSteps, subscription: string): string {
   const workspace = azJson(steps.az, [
     'rest',
     '--method',
@@ -390,13 +398,27 @@ function workspaceId(steps: JobSteps, subscription: string): string {
   return id;
 }
 
+/** One query of the workspace over `timespan` (ISO start/end), Log Analytics' answer as it gave it. */
+export const askWorkspace = (steps: JobSteps, workspace: string, query: string, timespan: string): unknown =>
+  azJson(steps.az, [
+    'rest',
+    '--method',
+    'post',
+    '--url',
+    `${LOG_API}${workspace}/query`,
+    '--resource',
+    LOG_AUDIENCE,
+    '--body',
+    JSON.stringify({ query, timespan }),
+  ]);
+
 /**
  * Everything logged about one run, oldest first: the platform's lines (which
  * name the run in the replica's name, or in the text for the run's own events)
  * and the container's (whose group is named after the run). Both names are
  * held to `isRunOf` before they get here, so neither can end a string early.
  */
-const logQuery = (job: Job, execution: string): string =>
+const logQuery = (job: Job | LoadJob, execution: string): string =>
   [
     'union',
     `(ContainerAppSystemLogs | where JobName == '${jobName(job)}' and (ReplicaName startswith_cs '${execution}-' or Log contains_cs "'${execution}'") | project TimeGenerated, Source = 'platform', Reason, Text = Log),`,
@@ -478,19 +500,7 @@ export async function readLog(
   for (let reading = 0; ; reading += 1) {
     const now = steps.now().getTime();
     const timespan = `${new Date(began - LOG_MARGIN_MS).toISOString()}/${new Date(Math.max(now, ended) + LOG_MARGIN_MS).toISOString()}`;
-    const lines = logLines(
-      azJson(steps.az, [
-        'rest',
-        '--method',
-        'post',
-        '--url',
-        `${LOG_API}${workspace}/query`,
-        '--resource',
-        LOG_AUDIENCE,
-        '--body',
-        JSON.stringify({ query, timespan }),
-      ]),
-    );
+    const lines = logLines(askWorkspace(steps, workspace, query, timespan));
     const fromContainer = lines.filter((line) => line.source !== 'platform').length;
     const terminated = lines.some((line) => line.reason === 'ContainerTerminated');
     const late = now >= ended + LOG_DELAY_MS;

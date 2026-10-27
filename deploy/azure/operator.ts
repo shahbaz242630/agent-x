@@ -63,9 +63,6 @@
 // (ADR-005 §6: the right to start it is the API's own authority), so this runs
 // from their `!`.
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
@@ -88,6 +85,7 @@ import { MOST_EXPORT_DAYS } from '../../packages/core/src/modules/evidence/domai
 import { invitationEmail } from '../../packages/core/src/modules/identity/domain/invitation.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/ids.ts';
 import { realAz, signedIn, text } from './deploy.ts';
+import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
 import {
   type Ended,
   jobName,
@@ -103,7 +101,6 @@ import {
   waitFor,
 } from './jobs.ts';
 import {
-  azureRefusal,
   changes,
   type Container,
   get,
@@ -135,9 +132,6 @@ const SETTLE_MS = 10 * 60_000;
 
 /** Any ID, for the size of a request before its own is made: every ID is as long. */
 const SOME_ID = '00000000-0000-7000-8000-000000000000';
-
-/** An error's message, or what was thrown when it isn't an Error. */
-const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** What may now hold the request when [] couldn't be put back, and what takes it off. */
 const mayStillHold = (id: string, noun: string): string =>
@@ -298,13 +292,6 @@ export function parseHandoff(argv: readonly string[]): HandoffArguments {
   return { command, reason: asked.reason, id };
 }
 
-/** One of the job's secrets that the vault holds, as Azure gives it back: sent back just so. */
-interface VaultReference {
-  readonly name: string;
-  readonly keyVaultUrl: string;
-  readonly identity: string;
-}
-
 /** The operator's job as Azure has it, checked: what a change sends back of it, and where it stands. */
 interface OperatorJob {
   readonly running: Running;
@@ -335,38 +322,13 @@ function readOperatorJob(steps: JobSteps, target: Target): OperatorJob {
   if (JSON.stringify([...running.container.command, ...running.container.args]) !== JSON.stringify(RUNS)) {
     refuse(`it must run ${RUNS.join(' ')}`);
   }
-  if (!Array.isArray(configuration.secrets)) return refuse('its secrets are not a list');
-  const secrets = configuration.secrets.map(record);
-  const held = secrets.filter((secret) => secret.name === REQUEST_SECRET);
-  if (held.length !== 1 || Object.keys(held[0] ?? {}).some((field) => field !== 'name')) {
-    refuse(`it must hold ${REQUEST_SECRET} once, nothing of it shown`);
-  }
-  const references = secrets
-    .filter((secret) => secret.name !== REQUEST_SECRET)
-    .map(({ name, keyVaultUrl, identity, ...other }) =>
-      typeof name === 'string' &&
-      typeof keyVaultUrl === 'string' &&
-      typeof identity === 'string' &&
-      Object.keys(other).length === 0
-        ? { name, keyVaultUrl, identity }
-        : refuse(
-            'a secret other than its request must be exactly a reference to the vault: a name, a URL and an identity',
-          ),
-    );
+  const references = vaultReferences(configuration.secrets, REQUEST_SECRET, refuse);
   const limit = configuration.replicaTimeout;
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) return refuse('it has no time limit');
-  const modified = text(record(found.systemData).lastModifiedAt);
+  const modified = lastModified(found);
   if (modified === '') return refuse("Azure gave no time of its last change, so one of ours can't be told apart");
   return { running, references, limit, state: text(properties.provisioningState), modified };
 }
-
-/**
- * JSON text with every character past ASCII written as its escape: the file
- * then reads the same in any encoding the CLI might take it to be in, and a
- * name is never kept misread for good.
- */
-const asciiJson = (json: string): string =>
-  json.replace(/[^ -~]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /**
  * The PATCH that sets the job's request to `value`: the secrets list whole,
@@ -383,41 +345,10 @@ const patchBody = (job: OperatorJob, value: string, container?: Container): stri
     }),
   );
 
-/**
- * Sends a PATCH to the job from a file in a folder of its own in this user's
- * temporary folder (inside their profile on Windows, so theirs alone), removed
- * straight after: the request stays off every command line. Azure's message
- * isn't shown, since it can quote what was sent. A folder that can't be
- * removed (a scanner holding the file, say) is said, never taken for a PATCH
- * that failed.
- */
-function patch(steps: JobSteps, target: Target, body: string, what: string): void {
-  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-'));
-  try {
-    const file = path.join(folder, 'patch.json');
-    writeFileSync(file, body, { mode: 0o600 });
-    const done = steps.az.run([
-      'rest',
-      '--method',
-      'patch',
-      '--url',
-      resourceUrl(target.subscription, OPERATOR_JOB),
-      '--body',
-      `@${file}`,
-    ]);
-    if (done.status !== 0) {
-      throw new Error(
-        `Azure refused ${what} (${azureRefusal(done.stderr)}). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it.`,
-      );
-    }
-  } finally {
-    try {
-      rmSync(folder, { recursive: true, force: true, maxRetries: 5 });
-    } catch (error) {
-      steps.say(`Couldn't remove ${folder}, which holds what was sent: remove it by hand (${reason(error)}).`);
-    }
-  }
-}
+/** Sends a PATCH to the operator's job (held-request.ts `sendPatch`). */
+const patch = (steps: JobSteps, target: Target, body: string, what: string): void => {
+  sendPatch(steps, resourceUrl(target.subscription, OPERATOR_JOB), body, what);
+};
 
 /**
  * Waits until Azure has taken a change sent after `before` (the time of the

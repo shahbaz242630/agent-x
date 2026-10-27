@@ -72,10 +72,14 @@ describe('the command line and settings', () => {
 });
 
 describe("the run's request, as load.ts writes it onto the job", () => {
-  it('takes the three values, each as text', () => {
+  it('takes the run values and the smoke flag, each as text', () => {
     const request = { AGENTX_LOAD_RUN_ID: 'r1', AGENTX_LOAD_SEEDED: '[]', AGENTX_LOAD_CREATED_FIRST: '12' };
     expect(requestOf(JSON.stringify(request))).toEqual(request);
     expect(requestOf('{}')).toEqual({});
+    expect(requestOf(JSON.stringify({ AGENTX_LOAD_RUN_ID: 'r1', AGENTX_LOAD_SMOKE: '1' }))).toEqual({
+      AGENTX_LOAD_RUN_ID: 'r1',
+      AGENTX_LOAD_SMOKE: '1',
+    });
   });
 
   it.each([
@@ -99,7 +103,7 @@ describe('k6, for one phase', () => {
     [
       "import { readFileSync, writeFileSync } from 'node:fs';",
       "const seed = JSON.parse(readFileSync(process.env.SEED, 'utf8'));",
-      'const summary = { phase: Number(process.env.PHASE), created: seed.agents.length, api: process.env.API, args: process.argv.slice(2) };',
+      'const summary = { phase: Number(process.env.PHASE), created: seed.agents.length, api: process.env.API, smoke: process.env.SMOKE, args: process.argv.slice(2) };',
       "if (process.env.FAKE_K6_EXIT !== '2') writeFileSync(`${process.env.OUT}/k6-phase-${process.env.PHASE}.json`, JSON.stringify(summary));",
       "process.exit(Number(process.env.FAKE_K6_EXIT ?? '0'));",
     ].join('\n'),
@@ -123,10 +127,17 @@ describe('k6, for one phase', () => {
         phase: 2,
         created: 1,
         api: 'http://api.internal',
+        smoke: '0',
         args: ['run', '--quiet', expect.stringMatching(/money-paths\.k6\.js$/) as unknown],
       },
     });
     expect(left()).toEqual(before);
+  });
+
+  it("tells the script it is the wiring run's short k6 only when asked (load.ts run --smoke)", () => {
+    expect(runK6('http://api.internal', [process.execPath, fake], true)(1, seeded).result).toMatchObject({
+      smoke: '1',
+    });
   });
 
   it('counts a failed threshold (99) as run to the end: the report says which', () => {
