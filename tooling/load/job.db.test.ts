@@ -66,7 +66,9 @@ const NO_REQUESTS: PhaseResult = {
 };
 
 /** A job's steps over the test database, k6 answering as `answer` does and recording what it was given; every line printed kept. */
-function stepsWith(answer: (phase: 1 | 2) => PhaseRun = () => ({ finished: true, result: NO_REQUESTS })) {
+function stepsWith(
+  answer: (phase: 1 | 2) => PhaseRun | Promise<PhaseRun> = () => ({ finished: true, result: NO_REQUESTS }),
+) {
   const printed: PrintedLine[] = [];
   const k6Calls: { phase: 1 | 2; seeded: Seeded }[] = [];
   const steps: JobSteps = {
@@ -99,6 +101,31 @@ const leftUndone = (agents: readonly PrintedAgent[]) =>
   );
 
 describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
+  /** Changes the pause's row past the app, as its owner can: its signed history then no longer agrees with it. */
+  const tamperPause = async (paused: boolean): Promise<void> => {
+    const owner = await database.connect('owner');
+    try {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written here.
+      await owner.query('update platform_controls.handoff_pause set paused = $1', [paused]);
+    } finally {
+      await owner.end();
+    }
+  };
+
+  it('refuses the first job, seeding nothing, while the pause is tampered with: nothing is believed', async () => {
+    await tamperPause(false);
+    try {
+      const { steps, printed, k6Calls } = stepsWith();
+      expect(await firstJob(steps, 'tampered')).toBe(1);
+      expect(printed.map(({ reason }) => reason)).toEqual([
+        'hand-offs are tampered before the seed, not paused: pause them (handoff-pause), so no request of the run can reach the bank',
+      ]);
+      expect(k6Calls).toEqual([]);
+    } finally {
+      await tamperPause(true);
+    }
+  });
+
   it('refuses the first job, seeding nothing, unless every hand-off is paused', async () => {
     await pauseMoved(false);
     try {
@@ -210,6 +237,20 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       await expect(secondJob(throwing.steps, 'job test thrown', thrown.agents, 0)).rejects.toBe(broken);
       expect(throwing.lineOf('load.cleaned')).toMatchObject({ problems: [] });
       expect(await leftUndone(thrown.agents)).toEqual([]);
+
+      // Resumed while phase 2 ran: the run fails, said, and is still cleaned up.
+      const during = await seededRun('job test during');
+      const resuming = stepsWith(async () => {
+        await pauseMoved(false);
+        return { finished: true, result: { ...NO_REQUESTS, phase: 2 } };
+      });
+      try {
+        expect(await secondJob(resuming.steps, 'job test during', during.agents, 0)).toBe(1);
+        expect(resuming.lineOf('load.refused')?.reason).toMatch(/^hand-offs are running after phase 2, not paused/);
+      } finally {
+        await pauseMoved(true);
+      }
+      expect(await leftUndone(during.agents)).toEqual([]);
 
       const resumed = await seededRun('job test resumed');
       await pauseMoved(false);

@@ -56,7 +56,7 @@ export interface PhaseRun {
 export interface JobSteps {
   readonly database: Database<LoadTables>;
   readonly keyring: KeyProvider;
-  readonly k6: (phase: 1 | 2, seeded: Seeded) => PhaseRun;
+  readonly k6: (phase: 1 | 2, seeded: Seeded) => PhaseRun | Promise<PhaseRun>;
   readonly print: (line: PrintedLine) => void;
 }
 
@@ -98,7 +98,7 @@ export async function firstJob(steps: JobSteps, runId: string): Promise<number> 
     },
   });
   steps.print({ event: 'load.seeded', runId, agents: seeded.agents.length });
-  return steps.k6(1, seeded).finished ? 0 : 1;
+  return (await steps.k6(1, seeded)).finished ? 0 : 1;
 }
 
 /**
@@ -196,7 +196,7 @@ export async function secondJob(
 /** New keys, k6's phase 2 and the checks, printed: true when k6 ran to the end, hand-offs stayed paused and every check held. */
 async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], createdFirst: number): Promise<boolean> {
   const seeded = await rekeyed(steps.database, steps.keyring, { agents });
-  const phase = steps.k6(2, seeded);
+  const phase = await steps.k6(2, seeded);
   const stillPaused = await handoffsPaused(steps, 'after phase 2');
   const created = createdFirst + (phase.result?.created ?? 0);
   const checks = [];
@@ -219,7 +219,10 @@ const K6_THRESHOLD_FAILED = 99;
  * as it prints it (`load.k6_summary`). `k6` is the command and its first
  * arguments: tests put a stand-in there.
  */
-export function runK6(api: string, k6: readonly [string, ...string[]] = ['k6']): JobSteps['k6'] {
+export function runK6(
+  api: string,
+  k6: readonly [string, ...string[]] = ['k6'],
+): (phase: 1 | 2, seeded: Seeded) => PhaseRun {
   const [command, ...first] = k6;
   return (phase, seeded) => {
     const dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-'));
