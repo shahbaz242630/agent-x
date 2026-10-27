@@ -1178,6 +1178,22 @@ const postgresSubnets = (snapshot: Snapshot): readonly { id: string; subnet: unk
       .map((subnet) => ({ id: `${network.id}/subnets/${String(at(subnet, 'name'))}`, subnet, network })),
   );
 
+// Staging's two sizes (main.bicep): no other is ever sent there by mistake.
+// Production's waits on the load run's answer (PL-38).
+const databaseSize: Check = (snapshot, expected, add) => {
+  if (expected.environment !== 'staging') return;
+  for (const server of ofType(snapshot, TYPES.server)) {
+    const size = `${String(at(server, 'sku', 'name'))}/${String(at(server, 'sku', 'tier'))}`;
+    if (!STAGING_DATABASE_SIZES.includes(size)) {
+      add({
+        rule: 'database-size',
+        resource: server.name,
+        message: `runs ${STAGING_DATABASE_SIZES.join(' or ')} on staging (ADR-002; the load run, D2c)`,
+      });
+    }
+  }
+};
+
 const database: Check = (snapshot, expected, add) => {
   for (const server of ofType(snapshot, TYPES.server)) {
     const problem = (rule: RuleId, message: string): void => {
@@ -1219,12 +1235,6 @@ const database: Check = (snapshot, expected, add) => {
     const minimum = expected.environment === 'production' ? 35 : 7;
     if (typeof retention !== 'number' || retention < minimum) {
       problem('database-backup', `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002)`);
-    }
-    // Staging's two sizes (main.bicep): no other is ever sent there by mistake.
-    // Production's waits on the load run's answer (PL-38).
-    const size = `${String(at(server, 'sku', 'name'))}/${String(at(server, 'sku', 'tier'))}`;
-    if (expected.environment === 'staging' && !STAGING_DATABASE_SIZES.includes(size)) {
-      problem('database-size', `runs ${STAGING_DATABASE_SIZES.join(' or ')} on staging (ADR-002; the load run, D2c)`);
     }
     const settings = new Map(
       ofType(snapshot, TYPES.setting)
@@ -3600,6 +3610,7 @@ const CHECKS: readonly Check[] = [
   tagged,
   noSecretLiterals,
   database,
+  databaseSize,
   databaseNetwork,
   appsNetwork,
   appsEgress,
