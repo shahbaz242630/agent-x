@@ -19,6 +19,9 @@ const SAMPLES = Object.values(SENSITIVE_SAMPLES);
 const CAP = SAMPLES.length + 5;
 const FLOOD = CAP + 15;
 
+/** A fixed time mid-minute: on the real clock a flood that crossed a minute's end got a fresh cap (S152, main's CI). */
+const AT = Date.UTC(2026, 9, 27, 9, 0, 30);
+
 /** Runs in the child process. Node strips the TypeScript types of the imported files itself. */
 const SCRIPT = `
 const { createLogger, guardOutputs } = await import(${JSON.stringify(LOGGER)});
@@ -26,6 +29,7 @@ guardOutputs(process);
 const logger = createLogger({
   service: 'stdout-check',
   config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: ${CAP} } },
+  now: () => ${AT},
 });
 const samples = ${JSON.stringify(SAMPLES)};
 for (const sample of samples) logger.info('check.sample', { note: 'seen ' + sample, password: sample });
