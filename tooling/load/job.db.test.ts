@@ -105,7 +105,6 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
   const tamperPause = async (paused: boolean): Promise<void> => {
     const owner = await database.connect('owner');
     try {
-      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written here.
       await owner.query('update platform_controls.handoff_pause set paused = $1', [paused]);
     } finally {
       await owner.end();
