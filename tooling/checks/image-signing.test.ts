@@ -10,7 +10,9 @@ import { parse } from 'yaml';
 
 import {
   EXIT,
+  identityOf,
   IMAGE_REPOSITORY,
+  LOAD_SIGNER,
   SIGNER_IDENTITY,
   SIGNING_WORKFLOW,
   SOURCE_REPOSITORY,
@@ -52,17 +54,22 @@ const jobs = ci.jobs;
 const IMAGE_JOBS = ['image-publish', 'image-sbom', 'image-attest'];
 const MAIN_PUSH_ONLY = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
 
-const job = (name: string): Job => {
-  const found = jobs[name];
-  if (found === undefined) throw new Error(`${SIGNING_WORKFLOW} has no job ${name}`);
-  return found;
-};
-const steps = (name: string): Step[] => job(name).steps ?? [];
-const indexOf = (name: string, found: (step: Step) => boolean): number => {
-  const index = steps(name).findIndex(found);
-  if (index < 0) throw new Error(`${name} has no such step`);
-  return index;
-};
+/** A workflow's jobs and steps by name, failing loudly on one that isn't there. */
+function helpersFor(file: string, workflow: Workflow) {
+  const job = (name: string): Job => {
+    const found = workflow.jobs[name];
+    if (found === undefined) throw new Error(`${file} has no job ${name}`);
+    return found;
+  };
+  const steps = (name: string): Step[] => job(name).steps ?? [];
+  const indexOf = (name: string, found: (step: Step) => boolean): number => {
+    const index = steps(name).findIndex(found);
+    if (index < 0) throw new Error(`${name} has no such step`);
+    return index;
+  };
+  return { job, steps, indexOf };
+}
+const { job, steps, indexOf } = helpersFor(SIGNING_WORKFLOW, ci);
 const expecting = (code: number) => (step: Step) => step.env?.EXPECTED_EXIT === String(code);
 const running = (command: string) => (step: Step) => step.run?.includes(command) === true;
 
@@ -76,10 +83,13 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       );
     // The prune job holds it too, to remove old versions (G4-5b): it asks for no signing token (below),
     // runs no code but ours, and never logs in to the registry, so nothing it could push would verify.
+    // The load test's image is published and signed the same way by its own workflow (below).
     expect(holding('packages').sort()).toEqual([
       `${SIGNING_WORKFLOW}: image-attest`,
       `${SIGNING_WORKFLOW}: image-prune`,
       `${SIGNING_WORKFLOW}: image-publish`,
+      `${LOAD_SIGNER.workflow}: load-image-attest`,
+      `${LOAD_SIGNER.workflow}: load-image-publish`,
     ]);
     expect(
       steps('image-prune').some((step) =>
@@ -95,6 +105,8 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       `${SIGNING_WORKFLOW}: image-attest`,
       `${SIGNING_WORKFLOW}: image-publish`,
       `${SIGNING_WORKFLOW}: release`,
+      `${LOAD_SIGNER.workflow}: load-image-attest`,
+      `${LOAD_SIGNER.workflow}: load-image-publish`,
     ]);
     // It checks the image with the pinned cosign (release.ts), and never signs, attests or pushes one.
     expect(
@@ -171,7 +183,8 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
         (candidate.steps ?? []).filter((step) => step.uses?.startsWith('sigstore/cosign-installer@') === true),
       ),
     );
-    expect(installs).toHaveLength(2);
+    // Two for the app's image, two for the load test's.
+    expect(installs).toHaveLength(4);
     for (const step of installs) {
       const [major = 0, minor = 0, patch = 0] = (step.with?.['cosign-release'] ?? '')
         .replace(/^v/, '')
@@ -266,6 +279,117 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
   it('logs out of the registry even when a step fails', () => {
     for (const name of ['image-publish', 'image-attest']) {
       expect(steps(name).at(-1)).toMatchObject({ if: 'always()', run: 'docker logout ghcr.io' });
+    }
+  });
+});
+
+// The load test's image (D2c, partner S153), held to the app image's rules above.
+describe("SEC-SC-02 the load test's image is signed only by its workflow, from main, started by hand", () => {
+  const load = workflows.find(({ file }) => file === LOAD_SIGNER.workflow)?.workflow as
+    (Workflow & { on: Record<string, unknown> }) | undefined;
+  if (load === undefined) throw new Error(`${LOAD_SIGNER.workflow} is missing`);
+  const { job: loadJob, steps: loadSteps, indexOf: loadIndex } = helpersFor(LOAD_SIGNER.workflow, load);
+
+  it('runs only when started by hand, and every job only from main', () => {
+    expect(Object.keys(load.on)).toEqual(['workflow_dispatch']);
+    expect(LOAD_SIGNER.trigger).toBe('workflow_dispatch');
+    expect(Object.keys(load.jobs).sort()).toEqual([
+      'load-image-attest',
+      'load-image-publish',
+      'load-image-sbom',
+      'load-image-scan',
+    ]);
+    for (const candidate of Object.values(load.jobs)) expect(candidate.if).toBe("github.ref == 'refs/heads/main'");
+  });
+
+  it("publishes where the deploy check's load signer looks, from the load Dockerfile", () => {
+    expect(identityOf(LOAD_SIGNER)).toContain(`/${LOAD_SIGNER.workflow}@refs/heads/main`);
+    for (const name of Object.keys(load.jobs)) expect(loadJob(name).env?.IMAGE).toBe(LOAD_SIGNER.repository);
+    const scan = loadSteps('load-image-sbom').find((step) => step.uses?.startsWith('anchore/sbom-action@') === true);
+    expect(scan?.with?.image).toBe(`${LOAD_SIGNER.repository}@\${{ needs.load-image-publish.outputs.digest }}`);
+    expect(loadSteps('load-image-publish').find((step) => step.name === 'Build the image')?.run).toContain(
+      '--file tooling/load/Dockerfile',
+    );
+  });
+
+  it.each([
+    ['load-image-sbom', 'anchore/sbom-action@'],
+    ['load-image-scan', 'anchore/scan-action@'],
+  ])('gives %s, outside code, no registry login: the image is pulled, and the login ended, first', (name, action) => {
+    const pull = loadIndex(name, running('docker pull'));
+    const scanner = loadIndex(name, (step) => step.uses?.startsWith(action) === true);
+    expect(pull).toBeLessThan(scanner);
+    expect(loadSteps(name)[pull]?.run).toMatch(/^trap 'docker logout ghcr\.io' EXIT\n/);
+    expect(Object.keys(loadSteps(name)[scanner]?.with ?? {}).filter((input) => input.startsWith('registry-'))).toEqual(
+      [],
+    );
+  });
+
+  it('keeps the SBOM in a job that can only read, and the scan report only, waited on by nothing', () => {
+    expect(loadJob('load-image-sbom').permissions).toEqual({ packages: 'read' });
+    expect(loadJob('load-image-scan').permissions).toEqual({
+      contents: 'read',
+      packages: 'read',
+      'security-events': 'write',
+    });
+    expect([loadJob('load-image-scan').needs ?? []].flat()).toEqual(['load-image-publish']);
+    const scan = loadSteps('load-image-scan').find((step) => step.uses?.startsWith('anchore/scan-action@') === true);
+    expect(scan?.with?.image).toBe(`${LOAD_SIGNER.repository}@\${{ needs.load-image-publish.outputs.digest }}`);
+    expect(scan?.with?.['fail-build']).toBe(false);
+    expect(Object.values(load.jobs).filter((other) => [other.needs ?? []].flat().includes('load-image-scan'))).toEqual(
+      [],
+    );
+  });
+
+  it('checks the built image before it pushes, and signs and attests by the digest it pushed', () => {
+    const smoke = loadIndex('load-image-publish', running('k6 version'));
+    const push = loadIndex('load-image-publish', (step) => step.name === 'Push');
+    expect(smoke).toBeLessThan(push);
+    expect(loadSteps('load-image-publish')[push]?.run).toContain(
+      'docker image inspect "${IMAGE}:${COMMIT}" --format \'{{range .RepoDigests}}{{.}} {{end}}\'',
+    );
+    const signing = loadSteps('load-image-publish').filter(running('cosign sign '));
+    expect(signing.map((step) => [step.run, step.env?.DIGEST])).toEqual([
+      ['cosign sign --yes "${IMAGE}@${DIGEST}"', '${{ steps.push.outputs.digest }}'],
+    ]);
+    const attesting = loadSteps('load-image-attest').filter(running('cosign attest '));
+    expect(attesting).toHaveLength(1);
+    expect(attesting[0]?.run).toMatch(
+      /cosign attest --yes --type cyclonedx --predicate "\$\{files\[0\]\}" "\$\{IMAGE\}@\$\{DIGEST\}"\n?$/,
+    );
+  });
+
+  it('proves each refusal against the real image, in order: unsigned, then no SBOM, then another commit', () => {
+    const unsigned = loadIndex('load-image-publish', expecting(EXIT.IMAGE_UNSIGNED));
+    const sign = loadIndex('load-image-publish', running('cosign sign '));
+    const noSbom = loadIndex('load-image-publish', expecting(EXIT.SBOM_MISSING));
+    expect(unsigned).toBeLessThan(sign);
+    expect(sign).toBeLessThan(noSbom);
+    const attest = loadIndex('load-image-attest', running('cosign attest '));
+    const accepted = loadIndex(
+      'load-image-attest',
+      (step) => running('node deploy/image/verify.ts')(step) && step.env?.EXPECTED_EXIT === undefined,
+    );
+    const otherCommit = loadIndex('load-image-attest', expecting(EXIT.SIGNATURE_REFUSED));
+    expect(attest).toBeLessThan(accepted);
+    expect(accepted).toBeLessThan(otherCommit);
+    expect(loadSteps('load-image-attest')[accepted]?.env?.COMMIT).toBe('${{ github.sha }}');
+    expect(loadSteps('load-image-attest')[otherCommit]?.env?.COMMIT).toMatch(/^[0-9a-f]{40}$/);
+    const proofs = Object.keys(load.jobs)
+      .flatMap(loadSteps)
+      .filter((step) => step.env?.EXPECTED_EXIT !== undefined);
+    expect(proofs).toHaveLength(3);
+    for (const proof of proofs) {
+      expect(proof.run).toContain('node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}" || status=$?');
+      expect(proof.run).toContain('if [ "${status}" -ne "${EXPECTED_EXIT}" ]; then');
+    }
+  });
+
+  it("uses the runner's own Node where it signs, and logs out of the registry even when a step fails", () => {
+    for (const name of ['load-image-publish', 'load-image-attest']) {
+      const setupNode = loadSteps(name).find((step) => step.uses?.startsWith('actions/setup-node@') === true);
+      expect(setupNode?.with?.['check-latest']).toBe(false);
+      expect(loadSteps(name).at(-1)).toMatchObject({ if: 'always()', run: 'docker logout ghcr.io' });
     }
   });
 });

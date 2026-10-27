@@ -1,0 +1,21 @@
+# What the load image's build may see (tooling/load/Dockerfile; BuildKit
+# reads this file, not the root .dockerignore, for that Dockerfile).
+# Everything is left out unless listed. Test files stay out but the one
+# helper the seed builds its world with; the laptop's own steps
+# (*.load.test.ts), the run's working files and its reports stay out too.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!apps/api/**
+!packages/core/**
+!packages/platform/**
+!packages/testing/**
+!deploy/compose/prepare.ts
+!tooling/load/**
+**/*.test.ts
+!apps/api/src/mandate-world.helper.test.ts
+tooling/load/.out
+tooling/load/reports
+tooling/load/Dockerfile*
+**/node_modules
