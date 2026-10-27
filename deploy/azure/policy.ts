@@ -30,6 +30,7 @@ export type RuleId =
   | 'owner-login-alert'
   | 'database-tls'
   | 'database-backup'
+  | 'database-size'
   | 'vault'
   | 'evidence-store'
   | 'activity-downloads'
@@ -148,6 +149,9 @@ export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
 
 /** The one role besides the server admin whose login raises the alert (ADR-012 §2). */
 const BACKUP_ROLE = 'agentx_backup';
+
+/** Staging's database sizes, name/tier: normal (B1ms), and load for the load run alone (main.bicep's databaseSize, D2c). */
+const STAGING_DATABASE_SIZES: readonly string[] = ['Standard_B1ms/Burstable', 'Standard_D2ads_v5/GeneralPurpose'];
 
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
 const LOG_LINE_PREFIX = '%t-%c-';
@@ -1173,6 +1177,21 @@ const postgresSubnets = (snapshot: Snapshot): readonly { id: string; subnet: unk
       .filter((subnet) => delegatedTo(subnet) === TYPES.server)
       .map((subnet) => ({ id: `${network.id}/subnets/${String(at(subnet, 'name'))}`, subnet, network })),
   );
+
+/** Staging runs one of its two sizes (main.bicep), never another by mistake; production's waits on the load run (PL-38). */
+const databaseSize: Check = (snapshot, expected, add) => {
+  if (expected.environment !== 'staging') return;
+  for (const server of ofType(snapshot, TYPES.server)) {
+    const size = `${String(at(server, 'sku', 'name'))}/${String(at(server, 'sku', 'tier'))}`;
+    if (!STAGING_DATABASE_SIZES.includes(size)) {
+      add({
+        rule: 'database-size',
+        resource: server.name,
+        message: `runs ${STAGING_DATABASE_SIZES.join(' or ')} on staging (ADR-002; the load run, D2c)`,
+      });
+    }
+  }
+};
 
 const database: Check = (snapshot, expected, add) => {
   for (const server of ofType(snapshot, TYPES.server)) {
@@ -3590,6 +3609,7 @@ const CHECKS: readonly Check[] = [
   tagged,
   noSecretLiterals,
   database,
+  databaseSize,
   databaseNetwork,
   appsNetwork,
   appsEgress,

@@ -100,7 +100,8 @@ const pemHeader = (...label: readonly string[]): string => ['-----BEGIN', ...lab
 
 describe('parseArguments', () => {
   it('reads the ways the tool is run', () => {
-    expect(parseArguments(['foundation'])).toEqual({ command: 'foundation' });
+    expect(parseArguments(['foundation'])).toEqual({ command: 'foundation', loadSize: false });
+    expect(parseArguments(['foundation', '--load-size'])).toEqual({ command: 'foundation', loadSize: true });
     expect(parseArguments(['alerts'])).toEqual({ command: 'alerts' });
     expect(parseArguments(['dns'])).toEqual({ command: 'dns' });
     expect(parseArguments(['certificates'])).toEqual({ command: 'certificates' });
@@ -154,7 +155,9 @@ describe('parseArguments', () => {
       [['apps', '--commit', COMMIT, '--commit', COMMIT], /each at most once/],
       [['apps', '--keep-running', '--keep-running'], /each at most once/],
       [['apps', '--keep'], /each at most once/],
-      [['foundation', '--all'], /foundation takes no options/],
+      [['foundation', '--all'], /foundation takes only --load-size/],
+      [['foundation', '--load-size', '--load-size'], /foundation takes only --load-size/],
+      [['foundation', '--load-size=yes'], /foundation takes only --load-size/],
       [['alerts', '--fix'], /alerts takes no options, not --fix/],
       [['dns', 'app.example.invalid'], /dns takes no options, not app.example.invalid/],
       [['certificates', '--keep-running'], /certificates takes no options, not --keep-running/],
@@ -818,7 +821,12 @@ describe('deploy foundation', () => {
     expect(deployment?.values).toEqual({
       AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid',
       AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: admin,
+      // Always sent: a load size left in the operator's shell never reaches Azure.
+      AGENTX_AZURE_DATABASE_SIZE: 'normal',
     });
+    expect(done.terminal.said).toContain(
+      'The database stays at (or goes back to) its normal size, B1ms; a change of size restarts it for a few minutes.',
+    );
     // The rules saw the run's values; the real check shapes them before any snapshot (shapedForPolicy).
     expect(done.checked).toEqual([deployment?.values]);
     for (const call of done.az.calls) expect(call.args.join(' ')).not.toContain(admin);
@@ -868,6 +876,20 @@ describe('deploy foundation', () => {
     });
     expect(skipped.status).toBe(1);
     expect(skipped.az.sequence.filter((call) => call === 'rest --method get')).toHaveLength(1);
+  });
+
+  it('sizes the database for the load run with --load-size, and says what it costs and how to size it back (D2c)', async () => {
+    const admin = aPaste();
+    const done = await run(['foundation', '--load-size'], {
+      answers: ['y', 'ops@example.invalid'],
+      hidden: [admin, admin],
+    });
+    expect(done.status).toBe(0);
+    expect(done.az.deployment?.values).toMatchObject({ AGENTX_AZURE_DATABASE_SIZE: 'load' });
+    expect(done.checked).toEqual([done.az.deployment?.values]);
+    expect(done.terminal.said).toContain(
+      "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes. Run foundation again without --load-size the same day to size it back.",
+    );
   });
 
   it('stops before asking for anything when the operator declines the subscription', async () => {

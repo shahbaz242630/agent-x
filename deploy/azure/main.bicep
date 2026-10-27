@@ -62,10 +62,24 @@ param budgetStartDate string
 @secure()
 param postgresAdminPassword string
 
-@description('The database compute size (ADR-002: Burstable B1ms to start).')
-param postgresSku object = {
-  name: 'Standard_B1ms'
-  tier: 'Burstable'
+@description('The database compute size: normal (ADR-002: Burstable B1ms to start), or load for the load test\'s run alone (D2c, PL-38).')
+@allowed([
+  'normal'
+  'load'
+])
+param databaseSize string
+
+// The load size: 2 vCores, General Purpose (D2c: offered in UAE North and within quota, S152). Its storage, backups and
+// network stay the server's own; only the compute changes, with a restart of a few minutes.
+var postgresSkus = {
+  normal: {
+    name: 'Standard_B1ms'
+    tier: 'Burstable'
+  }
+  load: {
+    name: 'Standard_D2ads_v5'
+    tier: 'GeneralPurpose'
+  }
 }
 
 @description('How many days of point-in-time restore the server keeps: 7 to 35 (ADR-002: 35 in production).')
@@ -199,7 +213,7 @@ module database 'modules/postgres.bicep' = {
     name: names.server
     tags: tags
     adminPassword: postgresAdminPassword
-    sku: postgresSku
+    sku: postgresSkus[databaseSize]
     backupRetentionDays: postgresBackupRetentionDays
     geoRedundantBackup: postgresGeoRedundantBackup
     subnetId: ids.databaseSubnet

@@ -641,6 +641,24 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     });
   });
 
+  it("compiles the load run's foundation (D2c): the server's size alone changes, and every rule still holds", () => {
+    const load = inCopy((dir) => environmentSnapshot(dir, 'staging', { AGENTX_AZURE_DATABASE_SIZE: 'load' }));
+    expect(policyProblems(load.together, STAGING).map(describeProblem)).toEqual([]);
+    expect(at(load.foundation.predictedResources.find(SERVER), 'sku')).toEqual({
+      name: 'Standard_D2ads_v5',
+      tier: 'GeneralPurpose',
+    });
+    expect(at(staging.predictedResources.find(SERVER), 'sku')).toEqual({ name: 'Standard_B1ms', tier: 'Burstable' });
+    // Only the foundation reads the size; the other parts carry stand-in values that differ each run.
+    const normal = deployed.get('staging')?.foundation.predictedResources ?? [];
+    const sizeless = (resource: PredictedResource) => (SERVER(resource) ? { ...resource, sku: undefined } : resource);
+    expect(load.foundation.predictedResources.map(sizeless)).toEqual(normal.map(sizeless));
+    // Any other value stops the run before Azure.
+    expect(() =>
+      inCopy((dir) => environmentSnapshot(dir, 'staging', { AGENTX_AZURE_DATABASE_SIZE: 'huge' })),
+    ).toThrow();
+  });
+
   it('resolves every reference between modules to a resource it creates', () => {
     const server = staging.predictedResources.find(SERVER);
     const network = staging.predictedResources.find(NETWORK);
@@ -1050,6 +1068,23 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ).toEqual(['database-backup']);
     const production = productionLike({ subject: true });
     expect(brokenRules(production, { region: 'uaenorth', environment: 'production' })).toEqual(['database-backup']);
+  });
+
+  it("database-size: on staging, any size but B1ms or the load run's D2ads_v5, each with its own tier", () => {
+    const sized = (name: string, tier: string) => changed(SERVER, (server) => (server.sku = { name, tier }));
+    expect(brokenRules(sized('Standard_D2ads_v5', 'GeneralPurpose'))).toEqual([]);
+    for (const [name, tier] of [
+      ['Standard_D4ads_v5', 'GeneralPurpose'],
+      ['Standard_B2s', 'Burstable'],
+      ['Standard_D2ads_v5', 'Burstable'],
+      ['Standard_B1ms', 'GeneralPurpose'],
+    ] as const) {
+      expect({ name, tier, broken: brokenRules(sized(name, tier)) }).toEqual({ name, tier, broken: ['database-size'] });
+    }
+    // Production's size waits on the load run (PL-38): the rule names staging's alone.
+    expect(
+      brokenRules(sized('Standard_D4ads_v5', 'GeneralPurpose'), { region: 'uaenorth', environment: 'production' }),
+    ).not.toContain('database-size');
   });
 
   it('database-network: any door wider than 5432 from the apps and the subnet itself, or a Postgres subnet without its rules', () => {
