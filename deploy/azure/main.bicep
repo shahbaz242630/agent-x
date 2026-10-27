@@ -62,7 +62,7 @@ param budgetStartDate string
 @secure()
 param postgresAdminPassword string
 
-@description('The database compute size: normal (ADR-002: Burstable B1ms to start), or load for the load test\'s run alone (D2c, PL-38). Only `deploy.ts foundation --load-size` asks for load; every other foundation run sizes it back to normal.')
+@description('The database compute size: normal (ADR-002: Burstable B1ms to start), or load for the load test\'s run alone (D2c, PL-38).')
 @allowed([
   'normal'
   'load'

@@ -151,7 +151,7 @@ export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
 const BACKUP_ROLE = 'agentx_backup';
 
 /** Staging's database sizes, name/tier: normal (B1ms), and load for the load run alone (main.bicep's databaseSize, D2c). */
-const STAGING_DATABASE_SIZES = ['Standard_B1ms/Burstable', 'Standard_D2ads_v5/GeneralPurpose'];
+const STAGING_DATABASE_SIZES: readonly string[] = ['Standard_B1ms/Burstable', 'Standard_D2ads_v5/GeneralPurpose'];
 
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
 const LOG_LINE_PREFIX = '%t-%c-';
@@ -1178,8 +1178,7 @@ const postgresSubnets = (snapshot: Snapshot): readonly { id: string; subnet: unk
       .map((subnet) => ({ id: `${network.id}/subnets/${String(at(subnet, 'name'))}`, subnet, network })),
   );
 
-// Staging's two sizes (main.bicep): no other is ever sent there by mistake.
-// Production's waits on the load run's answer (PL-38).
+/** Staging runs one of its two sizes (main.bicep), never another by mistake; production's waits on the load run (PL-38). */
 const databaseSize: Check = (snapshot, expected, add) => {
   if (expected.environment !== 'staging') return;
   for (const server of ofType(snapshot, TYPES.server)) {
