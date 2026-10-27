@@ -17,7 +17,7 @@ export const MONTHLY_CAP_CHOICES = ['amount', 'none'] as const;
 export type MonthlyCapChoice = (typeof MONTHLY_CAP_CHOICES)[number];
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
-const MONTHLY_CAP_STATEMENTS = {
+export const MONTHLY_CAP_STATEMENTS = {
   amount:
     'Each agent may spend at most this amount in its month, under every mandate of its counted: a request above it is ' +
     'refused. A mandate’s own policy may set another cap for its agent, higher or lower.',
@@ -27,7 +27,7 @@ const MONTHLY_CAP_STATEMENTS = {
 } as const satisfies Record<MonthlyCapChoice, string>;
 
 /** The version of MONTHLY_CAP_STATEMENTS each event names: raised with any change to their words. */
-const MONTHLY_CAP_STATEMENT_VERSION = 1;
+export const MONTHLY_CAP_STATEMENT_VERSION = 1;
 
 /** What the console fills in for the admin to change or confirm (partner, S113): AED 20,000, never applied unchosen. */
 export const SUGGESTED_MONTHLY_CAP_MINOR = 2_000_000;

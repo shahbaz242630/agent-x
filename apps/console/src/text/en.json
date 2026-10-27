@@ -33,5 +33,16 @@
   "error.body": "Agent X couldn't load this page. Try again in a moment.",
   "error.retry": "Try again",
   "notFound.title": "Page not found",
-  "notFound.home": "Go to approvals"
+  "notFound.home": "Go to approvals",
+  "confirm.choose": "Choose what happens. Nothing is chosen for you.",
+  "confirm.cancel": "Cancel",
+  "confirm.unloaded": "Agent X couldn't load what this change does, so it can't be confirmed yet. Try again in a moment.",
+  "stepUp.title": "You've signed in again. Confirm the change",
+  "stepUp.confirm": "Confirm",
+  "stepUp.notNow": "Don't make it",
+  "stepUp.done": "Done: {change}",
+  "stepUp.refused": "Agent X didn't make this change: {change}. Its confirmation was refused or ran out. Ask for it again if you still want it.",
+  "stepUp.failed": "Agent X couldn't be reached, so the change isn't made yet. Try confirming again.",
+  "stepUp.lost": "A change you signed in again for can't be found in this window, so it wasn't made. Ask for it again if you still want it.",
+  "stepUp.close": "Close"
 }

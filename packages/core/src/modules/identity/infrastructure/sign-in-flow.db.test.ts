@@ -304,8 +304,17 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
       idleEndsAt: new Date(START.getTime() + 1800 * 1000),
     });
     expect(await signIn.signedIn('A'.repeat(43))).toBeUndefined();
+    const lastUse = () =>
+      app.selectFrom('identity.sessions').select('last_seen_at').where('id', '=', done.sessionId).executeTakeFirst();
+    const before = await lastUse();
+    clock.advanceBy(600_000);
+    expect(await signIn.holderOf(done.cookie)).toBe(done.userId);
+    // Who holds it, without that counting as a use (6A2: a browser's error report).
+    expect(await lastUse()).toEqual(before);
+    expect(await signIn.holderOf('A'.repeat(43))).toBeUndefined();
     await signIn.signOut(done.cookie);
     expect(await signIn.signedIn(done.cookie)).toBeUndefined();
+    expect(await signIn.holderOf(done.cookie)).toBeUndefined();
   });
 
   it('gives up looking a session up after 10 seconds, a wait for a lock included, rather than hang', async () => {

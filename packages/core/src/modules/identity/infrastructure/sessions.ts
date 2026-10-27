@@ -60,6 +60,12 @@ export interface Sessions {
   /** The live session this cookie ID belongs to, its last use moved on; undefined for any other cookie ID. */
   use(db: Kysely<IdentityTables>, cookie: string): Promise<LiveSession | undefined>;
   /**
+   * Who holds the live session this cookie ID belongs to, its last use left
+   * as it was: a browser's error report (6A2) is no use of it, and mustn't
+   * keep an idle session alive. Undefined for any other cookie ID.
+   */
+  holder(db: Kysely<IdentityTables>, cookie: string): Promise<string | undefined>;
+  /**
    * Gives a live session a new cookie ID, keeping its record (step-up,
    * SEC-HA-07): the old one finds nothing from then on. Undefined if the
    * session isn't live.
@@ -200,6 +206,19 @@ export function createSessions({
         endsAt: row.ends_at,
         idleEndsAt: new Date(Math.min(idleEnd, row.ends_at.getTime())),
       };
+    },
+
+    async holder(db, cookie) {
+      if (!isCookie(cookie)) return undefined;
+      const now = clock.now();
+      const row = await db
+        .selectFrom('identity.sessions')
+        .select('user_id')
+        .where('cookie_hash', '=', hashOf(cookie))
+        .where('last_seen_at', '>', idleSince(now))
+        .where('ends_at', '>', now)
+        .executeTakeFirst();
+      return row?.user_id;
     },
 
     async rotate(db, sessionId) {

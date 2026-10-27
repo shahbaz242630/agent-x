@@ -140,6 +140,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/registered-contacts',
       'GET /v1/spend-requests',
       'GET /v1/spend-requests/{id}',
+      'GET /v1/statements',
       'GET /v1/suppliers',
       'GET /v1/suppliers/{id}',
       'HEAD /health',
@@ -175,6 +176,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/registered-contacts',
       'HEAD /v1/spend-requests',
       'HEAD /v1/spend-requests/{id}',
+      'HEAD /v1/statements',
       'HEAD /v1/suppliers',
       'HEAD /v1/suppliers/{id}',
       'POST /test/both',
@@ -195,6 +197,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/agents/{id}/suspend',
       'POST /v1/audit-log/exports',
       'POST /v1/auth/sign-out',
+      'POST /v1/client-errors',
       'POST /v1/factor-resets/confirm',
       'POST /v1/factor-resets/{id}/cancel',
       'POST /v1/factor-resets/{id}/confirm',
@@ -1256,8 +1259,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), a person's own organisations (Phase 6 6A1), with each GET's HEAD.
-    expect(answers).toHaveLength(168);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), with each GET's HEAD.
+    expect(answers).toHaveLength(171);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },

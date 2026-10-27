@@ -44,11 +44,12 @@ const TYPES: Readonly<Record<string, string>> = {
 /** An asset's published name, as Vite writes it: letters, digits, `-` and `_`, one dot, a known extension. */
 const ASSET_NAME = /^[A-Za-z0-9_-]+\.[a-z0-9]+$/;
 
-/** A console page's path: `/`, or segments of lower-case letters, digits and hyphens. The path part, never a dot. */
-const PAGE_PATH = /^\/(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
-
-/** The first segments that are the API's own, never a console page. */
-const API_SEGMENTS: ReadonlySet<string> = new Set(['v1', 'health']);
+/**
+ * A console page's path: `/`, or segments of lower-case letters, digits and
+ * hyphens, the first never one of the API's own (`v1`, `health`). The path
+ * part, never a dot. One pattern, so browser-errors.ts's contract states it.
+ */
+export const PAGE_PATH = /^\/(?!(?:v1|health)(?:\/|$))(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
 
 /** Hashed assets: their name changes with their bytes, so a browser may keep them. */
 const KEPT = 'public, max-age=31536000, immutable';
@@ -116,9 +117,7 @@ const PAGE_QUERY = /^[A-Za-z0-9\-._~%=&+]{0,512}$/;
 function isPage(url: string): boolean {
   const [path = '', query, ...rest] = url.split('?');
   if (rest.length > 0 || (query !== undefined && !PAGE_QUERY.test(query))) return false;
-  if (!PAGE_PATH.test(path)) return false;
-  const first = path.split('/')[1] ?? '';
-  return !API_SEGMENTS.has(first);
+  return PAGE_PATH.test(path);
 }
 
 function send(response: ServerResponse, file: ConsoleFile, cacheControl?: string): void {

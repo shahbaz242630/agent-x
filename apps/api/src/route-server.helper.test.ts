@@ -43,6 +43,7 @@ const signedIn = (live: LiveSession | undefined): SignIn => ({
   beginStepUp: () => Promise.reject(new Error('not in these tests')),
   complete: () => Promise.reject(new Error('not in these tests')),
   signOut: () => Promise.resolve(undefined),
+  holderOf: (cookie) => Promise.resolve(cookie === COOKIE ? live?.userId : undefined),
   signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? live : undefined),
 });
 

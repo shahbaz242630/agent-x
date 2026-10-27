@@ -14,7 +14,7 @@ const OLD_KEY_CHOICES = ['overlap', 'end_now'] as const;
 export type OldKeyChoice = (typeof OLD_KEY_CHOICES)[number];
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the events keep the version. */
-const OLD_KEY_STATEMENTS = {
+export const OLD_KEY_STATEMENTS = {
   overlap:
     'The old key keeps working for 24 hours beside the new one (or until its own expiry, if sooner), so the agent ' +
     'can switch without a gap. Then it stops.',
@@ -24,7 +24,7 @@ const OLD_KEY_STATEMENTS = {
 } as const satisfies Record<OldKeyChoice, string>;
 
 /** The version of OLD_KEY_STATEMENTS each event names: raised with any change to their words. */
-const OLD_KEY_STATEMENT_VERSION = 1;
+export const OLD_KEY_STATEMENT_VERSION = 1;
 
 /** The choice as a body names it: confirmed by the member rotating, no default. */
 export const OLD_KEY = z

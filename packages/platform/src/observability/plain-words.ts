@@ -18,6 +18,16 @@ export const PLAIN_WORDS = {
       'Activity rows still get a country and city, but places from newer internet addresses may be missing or wrong.',
     next: 'Check the monthly place file refresh ran, open its branch as a pull request and merge it.',
   },
+  'console.browser_error': {
+    happened: "The console failed in a person's browser and sent the error here.",
+    broke: 'That screen may not have shown or done what they asked; the server is fine.',
+    next: 'If it repeats, a developer should read the message and page on these lines.',
+  },
+  'console.browser_error_anonymous': {
+    happened: 'The console failed in the browser of someone not signed in, and sent the error here.',
+    broke: 'A page before signing in, such as the sign-in page, may not have worked; the server is fine.',
+    next: 'If many come, a developer should read them. Anyone can send these, so they may be forged.',
+  },
   'mandate_carry.failed': {
     happened: "Carrying a mandate's remaining waiting requests onto its new version failed.",
     broke: 'Those requests stay on the old version, so none of them can be approved or paid yet.',

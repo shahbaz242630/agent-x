@@ -118,6 +118,8 @@ export interface SignIn {
   signOut(cookie: string | undefined): Promise<Subject | undefined>;
   /** The live session this cookie belongs to, its last use moved on; undefined if there is none. */
   signedIn(cookie: string): Promise<LiveSession | undefined>;
+  /** Who holds the live session this cookie belongs to, its last use left as it was; undefined if there is none. */
+  holderOf(cookie: string): Promise<string | undefined>;
 }
 
 export function createSignIn({
@@ -245,6 +247,10 @@ export function createSignIn({
 
     signedIn(cookie) {
       return limited((tx) => sessions.use(tx, cookie));
+    },
+
+    holderOf(cookie) {
+      return limited((tx) => sessions.holder(tx, cookie));
     },
   };
 }

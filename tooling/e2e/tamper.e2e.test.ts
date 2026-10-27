@@ -402,6 +402,8 @@ function textSample(schema: Schema, tenant: Tenant, field: string): unknown {
     oldKey: tenant.key.text,
     accountId: bankAccountId,
     url: 'https://example.test/form',
+    // A console page, as a browser error report names it (6A2's POST /v1/client-errors).
+    page: '/approvals',
     agentId: tenant.draftAgent,
     fundingSourceId: tenant.world.source,
     supplierId: tenant.world.suppliers[0],

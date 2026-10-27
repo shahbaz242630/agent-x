@@ -174,6 +174,39 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
     });
   });
 
+  describe('who holds a session (6A2: a browser error report)', () => {
+    it('names the person holding a live session, leaving its last use as it was', async () => {
+      const { userId, clock, sessions } = await setUp();
+      const { sessionId, cookie } = await sessions.open(app, userId, evidence);
+      clock.advanceBy((IDLE - 1) * SECOND);
+
+      expect(await sessions.holder(app, cookie)).toBe(userId);
+      expect((await rowOf(sessionId))?.last_seen_at).toEqual(START);
+      // Its idle timeout, not moved by the look, ends it a second later, long before its absolute end.
+      clock.advanceBy(SECOND);
+      expect(await sessions.holder(app, cookie)).toBeUndefined();
+    });
+
+    it('names no one for a session past either timeout, a cookie ID it never gave, or text that is none', async () => {
+      const { userId, clock, sessions } = await setUp();
+      const idle = await sessions.open(app, userId, evidence);
+      const ending = await sessions.open(app, userId, evidence);
+      // Used every half idle timeout up to its absolute end: idle never ends it, the end does.
+      for (let use = 1; use < ABSOLUTE / (IDLE / 2); use += 1) {
+        clock.advanceBy((IDLE / 2) * SECOND);
+        await sessions.use(app, ending.cookie);
+      }
+      clock.advanceBy((IDLE / 2 - 1) * SECOND);
+      expect(await sessions.holder(app, ending.cookie)).toBe(userId);
+      clock.advanceBy(SECOND);
+
+      expect(await sessions.holder(app, ending.cookie)).toBeUndefined();
+      expect(await sessions.holder(app, idle.cookie)).toBeUndefined();
+      expect(await sessions.holder(app, 'A'.repeat(43))).toBeUndefined();
+      expect(await sessions.holder(app, 'not a cookie')).toBeUndefined();
+    });
+  });
+
   describe('the absolute timeout', () => {
     it('ends a session at it, however much it is used', async () => {
       const { userId, clock, sessions } = await setUp();
