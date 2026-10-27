@@ -49,3 +49,10 @@ param apiOidcClientId = readEnvironmentVariable('AGENTX_AZURE_API_OIDC_CLIENT_ID
 // 0, or 1 for `apps --keep-running` (AGENTX_AZURE_APP_MIN_REPLICAS), which
 // keeps one replica of each app running, billed, until the next `apps`.
 param appMinReplicas = int(readEnvironmentVariable('AGENTX_AZURE_APP_MIN_REPLICAS'))
+
+// The load test's run (D2c, PL-38): deploy.ts always sets both, the run only
+// for `apps --load-run` with the load image's verified digest; the defaults
+// serve the policy tests.
+param loadRun = bool(readEnvironmentVariable('AGENTX_AZURE_LOAD_RUN', 'false'))
+param loadImageRepository = 'ghcr.io/shahbaz242630/agent-x-load'
+param loadImageDigest = readEnvironmentVariable('AGENTX_AZURE_LOAD_IMAGE_DIGEST', '')

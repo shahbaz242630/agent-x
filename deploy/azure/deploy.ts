@@ -46,7 +46,16 @@ import { createInterface } from 'node:readline/promises';
 import { BICEP_VERSION, installedBicep } from '../../tooling/bicep/bicep.ts';
 import { installedCosign } from '../../tooling/cosign/cosign.ts';
 import { type KeyPair, newKeyPair, newMasterKey, newPassword, type Random } from '../compose/prepare.ts';
-import { IMAGE_REPOSITORY, type Outcome, runCosign, SOURCE_REPOSITORY, verifyImage } from '../image/verify.ts';
+import {
+  APP_SIGNER,
+  IMAGE_REPOSITORY,
+  LOAD_SIGNER,
+  type Outcome,
+  runCosign,
+  type Signer,
+  SOURCE_REPOSITORY,
+  verifyImage,
+} from '../image/verify.ts';
 import { APP_KEYS, newAppKeys } from './app-keys.ts';
 import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, policyProblems } from './policy.ts';
@@ -154,6 +163,11 @@ const ADMIN_PASSWORD = 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD';
 const ALERT_EMAIL = 'AGENTX_AZURE_ALERT_EMAIL';
 /** staging.bicepparam's databaseSize: always set by the foundation, so a value left in the shell is never what's sent. */
 const DATABASE_SIZE = 'AGENTX_AZURE_DATABASE_SIZE';
+/**
+ * staging.apps.bicepparam's load run and the load image's digest (D2c): always
+ * set by apps, the run only with --load-run, so a plain apps puts the API back.
+ */
+export const LOAD_VARIABLES = { run: 'AGENTX_AZURE_LOAD_RUN', digest: 'AGENTX_AZURE_LOAD_IMAGE_DIGEST' } as const;
 
 /** Every variable that carries a secret: the ones the policy check replaces with stand-ins. */
 const SECRET_VARIABLES: ReadonlySet<string> = new Set(Object.values(VAULT_SECRETS).map((secret) => secret.variable));
@@ -176,7 +190,12 @@ export type SecretPlan =
 export type Request =
   | { readonly command: 'foundation'; readonly loadSize: boolean }
   | { readonly command: 'secrets'; readonly plan: SecretPlan }
-  | { readonly command: 'apps'; readonly commit: string | undefined; readonly keepRunning: boolean }
+  | {
+      readonly command: 'apps';
+      readonly commit: string | undefined;
+      readonly keepRunning: boolean;
+      readonly loadRun: boolean;
+    }
   | { readonly command: 'alerts' }
   | { readonly command: 'dns' }
   | { readonly command: 'certificates' };
@@ -193,7 +212,7 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
   node deploy/azure/deploy.ts secrets --keys
-  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running]
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run]
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
   node deploy/azure/deploy.ts certificates`;
@@ -202,18 +221,23 @@ export const USAGE = `Usage, from your own terminal window:
 function parseApps(options: readonly string[]): Request {
   let commit: string | undefined;
   let keepRunning = false;
+  let loadRun = false;
   for (let at = 0; at < options.length; at += 1) {
     const option = options[at];
     if (option === '--keep-running' && !keepRunning) {
       keepRunning = true;
+    } else if (option === '--load-run' && !loadRun) {
+      loadRun = true;
     } else if (option === '--commit' && commit === undefined && COMMIT.test(options[at + 1] ?? '')) {
       commit = options[at + 1];
       at += 1;
     } else {
-      throw new UsageError('apps takes --keep-running, and --commit with one full 40-hex commit, each at most once');
+      throw new UsageError(
+        'apps takes --keep-running, --load-run, and --commit with one full 40-hex commit, each at most once',
+      );
     }
   }
-  return { command: 'apps', commit, keepRunning };
+  return { command: 'apps', commit, keepRunning, loadRun };
 }
 
 /** What the operator asked for, or a UsageError saying why it can't be done. */
@@ -651,10 +675,10 @@ export const deploymentName = (part: string, at: Date): string =>
 export interface Images {
   /** The newest commit on main, from GitHub. */
   latestCommit(): Promise<string>;
-  /** The digest ghcr.io gives the image CI tagged with that commit. */
-  digestOf(commit: string): Promise<string>;
-  /** verify.ts's answer for the image, by digest, at that commit. */
-  verify(image: string, commit: string): Outcome;
+  /** The digest ghcr.io gives the image its signer tagged with that commit: the app's, or the load test's. */
+  digestOf(commit: string, signer?: Signer): Promise<string>;
+  /** verify.ts's answer for the image, by digest, at that commit, signed by its signer. */
+  verify(image: string, commit: string, signer?: Signer): Outcome;
 }
 
 /** Media types a registry may answer a manifest request with. */
@@ -673,7 +697,6 @@ async function json(url: string, headers: Readonly<Record<string, string>> = {})
 
 /** GitHub and ghcr.io, both public, so nothing here holds a credential. */
 export function realImages(cosign: () => string = installedCosign): Images {
-  const repository = IMAGE_REPOSITORY.replace(/^ghcr\.io\//, '');
   return {
     latestCommit: async () =>
       text(
@@ -683,7 +706,8 @@ export function realImages(cosign: () => string = installedCosign): Images {
           })) as { sha?: unknown }
         ).sha,
       ),
-    digestOf: async (commit) => {
+    digestOf: async (commit, signer = APP_SIGNER) => {
+      const repository = signer.repository.replace(/^ghcr\.io\//, '');
       const token = text(
         (
           (await json(`https://ghcr.io/token?scope=repository:${repository}:pull&service=ghcr.io`)) as {
@@ -703,9 +727,9 @@ export function realImages(cosign: () => string = installedCosign): Images {
       }
       return response.headers.get('docker-content-digest') ?? '';
     },
-    verify: (image, commit) => {
+    verify: (image, commit, signer = APP_SIGNER) => {
       const binary = cosign();
-      return verifyImage(image, commit, (args) => runCosign(args, binary));
+      return verifyImage(image, commit, (args) => runCosign(args, binary), signer);
     },
   };
 }
@@ -1418,7 +1442,65 @@ function confirmCheckoutIs(steps: Steps, release: string): void {
   }
 }
 
-async function deployApps(steps: Steps, commit: string | undefined, keepRunning: boolean): Promise<number> {
+/**
+ * The load test's image for the same commit (D2c), checked as the app's is but
+ * against its own signer: built by hand from main (load-image.yml), so it may
+ * not exist yet for a newer commit.
+ */
+async function verifiedLoadImage(steps: Steps, images: Images, release: string): Promise<string> {
+  const digest = await images.digestOf(release, LOAD_SIGNER).catch((error: unknown) => {
+    throw new Error(
+      `The load test's image for ${release} isn't there (${error instanceof Error ? error.message : String(error)}). Build it from main first (the Load image workflow), then run apps --load-run again. Nothing was deployed.`,
+    );
+  });
+  if (!DIGEST.test(digest)) throw new Error(`ghcr.io gave ${digest} as the load image's digest, which isn't one.`);
+  const image = `${LOAD_SIGNER.repository}@${digest}`;
+  steps.terminal.say(`The load test's image for the same commit:\n  ${image}`);
+  steps.terminal.say('Checking it was signed by the Load image workflow on main at that commit, with its SBOM...');
+  const outcome = images.verify(image, release, LOAD_SIGNER);
+  if (!outcome.verified) {
+    throw new Error(`The load image was refused (${outcome.reason}), so nothing was deployed:\n${outcome.detail}`);
+  }
+  steps.terminal.say('Verified.');
+  steps.terminal.say(
+    "The load run: the API at 2 CPUs and 4 GiB (roughly $0.20 to $0.25 an hour while a copy runs, at list price), its limits raised, email off, and the load test's three jobs. Run apps again without --load-run the same day to put it back.",
+  );
+  return digest;
+}
+
+/** The apps and jobs as Azure left them after an apps deploy, and the load test's jobs when a plain one left them. */
+function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean): void {
+  const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
+    const found = azJson(steps.az, [
+      ...kind.split(' '),
+      'list',
+      '--subscription',
+      subscription,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--query',
+      '[].{name: name, state: properties.provisioningState}',
+    ]);
+    return Array.isArray(found) ? (found as { name?: unknown; state?: unknown }[]) : [];
+  };
+  steps.terminal.say('Deployed. The apps and jobs, and how Azure left each:');
+  const appsLeft = listed('containerapp');
+  const jobsLeft = listed('containerapp job');
+  for (const each of [...appsLeft, ...jobsLeft]) {
+    steps.terminal.say(`  ${text(each.name)}: ${text(each.state)}`);
+  }
+  // A deployment only adds and changes (incremental): it never removes the load test's jobs.
+  if (!loadRun && jobsLeft.some((each) => text(each.name).startsWith('job-agentx-stg-load-'))) {
+    steps.terminal.say(
+      "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
+    );
+  }
+}
+
+async function deployApps(
+  steps: Steps,
+  { commit, keepRunning, loadRun }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
+): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
@@ -1448,6 +1530,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
     throw new Error(`The image was refused (${outcome.reason}), so nothing was deployed:\n${outcome.detail}`);
   }
   steps.terminal.say('Verified.');
+  const loadDigest = loadRun ? await verifiedLoadImage(steps, images, release) : '';
   steps.terminal.say(
     keepRunning
       ? 'Each app will keep one replica running, billed, until apps runs again without --keep-running.'
@@ -1469,26 +1552,12 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
     [APP_VARIABLES.adminEmail]: adminEmail,
     [APP_VARIABLES.apiClientId]: apiClientId,
     [APP_VARIABLES.minReplicas]: keepRunning ? '1' : '0',
+    [LOAD_VARIABLES.run]: loadRun ? 'true' : 'false',
+    [LOAD_VARIABLES.digest]: loadDigest,
   };
   checkPolicy(steps, values);
   if (sendWithWhatIf(steps, subscription, 'apps', values) === undefined) return 1;
-  const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
-    const found = azJson(steps.az, [
-      ...kind.split(' '),
-      'list',
-      '--subscription',
-      subscription,
-      '--resource-group',
-      RESOURCE_GROUP,
-      '--query',
-      '[].{name: name, state: properties.provisioningState}',
-    ]);
-    return Array.isArray(found) ? (found as { name?: unknown; state?: unknown }[]) : [];
-  };
-  steps.terminal.say('Deployed. The apps and jobs, and how Azure left each:');
-  for (const each of [...listed('containerapp'), ...listed('containerapp job')]) {
-    steps.terminal.say(`  ${text(each.name)}: ${text(each.state)}`);
-  }
+  sayWhatIsDeployed(steps, subscription, loadRun);
   steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");
   // Most deploys need no job (S21): only a first one needs all four.
   steps.terminal.say(
@@ -1507,7 +1576,7 @@ export async function deploy(request: Request, steps: Steps): Promise<number> {
     case 'secrets':
       return deploySecrets(steps, request.plan);
     case 'apps':
-      return deployApps(steps, request.commit, request.keepRunning);
+      return deployApps(steps, request);
     case 'alerts':
       return checkAlerts(steps);
     case 'dns':

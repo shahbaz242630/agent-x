@@ -12,6 +12,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { BICEP_VERSION } from '../../tooling/bicep/bicep.ts';
 import { newPassword } from '../compose/prepare.ts';
+import { LOAD_SIGNER } from '../image/verify.ts';
 import { APP_KEYS } from './app-keys.ts';
 import {
   ACTION_GROUP,
@@ -32,6 +33,7 @@ import {
   doorRecords,
   HiddenLine,
   type Images,
+  LOAD_VARIABLES,
   main,
   type Makers,
   parseArguments,
@@ -62,6 +64,8 @@ const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000a';
 /** A commit and an image digest in the shapes GitHub and ghcr.io give them, made up. */
 const COMMIT = 'a'.repeat(40);
 const DIGEST = `sha256:${'b'.repeat(64)}`;
+/** The load test's image for the same commit (D2c). */
+const LOAD_DIGEST = `sha256:${'c'.repeat(64)}`;
 
 /** What an operator would paste: assembled when the tests run, all four kinds, never written down. */
 const aPaste = (): string => ['Str0ng', 'Enough', '#', randomBytes(8).toString('hex')].join('');
@@ -107,11 +111,17 @@ describe('parseArguments', () => {
     expect(parseArguments(['certificates'])).toEqual({ command: 'certificates' });
     expect(parseArguments(['secrets', '--all'])).toEqual({ command: 'secrets', plan: all });
     expect(parseArguments(['secrets', '--keys'])).toEqual({ command: 'secrets', plan: keysOnly });
-    expect(parseArguments(['apps'])).toEqual({ command: 'apps', commit: undefined, keepRunning: false });
+    expect(parseArguments(['apps'])).toEqual({
+      command: 'apps',
+      commit: undefined,
+      keepRunning: false,
+      loadRun: false,
+    });
     expect(parseArguments(['apps', '--commit', COMMIT])).toEqual({
       command: 'apps',
       commit: COMMIT,
       keepRunning: false,
+      loadRun: false,
     });
     expect(parseArguments(['secrets', '--rotate', 'db-app-password', 'db-owner-password'])).toEqual({
       command: 'secrets',
@@ -119,17 +129,30 @@ describe('parseArguments', () => {
     });
   });
 
-  it("reads apps' two options in either order", () => {
+  it("reads apps' three options in any order", () => {
     expect(parseArguments(['apps', '--keep-running'])).toEqual({
       command: 'apps',
       commit: undefined,
       keepRunning: true,
+      loadRun: false,
+    });
+    expect(parseArguments(['apps', '--load-run'])).toEqual({
+      command: 'apps',
+      commit: undefined,
+      keepRunning: false,
+      loadRun: true,
     });
     for (const argv of [
       ['apps', '--keep-running', '--commit', COMMIT],
       ['apps', '--commit', COMMIT, '--keep-running'],
     ]) {
-      expect(parseArguments(argv)).toEqual({ command: 'apps', commit: COMMIT, keepRunning: true });
+      expect(parseArguments(argv)).toEqual({ command: 'apps', commit: COMMIT, keepRunning: true, loadRun: false });
+    }
+    for (const argv of [
+      ['apps', '--load-run', '--keep-running', '--commit', COMMIT],
+      ['apps', '--commit', COMMIT, '--load-run', '--keep-running'],
+    ]) {
+      expect(parseArguments(argv)).toEqual({ command: 'apps', commit: COMMIT, keepRunning: true, loadRun: true });
     }
   });
 
@@ -146,7 +169,9 @@ describe('parseArguments', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
       [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
-      [['apps', '--commit'], /apps takes --keep-running, and --commit with one full 40-hex commit/],
+      [['apps', '--commit'], /apps takes --keep-running, --load-run, and --commit with one full 40-hex commit/],
+      [['apps', '--load-run', '--load-run'], /each at most once/],
+      [['apps', '--load-size'], /each at most once/],
       [['apps', '--commit', 'baca38b'], /one full 40-hex commit/],
       [['apps', '--commit', COMMIT.toUpperCase()], /one full 40-hex commit/],
       [['apps', '--commit', COMMIT, 'extra'], /apps takes --keep-running/],
@@ -531,6 +556,8 @@ interface AzAnswers {
   readonly environment?: unknown;
   /** Each app's name and replica minimum; by default all three kept running. */
   readonly apps?: readonly { readonly name: string; readonly fewest?: unknown }[];
+  /** The jobs Azure lists after an apps deploy, by name (default the set-up job alone). */
+  readonly jobs?: readonly string[];
   /** The environment's certificates after the deployment. */
   readonly certificates?: readonly unknown[];
   /**
@@ -655,7 +682,7 @@ class RecordingAz implements Az {
         if (args.some((arg) => arg.includes('fewest'))) return json(this.options.apps ?? KEPT_RUNNING);
         return json([{ name: 'ca-agentx-stg-api', state: 'Succeeded' }]);
       case 'containerapp job':
-        return json([{ name: 'job-agentx-stg-db-setup', state: 'Succeeded' }]);
+        return json((this.options.jobs ?? ['job-agentx-stg-db-setup']).map((name) => ({ name, state: 'Succeeded' })));
       case 'tag update':
         return this.#tagUpdate(args);
       case 'tag list':
@@ -1250,7 +1277,13 @@ describe('deploy secrets', () => {
 
 /** An image source that answers from the options and records what it was asked. */
 function recordingImages(
-  options: { readonly commit?: string; readonly digest?: string; readonly refuse?: boolean } = {},
+  options: {
+    readonly commit?: string;
+    readonly digest?: string;
+    readonly refuse?: boolean;
+    readonly refuseLoad?: boolean;
+    readonly noLoadImage?: boolean;
+  } = {},
 ): Images & { readonly asked: string[] } {
   const asked: string[] = [];
   return {
@@ -1259,13 +1292,19 @@ function recordingImages(
       asked.push('latest');
       return Promise.resolve(options.commit ?? COMMIT);
     },
-    digestOf: (commit) => {
-      asked.push(`digest ${commit}`);
-      return Promise.resolve(options.digest ?? DIGEST);
+    digestOf: (commit, signer) => {
+      const load = signer?.repository === LOAD_SIGNER.repository;
+      asked.push(load ? `load digest ${commit}` : `digest ${commit}`);
+      if (load && options.noLoadImage === true) {
+        return Promise.reject(new Error(`ghcr.io has no image for ${commit} (404)`));
+      }
+      return Promise.resolve(load ? LOAD_DIGEST : (options.digest ?? DIGEST));
     },
-    verify: (image, commit) => {
-      asked.push(`verify ${image} ${commit}`);
-      return options.refuse === true
+    verify: (image, commit, signer) => {
+      const by = signer === undefined ? '' : ` by ${signer.workflow}`;
+      asked.push(`verify ${image} ${commit}${by}`);
+      const refused = signer === LOAD_SIGNER ? options.refuseLoad : options.refuse;
+      return refused === true
         ? { verified: false, reason: 'SIGNATURE_REFUSED', detail: 'not signed by CI on main' }
         : { verified: true };
     },
@@ -1365,9 +1404,13 @@ describe('deploy apps', () => {
       AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
       AGENTX_AZURE_API_OIDC_CLIENT_ID: CLIENT_ID,
       AGENTX_AZURE_APP_MIN_REPLICAS: '0',
+      // Always sent, so a value left in the shell is never what's deployed (D2c).
+      AGENTX_AZURE_LOAD_RUN: 'false',
+      AGENTX_AZURE_LOAD_IMAGE_DIGEST: '',
     });
     expect(done.checked).toEqual([deployment?.values]);
     expect(done.terminal.said).toContain('Each app will scale to zero while nothing uses it.');
+    expect(done.terminal.said.join('\n')).not.toContain('load test');
     expect(done.terminal.said.join('\n')).not.toContain('--keep-running');
     expect(done.terminal.said).toContain('  ca-agentx-stg-api: Succeeded');
     expect(done.terminal.said).toContain('  job-agentx-stg-db-setup: Succeeded');
@@ -1398,6 +1441,62 @@ describe('deploy apps', () => {
     expect(before).toBeLessThan(said.findIndex((line) => line.startsWith("Azure's what-if follows")));
     expect(after).toBe(said.length - 1);
     expect(said).not.toContain('Each app will scale to zero while nothing uses it.');
+  });
+
+  it("deploys the load run (D2c) with the load test's image for the same commit, verified against its own signer", async () => {
+    const images = recordingImages();
+    const done = await run(['apps', '--load-run'], { answers, images });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(images.asked).toEqual([
+      'latest',
+      `digest ${COMMIT}`,
+      `verify ghcr.io/shahbaz242630/agent-x@${DIGEST} ${COMMIT}`,
+      `load digest ${COMMIT}`,
+      `verify ghcr.io/shahbaz242630/agent-x-load@${LOAD_DIGEST} ${COMMIT} by .github/workflows/load-image.yml`,
+    ]);
+    const values = done.az.deployment?.values;
+    expect(values?.AGENTX_AZURE_LOAD_RUN).toBe('true');
+    expect(values?.AGENTX_AZURE_LOAD_IMAGE_DIGEST).toBe(LOAD_DIGEST);
+    expect(values?.AGENTX_AZURE_APP_IMAGE_DIGEST).toBe(DIGEST);
+    expect(done.checked).toEqual([values]);
+    const said = done.terminal.said;
+    const cost = said.findIndex((line) => line.startsWith('The load run: the API at 2 CPUs and 4 GiB'));
+    expect(cost).toBeGreaterThan(-1);
+    expect(cost).toBeLessThan(said.findIndex((line) => line.startsWith("Azure's what-if follows")));
+    expect(said.join('\n')).not.toContain('load.ts finish');
+  });
+
+  it('sends nothing for a load run when the load image for that commit is missing or not signed by its workflow', async () => {
+    const missing = await run(['apps', '--load-run'], { answers, images: recordingImages({ noLoadImage: true }) });
+    expect(missing.error).toMatchObject({
+      message: `The load test's image for ${COMMIT} isn't there (ghcr.io has no image for ${COMMIT} (404)). Build it from main first (the Load image workflow), then run apps --load-run again. Nothing was deployed.`,
+    });
+    expect(missing.az.deployment).toBeUndefined();
+    const refused = await run(['apps', '--load-run'], { answers, images: recordingImages({ refuseLoad: true }) });
+    expect(refused.error).toMatchObject({
+      message: expect.stringMatching(
+        /^The load image was refused \(SIGNATURE_REFUSED\), so nothing was deployed:/,
+      ) as unknown,
+    });
+    expect(refused.az.deployment).toBeUndefined();
+    // Nothing is asked for a refused image: the hosts come after.
+    expect(refused.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+  });
+
+  it("says the load test's jobs are still there after a plain apps, which never removes them", async () => {
+    const jobs = ['job-agentx-stg-db-setup', 'job-agentx-stg-load-first'];
+    const plain = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ jobs }) });
+    expect(plain.status).toBe(0);
+    expect(plain.terminal.said).toContain(
+      "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
+    );
+    const loadRun = await run(['apps', '--load-run'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ jobs }),
+    });
+    expect(loadRun.terminal.said.join('\n')).not.toContain('load.ts finish');
   });
 
   it('says nothing about a running replica when a kept-running deployment fails', async () => {
@@ -1964,6 +2063,9 @@ describe('the tool and the deployment agree', () => {
     const appsText = readFileSync(path.join(AZURE_DIR, 'staging.apps.bicepparam'), 'utf8');
     const appsRead = [...appsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
     expect(appsRead.toSorted()).toEqual(Object.values(APP_VARIABLES).toSorted());
+    // The load run's two (D2c), which apps always sets: their defaults serve the policy tests alone.
+    expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.run}', 'false')`);
+    expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.digest}', '')`);
     const foundationText = readFileSync(path.join(AZURE_DIR, 'staging.bicepparam'), 'utf8');
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')");
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_ALERT_EMAIL')");
@@ -2035,6 +2137,8 @@ describe('the tool and the deployment agree', () => {
       [APP_VARIABLES.adminEmail]: 'admin@example.invalid',
       [APP_VARIABLES.apiClientId]: CLIENT_ID,
       [APP_VARIABLES.minReplicas]: '0',
+      [LOAD_VARIABLES.run]: 'false',
+      [LOAD_VARIABLES.digest]: '',
     };
     expect(shapedForPolicy(appValues, randomBytes)).toEqual(appValues);
     expect(policyCheck({ ...values, ...appValues })).toEqual([]);

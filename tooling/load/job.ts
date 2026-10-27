@@ -288,6 +288,38 @@ export function agentsOf(text: string): PrintedAgent[] {
   return agents;
 }
 
+/** What one run is given in its request (below), by the setting each stands for. */
+const REQUEST_FIELDS: ReadonlySet<string> = new Set([
+  'AGENTX_LOAD_RUN_ID',
+  'AGENTX_LOAD_SEEDED',
+  'AGENTX_LOAD_CREATED_FIRST',
+]);
+
+/**
+ * The run's request: what changes from one run to the next, which load.ts
+ * writes onto the job before starting it, as the operator's request is written
+ * (apps.bicep `loadRequest`): a run started with settings of its own would lose
+ * every mounted file, its login and keys among them. A JSON object of strings,
+ * keyed by the settings above; deployed as `{}`, so a deployment clears it.
+ */
+export function requestOf(text: string): NodeJS.ProcessEnv {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new JobRefused('The run request is not JSON.');
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !Object.entries(parsed).every(([name, value]) => REQUEST_FIELDS.has(name) && typeof value === 'string')
+  ) {
+    throw new JobRefused(`The run request must hold only ${[...REQUEST_FIELDS].join(', ')}, each as text.`);
+  }
+  return parsed as NodeJS.ProcessEnv;
+}
+
 /** The job's command line and settings, run. */
 export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const [job, ...rest] = argv;
@@ -299,7 +331,8 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
     AGENTX_LOAD_DB_HOST: needed(env, 'AGENTX_LOAD_DB_HOST'),
     AGENTX_LOAD_DB_PASSWORD: readFileSync(needed(env, 'AGENTX_DB_PASSWORD_FILE'), 'utf8').trim(),
   });
-  const runId = needed(env, 'AGENTX_LOAD_RUN_ID');
+  const run = requestOf(readFileSync(needed(env, 'AGENTX_LOAD_REQUEST_FILE'), 'utf8'));
+  const runId = needed(run, 'AGENTX_LOAD_RUN_ID');
   const database = createDatabase<LoadTables>(connection, testLogger());
   try {
     const steps: JobSteps = {
@@ -312,9 +345,9 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
       },
     };
     if (job === 'first') return await firstJob(steps, runId);
-    const agents = agentsOf(needed(env, 'AGENTX_LOAD_SEEDED'));
+    const agents = agentsOf(needed(run, 'AGENTX_LOAD_SEEDED'));
     if (job === 'cleanup') return await cleanupJob(steps, runId, agents);
-    const createdFirst = Number(needed(env, 'AGENTX_LOAD_CREATED_FIRST'));
+    const createdFirst = Number(needed(run, 'AGENTX_LOAD_CREATED_FIRST'));
     if (!Number.isSafeInteger(createdFirst) || createdFirst < 0) {
       throw new JobRefused("AGENTX_LOAD_CREATED_FIRST must be phase 1's count of new requests.");
     }

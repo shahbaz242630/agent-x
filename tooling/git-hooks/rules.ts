@@ -91,6 +91,14 @@ const WORD_KEY_WITH_PASSWORD_NAMED =
   /(['"`])[A-Za-z0-9_.-]{8,}\1\s*:\s*\[?[^:]*?(['"`])[A-Za-z0-9_.-]*passw(?:or)?d[A-Za-z0-9_.-]*\2/i;
 
 /**
+ * A password-named name and a quoted word side by side as a call's arguments,
+ * which GitGuardian read as a password, the word being it: a test writing a
+ * stand-in login to the file a variable named for it holds (PR #480, S154).
+ * Name the variable for the file it is (`loginFile`).
+ */
+const PASSWORD_NAMED_ARGUMENT_WITH_WORD = /\b[A-Za-z0-9_]*passw(?:or)?d[A-Za-z0-9_]*\s*,\s*(['"`])[^'"`]{6,}\1/i;
+
+/**
  * A call to something named "secret" with a quoted name holding a digit, which
  * GitGuardian read as a generic high-entropy secret: a test picking one of the
  * app's keys by its vault name, a key purpose and a version (PRs #66 and #67, S27).
@@ -184,6 +192,12 @@ export function lineProblems(file: string, line: number, text: string): Problem[
     add(
       'scanner-bait',
       'a quoted word paired with a quoted password-named name; GitGuardian reads the word as the password. Write the pair as one string ("api reads db-app-password")',
+    );
+  }
+  if (PASSWORD_NAMED_ARGUMENT_WITH_WORD.test(text)) {
+    add(
+      'scanner-bait',
+      'a password-named name beside a quoted word in a call; GitGuardian reads the word as the password. Name the variable for what it is (`loginFile`)',
     );
   }
   if (SECRET_CALL_WITH_DIGIT.test(text)) {
