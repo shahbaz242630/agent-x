@@ -396,6 +396,9 @@ const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init',
  * arguments: a request written into either would sit in the deployment and
  * every run's record.
  */
+/** The load test's three jobs (D2c; tooling/load/job.ts), by the part each runs. */
+const LOAD_PARTS: readonly string[] = ['first', 'second', 'cleanup'];
+
 const HELD: Readonly<
   Record<
     string,
@@ -415,7 +418,7 @@ const HELD: Readonly<
   },
   // The load test's run request (D2c; apps.bicep `loadRequest`), written by load.ts before each run.
   ...Object.fromEntries(
-    ['first', 'second', 'cleanup'].map((part) => [
+    LOAD_PARTS.map((part) => [
       `load-${part}`,
       { name: 'load-request', value: '{}', command: ['node', 'tooling/load/job.ts'], args: [part] },
     ]),
@@ -433,11 +436,11 @@ const HELD: Readonly<
  * none).
  */
 const LOAD_RUN = {
-  jobs: ['load-first', 'load-second', 'load-cleanup'],
+  jobs: LOAD_PARTS.map((part) => `load-${part}`),
   runsAs: 'api',
   image: 'ghcr.io/shahbaz242630/agent-x-load@',
   reads: new Set(['db-app-password', ...APP_KEYS]),
-  apiLeavesOut: ['acs-access-key', 'zitadel-directory-token'],
+  apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
   apiSettings: {
     AGENTX_RATE_LIMIT_PER_MINUTE: '50000',
@@ -445,9 +448,9 @@ const LOAD_RUN = {
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '50000',
     AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000',
   } as Readonly<Record<string, string>>,
-} as const;
+};
 
-const isLoadJob = (workload: string): boolean => (LOAD_RUN.jobs as readonly string[]).includes(workload);
+const isLoadJob = (workload: string): boolean => LOAD_RUN.jobs.includes(workload);
 
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): the API, Zitadel and
@@ -3058,6 +3061,10 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
 /** The work a job or an app does, from its name (`job-agentx-stg-migrate`, `ca-agentx-stg-api`). */
 const jobWorkloadOf = (name: string): string => name.replace(/^(?:job|ca)-agentx-[a-z]+-/, '');
 
+/** The settings a container is given, by name. */
+const settingsIn = (container: unknown): ReadonlyMap<string, unknown> =>
+  new Map(list(at(container, 'env')).map((entry) => [text(at(entry, 'name')), at(entry, 'value')] as const));
+
 /** The containers a job or an app runs. */
 const containersOf = (job: PredictedResource): readonly unknown[] => list(at(job.properties, 'template', 'containers'));
 
@@ -3265,10 +3272,6 @@ const apps: Check = (snapshot, _expected, add) => {
 /** The load test's jobs in the deployment (D2c). */
 const loadJobsIn = (snapshot: Snapshot): readonly PredictedResource[] =>
   ofType(snapshot, TYPES.job).filter((job) => isLoadJob(jobWorkloadOf(job.name)));
-
-/** The settings a container is given, by name. */
-const settingsIn = (container: unknown): ReadonlyMap<string, unknown> =>
-  new Map(list(at(container, 'env')).map((entry) => [text(at(entry, 'name')), at(entry, 'value')] as const));
 
 /** The API in a load run (`LOAD_RUN`) or out of one: its size, its limits and its email, either way. */
 function loadApiProblems(api: PredictedResource, loadRun: boolean, problem: (message: string) => void): void {
@@ -3554,7 +3557,7 @@ function secretsNeeded(workload: string, loadRun: boolean): ReadonlySet<string> 
   if (isLoadJob(workload)) return LOAD_RUN.reads;
   const read = secretsRead(workload);
   if (!loadRun || workload !== LOAD_RUN.runsAs) return read;
-  return new Set([...read].filter((secret) => !(LOAD_RUN.apiLeavesOut as readonly string[]).includes(secret)));
+  return new Set([...read].filter((secret) => !LOAD_RUN.apiLeavesOut.has(secret)));
 }
 
 /** The identity a job or an app runs as: user-assigned, and its own alone. Gives back the ids it is assigned. */
@@ -3663,9 +3666,7 @@ const containerTelemetry: Check = (snapshot, _expected, add) => {
       add({ rule: 'container-telemetry', resource: job.name, message });
     };
     for (const container of containersOf(job)) {
-      const settings = new Map(
-        list(at(container, 'env')).map((entry) => [text(at(entry, 'name')), at(entry, 'value')] as const),
-      );
+      const settings = settingsIn(container);
       for (const [name] of [...settings].filter(
         ([setting, value]) => setting.startsWith('OTEL_') && value !== 'true',
       )) {

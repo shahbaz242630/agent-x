@@ -175,7 +175,7 @@ var zitadelInternalUrl = 'https://${appName(environment, 'zitadel')}.internal.${
 
 // Where the load test's traffic goes (D2c): the API inside the environment, as
 // Zitadel is reached, never out and back in through the public door.
-var apiInternalUrl = {
+var loadApiSetting = {
   name: 'AGENTX_LOAD_API'
   value: 'https://${appName(environment, 'api')}.internal.${appsEnvironment.properties.defaultDomain}'
 }
@@ -1094,7 +1094,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 value: '${secretsPath}/${file.reads}'
               }),
               job.evidence ? evidenceSettings : [],
-              job.?callsApi ?? false ? [apiInternalUrl] : []
+              (job.?callsApi ?? false) ? [loadApiSetting] : []
             )
             volumeMounts: empty(concat(job.files, job.held))
               ? []

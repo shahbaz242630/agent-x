@@ -139,9 +139,13 @@ const SHARED_ZONES = [
 ];
 const SHARED_CLUSTER = /^(?:[a-z]\d+\.azurefd|[a-z]+\.akamaiedge)\.net\.$/;
 
-/** A copy of the staging snapshot with one change made to the resources `pick` selects. */
-function changed(pick: (resource: PredictedResource) => boolean, change: (resource: Mutable) => void): Snapshot {
-  const copy = structuredClone(staging) as unknown as { predictedResources: Mutable[] };
+/** A copy of a snapshot (staging's unless given) with one change made to the resources `pick` selects. */
+function changed(
+  pick: (resource: PredictedResource) => boolean,
+  change: (resource: Mutable) => void,
+  from: Snapshot = staging,
+): Snapshot {
+  const copy = structuredClone(from) as unknown as { predictedResources: Mutable[] };
   const picked = copy.predictedResources.filter((resource) => pick(resource as unknown as PredictedResource));
   expect(picked.length).toBeGreaterThan(0);
   for (const resource of picked) change(resource);
@@ -4372,26 +4376,17 @@ describe('the load run (D2c, PL-38)', () => {
   });
 
   /** A copy of the load run's snapshot with one change made to the resources `pick` selects. */
-  const loadChanged = (
-    pick: (resource: PredictedResource) => boolean,
-    change: (resource: Mutable) => void,
-  ): Snapshot => {
-    const copy = structuredClone(load.together) as unknown as { predictedResources: Mutable[] };
-    const picked = copy.predictedResources.filter((resource) => pick(resource as unknown as PredictedResource));
-    expect(picked.length).toBeGreaterThan(0);
-    for (const resource of picked) change(resource);
-    return copy as unknown as Snapshot;
-  };
+  const loadChanged = (pick: (resource: PredictedResource) => boolean, change: (resource: Mutable) => void): Snapshot =>
+    changed(pick, change, load.together);
   const LOAD_JOBS = ['load-first', 'load-second', 'load-cleanup'];
   const found = (snapshotted: Snapshot, pick: (resource: PredictedResource) => boolean): PredictedResource => {
     const resource = snapshotted.predictedResources.find(pick);
     if (resource === undefined) throw new Error('not in the snapshot');
     return resource;
   };
-  const containerIn = (resource: PredictedResource): Mutable =>
-    first(at(resource.properties, 'template', 'containers'));
+  const containerIn = (resource: PredictedResource): Mutable => containerOf(resource as unknown as Mutable);
   const settingNames = (resource: PredictedResource): string[] =>
-    (at(containerIn(resource), 'env') as Mutable[]).map((entry) => String(entry.name));
+    settingsOf(resource as unknown as Mutable).map((entry) => String(entry.name));
 
   it('compiles: every rule holds, the API is at its load size and limits without email, and the three jobs are added', () => {
     expect(policyProblems(load.together, STAGING).map(describeProblem)).toEqual([]);
