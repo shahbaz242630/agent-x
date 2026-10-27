@@ -153,6 +153,18 @@ describe('SEC-SC-02 verify-before-deploy: only our signed image, by digest, at t
         '--certificate-github-workflow-sha',
         COMMIT,
       ]);
+      expect(signatureArgs(LOAD_IMAGE, COMMIT, LOAD_SIGNER)).toEqual([
+        'verify',
+        ...signerFlags(COMMIT, LOAD_SIGNER),
+        LOAD_IMAGE,
+      ]);
+      expect(sbomArgs(LOAD_IMAGE, COMMIT, LOAD_SIGNER)).toEqual([
+        'verify-attestation',
+        '--type',
+        'cyclonedx',
+        ...signerFlags(COMMIT, LOAD_SIGNER),
+        LOAD_IMAGE,
+      ]);
     });
 
     it("takes each image's signer from its repository on the command line, the app's for any other", () => {
