@@ -4356,3 +4356,152 @@ describe('reading an alert query', () => {
     expect(singleSummaryColumn('T | project M')).toBeUndefined();
   });
 });
+
+describe('the load run (D2c, PL-38)', () => {
+  /** A digest of the load image, as `apps --load-run` gives one once verify.ts has checked it. */
+  const LOAD_DIGEST = `sha256:${'a'.repeat(64)}`;
+  let load: EnvironmentSnapshot;
+
+  beforeAll(() => {
+    load = inCopy((dir) =>
+      environmentSnapshot(dir, 'staging', {
+        AGENTX_AZURE_LOAD_RUN: 'true',
+        AGENTX_AZURE_LOAD_IMAGE_DIGEST: LOAD_DIGEST,
+      }),
+    );
+  });
+
+  /** A copy of the load run's snapshot with one change made to the resources `pick` selects. */
+  const loadChanged = (
+    pick: (resource: PredictedResource) => boolean,
+    change: (resource: Mutable) => void,
+  ): Snapshot => {
+    const copy = structuredClone(load.together) as unknown as { predictedResources: Mutable[] };
+    const picked = copy.predictedResources.filter((resource) => pick(resource as unknown as PredictedResource));
+    expect(picked.length).toBeGreaterThan(0);
+    for (const resource of picked) change(resource);
+    return copy as unknown as Snapshot;
+  };
+  const LOAD_JOBS = ['load-first', 'load-second', 'load-cleanup'];
+  const found = (snapshotted: Snapshot, pick: (resource: PredictedResource) => boolean): PredictedResource => {
+    const resource = snapshotted.predictedResources.find(pick);
+    if (resource === undefined) throw new Error('not in the snapshot');
+    return resource;
+  };
+  const containerIn = (resource: PredictedResource): Mutable =>
+    first(at(resource.properties, 'template', 'containers'));
+  const settingNames = (resource: PredictedResource): string[] =>
+    (at(containerIn(resource), 'env') as Mutable[]).map((entry) => String(entry.name));
+
+  it('compiles: every rule holds, the API is at its load size and limits without email, and the three jobs are added', () => {
+    expect(policyProblems(load.together, STAGING).map(describeProblem)).toEqual([]);
+    const api = found(load.together, APP('api'));
+    expect(at(containerIn(api), 'resources')).toEqual({ cpu: 2, memory: '4Gi' });
+    expect(settingNames(api)).toEqual(
+      expect.arrayContaining([
+        'AGENTX_RATE_LIMIT_PER_MINUTE',
+        'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
+        'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',
+        'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
+        'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
+      ]),
+    );
+    expect(settingNames(api).filter((name) => /EMAIL|DIRECTORY/.test(name))).toEqual([]);
+    expect(at(containerIn(found(staging, APP('api'))), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
+    for (const workload of LOAD_JOBS) {
+      const job = found(load.together, JOB(workload));
+      expect(Object.keys(at(job.identity, 'userAssignedIdentities') as Mutable)).toEqual([
+        expect.stringMatching(/\/id-agentx-stg-api'?\)?\]?$/) as unknown as string,
+      ]);
+      expect(at(containerIn(job), 'image')).toBe(`ghcr.io/shahbaz242630/agent-x-load@${LOAD_DIGEST}`);
+    }
+    expect(settingNames(found(load.together, JOB('load-first')))).toContain('AGENTX_LOAD_API');
+    expect(settingNames(found(load.together, JOB('load-cleanup')))).not.toContain('AGENTX_LOAD_API');
+    // Nothing else changes: the same resources, but the three jobs.
+    const names = (snapshotted: Snapshot) => snapshotted.predictedResources.map((resource) => resource.name).sort();
+    expect(names(load.together).filter((name) => !name.includes('-load-'))).toEqual(names(staging));
+    expect(staging.predictedResources.filter(JOBS).map((job) => job.name)).not.toContain('job-agentx-stg-load-first');
+  });
+
+  it('load-run: on production, or with a job missing or on another image', () => {
+    expect(brokenRules(load.together, { region: 'uaenorth', environment: 'production' })).toContain('load-run');
+    const kept = load.together.predictedResources.filter((resource) => !JOB('load-second')(resource));
+    expect(brokenRules({ predictedResources: kept, diagnostics: [] })).toEqual(['load-run']);
+    expect(
+      brokenRules(
+        loadChanged(JOB('load-first'), (job) => {
+          containerOf(job).image = `ghcr.io/shahbaz242630/agent-x@${LOAD_DIGEST}`;
+        }),
+      ),
+    ).toEqual(['load-run']);
+  });
+
+  it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {
+    const api = APP('api');
+    for (const change of [
+      (app: Mutable) => (inside(containerOf(app), 'resources').cpu = 0.5),
+      (app: Mutable) => (inside(containerOf(app), 'resources').memory = '1Gi'),
+      (app: Mutable) => {
+        for (const entry of settingsOf(app).filter((each) => each.name === 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE')) {
+          entry.value = '120';
+        }
+      },
+      (app: Mutable) => settingsOf(app).push({ name: 'AGENTX_EMAIL_SENDER', value: 'DoNotReply@example.invalid' }),
+    ]) {
+      expect(brokenRules(loadChanged(api, change))).toEqual(['load-run']);
+    }
+    // Out of a load run, the API never carries the load run's size or limits.
+    expect(
+      brokenRules(
+        changed(api, (app) => settingsOf(app).push({ name: 'AGENTX_RATE_LIMIT_PER_MINUTE', value: '50000' })),
+      ),
+    ).toEqual(['load-run']);
+    expect(brokenRules(changed(api, (app) => (inside(containerOf(app), 'resources').cpu = 2)))).toEqual(['load-run']);
+  });
+
+  it("workload-secrets: a load job given anything of the API's but its login and keys, as another identity, or with its request changed", () => {
+    const first = JOB('load-first');
+    const message = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter((problem) => problem.rule === 'workload-secrets')
+        .map((problem) => problem.message);
+    expect(
+      message(
+        loadChanged(first, (job) => {
+          declaredSecrets(job).push({ ...secretNamed(job, 'db-app-password'), name: 'zitadel-reset-token' });
+        }),
+      ),
+    ).toContain("is given zitadel-reset-token, which GRANTS doesn't let load-first read");
+    expect(
+      message(
+        loadChanged(first, (job) => {
+          job.identity = { type: 'UserAssigned', userAssignedIdentities: { other: {} } };
+        }),
+      ),
+    ).toContain('must run as its own identity alone, the one named for api');
+    expect(
+      message(
+        loadChanged(first, (job) => {
+          secretNamed(job, 'load-request').value = '{"AGENTX_LOAD_RUN_ID":"r1"}';
+        }),
+      ),
+    ).toContain('must hold load-request once, as {} and nothing else: a person writes it before a run');
+    expect(
+      message(
+        loadChanged(first, (job) => {
+          containerOf(job).args = ['cleanup'];
+        }),
+      ),
+    ).toContain(
+      "must run node tooling/load/job.ts first and nothing else: a request in its command or arguments would sit in the deployment and every run's record",
+    );
+    // In a load run the API goes without the email key and the directory token; out of one it must have both.
+    expect(
+      message(
+        changed(APP('api'), (app) => {
+          configurationOf(app).secrets = declaredSecrets(app).filter((secret) => secret.name !== 'acs-access-key');
+        }),
+      ),
+    ).toContain('must be given acs-access-key, which api reads (GRANTS)');
+  });
+});

@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { agentsOf, main, type PrintedAgent, runK6 } from './job.ts';
+import { agentsOf, main, type PrintedAgent, requestOf, runK6 } from './job.ts';
 
 const AGENT: PrintedAgent = {
   kind: 'ample',
@@ -50,6 +50,43 @@ describe('the command line and settings', () => {
     await expect(main(['first'], { AGENTX_LOAD_DB_HOST: 'db.example.invalid' })).rejects.toThrow(
       'AGENTX_DB_PASSWORD_FILE is not set.',
     );
+  });
+
+  it("reads the run's values from its request file alone, never from its own settings", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-request-'));
+    try {
+      const password = path.join(dir, 'db-app-password');
+      const request = path.join(dir, 'load-request');
+      writeFileSync(password, 'not-a-real-one');
+      writeFileSync(request, '{}');
+      const settings = { AGENTX_LOAD_DB_HOST: 'db.example.invalid', AGENTX_DB_PASSWORD_FILE: password };
+      await expect(main(['first'], settings)).rejects.toThrow('AGENTX_LOAD_REQUEST_FILE is not set.');
+      // As deployed, the request is {}: a run started without one changes nothing, whatever its settings say.
+      await expect(
+        main(['first'], { ...settings, AGENTX_LOAD_REQUEST_FILE: request, AGENTX_LOAD_RUN_ID: 'r1' }),
+      ).rejects.toThrow('AGENTX_LOAD_RUN_ID is not set.');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the run's request, as load.ts writes it onto the job", () => {
+  it('takes the three values, each as text', () => {
+    const request = { AGENTX_LOAD_RUN_ID: 'r1', AGENTX_LOAD_SEEDED: '[]', AGENTX_LOAD_CREATED_FIRST: '12' };
+    expect(requestOf(JSON.stringify(request))).toEqual(request);
+    expect(requestOf('{}')).toEqual({});
+  });
+
+  it.each([
+    ['not JSON', '{run'],
+    ['not an object', '"r1"'],
+    ['a list', '[]'],
+    ['nothing', 'null'],
+    ['another setting', JSON.stringify({ AGENTX_LOAD_RUN_ID: 'r1', AGENTX_LOAD_DB_HOST: 'elsewhere' })],
+    ['a value not text', JSON.stringify({ AGENTX_LOAD_CREATED_FIRST: 12 })],
+  ])('refuses %s', (_case, text) => {
+    expect(() => requestOf(text)).toThrow(/run request/);
   });
 });
 
