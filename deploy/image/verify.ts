@@ -24,7 +24,7 @@ export const SIGNING_WORKFLOW = '.github/workflows/ci.yml';
 export const SIGNING_REF = 'refs/heads/main';
 export const OIDC_ISSUER = 'https://token.actions.githubusercontent.com';
 
-/** Who signs an image of one kind: where it is published, and the workflow on main, and its trigger, that sign it. */
+/** One kind of image: where it is published, and the workflow (on main) and trigger whose certificate signs it. */
 export interface Signer {
   readonly repository: string;
   readonly workflow: string;

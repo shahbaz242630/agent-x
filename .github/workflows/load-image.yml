@@ -184,6 +184,51 @@ jobs:
           upload-release-assets: false
           dependency-snapshot: false
 
+  # Its known vulnerabilities (Grype), as ci.yml's image-scan: report only, to
+  # code scanning (category load-image), read before a load run. It holds the
+  # API's database login and keys on staging, and the test helpers too.
+  load-image-scan:
+    name: Load image - vulnerability scan
+    if: github.ref == 'refs/heads/main'
+    needs: [load-image-publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # to check out the repository for code scanning's paths
+      packages: read # to pull the image while its package is private
+      security-events: write # to put the findings in code scanning
+    env:
+      IMAGE: ghcr.io/shahbaz242630/agent-x-load
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Logged out again before the scanner runs, as in load-image-sbom.
+      - name: Pull the image by its digest
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          DIGEST: ${{ needs.load-image-publish.outputs.digest }}
+        run: |
+          trap 'docker logout ghcr.io' EXIT
+          printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+          docker pull --quiet "${IMAGE}@${DIGEST}"
+
+      - name: Scan the pushed image (Grype)
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ghcr.io/shahbaz242630/agent-x-load@${{ needs.load-image-publish.outputs.digest }}
+          grype-version: v0.119.0
+          fail-build: false
+          output-format: sarif
+
+      - uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: load-image
+
   # The SBOM attached, signed like the image; then the deploy check as a load run will run it.
   load-image-attest:
     name: Load image - attach the SBOM and verify
