@@ -151,9 +151,11 @@ describe('what only a person deploys', () => {
     const dropped = rules.lastIndexOf(`**/*${TEST_FILE}`);
     expect(dropped).toBeGreaterThan(-1);
     expect(rules.slice(dropped + 1).filter((line) => line.startsWith('!'))).toEqual([]);
-    // The build reads that file and no other: one beside a Dockerfile, anywhere, would take its place.
-    expect(gitSays('ls-files', '--cached', '--others', '--exclude-standard', '--', '*.dockerignore')).toEqual([
+    // The build reads that file and no other: one beside the Dockerfile (Dockerfile.dockerignore) would take its
+    // place. The load test's image has its own beside its own Dockerfile, read by that build alone (D2c).
+    expect(gitSays('ls-files', '--cached', '--others', '--exclude-standard', '--', '*.dockerignore').sort()).toEqual([
       '.dockerignore',
+      'tooling/load/Dockerfile.dockerignore',
     ]);
   });
 
