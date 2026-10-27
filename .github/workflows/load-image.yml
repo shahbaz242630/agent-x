@@ -72,7 +72,7 @@ jobs:
           COMMIT: ${{ github.sha }}
         run: |
           docker run --rm --network none "${IMAGE}:${COMMIT}" k6 version
-          docker run --rm --network none "${IMAGE}:${COMMIT}" node --input-type=module -e "for (const name of ['seed', 'checks', 'cleanup', 'plan', 'logs', 'report']) await import('/app/tooling/load/' + name + '.ts')"
+          docker run --rm --network none "${IMAGE}:${COMMIT}" node --input-type=module -e "for (const name of ['job', 'seed', 'checks', 'cleanup', 'plan', 'logs', 'report']) await import('/app/tooling/load/' + name + '.ts')"
           test "$(docker run --rm --network none "${IMAGE}:${COMMIT}" whoami)" = node
 
       - name: Log in to GitHub's registry

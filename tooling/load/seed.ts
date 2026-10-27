@@ -31,16 +31,19 @@ function worldOf(database: Database<MandateWorldTables>, keyring: KeyProvider) {
 /**
  * Seeds one run: the ample agents and the capped one, each in an organisation
  * of its own named for the run, with three verified suppliers, a mandate in
- * force and a key.
+ * force and a key. `onSeeded` hears of each agent as it is made, so a seed
+ * that stops half-way still leaves every organisation it made findable.
  */
 export async function seedRun({
   database,
   keyring,
   runId,
+  onSeeded = () => undefined,
 }: {
   readonly database: Database<MandateWorldTables>;
   readonly keyring: KeyProvider;
   readonly runId: string;
+  readonly onSeeded?: (agent: SeededAgent) => void;
 }): Promise<Seeded> {
   const { clock, shared } = worldOf(database, keyring);
   const registry = createMandateRegistry({ database, keys: keyring, ids: uuidV7Ids, clock, logger: testLogger() });
@@ -67,8 +70,11 @@ export async function seedRun({
   }
 
   const agents: SeededAgent[] = [];
-  for (let n = 0; n < AMPLE_AGENTS; n += 1) agents.push(await seeded('ample'));
-  agents.push(await seeded('capped'));
+  for (const kind of [...Array<'ample'>(AMPLE_AGENTS).fill('ample'), 'capped' as const]) {
+    const agent = await seeded(kind);
+    onSeeded(agent);
+    agents.push(agent);
+  }
   return { agents };
 }
 
@@ -82,7 +88,7 @@ export async function seedRun({
 export async function rekeyed(
   database: Database<MandateWorldTables>,
   keyring: KeyProvider,
-  seeded: Seeded,
+  seeded: { readonly agents: readonly Omit<SeededAgent, 'key'>[] },
 ): Promise<Seeded> {
   const { shared } = worldOf(database, keyring);
   const agents: SeededAgent[] = [];
