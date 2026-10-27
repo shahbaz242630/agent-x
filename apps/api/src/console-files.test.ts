@@ -73,6 +73,8 @@ describe('the console’s files (6A1)', () => {
       '/',
       '/approvals',
       '/approvals/0199a0f0-0000-7000-8000-00000000abcd',
+      // An approval email's link (6B1, waiting-requests.ts): the request's page in its organisation.
+      '/approvals/0199a0f0-0000-7000-8000-00000000abcd?org=0199a0f0-0000-7000-8000-00000000aaaa',
       '/payments?status=unknown',
     ]) {
       const answer = await fetch(base + path);

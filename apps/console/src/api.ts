@@ -89,6 +89,9 @@ export const api = {
   write: <T>(path: string, options: RequestOptions = {}): Promise<Answered<T>> => send<T>('POST', path, options),
 };
 
+/** A refusal (4xx): the API decided, and answers the same however often it is asked; a 5xx or no answer is a failure. */
+export const isRefusal = (error: unknown): error is ApiError => error instanceof ApiError && error.status < 500;
+
 /** Whether an error means the person isn't signed in (any more): their session ended, or never was. */
 export const isSignedOut = (error: unknown): boolean => error instanceof ApiError && error.status === 401;
 

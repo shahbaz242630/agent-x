@@ -9,7 +9,7 @@
 // by challenge: nothing secret (the challenge is good only for this session,
 // and only after the fresh sign-in), and gone once confirmed or dismissed. The
 // API checks everything again at the confirm whatever the console kept.
-import { api, ApiError } from './api.ts';
+import { api, isRefusal } from './api.ts';
 import { goTo } from './navigate.ts';
 
 /** A change asked and waiting for its step-up: where to confirm it and with what. */
@@ -102,18 +102,40 @@ function challengeIn(status: number, body: unknown): string | undefined {
   return typeof stepUpChallengeId === 'string' && UUID.test(stepUpChallengeId) ? stepUpChallengeId : undefined;
 }
 
+/** A change the API asked a step-up for: what its ask answered, and the way on to sign in again for it. */
+export interface Asked {
+  /** The ask's answer, which may say how the change would come out (an approve that would reject, 6B1). */
+  readonly answer: unknown;
+  /** Keeps the change and leaves to sign in again, under `label` if what was asked turned out otherwise. */
+  readonly stepUp: (label?: string) => 'stepping';
+}
+
+/**
+ * Asks for a change and stops there: done at once, its answer; asked for a
+ * step-up, the ask's answer, to show before stepping up (`stepUp`).
+ */
+export async function askFirst(change: Change): Promise<{ readonly done: unknown } | Asked> {
+  const { label, askPath, confirmPath, body, organization } = change;
+  const answered = await api.write<unknown>(askPath, { organization, body });
+  const challenge = challengeIn(answered.status, answered.body);
+  if (challenge === undefined) return { done: answered.body };
+  return {
+    answer: answered.body,
+    stepUp: (shown = label) => {
+      keep({ challenge, label: shown, confirmPath, body, organization, idempotencyKey: crypto.randomUUID() });
+      goTo(stepUpAddress(challenge, window.location.pathname));
+      return 'stepping';
+    },
+  };
+}
+
 /**
  * Asks for a change. Done at once: its answer. Asked for a step-up: the change
  * is kept, the browser leaves to sign in again, and this gives back `stepping`.
  */
 export async function ask(change: Change): Promise<{ readonly done: unknown } | 'stepping'> {
-  const { label, askPath, confirmPath, body, organization } = change;
-  const answered = await api.write<unknown>(askPath, { organization, body });
-  const challenge = challengeIn(answered.status, answered.body);
-  if (challenge === undefined) return { done: answered.body };
-  keep({ challenge, label, confirmPath, body, organization, idempotencyKey: crypto.randomUUID() });
-  goTo(stepUpAddress(challenge, window.location.pathname));
-  return 'stepping';
+  const asked = await askFirst(change);
+  return 'done' in asked ? asked : asked.stepUp();
 }
 
 /**
@@ -131,7 +153,7 @@ export async function confirm(pending: PendingChange): Promise<void> {
     });
     forget(pending.challenge);
   } catch (error) {
-    if (error instanceof ApiError && error.status < 500) forget(pending.challenge);
+    if (isRefusal(error)) forget(pending.challenge);
     throw error;
   }
 }

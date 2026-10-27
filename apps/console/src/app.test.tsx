@@ -79,7 +79,7 @@ describe('the console’s frame (6A1)', () => {
     signedIn([ORG_A]);
     const router = open('/');
     expect(await screen.findByText('Staging-Test-Org-1')).toBeDefined();
-    expect(screen.getByText('Payments waiting for your approval will appear here.')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Approvals' })).toBeDefined();
     expect(router.state.location.pathname).toBe('/approvals');
     expect(screen.getByRole('link', { name: 'Approvals' }).getAttribute('aria-current')).toBe('page');
     expect(screen.queryByRole('button', { name: 'Switch organisation' })).toBeNull();
@@ -194,7 +194,7 @@ describe('the console’s frame (6A1)', () => {
       signedIn([ORG_A, ORG_B]);
       open('/');
       await userEvent.click(await screen.findByRole('button', { name: /Staging-Test-Org-1/ }));
-      expect(await screen.findByText('Payments waiting for your approval will appear here.')).toBeDefined();
+      expect(await screen.findByRole('heading', { name: 'Approvals' })).toBeDefined();
     } finally {
       blocked.mockRestore();
       blockedSet.mockRestore();

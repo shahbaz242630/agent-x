@@ -142,6 +142,42 @@ describe('the shared confirm', () => {
     expect(await screen.findByText('New words, version 2.')).toBeDefined();
   });
 
+  it('confirms a change the API states no words for in the console’s own, reading none', async () => {
+    const onConfirm = vi.fn();
+    const { rerender } = render(
+      <QueryClientProvider client={new QueryClient()}>
+        <Confirm
+          text="Cancelling ends it now."
+          title="Cancel it?"
+          confirmLabel="Go"
+          onConfirm={onConfirm}
+          onCancel={vi.fn()}
+          ready={false}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText('Cancelling ends it now.')).toBeDefined();
+    expect(screen.queryByRole('status')).toBeNull();
+    // Waits while what the change needs (a reason) isn't given.
+    expect(screen.getByRole('button', { name: 'Go' })).toHaveProperty('disabled', true);
+
+    rerender(
+      <QueryClientProvider client={new QueryClient()}>
+        <Confirm
+          text="Cancelling ends it now."
+          title="Cancel it?"
+          confirmLabel="Go"
+          onConfirm={onConfirm}
+          onCancel={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Go' }));
+
+    expect(onConfirm).toHaveBeenCalledWith('confirm');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('cancels by its button or Escape, and starts on Cancel', async () => {
     const { onCancel } = shown('mark_failed');
 

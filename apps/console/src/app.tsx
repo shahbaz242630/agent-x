@@ -10,29 +10,34 @@ import {
   type RouterHistory,
   redirect,
   RouterProvider,
+  useRouterState,
 } from '@tanstack/react-router';
-import { isSignedOut } from './api.ts';
+import type { ReactElement } from 'react';
+import { isRefusal, isSignedOut } from './api.ts';
+import { Approvals } from './pages/approvals.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
-import { Failed, NotFound } from './pages/failed.tsx';
+import { Failed, Loading, NotFound } from './pages/failed.tsx';
 import { More } from './pages/more.tsx';
+import { RequestPage } from './pages/request.tsx';
 import { Shell } from './pages/shell.tsx';
 import { SignedOut } from './pages/signed-out.tsx';
 import { Soon } from './pages/soon.tsx';
-import { ActingProvider, type Session, useChosen, useOrganizations, useSession } from './session.tsx';
-import { t } from './text.ts';
-
-function Loading() {
-  return (
-    <p className="loading" role="status">
-      {t('loading')}
-    </p>
-  );
-}
+import {
+  ActingProvider,
+  ENDED,
+  endSession,
+  type Session,
+  useChosen,
+  useOrganizations,
+  useSession,
+} from './session.tsx';
 
 function SignedIn({ session }: { readonly session: Session }) {
   const organizations = useOrganizations();
   const listed = organizations.data?.organizations ?? [];
-  const { chosen, choose } = useChosen(listed);
+  // The raw query, not the router's parsed one, which reads values as JSON.
+  const linked = useRouterState({ select: ({ location }) => new URLSearchParams(location.searchStr).get('org') });
+  const { chosen, choose } = useChosen(listed, linked);
   if (organizations.isPending) return <Loading />;
   if (organizations.isError) return <Failed onRetry={() => void organizations.refetch()} />;
   const unreadable = organizations.data.unreadable.length;
@@ -45,9 +50,6 @@ function SignedIn({ session }: { readonly session: Session }) {
   );
 }
 
-/** Set once a request on this page was answered 401: the session ended while in use, which the sign-in page says. */
-const ENDED = ['session-ended'];
-
 function Root() {
   const session = useSession();
   const queries = useQueryClient();
@@ -59,6 +61,16 @@ function Root() {
 
 const root = createRootRoute({ component: Root, notFoundComponent: NotFound });
 
+/** One request's page, the approver's email's link (6B1): `/approvals/<id>`, its organisation in `?org=`. */
+function Request(): ReactElement {
+  // From the address this route matched (`/approvals/<id>`): the route's own typed read would refer to the
+  // route tree it is part of, and read as untyped.
+  const id = useRouterState({ select: ({ location }) => location.pathname.split('/')[2] ?? '' });
+  return <RequestPage key={id} id={id} />;
+}
+
+const requestRoute = createRoute({ getParentRoute: () => root, path: '/approvals/$id', component: Request });
+
 const routes = root.addChildren([
   createRoute({
     getParentRoute: () => root,
@@ -68,7 +80,9 @@ const routes = root.addChildren([
       throw redirect({ to: '/approvals' });
     },
   }),
-  createRoute({ getParentRoute: () => root, path: '/approvals', component: () => <Soon what="soon.approvals" /> }),
+  createRoute({ getParentRoute: () => root, path: '/approvals', component: () => <Approvals list="waiting" /> }),
+  createRoute({ getParentRoute: () => root, path: '/approvals/all', component: () => <Approvals list="all" /> }),
+  requestRoute,
   createRoute({ getParentRoute: () => root, path: '/payments', component: () => <Soon what="soon.payments" /> }),
   createRoute({ getParentRoute: () => root, path: '/agents', component: () => <Soon what="soon.agents" /> }),
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
@@ -79,13 +93,11 @@ export function createQueries(): QueryClient {
   const queries: QueryClient = new QueryClient({
     queryCache: new QueryCache({
       onError: (error) => {
-        if (!isSignedOut(error)) return;
-        queries.setQueryData(ENDED, true);
-        queries.setQueryData(['session'], null);
+        if (isSignedOut(error)) endSession(queries);
       },
     }),
     defaultOptions: {
-      queries: { retry: (count, error) => !isSignedOut(error) && count < 2, staleTime: 30_000 },
+      queries: { retry: (count, error) => !isRefusal(error) && count < 2, staleTime: 30_000 },
     },
   });
   return queries;
