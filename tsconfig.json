@@ -5,5 +5,5 @@
     "noEmit": true
   },
   "include": ["packages/*/src", "apps/*/src", "tooling/**/*.ts", "deploy/**/*.ts", "*.config.ts"],
-  "exclude": ["tooling/gate-proofs/fixtures"]
+  "exclude": ["tooling/gate-proofs/fixtures", "apps/console"]
 }

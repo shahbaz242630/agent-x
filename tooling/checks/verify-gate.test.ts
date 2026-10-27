@@ -18,7 +18,8 @@ const CHECKS = {
   // ESLint once with the repository's rules and SonarJS's, failing on every finding but SonarJS's not yet blocking (#222);
   // with a 6 GB heap: the whole repository in one process passed Node's 4 GB default on CI's runner (S141, #453).
   lint: 'node --max-old-space-size=6144 tooling/quality/lint.ts',
-  typecheck: 'tsc --project tsconfig.json',
+  // The server's code against Node alone, then the console's against the browser's (Phase 6 6A1: DOM and JSX).
+  typecheck: 'tsc --project tsconfig.json && tsc --project apps/console/tsconfig.json',
   boundaries: `depcruise ${['apps', 'packages'].filter((folder) => existsSync(folder)).join(' ')}`,
   knip: 'knip',
   'test:coverage': 'vitest run --coverage',
@@ -121,7 +122,7 @@ describe('CI-05 verify gate', () => {
     const projects = ((partsJob?.strategy as { matrix?: { include?: { projects: string }[] } }).matrix?.include ?? [])
       .flatMap(({ projects: flags }) => flags.split(' ').filter((flag) => flag !== '--project'))
       .sort();
-    expect(projects).toEqual(['unit', 'repo-checks', ...Object.keys(POSTGRES_IMAGES)].sort());
+    expect(projects).toEqual(['unit', 'console', 'repo-checks', ...Object.keys(POSTGRES_IMAGES)].sort());
     const configured = (config.test?.projects ?? []).map((project) =>
       typeof project === 'object' && 'test' in project ? project.test.name : undefined,
     );

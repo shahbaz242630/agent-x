@@ -17,6 +17,10 @@ const ALLOWED_LICENCES = new Set([
   'CC0-1.0',
   'ISC',
   'MIT',
+  // Fonts alone (the console's IBM Plex, 6A1): free to bundle and ship with any product; only selling the fonts on their own is barred.
+  'OFL-1.1',
+  // A public-domain dedication (isbot, under the console's router): no conditions at all.
+  'Unlicense',
 ]);
 
 /** A reviewed licence, or an SPDX choice such as `(MIT OR Apache-2.0)` with one reviewed option: the choice is ours. */

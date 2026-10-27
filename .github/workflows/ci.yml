@@ -95,7 +95,7 @@ jobs:
       matrix:
         include:
           - part: unit
-            projects: --project unit --project repo-checks
+            projects: --project unit --project console --project repo-checks
           - part: pg16
             projects: --project db-pg16
           - part: pg18

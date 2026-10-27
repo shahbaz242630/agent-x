@@ -69,6 +69,8 @@ export interface E2eFixtures {
     readonly tamper: TestUser & { readonly totpSecret: string; readonly provisionedAt: number };
     /** Registers a real passkey in the tamper file: admin confirms cannot be proved by TOTP alone. */
     readonly tamperAdmin: TestUser;
+    /** As `totp`, for the console's own pages in a real browser (Phase 6 6A1): in no organisation. */
+    readonly console: TestUser & { readonly totpSecret: string };
   };
   /** The API as the login service's client. */
   readonly api: ApiSignIn;
@@ -122,6 +124,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
     const [resetTarget] = await newUserWithApp('reset-target');
     const [tamper, tamperSecret] = await newUserWithApp('tamper');
     const tamperAdmin = await newUser('tamper-admin');
+    const [consoleUser, consoleSecret] = await newUserWithApp('console');
     const tamperProvisionedAt = Date.now();
     await addOtpEmail(client, resetTarget.userId);
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
@@ -133,6 +136,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
     await loginSees(client, member, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, tamper, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, tamperAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
+    await loginSees(client, consoleUser, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, resetTarget, [
       'AUTHENTICATION_METHOD_TYPE_PASSWORD',
       'AUTHENTICATION_METHOD_TYPE_TOTP',
@@ -156,6 +160,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
         resetTarget,
         tamper: { ...tamper, totpSecret: tamperSecret, provisionedAt: tamperProvisionedAt },
         tamperAdmin,
+        console: { ...consoleUser, totpSecret: consoleSecret },
       },
       api,
       policy: await loginPolicy(client),

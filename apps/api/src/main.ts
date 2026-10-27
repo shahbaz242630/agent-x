@@ -148,8 +148,10 @@ import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { activitySinkOf } from './activity-recorder.ts';
 import { loadPlaces } from './client-clues.ts';
+import { loadConsoleFiles } from './console-files.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
+import { createMyOrganizations } from './my-organizations.ts';
 import { contactFillFrom, directoryNamesFrom } from './kept-names.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
@@ -532,6 +534,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     securityEvents: recorder,
     activity: activitySinkOf(createActivityLog({ ids: uuidV7Ids }), database),
     placeOf: await loadPlaces(config.environment, logger),
+    consoleFiles: await loadConsoleFiles(config.environment, logger),
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(
         database,
@@ -540,6 +543,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
         userId,
       ),
     restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
+    myOrganizations: createMyOrganizations({ database, keys, ids: uuidV7Ids, logger }),
     listMembers: (orgId, correlationId) =>
       membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }), correlationId }, orgId),
     acceptanceConfirmations: createAcceptanceConfirmations({
