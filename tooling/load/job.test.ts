@@ -18,8 +18,8 @@ const AGENT: PrintedAgent = {
 };
 
 describe("the run's agents, as load.ts hands them to the second job", () => {
-  it('takes them as load.seeded printed them', () => {
-    const agents = [AGENT, { ...AGENT, kind: 'capped' }];
+  it('takes them as load.seeded_agent printed them', () => {
+    const agents = [AGENT, { ...AGENT, kind: 'capped', orgId: '01a17c20-0000-7000-8000-000000000009' }];
     expect(agentsOf(JSON.stringify(agents))).toEqual(agents);
   });
 
@@ -34,6 +34,7 @@ describe("the run's agents, as load.ts hands them to the second job", () => {
     ['no suppliers', JSON.stringify([{ ...AGENT, supplierIds: [] }])],
     ['a supplier not named', JSON.stringify([{ ...AGENT, supplierIds: [7] }])],
     ['one good and one not', JSON.stringify([AGENT, null])],
+    ['the same organisation twice', JSON.stringify([AGENT, { ...AGENT, kind: 'capped' }])],
   ])('refuses %s', (_case, text) => {
     expect(() => agentsOf(text)).toThrow(/AGENTX_LOAD_SEEDED/);
   });
@@ -53,7 +54,7 @@ describe('the command line and settings', () => {
 });
 
 describe('k6, for one phase', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-test-'));
+  const dir = mkdtempSync(path.join(tmpdir(), 'agentx-fake-k6-'));
   // A stand-in for k6: it writes the summary file k6's handleSummary writes, from what it was given, and exits as told.
   const fake = path.join(dir, 'fake-k6.mjs');
   writeFileSync(
@@ -68,8 +69,7 @@ describe('k6, for one phase', () => {
   );
   const seeded = { agents: [{ ...AGENT, key: 'agx_test_key' }] };
   const k6 = runK6('http://api.internal', [process.execPath, fake]);
-  const left = () =>
-    readdirSync(tmpdir()).filter((name) => name.startsWith('agentx-load-') && !name.startsWith('agentx-load-test-'));
+  const left = () => readdirSync(tmpdir()).filter((name) => name.startsWith('agentx-load-'));
   const before = left();
 
   afterEach(() => {
