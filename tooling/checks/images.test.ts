@@ -13,6 +13,8 @@ import { POSTGRES_IMAGES } from '../test-db/postgres-images.ts';
 
 const COMPOSE_FILE = 'deploy/compose/compose.yaml';
 const DOCKERFILE = 'Dockerfile';
+/** The load test's image (D2c), built only when a run is near (.github/workflows/load-image.yml). */
+const LOAD_DOCKERFILE = 'tooling/load/Dockerfile';
 
 /** `name:tag@sha256:<64 hex>`, with a registry and path allowed in the name. */
 const PINNED = /^(?<name>[a-z0-9][a-z0-9._/-]*):(?<tag>[A-Za-z0-9][A-Za-z0-9._-]*)@sha256:(?<digest>[0-9a-f]{64})$/g;
@@ -98,26 +100,38 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(text).toMatch(/^USER node$/m);
   });
 
-  it("ships no package manager, and the base image's Debian security updates, in the image that runs", () => {
-    const text = readFileSync(DOCKERFILE, 'utf8').replaceAll('\r\n', '\n');
-    const runtime = text.slice(text.lastIndexOf('\nFROM '));
-    const removed = [
-      '/usr/local/lib/node_modules/npm',
-      '/usr/local/lib/node_modules/corepack',
-      '/usr/local/bin/npm',
-      '/usr/local/bin/npx',
-      '/usr/local/bin/corepack',
-      '/usr/local/bin/yarn',
-      '/usr/local/bin/yarnpkg',
-      '/opt/yarn-',
-    ];
-    expect(removed.filter((path) => !runtime.includes(path))).toEqual([]);
-    // The lists first, then the upgrade, as root before the image drops to its unprivileged user.
-    const update = runtime.indexOf('apt-get update');
-    const upgrade = runtime.indexOf('DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes');
-    expect(update).toBeGreaterThan(-1);
-    expect(upgrade).toBeGreaterThan(update);
-    expect(upgrade).toBeLessThan(runtime.indexOf('USER node'));
+  it.each([DOCKERFILE, LOAD_DOCKERFILE])(
+    "%s: no package manager, and Debian's security updates, in the image that runs",
+    (file) => {
+      const text = readFileSync(file, 'utf8').replaceAll('\r\n', '\n');
+      const runtime = text.slice(text.lastIndexOf('\nFROM '));
+      const removed = [
+        '/usr/local/lib/node_modules/npm',
+        '/usr/local/lib/node_modules/corepack',
+        '/usr/local/bin/npm',
+        '/usr/local/bin/npx',
+        '/usr/local/bin/corepack',
+        '/usr/local/bin/yarn',
+        '/usr/local/bin/yarnpkg',
+        '/opt/yarn-',
+      ];
+      expect(removed.filter((path) => !runtime.includes(path))).toEqual([]);
+      // The lists first, then the upgrade, as root before the image drops to its unprivileged user.
+      const update = runtime.indexOf('apt-get update');
+      const upgrade = runtime.indexOf('DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes');
+      expect(update).toBeGreaterThan(-1);
+      expect(upgrade).toBeGreaterThan(update);
+      expect(upgrade).toBeLessThan(runtime.indexOf('USER node'));
+    },
+  );
+
+  it("builds the load test's image (D2c) on the app's own base, with the laptop run's own k6", () => {
+    const text = readFileSync(LOAD_DOCKERFILE, 'utf8');
+    const load = dockerfileImages(text);
+    expect(imageProblems(load)).toEqual([]);
+    const { k6 } = composeImages(readFileSync('tooling/load/compose.load.yaml', 'utf8'));
+    expect(load).toEqual([dockerfile[0], k6, dockerfile[0]]);
+    expect(text).toMatch(/^COPY --from=k6 \/usr\/bin\/k6 \/usr\/local\/bin\/k6$/m);
   });
 
   it('builds on the Node major the repository runs (.nvmrc)', () => {

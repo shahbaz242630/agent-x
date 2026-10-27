@@ -9,6 +9,11 @@
 //
 // It needs cosign 3.1.3 or later on PATH. It exits with a code per outcome,
 // so CI can prove each refusal on every publish (EXIT below).
+//
+// The load test's image (D2c, ghcr.io/shahbaz242630/agent-x-load) is checked
+// the same way against its own signer, the Load image workflow on main. The
+// command line takes each image's signer from its repository; the deploy and
+// the release ask for the app's alone, so the load image never passes as it.
 import { spawnSync } from 'node:child_process';
 
 /** Where CI publishes the image (ci.yml, the image-publish job). */
@@ -17,8 +22,28 @@ export const SOURCE_REPOSITORY = 'shahbaz242630/agent-x';
 /** The workflow whose main-branch runs sign; its certificate names it. */
 export const SIGNING_WORKFLOW = '.github/workflows/ci.yml';
 export const SIGNING_REF = 'refs/heads/main';
-export const SIGNER_IDENTITY = `https://github.com/${SOURCE_REPOSITORY}/${SIGNING_WORKFLOW}@${SIGNING_REF}`;
 export const OIDC_ISSUER = 'https://token.actions.githubusercontent.com';
+
+/** One kind of image: where it is published, and the workflow (on main) and trigger whose certificate signs it. */
+export interface Signer {
+  readonly repository: string;
+  readonly workflow: string;
+  readonly trigger: 'push' | 'workflow_dispatch';
+}
+
+/** The app's image: CI, on every push to main. */
+export const APP_SIGNER: Signer = { repository: IMAGE_REPOSITORY, workflow: SIGNING_WORKFLOW, trigger: 'push' };
+
+/** The load test's image (D2c): built only when a run is near, started by hand from main (partner S153). */
+export const LOAD_SIGNER: Signer = {
+  repository: 'ghcr.io/shahbaz242630/agent-x-load',
+  workflow: '.github/workflows/load-image.yml',
+  trigger: 'workflow_dispatch',
+};
+
+export const identityOf = (signer: Signer): string =>
+  `https://github.com/${SOURCE_REPOSITORY}/${signer.workflow}@${SIGNING_REF}`;
+export const SIGNER_IDENTITY = identityOf(APP_SIGNER);
 
 /** What cosign calls a signature, and the SBOM's in-toto predicate (`--type cyclonedx`). */
 const SIGNATURE_TYPE = 'https://sigstore.dev/cosign/sign/v1';
@@ -60,17 +85,17 @@ export type Cosign = (args: readonly string[]) => Run;
 const DIGEST_REFERENCE = /^(?<repository>[^@\s]+)@(?<digest>sha256:[0-9a-f]{64})$/g;
 const COMMIT = /^[0-9a-f]{40}$/;
 
-/** The digest of `repository@sha256:…` when the repository is ours, or nothing. */
-export function digestOf(image: string): string | undefined {
+/** The digest of `repository@sha256:…` when the repository is the signer's, or nothing. */
+export function digestOf(image: string, signer: Signer = APP_SIGNER): string | undefined {
   const match = [...image.matchAll(DIGEST_REFERENCE)][0]?.groups;
-  return match?.repository === IMAGE_REPOSITORY ? match.digest : undefined;
+  return match?.repository === signer.repository ? match.digest : undefined;
 }
 
 /** The certificate claims every signature and attestation must carry. */
-export function signerFlags(commit: string): string[] {
+export function signerFlags(commit: string, signer: Signer = APP_SIGNER): string[] {
   return [
     '--certificate-identity',
-    SIGNER_IDENTITY,
+    identityOf(signer),
     '--certificate-oidc-issuer',
     OIDC_ISSUER,
     '--certificate-github-workflow-repository',
@@ -78,19 +103,23 @@ export function signerFlags(commit: string): string[] {
     '--certificate-github-workflow-ref',
     SIGNING_REF,
     '--certificate-github-workflow-trigger',
-    'push',
+    signer.trigger,
     '--certificate-github-workflow-sha',
     commit,
   ];
 }
 
-export const signatureArgs = (image: string, commit: string): string[] => ['verify', ...signerFlags(commit), image];
+export const signatureArgs = (image: string, commit: string, signer: Signer = APP_SIGNER): string[] => [
+  'verify',
+  ...signerFlags(commit, signer),
+  image,
+];
 
-export const sbomArgs = (image: string, commit: string): string[] => [
+export const sbomArgs = (image: string, commit: string, signer: Signer = APP_SIGNER): string[] => [
   'verify-attestation',
   '--type',
   'cyclonedx',
-  ...signerFlags(commit),
+  ...signerFlags(commit, signer),
   image,
 ];
 
@@ -161,18 +190,18 @@ function lastLine(text: string): string {
 const refuse = (reason: Reason, detail: string): Outcome => ({ verified: false, reason, detail });
 
 /** Checks the signature first, then the SBOM: the first refusal is the answer. */
-export function verifyImage(image: string, commit: string, cosign: Cosign): Outcome {
-  const digest = digestOf(image);
-  if (digest === undefined) return refuse('INPUT_INVALID', `not ${IMAGE_REPOSITORY}@sha256:<64 hex digits>`);
+export function verifyImage(image: string, commit: string, cosign: Cosign, signer: Signer = APP_SIGNER): Outcome {
+  const digest = digestOf(image, signer);
+  if (digest === undefined) return refuse('INPUT_INVALID', `not ${signer.repository}@sha256:<64 hex digits>`);
   if (!COMMIT.test(commit)) return refuse('INPUT_INVALID', 'the commit must be 40 lower-case hex digits');
 
-  const signature = cosign(signatureArgs(image, commit));
+  const signature = cosign(signatureArgs(image, commit, signer));
   if (signature.status === COSIGN_IMAGE_WITHOUT_SIGNATURE) return refuse('IMAGE_UNSIGNED', lastLine(signature.stderr));
   if (signature.status !== 0) return refuse('SIGNATURE_REFUSED', lastLine(signature.stderr));
   const signatureProblem = signatureOutputProblem(signature.stdout, digest);
   if (signatureProblem !== undefined) return refuse('SIGNATURE_REFUSED', signatureProblem);
 
-  const sbom = cosign(sbomArgs(image, commit));
+  const sbom = cosign(sbomArgs(image, commit, signer));
   if (sbom.status !== 0)
     return refuse(sbom.stderr.includes(NO_SBOM) ? 'SBOM_MISSING' : 'SBOM_REFUSED', lastLine(sbom.stderr));
   const sbomProblem = sbomOutputProblem(sbom.stdout, digest);
@@ -193,7 +222,11 @@ export function runCosign(args: readonly string[], command = 'cosign'): Run {
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
-const USAGE = `Usage: node deploy/image/verify.ts ${IMAGE_REPOSITORY}@sha256:<64 hex> <40-hex commit>`;
+const USAGE = `Usage: node deploy/image/verify.ts ${IMAGE_REPOSITORY}@sha256:<64 hex> <40-hex commit> (or ${LOAD_SIGNER.repository}@…)`;
+
+/** The signer an image named on the command line must have: its repository's, the app's for any other (refused by name). */
+export const signerOf = (image: string): Signer =>
+  image.startsWith(`${LOAD_SIGNER.repository}@`) ? LOAD_SIGNER : APP_SIGNER;
 
 export function main(argv: readonly string[], cosign: Cosign = runCosign, log = console.log): number {
   const [image, commit, ...rest] = argv;
@@ -201,9 +234,10 @@ export function main(argv: readonly string[], cosign: Cosign = runCosign, log = 
     log(USAGE);
     return EXIT.INPUT_INVALID;
   }
-  const outcome = verifyImage(image, commit, cosign);
+  const signer = signerOf(image);
+  const outcome = verifyImage(image, commit, cosign, signer);
   if (outcome.verified) {
-    log(`Verified ${image}: signed by ${SIGNER_IDENTITY} at commit ${commit}, with its SBOM.`);
+    log(`Verified ${image}: signed by ${identityOf(signer)} at commit ${commit}, with its SBOM.`);
     return EXIT.VERIFIED;
   }
   log(`Refused ${image} (${outcome.reason}): ${outcome.detail}`);

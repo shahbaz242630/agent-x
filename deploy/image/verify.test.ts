@@ -4,10 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
+  APP_SIGNER,
   type Cosign,
   digestOf,
   EXIT,
+  identityOf,
   IMAGE_REPOSITORY,
+  LOAD_SIGNER,
   main,
   OIDC_ISSUER,
   type Run,
@@ -19,12 +22,14 @@ import {
   signatureOutputProblem,
   SIGNER_IDENTITY,
   signerFlags,
+  signerOf,
   verifyImage,
 } from './verify.ts';
 
 const HEX = '3f'.repeat(32);
 const DIGEST = `sha256:${HEX}`;
 const IMAGE = `${IMAGE_REPOSITORY}@${DIGEST}`;
+const LOAD_IMAGE = `${LOAD_SIGNER.repository}@${DIGEST}`;
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const OTHER_HEX = 'e0'.repeat(32);
 
@@ -126,6 +131,69 @@ describe('SEC-SC-02 verify-before-deploy: only our signed image, by digest, at t
         ...signerFlags(COMMIT),
         IMAGE,
       ]);
+    });
+  });
+
+  describe("the load test's image (D2c): its own repository and signer, never the app's", () => {
+    it('is signed by the Load image workflow on main, started by hand', () => {
+      expect(identityOf(LOAD_SIGNER)).toBe(
+        'https://github.com/shahbaz242630/agent-x/.github/workflows/load-image.yml@refs/heads/main',
+      );
+      expect(signerFlags(COMMIT, LOAD_SIGNER)).toEqual([
+        '--certificate-identity',
+        identityOf(LOAD_SIGNER),
+        '--certificate-oidc-issuer',
+        OIDC_ISSUER,
+        '--certificate-github-workflow-repository',
+        'shahbaz242630/agent-x',
+        '--certificate-github-workflow-ref',
+        'refs/heads/main',
+        '--certificate-github-workflow-trigger',
+        'workflow_dispatch',
+        '--certificate-github-workflow-sha',
+        COMMIT,
+      ]);
+      expect(signatureArgs(LOAD_IMAGE, COMMIT, LOAD_SIGNER)).toEqual([
+        'verify',
+        ...signerFlags(COMMIT, LOAD_SIGNER),
+        LOAD_IMAGE,
+      ]);
+      expect(sbomArgs(LOAD_IMAGE, COMMIT, LOAD_SIGNER)).toEqual([
+        'verify-attestation',
+        '--type',
+        'cyclonedx',
+        ...signerFlags(COMMIT, LOAD_SIGNER),
+        LOAD_IMAGE,
+      ]);
+    });
+
+    it("takes each image's signer from its repository on the command line, the app's for any other", () => {
+      expect(signerOf(LOAD_IMAGE)).toBe(LOAD_SIGNER);
+      expect(signerOf(IMAGE)).toBe(APP_SIGNER);
+      expect(signerOf(`${LOAD_SIGNER.repository}:latest`)).toBe(APP_SIGNER);
+      expect(signerOf(`${LOAD_SIGNER.repository}-evil@${DIGEST}`)).toBe(APP_SIGNER);
+    });
+
+    it("is refused where the app's image is asked for (the deploy and the release), before cosign runs", () => {
+      const cosign = fakeCosign({});
+      expect(verifyImage(LOAD_IMAGE, COMMIT, cosign)).toEqual({
+        verified: false,
+        reason: 'INPUT_INVALID',
+        detail: `not ${IMAGE_REPOSITORY}@sha256:<64 hex digits>`,
+      });
+      expect(digestOf(LOAD_IMAGE)).toBeUndefined();
+      expect(cosign.calls).toEqual([]);
+    });
+
+    it("refuses the app's image, or another, as the load image", () => {
+      expect(digestOf(LOAD_IMAGE, LOAD_SIGNER)).toBe(DIGEST);
+      expect(digestOf(IMAGE, LOAD_SIGNER)).toBeUndefined();
+      expect(digestOf(`${LOAD_SIGNER.repository}-evil@${DIGEST}`, LOAD_SIGNER)).toBeUndefined();
+      expect(verifyImage(IMAGE, COMMIT, fakeCosign({}), LOAD_SIGNER)).toEqual({
+        verified: false,
+        reason: 'INPUT_INVALID',
+        detail: `not ${LOAD_SIGNER.repository}@sha256:<64 hex digits>`,
+      });
     });
   });
 
@@ -335,7 +403,21 @@ describe('SEC-SC-02 verify-before-deploy: only our signed image, by digest, at t
     it.each([[[]], [[IMAGE]], [[IMAGE, COMMIT, 'extra']]])('shows its usage for the arguments %j', (argv) => {
       const { code, lines } = run(argv, fakeCosign({}));
       expect(code).toBe(EXIT.INPUT_INVALID);
-      expect(lines).toEqual([`Usage: node deploy/image/verify.ts ${IMAGE_REPOSITORY}@sha256:<64 hex> <40-hex commit>`]);
+      expect(lines).toEqual([
+        `Usage: node deploy/image/verify.ts ${IMAGE_REPOSITORY}@sha256:<64 hex> <40-hex commit> (or ${LOAD_SIGNER.repository}@…)`,
+      ]);
+    });
+
+    it("checks the load image against the Load image workflow's signature, named in what it prints", () => {
+      const cosign = fakeCosign({ verify: GOOD_SIGNATURE, attestation: GOOD_SBOM });
+      expect(run([LOAD_IMAGE, COMMIT], cosign)).toEqual({
+        code: 0,
+        lines: [`Verified ${LOAD_IMAGE}: signed by ${identityOf(LOAD_SIGNER)} at commit ${COMMIT}, with its SBOM.`],
+      });
+      expect(cosign.calls).toEqual([
+        signatureArgs(LOAD_IMAGE, COMMIT, LOAD_SIGNER),
+        sbomArgs(LOAD_IMAGE, COMMIT, LOAD_SIGNER),
+      ]);
     });
 
     it('runs from the command line, and refuses when cosign is not installed', () => {
