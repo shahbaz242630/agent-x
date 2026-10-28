@@ -424,6 +424,9 @@ describe('assertTenant', () => {
       await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_A}, true)`.execute(tx);
       await expect(assertTenant(tx, ORG_A)).resolves.toBeUndefined();
       await expect(assertTenant(tx, ORG_B)).rejects.toThrow(TenantContextError);
+      // A setting that isn't a UUID never passes, even when the ID asked about matches it.
+      await sql`select pg_catalog.set_config('app.' || 'org_id', 'org-b', true)`.execute(tx);
+      await expect(assertTenant(tx, 'org-b')).rejects.toThrow(TenantContextError);
     });
   });
 
