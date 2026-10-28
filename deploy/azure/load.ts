@@ -56,7 +56,7 @@ import {
 } from './jobs.ts';
 import { get, record, resourceUrl } from './release.ts';
 
-export const USAGE = `Usage, from your own terminal window, after apps --load-run --keep-running:
+const USAGE = `Usage, from your own terminal window, after apps --load-run --keep-running:
   node deploy/azure/load.ts run [--smoke]   one run, start to report; --smoke is the wiring run's short k6
   node deploy/azure/load.ts status          the load jobs, the API's size, the database's, any run left open
   node deploy/azure/load.ts finish          clean up a run left open, then remove the load jobs`;
@@ -78,7 +78,7 @@ export function parseArguments(argv: readonly string[]): Request {
 }
 
 /** The secret each load job holds its run's request in (apps.bicep `loadRequest`; policy.ts `HELD`). */
-export const LOAD_REQUEST = 'load-request';
+const LOAD_REQUEST = 'load-request';
 
 /** What a load job holds between runs: no request, which the jobs refuse. */
 export const NO_REQUEST = '{}';
@@ -87,7 +87,7 @@ export const NO_REQUEST = '{}';
 const LOAD_IMAGE = /^ghcr\.io\/shahbaz242630\/agent-x-load@sha256:[0-9a-f]{64}$/;
 
 /** The API, as apps.bicep names it. */
-export const API_APP = 'ca-agentx-stg-api';
+const API_APP = 'ca-agentx-stg-api';
 
 /** How long a change to a job, or the API's restart, may take to settle. */
 const SETTLE_MS = 10 * 60_000;
@@ -633,7 +633,7 @@ export function load(request: Request, steps: LoadSteps): Promise<number> {
 
 const LOAD_DIR = fileURLToPath(new URL('../../tooling/load/', import.meta.url));
 
-export function main(
+function main(
   argv: readonly string[],
   say: (line: string) => void = console.log,
   az: () => Az = realAz,

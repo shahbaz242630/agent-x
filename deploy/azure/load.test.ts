@@ -80,7 +80,7 @@ interface World {
   going?: LoadJob;
   startRefused?: LoadJob;
   /** This job's runs never end, while it says so. */
-  timesOut?: LoadJob;
+  timesOut?: LoadJob | undefined;
   /** Azure refuses {} put back on this job. */
   putBackRefused?: LoadJob;
   /** The API's replicas never change after a restart. */
@@ -160,33 +160,7 @@ class FakeAzure implements Az {
     const method = args[args.indexOf('--method') + 1];
     const url = args[args.indexOf('--url') + 1] ?? '';
     const job = LOAD_JOBS.find((each) => url.includes(`/Microsoft.App/jobs/${jobName(each)}?`));
-    if (job !== undefined && method === 'get') {
-      if (this.deleted.includes(job)) return { status: 3, stdout: '', stderr: 'ERROR: Not Found' };
-      return json(this.#job(job));
-    }
-    if (job !== undefined && method === 'patch') {
-      const body = readFileSync((args[args.indexOf('--body') + 1] ?? '').slice(1), 'utf8');
-      const secrets = (
-        JSON.parse(body) as { properties: { configuration: { secrets: { name: string; value?: string }[] } } }
-      ).properties.configuration.secrets;
-      expect(secrets.filter((secret) => secret.name !== 'load-request')).toEqual(this.#references(job));
-      const value = secrets.find((secret) => secret.name === 'load-request')?.value ?? '';
-      if (value === NO_REQUEST && this.#world.putBackRefused === job) {
-        return {
-          status: 1,
-          stdout: '',
-          stderr: 'ERROR: Conflict({"error":{"code":"ContainerAppOperationInProgress"}})',
-        };
-      }
-      this.requests.set(job, value);
-      this.written.push({ job, value });
-      this.#modified.set(job, (this.#modified.get(job) ?? 0) + 1);
-      return json({});
-    }
-    if (job !== undefined && method === 'delete') {
-      this.deleted.push(job);
-      return json({});
-    }
+    if (job !== undefined) return this.#jobRest(job, method, args);
     if (url.includes('/containerApps/ca-agentx-stg-api/revisions/api--r7/restart')) {
       this.restarted.push('api--r7');
       return json({});
@@ -207,6 +181,35 @@ class FakeAzure implements Az {
     if (url.includes('/workspaces/log-agentx-stg?')) return json({ properties: { customerId: WORKSPACE_ID } });
     if (url.endsWith(`/workspaces/${WORKSPACE_ID}/query`)) return json(this.#query(args));
     throw new Error(`unexpected az ${args.join(' ')}`);
+  }
+
+  /** A load job read, its request written, or the job removed, by Resource Manager. */
+  #jobRest(job: LoadJob, method: string | undefined, args: readonly string[]): AzResult {
+    if (method === 'delete') {
+      this.deleted.push(job);
+      return json({});
+    }
+    if (method !== 'patch') {
+      if (this.deleted.includes(job)) return { status: 3, stdout: '', stderr: 'ERROR: Not Found' };
+      return json(this.#job(job));
+    }
+    const body = readFileSync((args[args.indexOf('--body') + 1] ?? '').slice(1), 'utf8');
+    const secrets = (
+      JSON.parse(body) as { properties: { configuration: { secrets: { name: string; value?: string }[] } } }
+    ).properties.configuration.secrets;
+    expect(secrets.filter((secret) => secret.name !== 'load-request')).toEqual(this.#references(job));
+    const value = secrets.find((secret) => secret.name === 'load-request')?.value ?? '';
+    if (value === NO_REQUEST && this.#world.putBackRefused === job) {
+      return {
+        status: 1,
+        stdout: '',
+        stderr: 'ERROR: Conflict({"error":{"code":"ContainerAppOperationInProgress"}})',
+      };
+    }
+    this.requests.set(job, value);
+    this.written.push({ job, value });
+    this.#modified.set(job, (this.#modified.get(job) ?? 0) + 1);
+    return json({});
   }
 
   #references(job: LoadJob) {
@@ -292,7 +295,7 @@ class FakeAzure implements Az {
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-ts-'));
+  dir = mkdtempSync(path.join(tmpdir(), 'agentx-azure-load-test-'));
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
