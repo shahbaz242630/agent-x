@@ -258,8 +258,15 @@ async function runWith(
   if (execution === undefined || run === undefined) {
     throw new Error(`${String(execution)} didn't end in time: wait for it, then load.ts finish.${also}`);
   }
-  return { run, printed: printedLines(await readLog(steps, target, execution, run)), putBack };
+  return { run, printed: printedLines(await readLog(steps, target, execution, run, LAST_EVENT[job])), putBack };
 }
+
+/** The line each load job prints last when it succeeds: its log is read until that line has arrived. */
+const LAST_EVENT: Readonly<Record<LoadJob, string>> = {
+  'load-first': 'load.k6_summary',
+  'load-second': 'load.cleaned',
+  'load-cleanup': 'load.cleaned',
+};
 
 /** A job's own time limit, in seconds. */
 function limitOf(steps: JobSteps, subscription: string, job: LoadJob): number {
@@ -572,7 +579,7 @@ async function openAgents(steps: LoadSteps, subscription: string, open: OpenRun)
   const target: Target = { subscription, job: 'load-first' };
   const run = await waitFor(steps, target, open.firstRun, limitOf(steps, subscription, 'load-first'));
   if (run === undefined) throw new Error(`${open.firstRun} hasn't ended: run load.ts finish again once it has.`);
-  return seededAgents(printedLines(await readLog(steps, target, open.firstRun, run)));
+  return seededAgents(printedLines(await readLog(steps, target, open.firstRun, run, LAST_EVENT['load-first'])));
 }
 
 /** Cleans up the run left open, if any: its own organisations alone, in load-cleanup. */

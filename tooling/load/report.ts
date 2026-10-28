@@ -23,6 +23,12 @@ export interface PhaseResult {
   readonly thresholds: Readonly<Record<string, boolean>>;
 }
 
+/** The statements the app's role ran while one phase ran: the API's for its requests, and its timers'. */
+export interface PhaseStatements {
+  readonly phase: number;
+  readonly statements: number;
+}
+
 export interface RunResult {
   /** When it ran, as an ISO time. */
   readonly at: string;
@@ -37,6 +43,10 @@ export interface RunResult {
   /** The wiring run's short k6 (load.ts run --smoke): it proves the run is wired and measures nothing. */
   readonly smoke?: boolean;
   readonly phases: readonly PhaseResult[];
+  /** On the laptop (`--delay-ms`): whole ms added to every packet the database sent, as Azure's network adds them. */
+  readonly delayMs?: number;
+  /** On the laptop: the app's statements over each phase (pg_stat_statements), each one a round trip on a network. */
+  readonly statements?: readonly PhaseStatements[];
   readonly logs: LogSummary;
   readonly databaseChecksPassed: boolean;
   /** Every check that failed, in plain words: none on a clean run. */
@@ -59,9 +69,13 @@ function onTheLaptop(run: RunResult): string[] {
     run.apiCpus === STAGING_API_CPUS
       ? "sized as staging's (half a CPU, 1 GiB, ten connections)"
       : `given ${String(run.apiCpus)} CPU(s) (staging has half), 1 GiB and ten connections as staging`;
+  const delayed =
+    run.delayMs === undefined || run.delayMs === 0
+      ? ''
+      : ` ${String(run.delayMs)} ms was added to every packet the database sent, as Azure's network adds it.`;
   return [
     `Commit \`${run.commit}\`, run at ${run.at}, on a laptop: the compose stack's database and API only, the API`,
-    `${size}, k6 straight to it. As on staging today, the hand-off is`,
+    `${size}, k6 straight to it.${delayed} As on staging today, the hand-off is`,
     'paused: its timer re-checks the approved requests each run, and that work is in these numbers. Laptop numbers compare versions;',
     'they do not close PL-38, which closes on the same run on Azure, production-sized, before live.',
   ];
@@ -81,6 +95,19 @@ function onAzure(run: RunResult): string[] {
         '**The wiring run (--smoke): 20 seconds of k6 at 5 a second. It proves every step is wired; its numbers measure nothing.**',
       ]
     : [...lines, 'Sized up for the run, this is the run PL-38 closes on (D2c).'];
+}
+
+/** The database trips each request cost, phase by phase: the number 4D2d brings down. */
+function tripsLine(run: RunResult): string[] {
+  const each = (run.statements ?? []).flatMap(({ phase, statements }) => {
+    const requests = run.phases.find((p) => p.phase === phase)?.requests ?? 0;
+    return requests === 0 ? [] : [`phase ${String(phase)} ${(statements / requests).toFixed(1)}`];
+  });
+  return each.length === 0
+    ? []
+    : [
+        `Database trips a request (the app's statements over the phase, its timers' included, by pg_stat_statements): ${each.join(', ')}.`,
+      ];
 }
 
 const decisionRow = (traffic: string, { count, p50, p95, p99, max }: Percentiles) =>
@@ -108,6 +135,7 @@ export function renderReport(run: RunResult): string {
     ),
     '',
     'Target: a request p95 under 500 ms, with every planned request sent: the steady traffic, not the spike.',
+    ...tripsLine(run),
     ...spiked.map(
       ({ phase, spikeMs }) =>
         `Phase ${String(phase)}'s spike, 50 requests at once from the capped agent, queued on its month's lock by design: ` +

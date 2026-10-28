@@ -97,6 +97,8 @@ interface World {
   slowChange?: boolean;
   /** What the jobs run, in place of `node tooling/load/job.ts`. */
   command?: readonly string[];
+  /** How many readings of each run's lines find all but its last: the workspace takes them in batches. */
+  lastLineLate?: number;
 }
 
 const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
@@ -113,6 +115,8 @@ class FakeAzure implements Az {
   readonly restarted: string[] = [];
   readonly deleted: LoadJob[] = [];
   apiReadings = 0;
+  /** How many times each run's lines have been read. */
+  readonly #runReadings = new Map<string, number>();
   readonly #modified = new Map<LoadJob, number>(LOAD_JOBS.map((job) => [job, 0]));
   /** A change Azure has been sent but doesn't show yet, and how many readings until it does. */
   readonly #pending = new Map<LoadJob, { value: string; readings: number }>();
@@ -297,8 +301,11 @@ class FakeAzure implements Az {
       };
     }
     const run = this.runs.find((each) => query.includes(`'${each.name}-'`));
+    const readings = (this.#runReadings.get(run?.name ?? '') ?? 0) + 1;
+    this.#runReadings.set(run?.name ?? '', readings);
+    const arrived = readings <= (this.#world.lastLineLate ?? 0) ? (run?.lines ?? []).slice(0, -1) : (run?.lines ?? []);
     const rows: LogLine[] = [
-      ...(run?.lines ?? []).map((line) => ({
+      ...arrived.map((line) => ({
         time: '2026-10-27T10:01:00Z',
         source: 'stdout',
         reason: '',
@@ -489,6 +496,26 @@ describe('a run', () => {
     const done = await run(['run'], az);
     expect(done.status).toBe(0);
     expect(az.apiReadings).toBeGreaterThan(4);
+  });
+
+  it("waits for each job's last line, though two readings without it agree (S156: phase 1's summary came 6 minutes after the rest)", async () => {
+    const az = new FakeAzure({ lastLineLate: 3 });
+    const done = await run(['run'], az);
+    expect(done.status).toBe(0);
+    expect(az.runs.map(({ job }) => job)).toEqual(['load-first', 'load-second']);
+    expect(done.reports).toHaveLength(1);
+    // Each run's log read until its fifth reading: the fourth is the first holding its last line, and the
+    // fifth agrees with it, as the end alone can't vouch for lines in batches that came out of order.
+    expect(az.calls.filter((call) => call.includes('/query') && call.includes('load-first-'))).toHaveLength(5);
+    // A clean-up left to finish waits the same way for its `load.cleaned`.
+    const open = new FakeAzure({
+      lastLineLate: 3,
+      behaviour: { 'load-second': () => ({ status: 'Failed', lines: [] }) },
+    });
+    expect((await run(['run'], open)).status).not.toBe(0);
+    const finished = await run(['finish'], open);
+    expect(finished.status).toBe(0);
+    expect(open.deleted).toHaveLength(3);
   });
 
   it("stops before phase 2 when the API's replicas haven't restarted, or don't run, 10 minutes after the restart", async () => {

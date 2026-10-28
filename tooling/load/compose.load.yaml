@@ -12,6 +12,9 @@ services:
     # internal network can't publish a port, so it joins a second one.
     ports: ['127.0.0.1:56540:5432']
     networks: [internal, loopback]
+    # Postgres's statement counter, so the report can say how many statements each request costs (4D2d P0):
+    # on the network every one is a round trip. The load stack's database only.
+    command: ['postgres', '-c', 'shared_preload_libraries=pg_stat_statements', '-c', 'pg_stat_statements.max=5000']
     # Never back by itself after Docker restarts: a run left half-done holds no port or memory.
     restart: 'no'
 
@@ -46,6 +49,26 @@ services:
     volumes:
       - ../../tooling/load/money-paths.k6.js:/load/money-paths.k6.js:ro
       - ../../tooling/load/.out:/out
+    restart: 'no'
+
+  # `--delay-ms n` (4D2d P0): n ms added to every packet the database sends, in
+  # its own network namespace, as Azure's network adds it between the API and
+  # the database (S156). Run once by the runner, never by `up`; the delay stays
+  # with the database's interfaces after it exits. NET_ADMIN, nothing else.
+  delay:
+    image: nicolaka/netshoot:v0.13@sha256:a20c2531bf35436ed3766cd6cfe89d352b050ccc4d7005ce6400adf97503da1b
+    profiles: [delay]
+    network_mode: service:db
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: ['no-new-privileges:true']
+    command:
+      - sh
+      - -c
+      - for i in $$(ls /sys/class/net | grep -vx lo); do tc qdisc replace dev "$$i" root netem delay "$${AGENTX_LOAD_DELAY_MS:?}ms" || exit 1; done; tc qdisc show
+    environment:
+      AGENTX_LOAD_DELAY_MS: ${AGENTX_LOAD_DELAY_MS:-0}
     restart: 'no'
 
 networks:
