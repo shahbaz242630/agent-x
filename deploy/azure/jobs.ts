@@ -481,13 +481,17 @@ function showLog(steps: JobSteps, execution: string, lines: readonly LogLine[], 
  * Reads a run's log once it has all arrived, shows it, and gives its lines
  * back. It has arrived when the platform has logged the container's end and
  * two readings a minute apart hold the same container lines, or when the run
- * ended long enough ago that nothing more will come.
+ * ended long enough ago that nothing more will come. A run that succeeded and
+ * always prints `lastEvent` last has arrived only once that line has: the
+ * workspace takes a container's lines in batches minutes apart, so two equal
+ * readings can still be missing the end (D2c's first Azure run, S156).
  */
 export async function readLog(
   steps: JobSteps,
   target: Target,
   execution: string,
   run: Ended,
+  lastEvent?: string,
 ): Promise<readonly LogLine[]> {
   const began = Date.parse(run.began);
   const ended = Date.parse(run.ended);
@@ -496,6 +500,7 @@ export async function readLog(
   }
   const workspace = workspaceId(steps, target.subscription);
   const query = logQuery(target.job, execution);
+  const awaited = run.status === 'Succeeded' ? lastEvent : undefined;
   let previous: number | undefined;
   for (let reading = 0; ; reading += 1) {
     const now = steps.now().getTime();
@@ -504,7 +509,11 @@ export async function readLog(
     const fromContainer = lines.filter((line) => line.source !== 'platform').length;
     const terminated = lines.some((line) => line.reason === 'ContainerTerminated');
     const late = now >= ended + LOG_DELAY_MS;
-    if (late || (terminated && fromContainer > 0 && fromContainer === previous)) {
+    const settled =
+      awaited === undefined
+        ? fromContainer === previous
+        : lines.some((line) => line.source === 'stdout' && line.text.includes(`"event":"${awaited}"`));
+    if (late || (terminated && fromContainer > 0 && settled)) {
       showLog(steps, execution, lines, previous);
       return lines;
     }
