@@ -24,21 +24,20 @@
 // its mounted login and keys. Nothing here holds a secret or a key: the
 // agents' keys never leave the jobs. Every line a job prints reaches the
 // workspace 4 to 9 minutes late, so each step waits for its run's lines.
-import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
+import { agentsOf } from '../../tooling/load/job.ts';
 import { type LogSummary, summariseLogs, logFailures } from '../../tooling/load/logs.ts';
 import { POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
-import { agentsOf } from '../../tooling/load/job.ts';
 import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
 import {
   askWorkspace,
   type Ended,
-  JOBS_API,
   jobName,
   type JobSteps,
   LOAD_JOBS,
@@ -142,6 +141,10 @@ interface LoadJobState {
 const loadJobUrl = (subscription: string, job: LoadJob): string =>
   resourceUrl(subscription, { path: `jobs/${jobName(job)}`, container: job });
 
+/** Whether the load job is there at all: an earlier finish may have removed it. */
+const jobThere = (steps: JobSteps, subscription: string, job: LoadJob): boolean =>
+  steps.az.run(['rest', '--method', 'get', '--url', loadJobUrl(subscription, job), '--output', 'json']).status === 0;
+
 /**
  * A load job, read from Azure, or an error saying why it isn't one as
  * apps.bicep deploys it: one container on the load image by digest, running
@@ -157,9 +160,11 @@ function readLoadJob(steps: JobSteps, subscription: string, job: LoadJob): LoadJ
   if (!Array.isArray(containers) || containers.length !== 1) return refuse('it must run exactly one container');
   const container = record(containers[0]);
   if (!LOAD_IMAGE.test(text(container.image))) return refuse("it doesn't run the load image by digest");
-  const runs = JSON.stringify([container.command, container.args]);
-  if (runs !== JSON.stringify([['node', 'tooling/load/job.ts'], [job.replace(/^load-/, '')]])) {
-    refuse(`it must run node tooling/load/job.ts ${job.replace(/^load-/, '')}`);
+  const part = job.replace(/^load-/, '');
+  if (
+    JSON.stringify([container.command, container.args]) !== JSON.stringify([['node', 'tooling/load/job.ts'], [part]])
+  ) {
+    refuse(`it must run node tooling/load/job.ts ${part}`);
   }
   const references = vaultReferences(record(properties.configuration).secrets, LOAD_REQUEST, refuse);
   const modified = lastModified(found);
@@ -276,7 +281,7 @@ interface Api {
 }
 
 const apiUrl = (subscription: string, rest = ''): string =>
-  `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${API_APP}${rest}?api-version=${JOBS_API}`;
+  resourceUrl(subscription, { path: `containerApps/${API_APP}${rest}`, container: 'api' });
 
 function readApi(steps: JobSteps, subscription: string): Api {
   const properties = record(get(steps.az, apiUrl(subscription), 'the API').properties);
@@ -382,19 +387,15 @@ async function apiLog(steps: JobSteps, subscription: string, began: string, ende
   }
 }
 
-/** One event's lines among a job's, by name. */
+/** One event's lines among a job's, by name, or its first. */
 const linesOf = (printed: readonly Readonly<Record<string, unknown>>[], event: string) =>
   printed.filter((line) => line.event === event);
-
-/** What a job refused, said in its own words, or nothing. */
-const refusedBy = (printed: readonly Readonly<Record<string, unknown>>[]): string | undefined => {
-  const refused = linesOf(printed, 'load.refused')[0];
-  return refused === undefined ? undefined : text(refused.reason);
-};
+const lineOf = (printed: readonly Readonly<Record<string, unknown>>[], event: string) =>
+  printed.find((line) => line.event === event);
 
 /** k6's summary of a phase, as the job printed it, or nothing when k6 didn't run to the end. */
 function phaseOf(printed: readonly Readonly<Record<string, unknown>>[]): PhaseResult | undefined {
-  const { event: _event, ...result } = linesOf(printed, 'load.k6_summary')[0] ?? {};
+  const { event: _event, ...result } = lineOf(printed, 'load.k6_summary') ?? {};
   return 'phase' in result ? (result as unknown as PhaseResult) : undefined;
 }
 
@@ -434,8 +435,8 @@ function preflight(steps: LoadSteps, subscription: string, smoke: boolean): Api 
 
 /** How a job's run ended, with its own reason when it refused: `Failed: hand-offs are running`. */
 const endedAs = (run: Ended, printed: readonly Readonly<Record<string, unknown>>[]): string => {
-  const said = refusedBy(printed);
-  return said === undefined ? run.status : `${run.status}: ${said}`;
+  const refused = lineOf(printed, 'load.refused');
+  return refused === undefined ? run.status : `${run.status}: ${text(refused.reason)}`;
 };
 
 /** The problems a list in a job's line names, or `missing` when the line isn't there. */
@@ -472,10 +473,14 @@ async function phaseOne(
   return { run: first.run, agents, phase };
 }
 
-/** What the second job's lines say went wrong with the run's wiring, in plain words: none on a clean run. */
-function wiringFailures(second: JobRun, logText: string): string[] {
-  const checked = linesOf(second.printed, 'load.checked')[0];
-  const cleaned = problemsIn(linesOf(second.printed, 'load.cleaned')[0], 'The clean-up said nothing.');
+type Line = Readonly<Record<string, unknown>> | undefined;
+
+/**
+ * What the second job's lines (its database checks' and clean-up's among them)
+ * say went wrong with the run's wiring, in plain words: none on a clean run.
+ */
+function wiringFailures(second: JobRun, checked: Line, cleanedLine: Line, logText: string): string[] {
+  const cleaned = problemsIn(cleanedLine, 'The clean-up said nothing.');
   return [
     ...(second.run.status === 'Succeeded' ? [] : [`load-second ended ${endedAs(second.run, second.printed)}.`]),
     ...(phaseOf(second.printed) === undefined ? ["Phase 2's k6 didn't run to the end."] : []),
@@ -510,8 +515,9 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
     AGENTX_LOAD_CREATED_FIRST: String(first.phase.created),
     ...flags,
   });
-  const cleaned = linesOf(second.printed, 'load.cleaned')[0];
-  if (cleaned !== undefined && problemsIn(cleaned, '').length === 0) rmSync(steps.stateFile, { force: true });
+  const checked = lineOf(second.printed, 'load.checked');
+  const cleanedLine = lineOf(second.printed, 'load.cleaned');
+  if (cleanedLine !== undefined && problemsIn(cleanedLine, '').length === 0) rmSync(steps.stateFile, { force: true });
   steps.say("Reading the API's own lines over the run...");
   const logText = await apiLog(steps, subscription, first.run.began, second.run.ended);
   const spikeOrgs = new Set(first.agents.flatMap((agent) => (agent.kind === 'capped' ? [text(agent.orgId)] : [])));
@@ -519,12 +525,11 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   const secondPhase = phaseOf(second.printed);
   const phases = secondPhase === undefined ? [first.phase] : [first.phase, secondPhase];
   const created = phases.reduce((sum, phase) => sum + phase.created, 0);
-  const wiring = wiringFailures(second, logText);
+  const wiring = wiringFailures(second, checked, cleanedLine, logText);
   // The wiring run is judged on its wiring alone: its numbers are a few seconds' of k6 on staging's own sizes.
   const failures = smoke
     ? wiring
     : [...wiring, ...phases.flatMap(phaseFailures), ...logFailures(logs, created, POLICY_P95_MS)];
-  const checked = linesOf(second.printed, 'load.checked')[0];
   const report = renderReport({
     at,
     commit: api.release.slice(0, 7),
@@ -547,8 +552,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
 function status(steps: LoadSteps): number {
   const subscription = signedIn(steps.az, steps.say);
   for (const job of LOAD_JOBS) {
-    const found = steps.az.run(['rest', '--method', 'get', '--url', loadJobUrl(subscription, job), '--output', 'json']);
-    steps.say(`  ${jobName(job)}: ${found.status === 0 ? 'there' : 'not there'}`);
+    steps.say(`  ${jobName(job)}: ${jobThere(steps, subscription, job) ? 'there' : 'not there'}`);
   }
   const api = readApi(steps, subscription);
   steps.say(`  The API: ${String(api.cpus)} CPUs, ${api.fewest >= 1 ? 'a copy kept running' : 'scales to zero'}.`);
@@ -585,8 +589,7 @@ async function cleanOpenRun(steps: LoadSteps, subscription: string): Promise<voi
     AGENTX_LOAD_RUN_ID: open.runId,
     AGENTX_LOAD_SEEDED: JSON.stringify(agents),
   });
-  const cleaned = linesOf(printed, 'load.cleaned')[0];
-  const problems = problemsIn(cleaned, 'the clean-up said nothing');
+  const problems = problemsIn(lineOf(printed, 'load.cleaned'), 'the clean-up said nothing');
   if (run.status !== 'Succeeded' || problems.length > 0) {
     throw new Error(
       `The clean-up didn't finish (${endedAs(run, printed)}: ${problems.join(' ')}). The jobs are kept: run load.ts finish again.`,
@@ -600,9 +603,8 @@ async function cleanOpenRun(steps: LoadSteps, subscription: string): Promise<voi
 async function finish(steps: LoadSteps): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
   for (const job of LOAD_JOBS) {
-    const going = steps.az.run(['rest', '--method', 'get', '--url', loadJobUrl(subscription, job), '--output', 'json']);
     // A job already removed (an earlier finish) has nothing going.
-    if (going.status !== 0) continue;
+    if (!jobThere(steps, subscription, job)) continue;
     const runs = unfinishedRuns(steps, { subscription, job });
     if (runs.length > 0) {
       throw new Error(
