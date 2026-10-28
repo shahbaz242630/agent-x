@@ -418,6 +418,37 @@ describe('FX-RACE recording at the same time', () => {
       expect(recorded?.recordedAt.getTime()).toBeGreaterThanOrEqual(released.getTime() - 1);
     });
 
+    it('seals on the head as the holder moved it during the wait, taking the next place', async () => {
+      await record(org, event(1));
+      let release = (): void => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let moved = (): void => undefined;
+      const headMoved = new Promise<void>((resolve) => {
+        moved = resolve;
+      });
+      // A real recorder holds the head, moves it to 2, and keeps its transaction open.
+      const holding = withTenant(app, org, async (tx) => {
+        const recorded = await trail.record(tx, org, event(2));
+        moved();
+        await held;
+        return recorded;
+      });
+      try {
+        await headMoved;
+        const waiting = record(org, event(3));
+        await waitUntilQueued(attacker, 1);
+        release();
+
+        expect((await holding).seq).toBe(2n);
+        expect((await waiting).map((one) => one.seq)).toEqual([3n]);
+      } finally {
+        release();
+      }
+      expect(await verify(org)).toMatchObject({ ok: true, seq: 3n });
+    });
+
     it('refuses, writing nothing, when an event is slipped in past the head during the wait', async () => {
       await record(org, event(1));
       const outcome = await heldWhile(async (holder) => {

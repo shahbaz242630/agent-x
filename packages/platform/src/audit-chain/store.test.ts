@@ -12,6 +12,7 @@ import {
   type ChainWriter,
   clockOf,
   headFields,
+  type LockedHead,
   sealedFields,
   verifyChain,
 } from './store.ts';
@@ -48,7 +49,7 @@ class MemoryChain implements ChainWriter, ChainReader {
   /** How many pages of events the check has asked for. */
   pages = 0;
 
-  lockHead(): Promise<{ head: ChainHead | undefined; now: Date } | undefined> {
+  lockHead(): Promise<LockedHead | undefined> {
     this.calls.push('lockHead');
     if (this.head === 'none') return Promise.resolve(undefined);
     return Promise.resolve({ head: this.head === 'unreadable' ? undefined : this.head, now: NOW });

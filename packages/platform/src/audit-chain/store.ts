@@ -37,6 +37,12 @@ export interface SealedEvent extends ChainLink {
   readonly recordedAt: Date;
 }
 
+/** The head read under the lock, and the database's clock read in the same statement once the lock was held. */
+export interface LockedHead {
+  readonly head: ChainHead | undefined;
+  readonly now: Date;
+}
+
 /** What recording needs from a chain's tables. */
 export interface ChainWriter {
   /**
@@ -46,7 +52,7 @@ export interface ChainWriter {
    * statement, once the lock is held, the database's clock to the millisecond
    * (4D2d P2: one trip, not two).
    */
-  lockHead(): Promise<{ readonly head: ChainHead | undefined; readonly now: Date } | undefined>;
+  lockHead(): Promise<LockedHead | undefined>;
   /**
    * Inserts the first head, doing nothing if another transaction just did (it
    * then waits for that one to end). The head's table needs a key that allows
@@ -119,8 +125,8 @@ const BATCH = 500;
  * place. Refuses (ChainBroken) a head that fails its check, and one with
  * events past it (found by the write itself, which then writes nothing):
  * someone removed or wound it back, and a new event would carry on the
- * tampered chain. With the head locked no one else can be adding one, so any
- * found were there before. The ID is drawn once the lock is held,
+ * tampered chain. With the head locked no one else can be adding one through
+ * the app, so any found came from outside it. The ID is drawn once the lock is held,
  * so IDs rise with the numbers, and written in lower case, as Postgres returns
  * a uuid, so the stored row hashes the same.
  */

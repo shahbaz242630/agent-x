@@ -23,6 +23,7 @@ export {
   type ChainWriter,
   clockOf,
   headFields,
+  type LockedHead,
   type SealedEvent,
   sealedFields,
   verifyChain,

@@ -14,8 +14,8 @@ import {
   type ChainReader,
   type ChainReport,
   type ChainWriter,
-  entryIsSealed,
   clockOf,
+  entryIsSealed,
   headFields,
   sealedFields,
   type StoredEntry,
@@ -154,14 +154,14 @@ function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: strin
           set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
           where seq = ${previous.seq} and hash = ${previous.hash}
             and not exists (select from platform_controls.audit_events p where p.seq > ${previous.seq})
-          returning 1 as moved
+          returning seq
         )
         insert into platform_controls.audit_events (seq, id, recorded_at, actor_type, actor_id, action, details,
                                                     prev_hash, hash, mac, mac_key_version)
         select ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz, ${event.actor.type}::text,
                ${event.actor.id}::text, ${event.action}::text, ${details}::text, ${sealed.prevHash}::bytea,
                ${sealed.hash}::bytea, ${sealed.mac}::bytea, ${sealed.macKeyVersion}::integer
-        from moved m
+        from moved
       `.execute(tx);
       return written.numAffectedRows === 1n;
     },
