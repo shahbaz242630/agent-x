@@ -504,8 +504,9 @@ describe('a run', () => {
     expect(done.status).toBe(0);
     expect(az.runs.map(({ job }) => job)).toEqual(['load-first', 'load-second']);
     expect(done.reports).toHaveLength(1);
-    // Each run's log read until its fourth reading, the first holding its last line.
-    expect(az.calls.filter((call) => call.includes('/query') && call.includes('load-first-'))).toHaveLength(4);
+    // Each run's log read until its fifth reading: the fourth is the first holding its last line, and the
+    // fifth agrees with it, as the end alone can't vouch for lines in batches that came out of order.
+    expect(az.calls.filter((call) => call.includes('/query') && call.includes('load-first-'))).toHaveLength(5);
     // A clean-up left to finish waits the same way for its `load.cleaned`.
     const open = new FakeAzure({
       lastLineLate: 3,
