@@ -408,16 +408,20 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
     const key = newKey();
     const refusal = new Error('refused after rolling back to an earlier savepoint');
 
-    await withTenant(app, ORG, async (tx) => {
-      await sql`savepoint before_the_claim`.execute(tx);
-      await expect(
-        writes().run(tx, requestFor(key), async () => {
-          // Undoes the claim and ends its savepoint, which then can't be rolled back to.
-          await sql`rollback to savepoint before_the_claim`.execute(tx);
-          throw refusal;
-        }),
-      ).rejects.toBe(refusal);
-    });
+    // The failed rollback leaves the transaction aborted; since 4D2d P1 withTenant's read-back
+    // before commit says so, rather than a commit that Postgres quietly turns into a rollback.
+    await expect(
+      withTenant(app, ORG, async (tx) => {
+        await sql`savepoint before_the_claim`.execute(tx);
+        await expect(
+          writes().run(tx, requestFor(key), async () => {
+            // Undoes the claim and ends its savepoint, which then can't be rolled back to.
+            await sql`rollback to savepoint before_the_claim`.execute(tx);
+            throw refusal;
+          }),
+        ).rejects.toBe(refusal);
+      }),
+    ).rejects.toThrow(/current transaction is aborted/);
 
     expect(linesNamed('idempotency.rollback_failed')).toEqual([
       expect.objectContaining({ level: 'error', idempotencyKey: key }),

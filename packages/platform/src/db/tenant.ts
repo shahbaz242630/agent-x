@@ -53,6 +53,14 @@ export class TenantContextError extends Error {
 const insideTenant = new AsyncLocalStorage<{ open: boolean }>();
 
 /**
+ * The organisation withTenant set, in lower case, for each transaction it has
+ * open (4D2d P1, decision 41). assertTenant compares with this instead of
+ * asking the database each time; a transaction withTenant didn't open (or a
+ * handle made from one, a different object) is still asked the database.
+ */
+const tenantOf = new WeakMap<object, string>();
+
+/**
  * Runs `work` in one READ COMMITTED transaction scoped to the organisation.
  * The orgId must come from the server (the authenticated principal or the
  * directory), never from the request (ADR-005 §5). It commits when `work`
@@ -80,8 +88,30 @@ export async function withTenant<Schema, Result>(
         .transaction()
         .setIsolationLevel('read committed')
         .execute(async (tx) => {
-          await sql`select pg_catalog.set_config('app.org_id', ${orgId}, true)`.execute(tx);
-          return work(tx);
+          // set_config answers with the setting as the database now holds it: the read-back at the
+          // start. It can't differ today (the setting has no check hook); kept as decision 41 asks.
+          const { rows } = await sql<{ org_id: string | null }>`
+            select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id
+          `.execute(tx);
+          const tenant = orgId.toLowerCase();
+          if (!sameTenant(rows[0]?.org_id, tenant)) {
+            throw new TenantContextError("the organisation setting didn't take");
+          }
+          tenantOf.set(tx, tenant);
+          try {
+            const result = await work(tx);
+            // The read-back before commit: a setting still changed (a bug, or injected SQL) throws
+            // here, which rolls the whole transaction back. One changed and put back in between is
+            // not seen here; row security still walls each statement to the setting it ran under.
+            if (!sameTenant(await settingOf(tx), tenant)) {
+              throw new TenantContextError(
+                'the organisation setting changed inside the transaction, so nothing it wrote is kept',
+              );
+            }
+            return result;
+          } finally {
+            tenantOf.delete(tx);
+          }
         }),
     );
   } finally {
@@ -95,15 +125,30 @@ export async function withTenant<Schema, Result>(
  * Row security shows another tenant's rows as no rows at all, so work that
  * only reads, such as checking an audit chain, would take a wrong tenant's
  * view for an empty record.
+ *
+ * Inside a transaction withTenant opened, it compares with what withTenant
+ * set, with no round trip: withTenant reads the setting back at the start and
+ * again before commit (decision 41), so a setting changed and put back in
+ * between goes unseen here. Any other transaction is asked.
  */
 export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: string): Promise<void> {
+  const tenant = tenantOf.get(tx) ?? (await settingOf(tx));
+  if (!UUID.test(orgId) || !sameTenant(tenant, orgId.toLowerCase())) {
+    throw new TenantContextError("the transaction isn't withTenant's for this organisation");
+  }
+}
+
+/** The transaction's organisation setting as the database holds it, or '' for none. */
+async function settingOf<Schema>(tx: Transaction<Schema>): Promise<string> {
   const { rows } = await sql<{ org_id: string | null }>`
     select pg_catalog.current_setting('app.org_id', true) as org_id
   `.execute(tx);
-  const tenant = rows[0]?.org_id ?? '';
-  if (!UUID.test(orgId) || tenant.toLowerCase() !== orgId.toLowerCase()) {
-    throw new TenantContextError("the transaction isn't withTenant's for this organisation");
-  }
+  return rows[0]?.org_id ?? '';
+}
+
+/** Whether a setting names the organisation, given in lower case. */
+function sameTenant(setting: string | null | undefined, tenant: string): boolean {
+  return (setting ?? '').toLowerCase() === tenant;
 }
 
 /** The longest a request's statement runs: a hung read gives its connection back, and the request fails rather than hangs. */
