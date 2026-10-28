@@ -49,6 +49,8 @@ import {
   type SignedRow,
   type SignedRowKey,
   signedRowIds,
+  signedRowOf,
+  signedRowRead,
   type SignedStateTable,
   StatusChangeFailed,
   type StatusTable,
@@ -734,24 +736,24 @@ export function createSignedStates({
   const latestOf = (tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey): Promise<LatestSignedState> =>
     trail.latestSignedState(tx, key.orgId, { type: table.subject, id: key.id });
 
-  /** The row matched with the log's latest signed event for it. */
-  const compare = (
+  /** The row matched with the log's latest signed event for it: the state, or the tamper sign it shows. */
+  const judge = (
     table: SignedStateTable,
     key: SignedRowKey,
     row: FoundRow,
     latest: LatestSignedState,
-  ): StateCheck => {
-    if (latest.kind === 'none') return alarm(table.subject, key, 'unsigned');
-    if (latest.kind === 'broken') return alarm(table.subject, key, 'log', latest.seq);
+  ): Extract<StateCheck, { outcome: 'verified' }> | { readonly sign: TamperSign; readonly seq?: bigint } => {
+    if (latest.kind === 'none') return { sign: 'unsigned' };
+    if (latest.kind === 'broken') return latest.seq === undefined ? { sign: 'log' } : { sign: 'log', seq: latest.seq };
     const eventId = latest.id.toLowerCase();
-    if (row.eventId !== eventId) return alarm(table.subject, key, 'pointer');
-    if (row.version !== latest.version) return alarm(table.subject, key, 'version');
+    if (row.eventId !== eventId) return { sign: 'pointer' };
+    if (row.version !== latest.version) return { sign: 'version' };
     const facts = {
       orgId: key.orgId,
       subject: { type: table.subject, id: key.id, version: row.version },
       fields: row.fields,
     };
-    if (!stateSealMatches(keys, facts, latest.seal)) return alarm(table.subject, key, 'seal');
+    if (!stateSealMatches(keys, facts, latest.seal)) return { sign: 'seal' };
     return Object.freeze({
       outcome: 'verified',
       version: row.version,
@@ -759,6 +761,53 @@ export function createSignedStates({
       recordedAt: latest.recordedAt,
       fields: new Map(row.fields),
     });
+  };
+
+  /** judge, with the alarm raised for a tamper sign. */
+  const compare = (
+    table: SignedStateTable,
+    key: SignedRowKey,
+    row: FoundRow,
+    latest: LatestSignedState,
+  ): StateCheck => {
+    const judged = judge(table, key, row, latest);
+    return 'sign' in judged ? alarm(table.subject, key, judged.sign, judged.seq) : judged;
+  };
+
+  /**
+   * The row, locked, and its newest signed event in one statement (4D2d P3a):
+   * believed only when they agree (verified), or when there is neither a row
+   * nor a signed event. Anything else is undefined, raising no alarm: the row
+   * may have changed while the statement waited for its lock, after the log's
+   * snapshot was taken, so the caller checks again in two statements, as
+   * before, and only that check raises the alarm.
+   */
+  const inOneStatement = async (
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    lock: RowLock,
+  ): Promise<StateCheck | undefined> => {
+    let read: Awaited<ReturnType<AuditTrail['latestSignedStateWithRow']>>;
+    try {
+      read = await trail.latestSignedStateWithRow(
+        tx,
+        key.orgId,
+        { type: table.subject, id: key.id },
+        signedRowRead(table, key, lock),
+      );
+    } catch (error) {
+      // A backlog: the check in two statements reads the row first, so an unreadable row raises its own alarm.
+      if (error instanceof TooManyEventsAboutObject) return undefined;
+      throw error;
+    }
+    const { latest, rows } = read;
+    if (rows === undefined) return undefined;
+    const row = signedRowOf(table, rows);
+    if (row.outcome === 'missing') return latest.kind === 'none' ? MISSING : undefined;
+    if (row.outcome !== 'found') return undefined;
+    const judged = judge(table, key, row, latest);
+    return 'sign' in judged ? undefined : judged;
   };
 
   /** Throws if locking the row now would break the lock order: a shared lock raised to change, or a row after the head. */
@@ -783,8 +832,22 @@ export function createSignedStates({
     const name = rowName(table, key);
     const held = rows.get(name);
     checkLockOrder(tx, held, lock);
-    let row = await readSignedRow(tx, table, key, lock);
+    // Held from here: the statement below takes the lock before it gives anything back.
     rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
+    const quick = await inOneStatement(tx, table, key, lock);
+    const checked = quick ?? (await inTwoStatements(tx, table, key, lock));
+    if (checked.outcome === 'verified' && lock === 'change') rows.set(name, { lock, from: { table, state: checked } });
+    return checked;
+  };
+
+  /** The check as it was before 4D2d P3a, each step a statement of its own, raising the alarm it finds. */
+  const inTwoStatements = async (
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    lock: RowLock,
+  ): Promise<StateCheck> => {
+    let row = await readSignedRow(tx, table, key, lock);
     if (row.outcome === 'unreadable') return alarm(table.subject, key, 'row');
     let latest = await latestOf(tx, table, key);
     if (row.outcome === 'missing') {
@@ -797,9 +860,7 @@ export function createSignedStates({
       if (row.outcome === 'unreadable') return alarm(table.subject, key, 'row');
       latest = await latestOf(tx, table, key);
     }
-    const checked = compare(table, key, row, latest);
-    if (checked.outcome === 'verified' && lock === 'change') rows.set(name, { lock, from: { table, state: checked } });
-    return checked;
+    return compare(table, key, row, latest);
   };
 
   /**

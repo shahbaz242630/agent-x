@@ -54,6 +54,8 @@ export {
   type SignedRowKey,
   type SignedStateTable,
   signedRowIds,
+  signedRowOf,
+  signedRowRead,
   MOST_SIGNED_ROWS_READ,
   type WrittenRow,
   writeSignedRow,

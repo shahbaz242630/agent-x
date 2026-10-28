@@ -1128,8 +1128,13 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
     const create = AsyncResource.bind(() => newAgent('reader', id));
     let createdOnce = false;
     // The log is read only once the row's creation has committed, which a check can meet in production by chance.
+    // Only the check in two statements can meet it, so the one-statement read (4D2d P3a) is made to step aside.
     const late: AuditTrail = {
       ...trail,
+      latestSignedStateWithRow: async (tx: AuditTransaction, orgId, subject, rowRead) => ({
+        ...(await trail.latestSignedStateWithRow(tx, orgId, subject, rowRead)),
+        rows: undefined,
+      }),
       latestSignedState: async (tx: AuditTransaction, orgId, subject) => {
         if (!createdOnce) {
           createdOnce = true;
@@ -1140,6 +1145,37 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
     };
 
     expect(await check(id, statesWith(late))).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a check that waited for a change to commit: the one statement read the log before it, so read again, verified (4D2d P3a)', async () => {
+    const id = await newAgent();
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked = (): void => undefined;
+    const rowLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    // The change holds the row, and its new event, uncommitted while the check waits for the row.
+    const changing = withTenant(app, org, async (tx) => {
+      const changed = await states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      locked();
+      await held;
+      return changed;
+    });
+    try {
+      await rowLocked;
+      const checking = check(id);
+      await waitUntilQueued(attacker, 1);
+      release();
+
+      expect(await changing).toMatchObject({ outcome: 'changed', version: 2 });
+      expect(await checking).toMatchObject({ outcome: 'verified', version: 2 });
+    } finally {
+      release();
+    }
     expect(alarms()).toEqual([]);
   });
 

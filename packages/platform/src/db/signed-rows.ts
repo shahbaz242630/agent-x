@@ -242,15 +242,35 @@ export async function readSignedRow<Schema>(
   key: SignedRowKey,
   lock: RowLock,
 ): Promise<SignedRow> {
+  const read = signedRowRead(table, key, lock);
+  await assertTenant(tx, key.orgId);
+  const { rows } = await read.execute(tx);
+  return rowOf(table, rows);
+}
+
+/**
+ * readSignedRow's statement, not run: for a caller that reads the row inside a
+ * statement of its own (4D2d P3a), and judges what it gave with signedRowOf.
+ * That caller must hold withTenant's transaction for the row's organisation,
+ * as readSignedRow checks.
+ */
+export function signedRowRead(
+  table: SignedStateTable,
+  key: SignedRowKey,
+  lock: RowLock,
+): RawBuilder<Record<string, unknown>> {
   checkTable(table);
   checkKey(key);
-  await assertTenant(tx, key.orgId);
   // Filtered by org_id as well as row security, as ADR-005 §7 asks of every query.
-  const { rows } = await sql<Record<string, unknown>>`
+  return sql<Record<string, unknown>>`
     select ${columnsOf(table)} from ${sql.table(table.table)} as target
     where target.org_id = ${key.orgId} and target.id = ${key.id}
     ${lock === 'share' ? sql`for share` : sql`for no key update`}
-  `.execute(tx);
+  `;
+}
+
+/** readSignedRow's judgement of the rows signedRowRead's statement gave. */
+export function signedRowOf(table: SignedStateTable, rows: readonly Readonly<Record<string, unknown>>[]): SignedRow {
   return rowOf(table, rows);
 }
 
