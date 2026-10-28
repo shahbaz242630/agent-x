@@ -32,6 +32,10 @@ export interface RunResult {
   readonly site: LoadSite;
   /** The CPUs the API was given: staging's half unless the run said otherwise. */
   readonly apiCpus: number;
+  /** On Azure (load.ts): the database server's size as Azure gave it (`Standard_D2ads_v5 (GeneralPurpose)`). */
+  readonly database?: string;
+  /** The wiring run's short k6 (load.ts run --smoke): it proves the run is wired and measures nothing. */
+  readonly smoke?: boolean;
   readonly phases: readonly PhaseResult[];
   readonly logs: LogSummary;
   readonly databaseChecksPassed: boolean;
@@ -65,12 +69,18 @@ function onTheLaptop(run: RunResult): string[] {
 
 /** Where an Azure run ran: the run PL-38 closes on. */
 function onAzure(run: RunResult): string[] {
-  return [
-    `Commit \`${run.commit}\`, run at ${run.at}, on staging in Azure UAE North, sized up for the run: the API`,
-    `given ${String(run.apiCpus)} CPU(s) and ten connections, the database a General Purpose server, k6 in a job inside`,
+  const lines = [
+    `Commit \`${run.commit}\`, run at ${run.at}, on staging in Azure UAE North: the API`,
+    `given ${String(run.apiCpus)} CPU(s) and ten connections, the database ${run.database ?? 'of a size not read'}, k6 in a job inside`,
     "staging's own network, through the API's internal address. The hand-off is paused, as on staging today: its timer",
-    're-checks the approved requests each run, and that work is in these numbers. This is the run PL-38 closes on (D2c).',
+    're-checks the approved requests each run, and that work is in these numbers.',
   ];
+  return run.smoke === true
+    ? [
+        ...lines,
+        '**The wiring run (--smoke): 20 seconds of k6 at 5 a second. It proves every step is wired; its numbers measure nothing.**',
+      ]
+    : [...lines, 'Sized up for the run, this is the run PL-38 closes on (D2c).'];
 }
 
 const decisionRow = (traffic: string, { count, p50, p95, p99, max }: Percentiles) =>
@@ -81,7 +91,7 @@ export function renderReport(run: RunResult): string {
   const spiked = run.phases.flatMap(({ phase, spikeMs }) => (spikeMs === null ? [] : [{ phase, spikeMs }]));
   const checked = run.logs.holdingsChecks.reduce((sum, { requests }) => sum + requests, 0);
   const lines = [
-    `# Load test, ${run.at.slice(0, 10)} (${run.site}, API ${String(run.apiCpus)} CPU)`,
+    `# Load test, ${run.at.slice(0, 10)} (${run.site}${run.smoke === true ? ', smoke' : ''}, API ${String(run.apiCpus)} CPU)`,
     '',
     run.failures.length === 0 ? '**Passed.**' : `**Failed: ${String(run.failures.length)} check(s).**`,
     '',

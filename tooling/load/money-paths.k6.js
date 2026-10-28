@@ -14,6 +14,9 @@
 // On Azure (D2c) the run's job names the API's internal address, the seed's
 // file and the results folder (API, SEED, OUT), and the summary's JSON line
 // on stdout is how the result reaches the report: the job keeps no files.
+// SMOKE=1 (load.ts run --smoke, the wiring run) sends the same kinds for 20
+// seconds at 5 a second, the spike at 5 seconds: it proves the run is wired,
+// and measures nothing.
 import { check } from 'k6';
 import exec from 'k6/execution';
 import http from 'k6/http';
@@ -24,7 +27,8 @@ if (PHASE !== '1' && PHASE !== '2') throw new Error('PHASE must be 1 or 2');
 
 const API = __ENV.API ?? 'http://api:8080';
 const OUT = __ENV.OUT ?? '/out';
-const SECONDS = 120;
+const SMOKE = __ENV.SMOKE === '1';
+const SECONDS = SMOKE ? 20 : 120;
 const { agents } = JSON.parse(open(__ENV.SEED ?? `${OUT}/seed.json`));
 const ample = agents.filter((agent) => agent.kind === 'ample');
 const capped = agents.find((agent) => agent.kind === 'capped');
@@ -47,11 +51,19 @@ export const options = {
   summaryTrendStats: ['med', 'p(95)', 'p(99)', 'max'],
   scenarios: {
     // Enough VUs ready for the spike's ten seconds, when each steady request takes longer: none left unsent.
-    steady: steadily(25, 'steady', 60),
+    steady: SMOKE ? steadily(5, 'steady', 12) : steadily(25, 'steady', 60),
     duplicates: steadily(1, 'duplicate', 4),
     replays: steadily(1, 'replay', 4),
     ...(PHASE === '2'
-      ? { spike: { executor: 'per-vu-iterations', vus: 50, iterations: 1, startTime: '30s', exec: 'spike' } }
+      ? {
+          spike: {
+            executor: 'per-vu-iterations',
+            vus: 50,
+            iterations: 1,
+            startTime: SMOKE ? '5s' : '30s',
+            exec: 'spike',
+          },
+        }
       : {}),
   },
   thresholds: {

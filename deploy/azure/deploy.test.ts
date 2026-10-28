@@ -1470,7 +1470,7 @@ describe('deploy apps', () => {
   it('sends nothing for a load run when the load image for that commit is missing or not signed by its workflow', async () => {
     const missing = await run(['apps', '--load-run'], { answers, images: recordingImages({ noLoadImage: true }) });
     expect(missing.error).toMatchObject({
-      message: `The load test's image for ${COMMIT} isn't there (ghcr.io has no image for ${COMMIT} (404)). Build it from main first (the Load image workflow), then run apps --load-run again. Nothing was deployed.`,
+      message: `The load test's image for ${COMMIT} isn't there (ghcr.io has no image for ${COMMIT} (404)). Build it for main's newest commit first (gh workflow run load-image.yml --ref main, about 10 minutes), then run apps --load-run again. Nothing was deployed.`,
     });
     expect(missing.az.deployment).toBeUndefined();
     const refused = await run(['apps', '--load-run'], { answers, images: recordingImages({ refuseLoad: true }) });

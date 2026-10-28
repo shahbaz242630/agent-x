@@ -89,12 +89,28 @@ describe('the report', () => {
   });
 
   it('says an Azure run is the one PL-38 closes on, sized up on staging', () => {
-    const report = renderReport({ ...clean, site: 'azure', apiCpus: 2 });
+    const report = renderReport({
+      ...clean,
+      site: 'azure',
+      apiCpus: 2,
+      database: 'Standard_D2ads_v5 (GeneralPurpose)',
+    });
     expect(report).toContain('# Load test, 2026-10-22 (azure, API 2 CPU)\n\n**Passed.**');
-    expect(report).toContain('on staging in Azure UAE North, sized up for the run: the API\ngiven 2 CPU(s)');
-    expect(report).toContain('This is the run PL-38 closes on (D2c).');
+    expect(report).toContain(
+      'on staging in Azure UAE North: the API\ngiven 2 CPU(s) and ten connections, the database Standard_D2ads_v5 (GeneralPurpose), k6',
+    );
+    expect(report).toContain('Sized up for the run, this is the run PL-38 closes on (D2c).');
+    expect(report).not.toContain('--smoke');
     expect(report).not.toContain('laptop');
     expect(report).toContain('| 1 | 3300 | 3150 | 0 | 21.3 | 88.5 | 140.0 | 310.8 | 0 | 0 | 0 |');
+  });
+
+  it("says the wiring run (--smoke) measures nothing, and isn't the run PL-38 closes on", () => {
+    const report = renderReport({ ...clean, site: 'azure', apiCpus: 0.5, smoke: true });
+    expect(report).toContain('# Load test, 2026-10-22 (azure, smoke, API 0.5 CPU)');
+    expect(report).toContain('the database of a size not read');
+    expect(report).toContain('its numbers measure nothing.**');
+    expect(report).not.toContain('PL-38 closes on');
   });
 
   it('lists what failed', () => {

@@ -1450,7 +1450,7 @@ function confirmCheckoutIs(steps: Steps, release: string): void {
 async function verifiedLoadImage(steps: Steps, images: Images, release: string): Promise<string> {
   const digest = await images.digestOf(release, LOAD_SIGNER).catch((error: unknown) => {
     throw new Error(
-      `The load test's image for ${release} isn't there (${error instanceof Error ? error.message : String(error)}). Build it from main first (the Load image workflow), then run apps --load-run again. Nothing was deployed.`,
+      `The load test's image for ${release} isn't there (${error instanceof Error ? error.message : String(error)}). Build it for main's newest commit first (gh workflow run load-image.yml --ref main, about 10 minutes), then run apps --load-run again. Nothing was deployed.`,
     );
   });
   if (!DIGEST.test(digest)) throw new Error(`ghcr.io gave ${digest} as the load image's digest, which isn't one.`);
