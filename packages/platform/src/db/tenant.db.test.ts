@@ -55,6 +55,11 @@ const labelsSeenBy = (orgId: string): Promise<string[]> =>
     return rows.map((row) => row.label);
   });
 
+/** What withTenant says when work changed the setting and left it changed. */
+const changed = new TenantContextError(
+  'the organisation setting changed inside the transaction, so nothing it wrote is kept',
+);
+
 /** The connection's tenant setting, read outside any transaction. */
 const settingOutside = async (db: Kysely<ProbeSchema>): Promise<string | null> => {
   const { rows } = await sql<{ org_id: string | null }>`
@@ -358,10 +363,6 @@ describe('withTenant', () => {
 });
 
 describe('4D2d P1 (decision 41): the setting is read back before commit', () => {
-  const changed = new TenantContextError(
-    'the organisation setting changed inside the transaction, so nothing it wrote is kept',
-  );
-
   it.each([
     ['for the transaction', true],
     ['for the whole session', false],
@@ -416,7 +417,7 @@ describe('assertTenant', () => {
         await expect(assertTenant(tx, ORG_A)).resolves.toBeUndefined();
         await expect(assertTenant(tx, ORG_B)).rejects.toThrow(refused);
       }),
-    ).rejects.toThrow(/setting changed inside the transaction/);
+    ).rejects.toThrow(changed);
   });
 
   it('asks the database for a transaction withTenant did not open', async () => {

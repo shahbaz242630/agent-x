@@ -60,8 +60,6 @@ const insideTenant = new AsyncLocalStorage<{ open: boolean }>();
  */
 const tenantOf = new WeakMap<object, string>();
 
-const SETTING_CHANGED = 'the organisation setting changed inside the transaction, so nothing it wrote is kept';
-
 /**
  * Runs `work` in one READ COMMITTED transaction scoped to the organisation.
  * The orgId must come from the server (the authenticated principal or the
@@ -90,19 +88,26 @@ export async function withTenant<Schema, Result>(
         .transaction()
         .setIsolationLevel('read committed')
         .execute(async (tx) => {
-          // set_config answers with the setting as the database now holds it: the read-back at the start.
-          const set = await sql<{ org_id: string | null }>`
+          // set_config answers with the setting as the database now holds it: the read-back at the
+          // start. It can't differ today (the setting has no check hook); kept as decision 41 asks.
+          const { rows } = await sql<{ org_id: string | null }>`
             select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id
           `.execute(tx);
           const tenant = orgId.toLowerCase();
-          if (!sameTenant(set.rows[0]?.org_id, tenant))
+          if (!sameTenant(rows[0]?.org_id, tenant)) {
             throw new TenantContextError("the organisation setting didn't take");
+          }
           tenantOf.set(tx, tenant);
           try {
             const result = await work(tx);
-            // The read-back before commit: a setting changed in between (a bug, or injected SQL)
-            // throws here, which rolls the whole transaction back.
-            if (!sameTenant(await settingOf(tx), tenant)) throw new TenantContextError(SETTING_CHANGED);
+            // The read-back before commit: a setting still changed (a bug, or injected SQL) throws
+            // here, which rolls the whole transaction back. One changed and put back in between is
+            // not seen here; row security still walls each statement to the setting it ran under.
+            if (!sameTenant(await settingOf(tx), tenant)) {
+              throw new TenantContextError(
+                'the organisation setting changed inside the transaction, so nothing it wrote is kept',
+              );
+            }
             return result;
           } finally {
             tenantOf.delete(tx);
@@ -123,7 +128,8 @@ export async function withTenant<Schema, Result>(
  *
  * Inside a transaction withTenant opened, it compares with what withTenant
  * set, with no round trip: withTenant reads the setting back at the start and
- * again before commit (decision 41). Any other transaction is asked.
+ * again before commit (decision 41), so a setting changed and put back in
+ * between goes unseen here. Any other transaction is asked.
  */
 export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: string): Promise<void> {
   const tenant = tenantOf.get(tx) ?? (await settingOf(tx));
@@ -141,8 +147,9 @@ async function settingOf<Schema>(tx: Transaction<Schema>): Promise<string> {
 }
 
 /** Whether a setting names the organisation, given in lower case. */
-const sameTenant = (setting: string | null | undefined, tenant: string): boolean =>
-  (setting ?? '').toLowerCase() === tenant;
+function sameTenant(setting: string | null | undefined, tenant: string): boolean {
+  return (setting ?? '').toLowerCase() === tenant;
+}
 
 /** The longest a request's statement runs: a hung read gives its connection back, and the request fails rather than hangs. */
 export const STATEMENT_SECONDS = 10;
