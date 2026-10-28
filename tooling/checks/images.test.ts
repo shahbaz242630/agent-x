@@ -68,9 +68,9 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(imageProblems(pulled)).toEqual([]);
   });
 
-  it("pins the load test's k6 (Phase 4 D2)", () => {
+  it("pins the load test's k6 and network delay (Phase 4 D2, 4D2d P0)", () => {
     const load = composeImages(readFileSync('tooling/load/compose.load.yaml', 'utf8'));
-    expect(Object.keys(load)).toEqual(['k6']);
+    expect(Object.keys(load)).toEqual(['k6', 'delay']);
     expect(imageProblems(Object.values(load))).toEqual([]);
   });
 
