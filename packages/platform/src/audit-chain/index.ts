@@ -21,6 +21,7 @@ export {
   type ChainReader,
   ChainStoreError,
   type ChainWriter,
+  clockOf,
   headFields,
   type SealedEvent,
   sealedFields,

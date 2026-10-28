@@ -15,6 +15,7 @@ import {
   type ChainReport,
   type ChainWriter,
   entryIsSealed,
+  clockOf,
   headFields,
   sealedFields,
   type StoredEntry,
@@ -122,15 +123,18 @@ export function platformEventSealed(keys: KeyProvider, row: Readonly<Record<stri
 function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: string): ChainWriter {
   return {
     async lockHead() {
-      const rows = await tx
-        .selectFrom('platform_controls.audit_head')
-        .select(['seq', 'hash', 'mac', 'mac_key_version'])
-        .forNoKeyUpdate()
-        .execute();
+      // The clock in the outer select, which reads a row only once the inner one has locked it.
+      const { rows } = await sql<Record<string, unknown>>`
+        with locked as materialized (
+          select h.seq, h.hash, h.mac, h.mac_key_version from platform_controls.audit_head h
+          for no key update
+        )
+        select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now from locked l
+      `.execute(tx);
       const [row, ...others] = rows;
       if (row === undefined) return undefined;
       // A second head row means someone went round the app: no head can be trusted.
-      return { head: others.length > 0 ? undefined : headFields(row) };
+      return { head: others.length > 0 ? undefined : headFields(row), now: clockOf(row) };
     },
 
     async start(head) {
@@ -141,49 +145,25 @@ function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: strin
         .execute();
     },
 
-    async hasEventsPast(seq) {
-      const past = await tx
-        .selectFrom('platform_controls.audit_events')
-        .select('seq')
-        .where('seq', '>', seq)
-        .limit(1)
-        .executeTakeFirst();
-      return past !== undefined;
-    },
-
-    async now() {
-      const { now } = await tx
-        .selectNoFrom(sql<Date>`pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp())`.as('now'))
-        .executeTakeFirstOrThrow();
-      return now;
-    },
-
     async append(sealed, head, previous) {
-      const moved = await tx
-        .updateTable('platform_controls.audit_head')
-        .set({ seq: head.seq, hash: head.hash, mac: head.mac, mac_key_version: head.macKeyVersion })
-        .where('seq', '=', previous.seq)
-        .where('hash', '=', previous.hash)
-        .executeTakeFirst();
-      // The head first: the event is written only once it has a place, so a refused one leaves nothing behind.
-      if (moved.numUpdatedRows !== 1n) return false;
-      await tx
-        .insertInto('platform_controls.audit_events')
-        .values({
-          seq: sealed.seq,
-          id: sealed.id,
-          recorded_at: sealed.recordedAt,
-          actor_type: event.actor.type,
-          actor_id: event.actor.id,
-          action: event.action,
-          details,
-          prev_hash: sealed.prevHash,
-          hash: sealed.hash,
-          mac: sealed.mac,
-          mac_key_version: sealed.macKeyVersion,
-        })
-        .execute();
-      return true;
+      // One statement: the head moves only if it is still `previous` with no event past it,
+      // and the event is written only if the head moved, so a refused one leaves nothing behind.
+      const written = await sql`
+        with moved as (
+          update platform_controls.audit_head
+          set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
+          where seq = ${previous.seq} and hash = ${previous.hash}
+            and not exists (select from platform_controls.audit_events p where p.seq > ${previous.seq})
+          returning 1 as moved
+        )
+        insert into platform_controls.audit_events (seq, id, recorded_at, actor_type, actor_id, action, details,
+                                                    prev_hash, hash, mac, mac_key_version)
+        select ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz, ${event.actor.type}::text,
+               ${event.actor.id}::text, ${event.action}::text, ${details}::text, ${sealed.prevHash}::bytea,
+               ${sealed.hash}::bytea, ${sealed.mac}::bytea, ${sealed.macKeyVersion}::integer
+        from moved m
+      `.execute(tx);
+      return written.numAffectedRows === 1n;
     },
   };
 }
