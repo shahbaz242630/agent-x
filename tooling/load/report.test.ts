@@ -113,6 +113,36 @@ describe('the report', () => {
     expect(report).not.toContain('PL-38 closes on');
   });
 
+  it('says the database trips each request cost, phase by phase, and the delay added to the database (4D2d P0)', () => {
+    expect(renderReport(clean)).not.toContain('Database trips');
+    expect(renderReport({ ...clean, delayMs: 0 })).not.toContain('ms was added');
+    const report = renderReport({
+      ...clean,
+      delayMs: 2,
+      statements: [
+        { phase: 1, statements: 528_000 },
+        { phase: 2, statements: 3300 },
+      ],
+    });
+    expect(report).toContain(
+      "k6 straight to it. 2 ms was added to every packet the database sent, as Azure's network adds it. As",
+    );
+    expect(report).toContain(
+      "\nDatabase trips a request (the app's statements over the phase, its timers' included, by pg_stat_statements): phase 1 160.0, phase 2 1.0.\n",
+    );
+    // A phase with no request has no trips a request to give.
+    const none = renderReport({
+      ...clean,
+      phases: [phase(1, { requests: 0 }), phase(2)],
+      statements: [
+        { phase: 1, statements: 5 },
+        { phase: 2, statements: 6600 },
+        { phase: 3, statements: 1 },
+      ],
+    });
+    expect(none).toContain('by pg_stat_statements): phase 2 2.0.\n');
+  });
+
   it('lists what failed', () => {
     const report = renderReport({ ...clean, databaseChecksPassed: false, failures: ['One.', 'Two.'] });
     expect(report).toContain('**Failed: 2 check(s).**');
