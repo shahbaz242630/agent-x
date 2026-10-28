@@ -87,6 +87,16 @@ interface World {
   restartIgnored?: boolean;
   /** How many readings of the API's lines find none yet: they arrive late. */
   apiLinesLate?: number;
+  /** Azure refuses to remove this job. */
+  deleteRefused?: LoadJob;
+  /** Azure refuses the API's restart. */
+  restartRefused?: boolean;
+  /** The API's replica's state, once restarted. */
+  replicaState?: string;
+  /** Each change to a job shows two readings late, the job saying Succeeded as it was meanwhile. */
+  slowChange?: boolean;
+  /** What the jobs run, in place of `node tooling/load/job.ts`. */
+  command?: readonly string[];
 }
 
 const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
@@ -104,6 +114,8 @@ class FakeAzure implements Az {
   readonly deleted: LoadJob[] = [];
   apiReadings = 0;
   readonly #modified = new Map<LoadJob, number>(LOAD_JOBS.map((job) => [job, 0]));
+  /** A change Azure has been sent but doesn't show yet, and how many readings until it does. */
+  readonly #pending = new Map<LoadJob, { value: string; readings: number }>();
   readonly #world: World;
 
   constructor(world: World = {}) {
@@ -162,16 +174,16 @@ class FakeAzure implements Az {
     const job = LOAD_JOBS.find((each) => url.includes(`/Microsoft.App/jobs/${jobName(each)}?`));
     if (job !== undefined) return this.#jobRest(job, method, args);
     if (url.includes('/containerApps/ca-agentx-stg-api/revisions/api--r7/restart')) {
+      if (this.#world.restartRefused === true) return { status: 1, stdout: '', stderr: 'ERROR: Bad Request' };
       this.restarted.push('api--r7');
       return json({});
     }
     if (url.includes('/containerApps/ca-agentx-stg-api/revisions/api--r7/replicas?')) {
       // A restart restarts the replica's container: its count moves on, unless the world says it never does.
       const restarts = this.#world.restartIgnored === true ? 0 : this.restarted.length;
+      const runningState = this.restarted.length > 0 ? (this.#world.replicaState ?? 'Running') : 'Running';
       return json({
-        value: [
-          { name: 'api--r7-6f9c', properties: { runningState: 'Running', containers: [{ restartCount: restarts }] } },
-        ],
+        value: [{ name: 'api--r7-6f9c', properties: { runningState, containers: [{ restartCount: restarts }] } }],
       });
     }
     if (url.includes('/containerApps/ca-agentx-stg-api?')) return json(this.#api());
@@ -186,11 +198,18 @@ class FakeAzure implements Az {
   /** A load job read, its request written, or the job removed, by Resource Manager. */
   #jobRest(job: LoadJob, method: string | undefined, args: readonly string[]): AzResult {
     if (method === 'delete') {
+      if (this.#world.deleteRefused === job) return { status: 1, stdout: '', stderr: 'ERROR: Conflict' };
       this.deleted.push(job);
       return json({});
     }
     if (method !== 'patch') {
       if (this.deleted.includes(job)) return { status: 3, stdout: '', stderr: 'ERROR: Not Found' };
+      const pending = this.#pending.get(job);
+      if (pending !== undefined && pending.readings > 0) pending.readings -= 1;
+      else if (pending !== undefined) {
+        this.#pending.delete(job);
+        this.#take(job, pending.value);
+      }
       return json(this.#job(job));
     }
     const body = readFileSync((args[args.indexOf('--body') + 1] ?? '').slice(1), 'utf8');
@@ -206,10 +225,16 @@ class FakeAzure implements Az {
         stderr: 'ERROR: Conflict({"error":{"code":"ContainerAppOperationInProgress"}})',
       };
     }
-    this.requests.set(job, value);
     this.written.push({ job, value });
-    this.#modified.set(job, (this.#modified.get(job) ?? 0) + 1);
+    if (this.#world.slowChange === true) this.#pending.set(job, { value, readings: 2 });
+    else this.#take(job, value);
     return json({});
+  }
+
+  /** Azure takes a change: the job holds its request, and its last change's time moves on. */
+  #take(job: LoadJob, value: string): void {
+    this.requests.set(job, value);
+    this.#modified.set(job, (this.#modified.get(job) ?? 0) + 1);
   }
 
   #references(job: LoadJob) {
@@ -232,7 +257,7 @@ class FakeAzure implements Az {
             {
               name: job,
               image: this.#world.image ?? LOAD_IMAGE,
-              command: ['node', 'tooling/load/job.ts'],
+              command: this.#world.command ?? ['node', 'tooling/load/job.ts'],
               args: [job.replace(/^load-/, '')],
             },
           ],
@@ -466,13 +491,66 @@ describe('a run', () => {
     expect(az.apiReadings).toBeGreaterThan(4);
   });
 
-  it("stops before phase 2 when the API's replicas haven't restarted 10 minutes after the restart", async () => {
-    const az = new FakeAzure({ restartIgnored: true });
+  it("stops before phase 2 when the API's replicas haven't restarted, or don't run, 10 minutes after the restart", async () => {
+    for (const world of [{ restartIgnored: true }, { replicaState: 'Activating' }]) {
+      const az = new FakeAzure(world);
+      const done = await run(['run'], az);
+      expect(done.error).toMatchObject({
+        message: "The API's revision api--r7 wasn't running again 10 minutes after its restart.",
+      });
+      expect(az.runs.map(({ job }) => job)).toEqual(['load-first']);
+      // The run is left open for finish: the next case starts as the partner would, after it.
+      rmSync(done.steps.stateFile);
+    }
+  });
+
+  it('stops before phase 2 when Azure refuses the restart', async () => {
+    const az = new FakeAzure({ restartRefused: true });
     const done = await run(['run'], az);
-    expect(done.error).toMatchObject({
-      message: "The API's revision api--r7 wasn't running again 10 minutes after its restart.",
-    });
+    expect(done.error).toMatchObject({ message: "Azure refused to restart the API's revision api--r7." });
     expect(az.runs.map(({ job }) => job)).toEqual(['load-first']);
+  });
+
+  it("starts a job only once Azure shows its request taken, never on the job's state from before", async () => {
+    const az = new FakeAzure({ slowChange: true });
+    const done = await run(['run'], az);
+    expect(done.status).toBe(0);
+    expect(az.runs.map(({ request }) => request.AGENTX_LOAD_RUN_ID)).toEqual([
+      expect.stringMatching(/^azure-/) as unknown,
+      expect.stringMatching(/^azure-/) as unknown,
+    ]);
+    expect([...az.requests.values()]).toEqual([NO_REQUEST, NO_REQUEST, NO_REQUEST]);
+  });
+
+  it('refuses an agent printed with its key, keeping the key out of the open run and away from phase 2', async () => {
+    const az = new FakeAzure({
+      behaviour: {
+        'load-first': () => ({
+          status: 'Succeeded',
+          lines: [seededLine({ ...AMPLE, key: 'agx_leaked' }), summary(1, 1)],
+        }),
+      },
+    });
+    const done = await run(['run'], az);
+    expect(done.error).toMatchObject({ message: expect.stringMatching(/without keys/) as unknown });
+    expect(az.runs.map(({ job }) => job)).toEqual(['load-first']);
+    expect(readFileSync(done.steps.stateFile, 'utf8')).not.toContain('agx_leaked');
+  });
+
+  it("fails the run when {} couldn't be put back on load-second, saying so in the report", async () => {
+    const done = await run(['run'], new FakeAzure({ putBackRefused: 'load-second' }));
+    expect(done.status).toBe(1);
+    const report = readFileSync(path.join(done.steps.reportsDir, done.reports[0] ?? ''), 'utf8');
+    expect(report).toContain("{} wasn't put back on job-agentx-stg-load-second");
+  });
+
+  it("says both when a job's start is refused and {} couldn't be put back after", async () => {
+    const done = await run(['run'], new FakeAzure({ startRefused: 'load-first', putBackRefused: 'load-first' }));
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(
+        / {} wasn't put back on job-agentx-stg-load-first .*apps --load-run deploys it back\.$/,
+      ) as unknown,
+    });
   });
 
   it("keeps the run open with load-first's run named when it doesn't end in time, for finish to read and clean up", async () => {
@@ -523,7 +601,8 @@ describe('a run', () => {
   it('starts nothing unless the API keeps a copy running at the load size, every job is idle, and no run is left open', async () => {
     const refusals: [World, RegExp][] = [
       [{ fewest: 0 }, /keeps no copy running.*--keep-running/],
-      [{ cpus: 0.5 }, /runs at 0.5 CPUs, not the load run's 2/],
+      [{ cpus: 1 }, /runs at 1 CPUs, not the load run's 2/],
+      [{ command: ['sh', '-c', 'node tooling/load/job.ts first'] }, /must run node tooling\/load\/job\.ts first/],
       [{ going: 'load-second' }, /job-agentx-stg-load-second has runs still going/],
       [{ image: `ghcr.io/shahbaz242630/agent-x@sha256:${'c'.repeat(64)}` }, /doesn't run the load image by digest/],
     ];
@@ -615,6 +694,30 @@ describe('finish', () => {
     });
     expect(az.deleted).toEqual([]);
     expect(existsSync(done.steps.stateFile)).toBe(true);
+  });
+
+  it('keeps the jobs and the open run when the clean-up job fails, even saying nothing was left', async () => {
+    mkdirSync(path.join(dir, '.out'), { recursive: true });
+    writeFileSync(
+      path.join(dir, '.out', 'azure-run.json'),
+      JSON.stringify({ runId: 'azure-x', smoke: false, agents: [AMPLE] }),
+    );
+    const az = new FakeAzure({
+      behaviour: { 'load-cleanup': () => ({ status: 'Failed', lines: [{ event: 'load.cleaned', problems: [] }] }) },
+    });
+    const done = await run(['finish'], az);
+    expect(done.error).toMatchObject({ message: expect.stringMatching(/didn't finish \(Failed: \)/) as unknown });
+    expect(az.deleted).toEqual([]);
+    expect(existsSync(done.steps.stateFile)).toBe(true);
+  });
+
+  it('stops when Azure refuses to remove a job, saying to run finish again', async () => {
+    const az = new FakeAzure({ deleteRefused: 'load-second' });
+    const done = await run(['finish'], az);
+    expect(done.error).toMatchObject({
+      message: 'Azure refused to remove job-agentx-stg-load-second: run load.ts finish again.',
+    });
+    expect(az.deleted).toEqual(['load-first']);
   });
 });
 
