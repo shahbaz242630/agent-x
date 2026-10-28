@@ -9,6 +9,7 @@ import {
   type TestDatabase,
   testLogger,
   type TestSession,
+  waitUntilQueued,
   within,
 } from '@agentx/testing';
 import {
@@ -376,6 +377,98 @@ describe('FX-RACE recording at the same time', () => {
 
     expect(failures(outcomes)).toEqual([]);
     expect(await verify(org)).toMatchObject({ ok: true, seq: 6n });
+  });
+
+  // 4D2d P2 (partner S157): the lock and the clock are one statement, and the
+  // check for events past the head is in the write. Each is proved with the
+  // head held by another transaction while the event waits for it.
+  describe('with the head held while an event waits for it (4D2d P2)', () => {
+    /** Holds the head's row in a transaction of the attacker's own, runs `meanwhile` in it once `record` queues, then commits. */
+    async function heldWhile(meanwhile: (holder: TestSession) => Promise<void>) {
+      const holder = await database.connect('admin');
+      try {
+        await holder.query('begin');
+        await holder.query('select seq from audit.heads where org_id = $1 for update', [org]);
+        const waiting = record(org, event(2));
+        // Caught here so an early refusal can't go unhandled while the test waits.
+        const settled = waiting.then(
+          (recorded) => ({ recorded }),
+          (error: unknown) => ({ error }),
+        );
+        await waitUntilQueued(attacker, 1);
+        await meanwhile(holder);
+        await holder.query('commit');
+        return await settled;
+      } finally {
+        await holder.end();
+      }
+    }
+
+    it('reads the time once the lock is held, after the wait, so times still rise with the numbers', async () => {
+      await record(org, event(1));
+      let released = new Date(0);
+      const outcome = await heldWhile(async (holder) => {
+        const [row] = await holder.query<{ now: Date }>('select pg_catalog.clock_timestamp() as now');
+        released = row?.now ?? released;
+      });
+
+      expect(outcome).toHaveProperty('recorded');
+      const [recorded] = 'recorded' in outcome ? outcome.recorded : [];
+      // A millisecond's leeway: the event's time is cut to the millisecond, the release's rounded to it.
+      expect(recorded?.recordedAt.getTime()).toBeGreaterThanOrEqual(released.getTime() - 1);
+    });
+
+    it('seals on the head as the holder moved it during the wait, taking the next place', async () => {
+      await record(org, event(1));
+      let release = (): void => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let moved = (): void => undefined;
+      const headMoved = new Promise<void>((resolve) => {
+        moved = resolve;
+      });
+      // A real recorder holds the head, moves it to 2, and keeps its transaction open.
+      const holding = withTenant(app, org, async (tx) => {
+        const recorded = await trail.record(tx, org, event(2));
+        moved();
+        await held;
+        return recorded;
+      });
+      try {
+        await headMoved;
+        const waiting = record(org, event(3));
+        await waitUntilQueued(attacker, 1);
+        release();
+
+        expect((await holding).seq).toBe(2n);
+        expect((await waiting).map((one) => one.seq)).toEqual([3n]);
+      } finally {
+        release();
+      }
+      expect(await verify(org)).toMatchObject({ ok: true, seq: 3n });
+    });
+
+    it('refuses, writing nothing, when an event is slipped in past the head during the wait', async () => {
+      await record(org, event(1));
+      const outcome = await heldWhile(async (holder) => {
+        // Past the head by two, so the event's own place stays free: only the check can refuse it.
+        await holder.query(
+          `insert into audit.events
+           select org_id, 3, pg_catalog.gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type,
+                  subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version
+           from audit.events where org_id = $1 and seq = 1`,
+          [org],
+        );
+      });
+
+      expect(outcome).toEqual({ error: new ChainBroken({ kind: 'organisation', orgId: org }) });
+      const stored = await attacker.query<{ seq: string }>(
+        'select seq::text from audit.events where org_id = $1 order by seq',
+        [org],
+      );
+      expect(stored.map((row) => row.seq)).toEqual(['1', '3']);
+    });
   });
 });
 

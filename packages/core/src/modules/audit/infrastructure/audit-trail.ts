@@ -49,6 +49,7 @@ import {
   type ChainReader,
   type ChainReport,
   type ChainWriter,
+  clockOf,
   entryIsSealed,
   headFields,
   headIsSealed,
@@ -535,13 +536,17 @@ function brokenAt(seq: unknown): BrokenRead {
 function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, details: string): ChainWriter {
   return {
     async lockHead() {
-      const row = await tx
-        .selectFrom('audit.heads')
-        .select(['seq', 'hash', 'mac', 'mac_key_version'])
-        .where('org_id', '=', orgId)
-        .forNoKeyUpdate()
-        .executeTakeFirst();
-      return row === undefined ? undefined : { head: headFields(row) };
+      // The clock in the outer select, which reads a row only once the inner one has locked it.
+      const { rows } = await sql<Record<string, unknown>>`
+        with locked as materialized (
+          select h.seq, h.hash, h.mac, h.mac_key_version from audit.heads h
+          where h.org_id = ${orgId}
+          for no key update
+        )
+        select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now from locked l
+      `.execute(tx);
+      const row = rows[0];
+      return row === undefined ? undefined : { head: headFields(row), now: clockOf(row) };
     },
 
     async start(head) {
@@ -552,55 +557,27 @@ function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, detai
         .execute();
     },
 
-    async hasEventsPast(seq) {
-      const past = await tx
-        .selectFrom('audit.events')
-        .select('seq')
-        .where('org_id', '=', orgId)
-        .where('seq', '>', seq)
-        .limit(1)
-        .executeTakeFirst();
-      return past !== undefined;
-    },
-
-    async now() {
-      const { now } = await tx
-        .selectNoFrom(sql<Date>`pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp())`.as('now'))
-        .executeTakeFirstOrThrow();
-      return now;
-    },
-
     async append(sealed, head, previous) {
-      const moved = await tx
-        .updateTable('audit.heads')
-        .set({ seq: head.seq, hash: head.hash, mac: head.mac, mac_key_version: head.macKeyVersion })
-        .where('org_id', '=', orgId)
-        .where('seq', '=', previous.seq)
-        .where('hash', '=', previous.hash)
-        .executeTakeFirst();
-      // The head first: the event is written only once it has a place, so a refused one leaves nothing behind.
-      if (moved.numUpdatedRows !== 1n) return false;
-      await tx
-        .insertInto('audit.events')
-        .values({
-          org_id: orgId,
-          seq: sealed.seq,
-          id: sealed.id,
-          recorded_at: sealed.recordedAt,
-          actor_type: event.actor.type,
-          actor_id: event.actor.id,
-          action: event.action,
-          subject_type: event.subject.type,
-          subject_id: event.subject.id,
-          subject_version: event.subject.version,
-          details,
-          prev_hash: sealed.prevHash,
-          hash: sealed.hash,
-          mac: sealed.mac,
-          mac_key_version: sealed.macKeyVersion,
-        })
-        .execute();
-      return true;
+      // One statement: the head moves only if it is still `previous` with no event past it,
+      // and the event is written only if the head moved, so a refused one leaves nothing behind.
+      const written = await sql`
+        with moved as (
+          update audit.heads
+          set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
+          where org_id = ${orgId} and seq = ${previous.seq} and hash = ${previous.hash}
+            and not exists (select from audit.events p where p.org_id = ${orgId} and p.seq > ${previous.seq})
+          returning org_id
+        )
+        insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type,
+                                  subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version)
+        select m.org_id, ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz,
+               ${event.actor.type}::text, ${event.actor.id}::text, ${event.action}::text,
+               ${event.subject.type}::text, ${event.subject.id}::uuid, ${event.subject.version}::integer,
+               ${details}::text, ${sealed.prevHash}::bytea, ${sealed.hash}::bytea, ${sealed.mac}::bytea,
+               ${sealed.macKeyVersion}::integer
+        from moved m
+      `.execute(tx);
+      return written.numAffectedRows === 1n;
     },
   };
 }

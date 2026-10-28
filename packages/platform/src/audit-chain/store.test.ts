@@ -10,7 +10,9 @@ import {
   type ChainReader,
   ChainStoreError,
   type ChainWriter,
+  clockOf,
   headFields,
+  type LockedHead,
   sealedFields,
   verifyChain,
 } from './store.ts';
@@ -47,10 +49,10 @@ class MemoryChain implements ChainWriter, ChainReader {
   /** How many pages of events the check has asked for. */
   pages = 0;
 
-  lockHead(): Promise<{ head: ChainHead | undefined } | undefined> {
+  lockHead(): Promise<LockedHead | undefined> {
     this.calls.push('lockHead');
     if (this.head === 'none') return Promise.resolve(undefined);
-    return Promise.resolve({ head: this.head === 'unreadable' ? undefined : this.head });
+    return Promise.resolve({ head: this.head === 'unreadable' ? undefined : this.head, now: NOW });
   }
 
   start(head: ChainHead): Promise<void> {
@@ -59,21 +61,16 @@ class MemoryChain implements ChainWriter, ChainReader {
     return Promise.resolve();
   }
 
-  hasEventsPast(seq: bigint): Promise<boolean> {
-    this.calls.push('hasEventsPast');
-    return Promise.resolve(this.rows.some((event) => event.seq > seq));
-  }
-
-  now(): Promise<Date> {
-    this.calls.push('now');
-    return Promise.resolve(NOW);
-  }
-
   append(event: Omit<StoredEntry, 'content'>, head: ChainHead, previous: ChainHead): Promise<boolean> {
     this.calls.push('append');
     if (this.racedBy !== undefined) this.head = this.racedBy;
     const current = this.head;
-    if (typeof current === 'string' || current.seq !== previous.seq || !current.hash.equals(previous.hash)) {
+    if (
+      typeof current === 'string' ||
+      current.seq !== previous.seq ||
+      !current.hash.equals(previous.hash) ||
+      this.rows.some((stored) => stored.seq > previous.seq)
+    ) {
       return Promise.resolve(false);
     }
     this.head = head;
@@ -114,12 +111,13 @@ describe('appending an event', () => {
     expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({ ok: true, seq: 2n, hash: second.hash });
   });
 
-  it('reads the time only once the head is locked and found clean, then writes', async () => {
+  it('takes the time the head was locked with, then writes: two trips an event (4D2d P2)', async () => {
     const memory = await chainOf(1);
     memory.calls = [];
-    await appendEvent(keys, CHAIN, memory, { nextId: () => id(2), content: CONTENT });
+    const sealed = await appendEvent(keys, CHAIN, memory, { nextId: () => id(2), content: CONTENT });
 
-    expect(memory.calls).toEqual(['lockHead', 'hasEventsPast', 'now', 'append']);
+    expect(memory.calls).toEqual(['lockHead', 'append']);
+    expect(sealed.recordedAt).toBe(NOW);
   });
 
   it('writes the ID in lower case, as Postgres returns a uuid', async () => {
@@ -142,7 +140,7 @@ describe('appending an event', () => {
       content: CONTENT,
     });
 
-    expect(memory.calls).toEqual(['lockHead', 'hasEventsPast', 'nextId', 'now', 'append']);
+    expect(memory.calls).toEqual(['lockHead', 'nextId', 'append']);
   });
 
   it('refuses an ID that is not a UUID, and writes nothing', async () => {
@@ -198,7 +196,8 @@ describe('appending an event', () => {
     await expect(appendEvent(keys, CHAIN, memory, { nextId: () => id(3), content: CONTENT })).rejects.toThrow(
       new ChainBroken(CHAIN),
     );
-    expect(memory.calls).not.toContain('append');
+    // Events past the head are found by the write itself (P2), which then writes nothing.
+    expect(memory.rows).toHaveLength(2);
   });
 
   it('refuses when a new chain is started and its head still cannot be found', async () => {
@@ -379,6 +378,13 @@ describe('reading stored rows as untrusted', () => {
     ['mac_key_version', null],
   ])('refuses a head row whose %s is %j', (column, value) => {
     expect(headFields({ ...HEAD_ROW, [column]: value })).toBeUndefined();
+  });
+
+  it('reads the clock read with the head, and fails a store that read none', () => {
+    expect(clockOf({ ...HEAD_ROW, now: NOW })).toBe(NOW);
+    for (const now of [undefined, '2026-09-19', new Date(Number.NaN)]) {
+      expect(() => clockOf({ ...HEAD_ROW, now })).toThrow(new ChainStoreError('it read no clock with the head'));
+    }
   });
 
   it.each([

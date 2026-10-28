@@ -37,29 +37,36 @@ export interface SealedEvent extends ChainLink {
   readonly recordedAt: Date;
 }
 
+/** The head read under the lock, and the database's clock read in the same statement once the lock was held. */
+export interface LockedHead {
+  readonly head: ChainHead | undefined;
+  readonly now: Date;
+}
+
 /** What recording needs from a chain's tables. */
 export interface ChainWriter {
   /**
    * Locks the head (`FOR NO KEY UPDATE`) and reads it: nothing if the chain
    * hasn't started, a head of undefined if its row can't be read. The lock is
-   * held to the end of the transaction, so recordings queue on it.
+   * held to the end of the transaction, so recordings queue on it. In the same
+   * statement, once the lock is held, the database's clock to the millisecond
+   * (4D2d P2: one trip, not two).
    */
-  lockHead(): Promise<{ readonly head: ChainHead | undefined } | undefined>;
+  lockHead(): Promise<LockedHead | undefined>;
   /**
    * Inserts the first head, doing nothing if another transaction just did (it
    * then waits for that one to end). The head's table needs a key that allows
    * one head per chain, or two racing first events would each insert one.
    */
   start(head: ChainHead): Promise<void>;
-  /** Whether an event is stored past this number. */
-  hasEventsPast(seq: bigint): Promise<boolean>;
-  /** The database's clock, to the millisecond, read at the moment it is asked, not the transaction's start. */
-  now(): Promise<Date>;
   /**
-   * Moves the head to `head`, but only if it is still `previous`, and then,
-   * only if it moved, stores the event (exactly the sealed ID and time, and the
-   * fields its content was made from). Says whether it did: a refused event
-   * leaves nothing behind, even for a caller that goes on to commit.
+   * In **one statement**, moves the head to `head`, but only if it is still
+   * `previous` and no event is stored past it, and then, only if it moved,
+   * stores the event (exactly the sealed ID and time, and the fields its
+   * content was made from). Says whether it did: a refused event leaves nothing
+   * behind, even for a caller that goes on to commit. The check for events past
+   * the head is here, not in lockHead: this statement starts once the lock is
+   * held, so it sees every event committed before (4D2d P2, the partner S157).
    */
   append(event: SealedEvent, head: ChainHead, previous: ChainHead): Promise<boolean>;
 }
@@ -116,9 +123,10 @@ const BATCH = 500;
  * lock, which comes last of all the transaction's locks (ADR-006 §6): two
  * transactions recording at once queue on it, so each event takes the next
  * place. Refuses (ChainBroken) a head that fails its check, and one with
- * events past it: someone removed or wound it back, and a new event would
- * carry on the tampered chain. With the head locked no one else can be adding
- * one, so any found were there before. The ID is drawn once the lock is held,
+ * events past it (found by the write itself, which then writes nothing):
+ * someone removed or wound it back, and a new event would carry on the
+ * tampered chain. With the head locked no one else can be adding one through
+ * the app, so any found came from outside it. The ID is drawn once the lock is held,
  * so IDs rise with the numbers, and written in lower case, as Postgres returns
  * a uuid, so the stored row hashes the same.
  */
@@ -133,21 +141,16 @@ export async function appendEvent(
     await writer.start(genesisHead(keys, chain));
     locked = await writer.lockHead();
   }
-  if (
-    locked?.head === undefined ||
-    !headIsSealed(keys, chain, locked.head) ||
-    (await writer.hasEventsPast(locked.head.seq))
-  ) {
-    throw new ChainBroken(chain);
-  }
-  const { head } = locked;
+  if (locked?.head === undefined || !headIsSealed(keys, chain, locked.head)) throw new ChainBroken(chain);
+  const { head, now } = locked;
   const id = event.nextId().toLowerCase();
   if (!UUID.test(id)) throw new RangeError('The ID generator gave an ID that is not a UUID');
-  // Read once the lock is held, so the times rise with the events' numbers.
-  const entry = { seq: head.seq + 1n, id, recordedAt: await writer.now(), content: event.content };
+  // The clock was read once the lock was held, so the times rise with the events' numbers.
+  const entry = { seq: head.seq + 1n, id, recordedAt: now, content: event.content };
   const sealed = sealNext(keys, chain, head, entry);
   const stored: SealedEvent = Object.freeze({ seq: entry.seq, id, recordedAt: entry.recordedAt, ...sealed.link });
-  // The head moves only from the one read under the lock: a store that didn't lock can't fork the chain.
+  // The head moves only from the one read under the lock, and only with no event past it:
+  // a store that didn't lock can't fork the chain, nor carry on one wound back.
   if (!(await writer.append(stored, sealed.head, head))) throw new ChainBroken(chain);
   return stored;
 }
@@ -226,6 +229,14 @@ export function headFields(row: Readonly<Record<string, unknown>>): ChainHead | 
     return undefined;
   }
   return { seq, hash, mac, macKeyVersion };
+}
+
+/** The clock a writer's lockHead read with the head (its `now`): a time, or the store is failing. */
+export function clockOf(row: Readonly<Record<string, unknown>>): Date {
+  const { now } = row;
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime()))
+    throw new ChainStoreError('it read no clock with the head');
+  return now;
 }
 
 /**
