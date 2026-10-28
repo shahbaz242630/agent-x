@@ -8,7 +8,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { type Kysely, sql } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
@@ -216,12 +216,14 @@ describe('SEC-TEN-06 a pooled connection never carries a tenant', () => {
   // Found by the adversarial review: a session-wide setting made inside the
   // work, with the name built from pieces so lint can't see it (as injected
   // SQL would), outlived the transaction on the pooled connection.
+  // Since 4D2d P1 another organisation is refused at commit (below), so the
+  // leftover here names the transaction's own organisation.
   it('discards a connection that work left with a session-wide tenant, and logs it', async () => {
     const { capture, logger } = capturedLogger();
     const single = appDatabase(1, logger);
     try {
       const poisoned = await withTenant(single, ORG_A, async (tx) => {
-        await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_B}, false)`.execute(tx);
+        await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_A}, false)`.execute(tx);
         return backendId(tx);
       });
       expect(await single.selectFrom('probe.items').select('label').execute()).toEqual([]);
@@ -249,12 +251,12 @@ describe('SEC-TEN-06 a pooled connection never carries a tenant', () => {
     const single = appDatabase(1);
     try {
       await withTenant(single, ORG_A, async (tx) => {
-        await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_B}, false)`.execute(tx);
+        await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_A}, false)`.execute(tx);
       });
-      const seen = await withTenant(single, ORG_A, (tx) =>
+      const seen = await withTenant(single, ORG_B, (tx) =>
         tx.selectFrom('probe.items').select('label').orderBy('label').execute(),
       );
-      expect(seen.map((row) => row.label)).toEqual(['a1', 'a2']);
+      expect(seen.map((row) => row.label)).toEqual(['b1']);
     } finally {
       await single.destroy();
     }
@@ -355,7 +357,87 @@ describe('withTenant', () => {
   });
 });
 
+describe('4D2d P1 (decision 41): the setting is read back before commit', () => {
+  const changed = new TenantContextError(
+    'the organisation setting changed inside the transaction, so nothing it wrote is kept',
+  );
+
+  it.each([
+    ['for the transaction', true],
+    ['for the whole session', false],
+  ])(
+    'refuses the commit, keeping nothing written, when work moves the setting to another organisation %s',
+    async (_, local) => {
+      const single = appDatabase(1);
+      const before = [await labelsSeenBy(ORG_A), await labelsSeenBy(ORG_B)];
+      try {
+        await expect(
+          withTenant(single, ORG_A, async (tx) => {
+            await tx
+              .insertInto('probe.items')
+              .values({ org_id: ORG_A, id: ITEM(6), label: 'a-kept?' })
+              .execute();
+            await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_B}, ${local})`.execute(tx);
+            await tx
+              .insertInto('probe.items')
+              .values({ org_id: ORG_B, id: ITEM(7), label: 'b-smuggled' })
+              .execute();
+          }),
+        ).rejects.toThrow(changed);
+        expect([await labelsSeenBy(ORG_A), await labelsSeenBy(ORG_B)]).toEqual(before);
+        // The rollback took a session-wide setting with it too: the connection comes back clean.
+        expect(await settingOutside(single)).toBe('');
+      } finally {
+        await single.destroy();
+      }
+    },
+  );
+
+  it('refuses the commit when work clears the setting', async () => {
+    await expect(
+      withTenant(app, ORG_A, async (tx) => {
+        await sql`select pg_catalog.set_config('app.' || 'org_id', '', true)`.execute(tx);
+        return 'cleared';
+      }),
+    ).rejects.toThrow(changed);
+  });
+
+  it('commits when the setting is unchanged, however the organisation ID was written', async () => {
+    expect(await withTenant(app, ORG_A.toUpperCase(), () => Promise.resolve('kept'))).toBe('kept');
+  });
+});
+
 describe('assertTenant', () => {
+  it('compares with what withTenant set, without asking the database again (the commit asks)', async () => {
+    const refused = new TenantContextError("the transaction isn't withTenant's for this organisation");
+    await expect(
+      withTenant(app, ORG_A, async (tx) => {
+        await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_B}, true)`.execute(tx);
+        await expect(assertTenant(tx, ORG_A)).resolves.toBeUndefined();
+        await expect(assertTenant(tx, ORG_B)).rejects.toThrow(refused);
+      }),
+    ).rejects.toThrow(/setting changed inside the transaction/);
+  });
+
+  it('asks the database for a transaction withTenant did not open', async () => {
+    await app.transaction().execute(async (tx) => {
+      await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_A}, true)`.execute(tx);
+      await expect(assertTenant(tx, ORG_A)).resolves.toBeUndefined();
+      await expect(assertTenant(tx, ORG_B)).rejects.toThrow(TenantContextError);
+    });
+  });
+
+  it('forgets the transaction once withTenant has finished with it', async () => {
+    let kept: Transaction<ProbeSchema> | undefined;
+    await withTenant(app, ORG_A, (tx) => {
+      kept = tx;
+      return Promise.resolve();
+    });
+    if (kept === undefined) throw new Error('the work never ran');
+    // Asked of the database now, on a transaction that has ended: refused either way, never passed from memory.
+    await expect(assertTenant(kept, ORG_A)).rejects.toThrow();
+  });
+
   it('passes inside withTenant for the same organisation, however its ID is written', async () => {
     await withTenant(app, ORG_A, async (tx) => {
       await expect(assertTenant(tx, ORG_A)).resolves.toBeUndefined();
