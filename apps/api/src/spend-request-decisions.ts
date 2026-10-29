@@ -85,7 +85,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { createAgentTurns } from './agent-turns.ts';
+import { type AgentTurns, createAgentTurns } from './agent-turns.ts';
 import {
   consentOf,
   organizationChoicesOf,
@@ -457,6 +457,7 @@ export function createSpendRequestDecisions({
   ids,
   clock,
   logger,
+  turns = createAgentTurns(),
 }: {
   readonly database: Database<DecisionTables>;
   /** Where a request waiting for approval is told, in its decision's own transaction (Phase 3 B2). */
@@ -465,11 +466,11 @@ export function createSpendRequestDecisions({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
+  /** Whose decisions may hold a connection now, in this process (agent-turns.ts); the race suites' own, unqueued. */
+  readonly turns?: AgentTurns;
 }): SpendRequestDecisions {
   // The mandates' refusal: the decision reads mandates, versions and policies through their reads.
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
-  // Whose decisions may hold a connection now, in this process (agent-turns.ts).
-  const turns = createAgentTurns();
 
   /** Everything in the lock order, the decision, and what it makes: the request's ID, with its decision. */
   async function decided(
