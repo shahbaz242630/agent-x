@@ -503,6 +503,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/ssl_min_protocol_version$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_connections$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_line_prefix$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pg_qs\.query_capture_mode$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pg_qs\.store_query_plans$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pgms_wait_sampling\.query_capture_mode$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/track_io_timing$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_min_duration_statement$/),
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
@@ -645,7 +650,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     });
   });
 
-  it("compiles the load run's foundation (D2c): the server's size alone changes, and every rule still holds", () => {
+  it("compiles the load run's foundation (D2c): only the server's size and its measurements change, and every rule still holds", () => {
     const load = inCopy((dir) => environmentSnapshot(dir, 'staging', { AGENTX_AZURE_DATABASE_SIZE: 'load' }));
     expect(policyProblems(load.together, STAGING).map(describeProblem)).toEqual([]);
     expect(at(load.foundation.predictedResources.find(SERVER), 'sku')).toEqual({
@@ -655,7 +660,36 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     expect(at(staging.predictedResources.find(SERVER), 'sku')).toEqual({ name: 'Standard_B1ms', tier: 'Burstable' });
     // Only the foundation reads the size; the other parts carry stand-in values that differ each run.
     const normal = deployed.get('staging')?.foundation.predictedResources ?? [];
-    const sizeless = (resource: PredictedResource) => (SERVER(resource) ? { ...resource, sku: undefined } : resource);
+    const off: Record<string, string> = {
+      'pg_qs.query_capture_mode': 'none',
+      'pg_qs.store_query_plans': 'off',
+      'pgms_wait_sampling.query_capture_mode': 'none',
+      track_io_timing: 'off',
+      log_min_duration_statement: '-1',
+    };
+    const measures = (resources: readonly PredictedResource[]): Record<string, unknown> => {
+      const found: Record<string, unknown> = {};
+      for (const setting of resources.filter(type('Microsoft.DBforPostgreSQL/flexibleServers/configurations'))) {
+        const name = String(setting.name.split('/').at(-1));
+        if (name in off) found[name] = at(setting.properties, 'value');
+      }
+      return found;
+    };
+    expect(measures(normal)).toEqual(off);
+    expect(measures(load.foundation.predictedResources)).toEqual({
+      'pg_qs.query_capture_mode': 'top',
+      'pg_qs.store_query_plans': 'on',
+      'pgms_wait_sampling.query_capture_mode': 'all',
+      track_io_timing: 'on',
+      log_min_duration_statement: '250',
+    });
+    expect(at(load.foundation.predictedResources.find(SERVER)?.properties, 'availabilityZone')).toBe('2');
+    const sizeless = (resource: PredictedResource) =>
+      SERVER(resource)
+        ? { ...resource, sku: undefined }
+        : Object.keys(off).some((name) => resource.name.endsWith(`/${name}`))
+          ? { ...resource, properties: undefined }
+          : resource;
     expect(load.foundation.predictedResources.map(sizeless)).toEqual(normal.map(sizeless));
     // Any other value stops the run before Azure.
     expect(() =>
@@ -1089,6 +1123,45 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(sized('Standard_D4ads_v5', 'GeneralPurpose'), { region: 'uaenorth', environment: 'production' }),
     ).not.toContain('database-size');
+  });
+
+  it('database-zone: a server whose zone is left to Azure, or not one of the three', () => {
+    for (const zone of [undefined, '', '4']) {
+      const unzoned = changed(SERVER, (server) => (inside(server, 'properties').availabilityZone = zone));
+      expect({ zone, broken: brokenRules(unzoned) }).toEqual({ zone, broken: ['database-zone'] });
+    }
+  });
+
+  it('database-measures: any measurement on, or not stated, on a Burstable size; all on is fine on the load size', () => {
+    const MEASURE = (name: string) => (resource: PredictedResource) =>
+      type('Microsoft.DBforPostgreSQL/flexibleServers/configurations')(resource) && resource.name.endsWith(`/${name}`);
+    const on: Record<string, string> = {
+      'pg_qs.query_capture_mode': 'top',
+      'pg_qs.store_query_plans': 'on',
+      'pgms_wait_sampling.query_capture_mode': 'all',
+      track_io_timing: 'on',
+      log_min_duration_statement: '250',
+    };
+    for (const [name, value] of Object.entries(on)) {
+      const measured = changed(MEASURE(name), (setting) => (inside(setting, 'properties').value = value));
+      expect({ name, broken: brokenRules(measured) }).toEqual({ name, broken: ['database-measures'] });
+      // Not stated leaves the server's last value, which may be on.
+      const unstated = staging.predictedResources.filter((resource) => !MEASURE(name)(resource));
+      expect(unstated).toHaveLength(staging.predictedResources.length - 1);
+      expect(brokenRules({ predictedResources: structuredClone(unstated), diagnostics: [] })).toEqual([
+        'database-measures',
+      ]);
+    }
+    let everyOn = staging;
+    for (const [name, value] of Object.entries(on)) {
+      everyOn = changed(MEASURE(name), (setting) => (inside(setting, 'properties').value = value), everyOn);
+    }
+    const loadSized = changed(
+      SERVER,
+      (server) => (server.sku = { name: 'Standard_D2ads_v5', tier: 'GeneralPurpose' }),
+      everyOn,
+    );
+    expect(brokenRules(loadSized)).toEqual([]);
   });
 
   it('database-network: any door wider than 5432 from the apps and the subnet itself, or a Postgres subnet without its rules', () => {
