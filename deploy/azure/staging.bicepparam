@@ -21,6 +21,8 @@ param budgetStartDate = '2026-09-01'
 param postgresAdminPassword = readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')
 // deploy.ts always sets it (load only with --load-size, D2c); the default serves the policy tests.
 param databaseSize = readEnvironmentVariable('AGENTX_AZURE_DATABASE_SIZE', 'normal')
+// The zone Azure put the server in when it was made (S159): stated so it stays there.
+param postgresZone = '2'
 param postgresBackupRetentionDays = 7
 param postgresGeoRedundantBackup = false
 

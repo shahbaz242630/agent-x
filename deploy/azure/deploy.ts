@@ -933,7 +933,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean): Promise<number
   const values = { [ALERT_EMAIL]: email, [ADMIN_PASSWORD]: admin, [DATABASE_SIZE]: loadSize ? 'load' : 'normal' };
   steps.terminal.say(
     loadSize
-      ? "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes. Run foundation again without --load-size the same day to size it back."
+      ? "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes, and the run's measurements (Query Store) switch on. Run foundation again without --load-size the same day to size it back and switch them off."
       : 'The database stays at (or goes back to) its normal size, B1ms; a change of size restarts it for a few minutes.',
   );
   checkPolicy(steps, values);

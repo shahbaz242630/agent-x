@@ -82,6 +82,14 @@ var postgresSkus = {
   }
 }
 
+@description('The zone the database server runs in: the one it is in (4D2d P5; staging\'s, zone 2, Azure chose at creation).')
+@allowed([
+  '1'
+  '2'
+  '3'
+])
+param postgresZone string
+
 @description('How many days of point-in-time restore the server keeps: 7 to 35 (ADR-002: 35 in production).')
 @minValue(7)
 @maxValue(35)
@@ -214,6 +222,8 @@ module database 'modules/postgres.bicep' = {
     tags: tags
     adminPassword: postgresAdminPassword
     sku: postgresSkus[databaseSize]
+    zone: postgresZone
+    measured: databaseSize == 'load'
     backupRetentionDays: postgresBackupRetentionDays
     geoRedundantBackup: postgresGeoRedundantBackup
     subnetId: ids.databaseSubnet

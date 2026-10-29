@@ -31,6 +31,8 @@ export type RuleId =
   | 'database-tls'
   | 'database-backup'
   | 'database-size'
+  | 'database-zone'
+  | 'database-measures'
   | 'load-run'
   | 'vault'
   | 'evidence-store'
@@ -153,6 +155,17 @@ const BACKUP_ROLE = 'agentx_backup';
 
 /** Staging's database sizes, name/tier: normal (B1ms), and load for the load run alone (main.bicep's databaseSize, D2c). */
 const STAGING_DATABASE_SIZES: readonly string[] = ['Standard_B1ms/Burstable', 'Standard_D2ads_v5/GeneralPurpose'];
+
+/**
+ * The load run's measurements and the value that turns each off (postgres.bicep, 4D2d P5). Microsoft: "Don't enable
+ * query store on the Burstable pricing tier as it causes performance problems."
+ */
+const MEASURES_OFF: ReadonlyMap<string, string> = new Map([
+  ['pg_qs.query_capture_mode', 'none'],
+  ['pg_qs.store_query_plans', 'off'],
+  ['pgms_wait_sampling.query_capture_mode', 'none'],
+  ['track_io_timing', 'off'],
+]);
 
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
 const LOG_LINE_PREFIX = '%t-%c-';
@@ -1231,6 +1244,36 @@ const databaseSize: Check = (snapshot, expected, add) => {
   }
 };
 
+/** A server's settings by name, as this deployment sends them. */
+const serverSettings = (snapshot: Snapshot, server: PredictedResource): ReadonlyMap<string | undefined, unknown> =>
+  new Map(
+    ofType(snapshot, TYPES.setting)
+      .filter((setting) => setting.id.startsWith(`${server.id}/`))
+      .map((setting) => [setting.name.split('/').at(-1), at(setting.properties, 'value')]),
+  );
+
+/** Every server states its zone, and measures nothing on a Burstable size (4D2d P5). */
+const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
+  for (const server of ofType(snapshot, TYPES.server)) {
+    if (!['1', '2', '3'].includes(String(at(server.properties, 'availabilityZone')))) {
+      add({
+        rule: 'database-zone',
+        resource: server.name,
+        message: 'states the zone it runs in, never left to Azure (4D2d P5)',
+      });
+    }
+    const settings = serverSettings(snapshot, server);
+    const measuring = [...MEASURES_OFF].filter(([name, off]) => settings.get(name) !== off).map(([name]) => name);
+    if (at(server, 'sku', 'tier') === 'Burstable' && measuring.length > 0) {
+      add({
+        rule: 'database-measures',
+        resource: server.name,
+        message: `turns every measurement off on a Burstable size (Microsoft); on or not stated: ${measuring.join(', ')}`,
+      });
+    }
+  }
+};
+
 const database: Check = (snapshot, expected, add) => {
   for (const server of ofType(snapshot, TYPES.server)) {
     const problem = (rule: RuleId, message: string): void => {
@@ -1273,11 +1316,7 @@ const database: Check = (snapshot, expected, add) => {
     if (typeof retention !== 'number' || retention < minimum) {
       problem('database-backup', `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002)`);
     }
-    const settings = new Map(
-      ofType(snapshot, TYPES.setting)
-        .filter((setting) => setting.id.startsWith(`${server.id}/`))
-        .map((setting) => [setting.name.split('/').at(-1), at(setting.properties, 'value')]),
-    );
+    const settings = serverSettings(snapshot, server);
     if (settings.get('require_secure_transport') !== 'on' || settings.get('ssl_min_protocol_version') !== 'TLSv1.3') {
       problem('database-tls', 'requires TLS on every connection, 1.3 at least');
     }
@@ -3727,6 +3766,7 @@ const CHECKS: readonly Check[] = [
   noSecretLiterals,
   database,
   databaseSize,
+  databaseZoneAndMeasures,
   databaseNetwork,
   appsNetwork,
   appsEgress,

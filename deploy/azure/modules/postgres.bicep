@@ -18,6 +18,10 @@ param tags object
 @secure()
 param adminPassword string
 param sku object
+@description('The zone the server runs in, stated so a deploy never leaves the choice to Azure (4D2d P5). Azure moves a server only by a new one or a failover, so it is the zone the server is in.')
+param zone string
+@description('Whether the load run\'s measurements are on (D2c, 4D2d P5): Query Store and its wait sampling. Only on a size that isn\'t Burstable.')
+param measured bool
 param backupRetentionDays int
 param geoRedundantBackup bool
 param subnetId string
@@ -42,6 +46,7 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
   sku: sku
   properties: {
     version: '18'
+    availabilityZone: zone
     administratorLogin: adminLogin
     administratorLoginPassword: adminPassword
     authConfig: {
@@ -98,6 +103,30 @@ var settings = [
   {
     name: 'log_line_prefix'
     value: '%t-%c-'
+  }
+  // The load run's measurements, each sent either way so a plain foundation
+  // turns them off again. Microsoft: "Don't enable query store on the
+  // Burstable pricing tier as it causes performance problems." Query Store
+  // keeps each query's plan too, so auto_explain (a restart of its own, past
+  // the resize's) isn't needed. No slow-statement log either: at saturation
+  // it could fill the workspace's 1 GB a day, and the login alerts would go
+  // blind until the next day (S159 review); Query Store keeps each query's
+  // slowest time inside the server.
+  {
+    name: 'pg_qs.query_capture_mode'
+    value: measured ? 'top' : 'none'
+  }
+  {
+    name: 'pg_qs.store_query_plans'
+    value: measured ? 'on' : 'off'
+  }
+  {
+    name: 'pgms_wait_sampling.query_capture_mode'
+    value: measured ? 'all' : 'none'
+  }
+  {
+    name: 'track_io_timing'
+    value: measured ? 'on' : 'off'
   }
 ]
 
