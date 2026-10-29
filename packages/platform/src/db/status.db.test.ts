@@ -474,6 +474,123 @@ describe('the status guard (db/migrations/0004): the database refuses what the m
   });
 });
 
+describe('a move from the status the caller holds the row in (4D2d P8)', () => {
+  /** The change, with the status held, and how many times the row's status was read apart. */
+  const changeHeld = (id: string, event: Event, held: string) =>
+    withTenant(app, ORG, async (tx) => {
+      const reads = { status: 0 };
+      const counting = tx.withPlugin({
+        transformQuery: (args) => {
+          if (JSON.stringify(args.node).includes('select status from')) reads.status += 1;
+          return args.node;
+        },
+        transformResult: (args) => Promise.resolve(args.result),
+      });
+      const changed = await changer().change(counting, THINGS, { orgId: ORG, id }, event, held);
+      return { changed, reads: reads.status };
+    });
+
+  it('makes it in one statement when the row is in it, as the move it would make anyway', async () => {
+    const id = await thingIn('ACTIVE');
+
+    expect(await changeHeld(id, 'suspend', 'ACTIVE')).toEqual({
+      changed: { outcome: 'changed', from: 'ACTIVE', to: 'SUSPENDED' },
+      reads: 0,
+    });
+    expect(await statusOf(id)).toBe('SUSPENDED');
+    expect(linesNamed('status.changed')).toHaveLength(1);
+  });
+
+  it('reads the row first when it is in another status, and moves from that, as without one', async () => {
+    const id = await thingIn('SUSPENDED');
+
+    expect(await changeHeld(id, 'revoke', 'ACTIVE')).toEqual({
+      changed: { outcome: 'changed', from: 'SUSPENDED', to: 'REVOKED' },
+      reads: 1,
+    });
+    expect(await statusOf(id)).toBe('REVOKED');
+  });
+
+  it('reads the row first when the machine refuses the move from the status held, and refuses from the row', async () => {
+    const id = await thingIn('REVOKED');
+
+    expect(await changeHeld(id, 'reactivate', 'REVOKED')).toEqual({
+      changed: { outcome: 'refused', from: 'REVOKED' },
+      reads: 1,
+    });
+    // Held in a status the machine doesn't have: read, as a row would be.
+    expect(await changeHeld(id, 'revoke', 'UNLOCKED')).toMatchObject({ reads: 1 });
+  });
+
+  it('reads a row that is not there, and says it is missing', async () => {
+    expect(await changeHeld(newId(), 'suspend', 'ACTIVE')).toEqual({ changed: { outcome: 'missing' }, reads: 1 });
+  });
+
+  it('fails a move whose update leaves the row in another status: not as decided', async () => {
+    const id = await thingIn('ACTIVE');
+    await admin.query(
+      "create function probe.planted() returns trigger language plpgsql as $$ begin new.status := 'REVOKED'; return new; end $$",
+    );
+    await admin.query(
+      'create trigger zzz_planted before update on probe.things for each row execute function probe.planted()',
+    );
+    try {
+      await expect(changeHeld(id, 'suspend', 'ACTIVE')).rejects.toMatchObject({ reason: 'not_applied' });
+      expect(await statusOf(id)).toBe('ACTIVE');
+    } finally {
+      await admin.query('drop trigger zzz_planted on probe.things');
+      await admin.query('drop function probe.planted()');
+    }
+  });
+
+  it('fails a move whose key has a second row in another status, planted past the app, as the read finds it', async () => {
+    const id = await thingIn('ACTIVE');
+    await admin.query('alter table probe.parts drop constraint parts_org_id_thing_id_fkey');
+    await admin.query('alter table probe.things drop constraint things_pkey');
+    try {
+      // Made as the guard lets a row in, then moved on: the copy alone, by its place in the table.
+      await admin.query("insert into probe.things (org_id, id, status) values ($1, $2, 'ACTIVE')", [ORG, id]);
+      await admin.query(
+        "update probe.things set status = 'SUSPENDED' where id = $1 and ctid = (select max(ctid) from probe.things where id = $1)",
+        [id],
+      );
+
+      await expect(changeHeld(id, 'suspend', 'ACTIVE')).rejects.toMatchObject({ reason: 'unreadable' });
+      expect(linesNamed('status.unreadable')).toHaveLength(1);
+    } finally {
+      await admin.query("delete from probe.things where id = $1 and status = 'SUSPENDED'", [id]);
+      await admin.query('alter table probe.things add primary key (org_id, id)');
+      await admin.query(
+        'alter table probe.parts add constraint parts_org_id_thing_id_fkey foreign key (org_id, thing_id) references probe.things (org_id, id)',
+      );
+    }
+  });
+
+  it('fails a move that updates a second row under the same key, planted past the app', async () => {
+    const id = await thingIn('ACTIVE');
+    await admin.query('alter table probe.parts drop constraint parts_org_id_thing_id_fkey');
+    await admin.query('alter table probe.things drop constraint things_pkey');
+    try {
+      await admin.query("insert into probe.things (org_id, id, status) values ($1, $2, 'ACTIVE')", [ORG, id]);
+
+      await expect(changeHeld(id, 'suspend', 'ACTIVE')).rejects.toMatchObject({ reason: 'not_applied' });
+      expect(await admin.query('select status from probe.things where id = $1', [id])).toEqual([
+        { status: 'ACTIVE' },
+        { status: 'ACTIVE' },
+      ]);
+    } finally {
+      await admin.query(
+        'delete from probe.things where id = $1 and ctid <> (select min(ctid) from probe.things where id = $1)',
+        [id],
+      );
+      await admin.query('alter table probe.things add primary key (org_id, id)');
+      await admin.query(
+        'alter table probe.parts add constraint parts_org_id_thing_id_fkey foreign key (org_id, thing_id) references probe.things (org_id, id)',
+      );
+    }
+  });
+});
+
 describe('FX-TAMPER a table changed past the app is refused, not trusted', () => {
   // Each case plays the database owner or admin, holding none of the app's
   // keys, and undoes its change afterwards so the fixture stays whole.

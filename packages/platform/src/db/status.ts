@@ -91,13 +91,16 @@ export interface StatusChanger {
    * be withTenant's for the row's organisation. Any other throws
    * TenantContextError: row security would hide the row there, and `missing`
    * would hide the mistake. The row's lock is held to the end of the
-   * transaction.
+   * transaction. `held`: the status the caller has verified the row in,
+   * locked already, so a move the machine allows from it is made in one
+   * statement (4D2d P8); a row not found in it is read as without one.
    */
   change<Schema, State extends string, Event extends string>(
     tx: Transaction<Schema>,
     table: StatusTable<State, Event>,
     key: StatusKey,
     event: NoInfer<Event>,
+    held?: string,
   ): Promise<StatusChange<State>>;
 }
 
@@ -112,6 +115,7 @@ export function createStatusChanger({ logger }: { readonly logger: Logger }): St
       { table, rules }: StatusTable<State, Event>,
       { orgId, id }: StatusKey,
       event: NoInfer<Event>,
+      held?: string,
     ): Promise<StatusChange<State>> {
       if (!TABLE.test(table)) throw new RangeError('A status table is named schema.table, in lower-case words');
       if (!UUID.test(orgId) || !UUID.test(id)) {
@@ -123,6 +127,48 @@ export function createStatusChanger({ logger }: { readonly logger: Logger }): St
       // check above already confine them to it: ADR-005 §7 asks every query
       // to, so a table whose walls were ever lowered still isn't crossed.
       const facts = { machine: rules.name, statusEvent: event, objectId: id };
+
+      /** The move made from `from`, or undefined for no row in it; throws for a row not left as decided. */
+      const moved = async (from: State, to: State): Promise<StatusChange<State> | undefined> => {
+        // The alias keeps the text after the table name from starting with SET,
+        // which the lint rule against session-wide settings would take for one.
+        // Every copy of the key counted in the same statement, as the locking read finds them: a copy planted past
+        // the app in another status isn't updated, but is still a key that isn't unique (S161 review).
+        const { rows } = await sql<{ moved: unknown; copies: unknown }>`
+          with updated as (
+            update ${sql.table(table)} as target set status = ${to}
+            where org_id = ${orgId} and id = ${id} and status = ${from}
+            returning status
+          )
+          select (select pg_catalog.json_agg(u.status) from updated u) as moved,
+                 (select pg_catalog.count(*) from ${sql.table(table)} c where c.org_id = ${orgId} and c.id = ${id}) as copies
+        `.execute(tx);
+        const moved = Array.isArray(rows[0]?.moved) ? (rows[0].moved as unknown[]) : [];
+        // One row, and in the status decided. Two can match though the row is locked: a duplicate key
+        // inserted past the app while this change waited is outside the lock's snapshot, but not the update's.
+        const [written, ...alsoWritten] = moved;
+        if (written === undefined) return undefined;
+        if (written !== to || alsoWritten.length > 0) {
+          log.error('status.change_not_applied', { ...facts, from, to });
+          throw new StatusChangeFailed(
+            'not_applied',
+            `The locked ${rules.name} row's status update didn't leave it in the status decided`,
+          );
+        }
+        if (rows[0]?.copies !== 1n) {
+          log.error('status.unreadable', facts);
+          throw new StatusChangeFailed('unreadable', `A ${rules.name} row's key isn't unique`);
+        }
+        log.info('status.changed', { ...facts, from, to });
+        return { outcome: 'changed', from, to };
+      };
+
+      // Moved from the status the caller holds the row in, when the machine allows it; anything else is read first.
+      const expected = held === undefined ? undefined : rules.transition(held, event);
+      if (expected?.ok === true) {
+        const quick = await moved(expected.from, expected.to);
+        if (quick !== undefined) return quick;
+      }
 
       const { rows } = await sql<{ status: unknown }>`
         select status from ${sql.table(table)} where org_id = ${orgId} and id = ${id} for no key update
@@ -147,26 +193,13 @@ export function createStatusChanger({ logger }: { readonly logger: Logger }): St
       }
 
       const { from, to } = decided;
-      // The alias keeps the text after the table name from starting with SET,
-      // which the lint rule against session-wide settings would take for one.
-      const updated = await sql<{ status: unknown }>`
-        update ${sql.table(table)} as target set status = ${to}
-        where org_id = ${orgId} and id = ${id} and status = ${from}
-        returning status
-      `.execute(tx);
-      // One row, and in the status decided. Two can match here though the lock
-      // found one: a duplicate key inserted past the app while this change
-      // waited is outside the lock's snapshot, but not the update's.
-      const [written, ...alsoWritten] = updated.rows;
-      if (written?.status !== to || alsoWritten.length > 0) {
-        log.error('status.change_not_applied', { ...facts, from, to });
-        throw new StatusChangeFailed(
-          'not_applied',
-          `The locked ${rules.name} row's status update didn't leave it in the status decided`,
-        );
-      }
-      log.info('status.changed', { ...facts, from, to });
-      return { outcome: 'changed', from, to };
+      const made = await moved(from, to);
+      if (made !== undefined) return made;
+      log.error('status.change_not_applied', { ...facts, from, to });
+      throw new StatusChangeFailed(
+        'not_applied',
+        `The locked ${rules.name} row's status update didn't leave it in the status decided`,
+      );
     },
   });
 }

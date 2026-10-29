@@ -421,11 +421,14 @@ export function signedRowSeen(
   // JSON gives a version of any numeric type as a number, where the driver gives a bigint or numeric as text:
   // anything but an integer column is left to readSignedRow, which calls it unreadable (23 is int4's oid).
   if (versionType !== '23') return undefined;
-  const typed = Object.fromEntries(
+  return rowOf(table, [typedJson(row)]);
+}
+
+/** A row read back as JSON with each field's type (t0, t1…) as the driver gives an oid. */
+const typedJson = (row: Readonly<Record<string, unknown>>): Record<string, unknown> =>
+  Object.fromEntries(
     Object.entries(row).map(([column, value]) => [column, /^t\d+$/.test(column) ? typeId(value) : value]),
   );
-  return rowOf(table, [typed]);
-}
 
 /** The most rows readSignedRows reads in one statement. */
 export const MOST_SIGNED_ROWS_READ = 500;
@@ -566,13 +569,58 @@ export async function pointSignedRow<Schema>(
   key: SignedRowKey,
   at: { readonly version: number; readonly eventId: string },
 ): Promise<SignedRow> {
+  const { rows } = await pointing(table, key, at, sql``, sql``).execute(tx);
+  return rowOf(table, rows);
+}
+
+/** pointSignedRow's update, with `gate` ANDed to its filter and `more` returned beside the row. */
+function pointing(
+  table: SignedStateTable,
+  key: SignedRowKey,
+  at: { readonly version: number; readonly eventId: string },
+  gate: RawBuilder<unknown>,
+  more: RawBuilder<unknown>,
+): RawBuilder<Record<string, unknown>> {
   checkTable(table);
   checkKey(key);
-  const { rows } = await sql<Record<string, unknown>>`
-    update ${sql.table(table.table)} as target set state_event_id = ${at.eventId}
+  if (!UUID.test(at.eventId)) throw new RangeError('A signed row points at an event by its UUID');
+  return sql<Record<string, unknown>>`
+    update ${sql.table(table.table)} as target set state_event_id = ${at.eventId}::uuid
     where target.org_id = ${key.orgId} and target.id = ${key.id}
-      and target.state_version = ${at.version} and target.state_event_id is null
-    returning ${columnsOf(table)}
-  `.execute(tx);
-  return rowOf(table, rows);
+      and target.state_version = ${at.version} and target.state_event_id is null${gate}
+    returning ${columnsOf(table)}${more}
+  `;
+}
+
+/**
+ * pointSignedRow's update, not run, for the event's own write to carry in
+ * its statement (4D2d P8), `gate` ANDed to its filter (that the event was
+ * written); read what it gave back as JSON with signedRowPointed.
+ */
+export function signedRowPointing(
+  table: SignedStateTable,
+  key: SignedRowKey,
+  at: { readonly version: number; readonly eventId: string },
+  gate: RawBuilder<unknown>,
+): RawBuilder<unknown> {
+  return pointing(
+    table,
+    key,
+    at,
+    sql` and ${gate}`,
+    sql`, pg_catalog.pg_typeof(target.state_version)::oid::text as version_type`,
+  );
+}
+
+/**
+ * The row signedRowPointing's update gave, read back as JSON, judged as
+ * pointSignedRow judges it: anything but an integer version is unreadable,
+ * as the driver's text for a wider one is.
+ */
+export function signedRowPointed(
+  table: SignedStateTable,
+  rows: readonly Readonly<Record<string, unknown>>[],
+): SignedRow {
+  if (rows.some(({ version_type: versionType }) => versionType !== '23')) return { outcome: 'unreadable' };
+  return rowOf(table, rows.map(typedJson));
 }
