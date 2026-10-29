@@ -15,7 +15,7 @@
 // (its ID, agent, zone and window) and the version's number, as canonical
 // JSON: what an acceptance is bound to (B3), so an admin accepts these very
 // terms and nothing else.
-import type { SignedStateTable } from '@agentx/platform/db';
+import type { GatheredRow, SignedStateTable } from '@agentx/platform/db';
 import { holdTransactionLock } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 import { createHash } from 'node:crypto';
@@ -443,17 +443,30 @@ export async function openMandateOfAgent(
   states: SignedStates,
   orgId: string,
   agentId: string,
+  mandateFound?: { readonly id: string | null },
 ): Promise<MandateCheck> {
-  const row = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an ID alone, read through its signed state just below; a status flipped to ended is B3's to catch (above)
-    .selectFrom(MANDATES.table)
-    .select('id')
-    .where('org_id', '=', orgId)
-    .where('agent_id', '=', agentId)
-    .where('status', 'in', OPEN_STATES)
-    .executeTakeFirst();
-  return row === undefined ? { outcome: 'missing' } : mandateOf(tx, states, { orgId, id: row.id }, 'share');
+  // The ID a gather found, by the same filter (openMandateGathered), in place of this statement.
+  let id = mandateFound?.id ?? null;
+  if (mandateFound === undefined) {
+    const row = await tx
+      // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an ID alone, read through its signed state just below; a status flipped to ended is B3's to catch (above)
+      .selectFrom(MANDATES.table)
+      .select('id')
+      .where('org_id', '=', orgId)
+      .where('agent_id', '=', agentId)
+      .where('status', 'in', OPEN_STATES)
+      .executeTakeFirst();
+    id = row?.id ?? null;
+  }
+  return id === null ? { outcome: 'missing' } : mandateOf(tx, states, { orgId, id }, 'share');
 }
+
+/** openMandateOfAgent's mandate, for a gather (4D2d P8): found by the same filter, read `share`. */
+export const openMandateGathered = (agentId: string): GatheredRow => ({
+  table: MANDATES,
+  id: { findBy: { column: 'agent_id', value: agentId, statusIn: OPEN_STATES } },
+  lock: 'share',
+});
 
 /** A mandate as a list shows it: its signed state, with the purpose of the version in force, or else the waiting draft's. */
 export interface MandateShown extends MandateRecord {

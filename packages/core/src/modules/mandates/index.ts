@@ -36,6 +36,7 @@ export {
   MOST_DRAFTS_A_DAY,
   MOST_MANDATES_A_PAGE,
   oneDraftAtATime,
+  openMandateGathered,
   openMandateOfAgent,
   VERSION_DRAFTED,
 } from './infrastructure/drafts.ts';

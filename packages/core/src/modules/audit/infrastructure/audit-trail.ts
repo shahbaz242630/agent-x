@@ -59,7 +59,7 @@ import {
   type StoredEntry,
   verifyChain,
 } from '@agentx/platform/audit-chain';
-import { assertTenant, withTenant } from '@agentx/platform/db';
+import { assertTenant, type GatheredRead, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
 import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
@@ -159,7 +159,7 @@ export type RecordedEventCheck = { readonly kind: 'none' } | ({ readonly kind: '
  * `recorded`, each whole as recordedEvent believes one; or `broken`, at the
  * first that isn't, or where the chain holds an event past its head.
  */
-type RecordedEventsCheck = { readonly kind: 'recorded'; readonly events: readonly ReadEvent[] } | BrokenRead;
+export type RecordedEventsCheck = { readonly kind: 'recorded'; readonly events: readonly ReadEvent[] } | BrokenRead;
 
 /** A page of the organisation's whole log (logPage), newest first, each event with its chain links. */
 export interface LogPageToRead {
@@ -281,6 +281,21 @@ export interface AuditTrail {
     rowRead: RawBuilder<unknown>,
   ): Promise<LatestWithRow>;
   /**
+   * latestSignedStateWithRow for several rows in one statement (4D2d P8):
+   * gatheredRowReads' rows, read and locked in their order, each with its
+   * object's latest signed state, of its table's subject type. In the order
+   * given: the ID each row's read named (null for none found) and every row
+   * it gave, as latestSignedStateWithRow gives them; an object with more
+   * than LATER_EVENTS_READ events since its newest signed one is answered
+   * `backlog`, as latestSignedStates answers one. The log is read on the
+   * statement's snapshot, as latestSignedStateWithRow's.
+   */
+  latestSignedStatesGathered(
+    tx: AuditTransaction,
+    orgId: string,
+    reads: readonly GatheredRead[],
+  ): Promise<readonly GatheredLatest[]>;
+  /**
    * latestSignedState for many objects of one type, in one statement: each
    * ID asked, in lower case, with its object's latest signed state, judged
    * alone as latestSignedState judges one. At most MOST_LATEST_READ objects.
@@ -337,6 +352,16 @@ export interface AuditTrail {
    * withTenant's transaction for that organisation, like `verify`.
    */
   recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck>;
+  /**
+   * recordedEvents for each history asked, in one statement with the chain's
+   * head (4D2d P8): each judged as recordedEvents judges one, in the order
+   * asked. At most MOST_HISTORIES_READ.
+   */
+  recordedHistories(
+    tx: AuditTransaction,
+    orgId: string,
+    finds: readonly HistoryToRead[],
+  ): Promise<readonly RecordedEventsCheck[]>;
   /**
    * A page of the organisation's whole log for its admins (Phase 3 E10,
    * decision 24): every event recorded in [from, to), of `actions` and by
@@ -396,6 +421,34 @@ function objectsToRead({ subjectTypes, subjectId, subjectIds }: HistoryToRead): 
   return named;
 }
 
+/**
+ * The events a history picks (HistoryToRead), refused before any SQL if it
+ * breaks its rules: one past the limit tells one cut short, and the newest
+ * or oldest alone are never more than asked.
+ */
+interface HistoryPick {
+  readonly which: RawBuilder<unknown>;
+  readonly limit: number;
+  readonly newest: boolean;
+}
+
+function historyPick(find: HistoryToRead): HistoryPick {
+  const { subjectTypes, actions, limit, newest = false, oldest = false, afterSeq } = find;
+  const objects = objectsToRead(find);
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+  if (newest && oldest) throw new RangeError('The newest events or the oldest, not both');
+  const which = sql.join(
+    [
+      sql`e.subject_type = any(${[...subjectTypes]}::text[])`,
+      ...(objects === undefined ? [] : [sql`e.subject_id = any(${[...objects]}::uuid[])`]),
+      ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
+      ...(afterSeq === undefined ? [] : [sql`e.seq > ${afterSeq}`]),
+    ],
+    sql` and `,
+  );
+  return { which, limit: newest || oldest ? limit : limit + 1, newest };
+}
+
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
 function chainOf(orgId: string): Chain & { readonly kind: 'organisation' } {
   if (!UUID.test(orgId)) throw new AuditEventRefused(['the organisation ID must be a UUID']);
@@ -450,6 +503,23 @@ function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content
   );
 }
 
+/** The chain's head (`h`) and the first event past it (`past`), as every read of events beside the head gives them. */
+const HEAD_COLUMNS = sql`h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
+  h.mac_key_version as head_mac_key_version, past.past_head`;
+
+/** An event's own columns (`e`), as wholeEvent and wholeEntry judge them. */
+const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
+  e.subject_id, e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
+  e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms`;
+
+/** The chain's head and the first event past it, joined to each row of a read's `from`. */
+const headJoins = (chain: Chain & { readonly kind: 'organisation' }): RawBuilder<unknown> => sql`
+  left join audit.heads h on h.org_id = ${chain.orgId}
+  cross join lateral (
+    select pg_catalog.min(p.seq) as past_head from audit.events p
+    where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
+  ) as past`;
+
 /**
  * The events `which` picks, in chain order and at most `limit`, each beside
  * the chain's head and the first event past it, all in one statement so they
@@ -486,19 +556,44 @@ async function eventsWithHead(
   }
   const { rows } = await sql<Record<string, unknown>>`
     ${withRow}
-    select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-           h.mac_key_version as head_mac_key_version, past.past_head,
-           e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
-           e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
-           e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms${rowColumn}
+    select ${HEAD_COLUMNS},
+           ${EVENT_COLUMNS}${rowColumn}
     from (values (1)) as one (x)
-    left join audit.heads h on h.org_id = ${chain.orgId}
-    cross join lateral (
-      select pg_catalog.min(p.seq) as past_head from audit.events p
-      where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
-    ) as past
+    ${headJoins(chain)}
     left join lateral (${picked}) as e on true
     order by e.seq
+  `.execute(tx);
+  return rows;
+}
+
+/** The most histories recordedHistories reads in one statement. */
+const MOST_HISTORIES_READ = 8;
+
+/**
+ * Each history's events as recordedEvents picks one's (`which`, at most
+ * `limit`, the newest when asked), all beside the chain's head and the first
+ * event past it in one statement, as eventsWithHead reads one: each row's
+ * `find` is its history's place in the list. With no event picked, one row
+ * with the head alone.
+ */
+async function historiesWithHead(
+  tx: AuditTransaction,
+  chain: Chain & { readonly kind: 'organisation' },
+  picks: readonly HistoryPick[],
+): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  const each = picks.map(
+    ({ which, limit, newest }, find) =>
+      sql`(select ${find}::integer as find, e.* from audit.events e
+        where e.org_id = ${chain.orgId} and ${which} ${newest ? sql`order by e.seq desc` : sql`order by e.seq`}
+        limit ${limit})`,
+  );
+  const { rows } = await sql<Record<string, unknown>>`
+    select ${HEAD_COLUMNS}, e.find,
+           ${EVENT_COLUMNS}
+    from (values (1)) as one (x)
+    ${headJoins(chain)}
+    left join lateral (${sql.join(each, sql` union all `)}) as e on true
+    order by e.find, e.seq
   `.execute(tx);
   return rows;
 }
@@ -507,6 +602,54 @@ async function eventsWithHead(
 export interface LatestWithRow {
   readonly latest: LatestSignedState;
   readonly rows: readonly Readonly<Record<string, unknown>>[] | undefined;
+}
+
+/** latestSignedStatesGathered's answer for one row: the ID its read named, its latest signed state, and its rows. */
+export interface GatheredLatest {
+  readonly id: string | null;
+  readonly latest: LatestSignedState | BackloggedRead;
+  readonly rows: readonly Readonly<Record<string, unknown>>[] | undefined;
+}
+
+/**
+ * Each gathered row's object's newest signed event and every one after it,
+ * at most LATER_EVENTS_READ + 1 each, beside the chain's head and the first
+ * event past it, all in one statement with the rows' reads (their CTEs, run
+ * first: the objects CTE reads them in order), as eventsWithHead reads one
+ * object's with its row. One row at least for each object, its `item` its
+ * place in the list, in the list's order.
+ */
+async function gatheredWithHead(
+  tx: AuditTransaction,
+  chain: Chain & { readonly kind: 'organisation' },
+  reads: readonly GatheredRead[],
+): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  const each = reads.map(
+    (read, item) =>
+      sql`select ${item}::integer as item, ${read.subject}::text as subject_type, ${read.id} as subject_id,
+        (select pg_catalog.json_agg(pg_catalog.row_to_json(r)) from ${read.name} r) as row_json`,
+  );
+  const { rows } = await sql<Record<string, unknown>>`
+    with ${sql.join(reads.map(({ cte }) => cte))},
+    objects as materialized (${sql.join(each, sql` union all `)})
+    select o.item, o.subject_id::text as asked_id, o.row_json,
+           ${HEAD_COLUMNS},
+           ${EVENT_COLUMNS}
+    from objects o
+    ${headJoins(chain)}
+    left join lateral (
+      select e.* from audit.events e
+      where e.org_id = ${chain.orgId} and e.subject_type = o.subject_type and e.subject_id = o.subject_id
+        and e.seq >= (
+          select pg_catalog.max(s.seq) from audit.events s
+          where s.org_id = ${chain.orgId} and s.subject_type = o.subject_type and s.subject_id = o.subject_id
+            and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
+        )
+      order by e.seq limit ${LATER_EVENTS_READ + 1}
+    ) as e on true
+    order by o.item, e.seq
+  `.execute(tx);
+  return rows;
 }
 
 /** The caller's rows eventsWithHead read alongside (its `row_json`), none when it found none: undefined if they don't read as rows. */
@@ -847,6 +990,31 @@ export function createAuditTrail({
     return { latest: latestIn(chain, events, events[0]), rows };
   };
 
+  /**
+   * A history's events (recordedEvents), as read beside the chain's head
+   * (`first`, which every row of the statement carries alike): each whole, or
+   * where one isn't; more than `limit` throws TooManyEventsToRead.
+   */
+  const historyIn = (
+    chain: Chain & { readonly kind: 'organisation' },
+    rows: readonly Readonly<Record<string, unknown>>[],
+    first: Readonly<Record<string, unknown>> | undefined,
+    limit: number,
+  ): RecordedEventsCheck => {
+    const past = first?.past_head;
+    if (typeof past === 'bigint') return brokenAt(past);
+    if (rows.length > limit) throw new TooManyEventsToRead(limit);
+    const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
+    const events: ReadEvent[] = [];
+    for (const row of rows) {
+      if (row.seq === null) continue;
+      const read = wholeEvent(keys, chain, row, head);
+      if (read === undefined) return brokenAt(row.seq);
+      events.push(read);
+    }
+    return Object.freeze({ kind: 'recorded', events: Object.freeze(events) });
+  };
+
   const trail: AuditTrail = Object.freeze({
     record(tx: AuditTransaction, orgId: string, event: AuditEvent): Promise<RecordedAuditEvent> {
       return recordAs(false, tx, orgId, event);
@@ -890,6 +1058,31 @@ export function createAuditTrail({
       rowRead: RawBuilder<unknown>,
     ): Promise<LatestWithRow> {
       return latestWith(tx, orgId, subject, rowRead);
+    },
+
+    async latestSignedStatesGathered(
+      tx: AuditTransaction,
+      orgId: string,
+      reads: readonly GatheredRead[],
+    ): Promise<readonly GatheredLatest[]> {
+      const problems = reads.flatMap(({ subject }) => subjectTypeProblems(subject));
+      if (problems.length > 0) throw new AuditEventRefused(problems);
+      if (reads.length === 0) return [];
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      const rows = await gatheredWithHead(tx, chain, reads);
+      const byItem = reads.map((): Readonly<Record<string, unknown>>[] => []);
+      for (const row of rows) if (typeof row.item === 'number') byItem[row.item]?.push(row);
+      return byItem.map((own) => {
+        const [first] = own;
+        const asked = first?.asked_id;
+        // A backlog, past the head or not, is left to the row's own read, which judges it as it always has.
+        return {
+          id: typeof asked === 'string' ? asked : null,
+          latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first),
+          rows: rowsAlong(first),
+        };
+      });
     },
 
     async latestSignedStates(
@@ -1007,37 +1200,34 @@ export function createAuditTrail({
     },
 
     async recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck> {
-      const { subjectTypes, actions, limit, newest = false, oldest = false, afterSeq } = find;
-      const objects = objectsToRead(find);
-      if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
-      if (newest && oldest) throw new RangeError('The newest events or the oldest, not both');
+      const pick = historyPick(find);
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const which = sql.join(
-        [
-          sql`e.subject_type = any(${[...subjectTypes]}::text[])`,
-          ...(objects === undefined ? [] : [sql`e.subject_id = any(${[...objects]}::uuid[])`]),
-          ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
-          ...(afterSeq === undefined ? [] : [sql`e.seq > ${afterSeq}`]),
-        ],
-        sql` and `,
-      );
-      // One past the limit tells a history cut short; the newest or oldest alone are never more than asked.
-      const cut = newest || oldest;
-      const rows = await eventsWithHead(tx, chain, which, cut ? limit : limit + 1, { newest });
-      const [first] = rows;
-      const past = first?.past_head;
-      if (typeof past === 'bigint') return brokenAt(past);
-      if (rows.length > limit) throw new TooManyEventsToRead(limit);
-      const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
-      const events: ReadEvent[] = [];
-      for (const row of rows) {
-        if (row.seq === null) continue;
-        const read = wholeEvent(keys, chain, row, head);
-        if (read === undefined) return brokenAt(row.seq);
-        events.push(read);
+      const rows = await eventsWithHead(tx, chain, pick.which, pick.limit, { newest: pick.newest });
+      return historyIn(chain, rows, rows[0], find.limit);
+    },
+
+    async recordedHistories(
+      tx: AuditTransaction,
+      orgId: string,
+      finds: readonly HistoryToRead[],
+    ): Promise<readonly RecordedEventsCheck[]> {
+      if (finds.length > MOST_HISTORIES_READ) {
+        throw new RangeError(`At most ${MOST_HISTORIES_READ.toString()} histories are read at once`);
       }
-      return Object.freeze({ kind: 'recorded', events: Object.freeze(events) });
+      const picks = finds.map(historyPick);
+      if (picks.length === 0) return [];
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      const rows = await historiesWithHead(tx, chain, picks);
+      return finds.map((find, index) =>
+        historyIn(
+          chain,
+          rows.filter((row) => row.find === index),
+          rows[0],
+          find.limit,
+        ),
+      );
     },
 
     async logPage(tx: AuditTransaction, orgId: string, { from, to, actions, actor, beforeSeq, limit }: LogPageToRead) {

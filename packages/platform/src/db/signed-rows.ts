@@ -257,18 +257,133 @@ function signedRowRead(
 ): RawBuilder<Record<string, unknown>> {
   checkTable(table);
   checkKey(key);
+  return rowRead(table, key.orgId, sql`${key.id}`, lock, seen, sql``);
+}
+
+/**
+ * signedRowRead's statement for the row of `orgId` whose ID `id` gives (an
+ * expression), with `gate` (a condition) ANDed to its filter, both trusted
+ * as built here.
+ */
+function rowRead(
+  table: SignedStateTable,
+  orgId: string,
+  id: RawBuilder<unknown>,
+  lock: RowLock,
+  seen: boolean,
+  gate: RawBuilder<unknown>,
+): RawBuilder<Record<string, unknown>> {
   const versions = seen
     ? sql`, target.xmin::text as locked_xmin, (
         select pg_catalog.string_agg(s.xmin::text, ',') from ${sql.table(table.table)} as s
-        where s.org_id = ${key.orgId} and s.id = ${key.id}
+        where s.org_id = ${orgId} and s.id = ${id}
       ) as seen_xmin, pg_catalog.pg_typeof(target.state_version)::oid::text as version_type`
     : sql``;
   // Filtered by org_id as well as row security, as ADR-005 §7 asks of every query.
   return sql<Record<string, unknown>>`
     select ${columnsOf(table)}${versions} from ${sql.table(table.table)} as target
-    where target.org_id = ${key.orgId} and target.id = ${key.id}
+    where target.org_id = ${orgId} and target.id = ${id}${gate}
     ${lock === 'share' ? sql`for share` : sql`for no key update`}
   `;
+}
+
+/**
+ * Where a gathered row's ID comes from (4D2d P8): given; the ID an earlier
+ * row of the gather holds in a uuid field, as that row was locked; the same
+ * ID as an earlier row's; or the first row of the table whose `column` is
+ * `value`, in one of `statusIn` (an ID alone, as openMandateOfAgent finds a
+ * mandate). `from` and `sameAs` name an earlier row by its place in the list.
+ */
+export type GatheredId =
+  | { readonly id: string }
+  | { readonly from: number; readonly column: string }
+  | { readonly sameAs: number }
+  | { readonly findBy: { readonly column: string; readonly value: string; readonly statusIn: readonly string[] } };
+
+/** A row to gather: its table, where its ID comes from, and its lock. */
+export interface GatheredRow {
+  readonly table: SignedStateTable;
+  readonly id: GatheredId;
+  readonly lock: RowLock;
+}
+
+/** gatheredRowReads' answer for one row: its CTE, named `name`, its ID as an expression (null for none found), and its table's subject type. */
+export interface GatheredRead {
+  readonly subject: string;
+  readonly cte: RawBuilder<unknown>;
+  readonly name: RawBuilder<unknown>;
+  readonly id: RawBuilder<unknown>;
+}
+
+/** The most rows one gather reads. */
+export const MOST_ROWS_GATHERED = 16;
+
+/** A uuid field's canonical text back as a uuid, or null for anything else: a gather's ID never fails its statement. */
+const asUuid = (text: RawBuilder<unknown>): RawBuilder<unknown> =>
+  sql`case when ${text} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (${text})::uuid end`;
+
+/**
+ * signedRowReadSeen's statement for each row, in the order given, as CTEs of
+ * one statement (4D2d P8), for the caller to read with each row's newest
+ * signed event and judge each with signedRowSeen, as P3a's. Each row's read
+ * waits for the one before it to be read and locked (its `gate`), so the
+ * rows are locked in the list's order, the lock order (ADR-006 §6), whatever
+ * order the statement reads the CTEs in. The caller must hold withTenant's
+ * transaction for `orgId`, as readSignedRow checks.
+ */
+export function gatheredRowReads(orgId: string, rows: readonly GatheredRow[]): readonly GatheredRead[] {
+  if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
+  if (rows.length === 0 || rows.length > MOST_ROWS_GATHERED) {
+    throw new RangeError(`A gather reads 1 to ${String(MOST_ROWS_GATHERED)} rows`);
+  }
+  const reads: GatheredRead[] = [];
+  for (const [index, row] of rows.entries()) {
+    checkTable(row.table);
+    const name = sql.id(`gathered_${String(index)}`);
+    const id = gatheredId(orgId, row, reads, rows);
+    const before = reads.at(-1);
+    // The row before is read, and so locked, before this one's scan starts: an uncorrelated condition is
+    // checked once, before any row is fetched.
+    const gate = before === undefined ? sql`` : sql` and (select pg_catalog.count(*) from ${before.name}) >= 0`;
+    const read = rowRead(row.table, orgId, id, row.lock, true, gate);
+    reads.push({ subject: row.table.subject, cte: sql`${name} as materialized (${read})`, name, id });
+  }
+  return reads;
+}
+
+/** A gathered row's ID as an expression, from the reads before it. */
+function gatheredId(
+  orgId: string,
+  { table, id }: GatheredRow,
+  reads: readonly GatheredRead[],
+  rows: readonly GatheredRow[],
+): RawBuilder<unknown> {
+  if ('id' in id) {
+    if (!UUID.test(id.id)) throw new RangeError('A signed row is named by UUIDs');
+    return sql`${id.id.toLowerCase()}::uuid`;
+  }
+  if ('sameAs' in id) return earlier(reads, id.sameAs).id;
+  if ('from' in id) {
+    const index = rows[id.from]?.table.fields.findIndex(({ column, type }) => column === id.column && type === 'uuid');
+    if (index === undefined || index < 0) throw new RangeError("A gathered ID comes from an earlier row's uuid field");
+    const field = sql.ref(`g.f${String(index)}`);
+    return sql`(select ${asUuid(field)} from ${earlier(reads, id.from).name} as g limit 1)`;
+  }
+  const { column, value, statusIn } = id.findBy;
+  if (!COLUMN.test(column) || statusIn.length === 0) throw new RangeError('A gathered row is found by one column');
+  return sql`(
+    select f.id from ${sql.table(table.table)} as f
+    where f.org_id = ${orgId} and ${sql.ref(`f.${column}`)} = ${value}
+      and f.status in (${sql.join(statusIn.map((status) => sql`${status}`))})
+    limit 1
+  )`;
+}
+
+/** The read of an earlier row of the gather. */
+function earlier(reads: readonly GatheredRead[], index: number): GatheredRead {
+  const read = reads[index];
+  if (read === undefined) throw new RangeError('A gathered ID comes from an earlier row');
+  return read;
 }
 
 /**

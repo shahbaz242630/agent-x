@@ -50,7 +50,7 @@ import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
 import { UUID } from './patterns.ts';
-import { assertTenant, withTenant } from './tenant.ts';
+import { assertTenant, lockWaitBounded, withTenant } from './tenant.ts';
 
 /**
  * Who sent the request: a signed-in user, or an agent, each by its own ID.
@@ -287,13 +287,6 @@ export function createIdempotentWrites({
       if (problem !== undefined) throw new IdempotencyFailed('bad_request', `An idempotent write refused: ${problem}`);
       if (claimedIn.has(tx)) throw notFirst();
       await assertTenant(tx, request.orgId);
-
-      // A transaction gets its ID when it first writes or row-locks, so none
-      // yet means nothing has been written or row-locked before the claim.
-      const { rows: fresh } = await sql<{ first: boolean }>`
-        select pg_catalog.pg_current_xact_id_if_assigned() is null as first
-      `.execute(tx);
-      if (fresh[0]?.first !== true) throw notFirst();
       claimedIn.add(tx);
 
       const row: KeyRow = {
@@ -319,12 +312,15 @@ export function createIdempotentWrites({
       const savepoint = sql.id(CLAIM_SAVEPOINT);
       await sql`savepoint ${savepoint}`.execute(tx);
       try {
+        // A transaction gets its ID when it first writes or row-locks (a
+        // savepoint gives none), so none yet means nothing has been written or
+        // row-locked before the claim; asked with the wait's bound (4D2d P8).
+        if (!(await firstWithClaimWaitBound(tx))) throw notFirst();
         // Waits, if another transaction holds the key's row uncommitted, until
         // its claim ends: then nothing is inserted if it committed, and this
         // row is if it rolled back. A wait past the bound is answered `busy`. Every statement filters by org_id too
         // (ADR-005 §7).
         const { mac, keyVersion } = keys.mac('request-hash', message);
-        await boundClaimWait(tx);
         const claim = async (): Promise<boolean> => {
           let claimed;
           try {
@@ -384,17 +380,18 @@ export function createIdempotentWrites({
 }
 
 /**
- * Bounds how long the transaction waits for a lock from here on, the claim's
- * wait for the key among them: 5 seconds, unless the caller has already set a
- * shorter limit, which is kept (Postgres's `0` is no limit at all). Inside the
- * claim's savepoint, so a claim that fails leaves the caller's limit as it was.
+ * Whether the claim is the transaction's first write or row lock (it has no
+ * ID yet), and, in the same statement, bounds how long the transaction waits
+ * for a lock from here on, the claim's wait for the key among them: 5
+ * seconds, unless the caller has already set a shorter limit, which is kept
+ * (Postgres's `0` is no limit at all). Inside the claim's savepoint, so a
+ * claim that fails leaves the caller's limit as it was.
  */
-async function boundClaimWait<Schema>(tx: Transaction<Schema>): Promise<void> {
-  const { rows } = await sql<{ longer: boolean | null }>`
-    select (limit_now = interval '0' or limit_now > interval '5 seconds') as longer
-    from (select pg_catalog.current_setting('lock_timeout')::interval as limit_now) as setting
+async function firstWithClaimWaitBound<Schema>(tx: Transaction<Schema>): Promise<boolean> {
+  const { rows } = await sql<{ first: boolean | null }>`
+    select pg_catalog.pg_current_xact_id_if_assigned() is null as first, ${lockWaitBounded()} as bounded
   `.execute(tx);
-  if (rows[0]?.longer !== false) await sql`set local lock_timeout = '5s'`.execute(tx);
+  return rows[0]?.first === true;
 }
 
 /** One claim's transaction, row and logging. */

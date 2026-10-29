@@ -42,6 +42,11 @@ export {
 } from './server-setup.ts';
 export {
   type FieldText,
+  type GatheredId,
+  type GatheredRead,
+  type GatheredRow,
+  gatheredRowReads,
+  MOST_ROWS_GATHERED,
   pointSignedRow,
   readSignedRow,
   readSignedRows,
