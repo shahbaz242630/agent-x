@@ -612,6 +612,8 @@ type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
 interface Held {
   lock: RowLock;
   from?: { readonly table: SignedStateTable; readonly state: VerifiedState };
+  /** The state this transaction just recorded on the row, still locked, for changeStatus to go on from (4D2d P3b). */
+  wrote?: { readonly table: SignedStateTable; readonly state: VerifiedState };
 }
 
 const MISSING = Object.freeze({ outcome: 'missing' as const });
@@ -842,6 +844,20 @@ export function createSignedStates({
     return checked;
   };
 
+  /**
+   * The state this transaction last recorded on the row, with this same table,
+   * made the one to change from, as verifiedState would: no trip (4D2d P3b).
+   * Any read or change of the row since recorded it ends this; then undefined.
+   */
+  const justWritten = (tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey): VerifiedState | undefined => {
+    const rows = heldIn(tx);
+    const name = rowName(table, key);
+    const wrote = rows.get(name)?.wrote;
+    if (wrote?.table !== table) return undefined;
+    rows.set(name, { lock: 'change', from: wrote });
+    return wrote.state;
+  };
+
   /** The check as it was before 4D2d P3a, each step a statement of its own, raising the alarm it finds. */
   const inTwoStatements = async (
     tx: AuditTransaction,
@@ -1031,6 +1047,15 @@ export function createSignedStates({
     ) {
       return notApplied(table, key, "The row didn't take the pointer to its new state's event as sealed");
     }
+    // Sealed, logged and read back here, the row locked and the head too until commit: nothing else can move either.
+    const state: VerifiedState = Object.freeze({
+      outcome: 'verified',
+      version: row.version,
+      eventId: recorded.id.toLowerCase(),
+      recordedAt: recorded.recordedAt,
+      fields: sealed,
+    });
+    heldIn(tx).set(rowName(table, key), { lock: 'change', wrote: { table, state } });
     // An organisation's own row, created as its chain's first event: its hold may start here (startIntegrityHold).
     if (from === 'new' && key.id.toLowerCase() === key.orgId.toLowerCase() && recorded.seq === 1n) {
       created.set(tx, (created.get(tx) ?? new Set<string>()).add(key.orgId.toLowerCase()));
@@ -1311,7 +1336,7 @@ export function createSignedStates({
       if (!table.fields.some(({ column }) => column === STATUS)) {
         throw new RangeError('A signed status table seals its status');
       }
-      const current = await verifiedState(tx, table, key, 'change');
+      const current = justWritten(tx, table, key) ?? (await verifiedState(tx, table, key, 'change'));
       if (current.outcome !== 'verified') return current;
       const moved = await statuses.change(tx, table, key, event).catch((error: unknown) => {
         // The row is verified and locked: its status can't be unreadable or
@@ -1319,10 +1344,16 @@ export function createSignedStates({
         if (error instanceof StatusChangeFailed) alarm(table.subject, key, 'status');
         throw error;
       });
-      if (moved.outcome === 'refused') return moved;
       if (moved.outcome === 'missing') {
         return notApplied(table, key, 'The row verified and locked for change was missing when changed');
       }
+      // The machine moved from the status the row held, which must be the one sealed: a state just written
+      // isn't read again (P3b), so a status put in since, by this transaction, would else be moved from.
+      if (moved.from !== current.fields.get(STATUS)) {
+        alarm(table.subject, key, 'status');
+        throw new SignedStateFailed('not_applied', "The row's status isn't the one its signed state holds");
+      }
+      if (moved.outcome === 'refused') return moved;
       const recorded = await recordChange(
         tx,
         table,
