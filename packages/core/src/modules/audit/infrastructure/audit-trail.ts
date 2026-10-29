@@ -426,11 +426,13 @@ function objectsToRead({ subjectTypes, subjectId, subjectIds }: HistoryToRead): 
  * breaks its rules: one past the limit tells one cut short, and the newest
  * or oldest alone are never more than asked.
  */
-function historyPick(find: HistoryToRead): {
+interface HistoryPick {
   readonly which: RawBuilder<unknown>;
   readonly limit: number;
   readonly newest: boolean;
-} {
+}
+
+function historyPick(find: HistoryToRead): HistoryPick {
   const { subjectTypes, actions, limit, newest = false, oldest = false, afterSeq } = find;
   const objects = objectsToRead(find);
   if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
@@ -501,6 +503,23 @@ function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content
   );
 }
 
+/** The chain's head (`h`) and the first event past it (`past`), as every read of events beside the head gives them. */
+const HEAD_COLUMNS = sql`h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
+  h.mac_key_version as head_mac_key_version, past.past_head`;
+
+/** An event's own columns (`e`), as wholeEvent and wholeEntry judge them. */
+const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
+  e.subject_id, e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
+  e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms`;
+
+/** The chain's head and the first event past it, joined to each row of a read's `from`. */
+const headJoins = (chain: Chain & { readonly kind: 'organisation' }): RawBuilder<unknown> => sql`
+  left join audit.heads h on h.org_id = ${chain.orgId}
+  cross join lateral (
+    select pg_catalog.min(p.seq) as past_head from audit.events p
+    where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
+  ) as past`;
+
 /**
  * The events `which` picks, in chain order and at most `limit`, each beside
  * the chain's head and the first event past it, all in one statement so they
@@ -537,17 +556,10 @@ async function eventsWithHead(
   }
   const { rows } = await sql<Record<string, unknown>>`
     ${withRow}
-    select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-           h.mac_key_version as head_mac_key_version, past.past_head,
-           e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
-           e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
-           e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms${rowColumn}
+    select ${HEAD_COLUMNS},
+           ${EVENT_COLUMNS}${rowColumn}
     from (values (1)) as one (x)
-    left join audit.heads h on h.org_id = ${chain.orgId}
-    cross join lateral (
-      select pg_catalog.min(p.seq) as past_head from audit.events p
-      where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
-    ) as past
+    ${headJoins(chain)}
     left join lateral (${picked}) as e on true
     order by e.seq
   `.execute(tx);
@@ -555,7 +567,7 @@ async function eventsWithHead(
 }
 
 /** The most histories recordedHistories reads in one statement. */
-export const MOST_HISTORIES_READ = 8;
+const MOST_HISTORIES_READ = 8;
 
 /**
  * Each history's events as recordedEvents picks one's (`which`, at most
@@ -567,7 +579,7 @@ export const MOST_HISTORIES_READ = 8;
 async function historiesWithHead(
   tx: AuditTransaction,
   chain: Chain & { readonly kind: 'organisation' },
-  picks: readonly { readonly which: RawBuilder<unknown>; readonly limit: number; readonly newest: boolean }[],
+  picks: readonly HistoryPick[],
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
   const each = picks.map(
     ({ which, limit, newest }, find) =>
@@ -576,17 +588,10 @@ async function historiesWithHead(
         limit ${limit})`,
   );
   const { rows } = await sql<Record<string, unknown>>`
-    select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-           h.mac_key_version as head_mac_key_version, past.past_head, e.find,
-           e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
-           e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
-           e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+    select ${HEAD_COLUMNS}, e.find,
+           ${EVENT_COLUMNS}
     from (values (1)) as one (x)
-    left join audit.heads h on h.org_id = ${chain.orgId}
-    cross join lateral (
-      select pg_catalog.min(p.seq) as past_head from audit.events p
-      where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
-    ) as past
+    ${headJoins(chain)}
     left join lateral (${sql.join(each, sql` union all `)}) as e on true
     order by e.find, e.seq
   `.execute(tx);
@@ -628,17 +633,10 @@ async function gatheredWithHead(
     with ${sql.join(reads.map(({ cte }) => cte))},
     objects as materialized (${sql.join(each, sql` union all `)})
     select o.item, o.subject_id::text as asked_id, o.row_json,
-           h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-           h.mac_key_version as head_mac_key_version, past.past_head,
-           e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
-           e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
-           e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+           ${HEAD_COLUMNS},
+           ${EVENT_COLUMNS}
     from objects o
-    left join audit.heads h on h.org_id = ${chain.orgId}
-    cross join lateral (
-      select pg_catalog.min(p.seq) as past_head from audit.events p
-      where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
-    ) as past
+    ${headJoins(chain)}
     left join lateral (
       select e.* from audit.events e
       where e.org_id = ${chain.orgId} and e.subject_type = o.subject_type and e.subject_id = o.subject_id

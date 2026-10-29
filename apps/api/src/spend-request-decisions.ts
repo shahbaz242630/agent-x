@@ -244,22 +244,22 @@ export async function authorityIn(
   orgId: string,
   agentId: string,
   version: 'inForce' | 'draft' = 'inForce',
-  gathered?: { readonly id: string | null },
+  mandateFound?: { readonly id: string | null },
 ) {
-  const mandate = await mandateWeighedIn(tx, states, orgId, agentId, version, gathered);
+  const mandate = await mandateWeighedIn(tx, states, orgId, agentId, version, mandateFound);
   return { mandate, ...(await policiesIn(tx, states, orgId, mandate)) };
 }
 
-/** Level 4's first half: the agent's open mandate with the version asked for, or null for none; `gathered`: its ID as a gather found it. */
+/** Level 4's first half: the agent's open mandate with the version asked for, or null for none; `mandateFound`: its ID as a gather found it. */
 export async function mandateWeighedIn(
   tx: DecisionTx,
   states: SignedStates,
   orgId: string,
   agentId: string,
   version: 'inForce' | 'draft' = 'inForce',
-  gathered?: { readonly id: string | null },
+  mandateFound?: { readonly id: string | null },
 ): Promise<MandateWeighed | null> {
-  const open = await openMandateOfAgent(tx, states, orgId, agentId, gathered);
+  const open = await openMandateOfAgent(tx, states, orgId, agentId, mandateFound);
   believed(open);
   const found = open.outcome === 'found' ? open.mandate : null;
   const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
@@ -473,6 +473,9 @@ const actingRows = ({ orgId, agentId, keyId }: AgentActing): GatheredRow[] => [
   { table: AGENT_KEYS, id: { id: keyId }, lock: 'share' },
 ];
 
+/** Where decisionRows puts the rows other rows, and the decision, read by. */
+const AT = { mandate: 0, version: 1, mandatePolicy: 2, organizationPolicy: 4, organizationVersion: 5 } as const;
+
 /**
  * Levels 4–6 as a decision reads them, for one gather after actingRows, so
  * the mandate is found once its agent is held, as before: the agent's open
@@ -482,11 +485,11 @@ const actingRows = ({ orgId, agentId, keyId }: AgentActing): GatheredRow[] => [
  */
 const decisionRows = (orgId: string, agentId: string, asked: SpendWeighed): GatheredRow[] => [
   openMandateGathered(agentId),
-  { table: MANDATE_VERSIONS, id: { from: 0, column: 'current_version_id' }, lock: 'share' },
-  { table: POLICIES, id: { sameAs: 0 }, lock: 'share' },
-  { table: POLICY_VERSIONS, id: { from: 2, column: 'current_version_id' }, lock: 'share' },
+  { table: MANDATE_VERSIONS, id: { from: AT.mandate, column: 'current_version_id' }, lock: 'share' },
+  { table: POLICIES, id: { sameAs: AT.mandate }, lock: 'share' },
+  { table: POLICY_VERSIONS, id: { from: AT.mandatePolicy, column: 'current_version_id' }, lock: 'share' },
   { table: POLICIES, id: { id: orgId }, lock: 'share' },
-  { table: POLICY_VERSIONS, id: { from: 4, column: 'current_version_id' }, lock: 'share' },
+  { table: POLICY_VERSIONS, id: { from: AT.organizationPolicy, column: 'current_version_id' }, lock: 'share' },
   { table: SOURCES, id: { id: asked.fundingSourceId }, lock: 'share' },
   { table: SUPPLIERS, id: { id: asked.supplierId }, lock: 'change' },
 ];
@@ -529,11 +532,10 @@ export function createSpendRequestDecisions({
     // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them.
     await states.gather(tx, orgId, actingRows(acting));
     const { agent, keyId } = await actingIn(tx, states, acting, now);
-    const [mandateId = null, versionId = null, , , , policyVersionId = null] = await states.gather(
-      tx,
-      orgId,
-      decisionRows(orgId, agentId, asked),
-    );
+    const found = await states.gather(tx, orgId, decisionRows(orgId, agentId, asked));
+    const mandateId = found[AT.mandate] ?? null;
+    const versionId = found[AT.version] ?? null;
+    const policyVersionId = found[AT.organizationVersion] ?? null;
     // Their histories in one statement too, once their rows are held, as before.
     await states.gatherHistories(tx, orgId, [
       ...(mandateId === null || versionId === null ? [] : overLimitHistories(mandateId, versionId)),

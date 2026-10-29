@@ -443,22 +443,21 @@ export async function openMandateOfAgent(
   states: SignedStates,
   orgId: string,
   agentId: string,
-  gathered?: { readonly id: string | null },
+  mandateFound?: { readonly id: string | null },
 ): Promise<MandateCheck> {
   // The ID a gather found, by the same filter (openMandateGathered), in place of this statement.
-  const id =
-    gathered === undefined
-      ? ((
-          await tx
-            // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an ID alone, read through its signed state just below; a status flipped to ended is B3's to catch (above)
-            .selectFrom(MANDATES.table)
-            .select('id')
-            .where('org_id', '=', orgId)
-            .where('agent_id', '=', agentId)
-            .where('status', 'in', OPEN_STATES)
-            .executeTakeFirst()
-        )?.id ?? null)
-      : gathered.id;
+  let id = mandateFound?.id ?? null;
+  if (mandateFound === undefined) {
+    const row = await tx
+      // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an ID alone, read through its signed state just below; a status flipped to ended is B3's to catch (above)
+      .selectFrom(MANDATES.table)
+      .select('id')
+      .where('org_id', '=', orgId)
+      .where('agent_id', '=', agentId)
+      .where('status', 'in', OPEN_STATES)
+      .executeTakeFirst();
+    id = row?.id ?? null;
+  }
   return id === null ? { outcome: 'missing' } : mandateOf(tx, states, { orgId, id }, 'share');
 }
 
