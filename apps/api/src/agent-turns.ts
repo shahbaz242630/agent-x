@@ -9,7 +9,8 @@
 // holding the pool.
 //
 // A wait is bounded as the pool's own is (10 s for a connection): past it the
-// decision fails as a connection wait that ran out does, with nothing made.
+// decision is answered busy (503 AGENT_BUSY, with Retry-After), with nothing
+// made, so the agent sends it again (partner, S161).
 
 /** Decisions of one agent at once in this process: two, so one can get its locks while another holds the month's. */
 export const TURNS_AN_AGENT = 2;

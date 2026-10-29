@@ -30,6 +30,8 @@ export const REASON_CODES = {
     "The request is above its mandate's own per-order or monthly limit, so only an admin of the organisation may approve it. Ask an admin to approve it, or reject it. Nothing was changed.",
   AGENT_ADDS_SPENT:
     "The organisation has registered as many agents as it may in 24 hours, so this one wasn't registered. Try again tomorrow; if no one at the organisation registered them, tell its admins at once.",
+  AGENT_BUSY:
+    "The agent has several payment requests being decided at Agent X right now, so this one waited its turn too long and wasn't made. Wait the number of seconds in the Retry-After header, then send the same request again with the same Idempotency-Key.",
   AGENT_CANCELS_SPENT:
     "The agent has cancelled as many of its own spend requests as it may in 24 hours, so this one wasn't cancelled. An admin or finance approver can still cancel it; if the agent keeps cancelling, look at what it is doing.",
   AGENT_KEYS_FULL:

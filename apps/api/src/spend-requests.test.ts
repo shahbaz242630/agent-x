@@ -301,4 +301,14 @@ describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
     expect(response.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_BUSY' } });
     expect(response.headers['retry-after']).toBe('5');
   });
+
+  it('answers an agent whose turn waited too long busy, saying when to send it again; other refusals say no time (S161)', async () => {
+    const busy = await withDecisions({ outcome: 'refused', status: 503, code: 'AGENT_BUSY' });
+    const response = await busy.app.inject(asAgent(BODY));
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: { code: 'AGENT_BUSY' } });
+    expect(response.headers['retry-after']).toBe('5');
+    const frozen = await withDecisions({ outcome: 'refused', status: 409, code: 'ORG_FROZEN' });
+    expect((await frozen.app.inject(asAgent(BODY))).headers['retry-after']).toBeUndefined();
+  });
 });
