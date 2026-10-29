@@ -94,7 +94,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type AgentTurns, createAgentTurns, TURN_WAIT_MS, TurnWaitExceeded } from './agent-turns.ts';
+import { type AgentTurns, createAgentTurns, TurnWaitExceeded } from './agent-turns.ts';
 import {
   choicesHistory,
   consentOf,
@@ -651,7 +651,7 @@ export function createSpendRequestDecisions({
       } catch (error) {
         if (!(error instanceof TurnWaitExceeded)) throw error;
         // Nothing of it was made, its key unclaimed: the agent sends it again (partner, S161: busy, never a 500).
-        log.warn('spend_request.agent_busy', { agentId: agent.agentId, waitedMs: TURN_WAIT_MS });
+        log.warn('spend_request.agent_busy', { agentId: agent.agentId, waitedMs: error.waitedMs });
         return refused(503, 'AGENT_BUSY');
       }
       if (isUnwritten(done)) return done;

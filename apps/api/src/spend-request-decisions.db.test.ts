@@ -848,17 +848,27 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       ids,
       clock,
       logger: testLogger(capture),
-      turns: { run: () => Promise.reject(new TurnWaitExceeded(10_000)), agentsInHand: () => 0 },
+      turns: { run: () => Promise.reject(new TurnWaitExceeded(7_500)), agentsInHand: () => 0 },
     });
 
     expect(await ask(acting, asking(w), 'busy-turn')).toEqual({ outcome: 'refused', status: 503, code: 'AGENT_BUSY' });
     expect(capture.lines().filter((line) => line.event === 'spend_request.agent_busy')).toEqual([
-      expect.objectContaining({ level: 'warn', agentId: acting.agentId, waitedMs: 10_000 }),
+      expect.objectContaining({ level: 'warn', agentId: acting.agentId, waitedMs: 7_500 }),
     ]);
     const made = await withTenant(app, w.org, (tx) =>
       tx.selectFrom('spend_requests.requests').select('id').where('idempotency_key', '=', 'busy-turn').execute(),
     );
     expect(made).toEqual([]);
+    // Sent again with the same key once its turn comes: decided, as a first ask.
+    decisions = createSpendRequestDecisions({
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+    expect(await ask(acting, asking(w), 'busy-turn')).toMatchObject({ outcome: 'decided' });
   });
 
   it('fails a decision whose turn fails otherwise, as it always did', async () => {

@@ -20,9 +20,12 @@ export const TURN_WAIT_MS = 10_000;
 
 /** A decision that waited its whole bound for its agent's turn: nothing of it was made. */
 export class TurnWaitExceeded extends Error {
+  readonly waitedMs: number;
+
   constructor(waitedMs: number) {
     super(`A decision waited ${String(waitedMs)} ms for its agent's turn, behind its other decisions in this process`);
     this.name = 'TurnWaitExceeded';
+    this.waitedMs = waitedMs;
   }
 }
 
