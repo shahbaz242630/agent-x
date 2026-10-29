@@ -85,6 +85,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { createAgentTurns } from './agent-turns.ts';
 import {
   consentOf,
   organizationChoicesOf,
@@ -467,6 +468,8 @@ export function createSpendRequestDecisions({
 }): SpendRequestDecisions {
   // The mandates' refusal: the decision reads mandates, versions and policies through their reads.
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
+  // Whose decisions may hold a connection now, in this process (agent-turns.ts).
+  const turns = createAgentTurns();
 
   /** Everything in the lock order, the decision, and what it makes: the request's ID, with its decision. */
   async function decided(
@@ -573,14 +576,17 @@ export function createSpendRequestDecisions({
       // Each attempt sets it; only the one that committed is returned, so it is that attempt's decision.
       let made: Awaited<ReturnType<typeof decided>> | undefined;
       let fresh: SpendRequestRecord | undefined;
-      // The whole decision, its lock waits and retries too, for the Pilot's policy target (PL-38).
+      // The whole decision, its turn's wait, lock waits and retries too, for the Pilot's policy target (PL-38).
       const started = performance.now();
-      const done = await retryingTransaction(log, DECIDE_OPERATION, () =>
-        work.write(agent, idempotent, correlationId, async (tx, states) => {
-          made = await decided(tx, states, agent, idempotent.key, asked);
-          fresh = await answerOf(tx, states, agent.orgId, made.id);
-          return { status: 201, resourceId: made.id };
-        }),
+      // In its agent's turn, so a burst from one agent can't hold every connection while it waits on its month.
+      const done = await turns.run(agent.agentId, () =>
+        retryingTransaction(log, DECIDE_OPERATION, () =>
+          work.write(agent, idempotent, correlationId, async (tx, states) => {
+            made = await decided(tx, states, agent, idempotent.key, asked);
+            fresh = await answerOf(tx, states, agent.orgId, made.id);
+            return { status: 201, resourceId: made.id };
+          }),
+        ),
       );
       if (isUnwritten(done)) return done;
       // Once a decision is committed, and once only (never for its key's replay), from the write itself, so a

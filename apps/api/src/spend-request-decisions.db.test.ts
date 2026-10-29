@@ -50,6 +50,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { TURNS_AN_AGENT } from './agent-turns.ts';
 import { createMandateMoves } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
@@ -836,6 +837,44 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       tx.selectFrom('limit_reservations.reservations').select('amount_minor').execute(),
     );
     expect(reservations.reduce((sum, { amount_minor }) => sum + BigInt(amount_minor), 0n)).toBe(1_100_000n);
+  });
+
+  it('takes one agent’s burst two at a time: the rest hold no connection, so another agent’s goes on (S160)', async () => {
+    const { w, acting } = await ready();
+    // Of the same organisation, so the turns are the agent's, not its organisation's.
+    const theirKey = await shared.secondAgent(registry, w);
+    // The month's period row first, so the burst queues on its lock.
+    decidedOf(await ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-0' })));
+    const { promise: held, resolve: holds } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const holder = withTenant(app, w.org, async (tx) => {
+      await tx
+        .selectFrom('limit_reservations.agent_periods')
+        .select('month')
+        .where('agent_id', '=', w.agent)
+        .forNoKeyUpdate()
+        .execute();
+      holds(undefined);
+      await gate;
+    });
+    await held;
+
+    // Five and the lock's holder would fill the pool of six, with no turns.
+    const burst = Array.from({ length: 5 }, (_, n) =>
+      within(20_000, ask(acting, asking(w, { amount: AED(10_000n), orderReference: `INV-${String(n + 1)}` })), 'burst'),
+    );
+    await waitUntilQueued(database.as('admin'), TURNS_AN_AGENT);
+    // To the other supplier: the burst's first turn holds the first one's lock.
+    const theirs = asking(w, { supplierId: w.suppliers[1] ?? '', orderReference: 'INV-THEIRS' });
+    const meanwhile = await within(20_000, ask(theirKey, theirs), 'the other agent');
+    expect(decidedOf(meanwhile).decision).toBe('ALLOW');
+    expect(await waitUntilQueued(database.as('admin'), 1)).toHaveLength(TURNS_AN_AGENT);
+    open(undefined);
+    await holder;
+
+    expect((await Promise.all(burst)).map((answer) => decidedOf(answer).decision)).toEqual(
+      Array.from({ length: 5 }, () => 'ALLOW'),
+    );
   });
 
   it('runs two requests for one supplier’s order one after the other: the second is the duplicate (SEC-DP-10)', async () => {
