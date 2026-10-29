@@ -779,6 +779,11 @@ export const PLAIN_WORDS = {
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
+  'spend_request.agent_busy': {
+    happened: 'An agent sent many payment requests at once, and one waited too long for its turn.',
+    broke: 'That one was turned away as busy and nothing was saved; the agent was told to send it again.',
+    next: 'Nothing to do if rare. If often, look at how fast the agent sends.',
+  },
   'spend_request.agent_cancels_spent': {
     happened: 'An agent tried to cancel a spend request after using up its cancels for the last 24 hours.',
     broke: 'That cancel was refused; the request stays open.',

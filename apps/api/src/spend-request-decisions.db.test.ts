@@ -50,7 +50,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { TURNS_AN_AGENT } from './agent-turns.ts';
+import { TURNS_AN_AGENT, TurnWaitExceeded } from './agent-turns.ts';
 import { createMandateMoves } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
@@ -837,6 +837,53 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       tx.selectFrom('limit_reservations.reservations').select('amount_minor').execute(),
     );
     expect(reservations.reduce((sum, { amount_minor }) => sum + BigInt(amount_minor), 0n)).toBe(1_100_000n);
+  });
+
+  it('answers a decision whose turn waited past its bound busy, with nothing made and the key unused (S161)', async () => {
+    const { w, acting } = await ready();
+    decisions = createSpendRequestDecisions({
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      turns: { run: () => Promise.reject(new TurnWaitExceeded(7_500)), agentsInHand: () => 0 },
+    });
+
+    expect(await ask(acting, asking(w), 'busy-turn')).toEqual({ outcome: 'refused', status: 503, code: 'AGENT_BUSY' });
+    expect(capture.lines().filter((line) => line.event === 'spend_request.agent_busy')).toEqual([
+      expect.objectContaining({ level: 'warn', agentId: acting.agentId, waitedMs: 7_500 }),
+    ]);
+    const made = await withTenant(app, w.org, (tx) =>
+      tx.selectFrom('spend_requests.requests').select('id').where('idempotency_key', '=', 'busy-turn').execute(),
+    );
+    expect(made).toEqual([]);
+    // Sent again with the same key once its turn comes: decided, as a first ask.
+    decisions = createSpendRequestDecisions({
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+    expect(await ask(acting, asking(w), 'busy-turn')).toMatchObject({ outcome: 'decided' });
+  });
+
+  it('fails a decision whose turn fails otherwise, as it always did', async () => {
+    const { w, acting } = await ready();
+    decisions = createSpendRequestDecisions({
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      turns: { run: () => Promise.reject(new Error('the pool is gone')), agentsInHand: () => 0 },
+    });
+
+    await expect(ask(acting, asking(w))).rejects.toThrow('the pool is gone');
   });
 
   it('takes one agent’s burst two at a time: the rest hold no connection, so another agent’s goes on (S160)', async () => {

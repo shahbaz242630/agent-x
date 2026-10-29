@@ -61,6 +61,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "AGENT_BUSY",
+                    "description": "The agent has several payment requests being decided at Agent X right now, so this one waited its turn too long and wasn't made. Wait the number of seconds in the Retry-After header, then send the same request again with the same Idempotency-Key."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGENT_CANCELS_SPENT",
                     "description": "The agent has cancelled as many of its own spend requests as it may in 24 hours, so this one wasn't cancelled. An admin or finance approver can still cancel it; if the agent keeps cancelling, look at what it is doing."
                   },

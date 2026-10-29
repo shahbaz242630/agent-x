@@ -94,7 +94,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type AgentTurns, createAgentTurns } from './agent-turns.ts';
+import { type AgentTurns, createAgentTurns, TurnWaitExceeded } from './agent-turns.ts';
 import {
   choicesHistory,
   consentOf,
@@ -108,7 +108,7 @@ import {
   versionIn,
 } from './mandate-reads.ts';
 import { consentCeilingOf } from './over-limit-choice.ts';
-import type { Refused } from './refused.ts';
+import { type Refused, refused } from './refused.ts';
 import { createUseCaseWork } from './use-case-work.ts';
 
 /** The agent's write, as its idempotency keys name it. */
@@ -637,15 +637,23 @@ export function createSpendRequestDecisions({
       // The whole decision, its turn's wait, lock waits and retries too, for the Pilot's policy target (PL-38).
       const started = performance.now();
       // In its agent's turn, so a burst from one agent can't hold every connection while it waits on its month.
-      const done = await turns.run(agent.agentId, () =>
-        retryingTransaction(log, DECIDE_OPERATION, () =>
-          work.write(agent, idempotent, correlationId, async (tx, states) => {
-            made = await decided(tx, states, agent, idempotent.key, asked);
-            fresh = made.answer;
-            return { status: 201, resourceId: made.id };
-          }),
-        ),
-      );
+      let done: Awaited<ReturnType<typeof work.write>>;
+      try {
+        done = await turns.run(agent.agentId, () =>
+          retryingTransaction(log, DECIDE_OPERATION, () =>
+            work.write(agent, idempotent, correlationId, async (tx, states) => {
+              made = await decided(tx, states, agent, idempotent.key, asked);
+              fresh = made.answer;
+              return { status: 201, resourceId: made.id };
+            }),
+          ),
+        );
+      } catch (error) {
+        if (!(error instanceof TurnWaitExceeded)) throw error;
+        // Nothing of it was made, its key unclaimed: the agent sends it again (partner, S161: busy, never a 500).
+        log.warn('spend_request.agent_busy', { agentId: agent.agentId, waitedMs: error.waitedMs });
+        return refused(503, 'AGENT_BUSY');
+      }
       if (isUnwritten(done)) return done;
       // Once a decision is committed, and once only (never for its key's replay), from the write itself, so a
       // failed read after it can't lose it (E2a review): the denial-surge alert counts these lines per agent

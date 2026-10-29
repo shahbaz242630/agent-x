@@ -9,7 +9,8 @@
 // holding the pool.
 //
 // A wait is bounded as the pool's own is (10 s for a connection): past it the
-// decision fails as a connection wait that ran out does, with nothing made.
+// decision is answered busy (503 AGENT_BUSY, with Retry-After), with nothing
+// made, so the agent sends it again (partner, S161).
 
 /** Decisions of one agent at once in this process: two, so one can get its locks while another holds the month's. */
 export const TURNS_AN_AGENT = 2;
@@ -19,9 +20,12 @@ export const TURN_WAIT_MS = 10_000;
 
 /** A decision that waited its whole bound for its agent's turn: nothing of it was made. */
 export class TurnWaitExceeded extends Error {
+  readonly waitedMs: number;
+
   constructor(waitedMs: number) {
     super(`A decision waited ${String(waitedMs)} ms for its agent's turn, behind its other decisions in this process`);
     this.name = 'TurnWaitExceeded';
+    this.waitedMs = waitedMs;
   }
 }
 
