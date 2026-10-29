@@ -20,7 +20,7 @@ param adminPassword string
 param sku object
 @description('The zone the server runs in, stated so a deploy never leaves the choice to Azure (4D2d P5). Azure moves a server only by a new one or a failover, so it is the zone the server is in.')
 param zone string
-@description('Whether the load run\'s measurements are on (D2c, 4D2d P5): Query Store, its wait sampling and the slow-statement log. Only on a size that isn\'t Burstable.')
+@description('Whether the load run\'s measurements are on (D2c, 4D2d P5): Query Store and its wait sampling. Only on a size that isn\'t Burstable.')
 param measured bool
 param backupRetentionDays int
 param geoRedundantBackup bool
@@ -108,7 +108,10 @@ var settings = [
   // turns them off again. Microsoft: "Don't enable query store on the
   // Burstable pricing tier as it causes performance problems." Query Store
   // keeps each query's plan too, so auto_explain (a restart of its own, past
-  // the resize's) isn't needed.
+  // the resize's) isn't needed. No slow-statement log either: at saturation
+  // it could fill the workspace's 1 GB a day, and the login alerts would go
+  // blind until the next day (S159 review); Query Store keeps each query's
+  // slowest time inside the server.
   {
     name: 'pg_qs.query_capture_mode'
     value: measured ? 'top' : 'none'
@@ -124,11 +127,6 @@ var settings = [
   {
     name: 'track_io_timing'
     value: measured ? 'on' : 'off'
-  }
-  // Statements over 250 ms: rare enough to stay far under the workspace's 1 GB a day.
-  {
-    name: 'log_min_duration_statement'
-    value: measured ? '250' : '-1'
   }
 ]
 

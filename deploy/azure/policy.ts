@@ -165,7 +165,6 @@ const MEASURES_OFF: ReadonlyMap<string, string> = new Map([
   ['pg_qs.store_query_plans', 'off'],
   ['pgms_wait_sampling.query_capture_mode', 'none'],
   ['track_io_timing', 'off'],
-  ['log_min_duration_statement', '-1'],
 ]);
 
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
