@@ -1128,8 +1128,13 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
     const create = AsyncResource.bind(() => newAgent('reader', id));
     let createdOnce = false;
     // The log is read only once the row's creation has committed, which a check can meet in production by chance.
+    // Only the check in two statements can meet it, so the one-statement read (4D2d P3a) is made to step aside.
     const late: AuditTrail = {
       ...trail,
+      latestSignedStateWithRow: async (tx: AuditTransaction, orgId, subject, rowRead) => ({
+        ...(await trail.latestSignedStateWithRow(tx, orgId, subject, rowRead)),
+        rows: undefined,
+      }),
       latestSignedState: async (tx: AuditTransaction, orgId, subject) => {
         if (!createdOnce) {
           createdOnce = true;
@@ -1141,6 +1146,94 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
 
     expect(await check(id, statesWith(late))).toMatchObject({ outcome: 'verified', version: 1 });
     expect(alarms()).toEqual([]);
+  });
+
+  it('a check that waited for a change to commit: the one statement read the log before it, so read again, verified (4D2d P3a)', async () => {
+    const id = await newAgent();
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked = (): void => undefined;
+    const rowLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    // The change holds the row, and its new event, uncommitted while the check waits for the row.
+    const changing = withTenant(app, org, async (tx) => {
+      const changed = await states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      locked();
+      await held;
+      return changed;
+    });
+    try {
+      await rowLocked;
+      const checking = check(id);
+      await waitUntilQueued(attacker, 1);
+      release();
+
+      expect(await changing).toMatchObject({ outcome: 'changed', version: 2 });
+      expect(await checking).toMatchObject({ outcome: 'verified', version: 2 });
+    } finally {
+      release();
+    }
+    expect(alarms()).toEqual([]);
+  });
+
+  it('checks a row in one statement when nothing changed it (4D2d P3a): the log is never read apart', async () => {
+    const id = await newAgent();
+    const apart: AuditTrail = {
+      ...trail,
+      latestSignedState: () => Promise.reject(new Error('read apart')),
+    };
+
+    expect(await check(id, statesWith(apart))).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(await check(id, statesWith(apart), 'change')).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('raises the alarm for an older signed state put back while the check waited for the row (4D2d P3a)', async () => {
+    const id = await newAgent();
+    const [first] = await eventsAbout(id);
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked = (): void => undefined;
+    const rowLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    // A real change holds the row, its new event uncommitted.
+    const changing = withTenant(app, org, async (tx) => {
+      const changed = await states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      locked();
+      await held;
+      return changed;
+    });
+    const replayer = await database.connect('admin');
+    try {
+      await rowLocked;
+      // Behind it, the attacker waits to put the first signed state back, whole and sealed as it was.
+      await replayer.query('begin');
+      const replaying = replayer.query(
+        `update probe.agents set status = 'ACTIVE', role = 'reader', state_version = 1, state_event_id = $3
+         where org_id = $1 and id = $2`,
+        [org, id, first?.id],
+      );
+      await waitUntilQueued(attacker, 1);
+      // The check starts now: its snapshot shows the first event as the newest, as the replayed row will.
+      const checking = check(id);
+      await waitUntilQueued(attacker, 2);
+      release();
+      await changing;
+      await replaying;
+      await replayer.query('commit');
+
+      expect(await checking).toMatchObject({ outcome: 'tampered', sign: 'pointer' });
+    } finally {
+      release();
+      await replayer.end();
+    }
+    expect(alarms()).toHaveLength(1);
   });
 
   it('many checks while the row changes: every one verified, none alarmed', async () => {
