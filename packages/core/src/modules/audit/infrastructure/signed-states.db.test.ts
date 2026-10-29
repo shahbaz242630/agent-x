@@ -266,6 +266,32 @@ describe('ADR-012 §2 an authority row recorded and verified against the log', (
     expect(alarms()).toEqual([]);
   });
 
+  it('moves a verified row from its sealed status in one update, its status never read apart (4D2d P9)', async () => {
+    const id = await newAgent();
+    const reads = { status: 0 };
+
+    const changed = await withTenant(app, org, async (tx) => {
+      const counting = tx.withPlugin({
+        transformQuery: (args) => {
+          if (
+            JSON.stringify(args.node, (_, value: unknown) =>
+              typeof value === 'bigint' ? String(value) : value,
+            ).includes('select status from')
+          )
+            reads.status += 1;
+          return args.node;
+        },
+        transformResult: (args) => Promise.resolve(args.result),
+      });
+      await states.verifiedState(counting, AGENTS, { orgId: org, id }, 'change');
+      return states.changeStatus(counting, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+    });
+
+    expect(changed).toMatchObject({ outcome: 'changed', to: 'SUSPENDED', version: 2 });
+    expect(reads.status).toBe(0);
+    expect(alarms()).toEqual([]);
+  });
+
   it('changes a status with its signed event, the move in its details (ADR-007 §1.3)', async () => {
     const id = await newAgent();
 

@@ -132,21 +132,32 @@ export function createStatusChanger({ logger }: { readonly logger: Logger }): St
       const moved = async (from: State, to: State): Promise<StatusChange<State> | undefined> => {
         // The alias keeps the text after the table name from starting with SET,
         // which the lint rule against session-wide settings would take for one.
-        const updated = await sql<{ status: unknown }>`
-          update ${sql.table(table)} as target set status = ${to}
-          where org_id = ${orgId} and id = ${id} and status = ${from}
-          returning status
+        // Every copy of the key counted in the same statement, as the locking read finds them: a copy planted past
+        // the app in another status isn't updated, but is still a key that isn't unique (S161 review).
+        const { rows } = await sql<{ moved: unknown; copies: unknown }>`
+          with updated as (
+            update ${sql.table(table)} as target set status = ${to}
+            where org_id = ${orgId} and id = ${id} and status = ${from}
+            returning status
+          )
+          select (select pg_catalog.json_agg(u.status) from updated u) as moved,
+                 (select pg_catalog.count(*) from ${sql.table(table)} c where c.org_id = ${orgId} and c.id = ${id}) as copies
         `.execute(tx);
+        const moved = Array.isArray(rows[0]?.moved) ? (rows[0].moved as unknown[]) : [];
         // One row, and in the status decided. Two can match though the row is locked: a duplicate key
         // inserted past the app while this change waited is outside the lock's snapshot, but not the update's.
-        const [written, ...alsoWritten] = updated.rows;
+        const [written, ...alsoWritten] = moved;
         if (written === undefined) return undefined;
-        if (written.status !== to || alsoWritten.length > 0) {
+        if (written !== to || alsoWritten.length > 0) {
           log.error('status.change_not_applied', { ...facts, from, to });
           throw new StatusChangeFailed(
             'not_applied',
             `The locked ${rules.name} row's status update didn't leave it in the status decided`,
           );
+        }
+        if (rows[0]?.copies !== 1n) {
+          log.error('status.unreadable', facts);
+          throw new StatusChangeFailed('unreadable', `A ${rules.name} row's key isn't unique`);
         }
         log.info('status.changed', { ...facts, from, to });
         return { outcome: 'changed', from, to };

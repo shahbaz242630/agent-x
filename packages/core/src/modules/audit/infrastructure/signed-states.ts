@@ -1143,7 +1143,8 @@ export function createSignedStates({
       (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
     );
     const pointed =
-      recorded.along === undefined ? ({ outcome: 'unreadable' } as const) : signedRowPointed(table, recorded.along);
+      // None that read as rows is none taken: the row is then not as sealed, and the change fails with the alarm.
+      signedRowPointed(table, recorded.along ?? []);
     const sealed = new Map(row.fields);
     if (
       pointed.outcome !== 'found' ||

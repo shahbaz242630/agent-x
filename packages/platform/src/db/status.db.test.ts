@@ -543,6 +543,29 @@ describe('a move from the status the caller holds the row in (4D2d P8)', () => {
     }
   });
 
+  it('fails a move whose key has a second row in another status, planted past the app, as the read finds it', async () => {
+    const id = await thingIn('ACTIVE');
+    await admin.query('alter table probe.parts drop constraint parts_org_id_thing_id_fkey');
+    await admin.query('alter table probe.things drop constraint things_pkey');
+    try {
+      // Made as the guard lets a row in, then moved on: the copy alone, by its place in the table.
+      await admin.query("insert into probe.things (org_id, id, status) values ($1, $2, 'ACTIVE')", [ORG, id]);
+      await admin.query(
+        "update probe.things set status = 'SUSPENDED' where id = $1 and ctid = (select max(ctid) from probe.things where id = $1)",
+        [id],
+      );
+
+      await expect(changeHeld(id, 'suspend', 'ACTIVE')).rejects.toMatchObject({ reason: 'unreadable' });
+      expect(linesNamed('status.unreadable')).toHaveLength(1);
+    } finally {
+      await admin.query("delete from probe.things where id = $1 and status = 'SUSPENDED'", [id]);
+      await admin.query('alter table probe.things add primary key (org_id, id)');
+      await admin.query(
+        'alter table probe.parts add constraint parts_org_id_thing_id_fkey foreign key (org_id, thing_id) references probe.things (org_id, id)',
+      );
+    }
+  });
+
   it('fails a move that updates a second row under the same key, planted past the app', async () => {
     const id = await thingIn('ACTIVE');
     await admin.query('alter table probe.parts drop constraint parts_org_id_thing_id_fkey');
