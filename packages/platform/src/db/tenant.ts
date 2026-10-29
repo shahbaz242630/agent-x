@@ -17,7 +17,7 @@
 // function called set_config can stand in.
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-import { type Kysely, type PostgresPool, sql, type Transaction } from 'kysely';
+import { type Kysely, type PostgresPool, type RawBuilder, sql, type Transaction } from 'kysely';
 import type pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
@@ -172,6 +172,19 @@ const STATEMENT_TIMEOUT = `${String(STATEMENT_SECONDS)}s`;
  */
 export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<void> {
   await sql`select pg_catalog.set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true)`.execute(tx);
+}
+
+/**
+ * An expression that bounds how long the rest of the transaction waits for a
+ * lock to 5 seconds, unless a shorter limit is set already, which is kept
+ * (Postgres's `0` is no limit at all): set for the transaction alone, as SET
+ * LOCAL sets it, inside a statement of the caller's (an idempotency claim's,
+ * 4D2d P8). Its own value is never read.
+ */
+export function lockWaitBounded(): RawBuilder<unknown> {
+  return sql`case when (pg_catalog.current_setting('lock_timeout')::interval = interval '0'
+      or pg_catalog.current_setting('lock_timeout')::interval > interval '5 seconds') is not false
+    then pg_catalog.set_config('lock_timeout', '5s', true) end`;
 }
 
 /** A lock's name, `agentx.<scope>:<id>…` with the IDs in lower case, so every taker of one lock names it alike. */

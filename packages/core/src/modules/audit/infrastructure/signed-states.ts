@@ -40,6 +40,8 @@ import { type AnchorPoint, sealState, stateSealDetails, stateSealMatches } from 
 import {
   createStatusChanger,
   type FieldText,
+  type GatheredRow,
+  gatheredRowReads,
   MOST_SIGNED_ROWS_READ,
   pointSignedRow,
   readSignedRow,
@@ -74,6 +76,7 @@ import {
   type AuditTrail,
   type AuditTransaction,
   type EventToFind,
+  type GatheredLatest,
   type HistoryToRead,
   type LogEvent,
   type LogPageToRead,
@@ -82,8 +85,10 @@ import {
   lockChainHead,
   type ReadEvent,
   type RecordedEventCheck,
+  type RecordedEventsCheck,
   recordHoldEvent,
   TooManyEventsAboutObject,
+  TooManyEventsToRead,
 } from './audit-trail.ts';
 
 /**
@@ -283,6 +288,8 @@ export type SignedStatusChange<State extends string> =
       readonly to: State;
       readonly version: number;
       readonly eventId: string;
+      /** The state recorded, as sealed and read back with its pointer: what a fresh answer shows (4D2d P8). */
+      readonly state: VerifiedState;
     }
   | { readonly outcome: 'refused'; readonly from: State }
   | { readonly outcome: 'missing' }
@@ -358,6 +365,18 @@ export interface SignedStates {
    * row stays locked as asked to the end of the transaction.
    */
   verifiedState(tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey, lock: RowLock): Promise<StateCheck>;
+  /**
+   * Reads and locks the organisation's rows in the order given (the lock
+   * order, ADR-006 §6), each with its newest signed event, in one statement
+   * (4D2d P8), so that the next verifiedState of each, with the lock it was
+   * gathered with, answers from this read with no trip of its own. Judged as
+   * verifiedState judges its own one-statement read: a row that changed while
+   * the statement waited for a lock, or that disagrees with its log, is left
+   * for that verifiedState to read again, and only that read raises an
+   * alarm. A row's ID can come from an earlier row (GatheredId). Each row's
+   * ID as its read named it, in the order given, null for none found.
+   */
+  gather(tx: AuditTransaction, orgId: string, rows: readonly GatheredRow[]): Promise<readonly (string | null)[]>;
   /**
    * verifiedState for many rows of one table in the organisation, each locked
    * `share`: the rows in one statement and their signed states in another,
@@ -545,6 +564,15 @@ export interface SignedStates {
    */
   historyOf(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<HistoryCheck>;
   /**
+   * Reads these histories in one statement (4D2d P8, the trail's
+   * recordedHistories), so that the next historyOf of each, asked alike in
+   * this transaction, answers from this read with no trip of its own, once.
+   * Judged as historyOf judges each, its alarm raised by that historyOf, so a
+   * history read here and never asked raises none, as one never read. A
+   * history past its limit leaves them all to their own reads.
+   */
+  gatherHistories(tx: AuditTransaction, orgId: string, finds: readonly HistoryToRead[]): Promise<void>;
+  /**
    * One event of the organisation's log, by its ID or its object (the trail's
    * recordedEvent), believed only whole: a record an answer rests on, such as
    * an export's or a download's (Phase 3 F1, G2). One that isn't whole raises
@@ -615,6 +643,12 @@ interface Held {
   /** The state this transaction just recorded on the row, still locked, for changeStatus to go on from (4D2d P3b). */
   wrote?: { readonly table: SignedStateTable; readonly state: VerifiedState };
 }
+
+/** A history as gatherHistories keeps it: the organisation and every field of the find, a seq as its text. */
+const historyName = (orgId: string, find: HistoryToRead): string =>
+  JSON.stringify([orgId.toLowerCase(), Object.entries(find).toSorted(([a], [b]) => a.localeCompare(b))], (_, value) =>
+    typeof value === 'bigint' ? `${value.toString()}n` : (value as unknown),
+  );
 
 const MISSING = Object.freeze({ outcome: 'missing' as const });
 const MISSING_HOLD = Object.freeze({ outcome: 'not_held' as const });
@@ -707,6 +741,10 @@ export function createSignedStates({
   const KEPT: AnchorKept = Object.freeze({ outcome: 'kept' });
   /** Organisations verifyAll found whole in each transaction, whose hold it may clear. */
   const verifiedWhole = new WeakMap<AuditTransaction, Set<string>>();
+  /** What each transaction's gatherHistories read, by history, for its next historyOf to answer from (P8). */
+  const historiesGathered = new WeakMap<AuditTransaction, Map<string, RecordedEventsCheck>>();
+  /** What each transaction's gathers read and believed, by row, for its next verifiedState to answer from (P8). */
+  const gathered = new WeakMap<AuditTransaction, Map<string, { readonly lock: RowLock; readonly check: StateCheck }>>();
 
   const heldIn = (tx: AuditTransaction): Map<string, Held> => {
     const known = rowsHeld.get(tx) ?? new Map<string, Held>();
@@ -804,14 +842,65 @@ export function createSignedStates({
       if (error instanceof TooManyEventsAboutObject) return undefined;
       throw error;
     }
-    const { latest, rows } = read;
-    if (rows === undefined) return undefined;
+    return believedPair(table, key, read.latest, read.rows);
+  };
+
+  /**
+   * A row and its newest signed event read in one statement, believed only
+   * when they agree (verified), or when there is neither: undefined for
+   * anything else, raising no alarm (inOneStatement's rule).
+   */
+  const believedPair = (
+    table: SignedStateTable,
+    key: SignedRowKey,
+    latest: GatheredLatest['latest'],
+    rows: GatheredLatest['rows'],
+  ): StateCheck | undefined => {
+    if (rows === undefined || latest.kind === 'backlog') return undefined;
     const row = signedRowSeen(table, rows);
     if (row === undefined) return undefined;
     if (row.outcome === 'missing') return latest.kind === 'none' ? MISSING : undefined;
     if (row.outcome !== 'found') return undefined;
     const judged = judge(table, key, row, latest);
     return 'sign' in judged ? undefined : judged;
+  };
+
+  const gather = async (
+    tx: AuditTransaction,
+    orgId: string,
+    list: readonly GatheredRow[],
+  ): Promise<readonly (string | null)[]> => {
+    for (const { table } of list) notTheHold(table);
+    if (headLocked.has(tx)) checkLockOrder(tx, undefined, 'share');
+    const rows = heldIn(tx);
+    // A row named here held already: the lock order is checked before the statement can raise it.
+    for (const { table, id, lock } of list) {
+      if ('id' in id) checkLockOrder(tx, rows.get(rowName(table, { orgId, id: id.id })), lock);
+    }
+    const answers = await trail.latestSignedStatesGathered(tx, orgId, gatheredRowReads(orgId, list));
+    const kept = gathered.get(tx) ?? new Map<string, { readonly lock: RowLock; readonly check: StateCheck }>();
+    gathered.set(tx, kept);
+    return list.map(({ table, lock }, index) => {
+      const answer = answers[index];
+      if (answer === undefined || answer.id === null) return null;
+      const key = { orgId, id: answer.id };
+      const name = rowName(table, key);
+      const held = rows.get(name);
+      checkLockOrder(tx, held, lock);
+      // Held from here, as verifiedState holds a row it reads.
+      rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
+      const check = believedPair(table, key, answer.latest, answer.rows);
+      if (check === undefined) kept.delete(name);
+      else kept.set(name, { lock, check });
+      return answer.id;
+    });
+  };
+
+  /** What a gather believed of the row, once, if it was gathered with this lock: no trip (P8). */
+  const takeGathered = (tx: AuditTransaction, name: string, lock: RowLock): StateCheck | undefined => {
+    const kept = gathered.get(tx)?.get(name);
+    gathered.get(tx)?.delete(name);
+    return kept?.lock === lock ? kept.check : undefined;
   };
 
   /** Throws if locking the row now would break the lock order: a shared lock raised to change, or a row after the head. */
@@ -838,7 +927,7 @@ export function createSignedStates({
     checkLockOrder(tx, held, lock);
     // Held from here: the statement below takes the lock before it gives anything back.
     rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
-    const quick = await inOneStatement(tx, table, key, lock);
+    const quick = takeGathered(tx, name, lock) ?? (await inOneStatement(tx, table, key, lock));
     const checked = quick ?? (await inTwoStatements(tx, table, key, lock));
     if (checked.outcome === 'verified' && lock === 'change') rows.set(name, { lock, from: { table, state: checked } });
     return checked;
@@ -991,6 +1080,8 @@ export function createSignedStates({
     notTheHold(table);
     const rows = heldIn(tx);
     const name = rowName(table, key);
+    // A row written is never answered from what a gather read before.
+    gathered.get(tx)?.delete(name);
     if (from === 'new') {
       await lockNewRow(tx, table, key, set, rows, name);
     } else {
@@ -1165,10 +1256,30 @@ export function createSignedStates({
   };
 
   const historyOf = async (tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<HistoryCheck> => {
-    const read = await trail.recordedEvents(tx, orgId, find);
+    const asked = historyName(orgId, find);
+    const gatheredRead = historiesGathered.get(tx)?.get(asked);
+    historiesGathered.get(tx)?.delete(asked);
+    const read = gatheredRead ?? (await trail.recordedEvents(tx, orgId, find));
     // The organisation's own history: the alarm names it, as no one object is to blame.
     if (read.kind === 'broken') return alarm('organisation', { orgId, id: orgId }, 'log', read.seq);
     return Object.freeze({ outcome: 'read', events: read.events });
+  };
+
+  const gatherHistories = async (tx: AuditTransaction, orgId: string, finds: readonly HistoryToRead[]) => {
+    let reads: readonly RecordedEventsCheck[];
+    try {
+      reads = await trail.recordedHistories(tx, orgId, finds);
+    } catch (error) {
+      // Thrown after the statement ran, so the transaction goes on: each history is then read as it is asked.
+      if (error instanceof TooManyEventsToRead) return;
+      throw error;
+    }
+    const kept = historiesGathered.get(tx) ?? new Map<string, RecordedEventsCheck>();
+    historiesGathered.set(tx, kept);
+    for (const [index, find] of finds.entries()) {
+      const read = reads[index];
+      if (read !== undefined) kept.set(historyName(orgId, find), read);
+    }
   };
 
   const eventOf = async (tx: AuditTransaction, orgId: string, find: EventToFind): Promise<EventRead> => {
@@ -1204,6 +1315,7 @@ export function createSignedStates({
 
   return Object.freeze({
     verifiedState,
+    gather,
 
     verifiedStates,
     pageStates,
@@ -1363,12 +1475,16 @@ export function createSignedStates({
         { [STATUS]: moved.to },
         { ...change, details: { ...change.details, statusFrom: moved.from, statusTo: moved.to } },
       );
+      // recordChange keeps the state it recorded for the next change to go on from (P3b).
+      const state = heldIn(tx).get(rowName(table, key))?.wrote?.state;
+      if (state === undefined) throw new Error('A status change recorded no state');
       return Object.freeze({
         outcome: 'changed',
         from: moved.from,
         to: moved.to,
         version: recorded.version,
         eventId: recorded.eventId,
+        state,
       });
     },
 
@@ -1467,6 +1583,7 @@ export function createSignedStates({
     holdInvestigation,
 
     historyOf,
+    gatherHistories,
     eventOf,
     logPageOf,
 

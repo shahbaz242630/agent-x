@@ -86,7 +86,8 @@ export async function insertRequest(tx: RequestsTransaction, request: NewRequest
  * Signs the request just inserted (`spend_request.received`) and moves it
  * where its decision leads (`spend_request.decided`, with the reasons, and,
  * when it holds capacity, its reservation's month and instant and its payee
- * seal: `held`).
+ * seal: `held`). The request as its state was sealed and read back: a fresh
+ * decision's answer (4D2d P8).
  */
 export async function signRequest(
   tx: RequestsTransaction,
@@ -94,7 +95,7 @@ export async function signRequest(
   request: NewRequest,
   actor: AuditActor,
   held: HeldAs | null,
-): Promise<void> {
+): Promise<SpendRequestRecord> {
   const key = { orgId: request.orgId, id: request.id };
   await states.record(tx, SPEND_REQUESTS, key, 'new', fieldsOf(request), {
     actor,
@@ -123,6 +124,7 @@ export async function signRequest(
   });
   // Just recorded VALIDATING by this transaction, its move its decision's: anything else is something past the app.
   if (moved.outcome !== 'changed') throw new Error(`A new spend request didn't move as decided: ${moved.outcome}`);
+  return recordFrom(request.id, moved.state);
 }
 
 /** The authority fields of a new request, as the row and its first signed state hold them. */

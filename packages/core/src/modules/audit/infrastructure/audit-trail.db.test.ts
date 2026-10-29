@@ -1502,6 +1502,64 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
     ).rejects.toThrow(RangeError);
   });
 
+  describe('several at once (recordedHistories, 4D2d P8)', () => {
+    const histories = (finds: readonly HistoryToRead[]) =>
+      withTenant(app, org, (tx) => trail.recordedHistories(tx, org, finds));
+    const each = (finds: readonly HistoryToRead[]) =>
+      withTenant(app, org, async (tx) => {
+        const reads = [];
+        for (const find of finds) reads.push(await trail.recordedEvents(tx, org, find));
+        return reads;
+      });
+    const newestMembership: HistoryToRead = { subjectTypes: ['membership'], limit: 1, newest: true };
+    const finds: readonly HistoryToRead[] = [
+      newestMembership,
+      { subjectTypes: ['supplier', 'invitation'], subjectId: USER, limit: 5 },
+      { subjectTypes: ['probe'], limit: 2, oldest: true, afterSeq: 1n },
+    ];
+
+    it('gives each history as recordedEvents gives it alone, in the order asked, in one statement', async () => {
+      await record(org, about('membership', 1), about('supplier', 2), about('membership', 3), about('invitation', 4));
+
+      const read = await histories(finds);
+      expect(read).toEqual(await each(finds));
+      expect(read).toMatchObject([
+        { kind: 'recorded', events: [{ seq: 3n }] },
+        { kind: 'recorded', events: [{ seq: 2n }, { seq: 4n }] },
+        { kind: 'recorded', events: [] },
+      ]);
+      expect(await histories([])).toEqual([]);
+    });
+
+    it('gives none for a chain that holds none', async () => {
+      expect(await histories(finds)).toEqual(finds.map(() => ({ kind: 'recorded', events: [] })));
+    });
+
+    it('judges each alone: one tampered with is broken where, the others whole', async () => {
+      await record(org, about('membership', 1), about('supplier', 2));
+      await tamper(`update audit.events set details = '{"step":9}' where org_id = $1 and seq = 2`);
+
+      expect(await histories(finds.slice(0, 2))).toEqual([
+        expect.objectContaining({ kind: 'recorded' }),
+        { kind: 'broken', seq: 2n },
+      ]);
+    });
+
+    it('calls every history broken for a chain holding an event past its head', async () => {
+      await record(org, about('membership', 1), about('supplier', 2), about('membership', 3));
+      await tamper('update audit.heads set seq = 2 where org_id = $1');
+
+      expect(await histories(finds)).toEqual(finds.map(() => ({ kind: 'broken', seq: 3n })));
+    });
+
+    it('throws past a history’s limit, as one read alone does, and refuses more histories than one read takes', async () => {
+      await record(org, about('supplier', 1), about('supplier', 2));
+
+      await expect(histories([{ subjectTypes: ['supplier'], limit: 1 }])).rejects.toThrow(TooManyEventsToRead);
+      await expect(histories(Array.from({ length: 9 }, () => newestMembership))).rejects.toThrow(RangeError);
+    });
+  });
+
   it('tells a query whether an object was stopped to cancel since another’s first event, unverified (cancelledSince, F1 G1)', async () => {
     const cancelled = () =>
       withTenant(app, org, async (tx) => {

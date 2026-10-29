@@ -7,7 +7,7 @@
 // read here too, as every mandate shows the monthly cap its agent is held to
 // (C3c, partner S92: a lower cap is never quiet).
 import type { AgentsTables } from '@agentx/core/modules/agents';
-import type { SignedStates } from '@agentx/core/modules/audit';
+import type { HistoryToRead, SignedStates } from '@agentx/core/modules/audit';
 import { type FundingSourcesTables, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import {
@@ -164,26 +164,27 @@ export async function overLimitOf(
   mandateId: string,
   versionId: string,
 ): Promise<OverLimit | null> {
-  const chosen = await states.historyOf(tx, orgId, {
-    subjectTypes: [MANDATES.subject],
-    subjectId: mandateId,
-    actions: [OVER_LIMIT_CHOSEN],
-    limit: 1,
-    newest: true,
-  });
+  const [chosenFind, draftedFind] = overLimitHistories(mandateId, versionId);
+  const chosen = await states.historyOf(tx, orgId, chosenFind);
   if (chosen.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
   const latest = chosen.events.at(-1)?.event.details;
   if (latest?.versionId === versionId.toLowerCase()) return overLimitIn(latest);
-  const history = await states.historyOf(tx, orgId, {
+  const history = await states.historyOf(tx, orgId, draftedFind);
+  if (history.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  return overLimitIn(history.events.at(-1)?.event.details);
+}
+
+/** overLimitOf's two histories, the mandate's newest choice and the version's drafted event, for a gather (4D2d P8). */
+export const overLimitHistories = (mandateId: string, versionId: string): [HistoryToRead, HistoryToRead] => [
+  { subjectTypes: [MANDATES.subject], subjectId: mandateId, actions: [OVER_LIMIT_CHOSEN], limit: 1, newest: true },
+  {
     subjectTypes: [MANDATE_VERSIONS.subject],
     subjectId: versionId,
     actions: [VERSION_DRAFTED],
     limit: 1,
     newest: true,
-  });
-  if (history.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-  return overLimitIn(history.events.at(-1)?.event.details);
-}
+  },
+];
 
 /** Whether the agent's cap holds the version below its own monthly limit: never compared across currencies (C2 denies those). */
 const heldBelow = (
@@ -224,6 +225,15 @@ export async function policyRulesIn(
 /** The action whose event keeps a policy version's choices (`setPolicy`'s). */
 export const VERSION_MADE = 'policy_version.made';
 
+/** organizationChoicesOf's history, the version's made event, for a gather (4D2d P8). */
+export const choicesHistory = (versionId: string): HistoryToRead => ({
+  subjectTypes: [POLICY_VERSIONS.subject],
+  subjectId: versionId,
+  actions: [VERSION_MADE],
+  limit: 1,
+  newest: true,
+});
+
 /**
  * The organisation's monthly cap as an admin chose it (E2), from its policy
  * version in force (null: never set): an amount set is `amount`; none is
@@ -259,13 +269,7 @@ export async function organizationChoicesOf(
   current: PolicyVersionRecord | null,
 ): Promise<OrganizationChoices> {
   if (current === null) return { capChoice: null, approvalWait: null };
-  const history = await states.historyOf(tx, orgId, {
-    subjectTypes: [POLICY_VERSIONS.subject],
-    subjectId: current.id,
-    actions: [VERSION_MADE],
-    limit: 1,
-    newest: true,
-  });
+  const history = await states.historyOf(tx, orgId, choicesHistory(current.id));
   if (history.outcome !== 'read') throw new MandateRefused(503, 'INTEGRITY_FAILED');
   const details = history.events.at(-1)?.event.details;
   const capChoice = current.monthlyCap !== null ? 'amount' : capChoiceIn(details) === 'none' ? 'none' : null;

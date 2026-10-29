@@ -30,7 +30,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { AuditEventRefused } from '../domain/event.ts';
-import { type AuditTrail, type AuditTransaction, createAuditTrail, TooManyEventsAboutObject } from './audit-trail.ts';
+import {
+  type AuditTrail,
+  type AuditTransaction,
+  createAuditTrail,
+  type HistoryToRead,
+  TooManyEventsAboutObject,
+  TooManyEventsToRead,
+} from './audit-trail.ts';
 import {
   createSignedStates,
   type SignedStateFailed,
@@ -80,9 +87,34 @@ const FIXTURE = [
   'grant usage on schema probe to agentx_app',
   'grant select, insert on probe.agents to agentx_app',
   'grant update (status, role, label, state_version, state_event_id) on probe.agents to agentx_app',
+  // A row naming another by a uuid field, as a mandate names its version: a gather follows it (4D2d P8).
+  'create table probe.links (org_id uuid not null, id uuid not null, agent_id uuid, kind text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))',
+  'alter table probe.links enable row level security',
+  'alter table probe.links force row level security',
+  `create policy tenant_isolation on probe.links ${TENANT_POLICY}`,
+  'grant select, insert on probe.links to agentx_app',
+  'grant update (agent_id, kind, state_version, state_event_id) on probe.links to agentx_app',
 ];
 
+/** probe.links: the agent it names, and its kind. */
+const LINKS = {
+  table: 'probe.links',
+  subject: 'link',
+  fields: [
+    { column: 'agent_id', type: 'uuid' },
+    { column: 'kind', type: 'text' },
+  ],
+} as const satisfies SignedStateTable;
+
 interface ProbeTables {
+  'probe.links': {
+    org_id: string;
+    id: string;
+    agent_id: string | null;
+    kind: string;
+    state_version?: number;
+    state_event_id?: string | null;
+  };
   'probe.agents': {
     org_id: string;
     id: string;
@@ -245,6 +277,8 @@ describe('ADR-012 §2 an authority row recorded and verified against the log', (
       to: 'SUSPENDED',
       version: 2,
       eventId: suspended?.id,
+      // As sealed and read back: what the next verified read finds (4D2d P8).
+      state: await check(id),
     });
     expect(suspended).toMatchObject({ action: 'agent.suspend', subject_version: 2 });
     expect(JSON.parse(suspended?.details ?? '{}')).toMatchObject({
@@ -1407,6 +1441,445 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
       expect(outcomes.filter((outcome) => outcome.outcome === 'tampered')).toEqual([]);
     }
     expect(alarms()).toEqual([]);
+  });
+});
+
+describe('gather (4D2d P8): rows in one statement, each answered once, with no trip of its own', () => {
+  /** Inserts a link naming the agent and records its first signed state, as newAgent does. */
+  async function newLink(agentId: string | null, id = newId()): Promise<string> {
+    await withTenant(app, org, async (tx) => {
+      await tx.insertInto('probe.links').values({ org_id: org, id, agent_id: agentId, kind: 'grant' }).execute();
+      await states.record(
+        tx,
+        LINKS,
+        { orgId: org, id },
+        'new',
+        { agent_id: agentId, kind: 'grant' },
+        change('link.made'),
+      );
+    });
+    return id;
+  }
+
+  /** Signed states whose reads of one row and its log are counted: a gathered row's verifiedState makes none. */
+  const counted = () => {
+    const reads = { one: 0, apart: 0 };
+    const using: AuditTrail = {
+      ...trail,
+      latestSignedStateWithRow: (tx: AuditTransaction, orgId, subject, rowRead) => {
+        reads.one += 1;
+        return trail.latestSignedStateWithRow(tx, orgId, subject, rowRead);
+      },
+      latestSignedState: (tx: AuditTransaction, orgId, subject) => {
+        reads.apart += 1;
+        return trail.latestSignedState(tx, orgId, subject);
+      },
+    };
+    return { reads, using: statesWith(using) };
+  };
+
+  const key = (id: string) => ({ orgId: org, id });
+
+  it('follows each kind of link and answers every row verified from the one read', async () => {
+    const agent = await newAgent('finder');
+    const link = await newLink(agent);
+    const { reads, using } = counted();
+
+    const outcome = await withTenant(app, org, async (tx) => {
+      const ids = await using.gather(tx, org, [
+        { table: LINKS, id: { id: link }, lock: 'share' },
+        { table: AGENTS, id: { from: 0, column: 'agent_id' }, lock: 'share' },
+        { table: LINKS, id: { sameAs: 0 }, lock: 'share' },
+        { table: AGENTS, id: { findBy: { column: 'role', value: 'finder', statusIn: ['ACTIVE'] } }, lock: 'share' },
+      ]);
+      const checks = [
+        await using.verifiedState(tx, LINKS, key(link), 'share'),
+        await using.verifiedState(tx, AGENTS, key(agent), 'share'),
+      ];
+      return { ids, checks };
+    });
+
+    expect(outcome.ids).toEqual([link, agent, link, agent]);
+    expect(outcome.checks).toEqual([
+      expect.objectContaining({
+        outcome: 'verified',
+        fields: new Map([
+          ['agent_id', agent],
+          ['kind', 'grant'],
+        ]),
+      }),
+      expect.objectContaining({
+        outcome: 'verified',
+        fields: new Map([
+          ['status', 'ACTIVE'],
+          ['role', 'finder'],
+        ]),
+      }),
+    ]);
+    expect(reads).toEqual({ one: 0, apart: 0 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('finds a row by its column only in a status asked, the first of several', async () => {
+    const agent = await newAgent('twin');
+    await newAgent('twin');
+    await changeStatus(agent, 'suspend');
+    const { using } = counted();
+
+    const ids = await withTenant(app, org, (tx) =>
+      using.gather(tx, org, [
+        { table: AGENTS, id: { findBy: { column: 'role', value: 'twin', statusIn: ['REVOKED'] } }, lock: 'share' },
+        { table: AGENTS, id: { findBy: { column: 'role', value: 'twin', statusIn: ['SUSPENDED'] } }, lock: 'share' },
+        {
+          table: AGENTS,
+          id: { findBy: { column: 'role', value: 'twin', statusIn: ['ACTIVE', 'SUSPENDED'] } },
+          lock: 'share',
+        },
+      ]),
+    );
+
+    expect(ids).toEqual([null, agent, expect.any(String)]);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('answers a row once, and only for the lock it was gathered with: any other read is a read of its own', async () => {
+    const agent = await newAgent();
+    const other = await newAgent();
+    const { reads, using } = counted();
+
+    await withTenant(app, org, async (tx) => {
+      await using.gather(tx, org, [
+        { table: AGENTS, id: { id: agent }, lock: 'change' },
+        { table: AGENTS, id: { id: other }, lock: 'change' },
+      ]);
+      expect(await using.verifiedState(tx, AGENTS, key(agent), 'change')).toMatchObject({ outcome: 'verified' });
+      expect(reads.one).toBe(0);
+      expect(await using.verifiedState(tx, AGENTS, key(agent), 'change')).toMatchObject({ outcome: 'verified' });
+      expect(reads.one).toBe(1);
+      // Held for change, read for a decision: no lock is lowered, so it is read again, not answered.
+      expect(await using.verifiedState(tx, AGENTS, key(other), 'share')).toMatchObject({ outcome: 'verified' });
+      expect(reads.one).toBe(2);
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('never answers a row from a gather once this transaction has written it', async () => {
+    const agent = newId();
+    const { reads, using } = counted();
+
+    const after = await withTenant(app, org, async (tx) => {
+      // Gathered missing, then made: the gather's answer is dropped with the write.
+      await using.gather(tx, org, [{ table: AGENTS, id: { id: agent }, lock: 'change' }]);
+      await tx
+        .insertInto('probe.agents')
+        .values({ org_id: org, id: agent, status: 'ACTIVE', role: 'reader' })
+        .execute();
+      await using.record(tx, AGENTS, key(agent), 'new', NEW_AGENT, change('agent.created'));
+      return using.verifiedState(tx, AGENTS, key(agent), 'change');
+    });
+
+    expect(after).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(reads.one).toBe(1);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('gives null for a row its link finds none for; a given ID with no row and no signed state is missing', async () => {
+    const lone = await newLink(null);
+    const absent = newId();
+    const { reads, using } = counted();
+
+    const outcome = await withTenant(app, org, async (tx) => {
+      const ids = await using.gather(tx, org, [
+        { table: LINKS, id: { id: lone }, lock: 'share' },
+        { table: AGENTS, id: { from: 0, column: 'agent_id' }, lock: 'share' },
+        { table: AGENTS, id: { findBy: { column: 'role', value: 'nobody', statusIn: ['ACTIVE'] } }, lock: 'share' },
+        { table: AGENTS, id: { sameAs: 2 }, lock: 'share' },
+        { table: AGENTS, id: { id: absent }, lock: 'share' },
+      ]);
+      return { ids, absent: await using.verifiedState(tx, AGENTS, key(absent), 'share') };
+    });
+
+    expect(outcome).toEqual({ ids: [lone, null, null, null, absent], absent: { outcome: 'missing' } });
+    expect(reads).toEqual({ one: 0, apart: 0 });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('raises no alarm itself for a row tampered with: its verifiedState reads it again, which alone raises it', async () => {
+    const agent = await newAgent();
+    const deleted = await newAgent();
+    await tamper("update probe.agents set role = 'admin' where org_id = $1 and id = $2", agent);
+    await tamper('delete from probe.agents where org_id = $1 and id = $2', deleted);
+    const { reads, using } = counted();
+
+    const checks = await withTenant(app, org, async (tx) => {
+      await using.gather(tx, org, [
+        { table: AGENTS, id: { id: agent }, lock: 'share' },
+        { table: AGENTS, id: { id: deleted }, lock: 'share' },
+      ]);
+      expect(alarms()).toEqual([]);
+      return [
+        await using.verifiedState(tx, AGENTS, key(agent), 'share'),
+        await using.verifiedState(tx, AGENTS, key(deleted), 'share'),
+      ];
+    });
+
+    expect(checks).toEqual([
+      { outcome: 'tampered', sign: 'seal' },
+      { outcome: 'tampered', sign: 'deleted' },
+    ]);
+    expect(reads.one).toBe(2);
+    expect(alarms()).toHaveLength(2);
+  });
+
+  it("follows a link from a field tampered to hold no uuid to nothing, never failing the gather's statement", async () => {
+    const agent = await newAgent();
+    const link = await newLink(agent);
+    // The column's type swapped for text, holding a value no uuid reads as: the link finds no row.
+    await database.as('owner').query('alter table probe.links alter column agent_id type text');
+    try {
+      await tamper("update probe.links set agent_id = 'not-a-uuid' where org_id = $1 and id = $2", link);
+      const { using } = counted();
+
+      const outcome = await withTenant(app, org, async (tx) => {
+        const ids = await using.gather(tx, org, [
+          { table: LINKS, id: { id: link }, lock: 'share' },
+          { table: AGENTS, id: { from: 0, column: 'agent_id' }, lock: 'share' },
+        ]);
+        return { ids, link: await using.verifiedState(tx, LINKS, key(link), 'share') };
+      });
+
+      expect(outcome).toEqual({ ids: [link, null], link: { outcome: 'tampered', sign: 'row' } });
+      expect(alarms()).toHaveLength(1);
+    } finally {
+      await database
+        .as('owner')
+        .query(
+          "alter table probe.links alter column agent_id type uuid using (case when agent_id like '%-%-%-%-%' then agent_id::uuid end)",
+        );
+    }
+  });
+
+  it('leaves a row with a backlog of events to its own read, as the one-statement read does', async () => {
+    const agent = await newAgent();
+    await withTenant(app, org, async (tx) => {
+      for (let added = 0; added < 1001; added += 1) {
+        await trail.record(tx, org, {
+          actor: { type: 'user', id: USER },
+          action: 'agent.renamed',
+          subject: { type: 'agent', id: agent, version: 1 },
+          details: {},
+        });
+      }
+    });
+    const { reads, using } = counted();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await using.gather(tx, org, [{ table: AGENTS, id: { id: agent }, lock: 'share' }]);
+        return using.verifiedState(tx, AGENTS, key(agent), 'share');
+      }),
+    ).rejects.toBeInstanceOf(TooManyEventsAboutObject);
+    expect(reads.one).toBe(1);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a row that changed while the gather waited for its lock is read again, verified as it now is (as P3a)', async () => {
+    const agent = await newAgent();
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked = (): void => undefined;
+    const rowLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const changing = withTenant(app, org, async (tx) => {
+      const changed = await states.changeStatus(tx, AGENTS, key(agent), 'suspend', change('agent.suspend'));
+      locked();
+      await held;
+      return changed;
+    });
+    const { reads, using } = counted();
+    try {
+      await rowLocked;
+      const checking = withTenant(app, org, async (tx) => {
+        await using.gather(tx, org, [{ table: AGENTS, id: { id: agent }, lock: 'share' }]);
+        return using.verifiedState(tx, AGENTS, key(agent), 'share');
+      });
+      await waitUntilQueued(attacker, 1);
+      release();
+
+      expect(await changing).toMatchObject({ outcome: 'changed', version: 2 });
+      expect(await checking).toMatchObject({ outcome: 'verified', version: 2 });
+      expect(reads.one).toBe(1);
+    } finally {
+      release();
+    }
+    expect(alarms()).toEqual([]);
+  });
+
+  it('locks the rows in the order given: waiting on the second, it holds the first and not yet the third', async () => {
+    const first = await newAgent();
+    const second = await newAgent();
+    const third = await newAgent();
+    const holder = await database.connect('admin');
+    const prober = await database.connect('admin');
+    /** Whether the row can be locked for update now, without waiting. */
+    const free = async (id: string): Promise<boolean> => {
+      await prober.query('begin');
+      try {
+        await prober.query('select 1 from probe.agents where org_id = $1 and id = $2 for update nowait', [org, id]);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        await prober.query('rollback');
+      }
+    };
+    try {
+      await holder.query('begin');
+      await holder.query('select 1 from probe.agents where org_id = $1 and id = $2 for update', [org, second]);
+      const gathering = withTenant(app, org, (tx) =>
+        states.gather(
+          tx,
+          org,
+          [first, second, third].map((id) => ({ table: AGENTS, id: { id }, lock: 'share' as const })),
+        ),
+      );
+      await waitUntilQueued(attacker, 1);
+
+      expect(await free(first)).toBe(false);
+      expect(await free(third)).toBe(true);
+      await holder.query('commit');
+      expect(await gathering).toEqual([first, second, third]);
+    } finally {
+      await holder.end();
+      await prober.end();
+    }
+  });
+
+  it('keeps the lock order: never a row held for a decision raised to change, never one after the chain head', async () => {
+    const agent = await newAgent('held');
+
+    // Named: refused before the statement.
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await states.verifiedState(tx, AGENTS, key(agent), 'share');
+        return states.gather(tx, org, [{ table: AGENTS, id: { id: agent }, lock: 'change' }]);
+      }),
+    ).rejects.toMatchObject({ reason: 'lock_order' });
+    // Found by a link: refused once the statement names it, the transaction rolled back.
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await states.gather(tx, org, [{ table: AGENTS, id: { id: agent }, lock: 'share' }]);
+        return states.gather(tx, org, [
+          { table: AGENTS, id: { findBy: { column: 'role', value: 'held', statusIn: ['ACTIVE'] } }, lock: 'change' },
+        ]);
+      }),
+    ).rejects.toMatchObject({ reason: 'lock_order' });
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await states.integrityHold(tx, org, 'head');
+        return states.gather(tx, org, [{ table: AGENTS, id: { id: newId() }, lock: 'share' }]);
+      }),
+    ).rejects.toMatchObject({ reason: 'lock_order' });
+  });
+
+  it("refuses the integrity hold's own subject type, as verifiedState does", async () => {
+    await expect(
+      withTenant(app, org, (tx) =>
+        states.gather(tx, org, [{ table: { ...AGENTS, subject: 'integrity_hold' }, id: { id: org }, lock: 'share' }]),
+      ),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
+});
+
+describe('gatherHistories (4D2d P8): histories in one statement, each answered once', () => {
+  /** Signed states whose history reads one at a time are counted. */
+  const counted = () => {
+    const reads = { count: 0 };
+    const using = statesWith({
+      ...trail,
+      recordedEvents: (tx: AuditTransaction, orgId, find) => {
+        reads.count += 1;
+        return trail.recordedEvents(tx, orgId, find);
+      },
+    });
+    return { reads, using };
+  };
+  const about = (id: string, limit = 5): HistoryToRead => ({ subjectTypes: ['agent'], subjectId: id, limit });
+
+  it('answers each history asked alike once from the one read, then reads it again', async () => {
+    const id = await newAgent();
+    const other = await newAgent();
+    const { reads, using } = counted();
+
+    await withTenant(app, org, async (tx) => {
+      await using.gatherHistories(tx, org, [about(id), { ...about(other), afterSeq: 0n }]);
+      const first = await using.historyOf(tx, org, about(id));
+      // The same history, its fields in another order: asked alike.
+      const second = await using.historyOf(tx, org, {
+        afterSeq: 0n,
+        limit: 5,
+        subjectId: other,
+        subjectTypes: ['agent'],
+      });
+      expect(reads.count).toBe(0);
+      expect(first).toMatchObject({ outcome: 'read', events: [{ event: { action: 'agent.created' } }] });
+      expect(second).toMatchObject({ outcome: 'read', events: [{ event: { subject: { id: other } } }] });
+      expect(await using.historyOf(tx, org, about(id))).toEqual(first);
+      // Another limit is another history: read on its own.
+      await using.historyOf(tx, org, about(other, 4));
+      expect(reads.count).toBe(2);
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('raises the alarm for a history tampered with only when it is asked, as historyOf does', async () => {
+    const id = await newAgent();
+    const unasked = await newAgent();
+    await tamper(
+      `update audit.events set details = pg_catalog.replace(details, '"reason":"test"', '"reason":"tost"') where org_id = $1 and subject_id = $2`,
+      id,
+    );
+    await tamper(
+      `update audit.events set details = pg_catalog.replace(details, '"reason":"test"', '"reason":"tost"') where org_id = $1 and subject_id = $2`,
+      unasked,
+    );
+
+    const read = await withTenant(app, org, async (tx) => {
+      await states.gatherHistories(tx, org, [about(id), about(unasked)]);
+      expect(alarms()).toEqual([]);
+      return states.historyOf(tx, org, about(id));
+    });
+
+    expect(read).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toHaveLength(1);
+  });
+
+  it("never answers another organisation's history from a gather: it is read, and refused, as ever", async () => {
+    const id = await newAgent();
+    const { using } = counted();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await using.gatherHistories(tx, org, [about(id)]);
+        return using.historyOf(tx, newId(), about(id));
+      }),
+    ).rejects.toBeInstanceOf(TenantContextError);
+  });
+
+  it('keeps none when one history is past its limit: each is read as it is asked', async () => {
+    const id = await newAgent();
+    await changeStatus(id, 'suspend');
+    const { reads, using } = counted();
+
+    await withTenant(app, org, async (tx) => {
+      await using.gatherHistories(tx, org, [about(id), about(id, 1)]);
+      expect(await using.historyOf(tx, org, about(id))).toMatchObject({ outcome: 'read', events: [{}, {}] });
+      await expect(using.historyOf(tx, org, about(id, 1))).rejects.toBeInstanceOf(TooManyEventsToRead);
+      expect(reads.count).toBe(2);
+    });
   });
 });
 

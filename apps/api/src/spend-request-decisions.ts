@@ -36,9 +36,9 @@
 // (0033's `one_supplier_a_payee`), a key moving only by a change of the
 // supplier holding it, which that lock waits for. So a claim taken meanwhile
 // is something past the app, and fails the request (D3's `taken`).
-import { agentKeyOf, agentOf, isLiveKey } from '@agentx/core/modules/agents';
+import { AGENT_KEYS, agentKeyOf, agentOf, AGENTS, isLiveKey } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
-import { mayFund, sourceOf } from '@agentx/core/modules/funding-sources';
+import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   type LimitReservationsTables,
   lockAgentMonth,
@@ -47,7 +47,15 @@ import {
   sealNewZone,
   splitHeld,
 } from '@agentx/core/modules/limit-reservations';
-import { currencyAllowed, openMandateOfAgent, type PolicyVersionRecord } from '@agentx/core/modules/mandates';
+import {
+  currencyAllowed,
+  MANDATE_VERSIONS,
+  openMandateGathered,
+  openMandateOfAgent,
+  POLICIES,
+  POLICY_VERSIONS,
+  type PolicyVersionRecord,
+} from '@agentx/core/modules/mandates';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
@@ -73,11 +81,12 @@ import {
   type SpendRequestRecord,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
-import { supplierOf } from '@agentx/core/modules/suppliers';
+import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { type Clock, type IdGenerator, type Money, money, windowStart } from '@agentx/core/shared-kernel';
 import {
   type Database,
   type DatabaseTransaction,
+  type GatheredRow,
   type IdempotentRequest,
   isUnwritten,
   retryingTransaction,
@@ -87,8 +96,10 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { type AgentTurns, createAgentTurns } from './agent-turns.ts';
 import {
+  choicesHistory,
   consentOf,
   organizationChoicesOf,
+  overLimitHistories,
   MandateRefused,
   type MandateTables,
   policyRulesIn,
@@ -233,20 +244,22 @@ export async function authorityIn(
   orgId: string,
   agentId: string,
   version: 'inForce' | 'draft' = 'inForce',
+  gathered?: { readonly id: string | null },
 ) {
-  const mandate = await mandateWeighedIn(tx, states, orgId, agentId, version);
+  const mandate = await mandateWeighedIn(tx, states, orgId, agentId, version, gathered);
   return { mandate, ...(await policiesIn(tx, states, orgId, mandate)) };
 }
 
-/** Level 4's first half: the agent's open mandate with the version asked for, or null for none. */
+/** Level 4's first half: the agent's open mandate with the version asked for, or null for none; `gathered`: its ID as a gather found it. */
 export async function mandateWeighedIn(
   tx: DecisionTx,
   states: SignedStates,
   orgId: string,
   agentId: string,
   version: 'inForce' | 'draft' = 'inForce',
+  gathered?: { readonly id: string | null },
 ): Promise<MandateWeighed | null> {
-  const open = await openMandateOfAgent(tx, states, orgId, agentId);
+  const open = await openMandateOfAgent(tx, states, orgId, agentId, gathered);
   believed(open);
   const found = open.outcome === 'found' ? open.mandate : null;
   const versionId = (version === 'draft' ? found?.pendingVersionId : found?.currentVersionId) ?? null;
@@ -355,6 +368,7 @@ export async function weigh(
     monthOf,
     rules = (inForce) => inForce,
     except,
+    mandateFound,
   }: {
     readonly now: Date;
     /** A decision's locks (true), or the simulator's reads (false). */
@@ -363,9 +377,11 @@ export async function weigh(
     readonly rules?: (inForce: PoliciesWeighed, mandate: MandateWeighed | null) => PoliciesWeighed;
     /** The request weighed again, whose own reservation and claim aren't counted. */
     readonly except?: string | undefined;
+    /** The agent's open mandate's ID as a gather found it (decisionRows). */
+    readonly mandateFound?: { readonly id: string | null };
   },
 ) {
-  const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
+  const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id, 'inForce', mandateFound);
   const policies = rules(inForce, mandate);
   const { source, supplier, order, claims } = await payingIn(
     tx,
@@ -450,6 +466,31 @@ export function inputOf({
   };
 }
 
+/** Levels 2–3a as a decision reads them, for one gather (4D2d P8): the organisation, the agent, and its key. */
+const actingRows = ({ orgId, agentId, keyId }: AgentActing): GatheredRow[] => [
+  { table: ORGANIZATIONS, id: { id: orgId }, lock: 'share' },
+  { table: AGENTS, id: { id: agentId }, lock: 'share' },
+  { table: AGENT_KEYS, id: { id: keyId }, lock: 'share' },
+];
+
+/**
+ * Levels 4–6 as a decision reads them, for one gather after actingRows, so
+ * the mandate is found once its agent is held, as before: the agent's open
+ * mandate (0) and its version in force, the mandate's policy (2) and its
+ * version, the organisation's (4) and its version, the source, and the
+ * supplier, held for its orders.
+ */
+const decisionRows = (orgId: string, agentId: string, asked: SpendWeighed): GatheredRow[] => [
+  openMandateGathered(agentId),
+  { table: MANDATE_VERSIONS, id: { from: 0, column: 'current_version_id' }, lock: 'share' },
+  { table: POLICIES, id: { sameAs: 0 }, lock: 'share' },
+  { table: POLICY_VERSIONS, id: { from: 2, column: 'current_version_id' }, lock: 'share' },
+  { table: POLICIES, id: { id: orgId }, lock: 'share' },
+  { table: POLICY_VERSIONS, id: { from: 4, column: 'current_version_id' }, lock: 'share' },
+  { table: SOURCES, id: { id: asked.fundingSourceId }, lock: 'share' },
+  { table: SUPPLIERS, id: { id: asked.supplierId }, lock: 'change' },
+];
+
 export function createSpendRequestDecisions({
   database,
   outbox,
@@ -479,18 +520,31 @@ export function createSpendRequestDecisions({
     acting: AgentActing,
     idempotencyKey: string,
     asked: SpendAskedByAgent,
-  ): Promise<{ readonly id: string } & Pick<NewRequest, 'decision' | 'reasons'>> {
+  ): Promise<{ readonly id: string; readonly answer: SpendRequestRecord } & Pick<NewRequest, 'decision' | 'reasons'>> {
     const { orgId, agentId } = acting;
     // Read before the lock waits below (each at most 5 s), so a request can be weighed seconds past a mandate's
     // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
     await currencyTaken(tx, asked.amount.currency);
+    // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them.
+    await states.gather(tx, orgId, actingRows(acting));
     const { agent, keyId } = await actingIn(tx, states, acting, now);
+    const [mandateId = null, versionId = null, , , , policyVersionId = null] = await states.gather(
+      tx,
+      orgId,
+      decisionRows(orgId, agentId, asked),
+    );
+    // Their histories in one statement too, once their rows are held, as before.
+    await states.gatherHistories(tx, orgId, [
+      ...(mandateId === null || versionId === null ? [] : overLimitHistories(mandateId, versionId)),
+      ...(policyVersionId === null ? [] : [choicesHistory(policyVersionId)]),
+    ]);
     // The agent's zone, when this is its first decision: sealed with the request, as the audit head comes last.
     let zoneKept: string | undefined;
     const { input, mandate, supplier, order, month, approvalWait } = await weigh(tx, states, orgId, agent, asked, {
       now,
       decides: true,
+      mandateFound: { id: mandateId },
       monthOf: async (zoneIfNew) => {
         const locked = await lockAgentMonth(tx, states, { orgId, agentId, zoneIfNew, at: now });
         if (locked.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
@@ -563,12 +617,13 @@ export function createSpendRequestDecisions({
         actor: { type: 'agent', id: agent.id },
       });
     }
-    await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
     // Every admin and approver is told it waits (partner decision 2, Phase 3); the email reads it as it is sent.
+    // Told before it is signed, so the chain head, whose lock comes last, is held one statement less (4D2d P8).
     if (made.decision === 'REQUIRE_APPROVAL') {
       await outbox.add(tx, toldAdminsAndApprovers(orgId, 'spend_request_waiting', requestId));
     }
-    return { id: requestId, decision: made.decision, reasons: made.reasons };
+    const answer = await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
+    return { id: requestId, answer, decision: made.decision, reasons: made.reasons };
   }
 
   return {
@@ -584,7 +639,7 @@ export function createSpendRequestDecisions({
         retryingTransaction(log, DECIDE_OPERATION, () =>
           work.write(agent, idempotent, correlationId, async (tx, states) => {
             made = await decided(tx, states, agent, idempotent.key, asked);
-            fresh = await answerOf(tx, states, agent.orgId, made.id);
+            fresh = made.answer;
             return { status: 201, resourceId: made.id };
           }),
         ),
@@ -601,7 +656,7 @@ export function createSpendRequestDecisions({
           durationMs: Math.round(performance.now() - started),
         });
       }
-      // A fresh decision answers as its own transaction read it before commit (4D2d P4, partner decision 2);
+      // A fresh decision answers as its own transaction sealed it (4D2d P4 and P8, partner decision 2);
       // a replay of its key reads it in a transaction of its own, as it is now.
       if (done.outcome === 'done' && fresh !== undefined) return { outcome: 'decided' as const, request: fresh };
       return work.answered(agent.orgId, correlationId, async (tx, states) => ({
