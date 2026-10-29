@@ -49,8 +49,8 @@ import {
   type SignedRow,
   type SignedRowKey,
   signedRowIds,
-  signedRowOf,
-  signedRowRead,
+  signedRowReadSeen,
+  signedRowSeen,
   type SignedStateTable,
   StatusChangeFailed,
   type StatusTable,
@@ -78,6 +78,7 @@ import {
   type LogEvent,
   type LogPageToRead,
   type LatestSignedState,
+  type LatestWithRow,
   lockChainHead,
   type ReadEvent,
   type RecordedEventCheck,
@@ -788,13 +789,13 @@ export function createSignedStates({
     key: SignedRowKey,
     lock: RowLock,
   ): Promise<StateCheck | undefined> => {
-    let read: Awaited<ReturnType<AuditTrail['latestSignedStateWithRow']>>;
+    let read: LatestWithRow;
     try {
       read = await trail.latestSignedStateWithRow(
         tx,
         key.orgId,
         { type: table.subject, id: key.id },
-        signedRowRead(table, key, lock),
+        signedRowReadSeen(table, key, lock),
       );
     } catch (error) {
       // A backlog: the check in two statements reads the row first, so an unreadable row raises its own alarm.
@@ -803,7 +804,8 @@ export function createSignedStates({
     }
     const { latest, rows } = read;
     if (rows === undefined) return undefined;
-    const row = signedRowOf(table, rows);
+    const row = signedRowSeen(table, rows);
+    if (row === undefined) return undefined;
     if (row.outcome === 'missing') return latest.kind === 'none' ? MISSING : undefined;
     if (row.outcome !== 'found') return undefined;
     const judged = judge(table, key, row, latest);

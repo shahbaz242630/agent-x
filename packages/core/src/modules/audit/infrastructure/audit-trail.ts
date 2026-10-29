@@ -273,17 +273,13 @@ export interface AuditTrail {
    * The log is read on the statement's snapshot, taken before any wait for
    * the row's lock: a row changed during that wait points at an event this
    * read can't see, so a caller believes the pair only when they agree.
-   * `rows` is undefined if what came back doesn't read as rows.
    */
   latestSignedStateWithRow(
     tx: AuditTransaction,
     orgId: string,
     subject: AuditSubjectKey,
     rowRead: RawBuilder<unknown>,
-  ): Promise<{
-    readonly latest: LatestSignedState;
-    readonly rows: readonly Readonly<Record<string, unknown>>[] | undefined;
-  }>;
+  ): Promise<LatestWithRow>;
   /**
    * latestSignedState for many objects of one type, in one statement: each
    * ID asked, in lower case, with its object's latest signed state, judged
@@ -466,9 +462,11 @@ async function eventsWithHead(
   chain: Chain & { readonly kind: 'organisation' },
   which: RawBuilder<unknown>,
   limit: number,
-  each?: readonly string[],
-  newest = false,
-  alongside?: RawBuilder<unknown>,
+  {
+    each,
+    newest = false,
+    alongside,
+  }: { readonly each?: readonly string[]; readonly newest?: boolean; readonly alongside?: RawBuilder<unknown> } = {},
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
   // The oldest events first, or the newest (HistoryToRead.newest); either way handed back in chain order, below.
   const order = newest ? sql`order by e.seq desc` : sql`order by e.seq`;
@@ -480,11 +478,12 @@ async function eventsWithHead(
           where e.org_id = ${chain.orgId} and e.subject_id = a.id and ${which} ${order} limit ${limit}
         ) as e`;
   // A caller's row, read first (it may wait for the row's lock), its rows given back as JSON on every row (rowsAlong).
-  const withRow = alongside === undefined ? sql`` : sql`with target_row as materialized (${alongside})`;
-  const rowColumn =
-    alongside === undefined
-      ? sql``
-      : sql`, (select pg_catalog.json_agg(pg_catalog.row_to_json(r)) from target_row r) as row_json`;
+  let withRow = sql``;
+  let rowColumn = sql``;
+  if (alongside !== undefined) {
+    withRow = sql`with target_row as materialized (${alongside})`;
+    rowColumn = sql`, (select pg_catalog.json_agg(pg_catalog.row_to_json(r)) from target_row r) as row_json`;
+  }
   const { rows } = await sql<Record<string, unknown>>`
     ${withRow}
     select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
@@ -502,6 +501,12 @@ async function eventsWithHead(
     order by e.seq
   `.execute(tx);
   return rows;
+}
+
+/** latestSignedStateWithRow's answer: the latest signed state, and the caller's rows (undefined if they don't read as rows). */
+export interface LatestWithRow {
+  readonly latest: LatestSignedState;
+  readonly rows: readonly Readonly<Record<string, unknown>>[] | undefined;
 }
 
 /** The caller's rows eventsWithHead read alongside (its `row_json`), none when it found none: undefined if they don't read as rows. */
@@ -819,10 +824,7 @@ export function createAuditTrail({
     orgId: string,
     subject: AuditSubjectKey,
     rowRead?: RawBuilder<unknown>,
-  ): Promise<{
-    readonly latest: LatestSignedState;
-    readonly rows: readonly Readonly<Record<string, unknown>>[] | undefined;
-  }> => {
+  ): Promise<LatestWithRow> => {
     const problems = subjectKeyProblems(subject);
     if (problems.length > 0) throw new AuditEventRefused(problems);
     await assertTenant(tx, orgId);
@@ -839,9 +841,7 @@ export function createAuditTrail({
             and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
         )`,
       LATER_EVENTS_READ + 1,
-      undefined,
-      false,
-      rowRead,
+      rowRead === undefined ? {} : { alongside: rowRead },
     );
     const rows = rowRead === undefined ? undefined : rowsAlong(events[0]);
     return { latest: latestIn(chain, events, events[0]), rows };
@@ -891,10 +891,7 @@ export function createAuditTrail({
       orgId: string,
       subject: AuditSubjectKey,
       rowRead: RawBuilder<unknown>,
-    ): Promise<{
-      readonly latest: LatestSignedState;
-      readonly rows: readonly Readonly<Record<string, unknown>>[] | undefined;
-    }> {
+    ): Promise<LatestWithRow> {
       return latestWith(tx, orgId, subject, rowRead);
     },
 
@@ -928,7 +925,7 @@ export function createAuditTrail({
               and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
           )`,
         LATER_EVENTS_READ + 1,
-        asked,
+        { each: asked },
       );
       const [first] = rows;
       const byObject = new Map<string, Readonly<Record<string, unknown>>[]>(asked.map((id) => [id, []]));
@@ -1030,7 +1027,7 @@ export function createAuditTrail({
       );
       // One past the limit tells a history cut short; the newest or oldest alone are never more than asked.
       const cut = newest || oldest;
-      const rows = await eventsWithHead(tx, chain, which, cut ? limit : limit + 1, undefined, newest);
+      const rows = await eventsWithHead(tx, chain, which, cut ? limit : limit + 1, { newest });
       const [first] = rows;
       const past = first?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);
@@ -1061,7 +1058,7 @@ export function createAuditTrail({
         sql` and `,
       );
       // One past the limit tells there is a next page; the rows come back in chain order.
-      const rows = await eventsWithHead(tx, chain, which, limit + 1, undefined, true);
+      const rows = await eventsWithHead(tx, chain, which, limit + 1, { newest: true });
       const [first] = rows;
       const past = first?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);

@@ -248,30 +248,62 @@ export async function readSignedRow<Schema>(
   return rowOf(table, rows);
 }
 
-/**
- * readSignedRow's statement, not run: for a caller that reads the row inside a
- * statement of its own (4D2d P3a), and judges what it gave with signedRowOf.
- * That caller must hold withTenant's transaction for the row's organisation,
- * as readSignedRow checks.
- */
-export function signedRowRead(
+/** The statement readSignedRow runs; with `seen`, also the row's version as locked and as the snapshot saw it. */
+function signedRowRead(
   table: SignedStateTable,
   key: SignedRowKey,
   lock: RowLock,
+  seen = false,
 ): RawBuilder<Record<string, unknown>> {
   checkTable(table);
   checkKey(key);
+  const versions = seen
+    ? sql`, target.xmin::text as locked_xmin, (
+        select s.xmin::text from ${sql.table(table.table)} as s where s.org_id = ${key.orgId} and s.id = ${key.id}
+      ) as seen_xmin`
+    : sql``;
   // Filtered by org_id as well as row security, as ADR-005 §7 asks of every query.
   return sql<Record<string, unknown>>`
-    select ${columnsOf(table)} from ${sql.table(table.table)} as target
+    select ${columnsOf(table)}${versions} from ${sql.table(table.table)} as target
     where target.org_id = ${key.orgId} and target.id = ${key.id}
     ${lock === 'share' ? sql`for share` : sql`for no key update`}
   `;
 }
 
-/** readSignedRow's judgement of the rows signedRowRead's statement gave. */
-export function signedRowOf(table: SignedStateTable, rows: readonly Readonly<Record<string, unknown>>[]): SignedRow {
-  return rowOf(table, rows);
+/**
+ * readSignedRow's statement, not run, for a caller that reads the row inside a
+ * statement of its own (4D2d P3a) and judges what it gave with signedRowSeen.
+ * The caller must hold withTenant's transaction for the row's organisation, as
+ * readSignedRow checks. Beside the row: its version as locked (`xmin`, after
+ * any wait for the lock) and as the statement's snapshot saw it.
+ */
+export function signedRowReadSeen(table: SignedStateTable, key: SignedRowKey, lock: RowLock): RawBuilder<unknown> {
+  return signedRowRead(table, key, lock, true);
+}
+
+/** An oid as a row's JSON gives it (text), as the driver gives it (a number); anything else as it came. */
+const typeId = (value: unknown): unknown =>
+  typeof value === 'string' && /^\d{1,10}$/.test(value) ? Number(value) : value;
+
+/**
+ * The row signedRowReadSeen's statement gave, read back as JSON, judged as
+ * readSignedRow judges one: undefined when the row locked isn't the version
+ * the snapshot saw (it changed while the statement waited for the lock, maybe
+ * put back to an older signed state), so the caller reads it again.
+ */
+export function signedRowSeen(
+  table: SignedStateTable,
+  rows: readonly Readonly<Record<string, unknown>>[],
+): SignedRow | undefined {
+  const [row, ...others] = rows;
+  if (row === undefined) return { outcome: 'missing' };
+  if (others.length > 0) return rowOf(table, rows);
+  const { locked_xmin: locked, seen_xmin: seen } = row;
+  if (typeof locked !== 'string' || locked !== seen) return undefined;
+  const typed = Object.fromEntries(
+    Object.entries(row).map(([column, value]) => [column, /^t\d+$/.test(column) ? typeId(value) : value]),
+  );
+  return rowOf(table, [typed]);
 }
 
 /** The most rows readSignedRows reads in one statement. */

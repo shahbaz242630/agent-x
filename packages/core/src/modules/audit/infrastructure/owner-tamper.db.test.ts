@@ -417,7 +417,10 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
     expect(await owner.query('select id from audit.events where org_id = $1', [org])).toHaveLength(1);
   });
 
-  it('the table swapped for a view that shows every agent as an admin: the row check denies it, and the guard names it', async () => {
+  // Since 4D2d P3a (the partner's choice, S157) a check reads the row's version as locked and as its snapshot saw
+  // it (xmin), which a view has none of: the read is refused outright, nothing decided on it, and the scheduled
+  // schema check names the view (SEV-1), where before the row check denied it on its seal.
+  it('the table swapped for a view that shows every agent as an admin: every check of it refused, and the guard names it', async () => {
     const id = await newAgent('reader');
     await owner.query('alter table probe.agents rename to agents_real');
     await owner.query(
@@ -427,7 +430,8 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
     await owner.query('grant select, update on probe.agents to agentx_app');
     try {
       expect(await guard()).toContain('probe.agents is no longer a plain table');
-      await deniedWith(id, 'seal');
+      await expect(check(id)).rejects.toThrow('column target.xmin does not exist');
+      await expect(check(id, 'change')).rejects.toThrow('column target.xmin does not exist');
     } finally {
       await owner.query('drop view probe.agents');
       await owner.query('alter table probe.agents_real rename to agents');
