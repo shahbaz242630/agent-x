@@ -281,6 +281,18 @@ describe(`FX-TAMPER as the owner: an authority row changed past the app is denie
     await deniedWith(id, 'unsigned');
   });
 
+  it('copied, its key dropped so two rows hold it: the row alarm, not a failed statement (4D2d P3a review)', async () => {
+    const id = await newAgent();
+    await owner.query('alter table probe.agents drop constraint agents_pkey');
+    await owner.query('insert into probe.agents select * from probe.agents where org_id = $1 and id = $2', [org, id]);
+    try {
+      await deniedWith(id, 'row');
+    } finally {
+      await owner.query('delete from probe.agents where org_id = $1 and id = $2', [org, id]);
+      await owner.query('alter table probe.agents add primary key (org_id, id)');
+    }
+  });
+
   it('deleted, which the app role cannot do', async () => {
     const id = await newAgent();
     await owner.deleteRow(id);

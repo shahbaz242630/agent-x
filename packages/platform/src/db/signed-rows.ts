@@ -259,8 +259,9 @@ function signedRowRead(
   checkKey(key);
   const versions = seen
     ? sql`, target.xmin::text as locked_xmin, (
-        select s.xmin::text from ${sql.table(table.table)} as s where s.org_id = ${key.orgId} and s.id = ${key.id}
-      ) as seen_xmin`
+        select pg_catalog.string_agg(s.xmin::text, ',') from ${sql.table(table.table)} as s
+        where s.org_id = ${key.orgId} and s.id = ${key.id}
+      ) as seen_xmin, pg_catalog.pg_typeof(target.state_version)::oid::text as version_type`
     : sql``;
   // Filtered by org_id as well as row security, as ADR-005 §7 asks of every query.
   return sql<Record<string, unknown>>`
@@ -275,7 +276,9 @@ function signedRowRead(
  * statement of its own (4D2d P3a) and judges what it gave with signedRowSeen.
  * The caller must hold withTenant's transaction for the row's organisation, as
  * readSignedRow checks. Beside the row: its version as locked (`xmin`, after
- * any wait for the lock) and as the statement's snapshot saw it.
+ * any wait for the lock) and as the statement's snapshot saw it (every copy's,
+ * so a duplicated row reaches rowOf, which calls it unreadable, rather than
+ * failing the statement), and its state_version column's type.
  */
 export function signedRowReadSeen(table: SignedStateTable, key: SignedRowKey, lock: RowLock): RawBuilder<unknown> {
   return signedRowRead(table, key, lock, true);
@@ -298,8 +301,11 @@ export function signedRowSeen(
   const [row, ...others] = rows;
   if (row === undefined) return { outcome: 'missing' };
   if (others.length > 0) return rowOf(table, rows);
-  const { locked_xmin: locked, seen_xmin: seen } = row;
+  const { locked_xmin: locked, seen_xmin: seen, version_type: versionType } = row;
   if (typeof locked !== 'string' || locked !== seen) return undefined;
+  // JSON gives a version of any numeric type as a number, where the driver gives a bigint or numeric as text:
+  // anything but an integer column is left to readSignedRow, which calls it unreadable (23 is int4's oid).
+  if (versionType !== '23') return undefined;
   const typed = Object.fromEntries(
     Object.entries(row).map(([column, value]) => [column, /^t\d+$/.test(column) ? typeId(value) : value]),
   );
