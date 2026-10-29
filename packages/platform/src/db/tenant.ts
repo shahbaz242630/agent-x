@@ -95,7 +95,8 @@ export async function withTenant<Schema, Result>(
           // start. It can't differ today (the setting has no check hook); kept as decision 41 asks.
           const { rows } = await (
             limited
-              ? sql<{ org_id: string | null }>`
+              ? // The limit's own answer is never read: the setting holds for each later statement.
+                sql<{ org_id: string | null }>`
                   select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id,
                     pg_catalog.set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true) as statement_timeout
                 `

@@ -32,7 +32,7 @@
 // tampering too, and raises the alarm (`check: record`) before its error goes
 // back.
 import { ChainBroken } from '@agentx/platform/audit-chain';
-import { limitStatements, withTenant } from '@agentx/platform/db';
+import { withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
@@ -101,11 +101,15 @@ async function setHold(
       // It sets the hold, and reads none: nothing waiting could change what it does.
       unrecorded: () => undefined,
     });
-    const outcome = await withTenant<AuditTables, 'set' | 'already'>(db, held, async (tx) => {
-      await sql`set local lock_timeout = '5s'`.execute(tx);
-      await limitStatements(tx);
-      return holder.hold(tx, finding, count);
-    });
+    const outcome = await withTenant<AuditTables, 'set' | 'already'>(
+      db,
+      held,
+      async (tx) => {
+        await sql`set local lock_timeout = '5s'`.execute(tx);
+        return holder.hold(tx, finding, count);
+      },
+      { limited: true },
+    );
     unrecorded.delete(held);
     if (outcome === 'set') {
       log.warn('audit.integrity_hold_set', {
@@ -161,7 +165,7 @@ export async function holdOrganisation(
 
 /**
  * Runs `work` in withTenant's transaction for the organisation, with signed
- * states of its own and each statement limited (limitStatements), and then
+ * states of its own and each statement limited (withTenant's `limited`), and then
  * puts the organisation on hold for anything they found tampered with.
  * Returns what `work` returns, or throws what it throws.
  */
