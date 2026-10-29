@@ -895,8 +895,8 @@ export function createSignedStates({
       rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
       const check = believing ? believedPair(table, key, answer.latest, answer.rows) : undefined;
       believing = check !== undefined;
-      if (check === undefined) kept.delete(name);
-      else kept.set(name, { lock, check });
+      // A row not believed here keeps what an earlier gather believed of it: the row has been locked since.
+      if (check !== undefined) kept.set(name, { lock, check });
       return answer.id;
     });
   };

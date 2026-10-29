@@ -19,13 +19,14 @@ import {
 import {
   createDatabase,
   type Database,
+  type GatheredId,
   type SignedStateTable,
   StatusChangeFailed,
   TenantContextError,
   withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
@@ -1836,6 +1837,42 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
         return states.gather(tx, org, [{ table: AGENTS, id: { id: newId() }, lock: 'share' }]);
       }),
     ).rejects.toMatchObject({ reason: 'lock_order' });
+  });
+
+  it('refuses a named row it must not lock before its statement, never waiting for the lock', async () => {
+    const agent = await newAgent();
+    const holder = await database.connect('admin');
+    /** Refused with the lock order, as a wait for the lock would end in a lock timeout instead. */
+    const refusedAt = (
+      before: (tx: AuditTransaction) => Promise<unknown>,
+      lock: 'share' | 'change',
+      id: GatheredId = { id: agent },
+    ) =>
+      expect(
+        withTenant(app, org, async (tx) => {
+          await before(tx);
+          await sql`set local lock_timeout = '1s'`.execute(tx);
+          return states.gather(tx, org, [{ table: AGENTS, id, lock }]);
+        }),
+      ).rejects.toMatchObject({ reason: 'lock_order' });
+    try {
+      await holder.query('begin');
+      // Held for share elsewhere: a raise to change here would wait for it.
+      await holder.query('select 1 from probe.agents where org_id = $1 and id = $2 for share', [org, agent]);
+      await refusedAt((tx) => states.verifiedState(tx, AGENTS, key(agent), 'share'), 'change');
+      await holder.query('commit');
+      await holder.query('begin');
+      // Held for update elsewhere: a row after the head would wait for it.
+      await holder.query('select 1 from probe.agents where org_id = $1 and id = $2 for update', [org, agent]);
+      await refusedAt((tx) => states.integrityHold(tx, org, 'head'), 'share');
+      // Found by a link, after the head: refused before the statement too, though no ID is known yet.
+      await refusedAt((tx) => states.integrityHold(tx, org, 'head'), 'share', {
+        findBy: { column: 'role', value: 'reader', statusIn: ['ACTIVE'] },
+      });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it("refuses the integrity hold's own subject type, as verifiedState does", async () => {
