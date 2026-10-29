@@ -542,6 +542,10 @@ describe('a state just recorded, its status changed in the same transaction (4D2
         reads.count += 1;
         return trail.latestSignedStateWithRow(tx, orgId, subject, rowRead);
       },
+      latestSignedStates: (tx: AuditTransaction, orgId, subjectType, ids) => {
+        reads.count += 1;
+        return trail.latestSignedStates(tx, orgId, subjectType, ids);
+      },
     });
     return { reads, using };
   };
@@ -586,16 +590,22 @@ describe('a state just recorded, its status changed in the same transaction (4D2
     expect(alarms()).toEqual([]);
   });
 
-  it.each([
+  type Between = (tx: Transaction<Tables>, using: SignedStates, id: string) => Promise<unknown>;
+  it.each<[string, typeof AGENTS, Between]>([
     [
       'a read of the row since',
-      (tx: AuditTransaction, using: SignedStates, id: string) =>
-        using.verifiedState(tx, AGENTS, { orgId: org, id }, 'share'),
+      AGENTS,
+      (tx, using, id) => using.verifiedState(tx, AGENTS, { orgId: org, id }, 'share'),
     ],
-    ['another table object for it', () => Promise.resolve()],
-  ])('reads the row again after %s, as before', async (what, between) => {
+    ['a batch read of the row since', AGENTS, (tx, using, id) => using.verifiedStates(tx, AGENTS, org, [id])],
+    ['another table object for it', { ...AGENTS }, () => Promise.resolve()],
+    [
+      'a move refused on it, which leaves the state to read again',
+      AGENTS,
+      (tx, using, id) => using.changeStatus(tx, AGENTS, { orgId: org, id }, 'reactivate', change('agent.reactivate')),
+    ],
+  ])('reads the row again after %s, as before', async (_, table, between) => {
     const { reads, using } = counted();
-    const table = what === 'another table object for it' ? { ...AGENTS } : AGENTS;
 
     await withTenant(app, org, async (tx) => {
       const id = await created(tx, using);
@@ -607,6 +617,38 @@ describe('a state just recorded, its status changed in the same transaction (4D2
       expect(reads.count).toBe(before + 1);
     });
     expect(alarms()).toEqual([]);
+  });
+
+  it('reads a row this transaction did not record, though it recorded another', async () => {
+    const { reads, using } = counted();
+    const other = await newAgent();
+
+    await withTenant(app, org, async (tx) => {
+      await created(tx, using);
+      const before = reads.count;
+      expect(
+        await using.changeStatus(tx, AGENTS, { orgId: org, id: other }, 'suspend', change('agent.suspend')),
+      ).toMatchObject({ outcome: 'changed', version: 2 });
+      expect(reads.count).toBe(before + 1);
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  it.each([
+    ['its version', { state_version: 5 }],
+    ['its pointer', { state_event_id: null }],
+  ] as const)('%s put in by the transaction after the record: the change fails, with the alarm', async (_, planted) => {
+    let id = '';
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        id = await created(tx, states);
+        await tx.updateTable('probe.agents').set(planted).where('id', '=', id).execute();
+        return states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      }),
+    ).rejects.toEqual(expect.objectContaining({ name: 'SignedStateFailed', reason: 'not_applied' }));
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'row', objectId: id })]);
+    expect(await rowOf(id)).toBeUndefined();
   });
 
   it.each([

@@ -1047,7 +1047,8 @@ export function createSignedStates({
     ) {
       return notApplied(table, key, "The row didn't take the pointer to its new state's event as sealed");
     }
-    // Sealed, logged and read back here, the row locked and the head too until commit: nothing else can move either.
+    // Sealed, logged and read back here, the row and the head locked until commit: no other transaction moves
+    // either. Anything this one puts in since (or a savepoint rolled back over it) fails the next write's compare.
     const state: VerifiedState = Object.freeze({
       outcome: 'verified',
       version: row.version,
