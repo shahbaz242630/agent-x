@@ -25,6 +25,7 @@ import {
   withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import type { Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
@@ -524,6 +525,164 @@ describe('what a signed state is recorded from', () => {
         states.changeStatus(tx, unsealed, { orgId: org, id }, 'suspend', change('agent.suspend')),
       ),
     ).rejects.toBeInstanceOf(RangeError);
+  });
+});
+
+describe('a state just recorded, its status changed in the same transaction (4D2d P3b)', () => {
+  /** States whose every read of a signed state is counted in `reads`. */
+  const counted = () => {
+    const reads = { count: 0 };
+    const using = statesWith({
+      ...trail,
+      latestSignedState: (tx: AuditTransaction, orgId, subject) => {
+        reads.count += 1;
+        return trail.latestSignedState(tx, orgId, subject);
+      },
+      latestSignedStateWithRow: (tx: AuditTransaction, orgId, subject, rowRead) => {
+        reads.count += 1;
+        return trail.latestSignedStateWithRow(tx, orgId, subject, rowRead);
+      },
+      latestSignedStates: (tx: AuditTransaction, orgId, subjectType, ids) => {
+        reads.count += 1;
+        return trail.latestSignedStates(tx, orgId, subjectType, ids);
+      },
+    });
+    return { reads, using };
+  };
+
+  /** Inserts an agent and records it `new` in the open transaction, as a module creates one. */
+  const created = async (tx: Transaction<Tables>, using: SignedStates) => {
+    const id = newId();
+    await tx
+      .insertInto('probe.agents')
+      .values({ org_id: org, id, ...NEW_AGENT })
+      .execute();
+    await using.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+    return id;
+  };
+
+  it('moves on from the state it just recorded, read nowhere again, and each move is sealed as the log holds it', async () => {
+    const { reads, using } = counted();
+
+    const id = await withTenant(app, org, async (tx) => {
+      const made = await created(tx, using);
+      const before = reads.count;
+      const key = { orgId: org, id: made };
+      expect(await using.changeStatus(tx, AGENTS, key, 'suspend', change('agent.suspend'))).toMatchObject({
+        outcome: 'changed',
+        to: 'SUSPENDED',
+        version: 2,
+      });
+      expect(await using.changeStatus(tx, AGENTS, key, 'revoke', change('agent.revoke'))).toMatchObject({
+        outcome: 'changed',
+        from: 'SUSPENDED',
+        version: 3,
+      });
+      expect(reads.count).toBe(before);
+      return made;
+    });
+
+    expect(await check(id)).toMatchObject({
+      outcome: 'verified',
+      version: 3,
+      fields: new Map([...Object.entries(NEW_AGENT), ['status', 'REVOKED']]),
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  type Between = (tx: Transaction<Tables>, using: SignedStates, id: string) => Promise<unknown>;
+  it.each<[string, typeof AGENTS, Between]>([
+    [
+      'a read of the row since',
+      AGENTS,
+      (tx, using, id) => using.verifiedState(tx, AGENTS, { orgId: org, id }, 'share'),
+    ],
+    ['a batch read of the row since', AGENTS, (tx, using, id) => using.verifiedStates(tx, AGENTS, org, [id])],
+    ['another table object for it', { ...AGENTS }, () => Promise.resolve()],
+    [
+      'a move refused on it, which leaves the state to read again',
+      AGENTS,
+      (tx, using, id) => using.changeStatus(tx, AGENTS, { orgId: org, id }, 'reactivate', change('agent.reactivate')),
+    ],
+  ])('reads the row again after %s, as before', async (_, table, between) => {
+    const { reads, using } = counted();
+
+    await withTenant(app, org, async (tx) => {
+      const id = await created(tx, using);
+      await between(tx, using, id);
+      const before = reads.count;
+      expect(await using.changeStatus(tx, table, { orgId: org, id }, 'suspend', change('agent.suspend'))).toMatchObject(
+        { outcome: 'changed', version: 2 },
+      );
+      expect(reads.count).toBe(before + 1);
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('reads a row this transaction did not record, though it recorded another', async () => {
+    const { reads, using } = counted();
+    const other = await newAgent();
+
+    await withTenant(app, org, async (tx) => {
+      await created(tx, using);
+      const before = reads.count;
+      expect(
+        await using.changeStatus(tx, AGENTS, { orgId: org, id: other }, 'suspend', change('agent.suspend')),
+      ).toMatchObject({ outcome: 'changed', version: 2 });
+      expect(reads.count).toBe(before + 1);
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  it.each([
+    ['its version', { state_version: 5 }],
+    ['its pointer', { state_event_id: null }],
+  ] as const)('%s put in by the transaction after the record: the change fails, with the alarm', async (_, planted) => {
+    let id = '';
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        id = await created(tx, states);
+        await tx.updateTable('probe.agents').set(planted).where('id', '=', id).execute();
+        return states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      }),
+    ).rejects.toEqual(expect.objectContaining({ name: 'SignedStateFailed', reason: 'not_applied' }));
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'row', objectId: id })]);
+    expect(await rowOf(id)).toBeUndefined();
+  });
+
+  it.each([
+    ['moved from it', 'SUSPENDED', 'reactivate'],
+    ['refused on it', 'REVOKED', 'suspend'],
+  ] as const)(
+    'a status put in by the transaction after the record is never %s: the change fails, with the alarm',
+    async (_, planted, event) => {
+      let id = '';
+
+      await expect(
+        withTenant(app, org, async (tx) => {
+          id = await created(tx, states);
+          await tx.updateTable('probe.agents').set({ status: planted }).where('id', '=', id).execute();
+          return states.changeStatus(tx, AGENTS, { orgId: org, id }, event, change(`agent.${event}`));
+        }),
+      ).rejects.toEqual(expect.objectContaining({ name: 'SignedStateFailed', reason: 'not_applied' }));
+      expect(alarms()).toEqual([expect.objectContaining({ reason: 'status', objectId: id })]);
+      expect(await rowOf(id)).toBeUndefined();
+    },
+  );
+
+  it('a field put in by the transaction after the record is never sealed: the change fails, with the alarm', async () => {
+    let id = '';
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        id = await created(tx, states);
+        await tx.updateTable('probe.agents').set({ role: 'admin' }).where('id', '=', id).execute();
+        return states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      }),
+    ).rejects.toEqual(expect.objectContaining({ name: 'SignedStateFailed', reason: 'not_applied' }));
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'row', objectId: id })]);
+    expect(await rowOf(id)).toBeUndefined();
   });
 });
 
