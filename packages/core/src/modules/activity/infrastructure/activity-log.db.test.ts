@@ -76,6 +76,26 @@ afterAll(async () => {
 });
 
 describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () => {
+  it("cuts off an organisation's row slowed past the app, never waited on for ever (4D2d P4: limited with the organisation)", async () => {
+    const owner = database.as('owner');
+    await owner.query('create schema if not exists probe');
+    await owner.query(
+      'create function probe.slow() returns trigger language plpgsql as $$ begin perform pg_catalog.pg_sleep(30); return new; end $$',
+    );
+    await owner.query(
+      'create trigger slow before insert on access.requests for each row execute function probe.slow()',
+    );
+    const started = performance.now();
+    try {
+      await expect(log.recordForOrganisation(app, forOrganisation())).rejects.toMatchObject({ code: '57014' });
+    } finally {
+      await owner.query('drop trigger slow on access.requests');
+      await owner.query('drop function probe.slow()');
+    }
+    expect(performance.now() - started).toBeLessThan(20_000);
+    expect(await rowsOf(ORG)).toEqual([]);
+  }, 30_000);
+
   it('writes an organisation’s row inside its own wall, IDs in lower case, with its client’s clues', async () => {
     await log.recordForOrganisation(app, forOrganisation());
 

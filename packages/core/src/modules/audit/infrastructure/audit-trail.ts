@@ -59,7 +59,7 @@ import {
   type StoredEntry,
   verifyChain,
 } from '@agentx/platform/audit-chain';
-import { assertTenant, limitStatements, withTenant } from '@agentx/platform/db';
+import { assertTenant, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
 import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
@@ -859,10 +859,7 @@ export function createAuditTrail({
     },
 
     verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
-      return withTenant(db, orgId, async (tx) => {
-        await limitStatements(tx);
-        return trail.verify(tx, orgId, anchor);
-      });
+      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), { limited: true });
     },
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {

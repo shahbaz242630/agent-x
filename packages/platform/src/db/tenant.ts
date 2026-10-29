@@ -67,12 +67,15 @@ const tenantOf = new WeakMap<object, string>();
  * resolves and rolls back when it throws. It can't be nested: a second
  * withTenant inside `work` would open another transaction on another
  * connection, committed separately, and under load every connection could
- * end up waiting on another.
+ * end up waiting on another. `limited`: every statement is limited as
+ * limitStatements limits them, set with the organisation in one round trip
+ * (4D2d P4).
  */
 export async function withTenant<Schema, Result>(
   db: Kysely<Schema>,
   orgId: string,
   work: (tx: Transaction<Schema>) => Promise<Result>,
+  { limited = false }: { readonly limited?: boolean } = {},
 ): Promise<Result> {
   // Checked before the transaction opens; the ID itself is never echoed.
   if (!UUID.test(orgId)) throw new TenantContextError('the organisation ID is not a UUID');
@@ -90,9 +93,15 @@ export async function withTenant<Schema, Result>(
         .execute(async (tx) => {
           // set_config answers with the setting as the database now holds it: the read-back at the
           // start. It can't differ today (the setting has no check hook); kept as decision 41 asks.
-          const { rows } = await sql<{ org_id: string | null }>`
-            select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id
-          `.execute(tx);
+          const { rows } = await (
+            limited
+              ? // The limit's own answer is never read: the setting holds for each later statement.
+                sql<{ org_id: string | null }>`
+                  select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id,
+                    pg_catalog.set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true) as statement_timeout
+                `
+              : sql<{ org_id: string | null }>`select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id`
+          ).execute(tx);
           const tenant = orgId.toLowerCase();
           if (!sameTenant(rows[0]?.org_id, tenant)) {
             throw new TenantContextError("the organisation setting didn't take");
@@ -153,15 +162,16 @@ function sameTenant(setting: string | null | undefined, tenant: string): boolean
 
 /** The longest a request's statement runs: a hung read gives its connection back, and the request fails rather than hangs. */
 export const STATEMENT_SECONDS = 10;
+const STATEMENT_TIMEOUT = `${String(STATEMENT_SECONDS)}s`;
 
 /**
  * Limits every later statement of the transaction to STATEMENT_SECONDS, a wait
  * for a lock included, until the transaction ends: what a request's work sets
- * first, so the app layer needs no SQL of its own.
+ * first, so the app layer needs no SQL of its own. withTenant's `limited`
+ * sets the same with the organisation.
  */
 export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<void> {
-  const timeout = `${String(STATEMENT_SECONDS)}s`;
-  await sql`select pg_catalog.set_config('statement_timeout', ${timeout}, true)`.execute(tx);
+  await sql`select pg_catalog.set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true)`.execute(tx);
 }
 
 /** A lock's name, `agentx.<scope>:<id>…` with the IDs in lower case, so every taker of one lock names it alike. */

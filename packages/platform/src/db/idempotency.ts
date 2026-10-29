@@ -50,7 +50,7 @@ import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
 import { UUID } from './patterns.ts';
-import { assertTenant, limitStatements, withTenant } from './tenant.ts';
+import { assertTenant, withTenant } from './tenant.ts';
 
 /**
  * Who sent the request: a signed-in user, or an agent, each by its own ID.
@@ -526,8 +526,5 @@ export async function sweepIdempotencyKeys<Schema>(
  * to 10 seconds: the retention sweep's one step (B1e-3).
  */
 export function sweepExpiredKeys<Schema>(db: Kysely<Schema>, orgId: string, most: number): Promise<number> {
-  return withTenant(db, orgId, async (tx) => {
-    await limitStatements(tx);
-    return sweepIdempotencyKeys(tx, orgId, most);
-  });
+  return withTenant(db, orgId, (tx) => sweepIdempotencyKeys(tx, orgId, most), { limited: true });
 }

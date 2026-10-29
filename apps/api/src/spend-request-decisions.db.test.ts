@@ -576,6 +576,37 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(decided()).toHaveLength(2);
   });
 
+  it('answers a fresh decision as its own transaction read it, in that one transaction; its key’s replay reads it in another, alike (4D2d P4)', async () => {
+    const { w, acting } = await ready();
+    let opened = 0;
+    // The same pool, each transaction it opens counted.
+    const counted = new Proxy(app, {
+      get: (target, name): unknown => {
+        if (name === 'transaction') opened += 1;
+        // Kysely's own fields are private: each method runs on the pool itself.
+        const value = Reflect.get(target, name, target) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    decisions = createSpendRequestDecisions({
+      database: counted,
+      outbox: createOutbox({ ids, clock }),
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+
+    const fresh = decidedOf(await ask(acting, asking(w), 'fresh-answer'));
+    const freshOpened = opened;
+    const replayed = decidedOf(await ask(acting, asking(w), 'fresh-answer'));
+
+    expect(freshOpened).toBe(1);
+    expect(opened - freshOpened).toBe(2);
+    expect(replayed).toEqual(fresh);
+    expect(fresh).toMatchObject({ decision: 'ALLOW', status: 'APPROVED' });
+  });
+
   it('refuses with nothing made a currency the deployment doesn’t take, a revoked key and a frozen organisation', async () => {
     const { w, acting } = await ready();
     expect(await ask(acting, asking(w, { amount: money(1_000_000n, 'USD') }))).toEqual(
