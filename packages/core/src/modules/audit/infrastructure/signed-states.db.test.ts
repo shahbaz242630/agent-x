@@ -1718,6 +1718,59 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
     expect(alarms()).toEqual([]);
   });
 
+  it('a row made by the change a gather waited for, found through the row as it now is, is read on its own (S161 review)', async () => {
+    const before = await newAgent();
+    const link = await newLink(before);
+    const made = newId();
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked = (): void => undefined;
+    const linkLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    // The change holds the link, makes a new agent and points the link at it, uncommitted while the gather waits.
+    const changing = withTenant(app, org, async (tx) => {
+      const from = await states.verifiedState(tx, LINKS, key(link), 'change');
+      if (from.outcome !== 'verified') throw new Error('the link is not verified');
+      await tx
+        .insertInto('probe.agents')
+        .values({ org_id: org, id: made, ...NEW_AGENT })
+        .execute();
+      await states.record(tx, AGENTS, key(made), 'new', NEW_AGENT, change('agent.created'));
+      await states.record(tx, LINKS, key(link), from, { agent_id: made }, change('link.moved'));
+      locked();
+      await held;
+    });
+    const { using } = counted();
+    try {
+      await linkLocked;
+      const gathering = withTenant(app, org, async (tx) => {
+        const ids = await using.gather(tx, org, [
+          { table: LINKS, id: { id: link }, lock: 'share' },
+          { table: AGENTS, id: { from: 0, column: 'agent_id' }, lock: 'share' },
+        ]);
+        return {
+          ids,
+          link: await using.verifiedState(tx, LINKS, key(link), 'share'),
+          agent: await using.verifiedState(tx, AGENTS, key(made), 'share'),
+        };
+      });
+      await waitUntilQueued(attacker, 1);
+      release();
+      await changing;
+
+      const outcome = await gathering;
+      expect(outcome.ids).toEqual([link, made]);
+      expect(outcome.link).toMatchObject({ outcome: 'verified', version: 2 });
+      expect(outcome.agent).toMatchObject({ outcome: 'verified', version: 1 });
+    } finally {
+      release();
+    }
+    expect(alarms()).toEqual([]);
+  });
+
   it('locks the rows in the order given: waiting on the second, it holds the first and not yet the third', async () => {
     const first = await newAgent();
     const second = await newAgent();
@@ -1855,6 +1908,20 @@ describe('gatherHistories (4D2d P8): histories in one statement, each answered o
 
     expect(read).toEqual({ outcome: 'tampered', sign: 'log' });
     expect(alarms()).toHaveLength(1);
+  });
+
+  it('never answers a history from a gather once this transaction has recorded a change since', async () => {
+    const id = await newAgent();
+    const { reads, using } = counted();
+
+    const read = await withTenant(app, org, async (tx) => {
+      await using.gatherHistories(tx, org, [about(id)]);
+      await using.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      return using.historyOf(tx, org, about(id));
+    });
+
+    expect(read).toMatchObject({ outcome: 'read', events: [{}, { event: { action: 'agent.suspend' } }] });
+    expect(reads.count).toBe(1);
   });
 
   it("never answers another organisation's history from a gather: it is read, and refused, as ever", async () => {

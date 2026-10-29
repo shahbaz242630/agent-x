@@ -880,6 +880,10 @@ export function createSignedStates({
     const answers = await trail.latestSignedStatesGathered(tx, orgId, gatheredRowReads(orgId, list));
     const kept = gathered.get(tx) ?? new Map<string, { readonly lock: RowLock; readonly check: StateCheck }>();
     gathered.set(tx, kept);
+    // Once a row isn't believed (it may have changed while the statement waited for its lock), the rows after it
+    // aren't either: the statement's snapshot is older than that wait, so a row made by the change that ended it,
+    // found through the row as it now is, would read as missing (S161 review). Each is then read on its own.
+    let believing = true;
     return list.map(({ table, lock }, index) => {
       const answer = answers[index];
       if (answer === undefined || answer.id === null) return null;
@@ -889,7 +893,8 @@ export function createSignedStates({
       checkLockOrder(tx, held, lock);
       // Held from here, as verifiedState holds a row it reads.
       rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
-      const check = believedPair(table, key, answer.latest, answer.rows);
+      const check = believing ? believedPair(table, key, answer.latest, answer.rows) : undefined;
+      believing = check !== undefined;
       if (check === undefined) kept.delete(name);
       else kept.set(name, { lock, check });
       return answer.id;
@@ -1080,8 +1085,10 @@ export function createSignedStates({
     notTheHold(table);
     const rows = heldIn(tx);
     const name = rowName(table, key);
-    // A row written is never answered from what a gather read before.
+    // A row written is never answered from what a gather read before, nor any history from one: the change's
+    // event may belong in it.
     gathered.get(tx)?.delete(name);
+    historiesGathered.delete(tx);
     if (from === 'new') {
       await lockNewRow(tx, table, key, set, rows, name);
     } else {
