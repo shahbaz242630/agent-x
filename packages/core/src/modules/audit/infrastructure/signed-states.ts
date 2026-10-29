@@ -43,7 +43,6 @@ import {
   type GatheredRow,
   gatheredRowReads,
   MOST_SIGNED_ROWS_READ,
-  pointSignedRow,
   readSignedRow,
   readSignedRows,
   type RowLock,
@@ -53,6 +52,8 @@ import {
   signedRowIds,
   signedRowReadSeen,
   signedRowSeen,
+  signedRowPointed,
+  signedRowPointing,
   type SignedStateTable,
   StatusChangeFailed,
   type StatusTable,
@@ -1129,13 +1130,20 @@ export function createSignedStates({
     const row = await written(tx, table, key, from, set);
     const subject = { type: table.subject, id: key.id, version: row.version };
     const seal = sealState(keys, { orgId: key.orgId, subject, fields: row.fields });
-    const recorded = await trail.record(tx, key.orgId, {
-      actor: change.actor,
-      action: change.action,
-      subject,
-      details: { ...change.details, ...stateSealDetails(seal) },
-    });
-    const pointed = await pointSignedRow(tx, table, key, { version: row.version, eventId: recorded.id });
+    // The row pointed at its event in the event's own write (4D2d P8).
+    const recorded = await trail.recordAlong(
+      tx,
+      key.orgId,
+      {
+        actor: change.actor,
+        action: change.action,
+        subject,
+        details: { ...change.details, ...stateSealDetails(seal) },
+      },
+      (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
+    );
+    const pointed =
+      recorded.along === undefined ? ({ outcome: 'unreadable' } as const) : signedRowPointed(table, recorded.along);
     const sealed = new Map(row.fields);
     if (
       pointed.outcome !== 'found' ||
@@ -1458,7 +1466,9 @@ export function createSignedStates({
       }
       const current = justWritten(tx, table, key) ?? (await verifiedState(tx, table, key, 'change'));
       if (current.outcome !== 'verified') return current;
-      const moved = await statuses.change(tx, table, key, event).catch((error: unknown) => {
+      // From the status sealed, the row locked for change: one statement when the row still holds it (4D2d P8).
+      const sealedStatus = current.fields.get(STATUS) ?? undefined;
+      const moved = await statuses.change(tx, table, key, event, sealedStatus).catch((error: unknown) => {
         // The row is verified and locked: its status can't be unreadable or
         // left unchanged unless something past the app is at work on it.
         if (error instanceof StatusChangeFailed) alarm(table.subject, key, 'status');

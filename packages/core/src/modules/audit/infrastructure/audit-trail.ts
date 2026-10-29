@@ -259,6 +259,19 @@ export interface AuditTrail {
    */
   keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean>;
   /**
+   * record, with `statement` (a data-modifying one, given the event's ID and
+   * a condition to AND to its filter: that the event was written) run in the
+   * event's own write (4D2d P8): a signed row's pointer to the event. Every
+   * row it gave back as JSON (undefined if they don't read as rows). Nothing
+   * it changes stays if the event is refused: the transaction rolls back.
+   */
+  recordAlong(
+    tx: AuditTransaction,
+    orgId: string,
+    event: AuditEvent,
+    statement: (eventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
+  ): Promise<RecordedAuditEvent & { readonly along: readonly Readonly<Record<string, unknown>>[] | undefined }>;
+  /**
    * The object's latest signed state (ADR-012 §2): of the events about it,
    * the newest whose details carry a state seal, with every later event about
    * it sealed and no event of the chain past the head (see the file's comment
@@ -717,7 +730,13 @@ function brokenAt(seq: unknown): BrokenRead {
 }
 
 /** Recording's steps over the audit tables, for one organisation and one event. */
-function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, details: string): ChainWriter {
+function writerFor(
+  tx: AuditTransaction,
+  orgId: string,
+  event: AuditEvent,
+  details: string,
+  along?: Along,
+): ChainWriter {
   return {
     async lockHead() {
       // The clock in the outer select, which reads a row only once the inner one has locked it.
@@ -744,14 +763,7 @@ function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, detai
     async append(sealed, head, previous) {
       // One statement: the head moves only if it is still `previous` with no event past it,
       // and the event is written only if the head moved, so a refused one leaves nothing behind.
-      const written = await sql`
-        with moved as (
-          update audit.heads
-          set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
-          where org_id = ${orgId} and seq = ${previous.seq} and hash = ${previous.hash}
-            and not exists (select from audit.events p where p.org_id = ${orgId} and p.seq > ${previous.seq})
-          returning org_id
-        )
+      const insert = sql`
         insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type,
                                   subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version)
         select m.org_id, ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz,
@@ -760,10 +772,36 @@ function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, detai
                ${details}::text, ${sealed.prevHash}::bytea, ${sealed.hash}::bytea, ${sealed.mac}::bytea,
                ${sealed.macKeyVersion}::integer
         from moved m
-      `.execute(tx);
+      `;
+      const move = sql`
+        update audit.heads
+        set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
+        where org_id = ${orgId} and seq = ${previous.seq} and hash = ${previous.hash}
+          and not exists (select from audit.events p where p.org_id = ${orgId} and p.seq > ${previous.seq})
+        returning org_id
+      `;
+      if (along !== undefined) {
+        // The row's pointer too, only once the event is written (4D2d P8): the statement it came with, run here.
+        const { rows } = await sql<{ written: bigint; along: unknown }>`
+          with moved as (${move}), written as (${insert} returning 1),
+          along as (${along.statement(sealed.id, sql`exists (select from written)`)})
+          select (select pg_catalog.count(*) from written) as written,
+                 (select pg_catalog.json_agg(pg_catalog.row_to_json(a)) from along a) as along
+        `.execute(tx);
+        const [row] = rows;
+        along.rows = rowsAlong({ row_json: row?.along });
+        return row?.written === 1n;
+      }
+      const written = await sql`with moved as (${move}) ${insert}`.execute(tx);
       return written.numAffectedRows === 1n;
     },
   };
+}
+
+/** A statement an event's write carries (recordAlong): built with the event's ID, and the rows it gave once run. */
+interface Along {
+  readonly statement: (eventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>;
+  rows?: readonly Readonly<Record<string, unknown>>[] | undefined;
 }
 
 /** Checking's reads of the audit tables, for one organisation. */
@@ -874,6 +912,7 @@ export function createAuditTrail({
     tx: AuditTransaction,
     orgId: string,
     input: AuditEvent,
+    along?: Along,
   ): Promise<RecordedAuditEvent> => {
     const event = checkedEvent(input, hidesField);
     if (Object.hasOwn(event.details, CORRELATION_DETAIL)) {
@@ -895,7 +934,7 @@ export function createAuditTrail({
     const details = canonicalDetails(
       sealedCorrelation === undefined ? event.details : { ...event.details, [CORRELATION_DETAIL]: sealedCorrelation },
     );
-    const sealed = await appendEvent(keys, chain, writerFor(tx, chain.orgId, event, details), {
+    const sealed = await appendEvent(keys, chain, writerFor(tx, chain.orgId, event, details, along), {
       nextId: () => ids.next(),
       content: eventContent(event, details),
     });
@@ -1018,6 +1057,17 @@ export function createAuditTrail({
   const trail: AuditTrail = Object.freeze({
     record(tx: AuditTransaction, orgId: string, event: AuditEvent): Promise<RecordedAuditEvent> {
       return recordAs(false, tx, orgId, event);
+    },
+
+    async recordAlong(
+      tx: AuditTransaction,
+      orgId: string,
+      event: AuditEvent,
+      statement: (eventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
+    ): Promise<RecordedAuditEvent & { readonly along: readonly Readonly<Record<string, unknown>>[] | undefined }> {
+      const along: Along = { statement };
+      const recorded = await recordAs(false, tx, orgId, event, along);
+      return Object.freeze({ ...recorded, along: along.rows });
     },
 
     async verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {

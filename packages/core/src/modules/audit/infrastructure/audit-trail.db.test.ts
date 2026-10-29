@@ -23,7 +23,7 @@ import {
 } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { sql } from 'kysely';
+import { type RawBuilder, sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { canonicalDetails } from '../../../shared-kernel/index.ts';
@@ -1862,6 +1862,40 @@ describe('a page of the whole log, for the organisation’s admins (logPage; Pha
     await expect(page({ limit: 0 })).rejects.toThrow('The limit is a whole number from 1');
     await expect(withTenant(app, newOrg(), (tx) => trail.logPage(tx, org, { ...EVER, limit: 1 }))).rejects.toThrow(
       "the transaction isn't withTenant's for this organisation",
+    );
+  });
+});
+
+describe("recordAlong (4D2d P8): a statement in the event's own write", () => {
+  const along = (eventId: string, gate: RawBuilder<unknown>) => sql`select ${eventId}::text as id where ${gate}`;
+
+  it("runs it with the event's ID, only once the event is written, and gives back its rows", async () => {
+    await record(org, event(1));
+
+    const recorded = await withTenant(app, org, (tx) => trail.recordAlong(tx, org, event(2), along));
+    expect(recorded).toMatchObject({ seq: 2n });
+    expect(recorded.along).toEqual([{ id: recorded.id }]);
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 2n });
+    // A statement that gives nothing back: none.
+    const none = await withTenant(app, org, (tx) =>
+      trail.recordAlong(tx, org, event(3), (_, gate) => sql`select 1 as one where ${gate} and false`),
+    );
+    expect(none.along).toEqual([]);
+  });
+
+  it('refuses the event, the statement with it, on a chain holding an event past its head', async () => {
+    await record(org, event(1), event(2));
+    await attacker.query(
+      `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version)
+       select org_id, seq + 1, '0199a0f0-0000-7000-8000-0000000000fe', recorded_at, actor_type, actor_id, action,
+         subject_type, subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version
+       from audit.events where org_id = $1 and seq = 2`,
+      [org],
+    );
+
+    await expect(withTenant(app, org, (tx) => trail.recordAlong(tx, org, event(4), along))).rejects.toThrow(
+      ChainBroken,
     );
   });
 });
