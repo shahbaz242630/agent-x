@@ -157,18 +157,22 @@ export function createActivityLog({ ids }: { readonly ids: IdGenerator }): Activ
           ? undefined
           : 'its actor is not a person or an agent by UUID');
       if (problem !== undefined) refuse(problem);
-      await withTenant(db, request.orgId, async (tx) => {
-        await limitStatements(tx);
-        await tx
-          .insertInto('access.requests')
-          .values({
-            ...columnsOf(ids.next(), request),
-            org_id: request.orgId.toLowerCase(),
-            actor_type: request.actor.type,
-            actor_id: request.actor.id.toLowerCase(),
-          })
-          .execute();
-      });
+      await withTenant(
+        db,
+        request.orgId,
+        async (tx) => {
+          await tx
+            .insertInto('access.requests')
+            .values({
+              ...columnsOf(ids.next(), request),
+              org_id: request.orgId.toLowerCase(),
+              actor_type: request.actor.type,
+              actor_id: request.actor.id.toLowerCase(),
+            })
+            .execute();
+        },
+        { limited: true },
+      );
     },
 
     async recordForPerson(db, request) {

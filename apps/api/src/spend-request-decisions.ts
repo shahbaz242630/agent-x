@@ -168,6 +168,15 @@ const believed = (read: { readonly outcome: string }): void => {
   if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
 };
 
+/** A decided request, read and verified for its answer: INTEGRITY_FAILED if tampered with. */
+async function answerOf(tx: DecisionTx, states: SignedStates, orgId: string, id: string): Promise<SpendRequestRecord> {
+  const found = await requestOf(tx, states, { orgId, id });
+  believed(found);
+  // Requests are never deleted (0039's grants): one just made, or answered for its key, is there.
+  if (found.outcome !== 'found') throw new Error(`A decided spend request is missing: ${id}`);
+  return found.request;
+}
+
 /** Level 2: the organisation, refused while frozen (ORG_FROZEN). */
 export async function notFrozen(tx: DecisionTx, states: SignedStates, orgId: string): Promise<void> {
   // The organisation always exists while its requests can be made.
@@ -563,11 +572,13 @@ export function createSpendRequestDecisions({
       const log = logger.child({ correlationId, orgId: agent.orgId });
       // Each attempt sets it; only the one that committed is returned, so it is that attempt's decision.
       let made: Awaited<ReturnType<typeof decided>> | undefined;
+      let fresh: SpendRequestRecord | undefined;
       // The whole decision, its lock waits and retries too, for the Pilot's policy target (PL-38).
       const started = performance.now();
       const done = await retryingTransaction(log, DECIDE_OPERATION, () =>
         work.write(agent, idempotent, correlationId, async (tx, states) => {
           made = await decided(tx, states, agent, idempotent.key, asked);
+          fresh = await answerOf(tx, states, agent.orgId, made.id);
           return { status: 201, resourceId: made.id };
         }),
       );
@@ -583,13 +594,13 @@ export function createSpendRequestDecisions({
           durationMs: Math.round(performance.now() - started),
         });
       }
-      return work.answered(agent.orgId, correlationId, async (tx, states) => {
-        const found = await requestOf(tx, states, { orgId: agent.orgId, id: done.result.resourceId });
-        believed(found);
-        // Requests are never deleted (0039's grants): one just made, or answered for its key, is there.
-        if (found.outcome !== 'found') throw new Error(`A decided spend request is missing: ${done.result.resourceId}`);
-        return { outcome: 'decided' as const, request: found.request };
-      });
+      // A fresh decision answers as its own transaction read it before commit (4D2d P4, partner decision 2);
+      // a replay of its key reads it in a transaction of its own, as it is now.
+      if (done.outcome === 'done' && fresh !== undefined) return { outcome: 'decided' as const, request: fresh };
+      return work.answered(agent.orgId, correlationId, async (tx, states) => ({
+        outcome: 'decided' as const,
+        request: await answerOf(tx, states, agent.orgId, done.result.resourceId),
+      }));
     },
   };
 }

@@ -474,6 +474,28 @@ describe('limitStatements', () => {
     const after = await app.transaction().execute(async (tx) => (await read().execute(tx)).rows[0]?.limit);
     expect(after).not.toBe(`${String(STATEMENT_SECONDS)}s`);
   });
+
+  it("is set with the organisation by withTenant's `limited` (4D2d P4), for that transaction alone", async () => {
+    const read = () =>
+      sql<{ limit: string; org: string }>`
+        select pg_catalog.current_setting('statement_timeout') as limit,
+          pg_catalog.current_setting('app.org_id', true) as org
+      `;
+    const limited = await withTenant(app, ORG_A, async (tx) => (await read().execute(tx)).rows[0], { limited: true });
+    const plain = await withTenant(app, ORG_A, async (tx) => (await read().execute(tx)).rows[0]);
+    const after = await app.transaction().execute(async (tx) => (await read().execute(tx)).rows[0]);
+
+    expect(limited).toEqual({ limit: `${String(STATEMENT_SECONDS)}s`, org: ORG_A.toLowerCase() });
+    expect(plain?.org).toBe(ORG_A.toLowerCase());
+    expect(plain?.limit).not.toBe(`${String(STATEMENT_SECONDS)}s`);
+    expect(after?.limit).not.toBe(`${String(STATEMENT_SECONDS)}s`);
+  });
+
+  it('still refuses an organisation ID that is not a UUID, before opening a transaction, when `limited`', async () => {
+    await expect(withTenant(app, 'org-a', () => Promise.resolve('ran'), { limited: true })).rejects.toThrow(
+      TenantContextError,
+    );
+  });
 });
 
 describe('holdTransactionLock', () => {

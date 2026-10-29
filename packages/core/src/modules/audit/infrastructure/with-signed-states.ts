@@ -185,11 +185,15 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   // Whether the work's transaction began: one refused outright (nested, a bad ID) found nothing, and tries nothing.
   const opened = { began: false };
   try {
-    return await withTenant(db, orgId, async (tx) => {
-      opened.began = true;
-      await limitStatements(tx);
-      return work(tx, states);
-    });
+    return await withTenant(
+      db,
+      orgId,
+      (tx) => {
+        opened.began = true;
+        return work(tx, states);
+      },
+      { limited: true },
+    );
   } catch (error) {
     // Named by the chain that refused: the work may record on the platform's
     // too (an operator action records on both, ADR-006 §6).

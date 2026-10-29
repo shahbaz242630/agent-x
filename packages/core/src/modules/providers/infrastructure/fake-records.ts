@@ -14,7 +14,7 @@
 // first added.
 import { randomBytes } from 'node:crypto';
 
-import { limitStatements, withTenant } from '@agentx/platform/db';
+import { withTenant } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { ConsentControls, PayeeNameCheck } from '../domain/rail.ts';
@@ -231,10 +231,7 @@ export function createDatabaseRecords(db: Kysely<FakePartnerTables>): FakePartne
   };
   return {
     within: (organizationId, work) =>
-      withTenant(db, organizationId, async (tx) => {
-        await limitStatements(tx);
-        return work(of(tx, organizationId));
-      }),
+      withTenant(db, organizationId, (tx) => work(of(tx, organizationId)), { limited: true }),
     // Two processes asking at once: the second's insert adds nothing, and both read the one that stands.
     eventKey: async () => {
       await db
