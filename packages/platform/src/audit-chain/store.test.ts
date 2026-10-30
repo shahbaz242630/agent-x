@@ -175,7 +175,10 @@ describe('appending events together (4D2d P13)', () => {
     memory.calls = [];
 
     await expect(
-      appendEvents(keys, CHAIN, memory, [two[0] as (typeof two)[0], { nextId: () => 'nope', content: CONTENT }]),
+      appendEvents(keys, CHAIN, memory, [
+        { nextId: () => id(2), content: CONTENT },
+        { nextId: () => 'nope', content: CONTENT },
+      ]),
     ).rejects.toThrow(RangeError);
     expect(memory.calls).toEqual(['lockHead']);
   });

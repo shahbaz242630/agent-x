@@ -1606,7 +1606,8 @@ export function createSignedStates({
         [sealedEvent(table, key, first, change), sealedEvent(table, key, row, withMove(moveChange, moved))],
         (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
       );
-      const last = recorded.at(-1) as RecordedAuditEvent;
+      const last = recorded.at(-1);
+      if (last === undefined) throw new Error('Two events asked and none recorded');
       const state = pointedState(tx, table, key, row, last, along);
       return Object.freeze({
         outcome: 'changed',

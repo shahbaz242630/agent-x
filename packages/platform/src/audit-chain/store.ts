@@ -154,19 +154,21 @@ export async function appendEvent(
     {
       lockHead: () => writer.lockHead(),
       start: (head) => writer.start(head),
-      // One event asked, so one to write and one written.
-      appendAll: ([sealed], head, previous) => writer.append(sealed as SealedEvent, head, previous),
+      appendAll: ([sealed], head, previous) =>
+        sealed === undefined ? Promise.resolve(false) : writer.append(sealed, head, previous),
     },
     [event],
   );
-  return stored as SealedEvent;
+  if (stored === undefined) throw new ChainBroken(chain);
+  return stored;
 }
 
 /**
  * appendEvent for events that belong together (4D2d P13): the head locked
  * once, the events chained one after another, all written and the head moved
- * once, in one statement, under one reading of the clock. Each is sealed and
- * checked afterwards exactly as one recorded alone. In the order given.
+ * once, in one statement, under one reading of the clock (partner S163). Each is
+ * sealed and checked afterwards exactly as one recorded alone. In the order
+ * given.
  */
 export async function appendEvents(
   keys: KeyProvider,

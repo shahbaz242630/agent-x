@@ -54,7 +54,6 @@ import {
   headFields,
   headIsSealed,
   sealedFields,
-  type SealedEvent,
   type StateSeal,
   stateSealIn,
   type StoredEntry,
@@ -784,9 +783,13 @@ function writerFor(
     async appendAll(sealedEvents, head, previous) {
       // One statement: the head moves only if it is still `previous` with no event past it,
       // and the events are written only if the head moved, so a refused one leaves nothing behind.
+      const last = sealedEvents.at(-1);
+      if (last === undefined) return false;
       const selects = sealedEvents.map((sealed, index) => {
         // One sealed for each, in their order (recordAllAs).
-        const { event, details } = toWrite[index] as EventToWrite;
+        const written = toWrite[index];
+        if (written === undefined) throw new RangeError('An event sealed that was not asked for');
+        const { event, details } = written;
         return sql`
           select m.org_id, ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz,
                  ${event.actor.type}::text, ${event.actor.id}::text, ${event.action}::text,
@@ -813,7 +816,7 @@ function writerFor(
         // The row's pointer too, only once the events are written (4D2d P8): the statement it came with, run here.
         const { rows } = await sql<{ written: bigint; along: unknown }>`
           with moved as (${move}), written as (${insert} returning 1),
-          along as (${along.statement((sealedEvents.at(-1) as SealedEvent).id, sql`exists (select from written)`)})
+          along as (${along.statement(last.id, sql`exists (select from written)`)})
           select (select pg_catalog.count(*) from written) as written,
                  (select pg_catalog.json_agg(pg_catalog.row_to_json(a)) from along a) as along
         `.execute(tx);
@@ -987,7 +990,8 @@ export function createAuditTrail({
     along?: Along,
   ): Promise<RecordedAuditEvent> => {
     const [recorded] = await recordAllAs(hold, tx, orgId, [input], along);
-    return recorded as RecordedAuditEvent;
+    if (recorded === undefined) throw new Error('One event asked and none recorded');
+    return recorded;
   };
 
   /**

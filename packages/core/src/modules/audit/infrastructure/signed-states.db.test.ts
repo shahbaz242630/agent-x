@@ -803,7 +803,9 @@ describe('a new row signed and moved in one step of the chain (recordNewAndMove,
             column === 'status' ? status : ((NEW_AGENT as Record<string, string>)[column] ?? null),
           ]),
         },
-        stateSealIn(JSON.parse((version === 1 ? first : second)?.details ?? '{}')) as StateSeal,
+        stateSealIn(
+          JSON.parse((version === 1 ? first : second)?.details ?? '{}') as Record<string, unknown>,
+        ) as StateSeal,
       );
     expect(sealedAs('ACTIVE', 1)).toBe(true);
     expect(sealedAs('SUSPENDED', 2)).toBe(true);
@@ -847,10 +849,10 @@ describe('a new row signed and moved in one step of the chain (recordNewAndMove,
         (moved) => moved,
         (error: unknown) => error,
       );
-      await waitUntilQueued(attacker, 1);
+      const queued = await waitUntilQueued(attacker, 1);
       const waiters = await attacker.query<{ query: string }>(
-        `select query from pg_catalog.pg_stat_activity
-         where wait_event_type = 'Lock' and pg_catalog.pg_blocking_pids(pid) <> '{}'`,
+        'select query from pg_catalog.pg_stat_activity where pid = any($1::int[])',
+        [queued],
       );
       // Its wait is the head's lock, with the row's writes all behind it: the status and the version already moved.
       expect(waiters.map(({ query }) => query.replaceAll(/\s+/g, ' '))).toEqual([
@@ -955,24 +957,24 @@ describe('a new row signed and moved in one step of the chain (recordNewAndMove,
     ['the moved write', 'new.state_version = 2 and old.state_version = 1'],
     ['the pointer', 'new.state_event_id is not null'],
   ])('fails with the alarm when a trigger planted past the app changes what %s stored', async (_, when) => {
-    const trigger = newId().replaceAll('-', '_');
-    await database.as('owner').query(`create function probe.plant_${trigger}() returns trigger language plpgsql as $$
+    const owner = database.as('owner');
+    const plant = `create function probe.plant_role() returns trigger language plpgsql as $$
       begin
         if ${when} then new.role = 'admin'; end if;
         return new;
-      end $$`);
-    await database
-      .as('owner')
-      .query(
-        `create trigger plant_${trigger} before update on probe.agents for each row execute function probe.plant_${trigger}()`,
-      );
+      end $$`;
+    // eslint-disable-next-line agentx/no-string-built-sql -- `when` is one of the fixed conditions above.
+    await owner.query(plant);
+    await owner.query(
+      'create trigger plant_role before update on probe.agents for each row execute function probe.plant_role()',
+    );
     try {
       await expect(made()).rejects.toThrow(SignedStateFailed);
       expect(alarms().map(({ reason }) => reason)).toEqual(['row']);
       expect(await attacker.query('select 1 from audit.events where org_id = $1', [org])).toEqual([]);
     } finally {
-      await database.as('owner').query(`drop trigger plant_${trigger} on probe.agents`);
-      await database.as('owner').query(`drop function probe.plant_${trigger}()`);
+      await owner.query('drop trigger plant_role on probe.agents');
+      await owner.query('drop function probe.plant_role()');
     }
   });
 });
