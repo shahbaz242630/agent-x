@@ -127,13 +127,6 @@ export const orgsOf = (agents: readonly { readonly orgId: string }[]): string[] 
   ...new Set(agents.map(({ orgId }) => orgId)),
 ];
 
-/** The organisations of the agents of one kind, from a run's seed or a job's printed lines. */
-export const orgsOfKind = (
-  agents: readonly { readonly kind?: unknown; readonly orgId?: unknown }[],
-  kind: SeededAgent['kind'],
-): Set<string> =>
-  new Set(agents.flatMap((agent) => (agent.kind === kind && typeof agent.orgId === 'string' ? [agent.orgId] : [])));
-
 /** Where a run happens: the laptop's compose stack, or staging on Azure (D2c), production-sized. */
 export type LoadSite = 'local' | 'azure';
 

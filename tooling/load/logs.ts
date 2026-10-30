@@ -88,6 +88,17 @@ export interface ApartOrgs {
   readonly crowdShared?: ReadonlySet<string>;
 }
 
+/** The organisations of the agents of one kind, from a run's seed or a job's printed lines. */
+const orgsOfKind = (agents: readonly { readonly kind?: unknown; readonly orgId?: unknown }[], kind: string) =>
+  new Set(agents.flatMap((agent) => (agent.kind === kind && typeof agent.orgId === 'string' ? [agent.orgId] : [])));
+
+/** Which of a run's organisations are timed apart, by their agents' kinds. */
+export const apartOrgsOf = (agents: readonly { readonly kind?: unknown; readonly orgId?: unknown }[]): ApartOrgs => ({
+  spike: orgsOfKind(agents, 'capped'),
+  crowdOwn: orgsOfKind(agents, 'crowd-own'),
+  crowdShared: orgsOfKind(agents, 'crowd-shared'),
+});
+
 /** Below this share allowed, the steady traffic isn't the mix it means to be (S164: the split check made it 0.4%). */
 const LEAST_ALLOWED_SHARE = 0.3;
 

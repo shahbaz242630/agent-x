@@ -37,7 +37,7 @@ const OUT = __ENV.OUT ?? '/out';
 const SMOKE = __ENV.SMOKE === '1';
 const SECONDS = SMOKE ? 20 : 120;
 const { agents } = JSON.parse(open(__ENV.SEED ?? `${OUT}/seed.json`));
-const ample = agents.filter((agent) => agent.kind === (CROWD ?? 'ample'));
+const steadyAgents = agents.filter((agent) => agent.kind === (CROWD ?? 'ample'));
 const capped = agents.find((agent) => agent.kind === 'capped');
 
 const created = new Counter('created');
@@ -91,7 +91,7 @@ export const options = {
  * scattered from `n` for a crowd, so nothing lines its agents and suppliers up.
  * From `n`, never at random: an order's two asks must name the same supplier.
  */
-const supplierAt = (n) => (CROWD === undefined ? n : ((n * 2654435761) >>> 0) >>> 8);
+const supplierAt = (n) => (CROWD === undefined ? n : (n * 2654435761) >>> 8);
 
 /** The agent asks to pay its `n`th supplier (round the three) `amountMinor` fils for the order, timed as `kind`. */
 function ask(agent, key, orderReference, amountMinor, n, kind = TRAFFIC) {
@@ -122,14 +122,17 @@ const decided = (answer) => answer.status === 201;
 export function steady() {
   const n = exec.scenario.iterationInTest;
   const order = `P${PHASE}-S-${n}`;
-  const agent = CROWD === undefined ? ample[n % ample.length] : ample[Math.floor(Math.random() * ample.length)];
+  const agent =
+    CROWD === undefined
+      ? steadyAgents[n % steadyAgents.length]
+      : steadyAgents[Math.floor(Math.random() * steadyAgents.length)];
   const answer = counted(ask(agent, order, order, 100 + ((n * 37) % 801), n), true);
   check(answer, { 'decided (201)': decided });
 }
 
 export function duplicate() {
   const n = exec.scenario.iterationInTest;
-  const agent = ample[n % ample.length];
+  const agent = steadyAgents[n % steadyAgents.length];
   const order = `P${PHASE}-D-${n}`;
   const first = counted(ask(agent, `${order}-a`, order, 300, n), true);
   const second = counted(ask(agent, `${order}-b`, order, 300, n), true);
@@ -140,7 +143,7 @@ export function duplicate() {
 export function replay() {
   const n = exec.scenario.iterationInTest;
   const order = `P${PHASE}-R-${n}`;
-  const agent = ample[n % ample.length];
+  const agent = steadyAgents[n % steadyAgents.length];
   const first = counted(ask(agent, order, order, 200, n), true);
   const again = counted(ask(agent, order, order, 200, n), false);
   check(first, { 'decided (201)': decided });

@@ -30,8 +30,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { agentsOf, LATER_PHASES } from '../../tooling/load/job.ts';
-import { type LogSummary, summariseLogs, logFailures } from '../../tooling/load/logs.ts';
-import { orgsOfKind, POLICY_P95_MS } from '../../tooling/load/plan.ts';
+import { apartOrgsOf, type LogSummary, logFailures, summariseLogs } from '../../tooling/load/logs.ts';
+import { orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
 import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
@@ -529,11 +529,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   if (cleanedLine !== undefined && problemsIn(cleanedLine, '').length === 0) rmSync(steps.stateFile, { force: true });
   steps.say("Reading the API's own lines over the run...");
   const logText = await apiLog(steps, subscription, first.run.began, second.run.ended);
-  const logs: LogSummary = summariseLogs(logText, {
-    spike: orgsOfKind(first.agents, 'capped'),
-    crowdOwn: orgsOfKind(first.agents, 'crowd-own'),
-    crowdShared: orgsOfKind(first.agents, 'crowd-shared'),
-  });
+  const logs: LogSummary = summariseLogs(logText, apartOrgsOf(first.agents));
   const phases = [first.phase, ...phasesOf(second.printed)];
   const created = phases.reduce((sum, phase) => sum + phase.created, 0);
   const wiring = wiringFailures(second, checked, cleanedLine, logText);
@@ -595,7 +591,9 @@ async function cleanOpenRun(steps: LoadSteps, subscription: string): Promise<voi
     rmSync(steps.stateFile, { force: true });
     return;
   }
-  steps.say(`Cleaning up run ${open.runId}'s ${String(agents.length)} organisations, in load-cleanup...`);
+  steps.say(
+    `Cleaning up run ${open.runId}'s ${String(orgsOf(agents.map((agent) => ({ orgId: text(agent.orgId) }))).length)} organisations, in load-cleanup...`,
+  );
   const { run, printed, putBack } = await runWith(steps, subscription, 'load-cleanup', {
     AGENTX_LOAD_RUN_ID: open.runId,
     AGENTX_LOAD_SEEDED: JSON.stringify(agents),

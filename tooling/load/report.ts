@@ -64,7 +64,11 @@ export function phaseFailures(phase: PhaseResult): string[] {
 }
 
 /** The phases of the crowds, reported apart from the steady traffic's. */
-const CROWD_PHASES: readonly { readonly phase: number; readonly setup: string; readonly of: keyof LogSummary }[] = [
+const CROWD_PHASES: readonly {
+  readonly phase: number;
+  readonly setup: string;
+  readonly of: 'crowdOwnDecisions' | 'crowdSharedDecisions';
+}[] = [
   { phase: 3, setup: 'Each agent with its own three suppliers', of: 'crowdOwnDecisions' },
   { phase: 4, setup: 'All agents sharing three suppliers', of: 'crowdSharedDecisions' },
 ];
@@ -116,27 +120,36 @@ function tripsLine(run: RunResult): string[] {
       ];
 }
 
-/** Each crowd that missed the decision target, in plain words: none when all met it. */
+/** Each crowd that missed the decision target, in plain words, whether or not its phase ran to the end. */
 const crowdMisses = (run: RunResult): string[] =>
-  CROWD_PHASES.flatMap(({ phase, setup, of }) => {
-    const { p95 } = run.logs[of] as Percentiles;
-    return run.phases.some((p) => p.phase === phase) && p95 >= POLICY_P95_MS
-      ? [`${setup}: a decision's p95 was ${String(p95)} ms.`]
-      : [];
-  });
+  CROWD_PHASES.flatMap(({ setup, of }) =>
+    run.logs[of].p95 >= POLICY_P95_MS ? [`${setup}: a decision's p95 was ${String(run.logs[of].p95)} ms.`] : [],
+  );
+
+/** Each crowd with no phase summary or no decisions: never read as having met the target. */
+const crowdsUnmeasured = (run: RunResult): string[] =>
+  CROWD_PHASES.flatMap(({ phase, setup, of }) =>
+    run.logs[of].count > 0 && run.phases.some((p) => p.phase === phase) ? [] : [`${setup}: not measured.`],
+  );
 
 /** The crowds' numbers, apart: a miss of the decision target is named here, and doesn't yet fail the run (the partner's call). */
 function crowdSection(run: RunResult): string[] {
   const rows = CROWD_PHASES.flatMap(({ phase, setup, of }) => {
     const p = run.phases.find((candidate) => candidate.phase === phase);
     if (p === undefined) return [];
-    const { count, p50, p95, p99, max } = run.logs[of] as Percentiles;
+    const { count, p50, p95, p99, max } = run.logs[of];
     return [
       `| ${setup} | ${String(p.requests)} | ${String(p.dropped)} | ${ms(p.asksMs.p95)} | ${String(count)} | ${String(p50)} | ${String(p95)} | ` +
         `${String(p99)} | ${String(max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} |`,
     ];
   });
-  return rows.length === 0
+  const misses = crowdMisses(run);
+  const unmeasured = crowdsUnmeasured(run);
+  const verdict = [
+    ...(misses.length === 0 ? [] : [`**Decision target missed (${String(POLICY_P95_MS)} ms).** ${misses.join(' ')}`]),
+    ...unmeasured,
+  ];
+  return rows.length === 0 && misses.length === 0
     ? []
     : [
         '',
@@ -148,9 +161,9 @@ function crowdSection(run: RunResult): string[] {
         '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
         ...rows,
         '',
-        crowdMisses(run).length === 0
+        verdict.length === 0
           ? `Decision target met in each: p95 under ${String(POLICY_P95_MS)} ms.`
-          : `**Decision target missed (${String(POLICY_P95_MS)} ms).** ${crowdMisses(run).join(' ')}`,
+          : verdict.join(' '),
       ];
 }
 

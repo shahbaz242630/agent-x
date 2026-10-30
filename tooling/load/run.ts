@@ -24,7 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ENV_FILE, prepare } from '../../deploy/compose/prepare.ts';
-import { logFailures, summariseLogs } from './logs.ts';
+import { apartOrgsOf, logFailures, summariseLogs } from './logs.ts';
 import {
   API_CPUS_VARIABLE,
   DELAY_VARIABLE,
@@ -35,7 +35,6 @@ import {
   MOST_API_CPUS,
   MOST_DELAY_MS,
   optionsOf,
-  orgsOfKind,
   OUT_DIR,
   POLICY_P95_MS,
   readSeeded,
@@ -205,9 +204,7 @@ function main({ keep, apiCpus, delayMs }: LoadOptions): number {
     must('The API restarted', 'docker', [...COMPOSE, 'restart', 'api']);
     must('The API back', 'docker', [...COMPOSE, 'up', '--wait', '--no-deps', 'api']);
     must('New keys', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'keys'], login);
-    const second = measured(2);
-    const crowds = [measured(3), measured(4)];
-    const all = [first, second, ...crowds];
+    const all = [first, measured(2), measured(3), measured(4)];
     const created = all.reduce((sum, { result }) => sum + result.created, 0);
     console.log('\n== The database after the run');
     const verified = run(process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'verify'], {
@@ -219,12 +216,7 @@ function main({ keep, apiCpus, delayMs }: LoadOptions): number {
     });
     const log = run('docker', [...COMPOSE, 'logs', '--no-log-prefix', '--no-color', 'api'], { shown: false });
     writeFileSync(path.join(OUT_DIR, 'api.log'), log.stdout);
-    const { agents } = readSeeded();
-    const logs = summariseLogs(log.stdout, {
-      spike: orgsOfKind(agents, 'capped'),
-      crowdOwn: orgsOfKind(agents, 'crowd-own'),
-      crowdShared: orgsOfKind(agents, 'crowd-shared'),
-    });
+    const logs = summariseLogs(log.stdout, apartOrgsOf(readSeeded().agents));
     const failures = [
       ...all.flatMap(({ result }) => phaseFailures(result)),
       ...(verified.code === 0 ? [] : ['The database checks failed: their output is above.']),

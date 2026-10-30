@@ -54,58 +54,58 @@ export async function seedRun({
   // request to a person (S164: 24 of 6,777 allowed). Off, about half are allowed and half wait, as the traffic means.
   const ampleTerms = { approvalThreshold: AED(APPROVAL_THRESHOLD_MINOR), splitCheck: false };
 
-  async function seeded(kind: SeededAgent['kind']): Promise<SeededAgent> {
-    const w = await shared.world({ suppliers: 3, orgName: loadOrgName(runId) });
+  async function verifiedWorld(suppliers: number) {
+    const w = await shared.world({ suppliers, orgName: loadOrgName(runId) });
     for (const id of w.suppliers) await shared.verified(w, id);
-    const capped = kind === 'capped' ? AED(CAPPED_MONTHLY_MINOR) : undefined;
-    const terms =
-      capped === undefined
-        ? ampleTerms
-        : { approvalThreshold: AED(APPROVAL_THRESHOLD_MINOR), perOrderLimit: capped, monthlyLimit: capped };
+    return w;
+  }
+
+  /** The agent's mandate in force and its key, told to `onSeeded`. */
+  async function madeAgent(
+    kind: SeededAgent['kind'],
+    w: Parameters<typeof shared.inForce>[1],
+    terms: NonNullable<Parameters<typeof shared.inForce>[2]>,
+    supplierIds: readonly string[] = w.suppliers,
+  ): Promise<SeededAgent> {
     await shared.inForce(registry, w, terms);
     const acting = await shared.agentKey(w);
-    return {
+    const agent: SeededAgent = {
       kind,
       orgId: w.org,
       agentId: w.agent,
       key: acting.text,
       sourceId: w.source,
-      supplierIds: w.suppliers,
+      supplierIds,
       monthlyLimitMinor: String(shared.termsOf(w, terms).monthlyLimit.minor),
     };
+    onSeeded(agent);
+    return agent;
   }
 
   /** One organisation's ten agents, on the same terms as the ample ones: suppliers three each, or the same three. */
   async function crowded(kind: CrowdKind): Promise<SeededAgent[]> {
     const own = kind === 'crowd-own';
-    const w = await shared.world({ suppliers: own ? 3 * CROWD_AGENTS : 3, orgName: loadOrgName(runId) });
-    for (const id of w.suppliers) await shared.verified(w, id);
+    const w = await verifiedWorld(own ? 3 * CROWD_AGENTS : 3);
     const made: SeededAgent[] = [];
     for (let at = 0; at < CROWD_AGENTS; at += 1) {
       const theirs = at === 0 ? w : await shared.anotherAgent(w);
-      await shared.inForce(registry, theirs, ampleTerms);
-      const acting = await shared.agentKey(theirs);
-      const agent: SeededAgent = {
-        kind,
-        orgId: w.org,
-        agentId: theirs.agent,
-        key: acting.text,
-        sourceId: w.source,
-        supplierIds: own ? w.suppliers.slice(at * 3, at * 3 + 3) : w.suppliers,
-        monthlyLimitMinor: String(shared.termsOf(w, ampleTerms).monthlyLimit.minor),
-      };
-      onSeeded(agent);
-      made.push(agent);
+      const suppliers = own ? w.suppliers.slice(at * 3, at * 3 + 3) : w.suppliers;
+      made.push(await madeAgent(kind, theirs, ampleTerms, suppliers));
     }
     return made;
   }
 
   const agents: SeededAgent[] = [];
-  for (const kind of [...Array<'ample'>(AMPLE_AGENTS).fill('ample'), 'capped' as const]) {
-    const agent = await seeded(kind);
-    onSeeded(agent);
-    agents.push(agent);
-  }
+  for (let at = 0; at < AMPLE_AGENTS; at += 1)
+    agents.push(await madeAgent('ample', await verifiedWorld(3), ampleTerms));
+  const capped = AED(CAPPED_MONTHLY_MINOR);
+  agents.push(
+    await madeAgent('capped', await verifiedWorld(3), {
+      approvalThreshold: AED(APPROVAL_THRESHOLD_MINOR),
+      perOrderLimit: capped,
+      monthlyLimit: capped,
+    }),
+  );
   agents.push(...(await crowded('crowd-own')), ...(await crowded('crowd-shared')));
   return { agents };
 }

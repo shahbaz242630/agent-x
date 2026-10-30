@@ -133,6 +133,30 @@ describe('the report', () => {
     );
   });
 
+  it('never reads as met for a crowd cut short or with no decisions', () => {
+    const inOrg = (orgId: string, durationMs: number) =>
+      JSON.stringify({ level: 'info', event: 'spend_request.decided', durationMs, orgId });
+    const orgs = { crowdOwn: new Set(['own']), crowdShared: new Set(['shared']) };
+    // Phase 4 died part-way: no summary, but its decisions show the miss.
+    const cut = renderReport({
+      ...clean,
+      phases: [phase(1), phase(2), phase(3)],
+      logs: summariseLogs([inOrg('own', 40), inOrg('shared', 240)].join('\n'), orgs),
+    });
+    expect(cut).toContain("All agents sharing three suppliers: a decision's p95 was 240 ms.");
+    expect(cut).toContain('All agents sharing three suppliers: not measured.');
+    expect(cut).toContain('**But many agents');
+    expect(cut).not.toContain('Decision target met');
+    // A summary, but no decision lines: a p95 of 0 is no pass.
+    const empty = renderReport({
+      ...clean,
+      phases: [phase(1), phase(2), phase(3), phase(4)],
+      logs: summariseLogs(inOrg('own', 40), orgs),
+    });
+    expect(empty).toContain('All agents sharing three suppliers: not measured.');
+    expect(empty).not.toContain('Decision target met');
+  });
+
   it('says when the API was given more than staging’s half a CPU', () => {
     const report = renderReport({ ...clean, apiCpus: 2 });
     expect(report).toContain('# Load test, 2026-10-22 (local, API 2 CPU)');
