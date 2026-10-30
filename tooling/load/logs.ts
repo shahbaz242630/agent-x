@@ -29,12 +29,19 @@ export interface LogSummary {
   readonly decisions: Percentiles;
   /** Phase 2's spike's: 50 at once on one agent's month, queued on its lock by design, so apart. */
   readonly spikeDecisions: Percentiles;
+  /** Phase 3's crowd's, ten agents of one organisation with suppliers of their own: apart, with no target yet. */
+  readonly crowdOwnDecisions: Percentiles;
+  /** Phase 4's crowd's, ten agents of one organisation sharing three suppliers: apart, with no target yet. */
+  readonly crowdSharedDecisions: Percentiles;
+  /** How many of the steady traffic's decisions allowed the request at once: about half, as it means to. */
+  readonly allowed: number;
 }
 
 interface Line {
   readonly level?: string;
   readonly event?: string;
   readonly durationMs?: number;
+  readonly decision?: string;
   readonly orgId?: string;
   readonly requests?: number;
   readonly mismatched?: number;
@@ -71,19 +78,46 @@ const readLine = (text: string): Line | undefined => {
 const isHoldingsCheck = ({ event }: Line) => event === 'holdings_check.passed' || event === 'holdings_check.paused';
 const isProblem = ({ level }: Line) => level === 'warn' || level === 'error' || level === 'fatal';
 
-/**
- * The API's log, as `docker compose logs --no-log-prefix` prints it, summed
- * up; a decision in one of `spikeOrgs` (the capped agent's organisation) is
- * the spike's.
- */
-export function summariseLogs(text: string, spikeOrgs: ReadonlySet<string> = new Set()): LogSummary {
+/** The organisations whose decisions are timed apart from the steady traffic's. */
+export interface ApartOrgs {
+  /** The capped agent's. */
+  readonly spike?: ReadonlySet<string>;
+  /** Phase 3's crowd's. */
+  readonly crowdOwn?: ReadonlySet<string>;
+  /** Phase 4's crowd's. */
+  readonly crowdShared?: ReadonlySet<string>;
+}
+
+/** The organisations of the agents of one kind, from a run's seed or a job's printed lines. */
+const orgsOfKind = (agents: readonly { readonly kind?: unknown; readonly orgId?: unknown }[], kind: string) =>
+  new Set(agents.flatMap((agent) => (agent.kind === kind && typeof agent.orgId === 'string' ? [agent.orgId] : [])));
+
+/** Which of a run's organisations are timed apart, by their agents' kinds. */
+export const apartOrgsOf = (agents: readonly { readonly kind?: unknown; readonly orgId?: unknown }[]): ApartOrgs => ({
+  spike: orgsOfKind(agents, 'capped'),
+  crowdOwn: orgsOfKind(agents, 'crowd-own'),
+  crowdShared: orgsOfKind(agents, 'crowd-shared'),
+});
+
+/** Below this share allowed, the steady traffic isn't the mix it means to be (S164: the split check made it 0.4%). */
+const LEAST_ALLOWED_SHARE = 0.3;
+
+/** Too few decisions say nothing about the mix: the wiring run's. */
+const LEAST_DECISIONS_FOR_THE_MIX = 100;
+
+/** The API's log, as `docker compose logs --no-log-prefix` prints it, summed up. */
+export function summariseLogs(text: string, apart: ApartOrgs = {}): LogSummary {
   const raws = text.split(/\r?\n/).filter((raw) => raw.trim() !== '');
   const lines = raws.map(readLine).filter((line) => line !== undefined);
   const problems: Record<string, number> = {};
   for (const { event = '(no event)' } of lines.filter(isProblem)) problems[event] = (problems[event] ?? 0) + 1;
   const decided = lines.filter((line) => line.event === 'spend_request.decided' && line.durationMs !== undefined);
-  const timesOf = (spike: boolean) =>
-    decided.filter(({ orgId = '' }) => spikeOrgs.has(orgId) === spike).map(({ durationMs = 0 }) => durationMs);
+  const timesIn = (orgs: ReadonlySet<string> | undefined) =>
+    decided.filter(({ orgId = '' }) => orgs?.has(orgId) === true).map(({ durationMs = 0 }) => durationMs);
+  const steady = decided.filter(
+    ({ orgId = '' }) =>
+      apart.spike?.has(orgId) !== true && apart.crowdOwn?.has(orgId) !== true && apart.crowdShared?.has(orgId) !== true,
+  );
   return {
     problems,
     suppressed: lines.filter(({ event }) => event === 'log.suppressed').length,
@@ -93,8 +127,11 @@ export function summariseLogs(text: string, spikeOrgs: ReadonlySet<string> = new
       mismatched,
       tampered,
     })),
-    decisions: percentilesOf(timesOf(false)),
-    spikeDecisions: percentilesOf(timesOf(true)),
+    decisions: percentilesOf(steady.map(({ durationMs = 0 }) => durationMs)),
+    spikeDecisions: percentilesOf(timesIn(apart.spike)),
+    crowdOwnDecisions: percentilesOf(timesIn(apart.crowdOwn)),
+    crowdSharedDecisions: percentilesOf(timesIn(apart.crowdShared)),
+    allowed: steady.filter(({ decision }) => decision === 'ALLOW').length,
   };
 }
 
@@ -118,9 +155,19 @@ export function logFailures(summary: LogSummary, decided: number, policyP95Ms: n
   if (summary.holdingsChecks.some(({ mismatched, tampered }) => mismatched !== 0 || tampered !== 0)) {
     failures.push('A holdings check found a request whose money held did not match its decision.');
   }
-  const lines = summary.decisions.count + summary.spikeDecisions.count;
+  const lines =
+    summary.decisions.count +
+    summary.spikeDecisions.count +
+    summary.crowdOwnDecisions.count +
+    summary.crowdSharedDecisions.count;
   if (lines !== decided) {
     failures.push(`The log has ${String(lines)} decision line(s) for ${String(decided)} decision(s).`);
+  }
+  const { count } = summary.decisions;
+  if (count >= LEAST_DECISIONS_FOR_THE_MIX && summary.allowed / count < LEAST_ALLOWED_SHARE) {
+    failures.push(
+      `Only ${String(summary.allowed)} of ${String(count)} steady decisions allowed the request at once: the run should allow about half, or it measures one path only.`,
+    );
   }
   if (summary.decisions.p95 >= policyP95Ms) {
     failures.push(

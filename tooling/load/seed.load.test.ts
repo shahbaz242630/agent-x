@@ -11,14 +11,14 @@ import { loadKeys } from '../../packages/platform/src/keys/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
-import { AMPLE_AGENTS, APP_KEYS_DIR, loadConnection, OUT_DIR, SEED_FILE } from './plan.ts';
+import { APP_KEYS_DIR, loadConnection, OUT_DIR, SEED_FILE, SEEDED_AGENTS } from './plan.ts';
 import { seedRun } from './seed.ts';
 
 const database = createDatabase<MandateWorldTables>(loadConnection(), testLogger());
 
 afterAll(() => database.destroy());
 
-it('seeds the ample agents and the capped one', { timeout: 600_000 }, async () => {
+it('seeds the ample agents, the capped one and the two crowds', { timeout: 600_000 }, async () => {
   const seeded = await seedRun({
     database,
     keyring: loadKeys({ directory: APP_KEYS_DIR, current: {} }),
@@ -27,5 +27,5 @@ it('seeds the ample agents and the capped one', { timeout: 600_000 }, async () =
   mkdirSync(OUT_DIR, { recursive: true });
   // The agents' keys: readable by this user alone.
   writeFileSync(SEED_FILE, JSON.stringify(seeded), { mode: 0o600 });
-  expect(seeded.agents).toHaveLength(AMPLE_AGENTS + 1);
+  expect(seeded.agents).toHaveLength(SEEDED_AGENTS);
 });

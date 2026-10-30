@@ -22,7 +22,7 @@ import {
   type PrintedLine,
   secondJob,
 } from './job.ts';
-import { AMPLE_AGENTS, type Seeded } from './plan.ts';
+import { type LoadPhase, orgsOf, type Seeded, SEEDED_AGENTS } from './plan.ts';
 import type { PhaseResult } from './report.ts';
 
 const server = inject('postgres');
@@ -67,10 +67,10 @@ const NO_REQUESTS: PhaseResult = {
 
 /** A job's steps over the test database, k6 answering as `answer` does and recording what it was given; every line printed kept. */
 function stepsWith(
-  answer: (phase: 1 | 2) => PhaseRun | Promise<PhaseRun> = () => ({ finished: true, result: NO_REQUESTS }),
+  answer: (phase: LoadPhase) => PhaseRun | Promise<PhaseRun> = () => ({ finished: true, result: NO_REQUESTS }),
 ) {
   const printed: PrintedLine[] = [];
-  const k6Calls: { phase: 1 | 2; seeded: Seeded }[] = [];
+  const k6Calls: { phase: LoadPhase; seeded: Seeded }[] = [];
   const steps: JobSteps = {
     database: app,
     keyring: keys,
@@ -148,11 +148,11 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
     { timeout: 600_000 },
     async () => {
       const run = await seededRun('job test');
-      expect(run.agents).toHaveLength(AMPLE_AGENTS + 1);
+      expect(run.agents).toHaveLength(SEEDED_AGENTS);
       expect(run.first.lineOf('load.seeded')).toEqual({
         event: 'load.seeded',
         runId: 'job test',
-        agents: AMPLE_AGENTS + 1,
+        agents: SEEDED_AGENTS,
       });
       expect(JSON.stringify(run.first.printed)).not.toMatch(/"key"/);
       expect(run.keys.every((key) => key.length > 20)).toBe(true);
@@ -160,6 +160,7 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       const second = stepsWith(() => ({ finished: true, result: { ...NO_REQUESTS, phase: 2 } }));
       // No traffic stands in here, and the checks refuse to pass a run with none (the laptop's run holds them with it).
       expect(await secondJob(second.steps, 'job test', run.agents, 0)).toBe(1);
+      expect(second.k6Calls.map(({ phase }) => phase)).toEqual([2, 3, 4]);
       const secondKeys = second.k6Calls[0]?.seeded.agents.map(({ key }) => key) ?? [];
       expect(secondKeys.filter((key, n) => key === run.keys[n] || key.length <= 20)).toEqual([]);
       const checked = second.lineOf('load.checked');
@@ -173,7 +174,7 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       expect(checks.filter(({ problems }) => problems.length === 0)).toHaveLength(3);
       expect(second.lineOf('load.cleaned')).toEqual({
         event: 'load.cleaned',
-        organizations: run.agents.length,
+        organizations: orgsOf(run.agents).length,
         problems: [],
       });
       expect(await leftUndone(run.agents)).toEqual([]);
@@ -245,7 +246,7 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       });
       try {
         expect(await secondJob(resuming.steps, 'job test during', during.agents, 0)).toBe(1);
-        expect(resuming.lineOf('load.refused')?.reason).toMatch(/^hand-offs are running after phase 2, not paused/);
+        expect(resuming.lineOf('load.refused')?.reason).toMatch(/^hand-offs are running after the phases, not paused/);
       } finally {
         await pauseMoved(true);
       }

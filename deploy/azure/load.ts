@@ -16,7 +16,7 @@
 // 3. restarts the API's revision, so its holdings check runs over phase 1's
 //    requests at the start, and waits until it runs again
 // 4. writes the agents and phase 1's count onto load-second and runs it (new
-//    keys, k6's phase 2, the database checks, the clean-up)
+//    keys, k6's phases 2 to 4, the database checks, the clean-up)
 // 5. reads the API's own lines over the run and writes the report, as the
 //    laptop's run does, to tooling/load/reports/<day>-azure-<cpus>cpu.md
 // Each request is written as the operator's is (held-request.ts): the jobs
@@ -29,9 +29,9 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { agentsOf } from '../../tooling/load/job.ts';
-import { type LogSummary, summariseLogs, logFailures } from '../../tooling/load/logs.ts';
-import { POLICY_P95_MS } from '../../tooling/load/plan.ts';
+import { agentsOf, LATER_PHASES } from '../../tooling/load/job.ts';
+import { apartOrgsOf, type LogSummary, logFailures, summariseLogs } from '../../tooling/load/logs.ts';
+import { orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
 import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
@@ -400,11 +400,11 @@ const linesOf = (printed: readonly Readonly<Record<string, unknown>>[], event: s
 const lineOf = (printed: readonly Readonly<Record<string, unknown>>[], event: string) =>
   printed.find((line) => line.event === event);
 
-/** k6's summary of a phase, as the job printed it, or nothing when k6 didn't run to the end. */
-function phaseOf(printed: readonly Readonly<Record<string, unknown>>[]): PhaseResult | undefined {
-  const { event: _event, ...result } = lineOf(printed, 'load.k6_summary') ?? {};
-  return 'phase' in result ? (result as unknown as PhaseResult) : undefined;
-}
+/** k6's summary of each phase that ran to the end, as the job printed them. */
+const phasesOf = (printed: readonly Readonly<Record<string, unknown>>[]): PhaseResult[] =>
+  linesOf(printed, 'load.k6_summary').flatMap(({ event: _event, ...result }) =>
+    'phase' in result ? [result as unknown as PhaseResult] : [],
+  );
 
 /** The report's file for today, the API's size and the kind of run: a second run the same day gets its own. */
 function reportFile(dir: string, at: string, cpus: number, smoke: boolean): string {
@@ -471,7 +471,7 @@ async function phaseOne(
   const agents = seededAgents(first.printed);
   if (agents.length === 0) rmSync(steps.stateFile, { force: true });
   else keep(steps, { ...open, agents });
-  const phase = phaseOf(first.printed);
+  const [phase] = phasesOf(first.printed);
   const next = agents.length > 0 ? 'Run load.ts finish to clean up its organisations.' : 'It made no organisation.';
   if (first.run.status !== 'Succeeded' || phase === undefined) {
     throw new Error(`Phase 1 didn't finish (load-first ended ${endedAs(first.run, first.printed)}). ${next}`);
@@ -490,7 +490,9 @@ function wiringFailures(second: JobRun, checked: Line, cleanedLine: Line, logTex
   const cleaned = problemsIn(cleanedLine, 'The clean-up said nothing.');
   return [
     ...(second.run.status === 'Succeeded' ? [] : [`load-second ended ${endedAs(second.run, second.printed)}.`]),
-    ...(phaseOf(second.printed) === undefined ? ["Phase 2's k6 didn't run to the end."] : []),
+    ...LATER_PHASES.filter((n) => !phasesOf(second.printed).some(({ phase }) => phase === n)).map(
+      (n) => `Phase ${String(n)}'s k6 didn't run to the end.`,
+    ),
     ...(checked === undefined ? ['The database checks said nothing.'] : checkProblems(checked)),
     ...(cleaned.length === 0 ? [] : [`The clean-up left work undone: ${cleaned.join(' ')} Run load.ts finish.`]),
     ...(logText === '' ? ["None of the API's lines reached the workspace."] : []),
@@ -515,7 +517,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   const flags: Readonly<Record<string, string>> = smoke ? { AGENTX_LOAD_SMOKE: '1' } : {};
   const first = await phaseOne(steps, subscription, { runId, smoke, agents: [] }, flags);
   await restartApi(steps, subscription, api.revision);
-  steps.say('Phase 2: new keys, k6, the database checks and the clean-up, in load-second...');
+  steps.say('Phases 2 to 4: new keys, k6, the database checks and the clean-up, in load-second...');
   const second = await runWith(steps, subscription, 'load-second', {
     AGENTX_LOAD_RUN_ID: runId,
     AGENTX_LOAD_SEEDED: JSON.stringify(first.agents),
@@ -527,10 +529,8 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   if (cleanedLine !== undefined && problemsIn(cleanedLine, '').length === 0) rmSync(steps.stateFile, { force: true });
   steps.say("Reading the API's own lines over the run...");
   const logText = await apiLog(steps, subscription, first.run.began, second.run.ended);
-  const spikeOrgs = new Set(first.agents.flatMap((agent) => (agent.kind === 'capped' ? [text(agent.orgId)] : [])));
-  const logs: LogSummary = summariseLogs(logText, spikeOrgs);
-  const secondPhase = phaseOf(second.printed);
-  const phases = secondPhase === undefined ? [first.phase] : [first.phase, secondPhase];
+  const logs: LogSummary = summariseLogs(logText, apartOrgsOf(first.agents));
+  const phases = [first.phase, ...phasesOf(second.printed)];
   const created = phases.reduce((sum, phase) => sum + phase.created, 0);
   const wiring = wiringFailures(second, checked, cleanedLine, logText);
   // The wiring run is judged on its wiring alone: its numbers are a few seconds' of k6 on staging's own sizes.
@@ -591,7 +591,9 @@ async function cleanOpenRun(steps: LoadSteps, subscription: string): Promise<voi
     rmSync(steps.stateFile, { force: true });
     return;
   }
-  steps.say(`Cleaning up run ${open.runId}'s ${String(agents.length)} organisations, in load-cleanup...`);
+  steps.say(
+    `Cleaning up run ${open.runId}'s ${String(orgsOf(agents.map((agent) => ({ orgId: text(agent.orgId) }))).length)} organisations, in load-cleanup...`,
+  );
   const { run, printed, putBack } = await runWith(steps, subscription, 'load-cleanup', {
     AGENTX_LOAD_RUN_ID: open.runId,
     AGENTX_LOAD_SEEDED: JSON.stringify(agents),

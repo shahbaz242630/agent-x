@@ -4,7 +4,7 @@
  * with the app's keys, the way the laptop's run (run.ts) does each step:
  *
  *   node tooling/load/job.ts first     the hand-off pause read, the seed, k6's phase 1
- *   node tooling/load/job.ts second    new keys, k6's phase 2, the database checks, the clean-up
+ *   node tooling/load/job.ts second    new keys, k6's phases 2 to 4, the database checks, the clean-up
  *   node tooling/load/job.ts cleanup   the clean-up alone, for a run that stopped half-way
  *
  * Between the two, deploy/azure/load.ts restarts the API, as the laptop's run
@@ -35,7 +35,7 @@ import { testLogger } from '../../packages/testing/src/index.ts';
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { LOAD_CHECKS } from './checks.ts';
 import { cleanUpFailures, cleanUpRun } from './cleanup.ts';
-import { loadConnection, loadOrgName, type Seeded, type SeededAgent } from './plan.ts';
+import { loadConnection, type LoadPhase, loadOrgName, orgsOf, type Seeded, type SeededAgent } from './plan.ts';
 import type { PhaseResult } from './report.ts';
 import { rekeyed, seedRun } from './seed.ts';
 
@@ -56,7 +56,7 @@ export interface PhaseRun {
 export interface JobSteps {
   readonly database: Database<LoadTables>;
   readonly keyring: KeyProvider;
-  readonly k6: (phase: 1 | 2, seeded: Seeded) => PhaseRun | Promise<PhaseRun>;
+  readonly k6: (phase: LoadPhase, seeded: Seeded) => PhaseRun | Promise<PhaseRun>;
   readonly print: (line: PrintedLine) => void;
 }
 
@@ -147,7 +147,7 @@ async function mustBeTheRuns(steps: JobSteps, runId: string, agents: readonly Pr
 
 /** The clean-up (cleanup.ts) of organisations already known to be the run's, and what it left undone, printed. */
 async function cleanUp(steps: JobSteps, agents: readonly PrintedAgent[]): Promise<boolean> {
-  const orgIds = agents.map(({ orgId }) => orgId);
+  const orgIds = orgsOf(agents);
   let problems: string[];
   try {
     await cleanUpRun(steps.database, steps.keyring, orgIds);
@@ -193,19 +193,28 @@ export async function secondJob(
   return held && cleaned ? 0 : 1;
 }
 
-/** New keys, k6's phase 2 and the checks, printed: true when k6 ran to the end, hand-offs stayed paused and every check held. */
+/** New keys, k6's later phases and the checks, printed: true when k6 ran to the end, hand-offs stayed paused and every check held. */
 async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], createdFirst: number): Promise<boolean> {
   const seeded = await rekeyed(steps.database, steps.keyring, { agents });
-  const phase = await steps.k6(2, seeded);
-  const stillPaused = await handoffsPaused(steps, 'after phase 2');
-  const created = createdFirst + (phase.result?.created ?? 0);
+  let created = createdFirst;
+  let finished = true;
+  for (const n of LATER_PHASES) {
+    const phase = await steps.k6(n, seeded);
+    created += phase.result?.created ?? 0;
+    finished = phase.finished;
+    if (!finished) break;
+  }
+  const stillPaused = await handoffsPaused(steps, 'after the phases');
   const checks = [];
   for (const check of LOAD_CHECKS) {
     checks.push({ name: check.name, problems: await check.run(steps.database, seeded.agents, created) });
   }
-  steps.print({ event: 'load.checked', created, finished: phase.finished, checks });
-  return phase.finished && stillPaused && checks.every(({ problems }) => problems.length === 0);
+  steps.print({ event: 'load.checked', created, finished, checks });
+  return finished && stillPaused && checks.every(({ problems }) => problems.length === 0);
 }
+
+/** The second job's phases, in order: the steady traffic with its spike, then the two crowds. */
+export const LATER_PHASES: readonly LoadPhase[] = [2, 3, 4];
 
 /** Where the k6 script is, in the image as in the repository. */
 const K6_SCRIPT = fileURLToPath(new URL('./money-paths.k6.js', import.meta.url));
@@ -223,7 +232,7 @@ export function runK6(
   api: string,
   k6: readonly [string, ...string[]] = ['k6'],
   smoke = false,
-): (phase: 1 | 2, seeded: Seeded) => PhaseRun {
+): (phase: LoadPhase, seeded: Seeded) => PhaseRun {
   const [command, ...first] = k6;
   return (phase, seeded) => {
     const dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-'));
@@ -255,12 +264,14 @@ function needed(env: NodeJS.ProcessEnv, name: string): string {
 
 const STRING_FIELDS = ['orgId', 'agentId', 'sourceId', 'monthlyLimitMinor'] as const;
 
+const isCrowd = (kind: unknown): boolean => kind === 'crowd-own' || kind === 'crowd-shared';
+
 /** One agent as load.seeded_agent printed it: all its IDs, and never a key. */
 function isPrintedAgent(agent: unknown): agent is PrintedAgent {
   if (typeof agent !== 'object' || agent === null) return false;
   const fields = agent as Record<string, unknown>;
   return (
-    (fields.kind === 'ample' || fields.kind === 'capped') &&
+    (fields.kind === 'ample' || fields.kind === 'capped' || isCrowd(fields.kind)) &&
     STRING_FIELDS.every((name) => typeof fields[name] === 'string' && fields[name] !== '') &&
     Array.isArray(fields.supplierIds) &&
     fields.supplierIds.length > 0 &&
@@ -283,8 +294,12 @@ export function agentsOf(text: string): PrintedAgent[] {
       "AGENTX_LOAD_SEEDED must be the run's agents as load.seeded_agent printed them, without keys.",
     );
   }
-  if (new Set(agents.map(({ orgId }) => orgId)).size !== agents.length) {
-    throw new JobRefused('AGENTX_LOAD_SEEDED names an organisation twice: each agent of the run has its own.');
+  if (new Set(agents.map(({ agentId }) => agentId)).size !== agents.length) {
+    throw new JobRefused('AGENTX_LOAD_SEEDED names an agent twice.');
+  }
+  const orgs = agents.map(({ orgId }) => orgId);
+  if (agents.some(({ kind, orgId }) => !isCrowd(kind) && orgs.indexOf(orgId) !== orgs.lastIndexOf(orgId))) {
+    throw new JobRefused('AGENTX_LOAD_SEEDED names an organisation twice: only a crowd’s agents share one.');
   }
   return agents;
 }

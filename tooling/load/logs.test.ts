@@ -23,6 +23,55 @@ describe('percentiles', () => {
 });
 
 describe('the API’s log after a load run', () => {
+  it('times each crowd’s decisions apart, and counts only the steady traffic’s allowed', () => {
+    const inOrg = (orgId: string, durationMs: number, decision: string) =>
+      line({ event: 'spend_request.decided', orgId, durationMs, decision });
+    const summary = summariseLogs(
+      [
+        inOrg('steady', 10, 'ALLOW'),
+        inOrg('steady', 11, 'REQUIRE_APPROVAL'),
+        inOrg('own', 20, 'ALLOW'),
+        inOrg('shared', 30, 'ALLOW'),
+        inOrg('spike', 40, 'ALLOW'),
+      ].join('\n'),
+      { spike: new Set(['spike']), crowdOwn: new Set(['own']), crowdShared: new Set(['shared']) },
+    );
+    expect(summary.decisions.count).toBe(2);
+    expect(summary.crowdOwnDecisions).toEqual({ count: 1, p50: 20, p95: 20, p99: 20, max: 20 });
+    expect(summary.crowdSharedDecisions).toEqual({ count: 1, p50: 30, p95: 30, p99: 30, max: 30 });
+    expect(summary.spikeDecisions.count).toBe(1);
+    expect(summary.allowed).toBe(1);
+  });
+
+  it('fails a run that allowed too few to measure both paths (S164), never a run too small to say', () => {
+    const decisions = (allowed: number, rest: number) =>
+      [
+        checked(3),
+        ...Array.from({ length: allowed }, () =>
+          line({ event: 'spend_request.decided', durationMs: 1, decision: 'ALLOW' }),
+        ),
+        ...Array.from({ length: rest }, () =>
+          line({ event: 'spend_request.decided', durationMs: 1, decision: 'DENY' }),
+        ),
+      ].join('\n');
+    expect(logFailures(summariseLogs(decisions(29, 71)), 100, 150)).toEqual([
+      'Only 29 of 100 steady decisions allowed the request at once: the run should allow about half, or it measures one path only.',
+    ]);
+    expect(logFailures(summariseLogs(decisions(30, 70)), 100, 150)).toEqual([]);
+    expect(logFailures(summariseLogs(decisions(0, 99)), 99, 150)).toEqual([]);
+  });
+
+  it('counts every kind of decision against those the run made', () => {
+    const inOrg = (orgId: string) => line({ event: 'spend_request.decided', orgId, durationMs: 1, decision: 'ALLOW' });
+    const logs = summariseLogs([checked(3), inOrg('a'), inOrg('own'), inOrg('shared'), inOrg('spike')].join('\n'), {
+      spike: new Set(['spike']),
+      crowdOwn: new Set(['own']),
+      crowdShared: new Set(['shared']),
+    });
+    expect(logFailures(logs, 4, 150)).toEqual([]);
+    expect(logFailures(logs, 3, 150)).toEqual(['The log has 4 decision line(s) for 3 decision(s).']);
+  });
+
   it('reads the decisions’ times, the holdings checks and every warning or error', () => {
     const summary = summariseLogs(
       [
@@ -53,6 +102,9 @@ describe('the API’s log after a load run', () => {
       ],
       decisions: { count: 2, p50: 12, p95: 40, p99: 40, max: 40 },
       spikeDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
+      crowdOwnDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
+      crowdSharedDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
+      allowed: 0,
     });
   });
 
@@ -66,7 +118,7 @@ describe('the API’s log after a load run', () => {
         decided(30),
         line({ event: 'spend_request.decided', durationMs: 900, orgId: spikeOrg }),
       ].join('\n'),
-      new Set([spikeOrg]),
+      { spike: new Set([spikeOrg]) },
     );
     expect(summary.decisions).toEqual({ count: 2, p50: 20, p95: 30, p99: 30, max: 30 });
     expect(summary.spikeDecisions).toEqual({ count: 1, p50: 900, p95: 900, p99: 900, max: 900 });

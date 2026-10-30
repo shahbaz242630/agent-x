@@ -9,7 +9,7 @@
 import { type Database, withTenant } from '../../packages/platform/src/db/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
-import type { SeededAgent } from './plan.ts';
+import { orgsOf, type SeededAgent } from './plan.ts';
 
 /** The statuses that hold money before a hand-off: a reservation HELD and an order claim open. */
 const HOLDING = ['APPROVED', 'APPROVAL_REQUIRED'] as const;
@@ -24,14 +24,11 @@ export interface LoadCheck {
   ) => Promise<string[]>;
 }
 
-/** Runs `read` in each agent's organisation and keeps what each says was wrong. */
-async function eachOrg(
-  agents: readonly SeededAgent[],
-  read: (agent: SeededAgent) => Promise<string | undefined>,
-): Promise<string[]> {
+/** Runs `read` on each agent or organisation, each through its tenant wall, and keeps what each says was wrong. */
+async function eachOrg<T>(items: readonly T[], read: (item: T) => Promise<string | undefined>): Promise<string[]> {
   const found: string[] = [];
-  for (const agent of agents) {
-    const wrong = await read(agent);
+  for (const item of items) {
+    const wrong = await read(item);
     if (wrong !== undefined) found.push(wrong);
   }
   return found;
@@ -42,7 +39,7 @@ export const LOAD_CHECKS: readonly LoadCheck[] = [
     name: 'recorded each request k6 was answered 201 for, once',
     async run(database, agents, created) {
       const counts = await Promise.all(
-        agents.map(({ orgId }) =>
+        orgsOf(agents).map((orgId) =>
           withTenant(database, orgId, (tx) =>
             tx
               .selectFrom('spend_requests.requests')
@@ -92,7 +89,7 @@ export const LOAD_CHECKS: readonly LoadCheck[] = [
   {
     name: 'handed nothing off: the hand-off is paused, as staging’s is, so the check below holds',
     run: (database, agents) =>
-      eachOrg(agents, async ({ orgId }) => {
+      eachOrg(orgsOf(agents), async (orgId) => {
         const moved = await withTenant(database, orgId, (tx) =>
           tx
             .selectFrom('spend_requests.requests')
@@ -108,7 +105,7 @@ export const LOAD_CHECKS: readonly LoadCheck[] = [
   {
     name: 'holds exactly one reservation and one open claim for each request holding money, and none for the rest',
     run: (database, agents) =>
-      eachOrg(agents, async ({ orgId }) => {
+      eachOrg(orgsOf(agents), async (orgId) => {
         const found = await withTenant(database, orgId, async (tx) => {
           const holding = await tx
             .selectFrom('spend_requests.requests')
@@ -141,7 +138,7 @@ export const LOAD_CHECKS: readonly LoadCheck[] = [
   {
     name: 'left one open claim an order',
     run: (database, agents) =>
-      eachOrg(agents, async ({ orgId }) => {
+      eachOrg(orgsOf(agents), async (orgId) => {
         const twice = await withTenant(database, orgId, (tx) =>
           tx
             .selectFrom('spend_requests.order_claims')
@@ -159,7 +156,7 @@ export const LOAD_CHECKS: readonly LoadCheck[] = [
   {
     name: 'put no organisation on an integrity hold',
     run: (database, agents) =>
-      eachOrg(agents, async ({ orgId }) => {
+      eachOrg(orgsOf(agents), async (orgId) => {
         const holds = await withTenant(database, orgId, (tx) =>
           tx.selectFrom('audit.events').select('seq').where('action', '=', 'integrity_hold.set').execute(),
         );

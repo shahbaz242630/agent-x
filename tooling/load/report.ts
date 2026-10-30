@@ -4,7 +4,7 @@
 // PL-38 closes only on the same run against a production-sized Azure stack
 // (D2c), whose report says so.
 import type { LogSummary, Percentiles } from './logs.ts';
-import { type LoadSite, STAGING_API_CPUS } from './plan.ts';
+import { type LoadSite, POLICY_P95_MS, STAGING_API_CPUS } from './plan.ts';
 
 /** One phase as k6 sums it up (money-paths.k6.js, handleSummary). */
 export interface PhaseResult {
@@ -63,6 +63,16 @@ export function phaseFailures(phase: PhaseResult): string[] {
   return phase.created === 0 ? [...failed, `Phase ${String(phase.phase)}: no request was made.`] : failed;
 }
 
+/** The phases of the crowds, reported apart from the steady traffic's. */
+const CROWD_PHASES: readonly {
+  readonly phase: number;
+  readonly setup: string;
+  readonly of: 'crowdOwnDecisions' | 'crowdSharedDecisions';
+}[] = [
+  { phase: 3, setup: 'Each agent with its own three suppliers', of: 'crowdOwnDecisions' },
+  { phase: 4, setup: 'All agents sharing three suppliers', of: 'crowdSharedDecisions' },
+];
+
 /** Where a laptop run ran, and why its numbers don't close PL-38. */
 function onTheLaptop(run: RunResult): string[] {
   const size =
@@ -110,6 +120,53 @@ function tripsLine(run: RunResult): string[] {
       ];
 }
 
+/** Each crowd that missed the decision target, in plain words, whether or not its phase ran to the end. */
+const crowdMisses = (run: RunResult): string[] =>
+  CROWD_PHASES.flatMap(({ setup, of }) =>
+    run.logs[of].p95 >= POLICY_P95_MS ? [`${setup}: a decision's p95 was ${String(run.logs[of].p95)} ms.`] : [],
+  );
+
+/** Each crowd with no phase summary or no decisions: never read as having met the target. */
+const crowdsUnmeasured = (run: RunResult): string[] =>
+  CROWD_PHASES.flatMap(({ phase, setup, of }) =>
+    run.logs[of].count > 0 && run.phases.some((p) => p.phase === phase) ? [] : [`${setup}: not measured.`],
+  );
+
+/** The crowds' numbers, apart: a miss of the decision target is named here, and doesn't yet fail the run (the partner's call). */
+function crowdSection(run: RunResult): string[] {
+  const rows = CROWD_PHASES.flatMap(({ phase, setup, of }) => {
+    const p = run.phases.find((candidate) => candidate.phase === phase);
+    if (p === undefined) return [];
+    const { count, p50, p95, p99, max } = run.logs[of];
+    return [
+      `| ${setup} | ${String(p.requests)} | ${String(p.dropped)} | ${ms(p.asksMs.p95)} | ${String(count)} | ${String(p50)} | ${String(p95)} | ` +
+        `${String(p99)} | ${String(max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} |`,
+    ];
+  });
+  const misses = crowdMisses(run);
+  const unmeasured = crowdsUnmeasured(run);
+  const verdict = [
+    ...(misses.length === 0 ? [] : [`**Decision target missed (${String(POLICY_P95_MS)} ms).** ${misses.join(' ')}`]),
+    ...unmeasured,
+  ];
+  return rows.length === 0 && misses.length === 0
+    ? []
+    : [
+        '',
+        `## Many agents in one organisation (apart from the numbers above; the same ${String(POLICY_P95_MS)} ms decision target, not yet failing a run)`,
+        '',
+        'Ten agents of one organisation, 25 requests a second between them, picked at random, with the same duplicates and replays. They share its chain head, and in the second row each supplier’s lock too.',
+        '',
+        '| Setup | Requests | Not sent | Request p95 ms | Decisions | p50 ms | p95 ms | p99 ms | Max ms | 5xx | 429 | Checks failed |',
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+        ...rows,
+        '',
+        verdict.length === 0
+          ? `Decision target met in each: p95 under ${String(POLICY_P95_MS)} ms.`
+          : verdict.join(' '),
+      ];
+}
+
 const decisionRow = (traffic: string, { count, p50, p95, p99, max }: Percentiles) =>
   `| ${traffic} | ${String(count)} | ${String(p50)} | ${String(p95)} | ${String(p99)} | ${String(max)} |`;
 
@@ -121,6 +178,13 @@ export function renderReport(run: RunResult): string {
     `# Load test, ${run.at.slice(0, 10)} (${run.site}${run.smoke === true ? ', smoke' : ''}, API ${String(run.apiCpus)} CPU)`,
     '',
     run.failures.length === 0 ? '**Passed.**' : `**Failed: ${String(run.failures.length)} check(s).**`,
+    // Never only "Passed" above a miss further down (partner's heads-up, S164).
+    ...(crowdMisses(run).length === 0
+      ? []
+      : [
+          '',
+          `**But many agents in one organisation missed the ${String(POLICY_P95_MS)} ms decision target: see below.**`,
+        ]),
     '',
     ...(run.site === 'local' ? onTheLaptop(run) : onAzure(run)),
     '',
@@ -128,11 +192,13 @@ export function renderReport(run: RunResult): string {
     '',
     '| Phase | Requests | New | Not sent | p50 ms | p95 ms | p99 ms | Max ms | 5xx | 429 | Checks failed |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
-    ...run.phases.map(
-      (p) =>
-        `| ${String(p.phase)} | ${String(p.requests)} | ${String(p.created)} | ${String(p.dropped)} | ${ms(p.asksMs.p50)} | ${ms(p.asksMs.p95)} | ` +
-        `${ms(p.asksMs.p99)} | ${ms(p.asksMs.max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} |`,
-    ),
+    ...run.phases
+      .filter(({ phase }) => phase <= 2)
+      .map(
+        (p) =>
+          `| ${String(p.phase)} | ${String(p.requests)} | ${String(p.created)} | ${String(p.dropped)} | ${ms(p.asksMs.p50)} | ${ms(p.asksMs.p95)} | ` +
+          `${ms(p.asksMs.p99)} | ${ms(p.asksMs.max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} |`,
+      ),
     '',
     'Target: a request p95 under 500 ms, with every planned request sent: the steady traffic, not the spike.',
     ...tripsLine(run),
@@ -150,6 +216,8 @@ export function renderReport(run: RunResult): string {
     ...(spikeDecisions.count === 0 ? [] : [decisionRow('The spike', spikeDecisions)]),
     '',
     'Target: a steady decision p95 under 150 ms, timed over its whole transaction (lock waits, retries, the reservation, signing).',
+    `Allowed at once: ${String(run.logs.allowed)} of the ${String(decisions.count)} steady decisions; the rest wait for a person, or are denied. Hand-offs are paused, so what follows an allowed request isn't timed.`,
+    ...crowdSection(run),
     '',
     '## Checks',
     '',

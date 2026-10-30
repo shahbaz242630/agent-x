@@ -615,10 +615,12 @@ export function realAz(): Az {
         cwd: AZURE_DIR,
         env: invocation.env,
         encoding: 'utf8',
-        maxBuffer: 16 * 1024 * 1024,
+        // A load run's API log comes back whole: ~19 MB with the many-agents phases (S164's review).
+        maxBuffer: 128 * 1024 * 1024,
         windowsHide: true,
       });
-      return { status: done.status, stdout: done.stdout, stderr: done.stderr };
+      // Past the limit Node kills az with nothing on stderr: its own error says why.
+      return { status: done.status, stdout: done.stdout, stderr: done.stderr || (done.error?.message ?? '') };
     },
   };
 }

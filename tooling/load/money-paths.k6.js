@@ -9,6 +9,11 @@
 // agent, whose month (AED 100) stops at 25. They queue on that one month's
 // lock by design, so they are timed apart (kind:spike) from the steady
 // traffic the request target is for, and reported on their own.
+// Phases 3 and 4 (4D2d, S164) send the same steady, duplicate and replay traffic
+// from ten agents of one organisation, picked at random, so nothing here keeps
+// them apart by the clock: each with three suppliers of its own (3, the chain
+// head shared), or all sharing the same three (4, the suppliers' locks shared
+// too). No target of their own yet: reported apart, tagged kind:crowd.
 // Every request must be answered 201, quickly, never 5xx or 429. k6's own
 // result goes to /out for the runner, which checks the database and the log.
 // On Azure (D2c) the run's job names the API's internal address, the seed's
@@ -23,14 +28,16 @@ import http from 'k6/http';
 import { Counter } from 'k6/metrics';
 
 const PHASE = __ENV.PHASE;
-if (PHASE !== '1' && PHASE !== '2') throw new Error('PHASE must be 1 or 2');
+if (!['1', '2', '3', '4'].includes(PHASE)) throw new Error('PHASE must be 1, 2, 3 or 4');
+const CROWD = { 3: 'crowd-own', 4: 'crowd-shared' }[PHASE];
+const TRAFFIC = CROWD === undefined ? 'ask' : 'crowd';
 
 const API = __ENV.API ?? 'http://api:8080';
 const OUT = __ENV.OUT ?? '/out';
 const SMOKE = __ENV.SMOKE === '1';
 const SECONDS = SMOKE ? 20 : 120;
 const { agents } = JSON.parse(open(__ENV.SEED ?? `${OUT}/seed.json`));
-const ample = agents.filter((agent) => agent.kind === 'ample');
+const steadyAgents = agents.filter((agent) => agent.kind === (CROWD ?? 'ample'));
 const capped = agents.find((agent) => agent.kind === 'capped');
 
 const created = new Counter('created');
@@ -67,8 +74,8 @@ export const options = {
       : {}),
   },
   thresholds: {
-    // The Pilot's request target (PRD §8).
-    'http_req_duration{kind:ask}': ['p(95)<500'],
+    // The Pilot's request target (PRD §8); a crowd's has none yet: named so k6 times it apart.
+    [`http_req_duration{kind:${TRAFFIC}}`]: [CROWD === undefined ? 'p(95)<500' : 'max>=0'],
     // No target of its own (it queues by design): named so k6 times it apart, as it does only a metric a threshold names.
     'http_req_duration{kind:spike}': ['max>=0'],
     // An arrival k6 had no free VU for is a request never sent: the run then sent less than it says.
@@ -79,12 +86,19 @@ export const options = {
   },
 };
 
+/**
+ * Which supplier the `n`th order goes to: round the three for the steady traffic,
+ * scattered from `n` for a crowd, so nothing lines its agents and suppliers up.
+ * From `n`, never at random: an order's two asks must name the same supplier.
+ */
+const supplierAt = (n) => (CROWD === undefined ? n : (n * 2654435761) >>> 8);
+
 /** The agent asks to pay its `n`th supplier (round the three) `amountMinor` fils for the order, timed as `kind`. */
-function ask(agent, key, orderReference, amountMinor, n, kind = 'ask') {
+function ask(agent, key, orderReference, amountMinor, n, kind = TRAFFIC) {
   const body = {
     amountMinor,
     currency: 'AED',
-    supplierId: agent.supplierIds[n % agent.supplierIds.length],
+    supplierId: agent.supplierIds[supplierAt(n) % agent.supplierIds.length],
     fundingSourceId: agent.sourceId,
     orderReference,
     purpose: 'Load test order',
@@ -108,13 +122,17 @@ const decided = (answer) => answer.status === 201;
 export function steady() {
   const n = exec.scenario.iterationInTest;
   const order = `P${PHASE}-S-${n}`;
-  const answer = counted(ask(ample[n % ample.length], order, order, 100 + ((n * 37) % 801), n), true);
+  const agent =
+    CROWD === undefined
+      ? steadyAgents[n % steadyAgents.length]
+      : steadyAgents[Math.floor(Math.random() * steadyAgents.length)];
+  const answer = counted(ask(agent, order, order, 100 + ((n * 37) % 801), n), true);
   check(answer, { 'decided (201)': decided });
 }
 
 export function duplicate() {
   const n = exec.scenario.iterationInTest;
-  const agent = ample[n % ample.length];
+  const agent = steadyAgents[n % steadyAgents.length];
   const order = `P${PHASE}-D-${n}`;
   const first = counted(ask(agent, `${order}-a`, order, 300, n), true);
   const second = counted(ask(agent, `${order}-b`, order, 300, n), true);
@@ -125,7 +143,7 @@ export function duplicate() {
 export function replay() {
   const n = exec.scenario.iterationInTest;
   const order = `P${PHASE}-R-${n}`;
-  const agent = ample[n % ample.length];
+  const agent = steadyAgents[n % steadyAgents.length];
   const first = counted(ask(agent, order, order, 200, n), true);
   const again = counted(ask(agent, order, order, 200, n), false);
   check(first, { 'decided (201)': decided });
@@ -141,7 +159,7 @@ export function spike() {
 /** k6's numbers the runner reads, as one small JSON file, and a line for whoever watches. */
 export function handleSummary(data) {
   const { metrics } = data;
-  const asks = metrics['http_req_duration{kind:ask}'].values;
+  const asks = metrics[`http_req_duration{kind:${TRAFFIC}}`].values;
   const spike = metrics['http_req_duration{kind:spike}']?.values;
   const count = (name) => metrics[name]?.values.count ?? 0;
   const thresholds = Object.fromEntries(

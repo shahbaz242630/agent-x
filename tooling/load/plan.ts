@@ -80,6 +80,19 @@ export const APP_KEYS_DIR = path.join(SECRETS_DIR, APP_KEYS);
 /** Agents that never reach a limit, each in an organisation of its own: the steady traffic. */
 export const AMPLE_AGENTS = 10;
 
+/**
+ * Agents of one organisation, in each of the two many-agents phases (4D2d,
+ * S164): they share its chain head, and in phase 4 its suppliers' locks,
+ * which the steady traffic's agents, an organisation each, never do.
+ */
+export const CROWD_AGENTS = 10;
+
+/** Every agent a run seeds: the ample ones, the capped one, and the two crowds. */
+export const SEEDED_AGENTS = AMPLE_AGENTS + 1 + 2 * CROWD_AGENTS;
+
+/** A run's k6 phases: 1 and 2 the steady traffic (2 with the spike); 3 and 4 the crowds, reported apart. */
+export type LoadPhase = 1 | 2 | 3 | 4;
+
 /** Above AED 5 a request waits for a person, so the steady traffic is both allowed and held for approval. */
 export const APPROVAL_THRESHOLD_MINOR = 500n;
 
@@ -89,8 +102,11 @@ export const CAPPED_MONTHLY_MINOR = 10_000n;
 /** The Pilot's policy target (PRD §8): a decision's p95, from its own log line (D2a). */
 export const POLICY_P95_MS = 150;
 
+/** A crowd's agents: each with three suppliers of its own (phase 3), or all sharing the same three (phase 4). */
+export type CrowdKind = 'crowd-own' | 'crowd-shared';
+
 export interface SeededAgent {
-  readonly kind: 'ample' | 'capped';
+  readonly kind: 'ample' | 'capped' | CrowdKind;
   readonly orgId: string;
   readonly agentId: string;
   /** The agent's key as it sends it: a local, throwaway stack's, never kept. */
@@ -105,6 +121,11 @@ export interface Seeded {
 }
 
 export const readSeeded = (): Seeded => JSON.parse(readFileSync(SEED_FILE, 'utf8')) as Seeded;
+
+/** The agents' organisations, each once: a crowd's agents share one. */
+export const orgsOf = (agents: readonly { readonly orgId: string }[]): string[] => [
+  ...new Set(agents.map(({ orgId }) => orgId)),
+];
 
 /** Where a run happens: the laptop's compose stack, or staging on Azure (D2c), production-sized. */
 export type LoadSite = 'local' | 'azure';

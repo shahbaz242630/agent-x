@@ -57,7 +57,9 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
     status: 'Succeeded',
     lines: [
       summary(2, 1),
-      { event: 'load.checked', created: 3, finished: true, checks: [{ name: 'recorded', problems: [] }] },
+      summary(3, 1),
+      summary(4, 1),
+      { event: 'load.checked', created: 5, finished: true, checks: [{ name: 'recorded', problems: [] }] },
       { event: 'load.cleaned', organizations: 2, problems: [] },
     ],
   }),
@@ -67,7 +69,12 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
 /** The API's own lines over a clean run: three decisions and the holdings check at the restart. */
 const API_LINES = [
   { level: 'info', event: 'holdings_check.passed', requests: 2, mismatched: 0, tampered: 0 },
-  ...[30, 40, 50].map((durationMs) => ({ level: 'info', event: 'spend_request.decided', durationMs, orgId: 'org-a' })),
+  ...[30, 40, 50, 60, 70].map((durationMs) => ({
+    level: 'info',
+    event: 'spend_request.decided',
+    durationMs,
+    orgId: 'org-a',
+  })),
 ];
 
 interface World {
@@ -99,6 +106,8 @@ interface World {
   command?: readonly string[];
   /** How many readings of each run's lines find all but its last: the workspace takes them in batches. */
   lastLineLate?: number;
+  /** Azure gives no time for a job's last change. */
+  noChangeTime?: boolean;
 }
 
 const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
@@ -267,7 +276,9 @@ class FakeAzure implements Az {
           ],
         },
       },
-      systemData: { lastModifiedAt: `2026-10-27T09:00:0${String(this.#modified.get(job) ?? 0)}Z` },
+      systemData: this.#world.noChangeTime
+        ? {}
+        : { lastModifiedAt: `2026-10-27T09:00:0${String(this.#modified.get(job) ?? 0)}Z` },
     };
   }
 
@@ -465,10 +476,29 @@ describe('a run', () => {
     expect(done.status).toBe(1);
     const report = readFileSync(path.join(done.steps.reportsDir, done.reports[0] ?? ''), 'utf8');
     expect(report).toContain('- load-second ended Failed.');
+    expect(report).toContain("- Phase 3's k6 didn't run to the end.");
     expect(report).toContain('- one claim an order: Order X has two.');
     expect(report).toContain('The clean-up left work undone: Org org-c still has a key. Run load.ts finish.');
     expect(report).toContain('The database after the run: failed');
     expect(JSON.parse(readFileSync(done.steps.stateFile, 'utf8'))).toMatchObject({ agents: [AMPLE, CAPPED] });
+  });
+
+  it('refuses a job Azure gives no time of its last change for', async () => {
+    const done = await run(['run'], new FakeAzure({ noChangeTime: true }));
+    expect(done.error).toMatchObject({
+      message: expect.stringContaining('Azure gave no time of its last change') as string,
+    });
+  });
+
+  it('takes no phase from a summary line that names none', async () => {
+    const az = new FakeAzure({
+      behaviour: {
+        'load-first': () => ({ status: 'Succeeded', lines: [seededLine(AMPLE), { event: 'load.k6_summary' }] }),
+      },
+    });
+    const done = await run(['run'], az);
+    expect(done.error).toMatchObject({ message: expect.stringContaining("Phase 1 didn't finish") as string });
+    expect(az.restarted).toEqual([]);
   });
 
   it('stops after a first job that refused, saying why, keeps what it seeded to clean up, and never restarts the API', async () => {

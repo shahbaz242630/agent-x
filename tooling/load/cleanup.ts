@@ -33,8 +33,12 @@ import { freezeChoiceDetails } from '../../apps/api/src/suspensions.ts';
 /** The load test, as the audit log names it: a part of Agent X, by its process name. */
 const LOAD_TEST = { type: 'system' as const, id: 'load-test' };
 
-/** Requests voided a transaction: each void is a dozen statements, so a batch holds the organisation's lock and the chain head for seconds, not minutes. */
-const VOIDED_A_BATCH = 200;
+/**
+ * Requests voided a transaction: each void is a dozen statements. Fifty hold the
+ * organisation's lock and the chain head for ~6 s, under a request's 10 s limit
+ * (S164: 200 held them ~25 s, and the API's holdings check timed out behind them).
+ */
+const VOIDED_A_BATCH = 50;
 
 /** The IDs of the organisation's rows of `table` in `status`, through its tenant wall. */
 async function idsIn(
