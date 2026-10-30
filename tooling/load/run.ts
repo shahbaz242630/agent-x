@@ -124,7 +124,7 @@ const APP_STATEMENTS =
  * read-back. Counted out, so the report's number stays round trips.
  */
 const RIDERS =
-  "coalesce(pg_catalog.sum(s.calls) filter (where s.query ~ '^(start transaction|begin)' or s.query like 'do $$%' or s.query ~ '^select pg_catalog[.]set_config[(].*[)] as (org_id|statement_timeout)'), 0)";
+  "coalesce(pg_catalog.sum(s.calls) filter (where s.query ~ '^(start transaction|begin)' or s.query like '% as unchanged' or s.query ~ '^select pg_catalog[.]set_config[(].*[)] as (org_id|statement_timeout)'), 0)";
 
 /**
  * A phase with the statement counter reset before it and read after it: how

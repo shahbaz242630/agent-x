@@ -51,11 +51,11 @@ function connection(
     sent.push(text);
     if (tenant instanceof Error) return Promise.reject(tenant);
     if (text === CHECK) return Promise.resolve({ command: 'SELECT', rows: [state] });
-    if (text.startsWith('do $$')) {
+    if (text.startsWith('select 1 / ')) {
       return changed
-        ? Promise.reject(Object.assign(new Error('the organisation setting changed'), { code: 'AXT01' }))
+        ? Promise.reject(Object.assign(new Error('division by zero'), { code: '22012' }))
         : Promise.resolve([
-            { command: 'DO', rows: [] },
+            { command: 'SELECT', rows: [{ unchanged: 1 }] },
             { command: 'COMMIT', rows: [] },
           ]);
     }
@@ -219,14 +219,8 @@ describe('4D2d P11: a transaction opens and commits with its checks, a round tri
       expect(clean.sent).toEqual([
         tenantStart(limited),
         'select 1 as answer',
-        expect.stringMatching(/^do \$\$/) as unknown,
+        `select 1 / (case when pg_catalog.lower(pg_catalog.current_setting('app.org_id', true)) is distinct from '${ORG}' then 0 else 1 end) as unchanged; commit`,
       ]);
-      const commit = clean.sent[2] ?? '';
-      expect(commit).toContain(
-        `pg_catalog.lower(pg_catalog.current_setting('app.org_id', true)) is distinct from '${ORG}'`,
-      );
-      expect(commit).toContain("errcode = 'AXT01'");
-      expect(commit.endsWith('end $$; commit')).toBe(true);
       expect(clean.released).toEqual([undefined]);
     }
   });
@@ -272,7 +266,7 @@ describe('4D2d P11: a transaction opens and commits with its checks, a round tri
     const failure = Object.assign(new Error('could not serialize'), { code: '40001' });
     const query = failing.client.query.bind(failing.client) as (text: string) => Promise<unknown>;
     (failing.client as unknown as { query: (text: string) => Promise<unknown> }).query = (text) =>
-      text.startsWith('do $$') ? Promise.reject(failure) : query(text);
+      text.startsWith('select 1 / ') ? Promise.reject(failure) : query(text);
 
     await expect(withTenant(databaseOf(3, logger(), failing), ORG, (tx) => one(tx))).rejects.toBe(failure);
   });

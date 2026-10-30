@@ -311,21 +311,23 @@ export async function refuseTenantPreset(client: pg.ClientBase): Promise<void> {
   }
 }
 
-/** The SQLSTATE the commit's read-back raises, so the driver knows its refusal from any other failure. */
-const TENANT_CHANGED = 'AXT01';
+/**
+ * The SQLSTATE the commit's read-back raises (division_by_zero), so the
+ * driver knows its refusal: nothing else in the commit's round trip divides.
+ */
+const TENANT_CHANGED = '22012';
 
 /**
  * The read-back before commit, in the commit's own round trip: it raises when
  * the setting no longer names the organisation, so the commit after it never
  * runs and the transaction is rolled back. The ID is written into the text
- * (a round trip of several statements takes no parameters).
+ * (a round trip of several statements takes no parameters). A plain select,
+ * not a DO block: pg_stat_statements folds its constants into one entry,
+ * where a DO block would keep one an organisation (P11 review). The setting
+ * is read at run time, so the planner can't divide early.
  */
 function stillTenant(tenant: string): string {
-  return `do $$ begin
-    if pg_catalog.lower(pg_catalog.current_setting('app.org_id', true)) is distinct from '${written(tenant)}' then
-      raise exception using errcode = '${TENANT_CHANGED}', message = 'the organisation setting changed';
-    end if;
-  end $$`;
+  return `select 1 / (case when pg_catalog.lower(pg_catalog.current_setting('app.org_id', true)) is distinct from '${written(tenant)}' then 0 else 1 end) as unchanged`;
 }
 
 /** What the start sets with it, in a statement of its own: the organisation, the statements' limit, both, or nothing. */
