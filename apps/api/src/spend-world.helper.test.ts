@@ -9,13 +9,13 @@ import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import { monthSpent } from '@agentx/core/modules/limit-reservations';
 import { policyOf, setPolicy } from '@agentx/core/modules/mandates';
 import {
   type ApprovalWaitHours,
   type Pausable,
   type PendingChoice,
   requestOf,
+  totalsWeighed,
 } from '@agentx/core/modules/spend-requests';
 import {
   changeDetails,
@@ -172,7 +172,8 @@ export function spendWorld({
         .select('month')
         .where('agent_id', '=', acting.agentId)
         .executeTakeFirstOrThrow();
-      return monthSpent(tx, { agentId: acting.agentId, month, currency: 'AED' });
+      const asked = { agentId: acting.agentId, month, currency: 'AED' };
+      return (await totalsWeighed(tx, { month: asked, split: null, order: null })).spent;
     });
 
   /** A change past the use cases, signed, as each brake or edit would make it, in the organisation's transaction. */

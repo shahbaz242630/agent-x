@@ -31,7 +31,12 @@ import {
   setPolicy,
 } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
-import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import {
+  releaseClaim,
+  SPEND_REQUESTS,
+  type SpendRequestsTables,
+  totalsWeighed,
+} from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -1001,6 +1006,61 @@ describe('the lock order (ADR-006 §6, forced)', () => {
   });
 });
 
+describe('what is weighed once the locks are held, in one statement (4D2d P12)', () => {
+  it('answers each part only where it is asked', async () => {
+    const { w, acting } = await ready();
+    const supplierId = w.suppliers[0] ?? '';
+    const first = decidedOf(await ask(acting, asking(w, { amount: AED(100_000n), orderReference: 'INV-1' })));
+    expect(first.decision).toBe('ALLOW');
+
+    await withTenant(app, w.org, async (tx) => {
+      const { month } = await tx
+        .selectFrom('limit_reservations.reservations')
+        .select('month')
+        .where('agent_id', '=', acting.agentId)
+        .executeTakeFirstOrThrow();
+      const asked = { agentId: acting.agentId, month, currency: 'AED' };
+      const window = { supplierId, payeeKey: null, since: new Date(0), currency: 'AED' };
+      const order = { supplierId, payeeKey: null, reference: 'INV-1' };
+
+      expect(await totalsWeighed(tx, { month: asked, split: window, order })).toEqual({
+        spent: 100_000n,
+        split: 100_000n,
+        claims: { duplicate: true, possible: false },
+      });
+      expect(await totalsWeighed(tx, { month: asked, split: null, order: null })).toEqual({
+        spent: 100_000n,
+        split: 0n,
+        claims: { duplicate: false, possible: false },
+      });
+      expect(await totalsWeighed(tx, { month: null, split: window, order: null })).toMatchObject({
+        spent: 0n,
+        split: 100_000n,
+      });
+      expect(await totalsWeighed(tx, { month: null, split: null, order })).toEqual({
+        spent: 0n,
+        split: 0n,
+        claims: { duplicate: true, possible: false },
+      });
+      // A lookalike: another form the rail would carry alike.
+      expect(
+        await totalsWeighed(tx, { month: null, split: null, order: { ...order, reference: 'INV_1' } }),
+      ).toMatchObject({ claims: { duplicate: false, possible: true } });
+    });
+  });
+
+  it('makes no trip when nothing is asked', async () => {
+    // A transaction any use of which would fail.
+    const none = null as unknown as Parameters<typeof totalsWeighed>[0];
+
+    expect(await totalsWeighed(none, { month: null, split: null, order: null })).toEqual({
+      spent: 0n,
+      split: 0n,
+      claims: { duplicate: false, possible: false },
+    });
+  });
+});
+
 describe("through the agent's route (D4r)", () => {
   it('answers the agent’s request over HTTP with its key, the bank reference that differs, and a retry as it was', async () => {
     const { w, mandateId, acting } = await ready();
@@ -1138,6 +1198,17 @@ describe('the split check (D5, SEC-LIM-04)', () => {
     const second = asking(w, { amount: AED(600_000n), orderReference: 'INV-2' });
 
     expect(decidedOf(await ask(acting, second)).decision).toBe('ALLOW');
+    // Nothing weighed, so nothing sealed: the first order's AED is on this supplier, and unread.
+    const sealed = await database
+      .as('admin')
+      .query<{ details: string }>(
+        "select details from audit.events where org_id = $1 and action = 'spend_request.decided' order by seq",
+        [w.org],
+      );
+    expect(sealed.map(({ details }) => (JSON.parse(details) as Record<string, unknown>).splitOpen)).toEqual([
+      '0 AED',
+      '0 AED',
+    ]);
     // The same order again, for AED 100: within every limit, and still the duplicate.
     expect(decidedOf(await ask(acting, { ...second, amount: AED(10_000n) }))).toMatchObject({
       decision: 'DENY',

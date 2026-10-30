@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { seedRows } from '../../../seed-rows.helper.test.ts';
 import { RESERVATION } from '../domain/reservation.ts';
-import { monthSpent, monthsSpent, splitHeld } from './reservations.ts';
+import { type MonthToSum, monthSpentRead, monthsSpent, splitHeld } from './reservations.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -60,6 +60,10 @@ const organisation = async (payeeKey: string | null = null): Promise<Org> => {
 };
 
 const inOrg = <Result>(org: Org, work: (tx: Tx) => Promise<Result>) => withTenant(app, org.id, work);
+
+/** The month's total, as a statement that reads nothing else gives it. */
+const monthSpent = async (tx: Tx, month: MonthToSum) =>
+  BigInt((await monthSpentRead(tx, month).executeTakeFirstOrThrow()).spent);
 
 /** The agent's zone, then its period for the month, each added if it isn't there, as D4 adds them. */
 const period = (org: Org, month = MONTH, zone = 'Asia/Dubai') =>

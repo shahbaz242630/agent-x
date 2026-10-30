@@ -7,11 +7,12 @@
 //   first decision, then kept for good: D2's review; a signed record, 0054,
 //   agent-zones.ts), its month at `at` in that
 //   zone, and that month's period row locked FOR NO KEY UPDATE (level 7);
-// - `monthSpent`: the agent's month, every reservation but a released one, in
-//   a statement of its own after the lock, so READ COMMITTED's fresh snapshot
-//   sees every reservation the transaction it waited for committed (§7.2);
-// - `splitHeld`: with the mandate's split check on, the payee's reservations
-//   in its rolling window, across agents, as a statement of its own too (D5);
+// - `monthSpentRead`: the agent's month, every reservation but a released one,
+//   read in a statement after the lock, never the locking one, so READ
+//   COMMITTED's fresh snapshot sees every reservation the transaction it waited
+//   for committed (§7.2);
+// - `splitHeldRead`: with the mandate's split check on, the payee's reservations
+//   in its rolling window, across agents, likewise (D5);
 // - `reserve`: the request's reservation, HELD, while the request is still
 //   VALIDATING (level 11; 0039's `held_for_its_request`), at the very instant
 //   the month was worked out from.
@@ -101,36 +102,35 @@ export async function agentMonth(
   return periodOf(at, kept.outcome === 'kept' ? kept.zone : zoneIfNew).month;
 }
 
+/** The agent's month to total (monthSpentRead). */
+export interface MonthToSum {
+  readonly agentId: string;
+  readonly month: string;
+  readonly currency: string;
+  readonly except?: string | undefined;
+}
+
 /**
  * The agent's month's total in minor units of `currency`: every reservation
  * but a released one, under any of its mandates. One currency's alone, as a
  * cap is in one (G4: another's minor units would be counted as its own).
  * `except` leaves one request's out: an approval weighs its request against
- * the others, as its own amount is added by the engine (Phase 3 B4b).
+ * the others, as its own amount is added by the engine (Phase 3 B4b). Not
+ * run, for a statement that reads more beside it (4D2d P12): one row, its total
+ * as text.
  */
-export async function monthSpent(
-  tx: ReservationsTransaction,
-  {
-    agentId,
-    month,
-    currency,
-    except,
-  }: { agentId: string; month: string; currency: string; except?: string | undefined },
-): Promise<bigint> {
-  const { spent } = await tx
+export const monthSpentRead = (tx: ReservationsTransaction, { agentId, month, currency, except }: MonthToSum) =>
+  tx
     .selectFrom('limit_reservations.reservations')
     .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('spent'))
     .where('agent_id', '=', agentId)
     .where('month', '=', month)
     .where('currency', '=', currency)
     .where('state', '<>', 'RELEASED')
-    .where((where) => (except === undefined ? where.lit(true) : where('request_id', '<>', except)))
-    .executeTakeFirstOrThrow();
-  return BigInt(spent);
-}
+    .where((where) => (except === undefined ? where.lit(true) : where('request_id', '<>', except)));
 
 /**
- * monthSpent for several of the agent's months at once, in one statement,
+ * monthSpentRead's total for several of the agent's months at once, in one statement,
  * leaving out every request in `except`: a carry to a new mandate version
  * weighs its requests against all else first (Phase 3 E4c). At least one
  * month and one request; each month asked is answered, 0 where nothing is
@@ -167,22 +167,31 @@ export async function monthsSpent(
  * its supplier, and its payee key where it has one: both are read, so a
  * reservation made under another supplier record with the same payee key
  * counts, and so does one the supplier made before it had a key (0041's
- * indexes). A statement of its own after the supplier's lock, which
- * serialises the payee's decisions (§7.2). In `currency` alone, as the
- * threshold is (G4). `except` leaves requests out: a carry weighs its own
+ * indexes). Read in a statement after the supplier's lock, which serialises
+ * the payee's decisions (§7.2), never the one taking it. In `currency` alone,
+ * as the threshold is (G4). `except` leaves requests out: a carry weighs its own
  * apart (Phase 3 E4c).
  */
-export async function splitHeld(
+export async function splitHeld(tx: ReservationsTransaction, split: SplitToSum): Promise<bigint> {
+  const { held } = await splitHeldRead(tx, split).executeTakeFirstOrThrow();
+  return BigInt(held);
+}
+
+/** The payee's window to total (splitHeld). */
+export interface SplitToSum {
+  readonly supplierId: string;
+  readonly payeeKey: string | null;
+  readonly since: Date;
+  readonly currency: string;
+  readonly except?: readonly string[];
+}
+
+/** splitHeld's read, not run, for a statement that reads more beside it (4D2d P12): one row, its total as text. */
+export const splitHeldRead = (
   tx: ReservationsTransaction,
-  {
-    supplierId,
-    payeeKey,
-    since,
-    currency,
-    except = [],
-  }: { supplierId: string; payeeKey: string | null; since: Date; currency: string; except?: readonly string[] },
-): Promise<bigint> {
-  const { held } = await tx
+  { supplierId, payeeKey, since, currency, except = [] }: SplitToSum,
+) =>
+  tx
     .selectFrom('limit_reservations.reservations')
     .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('held'))
     .where('state', '<>', 'RELEASED')
@@ -193,10 +202,7 @@ export async function splitHeld(
       payeeKey === null
         ? where('supplier_id', '=', supplierId)
         : where.or([where('supplier_id', '=', supplierId), where('payee_key', '=', payeeKey)]),
-    )
-    .executeTakeFirstOrThrow();
-  return BigInt(held);
-}
+    );
 
 /** A reservation as the holdings check (E1) compares it with its request. */
 export interface ReservationSeen {

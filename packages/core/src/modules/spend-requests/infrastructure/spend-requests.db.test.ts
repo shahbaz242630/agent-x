@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { type SeededSupplier as Supplier, seedRows } from '../../../seed-rows.helper.test.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
-import { claimOrder, claimsOn, claimsOnEach, orderKeyOf, releaseClaim } from './order-claims.ts';
+import { claimLooks, claimOrder, claimsOnEach, orderKeyOf, type OrderWeighed, releaseClaim } from './order-claims.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -82,6 +82,12 @@ const organisation = async (): Promise<Org> => {
 };
 
 const inOrg = <Result>(org: Org, work: (tx: Tx) => Promise<Result>) => withTenant(app, org.id, work);
+
+/** The claims' two looks, as a statement that reads nothing else gives them. */
+const claimsOn = (tx: Tx, order: OrderWeighed) => {
+  const { duplicate, possible } = claimLooks(tx, order);
+  return tx.selectNoFrom([duplicate.as('duplicate'), possible.as('possible')]).executeTakeFirstOrThrow();
+};
 
 /** A decision with reasons, as the engine gives one: none for ALLOW. */
 const decided = (decision: Decision, reasons = 'APPROVAL_THRESHOLD') => ({
