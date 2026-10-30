@@ -45,7 +45,7 @@ export interface RunResult {
   readonly phases: readonly PhaseResult[];
   /** On the laptop (`--delay-ms`): whole ms added to every packet the database sent, as Azure's network adds them. */
   readonly delayMs?: number;
-  /** On the laptop: the app's statements over each phase (pg_stat_statements), each one a round trip on a network. */
+  /** On the laptop: the app's round trips over each phase (pg_stat_statements, less statements sent in another's trip). */
   readonly statements?: readonly PhaseStatements[];
   readonly logs: LogSummary;
   readonly databaseChecksPassed: boolean;
@@ -106,7 +106,7 @@ function tripsLine(run: RunResult): string[] {
   return each.length === 0
     ? []
     : [
-        `Database trips a request (the app's statements over the phase, its timers' included, by pg_stat_statements): ${each.join(', ')}.`,
+        `Database trips a request (the app's round trips over the phase, its timers' included: its statements by pg_stat_statements, less those sent in another's trip): ${each.join(', ')}.`,
       ];
 }
 

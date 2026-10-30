@@ -1,4 +1,4 @@
-import { limitStatements } from '@agentx/platform/db';
+import { limitedTransaction } from '@agentx/platform/db';
 import type { Kysely, Transaction } from 'kysely';
 
 import type { DirectoryTables } from './tables.ts';
@@ -12,11 +12,5 @@ export function readAlone<T>(
   db: Kysely<DirectoryTables>,
   read: (tx: Transaction<DirectoryTables>) => Promise<T>,
 ): Promise<T> {
-  return db
-    .transaction()
-    .setIsolationLevel('read committed')
-    .execute(async (tx) => {
-      await limitStatements(tx);
-      return read(tx);
-    });
+  return limitedTransaction(db, read);
 }

@@ -119,6 +119,14 @@ const APP_STATEMENTS =
   "from pg_stat_statements s join pg_roles r on r.oid = s.userid join pg_database d on d.oid = s.dbid where r.rolname = 'agentx_app' and d.datname = 'agentx'";
 
 /**
+ * The statements sent in another's round trip (4D2d P11): with each start,
+ * the connection's check and the transaction's settings; with a commit, its
+ * read-back. Counted out, so the report's number stays round trips.
+ */
+const RIDERS =
+  "coalesce(pg_catalog.sum(s.calls) filter (where s.query ~ '^(start transaction|begin)' or s.query like 'do $$%' or s.query ~ '^select pg_catalog[.]set_config[(].*[)] as (org_id|statement_timeout)'), 0)";
+
+/**
  * A phase with the statement counter reset before it and read after it: how
  * many statements the app ran, and its 80 most frequent kept in the run's
  * folder to see where they went: calls, the server's total and mean time in
@@ -131,7 +139,7 @@ function measured(n: 1 | 2): { result: PhaseResult; statements: PhaseStatements 
   if (asAdmin('select dealloc from pg_stat_statements_info') !== '0') {
     throw new LoadRefused(`The statement counter ran out of room in phase ${String(n)}: raise pg_stat_statements.max.`);
   }
-  const statements = Number(asAdmin(`select coalesce(pg_catalog.sum(s.calls), 0) ${APP_STATEMENTS}`));
+  const statements = Number(asAdmin(`select coalesce(pg_catalog.sum(s.calls), 0) - ${RIDERS} ${APP_STATEMENTS}`));
   const top = asAdmin(
     `select s.calls, pg_catalog.round(s.total_exec_time::numeric, 1), pg_catalog.round(s.mean_exec_time::numeric, 3), pg_catalog.left(pg_catalog.regexp_replace(s.query, '\\s+', ' ', 'g'), 300) ${APP_STATEMENTS} order by s.calls desc limit 80`,
   );

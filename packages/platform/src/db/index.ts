@@ -70,6 +70,7 @@ export {
 export {
   assertTenant,
   holdTransactionLock,
+  limitedTransaction,
   limitStatements,
   lockName,
   STATEMENT_SECONDS,

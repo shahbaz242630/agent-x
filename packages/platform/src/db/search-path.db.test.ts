@@ -15,14 +15,14 @@
 // it. Without the second half the first would pass on its own for the wrong
 // reason, so the unpinned control is part of the proof, not a curiosity.
 import { createTestDatabase, LogCapture, type TestDatabase, testLogger } from '@agentx/testing';
-import { type Kysely, sql } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import type { Logger } from '../observability/index.ts';
 import { createDatabase, PINNED_SEARCH_PATH, poolConfig } from './database.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
-import { TenantContextError, tenantCheckedPool } from './tenant.ts';
+import { TenantContextError, tenantCheckedDialect } from './tenant.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -139,9 +139,11 @@ describe('A3e: a connection that lost the pin is refused', () => {
     // the app would face if poolConfig ever stopped pinning.
     const { capture, logger } = captured();
     const pool = new pg.Pool({ ...database.connection('app'), ssl: false, max: 2 });
-    const guarded = tenantCheckedPool(pool, logger, 2);
+    const guarded = new Kysely<unknown>({ dialect: tenantCheckedDialect(pool, logger, 2) });
     try {
-      await expect(guarded.connect()).rejects.toThrow(new TenantContextError('no sound connection after 2 tries'));
+      await expect(sql`select 1`.execute(guarded)).rejects.toThrow(
+        new TenantContextError('no sound connection after 2 tries'),
+      );
       expect(capture.lines()).toMatchObject([
         { event: 'db.tenant.leftover_discarded', problem: expect.stringContaining('search_path') as unknown },
         { event: 'db.tenant.leftover_discarded' },
@@ -160,10 +162,9 @@ describe('A3e: a connection that lost the pin is refused', () => {
       max: 2,
       options: PINNED_SEARCH_PATH,
     });
-    const guarded = tenantCheckedPool(pool, logger, 2);
+    const guarded = new Kysely<unknown>({ dialect: tenantCheckedDialect(pool, logger, 2) });
     try {
-      const client = await guarded.connect();
-      client.release();
+      expect((await sql<{ answer: number }>`select 1 as answer`.execute(guarded)).rows).toEqual([{ answer: 1 }]);
     } finally {
       await pool.end();
     }
