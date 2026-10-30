@@ -335,11 +335,7 @@ function after(job: Job): string {
 }
 
 /** Readings of an ended run without both its times before it is taken as Azure gives it: two minutes. */
-const TIMES_READINGS = 8;
-
-function isTime(value: string): boolean {
-  return Number.isFinite(Date.parse(value));
-}
+const TIMES_READINGS = 120_000 / POLL_MS;
 
 /** How a run ended: its state, and its start and end as Azure gave them. */
 export interface Ended {
@@ -377,14 +373,16 @@ export async function waitFor(
     if (ENDED.has(status)) {
       const began = text(run.properties?.startTime);
       const ended = text(run.properties?.endTime);
+      const start = Date.parse(began);
+      const end = Date.parse(ended);
+      const timed = Number.isFinite(start) && Number.isFinite(end);
       // Azure can say a run ended before it has filled in when (D2c run day 3, S161): read again, a while at most.
-      if (!(isTime(began) && isTime(ended)) && timeless < TIMES_READINGS) {
+      if (!timed && timeless < TIMES_READINGS) {
         timeless += 1;
         await steps.sleep(POLL_MS);
         continue;
       }
-      const seconds = (new Date(ended).getTime() - new Date(began).getTime()) / 1000;
-      const took = Number.isFinite(seconds) ? ` (${String(seconds)} s)` : '';
+      const took = timed ? ` (${String((end - start) / 1000)} s)` : '';
       steps.say(`${execution} ended ${status}: started ${clock(began)}, ended ${clock(ended)}${took}.`);
       return { status, began, ended };
     }
