@@ -21,7 +21,13 @@
 // VALIDATING.
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import { addZone, type LimitReservationsTables, sealNewZone } from '@agentx/core/modules/limit-reservations';
+import {
+  addZone,
+  type LimitReservationsTables,
+  monthSpent,
+  sealNewZone,
+  splitHeld,
+} from '@agentx/core/modules/limit-reservations';
 import {
   draftMandate,
   MANDATE_VERSIONS,
@@ -31,7 +37,13 @@ import {
   setPolicy,
 } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
-import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import {
+  claimsOn,
+  releaseClaim,
+  SPEND_REQUESTS,
+  type SpendRequestsTables,
+  totalsWeighed,
+} from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -998,6 +1010,66 @@ describe('the lock order (ADR-006 §6, forced)', () => {
 
     expect(answers).toEqual([refused(409, 'ORG_FROZEN')]);
     expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+});
+
+describe('what is weighed once the locks are held, in one statement (4D2d P12)', () => {
+  it('answers as each read alone does, each part only where it is asked', async () => {
+    const { w, acting } = await ready();
+    const supplierId = w.suppliers[0] ?? '';
+    const first = decidedOf(await ask(acting, asking(w, { amount: AED(100_000n), orderReference: 'INV-1' })));
+    expect(first.decision).toBe('ALLOW');
+
+    await withTenant(app, w.org, async (tx) => {
+      const { month } = await tx
+        .selectFrom('limit_reservations.reservations')
+        .select('month')
+        .where('agent_id', '=', acting.agentId)
+        .executeTakeFirstOrThrow();
+      const asked = { agentId: acting.agentId, month, currency: 'AED' };
+      const window = { supplierId, payeeKey: null, since: new Date(0), currency: 'AED' };
+      const order = { supplierId, payeeKey: null, reference: 'INV-1' };
+
+      expect(await totalsWeighed(tx, { month: asked, split: window, order })).toEqual({
+        spent: await monthSpent(tx, asked),
+        split: await splitHeld(tx, window),
+        claims: await claimsOn(tx, order),
+      });
+      expect(await totalsWeighed(tx, { month: asked, split: window, order })).toEqual({
+        spent: 100_000n,
+        split: 100_000n,
+        claims: { duplicate: true, possible: false },
+      });
+      expect(await totalsWeighed(tx, { month: asked, split: null, order: null })).toEqual({
+        spent: 100_000n,
+        split: 0n,
+        claims: { duplicate: false, possible: false },
+      });
+      expect(await totalsWeighed(tx, { month: null, split: window, order: null })).toMatchObject({
+        spent: 0n,
+        split: 100_000n,
+      });
+      expect(await totalsWeighed(tx, { month: null, split: null, order })).toEqual({
+        spent: 0n,
+        split: 0n,
+        claims: { duplicate: true, possible: false },
+      });
+      // A lookalike: another form the rail would carry alike.
+      expect(
+        await totalsWeighed(tx, { month: null, split: null, order: { ...order, reference: 'INV/1' } }),
+      ).toMatchObject({ claims: await claimsOn(tx, { ...order, reference: 'INV/1' }) });
+    });
+  });
+
+  it('makes no trip when nothing is asked', async () => {
+    // A transaction any use of which would fail.
+    const none = null as unknown as Parameters<typeof totalsWeighed>[0];
+
+    expect(await totalsWeighed(none, { month: null, split: null, order: null })).toEqual({
+      spent: 0n,
+      split: 0n,
+      claims: { duplicate: false, possible: false },
+    });
   });
 });
 

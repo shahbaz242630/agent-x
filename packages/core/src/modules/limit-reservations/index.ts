@@ -22,6 +22,8 @@ export {
   lockAgentPeriod,
   lockReservationsOf,
   monthSpent,
+  monthSpentRead,
+  type MonthToSum,
   monthsSpent,
   type NewReservation,
   releaseReservationsOf,
@@ -31,5 +33,7 @@ export {
   reserve,
   settleReservationsOf,
   splitHeld,
+  splitHeldRead,
+  type SplitToSum,
 } from './infrastructure/reservations.ts';
 export type { LimitReservationsTables } from './infrastructure/tables.ts';

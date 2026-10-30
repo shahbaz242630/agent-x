@@ -42,10 +42,8 @@ import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources
 import {
   type LimitReservationsTables,
   lockAgentMonth,
-  monthSpent,
   reserve,
   sealNewZone,
-  splitHeld,
 } from '@agentx/core/modules/limit-reservations';
 import {
   currencyAllowed,
@@ -68,7 +66,7 @@ import {
 } from '@agentx/core/modules/policies';
 import {
   claimOrder,
-  claimsOn,
+  totalsWeighed,
   type HeldAs,
   holdsCapacity,
   type ApprovalWaitHours,
@@ -308,8 +306,8 @@ export async function organizationWeighed(
 }
 
 /**
- * Levels 5 and 6: the source asked for, and the supplier, with whether its
- * order is claimed already. A decision holds the supplier FOR NO KEY UPDATE
+ * Levels 5 and 6: the source asked for, and the supplier, with the order to
+ * look for among the claims once the locks are held. A decision holds the supplier FOR NO KEY UPDATE
  * (`change`), serialising its orders; the simulator FOR SHARE, as all its
  * reads (C4's review): simulations never wait on each other, and a decision
  * waits at most the moment one takes, each person's simulations rate-limited.
@@ -320,22 +318,20 @@ async function payingIn(
   orgId: string,
   asked: SpendWeighed,
   supplierLock: 'share' | 'change',
-  except: string | undefined,
 ) {
   const source = await sourceOf(tx, states, { orgId, id: asked.fundingSourceId }, 'share');
   believed(source);
   const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, supplierLock);
   believed(supplier);
-  const unclaimed = { duplicate: false, possible: false };
-  if (supplier.outcome !== 'found') return { source, supplier: null, order: null, claims: unclaimed };
+  if (supplier.outcome !== 'found') return { source, supplier: null, order: null };
   // The simulator may weigh a request with no order named: no duplicate is then looked for.
-  if (asked.orderReference === null) return { source, supplier: supplier.supplier, order: null, claims: unclaimed };
+  if (asked.orderReference === null) return { source, supplier: supplier.supplier, order: null };
   const order = {
     supplierId: supplier.supplier.id,
     payeeKey: supplier.supplier.payeeKey,
     reference: asked.orderReference,
   };
-  return { source, supplier: supplier.supplier, order, claims: await claimsOn(tx, { ...order, except }) };
+  return { source, supplier: supplier.supplier, order };
 }
 
 /** The policies in force for the agent's mandate, as the engine weighs them. */
@@ -383,29 +379,26 @@ export async function weigh(
 ) {
   const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id, 'inForce', mandateFound);
   const policies = rules(inForce, mandate);
-  const { source, supplier, order, claims } = await payingIn(
-    tx,
-    states,
-    orgId,
-    asked,
-    decides ? 'change' : 'share',
-    except,
-  );
+  const { source, supplier, order } = await payingIn(tx, states, orgId, asked, decides ? 'change' : 'share');
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   // The currency weighed: the mandate's, as its limits are (a request in another is denied by decide).
   const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
-  const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month, currency, except });
-  // The split total, only where it is weighed: the mandate's split check on, for a supplier of the organisation's.
-  const split =
-    mandate?.splitCheck === true && supplier !== null
-      ? await splitHeld(tx, {
-          supplierId: supplier.id,
-          payeeKey: supplier.payeeKey,
-          since: windowStart(now, mandate.splitWindowHours),
-          currency,
-        })
-      : 0n;
+  // All in one statement, after the supplier's and the month's locks (4D2d P12). The split total only where it is
+  // weighed: the mandate's split check on, for a supplier of the organisation's.
+  const { spent, split, claims } = await totalsWeighed(tx, {
+    month: month === null ? null : { agentId: agent.id, month, currency, except },
+    split:
+      mandate?.splitCheck === true && supplier !== null
+        ? {
+            supplierId: supplier.id,
+            payeeKey: supplier.payeeKey,
+            since: windowStart(now, mandate.splitWindowHours),
+            currency,
+          }
+        : null,
+    order: order === null ? null : { ...order, except },
+  });
   const input = inputOf({
     asked,
     now,

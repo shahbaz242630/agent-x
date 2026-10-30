@@ -82,6 +82,12 @@ export async function claimsOn(
   tx: ClaimsTransaction,
   order: OrderWeighed,
 ): Promise<{ readonly duplicate: boolean; readonly possible: boolean }> {
+  const { duplicate, possible } = claimLooks(tx, order);
+  return tx.selectNoFrom([duplicate.as('duplicate'), possible.as('possible')]).executeTakeFirstOrThrow();
+}
+
+/** claimsOn's two looks, not run, for a statement that reads more beside them (4D2d P12). */
+export function claimLooks(tx: ClaimsTransaction, order: OrderWeighed) {
   const bankKey = bankKeyOf(order.reference);
   const lookalikes = (bank: string) =>
     tx
@@ -91,14 +97,10 @@ export async function claimsOn(
       .where('bank_key', '=', bank)
       .where('order_reference', '<>', orderKeyOf(order.reference))
       .where(onTheOrdersPayee(order));
-  const found = await tx
-    .selectNoFrom((select) => [
-      select.exists(openClaimsOn(tx, order)).as('duplicate'),
-      bankKey === null ? sql<boolean>`false`.as('possible') : select.exists(lookalikes(bankKey)).as('possible'),
-    ])
-    .executeTakeFirstOrThrow();
-  // Postgres answers booleans; Kysely types EXISTS as any dialect's.
-  return { duplicate: found.duplicate === true, possible: found.possible === true };
+  return {
+    duplicate: sql<boolean>`exists (${openClaimsOn(tx, order)})`,
+    possible: bankKey === null ? sql<boolean>`false` : sql<boolean>`exists (${lookalikes(bankKey)})`,
+  };
 }
 
 /** What claimsOnEach answers of one order: claimsOn's two looks, and its canonical form and bank key. */

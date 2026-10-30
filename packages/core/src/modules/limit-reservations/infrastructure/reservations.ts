@@ -108,26 +108,29 @@ export async function agentMonth(
  * `except` leaves one request's out: an approval weighs its request against
  * the others, as its own amount is added by the engine (Phase 3 B4b).
  */
-export async function monthSpent(
-  tx: ReservationsTransaction,
-  {
-    agentId,
-    month,
-    currency,
-    except,
-  }: { agentId: string; month: string; currency: string; except?: string | undefined },
-): Promise<bigint> {
-  const { spent } = await tx
+export async function monthSpent(tx: ReservationsTransaction, month: MonthToSum): Promise<bigint> {
+  const { spent } = await monthSpentRead(tx, month).executeTakeFirstOrThrow();
+  return BigInt(spent);
+}
+
+/** The agent's month to total (monthSpent). */
+export interface MonthToSum {
+  readonly agentId: string;
+  readonly month: string;
+  readonly currency: string;
+  readonly except?: string | undefined;
+}
+
+/** monthSpent's read, not run, for a statement that reads more beside it (4D2d P12): one row, its total as text. */
+export const monthSpentRead = (tx: ReservationsTransaction, { agentId, month, currency, except }: MonthToSum) =>
+  tx
     .selectFrom('limit_reservations.reservations')
     .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('spent'))
     .where('agent_id', '=', agentId)
     .where('month', '=', month)
     .where('currency', '=', currency)
     .where('state', '<>', 'RELEASED')
-    .where((where) => (except === undefined ? where.lit(true) : where('request_id', '<>', except)))
-    .executeTakeFirstOrThrow();
-  return BigInt(spent);
-}
+    .where((where) => (except === undefined ? where.lit(true) : where('request_id', '<>', except)));
 
 /**
  * monthSpent for several of the agent's months at once, in one statement,
@@ -167,22 +170,31 @@ export async function monthsSpent(
  * its supplier, and its payee key where it has one: both are read, so a
  * reservation made under another supplier record with the same payee key
  * counts, and so does one the supplier made before it had a key (0041's
- * indexes). A statement of its own after the supplier's lock, which
- * serialises the payee's decisions (§7.2). In `currency` alone, as the
- * threshold is (G4). `except` leaves requests out: a carry weighs its own
+ * indexes). Read in a statement after the supplier's lock, which serialises
+ * the payee's decisions (§7.2), never the one taking it. In `currency` alone,
+ * as the threshold is (G4). `except` leaves requests out: a carry weighs its own
  * apart (Phase 3 E4c).
  */
-export async function splitHeld(
+export async function splitHeld(tx: ReservationsTransaction, split: SplitToSum): Promise<bigint> {
+  const { held } = await splitHeldRead(tx, split).executeTakeFirstOrThrow();
+  return BigInt(held);
+}
+
+/** The payee's window to total (splitHeld). */
+export interface SplitToSum {
+  readonly supplierId: string;
+  readonly payeeKey: string | null;
+  readonly since: Date;
+  readonly currency: string;
+  readonly except?: readonly string[];
+}
+
+/** splitHeld's read, not run, for a statement that reads more beside it (4D2d P12): one row, its total as text. */
+export const splitHeldRead = (
   tx: ReservationsTransaction,
-  {
-    supplierId,
-    payeeKey,
-    since,
-    currency,
-    except = [],
-  }: { supplierId: string; payeeKey: string | null; since: Date; currency: string; except?: readonly string[] },
-): Promise<bigint> {
-  const { held } = await tx
+  { supplierId, payeeKey, since, currency, except = [] }: SplitToSum,
+) =>
+  tx
     .selectFrom('limit_reservations.reservations')
     .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('held'))
     .where('state', '<>', 'RELEASED')
@@ -193,10 +205,7 @@ export async function splitHeld(
       payeeKey === null
         ? where('supplier_id', '=', supplierId)
         : where.or([where('supplier_id', '=', supplierId), where('payee_key', '=', payeeKey)]),
-    )
-    .executeTakeFirstOrThrow();
-  return BigInt(held);
-}
+    );
 
 /** A reservation as the holdings check (E1) compares it with its request. */
 export interface ReservationSeen {

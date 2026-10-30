@@ -98,6 +98,7 @@ export {
   type OrderWeighed,
   releaseClaim,
 } from './infrastructure/order-claims.ts';
+export { totalsWeighed } from './infrastructure/weighed-totals.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';
