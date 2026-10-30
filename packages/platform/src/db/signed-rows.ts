@@ -534,12 +534,9 @@ export async function writeSignedRow<Schema>(
     ...(from === 'new' ? [] : [sql`state_version = target.state_version + 1`, sql`state_event_id = null`]),
     ...values.map(([{ column, type }, value]) => sql`${sql.ref(column)} = ${typed(type, value)}`),
   ];
-  const state =
-    from === 'new'
-      ? sql`target.state_version = 1 and target.state_event_id is null`
-      : from.eventId === null
-        ? sql`target.state_version = ${from.version} and target.state_event_id is null`
-        : sql`target.state_version = ${from.version} and target.state_event_id = ${from.eventId}`;
+  const { version, eventId } = from === 'new' ? { version: 1, eventId: null } : from;
+  const pointer = eventId === null ? sql`target.state_event_id is null` : sql`target.state_event_id = ${eventId}`;
+  const state = sql`target.state_version = ${version} and ${pointer}`;
   const echoes = values.map(
     ([{ type }, value], index) => sql`${canonical(type, typed(type, value))} as ${sql.id('w' + index.toString())}`,
   );

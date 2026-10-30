@@ -283,6 +283,9 @@ export interface RecordedState {
 }
 
 /** A status change with its signed event: as a status change, or refused on the row's verified state. */
+/** A status change that moved the row. */
+type SignedStatusChanged<State extends string> = Extract<SignedStatusChange<State>, { outcome: 'changed' }>;
+
 export type SignedStatusChange<State extends string> =
   | {
       readonly outcome: 'changed';
@@ -455,8 +458,9 @@ export interface SignedStates {
    * `record` of a row just inserted and `changeStatus` straight after, in one
    * step of the chain (4D2d P13): the row written and moved first, then the
    * head locked once and both events written with the row's pointer in one
-   * statement, so the head is held for that alone. The events are as those two
-   * would record, sharing one time. A move its machine refuses throws: nothing
+   * statement, so this row's step holds the head for that alone (unless the
+   * transaction took it earlier). The events are as those two would record,
+   * sharing one time. A move its machine refuses throws: nothing
    * is signed, so the caller's transaction must not commit the row.
    */
   recordNewAndMove<State extends string, Event extends string>(
@@ -467,7 +471,7 @@ export interface SignedStates {
     change: SignedChange,
     event: NoInfer<Event>,
     moveChange: SignedChange,
-  ): Promise<Extract<SignedStatusChange<State>, { outcome: 'changed' }>>;
+  ): Promise<SignedStatusChanged<State>>;
   /**
    * One batch of a growing table's whole history (Phase 2 D1c): the objects
    * after `after` (null from the start), its rows in every status and every
@@ -1145,6 +1149,19 @@ export function createSignedStates({
     return row;
   };
 
+  /** An unsealed status could be flipped unseen. */
+  const sealsStatus = (table: SignedStateTable): void => {
+    if (!table.fields.some(({ column }) => column === STATUS)) {
+      throw new RangeError('A signed status table seals its status');
+    }
+  };
+
+  /** A status change's event says what it moved from and to. */
+  const withMove = (
+    change: SignedChange,
+    { from, to }: { readonly from: string; readonly to: string },
+  ): SignedChange => ({ ...change, details: { ...change.details, statusFrom: from, statusTo: to } });
+
   /** A change's details may not bring the seal, which recording adds. */
   const noSealGiven = ({ details }: SignedChange): void => {
     if (Object.hasOwn(details, 'stateFingerprint') || Object.hasOwn(details, 'stateKeyVersion')) {
@@ -1179,9 +1196,8 @@ export function createSignedStates({
     recorded: RecordedAuditEvent,
     along: readonly Readonly<Record<string, unknown>>[] | undefined,
   ): VerifiedState => {
-    const pointed =
-      // None that read as rows is none taken: the row is then not as sealed, and the change fails with the alarm.
-      signedRowPointed(table, along ?? []);
+    // None that read as rows is none taken: the row is then not as sealed, and the change fails with the alarm.
+    const pointed = signedRowPointed(table, along ?? []);
     const sealed = new Map(row.fields);
     if (
       pointed.outcome !== 'found' ||
@@ -1208,8 +1224,9 @@ export function createSignedStates({
     table: SignedStateTable & StatusTable<State, Event>,
     key: SignedRowKey,
     event: Event,
-    sealedStatus: string | undefined,
+    fields: ReadonlyMap<string, string | null>,
   ) => {
+    const sealedStatus = fields.get(STATUS) ?? undefined;
     const moved = await statuses.change(tx, table, key, event, sealedStatus).catch((error: unknown) => {
       // The row is verified and locked: its status can't be unreadable or
       // left unchanged unless something past the app is at work on it.
@@ -1540,22 +1557,12 @@ export function createSignedStates({
       event: NoInfer<Event>,
       change: SignedChange,
     ): Promise<SignedStatusChange<State>> {
-      // An unsealed status could be flipped unseen.
-      if (!table.fields.some(({ column }) => column === STATUS)) {
-        throw new RangeError('A signed status table seals its status');
-      }
+      sealsStatus(table);
       const current = justWritten(tx, table, key) ?? (await verifiedState(tx, table, key, 'change'));
       if (current.outcome !== 'verified') return current;
-      const moved = await movedFrom(tx, table, key, event, current.fields.get(STATUS) ?? undefined);
+      const moved = await movedFrom(tx, table, key, event, current.fields);
       if (moved.outcome === 'refused') return moved;
-      const recorded = await recordChange(
-        tx,
-        table,
-        key,
-        current,
-        { [STATUS]: moved.to },
-        { ...change, details: { ...change.details, statusFrom: moved.from, statusTo: moved.to } },
-      );
+      const recorded = await recordChange(tx, table, key, current, { [STATUS]: moved.to }, withMove(change, moved));
       // recordChange keeps the state it recorded for the next change to go on from (P3b).
       const state = heldIn(tx).get(rowName(table, key))?.wrote?.state;
       if (state === undefined) throw new Error('A status change recorded no state');
@@ -1577,15 +1584,13 @@ export function createSignedStates({
       change: SignedChange,
       event: NoInfer<Event>,
       moveChange: SignedChange,
-    ): Promise<Extract<SignedStatusChange<State>, { outcome: 'changed' }>> {
-      if (!table.fields.some(({ column }) => column === STATUS)) {
-        throw new RangeError('A signed status table seals its status');
-      }
+    ): Promise<SignedStatusChanged<State>> {
+      sealsStatus(table);
       noSealGiven(change);
       noSealGiven(moveChange);
       const first = await written(tx, table, key, 'new', set);
       const firstFields = new Map(first.fields);
-      const moved = await movedFrom(tx, table, key, event, firstFields.get(STATUS) ?? undefined);
+      const moved = await movedFrom(tx, table, key, event, firstFields);
       // Nothing signed yet, and no new row is meant to be refused its first move: never a row left to commit unsigned.
       if (moved.outcome === 'refused') throw new RangeError("A new row's first move was refused by its machine");
       const row = await writtenOver(
@@ -1598,13 +1603,7 @@ export function createSignedStates({
       const { recorded, along } = await trail.recordAllAlong(
         tx,
         key.orgId,
-        [
-          sealedEvent(table, key, first, change),
-          sealedEvent(table, key, row, {
-            ...moveChange,
-            details: { ...moveChange.details, statusFrom: moved.from, statusTo: moved.to },
-          }),
-        ],
+        [sealedEvent(table, key, first, change), sealedEvent(table, key, row, withMove(moveChange, moved))],
         (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
       );
       const last = recorded.at(-1) as RecordedAuditEvent;

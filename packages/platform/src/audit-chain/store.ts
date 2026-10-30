@@ -78,7 +78,7 @@ export interface ChainBatchWriter extends Pick<ChainWriter, 'lockHead' | 'start'
 }
 
 /** An event to add: its ID, drawn once the head is locked and found clean, and what it says. */
-export interface EventToAppend {
+interface EventToAppend {
   readonly nextId: () => string;
   readonly content: Message;
 }

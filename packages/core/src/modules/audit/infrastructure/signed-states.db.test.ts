@@ -950,11 +950,15 @@ describe('a new row signed and moved in one step of the chain (recordNewAndMove,
     expect(await check(existing)).toMatchObject({ outcome: 'verified', version: 1 });
   });
 
-  it('fails with the alarm when a trigger planted past the app changes what the moved write stored', async () => {
+  it.each([
+    ['the status update', 'old.state_version = 1 and new.status <> old.status'],
+    ['the moved write', 'new.state_version = 2 and old.state_version = 1'],
+    ['the pointer', 'new.state_event_id is not null'],
+  ])('fails with the alarm when a trigger planted past the app changes what %s stored', async (_, when) => {
     const trigger = newId().replaceAll('-', '_');
     await database.as('owner').query(`create function probe.plant_${trigger}() returns trigger language plpgsql as $$
       begin
-        if new.state_version = 2 then new.role = 'admin'; end if;
+        if ${when} then new.role = 'admin'; end if;
         return new;
       end $$`);
     await database

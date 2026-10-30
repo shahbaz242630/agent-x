@@ -5,8 +5,9 @@
 //   verifiedState(tx, TABLE, key, lock)   to decide anything on the row
 //   record(tx, TABLE, key, from, set, …)  to create it or change a field
 //   changeStatus(tx, TABLE, key, event, …) to move its status
+//   recordNewAndMove(tx, TABLE, key, …)   to create it and move it, one step of the chain
 //
-// Those three find the object's latest signed event in the log, check the row
+// Those find the object's latest signed event in the log, check the row
 // against its seal, and seal every change as it is recorded. The raw steps
 // (`readSignedRow`, `writeSignedRow`, `pointSignedRow`) and the bare status
 // change (`createStatusChanger`) do none of that: a module using them directly

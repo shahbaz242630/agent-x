@@ -784,7 +784,7 @@ function writerFor(
     async appendAll(sealedEvents, head, previous) {
       // One statement: the head moves only if it is still `previous` with no event past it,
       // and the events are written only if the head moved, so a refused one leaves nothing behind.
-      const rows = sealedEvents.map((sealed, index) => {
+      const selects = sealedEvents.map((sealed, index) => {
         // One sealed for each, in their order (recordAllAs).
         const { event, details } = toWrite[index] as EventToWrite;
         return sql`
@@ -799,9 +799,8 @@ function writerFor(
       const insert = sql`
         insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type,
                                   subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version)
-        ${sql.join(rows, sql` union all `)}
+        ${sql.join(selects, sql` union all `)}
       `;
-      const allWritten = BigInt(sealedEvents.length);
       const move = sql`
         update audit.heads
         set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
@@ -809,15 +808,16 @@ function writerFor(
           and not exists (select from audit.events p where p.org_id = ${orgId} and p.seq > ${previous.seq})
         returning org_id
       `;
+      const allWritten = BigInt(sealedEvents.length);
       if (along !== undefined) {
         // The row's pointer too, only once the events are written (4D2d P8): the statement it came with, run here.
-        const { rows: results } = await sql<{ written: bigint; along: unknown }>`
+        const { rows } = await sql<{ written: bigint; along: unknown }>`
           with moved as (${move}), written as (${insert} returning 1),
           along as (${along.statement((sealedEvents.at(-1) as SealedEvent).id, sql`exists (select from written)`)})
           select (select pg_catalog.count(*) from written) as written,
                  (select pg_catalog.json_agg(pg_catalog.row_to_json(a)) from along a) as along
         `.execute(tx);
-        const [row] = results;
+        const [row] = rows;
         along.rows = rowsAlong({ row_json: row?.along });
         return row?.written === allWritten;
       }
@@ -936,7 +936,7 @@ export function createAuditTrail({
   const sealedCorrelation = correlationId?.toLowerCase();
 
   /** The event checked, which must be about the integrity hold when `hold` says so, and otherwise must not. */
-  const toWrite = (hold: boolean, input: AuditEvent): EventToWrite => {
+  const checkedToWrite = (hold: boolean, input: AuditEvent): EventToWrite => {
     const event = checkedEvent(input, hidesField);
     if (Object.hasOwn(event.details, CORRELATION_DETAIL)) {
       throw new AuditEventRefused([`details.${CORRELATION_DETAIL} is the request's own, added by the trail alone`]);
@@ -959,7 +959,7 @@ export function createAuditTrail({
     return { event, details };
   };
 
-  /** Records the events, each as `toWrite` lets it, in one step of the chain, in their order. */
+  /** Records the events, each as `checkedToWrite` lets it, in one step of the chain, in their order. */
   const recordAllAs = async (
     hold: boolean,
     tx: AuditTransaction,
@@ -967,7 +967,7 @@ export function createAuditTrail({
     inputs: readonly AuditEvent[],
     along?: Along,
   ): Promise<readonly RecordedAuditEvent[]> => {
-    const events = inputs.map((input) => toWrite(hold, input));
+    const events = inputs.map((input) => checkedToWrite(hold, input));
     const chain = chainOf(orgId);
     const sealed = await appendEvents(
       keys,

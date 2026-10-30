@@ -7,9 +7,9 @@
 // after), then moves it where its decision leads and signs both
 // (`spend_request.received` and `.decided`, the chain head, level 12) in one
 // step of the chain (4D2d P13): no request is ever left VALIDATING (D1's
-// review), and the head is held for no more than that step. A plain
-// insert is safe here as agents.ts says: the row is new, and record('new')
-// refuses one the log already holds a state for.
+// review), and that step holds the head for no more than its own write. A
+// plain insert is safe here as agents.ts says: the row is new, and
+// recordNewAndMove refuses one the log already holds a state for.
 import type { Transaction } from 'kysely';
 
 import {
@@ -77,7 +77,7 @@ export interface NewRequest {
 /** Inserts the request, VALIDATING with its decision, unsigned yet: its reservation and claim go in next, then `sign`. */
 export async function insertRequest(tx: RequestsTransaction, request: NewRequest): Promise<void> {
   await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') in signRequest (see the top of this file)
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by recordNewAndMove in signRequest (see the top of this file)
     .insertInto(SPEND_REQUESTS.table)
     .values({ org_id: request.orgId, id: request.id, ...fieldsOf(request), created_at: request.createdAt })
     .execute();
