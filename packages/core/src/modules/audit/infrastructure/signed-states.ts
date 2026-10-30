@@ -63,7 +63,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { UUID } from '../../../shared-kernel/index.ts';
-import { type AuditActor, type AuditDetails, AuditEventRefused } from '../domain/event.ts';
+import { type AuditActor, type AuditDetails, type AuditEvent, AuditEventRefused } from '../domain/event.ts';
 import {
   HISTORY_CHECK_SUBJECT,
   HOLD_SUBJECT,
@@ -85,6 +85,7 @@ import {
   type LatestWithRow,
   lockChainHead,
   type ReadEvent,
+  type RecordedAuditEvent,
   type RecordedEventCheck,
   type RecordedEventsCheck,
   recordHoldEvent,
@@ -450,6 +451,23 @@ export interface SignedStates {
     event: NoInfer<Event>,
     change: SignedChange,
   ): Promise<SignedStatusChange<State>>;
+  /**
+   * `record` of a row just inserted and `changeStatus` straight after, in one
+   * step of the chain (4D2d P13): the row written and moved first, then the
+   * head locked once and both events written with the row's pointer in one
+   * statement, so the head is held for that alone. The events are as those two
+   * would record, sharing one time. A move its machine refuses throws: nothing
+   * is signed, so the caller's transaction must not commit the row.
+   */
+  recordNewAndMove<State extends string, Event extends string>(
+    tx: AuditTransaction,
+    table: SignedStateTable & StatusTable<State, Event>,
+    key: SignedRowKey,
+    set: SignedFieldValues,
+    change: SignedChange,
+    event: NoInfer<Event>,
+    moveChange: SignedChange,
+  ): Promise<Extract<SignedStatusChange<State>, { outcome: 'changed' }>>;
   /**
    * One batch of a growing table's whole history (Phase 2 D1c): the objects
    * after `after` (null from the start), its rows in every status and every
@@ -1102,6 +1120,17 @@ export function createSignedStates({
       }
       rows.set(name, { lock: 'change' });
     }
+    return writtenOver(tx, table, key, from, set);
+  };
+
+  /** The write itself, and the row read back: from new, or from a version and pointer, with the fields it held. */
+  const writtenOver = async (
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    from: 'new' | (Pick<VerifiedState, 'version' | 'fields'> & { readonly eventId: string | null }),
+    set: SignedFieldValues,
+  ): Promise<FoundRow> => {
     const { row, written: values } = await writeSignedRow(tx, table, key, from, set);
     const expectedVersion = from === 'new' ? 1 : from.version + 1;
     if (row.outcome !== 'found' || row.version !== expectedVersion || row.eventId !== null) {
@@ -1116,35 +1145,43 @@ export function createSignedStates({
     return row;
   };
 
-  const recordChange = async (
+  /** A change's details may not bring the seal, which recording adds. */
+  const noSealGiven = ({ details }: SignedChange): void => {
+    if (Object.hasOwn(details, 'stateFingerprint') || Object.hasOwn(details, 'stateKeyVersion')) {
+      throw new AuditEventRefused(['details.stateFingerprint and details.stateKeyVersion are the seal, added here']);
+    }
+  };
+
+  /** The event of a change that leaves the row as `row`, its state sealed. */
+  const sealedEvent = (table: SignedStateTable, key: SignedRowKey, row: FoundRow, change: SignedChange): AuditEvent => {
+    const subject = { type: table.subject, id: key.id, version: row.version };
+    const seal = sealState(keys, { orgId: key.orgId, subject, fields: row.fields });
+    return {
+      actor: change.actor,
+      action: change.action,
+      subject,
+      details: { ...change.details, ...stateSealDetails(seal) },
+    };
+  };
+
+  /**
+   * The row as its event's write pointed it, checked against `row` as sealed,
+   * and kept as the state this transaction just recorded (P3b): sealed, logged
+   * and read back here, the row and the head locked until commit, so no other
+   * transaction moves either. Anything this one puts in since (or a savepoint
+   * rolled back over it) fails the next write's compare.
+   */
+  const pointedState = (
     tx: AuditTransaction,
     table: SignedStateTable,
     key: SignedRowKey,
-    from: VerifiedState | 'new',
-    set: SignedFieldValues,
-    change: SignedChange,
-  ): Promise<RecordedState> => {
-    if (Object.hasOwn(change.details, 'stateFingerprint') || Object.hasOwn(change.details, 'stateKeyVersion')) {
-      throw new AuditEventRefused(['details.stateFingerprint and details.stateKeyVersion are the seal, added here']);
-    }
-    const row = await written(tx, table, key, from, set);
-    const subject = { type: table.subject, id: key.id, version: row.version };
-    const seal = sealState(keys, { orgId: key.orgId, subject, fields: row.fields });
-    // The row pointed at its event in the event's own write (4D2d P8).
-    const recorded = await trail.recordAlong(
-      tx,
-      key.orgId,
-      {
-        actor: change.actor,
-        action: change.action,
-        subject,
-        details: { ...change.details, ...stateSealDetails(seal) },
-      },
-      (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
-    );
+    row: FoundRow,
+    recorded: RecordedAuditEvent,
+    along: readonly Readonly<Record<string, unknown>>[] | undefined,
+  ): VerifiedState => {
     const pointed =
       // None that read as rows is none taken: the row is then not as sealed, and the change fails with the alarm.
-      signedRowPointed(table, recorded.along ?? []);
+      signedRowPointed(table, along ?? []);
     const sealed = new Map(row.fields);
     if (
       pointed.outcome !== 'found' ||
@@ -1154,8 +1191,6 @@ export function createSignedStates({
     ) {
       return notApplied(table, key, "The row didn't take the pointer to its new state's event as sealed");
     }
-    // Sealed, logged and read back here, the row and the head locked until commit: no other transaction moves
-    // either. Anything this one puts in since (or a savepoint rolled back over it) fails the next write's compare.
     const state: VerifiedState = Object.freeze({
       outcome: 'verified',
       version: row.version,
@@ -1164,6 +1199,50 @@ export function createSignedStates({
       fields: sealed,
     });
     heldIn(tx).set(rowName(table, key), { lock: 'change', wrote: { table, state } });
+    return state;
+  };
+
+  /** The row moved by its machine from the status sealed, locked for change: one statement when it still holds it (4D2d P8). */
+  const movedFrom = async <State extends string, Event extends string>(
+    tx: AuditTransaction,
+    table: SignedStateTable & StatusTable<State, Event>,
+    key: SignedRowKey,
+    event: Event,
+    sealedStatus: string | undefined,
+  ) => {
+    const moved = await statuses.change(tx, table, key, event, sealedStatus).catch((error: unknown) => {
+      // The row is verified and locked: its status can't be unreadable or
+      // left unchanged unless something past the app is at work on it.
+      if (error instanceof StatusChangeFailed) alarm(table.subject, key, 'status');
+      throw error;
+    });
+    if (moved.outcome === 'missing') {
+      return notApplied(table, key, 'The row verified and locked for change was missing when changed');
+    }
+    // The machine moved from the status the row held, which must be the one sealed: a state just written
+    // isn't read again (P3b), so a status put in since, by this transaction, would else be moved from.
+    if (moved.from !== sealedStatus) {
+      alarm(table.subject, key, 'status');
+      throw new SignedStateFailed('not_applied', "The row's status isn't the one its signed state holds");
+    }
+    return moved;
+  };
+
+  const recordChange = async (
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    from: VerifiedState | 'new',
+    set: SignedFieldValues,
+    change: SignedChange,
+  ): Promise<RecordedState> => {
+    noSealGiven(change);
+    const row = await written(tx, table, key, from, set);
+    // The row pointed at its event in the event's own write (4D2d P8).
+    const recorded = await trail.recordAlong(tx, key.orgId, sealedEvent(table, key, row, change), (eventId, gate) =>
+      signedRowPointing(table, key, { version: row.version, eventId }, gate),
+    );
+    pointedState(tx, table, key, row, recorded, recorded.along);
     // An organisation's own row, created as its chain's first event: its hold may start here (startIntegrityHold).
     if (from === 'new' && key.id.toLowerCase() === key.orgId.toLowerCase() && recorded.seq === 1n) {
       created.set(tx, (created.get(tx) ?? new Set<string>()).add(key.orgId.toLowerCase()));
@@ -1467,23 +1546,7 @@ export function createSignedStates({
       }
       const current = justWritten(tx, table, key) ?? (await verifiedState(tx, table, key, 'change'));
       if (current.outcome !== 'verified') return current;
-      // From the status sealed, the row locked for change: one statement when the row still holds it (4D2d P8).
-      const sealedStatus = current.fields.get(STATUS) ?? undefined;
-      const moved = await statuses.change(tx, table, key, event, sealedStatus).catch((error: unknown) => {
-        // The row is verified and locked: its status can't be unreadable or
-        // left unchanged unless something past the app is at work on it.
-        if (error instanceof StatusChangeFailed) alarm(table.subject, key, 'status');
-        throw error;
-      });
-      if (moved.outcome === 'missing') {
-        return notApplied(table, key, 'The row verified and locked for change was missing when changed');
-      }
-      // The machine moved from the status the row held, which must be the one sealed: a state just written
-      // isn't read again (P3b), so a status put in since, by this transaction, would else be moved from.
-      if (moved.from !== current.fields.get(STATUS)) {
-        alarm(table.subject, key, 'status');
-        throw new SignedStateFailed('not_applied', "The row's status isn't the one its signed state holds");
-      }
+      const moved = await movedFrom(tx, table, key, event, current.fields.get(STATUS) ?? undefined);
       if (moved.outcome === 'refused') return moved;
       const recorded = await recordChange(
         tx,
@@ -1502,6 +1565,56 @@ export function createSignedStates({
         to: moved.to,
         version: recorded.version,
         eventId: recorded.eventId,
+        state,
+      });
+    },
+
+    async recordNewAndMove<State extends string, Event extends string>(
+      tx: AuditTransaction,
+      table: SignedStateTable & StatusTable<State, Event>,
+      key: SignedRowKey,
+      set: SignedFieldValues,
+      change: SignedChange,
+      event: NoInfer<Event>,
+      moveChange: SignedChange,
+    ): Promise<Extract<SignedStatusChange<State>, { outcome: 'changed' }>> {
+      if (!table.fields.some(({ column }) => column === STATUS)) {
+        throw new RangeError('A signed status table seals its status');
+      }
+      noSealGiven(change);
+      noSealGiven(moveChange);
+      const first = await written(tx, table, key, 'new', set);
+      const firstFields = new Map(first.fields);
+      const moved = await movedFrom(tx, table, key, event, firstFields.get(STATUS) ?? undefined);
+      // Nothing signed yet, and no new row is meant to be refused its first move: never a row left to commit unsigned.
+      if (moved.outcome === 'refused') throw new RangeError("A new row's first move was refused by its machine");
+      const row = await writtenOver(
+        tx,
+        table,
+        key,
+        { version: first.version, eventId: null, fields: firstFields },
+        { [STATUS]: moved.to },
+      );
+      const { recorded, along } = await trail.recordAllAlong(
+        tx,
+        key.orgId,
+        [
+          sealedEvent(table, key, first, change),
+          sealedEvent(table, key, row, {
+            ...moveChange,
+            details: { ...moveChange.details, statusFrom: moved.from, statusTo: moved.to },
+          }),
+        ],
+        (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
+      );
+      const last = recorded.at(-1) as RecordedAuditEvent;
+      const state = pointedState(tx, table, key, row, last, along);
+      return Object.freeze({
+        outcome: 'changed',
+        from: moved.from,
+        to: moved.to,
+        version: row.version,
+        eventId: last.id,
         state,
       });
     },

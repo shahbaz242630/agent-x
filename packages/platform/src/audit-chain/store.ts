@@ -71,6 +71,18 @@ export interface ChainWriter {
   append(event: SealedEvent, head: ChainHead, previous: ChainHead): Promise<boolean>;
 }
 
+/** What recording events together needs (appendEvents): `append`'s duties, for all of them in one statement. */
+export interface ChainBatchWriter extends Pick<ChainWriter, 'lockHead' | 'start'> {
+  /** As `append`: all of the events stored and the head moved from `previous` to `head`, or nothing at all. */
+  appendAll(events: readonly SealedEvent[], head: ChainHead, previous: ChainHead): Promise<boolean>;
+}
+
+/** An event to add: its ID, drawn once the head is locked and found clean, and what it says. */
+export interface EventToAppend {
+  readonly nextId: () => string;
+  readonly content: Message;
+}
+
 /** What checking needs from a chain's tables. */
 export interface ChainReader {
   /**
@@ -134,24 +146,55 @@ export async function appendEvent(
   keys: KeyProvider,
   chain: Chain,
   writer: ChainWriter,
-  event: { readonly nextId: () => string; readonly content: Message },
+  event: EventToAppend,
 ): Promise<SealedEvent> {
+  const [stored] = await appendEvents(
+    keys,
+    chain,
+    {
+      lockHead: () => writer.lockHead(),
+      start: (head) => writer.start(head),
+      // One event asked, so one to write and one written.
+      appendAll: ([sealed], head, previous) => writer.append(sealed as SealedEvent, head, previous),
+    },
+    [event],
+  );
+  return stored as SealedEvent;
+}
+
+/**
+ * appendEvent for events that belong together (4D2d P13): the head locked
+ * once, the events chained one after another, all written and the head moved
+ * once, in one statement, under one reading of the clock. Each is sealed and
+ * checked afterwards exactly as one recorded alone. In the order given.
+ */
+export async function appendEvents(
+  keys: KeyProvider,
+  chain: Chain,
+  writer: ChainBatchWriter,
+  events: readonly EventToAppend[],
+): Promise<readonly SealedEvent[]> {
+  if (events.length === 0) throw new RangeError('At least one event is appended');
   let locked = await writer.lockHead();
   if (locked === undefined) {
     await writer.start(genesisHead(keys, chain));
     locked = await writer.lockHead();
   }
   if (locked?.head === undefined || !headIsSealed(keys, chain, locked.head)) throw new ChainBroken(chain);
-  const { head, now } = locked;
-  const id = event.nextId().toLowerCase();
-  if (!UUID.test(id)) throw new RangeError('The ID generator gave an ID that is not a UUID');
-  // The clock was read once the lock was held, so the times rise with the events' numbers.
-  const entry = { seq: head.seq + 1n, id, recordedAt: now, content: event.content };
-  const sealed = sealNext(keys, chain, head, entry);
-  const stored: SealedEvent = Object.freeze({ seq: entry.seq, id, recordedAt: entry.recordedAt, ...sealed.link });
+  const { head: previous, now } = locked;
+  let head = previous;
+  const stored = events.map(({ nextId, content }): SealedEvent => {
+    const id = nextId().toLowerCase();
+    if (!UUID.test(id)) throw new RangeError('The ID generator gave an ID that is not a UUID');
+    // The clock was read once the lock was held, so the times never fall as the events' numbers rise.
+    const entry = { seq: head.seq + 1n, id, recordedAt: now, content };
+    const sealed = sealNext(keys, chain, head, entry);
+    head = sealed.head;
+    return Object.freeze({ seq: entry.seq, id, recordedAt: entry.recordedAt, ...sealed.link });
+  });
   // The head moves only from the one read under the lock, and only with no event past it:
   // a store that didn't lock can't fork the chain, nor carry on one wound back.
-  if (!(await writer.append(stored, sealed.head, head))) throw new ChainBroken(chain);
+  if (!(await writer.appendAll(stored, head, previous))) throw new ChainBroken(chain);
   return stored;
 }
 

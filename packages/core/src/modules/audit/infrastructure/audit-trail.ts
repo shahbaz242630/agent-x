@@ -43,17 +43,18 @@
 // an alarm over nothing but volume.
 import {
   type AnchorPoint,
-  appendEvent,
+  appendEvents,
   type Chain,
+  type ChainBatchWriter,
   type ChainHead,
   type ChainReader,
   type ChainReport,
-  type ChainWriter,
   clockOf,
   entryIsSealed,
   headFields,
   headIsSealed,
   sealedFields,
+  type SealedEvent,
   type StateSeal,
   stateSealIn,
   type StoredEntry,
@@ -271,6 +272,21 @@ export interface AuditTrail {
     event: AuditEvent,
     statement: (eventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
   ): Promise<RecordedAuditEvent & { readonly along: readonly Readonly<Record<string, unknown>>[] | undefined }>;
+  /**
+   * recordAlong for events that belong together, in their order (4D2d P13):
+   * the head locked once and moved once, all of them in one statement with
+   * `statement`, which is given the last one's ID. They share one time. Each
+   * event as recorded, and the statement's rows, as recordAlong gives them.
+   */
+  recordAllAlong(
+    tx: AuditTransaction,
+    orgId: string,
+    events: readonly AuditEvent[],
+    statement: (lastEventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
+  ): Promise<{
+    readonly recorded: readonly RecordedAuditEvent[];
+    readonly along: readonly Readonly<Record<string, unknown>>[] | undefined;
+  }>;
   /**
    * The object's latest signed state (ADR-012 §2): of the events about it,
    * the newest whose details carry a state seal, with every later event about
@@ -729,14 +745,19 @@ function brokenAt(seq: unknown): BrokenRead {
   return typeof seq === 'bigint' ? { kind: 'broken', seq } : { kind: 'broken' };
 }
 
-/** Recording's steps over the audit tables, for one organisation and one event. */
+/** An event as recording writes it: checked, with its details' text as sealed. */
+interface EventToWrite {
+  readonly event: AuditEvent;
+  readonly details: string;
+}
+
+/** Recording's steps over the audit tables, for one organisation and the events recorded together, in their order. */
 function writerFor(
   tx: AuditTransaction,
   orgId: string,
-  event: AuditEvent,
-  details: string,
+  toWrite: readonly EventToWrite[],
   along?: Along,
-): ChainWriter {
+): ChainBatchWriter {
   return {
     async lockHead() {
       // The clock in the outer select, which reads a row only once the inner one has locked it.
@@ -760,19 +781,27 @@ function writerFor(
         .execute();
     },
 
-    async append(sealed, head, previous) {
+    async appendAll(sealedEvents, head, previous) {
       // One statement: the head moves only if it is still `previous` with no event past it,
-      // and the event is written only if the head moved, so a refused one leaves nothing behind.
+      // and the events are written only if the head moved, so a refused one leaves nothing behind.
+      const rows = sealedEvents.map((sealed, index) => {
+        // One sealed for each, in their order (recordAllAs).
+        const { event, details } = toWrite[index] as EventToWrite;
+        return sql`
+          select m.org_id, ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz,
+                 ${event.actor.type}::text, ${event.actor.id}::text, ${event.action}::text,
+                 ${event.subject.type}::text, ${event.subject.id}::uuid, ${event.subject.version}::integer,
+                 ${details}::text, ${sealed.prevHash}::bytea, ${sealed.hash}::bytea, ${sealed.mac}::bytea,
+                 ${sealed.macKeyVersion}::integer
+          from moved m
+        `;
+      });
       const insert = sql`
         insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type,
                                   subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version)
-        select m.org_id, ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz,
-               ${event.actor.type}::text, ${event.actor.id}::text, ${event.action}::text,
-               ${event.subject.type}::text, ${event.subject.id}::uuid, ${event.subject.version}::integer,
-               ${details}::text, ${sealed.prevHash}::bytea, ${sealed.hash}::bytea, ${sealed.mac}::bytea,
-               ${sealed.macKeyVersion}::integer
-        from moved m
+        ${sql.join(rows, sql` union all `)}
       `;
+      const allWritten = BigInt(sealedEvents.length);
       const move = sql`
         update audit.heads
         set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
@@ -781,19 +810,19 @@ function writerFor(
         returning org_id
       `;
       if (along !== undefined) {
-        // The row's pointer too, only once the event is written (4D2d P8): the statement it came with, run here.
-        const { rows } = await sql<{ written: bigint; along: unknown }>`
+        // The row's pointer too, only once the events are written (4D2d P8): the statement it came with, run here.
+        const { rows: results } = await sql<{ written: bigint; along: unknown }>`
           with moved as (${move}), written as (${insert} returning 1),
-          along as (${along.statement(sealed.id, sql`exists (select from written)`)})
+          along as (${along.statement((sealedEvents.at(-1) as SealedEvent).id, sql`exists (select from written)`)})
           select (select pg_catalog.count(*) from written) as written,
                  (select pg_catalog.json_agg(pg_catalog.row_to_json(a)) from along a) as along
         `.execute(tx);
-        const [row] = rows;
+        const [row] = results;
         along.rows = rowsAlong({ row_json: row?.along });
-        return row?.written === 1n;
+        return row?.written === allWritten;
       }
       const written = await sql`with moved as (${move}) ${insert}`.execute(tx);
-      return written.numAffectedRows === 1n;
+      return written.numAffectedRows === allWritten;
     },
   };
 }
@@ -906,14 +935,8 @@ export function createAuditTrail({
   }
   const sealedCorrelation = correlationId?.toLowerCase();
 
-  /** Records the event, which must be about the integrity hold when `hold` says so, and otherwise must not. */
-  const recordAs = async (
-    hold: boolean,
-    tx: AuditTransaction,
-    orgId: string,
-    input: AuditEvent,
-    along?: Along,
-  ): Promise<RecordedAuditEvent> => {
+  /** The event checked, which must be about the integrity hold when `hold` says so, and otherwise must not. */
+  const toWrite = (hold: boolean, input: AuditEvent): EventToWrite => {
     const event = checkedEvent(input, hidesField);
     if (Object.hasOwn(event.details, CORRELATION_DETAIL)) {
       throw new AuditEventRefused([`details.${CORRELATION_DETAIL} is the request's own, added by the trail alone`]);
@@ -930,15 +953,41 @@ export function createAuditTrail({
         'details.stateFingerprint and details.stateKeyVersion must hold a state seal, both of them or neither',
       ]);
     }
-    const chain = chainOf(orgId);
     const details = canonicalDetails(
       sealedCorrelation === undefined ? event.details : { ...event.details, [CORRELATION_DETAIL]: sealedCorrelation },
     );
-    const sealed = await appendEvent(keys, chain, writerFor(tx, chain.orgId, event, details, along), {
-      nextId: () => ids.next(),
-      content: eventContent(event, details),
-    });
-    return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
+    return { event, details };
+  };
+
+  /** Records the events, each as `toWrite` lets it, in one step of the chain, in their order. */
+  const recordAllAs = async (
+    hold: boolean,
+    tx: AuditTransaction,
+    orgId: string,
+    inputs: readonly AuditEvent[],
+    along?: Along,
+  ): Promise<readonly RecordedAuditEvent[]> => {
+    const events = inputs.map((input) => toWrite(hold, input));
+    const chain = chainOf(orgId);
+    const sealed = await appendEvents(
+      keys,
+      chain,
+      writerFor(tx, chain.orgId, events, along),
+      events.map(({ event, details }) => ({ nextId: () => ids.next(), content: eventContent(event, details) })),
+    );
+    return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
+  };
+
+  /** recordAllAs for one event. */
+  const recordAs = async (
+    hold: boolean,
+    tx: AuditTransaction,
+    orgId: string,
+    input: AuditEvent,
+    along?: Along,
+  ): Promise<RecordedAuditEvent> => {
+    const [recorded] = await recordAllAs(hold, tx, orgId, [input], along);
+    return recorded as RecordedAuditEvent;
   };
 
   /**
@@ -1068,6 +1117,17 @@ export function createAuditTrail({
       const along: Along = { statement };
       const recorded = await recordAs(false, tx, orgId, event, along);
       return Object.freeze({ ...recorded, along: along.rows });
+    },
+
+    async recordAllAlong(
+      tx: AuditTransaction,
+      orgId: string,
+      events: readonly AuditEvent[],
+      statement: (lastEventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
+    ) {
+      const along: Along = { statement };
+      const recorded = await recordAllAs(false, tx, orgId, events, along);
+      return Object.freeze({ recorded, along: along.rows });
     },
 
     async verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {

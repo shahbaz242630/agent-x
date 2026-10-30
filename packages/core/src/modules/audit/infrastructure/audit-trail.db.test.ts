@@ -28,6 +28,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { canonicalDetails } from '../../../shared-kernel/index.ts';
 import { type AuditEvent, AuditEventRefused, eventContent } from '../domain/event.ts';
+import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import {
   type AuditTrail,
   createAuditTrail,
@@ -1863,6 +1864,145 @@ describe('a page of the whole log, for the organisation’s admins (logPage; Pha
     await expect(withTenant(app, newOrg(), (tx) => trail.logPage(tx, org, { ...EVER, limit: 1 }))).rejects.toThrow(
       "the transaction isn't withTenant's for this organisation",
     );
+  });
+});
+
+describe('recordAllAlong (4D2d P13): events recorded together, in one step of the chain', () => {
+  const along = (eventId: string, gate: RawBuilder<unknown>) => sql`select ${eventId}::text as id where ${gate}`;
+  const recordTwo = (first: number) =>
+    withTenant(app, org, (tx) => trail.recordAllAlong(tx, org, [event(first), event(first + 1)], along));
+
+  const storedSeqs = async () => {
+    const stored = await attacker.query<{ seq: string }>(
+      'select seq::text from audit.events where org_id = $1 order by seq',
+      [org],
+    );
+    return stored.map(({ seq }) => seq);
+  };
+
+  it('chains them, the statement given the last, and the whole chain checks out, sharing one time', async () => {
+    await record(org, event(1));
+
+    const { recorded, along: rows } = await recordTwo(2);
+
+    expect(recorded.map(({ seq }) => seq)).toEqual([2n, 3n]);
+    expect(rows).toEqual([{ id: recorded[1]?.id }]);
+    expect(recorded[0]?.recordedAt).toEqual(recorded[1]?.recordedAt);
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 3n });
+    const stored = await attacker.query<{ prev_hash: Buffer; hash: Buffer; subject_version: number }>(
+      'select prev_hash, hash, subject_version from audit.events where org_id = $1 and seq >= 2 order by seq',
+      [org],
+    );
+    expect(stored[1]?.prev_hash).toEqual(stored[0]?.hash);
+    expect(stored.map((row) => row.subject_version)).toEqual([2, 3]);
+  });
+
+  it('starts a chain with none yet', async () => {
+    const { recorded } = await recordTwo(1);
+
+    expect(recorded.map(({ seq }) => seq)).toEqual([1n, 2n]);
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 2n });
+  });
+
+  it('refuses them all before any trip if any one breaks the rules', async () => {
+    await record(org, event(1));
+
+    await expect(
+      withTenant(app, org, (tx) =>
+        trail.recordAllAlong(
+          tx,
+          org,
+          [event(2), { ...event(3), subject: { ...event(3).subject, type: HOLD_SUBJECT } }],
+          along,
+        ),
+      ),
+    ).rejects.toThrow(AuditEventRefused);
+    expect(await storedSeqs()).toEqual(['1']);
+  });
+
+  it('runs the statement only with the events written, and refuses them all on a chain holding an event past its head', async () => {
+    await record(org, event(1), event(2));
+    await attacker.query(
+      `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version)
+       select org_id, seq + 3, '0199a0f0-0000-7000-8000-0000000000fd', recorded_at, actor_type, actor_id, action,
+         subject_type, subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version
+       from audit.events where org_id = $1 and seq = 2`,
+      [org],
+    );
+    let ran = false;
+
+    await expect(
+      withTenant(app, org, (tx) =>
+        trail.recordAllAlong(tx, org, [event(3), event(4)], (eventId, gate) => {
+          ran = true;
+          return along(eventId, gate);
+        }),
+      ),
+    ).rejects.toThrow(ChainBroken);
+    // Built, as part of the one statement, which refused it all.
+    expect(ran).toBe(true);
+    expect(await storedSeqs()).toEqual(['1', '2', '5']);
+  });
+
+  describe('waiting for a head another holds', () => {
+    it('seals both on the head as the holder moved it, taking the next places', async () => {
+      await record(org, event(1));
+      let release = (): void => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let moved = (): void => undefined;
+      const headMoved = new Promise<void>((resolve) => {
+        moved = resolve;
+      });
+      const holding = withTenant(app, org, async (tx) => {
+        const recorded = await trail.record(tx, org, event(2));
+        moved();
+        await held;
+        return recorded;
+      });
+      try {
+        await headMoved;
+        const waiting = recordTwo(3);
+        await waitUntilQueued(attacker, 1);
+        release();
+
+        expect((await holding).seq).toBe(2n);
+        expect((await waiting).recorded.map(({ seq }) => seq)).toEqual([3n, 4n]);
+      } finally {
+        release();
+      }
+      expect(await verify(org)).toMatchObject({ ok: true, seq: 4n });
+    });
+
+    it('refuses both, writing nothing, when an event is slipped in past the head during the wait', async () => {
+      await record(org, event(1));
+      const holder = await database.connect('admin');
+      try {
+        await holder.query('begin');
+        await holder.query('select seq from audit.heads where org_id = $1 for update', [org]);
+        const settled = recordTwo(2).then(
+          () => 'recorded',
+          (error: unknown) => error,
+        );
+        await waitUntilQueued(attacker, 1);
+        // Past the head by three, so both events' own places stay free: only the check can refuse them.
+        await holder.query(
+          `insert into audit.events
+           select org_id, 4, pg_catalog.gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type,
+                  subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version
+           from audit.events where org_id = $1 and seq = 1`,
+          [org],
+        );
+        await holder.query('commit');
+
+        expect(await settled).toBeInstanceOf(ChainBroken);
+      } finally {
+        await holder.end();
+      }
+      expect(await storedSeqs()).toEqual(['1', '4']);
+    });
   });
 });
 

@@ -425,6 +425,18 @@ describe('writing a signed row', () => {
     expect(await rowOf(id)).toMatchObject({ state_version: 1, state_event_id: EVENT });
   });
 
+  it('moves on from a version pointing nowhere only while the row still points nowhere (4D2d P13)', async () => {
+    const unpointed = await newGrant();
+    const moved = await write(unpointed, { version: 1, eventId: null }, { status: 'ACTIVE' });
+    expect(moved.row).toMatchObject({ outcome: 'found', version: 2, eventId: null });
+
+    const pointed = await newGrant(ORG, EVENT);
+    expect((await write(pointed, { version: 1, eventId: null }, { status: 'ACTIVE' })).row).toEqual({
+      outcome: 'missing',
+    });
+    expect(await rowOf(pointed)).toMatchObject({ state_version: 1, state_event_id: EVENT });
+  });
+
   const EVERY = { status: 'ACTIVE', holder: null, amount: null, expires_at: null, role: null };
   const NOT_A_VALUE = /written as text, a whole number, a valid time, or null/;
 

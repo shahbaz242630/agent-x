@@ -17,7 +17,9 @@ export {
 } from './chain.ts';
 export {
   appendEvent,
+  appendEvents,
   ChainBroken,
+  type ChainBatchWriter,
   type ChainReader,
   ChainStoreError,
   type ChainWriter,
