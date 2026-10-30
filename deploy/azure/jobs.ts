@@ -334,6 +334,9 @@ function after(job: Job): string {
     : `In a first deploy, the next is: node deploy/azure/jobs.ts run ${next}`;
 }
 
+/** Readings of an ended run without both its times before it is taken as Azure gives it: two minutes. */
+const TIMES_READINGS = 120_000 / POLL_MS;
+
 /** How a run ended: its state, and its start and end as Azure gave them. */
 export interface Ended {
   readonly status: string;
@@ -351,6 +354,7 @@ export async function waitFor(
   const deadline = steps.now().getTime() + (limit + START_ALLOWANCE_SECONDS) * 1000;
   steps.say(`Waiting for ${execution} to end (the job gives up after ${String(limit)} s)...`);
   let last: string | undefined;
+  let timeless = 0;
   for (;;) {
     const run = azJson(steps.az, [
       'containerapp',
@@ -369,8 +373,16 @@ export async function waitFor(
     if (ENDED.has(status)) {
       const began = text(run.properties?.startTime);
       const ended = text(run.properties?.endTime);
-      const seconds = (new Date(ended).getTime() - new Date(began).getTime()) / 1000;
-      const took = Number.isFinite(seconds) ? ` (${String(seconds)} s)` : '';
+      const start = Date.parse(began);
+      const end = Date.parse(ended);
+      const timed = Number.isFinite(start) && Number.isFinite(end);
+      // Azure can say a run ended before it has filled in when (D2c run day 3, S161): read again, a while at most.
+      if (!timed && timeless < TIMES_READINGS) {
+        timeless += 1;
+        await steps.sleep(POLL_MS);
+        continue;
+      }
+      const took = timed ? ` (${String((end - start) / 1000)} s)` : '';
       steps.say(`${execution} ended ${status}: started ${clock(began)}, ended ${clock(ended)}${took}.`);
       return { status, began, ended };
     }
