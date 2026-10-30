@@ -246,7 +246,7 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       });
       try {
         expect(await secondJob(resuming.steps, 'job test during', during.agents, 0)).toBe(1);
-        expect(resuming.lineOf('load.refused')?.reason).toMatch(/^hand-offs are running after phase 2, not paused/);
+        expect(resuming.lineOf('load.refused')?.reason).toMatch(/^hand-offs are running after the phases, not paused/);
       } finally {
         await pauseMoved(true);
       }
