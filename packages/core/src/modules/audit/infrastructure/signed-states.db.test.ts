@@ -16,6 +16,7 @@ import {
   type TestSession,
   waitUntilQueued,
 } from '@agentx/testing';
+import { type StateSeal, stateSealIn, stateSealMatches } from '@agentx/platform/audit-chain';
 import {
   createDatabase,
   type Database,
@@ -41,7 +42,7 @@ import {
 } from './audit-trail.ts';
 import {
   createSignedStates,
-  type SignedStateFailed,
+  SignedStateFailed,
   type SignedStates,
   type TamperFinding,
   type TamperSign,
@@ -744,6 +745,237 @@ describe('a state just recorded, its status changed in the same transaction (4D2
     ).rejects.toEqual(expect.objectContaining({ name: 'SignedStateFailed', reason: 'not_applied' }));
     expect(alarms()).toEqual([expect.objectContaining({ reason: 'row', objectId: id })]);
     expect(await rowOf(id)).toBeUndefined();
+  });
+});
+
+describe('a new row signed and moved in one step of the chain (recordNewAndMove, 4D2d P13)', () => {
+  const inserted = async (tx: Transaction<Tables>) => {
+    const id = newId();
+    await tx
+      .insertInto('probe.agents')
+      .values({ org_id: org, id, ...NEW_AGENT })
+      .execute();
+    return id;
+  };
+  const signedAndMoved = (tx: Transaction<Tables>, id: string, using = states) =>
+    using.recordNewAndMove(
+      tx,
+      AGENTS,
+      { orgId: org, id },
+      NEW_AGENT,
+      change('agent.created'),
+      'suspend',
+      change('agent.suspended'),
+    );
+  /** A new agent signed and moved, its own transaction committed. */
+  const made = () =>
+    withTenant(app, org, async (tx) => {
+      const id = await inserted(tx);
+      return { id, moved: await signedAndMoved(tx, id) };
+    });
+
+  it('leaves the row verified at its moved version, with an event for each state, each sealed as the log holds it', async () => {
+    const { id, moved } = await made();
+
+    expect(moved).toMatchObject({ outcome: 'changed', from: 'ACTIVE', to: 'SUSPENDED', version: 2 });
+    expect(await check(id)).toMatchObject({
+      outcome: 'verified',
+      version: 2,
+      eventId: moved.eventId.toLowerCase(),
+      fields: new Map([...Object.entries(NEW_AGENT), ['status', 'SUSPENDED']]),
+    });
+    const events = await eventsAbout(id);
+    expect(events.map(({ action, subject_version: version }) => [action, version])).toEqual([
+      ['agent.created', 1],
+      ['agent.suspended', 2],
+    ]);
+    const [first, second] = events;
+    expect(Number(second?.seq)).toBe(Number(first?.seq) + 1);
+    expect(second?.id).toBe(moved.eventId.toLowerCase());
+    const sealedAs = (status: string, version: number) =>
+      stateSealMatches(
+        keys,
+        {
+          orgId: org,
+          subject: { type: AGENTS.subject, id, version },
+          fields: AGENTS.fields.map(({ column }) => [
+            column,
+            column === 'status' ? status : ((NEW_AGENT as Record<string, string>)[column] ?? null),
+          ]),
+        },
+        stateSealIn(
+          JSON.parse((version === 1 ? first : second)?.details ?? '{}') as Record<string, unknown>,
+        ) as StateSeal,
+      );
+    expect(sealedAs('ACTIVE', 1)).toBe(true);
+    expect(sealedAs('SUSPENDED', 2)).toBe(true);
+    expect(JSON.parse(second?.details ?? '{}')).toMatchObject({ statusFrom: 'ACTIVE', statusTo: 'SUSPENDED' });
+    expect(JSON.parse(first?.details ?? '{}')).not.toHaveProperty('statusTo');
+  });
+
+  it('records through one step of the chain, no event alone', async () => {
+    let alone = 0;
+    let together = 0;
+    const using = statesWith({
+      ...trail,
+      recordAlong: (...args: Parameters<AuditTrail['recordAlong']>) => {
+        alone += 1;
+        return trail.recordAlong(...args);
+      },
+      recordAllAlong: (...args: Parameters<AuditTrail['recordAllAlong']>) => {
+        together += 1;
+        return trail.recordAllAlong(...args);
+      },
+    });
+
+    await withTenant(app, org, async (tx) => signedAndMoved(tx, await inserted(tx), using));
+
+    expect([alone, together]).toEqual([0, 1]);
+  });
+
+  it('waits for the head only with the row moved: the head is taken last, and only the step itself holds it', async () => {
+    await newAgent();
+    const holder = await database.connect('admin');
+    try {
+      await holder.query('begin');
+      await holder.query('select seq from audit.heads where org_id = $1 for update', [org]);
+      let id = '';
+      const waiting = withTenant(app, org, async (tx) => {
+        id = await inserted(tx);
+        const moved = await signedAndMoved(tx, id);
+        return moved;
+      });
+      const settled = waiting.then(
+        (moved) => moved,
+        (error: unknown) => error,
+      );
+      const queued = await waitUntilQueued(attacker, 1);
+      const waiters = await attacker.query<{ query: string }>(
+        'select query from pg_catalog.pg_stat_activity where pid = any($1::int[])',
+        [queued],
+      );
+      // Its wait is the head's lock, with the row's writes all behind it: the status and the version already moved.
+      expect(waiters.map(({ query }) => query.replaceAll(/\s+/g, ' '))).toEqual([
+        expect.stringContaining('from audit.heads h where h.org_id ='),
+      ]);
+      await holder.query('commit');
+      expect(await settled).toMatchObject({ outcome: 'changed', version: 2 });
+      expect(await check(id)).toMatchObject({ outcome: 'verified', version: 2 });
+    } finally {
+      await holder.end();
+    }
+  });
+
+  it('keeps the state it recorded for a further move to go on from, read nowhere again', async () => {
+    let reads = 0;
+    const using = statesWith({
+      ...trail,
+      latestSignedStateWithRow: (...args: Parameters<AuditTrail['latestSignedStateWithRow']>) => {
+        reads += 1;
+        return trail.latestSignedStateWithRow(...args);
+      },
+    });
+
+    const id = await withTenant(app, org, async (tx) => {
+      const made_ = await inserted(tx);
+      await signedAndMoved(tx, made_, using);
+      expect(
+        await using.changeStatus(tx, AGENTS, { orgId: org, id: made_ }, 'reactivate', change('agent.reactivated')),
+      ).toMatchObject({ outcome: 'changed', from: 'SUSPENDED', to: 'ACTIVE', version: 3 });
+      return made_;
+    });
+
+    expect(reads).toBe(0);
+    expect(await check(id)).toMatchObject({ outcome: 'verified', version: 3 });
+  });
+
+  it("refuses a move its machine doesn't allow, signing nothing", async () => {
+    await expect(
+      withTenant(app, org, async (tx) =>
+        states.recordNewAndMove(
+          tx,
+          AGENTS,
+          { orgId: org, id: await inserted(tx) },
+          NEW_AGENT,
+          change('agent.created'),
+          'reactivate',
+          change('agent.reactivated'),
+        ),
+      ),
+    ).rejects.toThrow(RangeError);
+    expect(await attacker.query('select 1 from audit.events where org_id = $1', [org])).toEqual([]);
+  });
+
+  it('refuses a seal brought in either change', async () => {
+    const sealedChange = { ...change('agent.created'), details: { stateFingerprint: 'x' } };
+    const sealedKey = { ...change('agent.created'), details: { stateKeyVersion: 1 } };
+    for (const [first, second] of [
+      [sealedChange, change('agent.suspended')],
+      [change('agent.created'), sealedKey],
+    ] as const) {
+      await expect(
+        withTenant(app, org, async (tx) =>
+          states.recordNewAndMove(
+            tx,
+            AGENTS,
+            { orgId: org, id: await inserted(tx) },
+            NEW_AGENT,
+            first,
+            'suspend',
+            second,
+          ),
+        ),
+      ).rejects.toThrow(AuditEventRefused);
+    }
+  });
+
+  it('refuses a table that seals no status', async () => {
+    await expect(
+      withTenant(app, org, (tx) =>
+        states.recordNewAndMove(
+          tx,
+          { ...AGENTS, fields: AGENTS.fields.filter(({ column }) => column !== 'status') },
+          { orgId: org, id: newId() },
+          { role: 'reader' },
+          change('agent.created'),
+          'suspend',
+          change('agent.suspended'),
+        ),
+      ),
+    ).rejects.toThrow('A signed status table seals its status');
+  });
+
+  it('refuses a row the log already holds a state for, with the alarm', async () => {
+    const existing = await newAgent();
+
+    await expect(withTenant(app, org, (tx) => signedAndMoved(tx, existing))).rejects.toThrow(SignedStateFailed);
+    expect(await check(existing)).toMatchObject({ outcome: 'verified', version: 1 });
+  });
+
+  it.each([
+    ['the status update', 'old.state_version = 1 and new.status <> old.status'],
+    ['the moved write', 'new.state_version = 2 and old.state_version = 1'],
+    ['the pointer', 'new.state_event_id is not null'],
+  ])('fails with the alarm when a trigger planted past the app changes what %s stored', async (_, when) => {
+    const owner = database.as('owner');
+    const plant = `create function probe.plant_role() returns trigger language plpgsql as $$
+      begin
+        if ${when} then new.role = 'admin'; end if;
+        return new;
+      end $$`;
+    // eslint-disable-next-line agentx/no-string-built-sql -- `when` is one of the fixed conditions above.
+    await owner.query(plant);
+    await owner.query(
+      'create trigger plant_role before update on probe.agents for each row execute function probe.plant_role()',
+    );
+    try {
+      await expect(made()).rejects.toThrow(SignedStateFailed);
+      expect(alarms().map(({ reason }) => reason)).toEqual(['row']);
+      expect(await attacker.query('select 1 from audit.events where org_id = $1', [org])).toEqual([]);
+    } finally {
+      await owner.query('drop trigger plant_role on probe.agents');
+      await owner.query('drop function probe.plant_role()');
+    }
   });
 });
 

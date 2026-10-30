@@ -4,11 +4,12 @@
 // D4's decideAndReserve inserts the request VALIDATING with its decision
 // (level 8), adds its reservation and order claim while it still is (level
 // 11: 0039's `claim_guard` and 0040's `held_for_its_request` refuse them
-// after), then signs it (`spend_request.received`, the chain head, level 12)
-// and moves it where its decision leads in the same transaction, a second
-// signed event: no request is ever left VALIDATING (D1's review). A plain
-// insert is safe here as agents.ts says: the row is new, and record('new')
-// refuses one the log already holds a state for.
+// after), then moves it where its decision leads and signs both
+// (`spend_request.received` and `.decided`, the chain head, level 12) in one
+// step of the chain (4D2d P13): no request is ever left VALIDATING (D1's
+// review), and that step holds the head for no more than its own write. A
+// plain insert is safe here as agents.ts says: the row is new, and
+// recordNewAndMove refuses one the log already holds a state for.
 import type { Transaction } from 'kysely';
 
 import {
@@ -76,7 +77,7 @@ export interface NewRequest {
 /** Inserts the request, VALIDATING with its decision, unsigned yet: its reservation and claim go in next, then `sign`. */
 export async function insertRequest(tx: RequestsTransaction, request: NewRequest): Promise<void> {
   await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') in signRequest (see the top of this file)
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by recordNewAndMove in signRequest (see the top of this file)
     .insertInto(SPEND_REQUESTS.table)
     .values({ org_id: request.orgId, id: request.id, ...fieldsOf(request), created_at: request.createdAt })
     .execute();
@@ -97,33 +98,38 @@ export async function signRequest(
   held: HeldAs | null,
 ): Promise<SpendRequestRecord> {
   const key = { orgId: request.orgId, id: request.id };
-  await states.record(tx, SPEND_REQUESTS, key, 'new', fieldsOf(request), {
-    actor,
-    action: 'spend_request.received',
-    details: { agentKeyId: request.agentKeyId },
-  });
-  const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, MOVED_BY[request.decision], {
-    actor,
-    action: 'spend_request.decided',
-    details: {
-      decision: request.decision,
-      reasons: request.reasons.join(' '),
-      ...request.weighed,
-      // The wait it is held to, never moved by a later change of the organisation's (partner decision 20).
-      ...(request.decision === 'REQUIRE_APPROVAL' ? { approvalWaitHours: request.approvalWait } : {}),
-      // What its reservation and claim were made as, sealed with the decision, for the holdings check (E1, E1b).
-      ...(held === null
-        ? {}
-        : {
-            heldMonth: held.month,
-            heldAt: held.reservedAt.toISOString(),
-            payeeSeal: held.payee.mac,
-            payeeSealKeyVersion: held.payee.keyVersion,
-          }),
+  const moved = await states.recordNewAndMove(
+    tx,
+    SPEND_REQUESTS,
+    key,
+    fieldsOf(request),
+    {
+      actor,
+      action: 'spend_request.received',
+      details: { agentKeyId: request.agentKeyId },
     },
-  });
-  // Just recorded VALIDATING by this transaction, its move its decision's: anything else is something past the app.
-  if (moved.outcome !== 'changed') throw new Error(`A new spend request didn't move as decided: ${moved.outcome}`);
+    MOVED_BY[request.decision],
+    {
+      actor,
+      action: 'spend_request.decided',
+      details: {
+        decision: request.decision,
+        reasons: request.reasons.join(' '),
+        ...request.weighed,
+        // The wait it is held to, never moved by a later change of the organisation's (partner decision 20).
+        ...(request.decision === 'REQUIRE_APPROVAL' ? { approvalWaitHours: request.approvalWait } : {}),
+        // What its reservation and claim were made as, sealed with the decision, for the holdings check (E1, E1b).
+        ...(held === null
+          ? {}
+          : {
+              heldMonth: held.month,
+              heldAt: held.reservedAt.toISOString(),
+              payeeSeal: held.payee.mac,
+              payeeSealKeyVersion: held.payee.keyVersion,
+            }),
+      },
+    },
+  );
   return recordFrom(request.id, moved.state);
 }
 

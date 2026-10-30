@@ -515,15 +515,16 @@ export async function signedRowIds<Schema>(
  * at version 1 pointing nowhere, the one the transaction has just inserted,
  * and `set` names every field. From a version and pointer: only while the row
  * still holds them, and it moves to the next version, pointing nowhere until
- * its event is recorded. A row in any other state is left as it is
- * (`missing`). Only after readSignedRow locked the row for a change, in the
- * same transaction.
+ * its event is recorded; a pointer of null is a version written in this
+ * transaction whose event goes in with the next's (4D2d P13). A row in any
+ * other state is left as it is (`missing`). Only after readSignedRow locked
+ * the row for a change, in the same transaction.
  */
 export async function writeSignedRow<Schema>(
   tx: Transaction<Schema>,
   table: SignedStateTable,
   key: SignedRowKey,
-  from: 'new' | { readonly version: number; readonly eventId: string },
+  from: 'new' | { readonly version: number; readonly eventId: string | null },
   set: SignedFieldValues,
 ): Promise<WrittenRow> {
   checkTable(table);
@@ -533,10 +534,9 @@ export async function writeSignedRow<Schema>(
     ...(from === 'new' ? [] : [sql`state_version = target.state_version + 1`, sql`state_event_id = null`]),
     ...values.map(([{ column, type }, value]) => sql`${sql.ref(column)} = ${typed(type, value)}`),
   ];
-  const state =
-    from === 'new'
-      ? sql`target.state_version = 1 and target.state_event_id is null`
-      : sql`target.state_version = ${from.version} and target.state_event_id = ${from.eventId}`;
+  const { version, eventId } = from === 'new' ? { version: 1, eventId: null } : from;
+  const pointer = eventId === null ? sql`target.state_event_id is null` : sql`target.state_event_id = ${eventId}`;
+  const state = sql`target.state_version = ${version} and ${pointer}`;
   const echoes = values.map(
     ([{ type }, value], index) => sql`${canonical(type, typed(type, value))} as ${sql.id('w' + index.toString())}`,
   );

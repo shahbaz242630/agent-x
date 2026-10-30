@@ -6,7 +6,9 @@ import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import { type Chain, type ChainHead, GENESIS_HASH, genesisHead, type StoredEntry } from './chain.ts';
 import {
   appendEvent,
+  appendEvents,
   ChainBroken,
+  type ChainBatchWriter,
   type ChainReader,
   ChainStoreError,
   type ChainWriter,
@@ -34,7 +36,7 @@ const id = (n: number): string => `0199a0f0-0000-7000-8000-${n.toString().padSta
  * the head (or none, or a row that can't be read) and the events, some of
  * which a test can make unreadable.
  */
-class MemoryChain implements ChainWriter, ChainReader {
+class MemoryChain implements ChainWriter, ChainBatchWriter, ChainReader {
   head: ChainHead | 'none' | 'unreadable' = 'none';
   rows: StoredEntry[] = [];
   unreadable = new Set<bigint>();
@@ -78,6 +80,18 @@ class MemoryChain implements ChainWriter, ChainReader {
     return Promise.resolve(true);
   }
 
+  appendAll(events: readonly Omit<StoredEntry, 'content'>[], head: ChainHead, previous: ChainHead): Promise<boolean> {
+    this.calls.push('appendAll');
+    if (this.racedBy !== undefined) this.head = this.racedBy;
+    const current = this.head;
+    if (typeof current === 'string' || current.seq !== previous.seq || !current.hash.equals(previous.hash)) {
+      return Promise.resolve(false);
+    }
+    this.head = head;
+    this.rows.push(...events.map((event) => ({ ...event, content: CONTENT })));
+    return Promise.resolve(true);
+  }
+
   state(): Promise<{ head: ChainHead | 'none' | 'unreadable'; stored: bigint }> {
     return Promise.resolve({ head: this.head, stored: BigInt(this.rows.length) });
   }
@@ -98,6 +112,85 @@ async function chainOf(count: number): Promise<MemoryChain> {
   for (let n = 1; n <= count; n += 1) await appendEvent(keys, CHAIN, memory, { nextId: () => id(n), content: CONTENT });
   return memory;
 }
+
+describe('appending events together (4D2d P13)', () => {
+  const two = [
+    { nextId: () => id(2), content: CONTENT },
+    { nextId: () => id(3), content: CONTENT },
+  ];
+
+  it('locks once and writes once, chaining each on the last, and checks out as events added alone', async () => {
+    const memory = await chainOf(1);
+    memory.calls = [];
+    const [second, third] = await appendEvents(keys, CHAIN, memory, two);
+
+    expect(memory.calls).toEqual(['lockHead', 'appendAll']);
+    expect([second?.seq, third?.seq]).toEqual([2n, 3n]);
+    expect(third?.prevHash).toEqual(second?.hash);
+    expect([second?.recordedAt, third?.recordedAt]).toEqual([NOW, NOW]);
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({ ok: true, seq: 3n, hash: third?.hash });
+  });
+
+  it('starts a chain with no head, as one event does', async () => {
+    const memory = new MemoryChain();
+    const events = await appendEvents(keys, CHAIN, memory, [
+      { nextId: () => id(1), content: CONTENT },
+      { nextId: () => id(2), content: CONTENT },
+    ]);
+
+    expect(memory.calls).toEqual(['lockHead', 'start', 'lockHead', 'appendAll']);
+    expect(events.map(({ seq }) => seq)).toEqual([1n, 2n]);
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toMatchObject({ ok: true, seq: 2n });
+  });
+
+  it('refuses a head that moved past the lock, keeping none of them', async () => {
+    const memory = await chainOf(1);
+    const other = await chainOf(5);
+    memory.racedBy = other.head as ChainHead;
+
+    await expect(appendEvents(keys, CHAIN, memory, two)).rejects.toThrow(ChainBroken);
+    expect(memory.rows).toHaveLength(1);
+  });
+
+  it('refuses a head that fails its check, writing nothing and drawing no ID', async () => {
+    const memory = await chainOf(1);
+    memory.head = 'unreadable';
+    memory.calls = [];
+    let drawn = 0;
+    const counted = {
+      nextId: () => {
+        drawn += 1;
+        return id(2);
+      },
+      content: CONTENT,
+    };
+
+    await expect(appendEvents(keys, CHAIN, memory, [counted])).rejects.toThrow(ChainBroken);
+    expect(memory.calls).toEqual(['lockHead']);
+    expect(drawn).toBe(0);
+  });
+
+  it('refuses an ID that is not a UUID, before writing any', async () => {
+    const memory = await chainOf(1);
+    memory.calls = [];
+
+    await expect(
+      appendEvents(keys, CHAIN, memory, [
+        { nextId: () => id(2), content: CONTENT },
+        { nextId: () => 'nope', content: CONTENT },
+      ]),
+    ).rejects.toThrow(RangeError);
+    expect(memory.calls).toEqual(['lockHead']);
+  });
+
+  it('refuses none at all', async () => {
+    const memory = await chainOf(1);
+    memory.calls = [];
+
+    await expect(appendEvents(keys, CHAIN, memory, [])).rejects.toThrow(RangeError);
+    expect(memory.calls).toEqual([]);
+  });
+});
 
 describe('appending an event', () => {
   it('starts the chain, takes the next place, and checks out', async () => {
