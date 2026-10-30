@@ -128,7 +128,7 @@ describe('the report', () => {
       "k6 straight to it. 2 ms was added to every packet the database sent, as Azure's network adds it. As",
     );
     expect(report).toContain(
-      "\nDatabase trips a request (the app's statements over the phase, its timers' included, by pg_stat_statements): phase 1 160.0, phase 2 1.0.\n",
+      "\nDatabase trips a request (the app's round trips over the phase, its timers' included: its statements by pg_stat_statements, less those sent in another's trip): phase 1 160.0, phase 2 1.0.\n",
     );
     // A phase with no request has no trips a request to give.
     const none = renderReport({
@@ -140,7 +140,7 @@ describe('the report', () => {
         { phase: 3, statements: 1 },
       ],
     });
-    expect(none).toContain('by pg_stat_statements): phase 2 2.0.\n');
+    expect(none).toContain("less those sent in another's trip): phase 2 2.0.\n");
   });
 
   it('lists what failed', () => {

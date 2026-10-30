@@ -12,12 +12,28 @@
 // SEC-TEN-06: a setting made for the whole session (by a bug or injected SQL
 // inside the work, or before a connection was opened) would outlive the
 // transaction. So every connection is checked when it is opened, and again
-// each time it is taken from the pool. This is the only product file that
-// names the setting (lint), and pg_catalog is named explicitly, so no other
-// function called set_config can stand in.
+// each time it is taken from the pool, before its first statement. This is the
+// only product file that names the setting (lint), and pg_catalog is named
+// explicitly, so no other function called set_config can stand in.
+//
+// 4D2d P11: the checks travel with the statements they guard, a round trip
+// fewer each. A transaction's start carries the connection's check and the
+// organisation's setting with its read-back; its commit carries the read-back
+// before commit, which refuses the commit in the database itself.
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-import { type Kysely, type PostgresPool, type RawBuilder, sql, type Transaction } from 'kysely';
+import {
+  type CompiledQuery,
+  type DatabaseConnection,
+  type Driver,
+  type Kysely,
+  PostgresDialect,
+  type QueryResult,
+  type RawBuilder,
+  sql,
+  type Transaction,
+  type TransactionSettings,
+} from 'kysely';
 import type pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
@@ -61,6 +77,21 @@ const insideTenant = new AsyncLocalStorage<{ open: boolean }>();
 const tenantOf = new WeakMap<object, string>();
 
 /**
+ * A transaction withTenant or limitedTransaction is about to open, which the
+ * driver opens with its settings in the start's own round trip (4D2d P11). The
+ * first transaction begun in its scope takes it, so one begun inside the work
+ * (another connection's) opens as a plain one.
+ */
+interface Opening {
+  /** The organisation, in lower case; none for a plain limited transaction, which is `limited`: an opening sets one or both. */
+  readonly tenant: string | undefined;
+  readonly limited: boolean;
+  taken: boolean;
+}
+
+const opening = new AsyncLocalStorage<Opening>();
+
+/**
  * Runs `work` in one READ COMMITTED transaction scoped to the organisation.
  * The orgId must come from the server (the authenticated principal or the
  * directory), never from the request (ADR-005 §5). It commits when `work`
@@ -83,49 +114,56 @@ export async function withTenant<Schema, Result>(
     throw new TenantContextError('withTenant was called inside another withTenant; pass the transaction on instead');
   }
   const scope = { open: true };
+  const tenant = orgId.toLowerCase();
+  const asked: Opening = { tenant, limited, taken: false };
   try {
-    // READ COMMITTED is Postgres's default, but the default can be changed per
-    // server, database or role; the locking rules in ADR-006 rely on it.
     return await insideTenant.run(scope, () =>
-      db
-        .transaction()
-        .setIsolationLevel('read committed')
-        .execute(async (tx) => {
-          // set_config answers with the setting as the database now holds it: the read-back at the
-          // start. It can't differ today (the setting has no check hook); kept as decision 41 asks.
-          const { rows } = await (
-            limited
-              ? // The limit's own answer is never read: the setting holds for each later statement.
-                sql<{ org_id: string | null }>`
-                  select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id,
-                    pg_catalog.set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true) as statement_timeout
-                `
-              : sql<{ org_id: string | null }>`select pg_catalog.set_config('app.org_id', ${orgId}, true) as org_id`
-          ).execute(tx);
-          const tenant = orgId.toLowerCase();
-          if (!sameTenant(rows[0]?.org_id, tenant)) {
-            throw new TenantContextError("the organisation setting didn't take");
-          }
-          tenantOf.set(tx, tenant);
-          try {
-            const result = await work(tx);
-            // The read-back before commit: a setting still changed (a bug, or injected SQL) throws
-            // here, which rolls the whole transaction back. One changed and put back in between is
-            // not seen here; row security still walls each statement to the setting it ran under.
-            if (!sameTenant(await settingOf(tx), tenant)) {
-              throw new TenantContextError(
-                'the organisation setting changed inside the transaction, so nothing it wrote is kept',
-              );
-            }
-            return result;
-          } finally {
-            tenantOf.delete(tx);
-          }
-        }),
+      openedWith(db, asked, async (tx) => {
+        // The driver set the organisation and read it back with the start (decision 41), and reads
+        // it back again with the commit. Only createDatabase's driver does: with any other, nothing
+        // would be walled to the organisation, so nothing runs.
+        if (!asked.taken) throw new TenantContextError("this database can't set an organisation");
+        tenantOf.set(tx, tenant);
+        try {
+          return await work(tx);
+        } finally {
+          tenantOf.delete(tx);
+        }
+      }),
     );
   } finally {
     scope.open = false;
   }
+}
+
+/**
+ * Runs `work` in one READ COMMITTED transaction with no organisation, each
+ * statement limited as limitStatements limits them, set with the start in one
+ * round trip (4D2d P11): a read across organisations, such as the directory's.
+ */
+export function limitedTransaction<Schema, Result>(
+  db: Kysely<Schema>,
+  work: (tx: Transaction<Schema>) => Promise<Result>,
+): Promise<Result> {
+  const asked: Opening = { tenant: undefined, limited: true, taken: false };
+  return openedWith(db, asked, async (tx) => {
+    // Another driver: the limit in a round trip of its own.
+    if (!asked.taken) await limitStatements(tx);
+    return work(tx);
+  });
+}
+
+/**
+ * One READ COMMITTED transaction, opened with `asked`. READ COMMITTED is
+ * Postgres's default, but the default can be changed per server, database or
+ * role; the locking rules in ADR-006 rely on it.
+ */
+function openedWith<Schema, Result>(
+  db: Kysely<Schema>,
+  asked: Opening,
+  work: (tx: Transaction<Schema>) => Promise<Result>,
+): Promise<Result> {
+  return opening.run(asked, () => db.transaction().setIsolationLevel('read committed').execute(work));
 }
 
 /**
@@ -168,7 +206,7 @@ const STATEMENT_TIMEOUT = `${String(STATEMENT_SECONDS)}s`;
  * Limits every later statement of the transaction to STATEMENT_SECONDS, a wait
  * for a lock included, until the transaction ends: what a request's work sets
  * first, so the app layer needs no SQL of its own. withTenant's `limited`
- * sets the same with the organisation.
+ * sets the same with the organisation, and limitedTransaction with the start.
  */
 export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<void> {
   await sql`select pg_catalog.set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true)`.execute(tx);
@@ -221,9 +259,16 @@ interface ConnectionState {
 const CONNECTION_STATE =
   "select pg_catalog.current_setting('app.org_id', true) as org_id, pg_catalog.current_setting('search_path', true) as search_path";
 
+/** A state row as the database gave it. */
+type StateRow = { org_id?: string | null; search_path?: string | null } | undefined;
+
+function stateFrom(row: StateRow): ConnectionState {
+  return { tenant: row?.org_id ?? '', searchPath: row?.search_path ?? '' };
+}
+
 async function stateOf(client: pg.ClientBase): Promise<ConnectionState> {
   const { rows } = await client.query<{ org_id: string | null; search_path: string | null }>(CONNECTION_STATE);
-  return { tenant: rows[0]?.org_id ?? '', searchPath: rows[0]?.search_path ?? '' };
+  return stateFrom(rows[0]);
 }
 
 /**
@@ -267,33 +312,250 @@ export async function refuseTenantPreset(client: pg.ClientBase): Promise<void> {
 }
 
 /**
- * Wraps the pool so that every connection taken from it carries no tenant and
- * still has the pinned search_path. A connection that carries either fault was
- * given a session-wide setting by an earlier caller, which is a bug or an
- * attack: it is closed (so any other session settings go with it), the event
- * is logged, and another connection is taken. New connections are checked on
- * opening, so after at most `attempts` tries one is sound, or the pool is
- * failing and the error says so.
+ * The SQLSTATE the commit's read-back raises (division_by_zero), so the
+ * driver knows its refusal: nothing else in the commit's round trip divides.
  */
-export function tenantCheckedPool(pool: pg.Pool, logger: Logger, attempts: number): PostgresPool {
-  return {
-    options: pool.options,
-    end: () => pool.end(),
-    connect: async () => {
-      for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        const client = await pool.connect();
-        let problem: string | undefined;
-        try {
-          problem = unusable(await stateOf(client));
-        } catch (error) {
-          client.release(error instanceof Error ? error : true);
-          throw error;
-        }
-        if (problem === undefined) return client;
-        client.release(true);
-        logger.error('db.tenant.leftover_discarded', { attempt, problem });
+const TENANT_CHANGED = '22012';
+
+/**
+ * The read-back before commit, in the commit's own round trip: it raises when
+ * the setting no longer names the organisation, so the commit after it never
+ * runs and the transaction is rolled back. The ID is written into the text
+ * (a round trip of several statements takes no parameters). A plain select,
+ * not a DO block: pg_stat_statements folds its constants into one entry,
+ * where a DO block would keep one an organisation (P11 review). The setting
+ * is read at run time, so the planner can't divide early.
+ */
+function stillTenant(tenant: string): string {
+  return `select 1 / (case when pg_catalog.lower(pg_catalog.current_setting('app.org_id', true)) is distinct from '${written(tenant)}' then 0 else 1 end) as unchanged`;
+}
+
+/** What the start sets with it, in a statement of its own: the organisation, the statements' limit, or both. */
+function startSettings({ tenant, limited }: Opening): string {
+  const settings = [
+    ...(tenant === undefined ? [] : [`pg_catalog.set_config('app.org_id', '${written(tenant)}', true) as org_id`]),
+    ...(limited
+      ? [`pg_catalog.set_config('statement_timeout', '${STATEMENT_TIMEOUT}', true) as statement_timeout`]
+      : []),
+  ];
+  return `select ${settings.join(', ')}`;
+}
+
+/**
+ * The organisation's ID to write into a statement's text: a UUID in lower
+ * case, which nothing can break out of. Only withTenant's checked ID reaches
+ * here; checked again, as text is no parameter.
+ */
+function written(tenant: string): string {
+  if (!UUID.test(tenant) || tenant !== tenant.toLowerCase()) throw new TenantContextError('not a UUID in lower case');
+  return tenant;
+}
+
+/** A transaction's start, as Kysely's own driver writes it. */
+function startOf({ isolationLevel, accessMode }: TransactionSettings): string {
+  if (isolationLevel === undefined && accessMode === undefined) return 'begin';
+  return [
+    'start transaction',
+    ...(isolationLevel === undefined ? [] : [`isolation level ${isolationLevel}`]),
+    ...(accessMode === undefined ? [] : [accessMode]),
+  ].join(' ');
+}
+
+/** What a query answered, as Kysely's own driver gives it back. */
+function resultOf<R>(result: pg.QueryResult): QueryResult<R> {
+  const rows = result.rows as R[];
+  return ['INSERT', 'UPDATE', 'DELETE', 'MERGE'].includes(result.command)
+    ? { numAffectedRows: BigInt(result.rowCount ?? 0), rows }
+    : { rows };
+}
+
+/** The opening the first transaction begun in its scope takes, or none. */
+function taken(): Opening | undefined {
+  const asked = opening.getStore();
+  if (asked === undefined || asked.taken) return undefined;
+  asked.taken = true;
+  return asked;
+}
+
+/**
+ * A pool connection that is checked before its first statement: with the
+ * start, when that is a transaction's. One that carries a tenant or a changed
+ * search_path was given a session-wide setting by an earlier caller, which is
+ * a bug or an attack: it is closed (so any other session settings go with
+ * it), the event is logged, and another connection is taken. New connections
+ * are checked on opening, so after at most `attempts` tries one is sound, or
+ * the pool is failing and the error says so.
+ */
+class CheckedConnection implements DatabaseConnection {
+  readonly #pool: pg.Pool;
+  readonly #logger: Logger;
+  readonly #attempts: number;
+  #client: pg.PoolClient | undefined;
+  #checked = false;
+  /** Closed rather than given back at release: a check failed on it, or its start did. */
+  #broken = false;
+  /** The organisation of the transaction open on it, to read back with the commit. */
+  #tenant: string | undefined;
+
+  constructor(pool: pg.Pool, logger: Logger, attempts: number, client: pg.PoolClient) {
+    this.#pool = pool;
+    this.#logger = logger;
+    this.#attempts = attempts;
+    this.#client = client;
+  }
+
+  async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
+    if (!this.#checked) await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)) }));
+    // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
+    return resultOf<R>(await this.#taken().query(query.sql, [...query.parameters]));
+  }
+
+  streamQuery<R>(): AsyncIterableIterator<QueryResult<R>> {
+    throw new Error('streaming is not used');
+  }
+
+  /** The start, with the connection's check and the opening's settings, in one round trip. */
+  async begin(settings: TransactionSettings, asked: Opening | undefined): Promise<void> {
+    const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : [startSettings(asked)])];
+    const set = await this.#sound(async (client) => {
+      // Several statements take the simple protocol, which answers each in turn.
+      // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
+      const answers = (await client.query(statements.join('; '))) as unknown as pg.QueryResult[];
+      // A connection closed for its state ends the transaction just begun on it.
+      return { problem: unusable(stateFrom(answers[1]?.rows[0] as StateRow)), value: answers[2]?.rows[0] as StateRow };
+    });
+    if (asked?.tenant === undefined) return;
+    // The read-back at the start (decision 41). It can't differ today (the setting has no check hook).
+    if (!sameTenant(set?.org_id, asked.tenant)) {
+      this.#broken = true;
+      throw new TenantContextError("the organisation setting didn't take");
+    }
+    this.#tenant = asked.tenant;
+  }
+
+  /** The commit, after the read-back before it when an organisation was set, in one round trip. */
+  async commit(): Promise<void> {
+    const tenant = this.#tenant;
+    this.#tenant = undefined;
+    if (tenant === undefined) {
+      await this.#taken().query('commit');
+      return;
+    }
+    try {
+      // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
+      await this.#taken().query(`${stillTenant(tenant)}; commit`);
+    } catch (error) {
+      // Changed and put back in between is not seen here; row security still walls each statement to the setting it ran under.
+      if (error instanceof Error && (error as { code?: unknown }).code === TENANT_CHANGED) {
+        throw new TenantContextError(
+          'the organisation setting changed inside the transaction, so nothing it wrote is kept',
+        );
       }
-      throw new TenantContextError(`no sound connection after ${String(attempts)} tries`);
-    },
-  };
+      throw error;
+    }
+  }
+
+  async rollback(): Promise<void> {
+    this.#tenant = undefined;
+    await this.#taken().query('rollback');
+  }
+
+  release(): void {
+    const client = this.#client;
+    this.#client = undefined;
+    client?.release(this.#broken ? true : undefined);
+  }
+
+  #taken(): pg.PoolClient {
+    if (this.#client === undefined) throw new TenantContextError('the connection was already given back');
+    return this.#client;
+  }
+
+  /**
+   * Runs `trip`, which checks the connection, until one is sound: one that
+   * isn't is closed, logged and replaced. A trip that fails closes it too.
+   */
+  async #sound<T>(
+    trip: (client: pg.PoolClient) => Promise<{ problem: string | undefined; value?: T }>,
+  ): Promise<T | undefined> {
+    for (let attempt = 1; attempt <= this.#attempts; attempt += 1) {
+      let answer: { problem: string | undefined; value?: T };
+      try {
+        answer = await trip(this.#taken());
+      } catch (error) {
+        this.#broken = true;
+        throw error;
+      }
+      if (answer.problem === undefined) {
+        this.#checked = true;
+        return answer.value;
+      }
+      this.#taken().release(true);
+      this.#client = undefined;
+      this.#logger.error('db.tenant.leftover_discarded', { attempt, problem: answer.problem });
+      if (attempt < this.#attempts) this.#client = await this.#pool.connect();
+    }
+    throw new TenantContextError(`no sound connection after ${String(this.#attempts)} tries`);
+  }
+}
+
+function checked(connection: DatabaseConnection): CheckedConnection {
+  if (!(connection instanceof CheckedConnection)) throw new TenantContextError('not a checked connection');
+  return connection;
+}
+
+/** Kysely's driver for the pool, each connection checked and each transaction opened and closed as above. */
+class CheckedDriver implements Driver {
+  readonly #pool: pg.Pool;
+  readonly #logger: Logger;
+  readonly #attempts: number;
+
+  constructor(pool: pg.Pool, logger: Logger, attempts: number) {
+    this.#pool = pool;
+    this.#logger = logger;
+    this.#attempts = attempts;
+  }
+
+  async init(): Promise<void> {
+    // The pool is made by the caller.
+  }
+
+  async acquireConnection(): Promise<DatabaseConnection> {
+    return new CheckedConnection(this.#pool, this.#logger, this.#attempts, await this.#pool.connect());
+  }
+
+  beginTransaction(connection: DatabaseConnection, settings: TransactionSettings): Promise<void> {
+    return checked(connection).begin(settings, taken());
+  }
+
+  commitTransaction(connection: DatabaseConnection): Promise<void> {
+    return checked(connection).commit();
+  }
+
+  rollbackTransaction(connection: DatabaseConnection): Promise<void> {
+    return checked(connection).rollback();
+  }
+
+  releaseConnection(connection: DatabaseConnection): Promise<void> {
+    checked(connection).release();
+    return Promise.resolve();
+  }
+
+  async destroy(): Promise<void> {
+    await this.#pool.end();
+  }
+}
+
+/**
+ * Postgres for Kysely, through the pool, with every connection checked before
+ * its first statement and every transaction opened and committed with the
+ * checks that guard it (4D2d P11). `attempts`: how many connections to try
+ * before giving up, every idle one and then a new one.
+ */
+export function tenantCheckedDialect(pool: pg.Pool, logger: Logger, attempts: number): PostgresDialect {
+  return new (class extends PostgresDialect {
+    override createDriver(): Driver {
+      return new CheckedDriver(pool, logger, attempts);
+    }
+  })({ pool });
 }

@@ -2,12 +2,12 @@
 // auth, with TLS in every deployed environment). Only this folder may import
 // the driver (ADR-004 §8), so every connection is made here, with the checks
 // below, and nothing else in the product can open one.
-import { Kysely, PostgresDialect, sql, type Transaction } from 'kysely';
+import { Kysely, sql, type Transaction } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
 import type { Logger } from '../observability/index.ts';
 import { PINNED_SEARCH_PATH } from './search-path.ts';
-import { refuseTenantPreset, tenantCheckedPool } from './tenant.ts';
+import { refuseTenantPreset, tenantCheckedDialect } from './tenant.ts';
 
 export interface DatabaseConnectionOptions {
   readonly host: string;
@@ -150,7 +150,7 @@ export function createDatabase<Schema = unknown>(options: DatabaseConnectionOpti
   pool.on('error', () => undefined);
   // Every idle connection could need replacing, and then one new one.
   const attempts = config.max + 1;
-  return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: tenantCheckedPool(pool, logger, attempts) }) });
+  return new Kysely<Schema>({ dialect: tenantCheckedDialect(pool, logger, attempts) });
 }
 
 /** Whether a connection's transactions are read-only, as Postgres itself says (`readOnly`): proof asked before anything is read. */
