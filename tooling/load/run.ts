@@ -6,7 +6,8 @@
  * 3. phase 1 of k6 (money-paths.k6.js)
  * 4. the API restarted, so its holdings check runs over phase 1's requests,
  *    and a new key for each agent (keys.load.test.ts), as Azure's second job makes its own
- * 5. phase 2 of k6, with the spike
+ * 5. phase 2 of k6, with the spike, then phases 3 and 4: the same traffic from
+ *    ten agents of one organisation, reported apart
  * 6. the database checked (verify.load.test.ts), the run's organisations
  *    made inert (cleanup.load.test.ts), as Azure's run leaves them on
  *    staging, and the API's log read (logs.ts)
@@ -29,10 +30,12 @@ import {
   DELAY_VARIABLE,
   LEAST_API_CPUS,
   type LoadOptions,
+  type LoadPhase,
   LOAD_PROJECT,
   MOST_API_CPUS,
   MOST_DELAY_MS,
   optionsOf,
+  orgsOfKind,
   OUT_DIR,
   POLICY_P95_MS,
   readSeeded,
@@ -132,7 +135,7 @@ const RIDERS =
  * folder to see where they went: calls, the server's total and mean time in
  * ms, then the statement, so a trip's cost can be set against its work (P10).
  */
-function measured(n: 1 | 2): { result: PhaseResult; statements: PhaseStatements } {
+function measured(n: LoadPhase): { result: PhaseResult; statements: PhaseStatements } {
   asAdmin('select pg_stat_statements_reset()');
   const result = phase(n);
   // A counter that ran out of room dropped entries and their counts: never a number short without saying so.
@@ -147,7 +150,7 @@ function measured(n: 1 | 2): { result: PhaseResult; statements: PhaseStatements 
   return { result, statements: { phase: n, statements } };
 }
 
-function phase(n: 1 | 2): PhaseResult {
+function phase(n: LoadPhase): PhaseResult {
   console.log(`\n== Phase ${String(n)} (k6, about two minutes)`);
   const args = [...COMPOSE, '--profile', 'load', 'run', '--rm', '--no-deps', '-e', `PHASE=${String(n)}`, 'k6'];
   // k6 answers 99 when a threshold failed: the report says which, so the run goes on.
@@ -203,7 +206,9 @@ function main({ keep, apiCpus, delayMs }: LoadOptions): number {
     must('The API back', 'docker', [...COMPOSE, 'up', '--wait', '--no-deps', 'api']);
     must('New keys', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'keys'], login);
     const second = measured(2);
-    const created = first.result.created + second.result.created;
+    const crowds = [measured(3), measured(4)];
+    const all = [first, second, ...crowds];
+    const created = all.reduce((sum, { result }) => sum + result.created, 0);
     console.log('\n== The database after the run');
     const verified = run(process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'verify'], {
       env: { ...login, AGENTX_LOAD_CREATED: String(created) },
@@ -214,11 +219,14 @@ function main({ keep, apiCpus, delayMs }: LoadOptions): number {
     });
     const log = run('docker', [...COMPOSE, 'logs', '--no-log-prefix', '--no-color', 'api'], { shown: false });
     writeFileSync(path.join(OUT_DIR, 'api.log'), log.stdout);
-    const spikeOrgs = new Set(readSeeded().agents.flatMap(({ kind, orgId }) => (kind === 'capped' ? [orgId] : [])));
-    const logs = summariseLogs(log.stdout, spikeOrgs);
+    const { agents } = readSeeded();
+    const logs = summariseLogs(log.stdout, {
+      spike: orgsOfKind(agents, 'capped'),
+      crowdOwn: orgsOfKind(agents, 'crowd-own'),
+      crowdShared: orgsOfKind(agents, 'crowd-shared'),
+    });
     const failures = [
-      ...phaseFailures(first.result),
-      ...phaseFailures(second.result),
+      ...all.flatMap(({ result }) => phaseFailures(result)),
       ...(verified.code === 0 ? [] : ['The database checks failed: their output is above.']),
       ...(cleaned.code === 0 ? [] : ["The clean-up didn't leave every organisation inert: its output is above."]),
       ...logFailures(logs, created, POLICY_P95_MS),
@@ -229,9 +237,9 @@ function main({ keep, apiCpus, delayMs }: LoadOptions): number {
       commit,
       site: 'local',
       apiCpus,
-      phases: [first.result, second.result],
+      phases: all.map(({ result }) => result),
       delayMs,
-      statements: [first.statements, second.statements],
+      statements: all.map(({ statements }) => statements),
       logs,
       databaseChecksPassed: verified.code === 0,
       failures,

@@ -10,10 +10,10 @@ import { testLogger } from '../../packages/testing/src/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { cleanUpFailures, cleanUpRun } from './cleanup.ts';
-import { APP_KEYS_DIR, loadConnection, readSeeded } from './plan.ts';
+import { APP_KEYS_DIR, loadConnection, orgsOf, readSeeded } from './plan.ts';
 
 const database = createDatabase<MandateWorldTables>(loadConnection(), testLogger());
-const orgIds = readSeeded().agents.map(({ orgId }) => orgId);
+const orgIds = orgsOf(readSeeded().agents);
 const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} });
 
 afterAll(() => database.destroy());
@@ -31,7 +31,7 @@ const chainLengths = () =>
     ),
   );
 
-// ~6,800 requests voided, four organisations at once: under 3 minutes on the laptop; room for a slower database.
+// ~13,500 requests voided, four organisations at once: ~10 minutes on the laptop; room for a slower database.
 it(
   'leaves every organisation of the run frozen, holding nothing, with no live key or member',
   { timeout: 1_800_000 },

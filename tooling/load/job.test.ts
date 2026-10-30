@@ -19,7 +19,10 @@ const AGENT: PrintedAgent = {
 
 describe("the run's agents, as load.ts hands them to the second job", () => {
   it('takes them as load.seeded_agent printed them', () => {
-    const agents = [AGENT, { ...AGENT, kind: 'capped', orgId: '01a17c20-0000-7000-8000-000000000009' }];
+    const agents = [
+      AGENT,
+      { ...AGENT, kind: 'capped', agentId: 'capped', orgId: '01a17c20-0000-7000-8000-000000000009' },
+    ];
     expect(agentsOf(JSON.stringify(agents))).toEqual(agents);
   });
 
@@ -34,9 +37,28 @@ describe("the run's agents, as load.ts hands them to the second job", () => {
     ['no suppliers', JSON.stringify([{ ...AGENT, supplierIds: [] }])],
     ['a supplier not named', JSON.stringify([{ ...AGENT, supplierIds: [7] }])],
     ['one good and one not', JSON.stringify([AGENT, null])],
-    ['the same organisation twice', JSON.stringify([AGENT, { ...AGENT, kind: 'capped' }])],
+    ['the same organisation twice', JSON.stringify([AGENT, { ...AGENT, agentId: 'another', kind: 'capped' }])],
+    [
+      'a crowd in an ample agent’s organisation',
+      JSON.stringify([AGENT, { ...AGENT, agentId: 'b', kind: 'crowd-own' }]),
+    ],
+    [
+      'the same agent twice',
+      JSON.stringify([
+        { ...AGENT, kind: 'crowd-own' },
+        { ...AGENT, kind: 'crowd-own' },
+      ]),
+    ],
   ])('refuses %s', (_case, text) => {
     expect(() => agentsOf(text)).toThrow(/AGENTX_LOAD_SEEDED/);
+  });
+
+  it('lets a crowd’s agents share their organisation', () => {
+    const crowd = [
+      { ...AGENT, kind: 'crowd-shared', agentId: 'a' },
+      { ...AGENT, kind: 'crowd-shared', agentId: 'b' },
+    ];
+    expect(agentsOf(JSON.stringify(crowd))).toEqual(crowd);
   });
 });
 

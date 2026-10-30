@@ -73,13 +73,64 @@ describe('the report', () => {
     const report = renderReport({
       ...clean,
       phases: [phase(1), phase(2, { spikeMs: { p50: 410.25, p95: 757.5, max: 812 } })],
-      logs: summariseLogs(spikeDecided, new Set(['o'])),
+      logs: summariseLogs(spikeDecided, { spike: new Set(['o']) }),
     });
     expect(report).toContain(
       "Phase 2's spike, 50 requests at once from the capped agent, queued on its month's lock by design: " +
         'p50 410.3 ms, p95 757.5 ms, max 812.0 ms.',
     );
     expect(report).toContain('| The spike | 1 | 640 | 640 | 640 | 640 |');
+  });
+
+  it('gives the crowds their own section, apart from the phases held to the targets', () => {
+    expect(renderReport(clean)).not.toContain('Many agents in one organisation');
+    const decided = (orgId: string, durationMs: number) =>
+      JSON.stringify({ level: 'info', event: 'spend_request.decided', durationMs, orgId, decision: 'ALLOW' });
+    const report = renderReport({
+      ...clean,
+      phases: [
+        phase(1),
+        phase(2),
+        phase(3, { requests: 3480, asksMs: { p50: 90, p95: 137.5, p99: 170, max: 300 } }),
+        phase(4, { requests: 3490, dropped: 2, serverErrors: 1, rateLimited: 3, checksFailed: 4 }),
+      ],
+      logs: summariseLogs([decided('steady', 31), decided('own', 41), decided('shared', 51)].join('\n'), {
+        crowdOwn: new Set(['own']),
+        crowdShared: new Set(['shared']),
+      }),
+    });
+    expect(report).toContain(
+      '## Many agents in one organisation (apart from the numbers above; the same 150 ms decision target, not yet failing a run)',
+    );
+    expect(report).toContain('Decision target met in each: p95 under 150 ms.');
+    expect(report).not.toContain('**But many agents');
+    expect(report).toContain(
+      '| Each agent with its own three suppliers | 3480 | 0 | 137.5 | 1 | 41 | 41 | 41 | 41 | 0 | 0 | 0 |',
+    );
+    expect(report).toContain(
+      '| All agents sharing three suppliers | 3490 | 2 | 88.5 | 1 | 51 | 51 | 51 | 51 | 1 | 3 | 4 |',
+    );
+    // The main table stays the steady traffic's, so its numbers compare with earlier runs.
+    expect(report).not.toContain('| 3 | 3480 |');
+    expect(report).toContain('| Steady | 1 | 31 | 31 | 31 | 31 |');
+    expect(report).toContain('Allowed at once: 1 of the 1 steady decisions;');
+    expect(report).toContain("Hand-offs are paused, so what follows an allowed request isn't timed.");
+  });
+
+  it('names a crowd that missed the decision target, in the crowds’ own section', () => {
+    const decided = JSON.stringify({ level: 'info', event: 'spend_request.decided', durationMs: 181, orgId: 'shared' });
+    const report = renderReport({
+      ...clean,
+      phases: [phase(1), phase(2), phase(3), phase(4)],
+      logs: summariseLogs(decided, { crowdShared: new Set(['shared']) }),
+    });
+    expect(report).toContain(
+      "**Decision target missed (150 ms).** All agents sharing three suppliers: a decision's p95 was 181 ms.",
+    );
+    expect(report).not.toContain('Decision target met');
+    expect(report).toContain(
+      '**Passed.**\n\n**But many agents in one organisation missed the 150 ms decision target: see below.**',
+    );
   });
 
   it('says when the API was given more than staging’s half a CPU', () => {
