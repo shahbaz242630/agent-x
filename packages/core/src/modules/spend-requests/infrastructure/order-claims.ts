@@ -14,7 +14,7 @@
 // reference in lower case, the app's (`bankKeyOf`). An open claim with the
 // same bank key and another canonical form, on the supplier or its payee key,
 // makes the request a possible duplicate, for a person to approve
-// (`claimsOn`); the holdings check compares each claim's with its request's.
+// (`claimLooks`); the holdings check compares each claim's with its request's.
 //
 // The caller (D4) holds the supplier FOR NO KEY UPDATE first (ADR-006 §6: 6),
 // which serialises the check and the claim for one supplier, and its payee
@@ -76,17 +76,9 @@ const openClaimsOn = (tx: ClaimsTransaction, order: OrderWeighed) =>
  * `possible`, one in another form the rail would carry alike (decision 11a:
  * a person approves it). An order whose bank reference would be its
  * request's own ID is never a possible duplicate. An approval's own claim is
- * left out (`except`): a lookalike is another form, so never its own.
+ * left out (`except`): a lookalike is another form, so never its own. Not run,
+ * for a statement that reads more beside them (4D2d P12).
  */
-export async function claimsOn(
-  tx: ClaimsTransaction,
-  order: OrderWeighed,
-): Promise<{ readonly duplicate: boolean; readonly possible: boolean }> {
-  const { duplicate, possible } = claimLooks(tx, order);
-  return tx.selectNoFrom([duplicate.as('duplicate'), possible.as('possible')]).executeTakeFirstOrThrow();
-}
-
-/** claimsOn's two looks, not run, for a statement that reads more beside them (4D2d P12). */
 export function claimLooks(tx: ClaimsTransaction, order: OrderWeighed) {
   const bankKey = bankKeyOf(order.reference);
   const lookalikes = (bank: string) =>
@@ -103,7 +95,7 @@ export function claimLooks(tx: ClaimsTransaction, order: OrderWeighed) {
   };
 }
 
-/** What claimsOnEach answers of one order: claimsOn's two looks, and its canonical form and bank key. */
+/** What claimsOnEach answers of one order: claimLooks' two looks, and its canonical form and bank key. */
 export interface OrderClaimsSeen {
   readonly duplicate: boolean;
   readonly possible: boolean;
@@ -114,7 +106,7 @@ export interface OrderClaimsSeen {
 }
 
 /**
- * claimsOn for several orders at once, in one statement, each with its own
+ * claimLooks for several orders at once, in one statement, each with its own
  * request left out, and the claims of `alsoExcept` left out of both looks (a
  * carry to a new mandate version weighs its pending requests again apart from
  * one another, Phase 3 E4c): the same two looks, clause for clause, made for

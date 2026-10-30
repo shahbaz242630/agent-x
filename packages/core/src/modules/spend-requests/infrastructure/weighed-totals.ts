@@ -18,13 +18,13 @@ import { claimLooks, type OrderWeighed } from './order-claims.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 /** Each part read only where it is weighed: 0, or no claim, for one not asked. */
-export interface TotalsToWeigh {
+interface TotalsToWeigh {
   readonly month: MonthToSum | null;
   readonly split: SplitToSum | null;
   readonly order: OrderWeighed | null;
 }
 
-export interface TotalsWeighed {
+interface TotalsWeighed {
   readonly spent: bigint;
   readonly split: bigint;
   readonly claims: { readonly duplicate: boolean; readonly possible: boolean };

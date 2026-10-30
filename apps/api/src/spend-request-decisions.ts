@@ -18,9 +18,10 @@
 // - 6: the supplier FOR NO KEY UPDATE, serialising the duplicate check;
 // - 7: the agent's month FOR NO KEY UPDATE, serialising the monthly check
 //   (decision 4: the agent's, under all its mandates);
-// - then the checks, each a statement of its own after the locks (with the
-//   mandate's split check on, the payee's reservations in its rolling
-//   window, across agents: D5, serialised by the supplier's lock); the
+// - then the checks, in one statement of their own after the locks, never the
+//   locking one (4D2d P12; with the mandate's split check on, the payee's
+//   reservations in its rolling window, across agents: D5, serialised by the
+//   supplier's lock); the
 //   request (8); its reservation and claim (11); its two signed events (12).
 //
 // Whatever the organisation can't give (no mandate, another organisation's
@@ -307,8 +308,8 @@ export async function organizationWeighed(
 
 /**
  * Levels 5 and 6: the source asked for, and the supplier, with the order to
- * look for among the claims once the locks are held. A decision holds the supplier FOR NO KEY UPDATE
- * (`change`), serialising its orders; the simulator FOR SHARE, as all its
+ * look for among the claims once the locks are held. A decision holds the
+ * supplier FOR NO KEY UPDATE (`change`), serialising its orders; the simulator FOR SHARE, as all its
  * reads (C4's review): simulations never wait on each other, and a decision
  * waits at most the moment one takes, each person's simulations rate-limited.
  */
@@ -324,14 +325,13 @@ async function payingIn(
   const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, supplierLock);
   believed(supplier);
   if (supplier.outcome !== 'found') return { source, supplier: null, order: null };
+  const found = supplier.supplier;
   // The simulator may weigh a request with no order named: no duplicate is then looked for.
-  if (asked.orderReference === null) return { source, supplier: supplier.supplier, order: null };
-  const order = {
-    supplierId: supplier.supplier.id,
-    payeeKey: supplier.supplier.payeeKey,
-    reference: asked.orderReference,
-  };
-  return { source, supplier: supplier.supplier, order };
+  const order =
+    asked.orderReference === null
+      ? null
+      : { supplierId: found.id, payeeKey: found.payeeKey, reference: asked.orderReference };
+  return { source, supplier: found, order };
 }
 
 /** The policies in force for the agent's mandate, as the engine weighs them. */

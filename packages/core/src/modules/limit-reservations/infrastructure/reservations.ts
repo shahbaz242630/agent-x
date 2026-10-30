@@ -7,11 +7,12 @@
 //   first decision, then kept for good: D2's review; a signed record, 0054,
 //   agent-zones.ts), its month at `at` in that
 //   zone, and that month's period row locked FOR NO KEY UPDATE (level 7);
-// - `monthSpent`: the agent's month, every reservation but a released one, in
-//   a statement of its own after the lock, so READ COMMITTED's fresh snapshot
-//   sees every reservation the transaction it waited for committed (§7.2);
-// - `splitHeld`: with the mandate's split check on, the payee's reservations
-//   in its rolling window, across agents, as a statement of its own too (D5);
+// - `monthSpentRead`: the agent's month, every reservation but a released one,
+//   read in a statement after the lock, never the locking one, so READ
+//   COMMITTED's fresh snapshot sees every reservation the transaction it waited
+//   for committed (§7.2);
+// - `splitHeldRead`: with the mandate's split check on, the payee's reservations
+//   in its rolling window, across agents, likewise (D5);
 // - `reserve`: the request's reservation, HELD, while the request is still
 //   VALIDATING (level 11; 0039's `held_for_its_request`), at the very instant
 //   the month was worked out from.
@@ -101,19 +102,7 @@ export async function agentMonth(
   return periodOf(at, kept.outcome === 'kept' ? kept.zone : zoneIfNew).month;
 }
 
-/**
- * The agent's month's total in minor units of `currency`: every reservation
- * but a released one, under any of its mandates. One currency's alone, as a
- * cap is in one (G4: another's minor units would be counted as its own).
- * `except` leaves one request's out: an approval weighs its request against
- * the others, as its own amount is added by the engine (Phase 3 B4b).
- */
-export async function monthSpent(tx: ReservationsTransaction, month: MonthToSum): Promise<bigint> {
-  const { spent } = await monthSpentRead(tx, month).executeTakeFirstOrThrow();
-  return BigInt(spent);
-}
-
-/** The agent's month to total (monthSpent). */
+/** The agent's month to total (monthSpentRead). */
 export interface MonthToSum {
   readonly agentId: string;
   readonly month: string;
@@ -121,7 +110,15 @@ export interface MonthToSum {
   readonly except?: string | undefined;
 }
 
-/** monthSpent's read, not run, for a statement that reads more beside it (4D2d P12): one row, its total as text. */
+/**
+ * The agent's month's total in minor units of `currency`: every reservation
+ * but a released one, under any of its mandates. One currency's alone, as a
+ * cap is in one (G4: another's minor units would be counted as its own).
+ * `except` leaves one request's out: an approval weighs its request against
+ * the others, as its own amount is added by the engine (Phase 3 B4b). Not
+ * run, for a statement that reads more beside it (4D2d P12): one row, its total
+ * as text.
+ */
 export const monthSpentRead = (tx: ReservationsTransaction, { agentId, month, currency, except }: MonthToSum) =>
   tx
     .selectFrom('limit_reservations.reservations')
@@ -133,7 +130,7 @@ export const monthSpentRead = (tx: ReservationsTransaction, { agentId, month, cu
     .where((where) => (except === undefined ? where.lit(true) : where('request_id', '<>', except)));
 
 /**
- * monthSpent for several of the agent's months at once, in one statement,
+ * monthSpentRead's total for several of the agent's months at once, in one statement,
  * leaving out every request in `except`: a carry to a new mandate version
  * weighs its requests against all else first (Phase 3 E4c). At least one
  * month and one request; each month asked is answered, 0 where nothing is

@@ -21,7 +21,6 @@ export {
   lockAgentMonth,
   lockAgentPeriod,
   lockReservationsOf,
-  monthSpent,
   monthSpentRead,
   type MonthToSum,
   monthsSpent,

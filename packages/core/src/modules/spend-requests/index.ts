@@ -90,7 +90,6 @@ export {
 } from './domain/voids.ts';
 export {
   claimOrder,
-  claimsOn,
   claimsOnEach,
   lockClaimsOf,
   type OrderClaimsSeen,
