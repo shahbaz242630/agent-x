@@ -1198,6 +1198,17 @@ describe('the split check (D5, SEC-LIM-04)', () => {
     const second = asking(w, { amount: AED(600_000n), orderReference: 'INV-2' });
 
     expect(decidedOf(await ask(acting, second)).decision).toBe('ALLOW');
+    // Nothing weighed, so nothing sealed: the first order's AED is on this supplier, and unread.
+    const sealed = await database
+      .as('admin')
+      .query<{ details: string }>(
+        "select details from audit.events where org_id = $1 and action = 'spend_request.decided' order by seq",
+        [w.org],
+      );
+    expect(sealed.map(({ details }) => (JSON.parse(details) as Record<string, unknown>).splitOpen)).toEqual([
+      '0 AED',
+      '0 AED',
+    ]);
     // The same order again, for AED 100: within every limit, and still the duplicate.
     expect(decidedOf(await ask(acting, { ...second, amount: AED(10_000n) }))).toMatchObject({
       decision: 'DENY',

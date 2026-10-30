@@ -26,6 +26,7 @@
 // request finds it no longer waiting, and one waiting on a mandate's revoke
 // finds it changed (revoke-during-approval).
 import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
+import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import {
@@ -731,6 +732,17 @@ describe('approving while a brake holds the request or its mandate (forced)', ()
       expect(await statusOf(w, waiting.id)).toBe(kind === 'cancel' ? 'CANCELLED' : 'EXPIRED');
     },
   );
+
+  it('holds the supplier for change, so it waits for a read holding it for share (ADR-006 §6)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const { racing } = await whileHeld(w, waiting.id, async (tx, states, gate) => {
+      await states.verifiedState(tx, SUPPLIERS, { orgId: w.org, id: w.suppliers[0] ?? '' }, 'share');
+      await gate();
+    });
+
+    expect(racing).toMatchObject({ outcome: 'approved' });
+  });
 
   it('waits for a revoke holding its mandate, then finds it changed (revoke-during-approval)', async () => {
     const { w, acting } = await ready();
