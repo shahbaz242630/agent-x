@@ -5,7 +5,7 @@
 // They are derived from a single literal rather than written twice. A second
 // hand-kept copy would be worse than no check at all: strengthening the pin
 // while forgetting the other copy would make every connection fail the check,
-// and `tenantCheckedPool` would then refuse every query — an outage that no
+// and `tenantCheckedDialect`'s driver would then refuse every query — an outage that no
 // unit test would show, since those report the value rather than read it from
 // a server.
 //

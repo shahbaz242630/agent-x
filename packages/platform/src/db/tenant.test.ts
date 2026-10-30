@@ -33,7 +33,7 @@ interface Stand {
 /**
  * A stand-in connection that reports `tenant` and `searchPath` to its check,
  * reads back `setBack` (by default what it was given) at a transaction's
- * start, and refuses the commit's read-back when `changed`. The search path
+ * start, and refuses the commit's read-back with `commitRefusal`. The search path
  * defaults to the pinned one, so each test names only the fault it is about.
  */
 function connection(
@@ -41,8 +41,8 @@ function connection(
   {
     searchPath = PINNED,
     setBack,
-    changed = false,
-  }: { searchPath?: string | null; setBack?: string; changed?: boolean } = {},
+    commitRefusal,
+  }: { searchPath?: string | null; setBack?: string; commitRefusal?: Error } = {},
 ): Stand {
   const sent: string[] = [];
   const released: unknown[] = [];
@@ -52,8 +52,8 @@ function connection(
     if (tenant instanceof Error) return Promise.reject(tenant);
     if (text === CHECK) return Promise.resolve({ command: 'SELECT', rows: [state] });
     if (text.startsWith('select 1 / ')) {
-      return changed
-        ? Promise.reject(Object.assign(new Error('division by zero'), { code: '22012' }))
+      return commitRefusal
+        ? Promise.reject(commitRefusal)
         : Promise.resolve([
             { command: 'SELECT', rows: [{ unchanged: 1 }] },
             { command: 'COMMIT', rows: [] },
@@ -254,7 +254,9 @@ describe('4D2d P11: a transaction opens and commits with its checks, a round tri
   });
 
   it("refuses the commit when the commit's read-back says the setting changed, and rolls back", async () => {
-    const changed = connection(null, { changed: true });
+    const changed = connection(null, {
+      commitRefusal: Object.assign(new Error('division by zero'), { code: '22012' }),
+    });
     await expect(withTenant(databaseOf(3, logger(), changed), ORG, (tx) => one(tx))).rejects.toThrow(
       new TenantContextError('the organisation setting changed inside the transaction, so nothing it wrote is kept'),
     );
@@ -262,11 +264,8 @@ describe('4D2d P11: a transaction opens and commits with its checks, a round tri
   });
 
   it('passes on any other failure of the commit', async () => {
-    const failing = connection(null);
     const failure = Object.assign(new Error('could not serialize'), { code: '40001' });
-    const query = failing.client.query.bind(failing.client) as (text: string) => Promise<unknown>;
-    (failing.client as unknown as { query: (text: string) => Promise<unknown> }).query = (text) =>
-      text.startsWith('select 1 / ') ? Promise.reject(failure) : query(text);
+    const failing = connection(null, { commitRefusal: failure });
 
     await expect(withTenant(databaseOf(3, logger(), failing), ORG, (tx) => one(tx))).rejects.toBe(failure);
   });

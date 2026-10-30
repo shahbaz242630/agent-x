@@ -83,7 +83,7 @@ const tenantOf = new WeakMap<object, string>();
  * (another connection's) opens as a plain one.
  */
 interface Opening {
-  /** The organisation, in lower case; none for a plain limited transaction. */
+  /** The organisation, in lower case; none for a plain limited transaction, which is `limited`: an opening sets one or both. */
   readonly tenant: string | undefined;
   readonly limited: boolean;
   taken: boolean;
@@ -117,26 +117,19 @@ export async function withTenant<Schema, Result>(
   const tenant = orgId.toLowerCase();
   const asked: Opening = { tenant, limited, taken: false };
   try {
-    // READ COMMITTED is Postgres's default, but the default can be changed per
-    // server, database or role; the locking rules in ADR-006 rely on it.
     return await insideTenant.run(scope, () =>
-      opening.run(asked, () =>
-        db
-          .transaction()
-          .setIsolationLevel('read committed')
-          .execute(async (tx) => {
-            // The driver set the organisation and read it back with the start (decision 41), and reads
-            // it back again with the commit. Only createDatabase's driver does: with any other, nothing
-            // would be walled to the organisation, so nothing runs.
-            if (!asked.taken) throw new TenantContextError("this database can't set an organisation");
-            tenantOf.set(tx, tenant);
-            try {
-              return await work(tx);
-            } finally {
-              tenantOf.delete(tx);
-            }
-          }),
-      ),
+      openedWith(db, asked, async (tx) => {
+        // The driver set the organisation and read it back with the start (decision 41), and reads
+        // it back again with the commit. Only createDatabase's driver does: with any other, nothing
+        // would be walled to the organisation, so nothing runs.
+        if (!asked.taken) throw new TenantContextError("this database can't set an organisation");
+        tenantOf.set(tx, tenant);
+        try {
+          return await work(tx);
+        } finally {
+          tenantOf.delete(tx);
+        }
+      }),
     );
   } finally {
     scope.open = false;
@@ -153,16 +146,24 @@ export function limitedTransaction<Schema, Result>(
   work: (tx: Transaction<Schema>) => Promise<Result>,
 ): Promise<Result> {
   const asked: Opening = { tenant: undefined, limited: true, taken: false };
-  return opening.run(asked, () =>
-    db
-      .transaction()
-      .setIsolationLevel('read committed')
-      .execute(async (tx) => {
-        // Another driver: the limit in a round trip of its own.
-        if (!asked.taken) await limitStatements(tx);
-        return work(tx);
-      }),
-  );
+  return openedWith(db, asked, async (tx) => {
+    // Another driver: the limit in a round trip of its own.
+    if (!asked.taken) await limitStatements(tx);
+    return work(tx);
+  });
+}
+
+/**
+ * One READ COMMITTED transaction, opened with `asked`. READ COMMITTED is
+ * Postgres's default, but the default can be changed per server, database or
+ * role; the locking rules in ADR-006 rely on it.
+ */
+function openedWith<Schema, Result>(
+  db: Kysely<Schema>,
+  asked: Opening,
+  work: (tx: Transaction<Schema>) => Promise<Result>,
+): Promise<Result> {
+  return opening.run(asked, () => db.transaction().setIsolationLevel('read committed').execute(work));
 }
 
 /**
@@ -205,7 +206,7 @@ const STATEMENT_TIMEOUT = `${String(STATEMENT_SECONDS)}s`;
  * Limits every later statement of the transaction to STATEMENT_SECONDS, a wait
  * for a lock included, until the transaction ends: what a request's work sets
  * first, so the app layer needs no SQL of its own. withTenant's `limited`
- * sets the same with the organisation.
+ * sets the same with the organisation, and limitedTransaction with the start.
  */
 export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<void> {
   await sql`select pg_catalog.set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true)`.execute(tx);
@@ -261,10 +262,9 @@ const CONNECTION_STATE =
 /** A state row as the database gave it. */
 type StateRow = { org_id?: string | null; search_path?: string | null } | undefined;
 
-const stateFrom = (row: StateRow): ConnectionState => ({
-  tenant: row?.org_id ?? '',
-  searchPath: row?.search_path ?? '',
-});
+function stateFrom(row: StateRow): ConnectionState {
+  return { tenant: row?.org_id ?? '', searchPath: row?.search_path ?? '' };
+}
 
 async function stateOf(client: pg.ClientBase): Promise<ConnectionState> {
   const { rows } = await client.query<{ org_id: string | null; search_path: string | null }>(CONNECTION_STATE);
@@ -330,15 +330,15 @@ function stillTenant(tenant: string): string {
   return `select 1 / (case when pg_catalog.lower(pg_catalog.current_setting('app.org_id', true)) is distinct from '${written(tenant)}' then 0 else 1 end) as unchanged`;
 }
 
-/** What the start sets with it, in a statement of its own: the organisation, the statements' limit, both, or nothing. */
-function settingsOf({ tenant, limited }: Opening): string[] {
+/** What the start sets with it, in a statement of its own: the organisation, the statements' limit, or both. */
+function startSettings({ tenant, limited }: Opening): string {
   const settings = [
     ...(tenant === undefined ? [] : [`pg_catalog.set_config('app.org_id', '${written(tenant)}', true) as org_id`]),
     ...(limited
       ? [`pg_catalog.set_config('statement_timeout', '${STATEMENT_TIMEOUT}', true) as statement_timeout`]
       : []),
   ];
-  return settings.length === 0 ? [] : [`select ${settings.join(', ')}`];
+  return `select ${settings.join(', ')}`;
 }
 
 /**
@@ -406,6 +406,7 @@ class CheckedConnection implements DatabaseConnection {
 
   async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
     if (!this.#checked) await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)) }));
+    // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
     return resultOf<R>(await this.#taken().query(query.sql, [...query.parameters]));
   }
 
@@ -415,9 +416,10 @@ class CheckedConnection implements DatabaseConnection {
 
   /** The start, with the connection's check and the opening's settings, in one round trip. */
   async begin(settings: TransactionSettings, asked: Opening | undefined): Promise<void> {
-    const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : settingsOf(asked))];
+    const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : [startSettings(asked)])];
     const set = await this.#sound(async (client) => {
       // Several statements take the simple protocol, which answers each in turn.
+      // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
       const answers = (await client.query(statements.join('; '))) as unknown as pg.QueryResult[];
       // A connection closed for its state ends the transaction just begun on it.
       return { problem: unusable(stateFrom(answers[1]?.rows[0] as StateRow)), value: answers[2]?.rows[0] as StateRow };
@@ -440,6 +442,7 @@ class CheckedConnection implements DatabaseConnection {
       return;
     }
     try {
+      // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
       await this.#taken().query(`${stillTenant(tenant)}; commit`);
     } catch (error) {
       // Changed and put back in between is not seen here; row security still walls each statement to the setting it ran under.
@@ -496,10 +499,10 @@ class CheckedConnection implements DatabaseConnection {
   }
 }
 
-const checked = (connection: DatabaseConnection): CheckedConnection => {
+function checked(connection: DatabaseConnection): CheckedConnection {
   if (!(connection instanceof CheckedConnection)) throw new TenantContextError('not a checked connection');
   return connection;
-};
+}
 
 /** Kysely's driver for the pool, each connection checked and each transaction opened and closed as above. */
 class CheckedDriver implements Driver {
@@ -533,8 +536,9 @@ class CheckedDriver implements Driver {
     return checked(connection).rollback();
   }
 
-  async releaseConnection(connection: DatabaseConnection): Promise<void> {
+  releaseConnection(connection: DatabaseConnection): Promise<void> {
     checked(connection).release();
+    return Promise.resolve();
   }
 
   async destroy(): Promise<void> {
