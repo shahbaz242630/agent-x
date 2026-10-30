@@ -102,6 +102,8 @@ interface Script {
   readonly states?: readonly string[];
   readonly startTime?: string;
   readonly endTime?: string;
+  /** The end times `execution show` gives, one per reading, the last one repeated; `endTime` when not given. */
+  readonly endTimes?: readonly string[];
   /** The workspace's ID, as Resource Manager gives it. */
   readonly workspace?: unknown;
   /** The log query's rows, one list per reading, the last one repeated; or a whole answer of another shape. */
@@ -161,13 +163,15 @@ class ScriptedAz implements Az {
       case 'containerapp job execution show': {
         const states = script.states ?? ['Succeeded'];
         const state = states[Math.min(this.#readings, states.length - 1)];
+        const endTimes = script.endTimes ?? [script.endTime ?? '2026-09-17T05:47:21+00:00'];
+        const endTime = endTimes[Math.min(this.#readings, endTimes.length - 1)];
         this.#readings += 1;
         return json({
           name: args[args.indexOf('--job-execution-name') + 1],
           properties: {
             status: state,
             startTime: script.startTime ?? '2026-09-17T05:46:43+00:00',
-            endTime: script.endTime ?? '2026-09-17T05:47:21+00:00',
+            endTime,
           },
         });
       }
@@ -468,12 +472,25 @@ describe('run', () => {
     expect(done.az.sequence).not.toContain('rest --method get');
   });
 
-  it('says the times as Azure gave them when they are not times, and then looks for no log', async () => {
+  it('reads an ended run again until Azure has filled in its end, then reads its log (D2c run day 3)', async () => {
+    const done = await run(['run', 'db-setup'], {
+      states: ['Running', 'Succeeded'],
+      endTimes: ['', '', '', '2026-09-17T05:47:21+00:00'],
+    });
+    expect(done.status).toBe(0);
+    expect(done.said).toContain(
+      'job-agentx-stg-db-setup-o2jp673 ended Succeeded: started 05:46:43 UTC, ended 05:47:21 UTC (38 s).',
+    );
+    expect(stateLines(done.said)).toEqual(['  05:46:30 UTC  Running', '  05:46:45 UTC  Succeeded']);
+  });
+
+  it('says the times as Azure gave them when they are not times, after two minutes of asking, and then looks for no log', async () => {
     for (const [startTime, endTime] of [
       ['soon', ''],
       ['2026-09-17T05:46:43+00:00', 'later'],
     ] as const) {
       const done = await run(['run', 'db-setup'], { startTime, endTime });
+      expect(done.slept.filter((ms) => ms === 15_000)).toHaveLength(8);
       expect(done.said.at(-1)).toMatch(/^job-agentx-stg-db-setup-o2jp673 ended Succeeded: started .*, ended .*\.$/);
       expect(done.said.at(-1)).not.toMatch(/ s\)\.$/);
       expect(done.error).toMatchObject({

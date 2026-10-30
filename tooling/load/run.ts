@@ -120,8 +120,9 @@ const APP_STATEMENTS =
 
 /**
  * A phase with the statement counter reset before it and read after it: how
- * many statements the app ran, and its 40 most frequent kept in the run's
- * folder to see where they went.
+ * many statements the app ran, and its 80 most frequent kept in the run's
+ * folder to see where they went: calls, the server's total and mean time in
+ * ms, then the statement, so a trip's cost can be set against its work (P10).
  */
 function measured(n: 1 | 2): { result: PhaseResult; statements: PhaseStatements } {
   asAdmin('select pg_stat_statements_reset()');
@@ -132,7 +133,7 @@ function measured(n: 1 | 2): { result: PhaseResult; statements: PhaseStatements 
   }
   const statements = Number(asAdmin(`select coalesce(pg_catalog.sum(s.calls), 0) ${APP_STATEMENTS}`));
   const top = asAdmin(
-    `select s.calls, pg_catalog.left(pg_catalog.regexp_replace(s.query, '\\s+', ' ', 'g'), 200) ${APP_STATEMENTS} order by s.calls desc limit 40`,
+    `select s.calls, pg_catalog.round(s.total_exec_time::numeric, 1), pg_catalog.round(s.mean_exec_time::numeric, 3), pg_catalog.left(pg_catalog.regexp_replace(s.query, '\\s+', ' ', 'g'), 300) ${APP_STATEMENTS} order by s.calls desc limit 80`,
   );
   writeFileSync(path.join(OUT_DIR, `statements-phase-${String(n)}.txt`), `${top}\n`);
   return { result, statements: { phase: n, statements } };
