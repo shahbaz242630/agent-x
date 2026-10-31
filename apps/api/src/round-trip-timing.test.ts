@@ -3,12 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createRoundTripTiming } from './round-trip-timing.ts';
 
-function timing(timed: () => Promise<readonly number[]>, deadlineMs?: number) {
+function timing(timed: () => Promise<readonly number[]>, deadlineMs = 100) {
   const capture = new LogCapture();
   const job = createRoundTripTiming({
     timed,
     logger: testLogger(capture),
-    ...(deadlineMs === undefined ? {} : { deadlineMs }),
+    deadlineMs,
   });
   return { job, lines: () => capture.lines() };
 }
@@ -25,6 +25,7 @@ describe('the round trip timing', () => {
         fastestMs: 1,
         medianMs: 2.5,
         slowestMs: 10,
+        loopDelayP99Ms: expect.any(Number) as number,
       }),
     ]);
   });
@@ -38,7 +39,7 @@ describe('the round trip timing', () => {
   it('warns when the trips hang past the deadline', async () => {
     vi.useFakeTimers();
     try {
-      const { job, lines } = timing(() => new Promise<never>(() => undefined), 100);
+      const { job, lines } = timing(() => new Promise<never>(() => undefined));
       const running = job.run();
       await vi.advanceTimersByTimeAsync(101);
       await running;

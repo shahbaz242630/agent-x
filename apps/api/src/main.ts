@@ -1075,6 +1075,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
+  // A trip's time through the API's life (4D2d): what its decisions' times are read against.
   const roundTripTiming = scheduleRuns(
     createRoundTripTiming({ timed: () => timedRoundTrips(database, ROUND_TRIPS_A_RUN), logger }),
     ROUND_TRIP_EVERY_MS,

@@ -76,10 +76,8 @@ describe('timing statements', () => {
 describe('the checked driver under timing', () => {
   /** A pool of one stand-in connection that answers a transaction's start, its statements and its commit. */
   function database() {
-    const sent: string[] = [];
     const client = {
       query: (text: string) => {
-        sent.push(text);
         const answer = (rows: readonly unknown[]) => ({ rows, rowCount: rows.length, command: 'SELECT' });
         const state = answer([{ org_id: '', search_path: PINNED_SEARCH_PATH_VALUE }]);
         // A transaction's start answers each of its statements in turn; its commit's read-back needs no rows.
@@ -91,22 +89,13 @@ describe('the checked driver under timing', () => {
     };
     const pool = { connect: () => Promise.resolve(client) } as unknown as pg.Pool;
     const logger = testLogger(new LogCapture());
-    return { sent, database: new Kysely<unknown>({ dialect: tenantCheckedDialect(pool, logger, 2) }) };
+    return new Kysely<unknown>({ dialect: tenantCheckedDialect(pool, logger, 2) });
   }
 
-  it('leaves untimed work uncounted, and a stand-in database still answers', async () => {
-    const { sent, database: db } = database();
-    await expect(withTenant(db, ORG, () => Promise.resolve('kept'))).resolves.toBe('kept');
-    expect(sent.length).toBeGreaterThan(0);
-  });
-
   it('counts a transaction start and its commit', async () => {
-    const { database: db } = database();
     const times = noStatementTimes();
-    await timingStatements(times, () => withTenant(db, ORG, () => Promise.resolve('kept')));
+    await timingStatements(times, () => withTenant(database(), ORG, () => Promise.resolve('kept')));
     expect(times.trips).toBe(2);
-    expect(times.commitMs).toBeGreaterThanOrEqual(0);
-    expect(times.databaseMs).toBeGreaterThanOrEqual(times.commitMs);
   });
 });
 

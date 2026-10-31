@@ -8,10 +8,11 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { type Kysely, sql } from 'kysely';
 
 export interface StatementTimes {
+  /** The wait for a free connection, and the opening of a new one when one was opened. */
   poolWaitMs: number;
   /** The round trips, the commit's among them. */
   trips: number;
-  /** All the round trips' time, the commit's among it; a lock's wait is inside its statement's. */
+  /** All the round trips' time as the API sees it, its own delay too; the commit's and a statement's lock wait inside. */
   databaseMs: number;
   slowestTripMs: number;
   commitMs: number;
@@ -32,32 +33,33 @@ export function timingStatements<T>(times: StatementTimes, work: () => Promise<T
   return timing.run(times, work);
 }
 
-/** One round trip, counted when work is being timed; a failed one took its time too. */
-export async function timedTrip<T>(send: () => Promise<T>, kind: 'commit' | 'statement' = 'statement'): Promise<T> {
+/** `work`, its time added when work is being timed; a failed one took its time too. */
+async function measured<T>(work: () => Promise<T>, add: (times: StatementTimes, took: number) => void): Promise<T> {
   const times = timing.getStore();
-  if (times === undefined) return send();
+  if (times === undefined) return work();
   const started = performance.now();
   try {
-    return await send();
+    return await work();
   } finally {
-    const took = performance.now() - started;
+    add(times, performance.now() - started);
+  }
+}
+
+/** One round trip. */
+export function timedTrip<T>(send: () => Promise<T>, kind: 'commit' | 'statement' = 'statement'): Promise<T> {
+  return measured(send, (times, took) => {
     times.trips += 1;
     times.databaseMs += took;
     times.slowestTripMs = Math.max(times.slowestTripMs, took);
     if (kind === 'commit') times.commitMs += took;
-  }
+  });
 }
 
-/** The wait for a pool's connection, counted when work is being timed. */
-export async function timedPoolWait<T>(connect: () => Promise<T>): Promise<T> {
-  const times = timing.getStore();
-  if (times === undefined) return connect();
-  const started = performance.now();
-  try {
-    return await connect();
-  } finally {
-    times.poolWaitMs += performance.now() - started;
-  }
+/** The wait for a pool's connection. */
+export function timedPoolWait<T>(connect: () => Promise<T>): Promise<T> {
+  return measured(connect, (times, took) => {
+    times.poolWaitMs += took;
+  });
 }
 
 /** A tenth of a millisecond is all a log line needs. */

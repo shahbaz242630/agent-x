@@ -494,7 +494,7 @@ class CheckedConnection implements DatabaseConnection {
       this.#taken().release(true);
       this.#client = undefined;
       this.#logger.error('db.tenant.leftover_discarded', { attempt, problem: answer.problem });
-      if (attempt < this.#attempts) this.#client = await this.#pool.connect();
+      if (attempt < this.#attempts) this.#client = await timedPoolWait(() => this.#pool.connect());
     }
     throw new TenantContextError(`no sound connection after ${String(this.#attempts)} tries`);
   }
