@@ -195,15 +195,15 @@ const SETTINGS = {
     }),
     default: '120',
   },
-  // 4D2d (PL-63): one organisation's, people and agents together, so its requests can't take
-  // another's room. As high as the log's default cap lets it: an organisation's own requests
-  // can't fill the request log, which every organisation shares. Raise both for a larger customer.
+  // 4D2d (PL-63): one organisation's agents together, so what they send can't take another's
+  // room. As high as the log's default cap lets it: they can't fill the request log, which every
+  // organisation shares. A production number with the log's cap: Pre-Launch Checklist, PL-63.
   AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: {
     schema: wholeNumber({
       min: 10,
       max: 100_000,
       unit: 'requests',
-      minimumReason: 'fewer would stop an organisation checking on its own requests',
+      minimumReason: 'fewer would stop an organisation’s agents checking on their own requests',
     }),
     default: '300',
   },

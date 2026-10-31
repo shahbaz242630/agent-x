@@ -138,7 +138,7 @@ describe("each organisation's own rate limit, beside its agents' (PL-63)", () =>
     expect((await app.inject(ask('k'))).statusCode).toBe(200);
   });
 
-  it('leaves a request of no known organisation to its address’s limit', async () => {
+  it('never counts or refuses anyone but an agent', async () => {
     const { app } = await server({ perAddress: 1000, perAgent: 1000, perOrganisation: 1 });
     for (let at = 0; at < 3; at += 1) expect((await app.inject({ url: '/test/open-traffic' })).statusCode).toBe(200);
   });

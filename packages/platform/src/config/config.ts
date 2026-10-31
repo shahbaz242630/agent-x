@@ -58,7 +58,7 @@ export interface Config {
     readonly rateLimitPerUserPerMinute: number;
     /** ADR-011 §4 (C2-2, SEC-AG-06): the most requests one AI agent may make per minute, with any of its keys. */
     readonly rateLimitPerAgentPerMinute: number;
-    /** One organisation's, people and agents together (PL-63). */
+    /** One organisation's agents together (PL-63). */
     readonly rateLimitPerOrganisationPerMinute: number;
   };
   /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
@@ -194,7 +194,7 @@ function rateLimitProblems(
     AGENTX_RATE_LIMIT_PER_MINUTE: "one client's",
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: "one person's",
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: "one agent's",
-    AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: "one organisation's",
+    AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: "one organisation's agents'",
   }[name];
   return perMinute * 2 > eventCapPerMinute
     ? [
@@ -427,7 +427,7 @@ function rateLimitRuleProblems(checks: Settings): string[] {
     ['AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE', checks.rateLimitPerUser],
     // C2-2: an agent using several keys, or several addresses, is held by its own.
     ['AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE', checks.rateLimitPerAgent],
-    // PL-63: an organisation's people and agents together, each under their own, are held by its own.
+    // PL-63: an organisation's agents together, each under their own, are held by its own.
     ['AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE', checks.rateLimitPerOrganisation],
   ] as const;
   return limits.flatMap(([name, limit]) =>

@@ -973,6 +973,21 @@ describe('SEC-AG-06 the rate limit per AI agent (C2-2)', () => {
     ]);
   });
 
+  it('holds an organisation’s limit to the same rules: 300 by default, half the log cap, 10 to 100000', () => {
+    const name = 'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE';
+    expect(loadConfig(MINIMAL).http.rateLimitPerOrganisationPerMinute).toBe(300);
+    expect(loadConfig({ ...MINIMAL, [name]: '10' }).http.rateLimitPerOrganisationPerMinute).toBe(10);
+    expect(problemsWith({ ...MINIMAL, [name]: '301' })).toEqual([
+      `${name}: must be at most half of AGENTX_LOG_EVENT_CAP_PER_MINUTE (600), so one organisation's agents' requests can't fill the request log on their own`,
+    ]);
+    expect(problemsWith({ ...MINIMAL, [name]: '9' })).toEqual([
+      `${name}: must be at least 10 requests (fewer would stop an organisation’s agents checking on their own requests)`,
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_LOG_EVENT_CAP_PER_MINUTE: '400000', [name]: '100001' })).toEqual([
+      `${name}: must be at most 100000 requests`,
+    ]);
+  });
+
   it('refuses fewer than 10, which would stop an agent checking on its own requests', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '9' })).toEqual([
       'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: must be at least 10 requests (fewer would stop an agent checking on its own requests)',

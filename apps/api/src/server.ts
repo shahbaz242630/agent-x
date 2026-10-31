@@ -381,7 +381,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.addHook('onRequest', personCounter);
   // After the access hook too, which finds the agent.
   app.addHook('onRequest', agentCounter);
-  // Once they have, so a person or agent past their own limit doesn't use the organisation's (PL-63).
+  // Once it has, so an agent past its own limit doesn't use its organisation's (PL-63).
   app.addHook(
     'onRequest',
     createOrganisationCounter(app, config.http.rateLimitPerOrganisationPerMinute, trust, (ip) => {

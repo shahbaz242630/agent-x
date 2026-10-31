@@ -166,14 +166,14 @@ export function createAgentCounter(
 }
 
 /**
- * The hook that counts each organisation's requests against its own limit
- * (4D2d, PL-63), beside each person's and agent's: its people and agents
- * together, so what it sends can't take another organisation's room, and only
- * ever refuses the organisation that hit it. It runs after the access hook, and
- * counts only a request it knows the organisation of. Counted per API process,
- * so the real limit grows with replicas. Over the limit, it tells `limited` the
- * client's address, sets the limit headers to the organisation's, and throws the
- * same 429.
+ * The hook that counts each organisation's agents' requests against its own
+ * limit (4D2d, PL-63), beside each agent's: what they send together can't take
+ * another organisation's room, and it only ever refuses the organisation that
+ * hit it. Never its people's: runaway agents using the count up would lock an
+ * admin out of the brakes (the review, S166), and each person has their own limit.
+ * It runs after the access hook. Counted per API process, so the real limit grows
+ * with replicas. Over the limit, it tells `limited` the client's address, sets
+ * the limit headers to the organisation's, and throws the same 429.
  */
 export function createOrganisationCounter(
   app: FastifyInstance,
@@ -184,21 +184,17 @@ export function createOrganisationCounter(
   const limiter = app.createRateLimit({
     max: perMinute,
     timeWindow: WINDOW_MS,
-    // Only called for a request with an organisation: the hook below looks first.
-    keyGenerator: (request) => organisationOf(request) ?? UNREADABLE_ADDRESS,
+    // Only called for a request with an agent: the hook below looks first.
+    keyGenerator: (request) => request.agent?.orgId ?? UNREADABLE_ADDRESS,
   });
   return async (request, reply) => {
-    if (organisationOf(request) === undefined) return;
+    if (request.agent === null) return;
     if (await overLimit(limiter, request, reply, 'when-refused')) {
       limited(rawClientIp(request, trust));
       throw new RateLimited('rate limit exceeded');
     }
   };
 }
-
-/** The organisation a request is known to act in: its agent's, or the one its person was verified in. */
-const organisationOf = (request: FastifyRequest): string | undefined =>
-  request.agent?.orgId ?? request.verifiedOrg ?? undefined;
 
 /**
  * Counts the request and says whether it is over the limit. The limit headers
