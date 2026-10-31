@@ -4,7 +4,7 @@
  * with the app's keys, the way the laptop's run (run.ts) does each step:
  *
  *   node tooling/load/job.ts first     the hand-off pause read, the seed, k6's phase 1
- *   node tooling/load/job.ts second    new keys, k6's phases 2 to 4, the database checks, the clean-up
+ *   node tooling/load/job.ts second    new keys, k6's phases 2 to 5, the database checks, the clean-up
  *   node tooling/load/job.ts cleanup   the clean-up alone, for a run that stopped half-way
  *
  * Between the two, deploy/azure/load.ts restarts the API, as the laptop's run
@@ -35,9 +35,18 @@ import { testLogger } from '../../packages/testing/src/index.ts';
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { LOAD_CHECKS } from './checks.ts';
 import { cleanUpFailures, cleanUpRun } from './cleanup.ts';
-import { loadConnection, type LoadPhase, loadOrgName, orgsOf, type Seeded, type SeededAgent } from './plan.ts';
+import {
+  loadConnection,
+  type LoadPhase,
+  loadOrgName,
+  NEIGHBOURS_PHASE,
+  orgsOf,
+  type Seeded,
+  type SeededAgent,
+} from './plan.ts';
 import type { PhaseResult } from './report.ts';
 import { rekeyed, seedRun } from './seed.ts';
+import { whileStuck } from './stuck.ts';
 
 export type LoadTables = MandateWorldTables & PlatformControlsTables;
 
@@ -199,7 +208,8 @@ async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], create
   let created = createdFirst;
   let finished = true;
   for (const n of LATER_PHASES) {
-    const phase = await steps.k6(n, seeded);
+    const send = () => steps.k6(n, seeded);
+    const phase = await (n === NEIGHBOURS_PHASE ? whileStuck(steps.database, seeded.agents, send) : send());
     created += phase.result?.created ?? 0;
     finished = phase.finished;
     if (!finished) break;
@@ -213,8 +223,8 @@ async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], create
   return finished && stillPaused && checks.every(({ problems }) => problems.length === 0);
 }
 
-/** The second job's phases, in order: the steady traffic with its spike, then the two crowds. */
-export const LATER_PHASES: readonly LoadPhase[] = [2, 3, 4];
+/** The second job's phases, in order: the steady traffic with its spike, the two crowds, then the neighbours. */
+export const LATER_PHASES: readonly LoadPhase[] = [2, 3, 4, NEIGHBOURS_PHASE];
 
 /** Where the k6 script is, in the image as in the repository. */
 const K6_SCRIPT = fileURLToPath(new URL('./money-paths.k6.js', import.meta.url));
@@ -264,14 +274,15 @@ function needed(env: NodeJS.ProcessEnv, name: string): string {
 
 const STRING_FIELDS = ['orgId', 'agentId', 'sourceId', 'monthlyLimitMinor'] as const;
 
-const isCrowd = (kind: unknown): boolean => kind === 'crowd-own' || kind === 'crowd-shared';
+const isCrowd = (kind: unknown): boolean =>
+  kind === 'crowd-own' || kind === 'crowd-shared' || kind === 'neighbour-busy' || kind === 'neighbour-stuck';
 
 /** One agent as load.seeded_agent printed it: all its IDs, and never a key. */
 function isPrintedAgent(agent: unknown): agent is PrintedAgent {
   if (typeof agent !== 'object' || agent === null) return false;
   const fields = agent as Record<string, unknown>;
   return (
-    (fields.kind === 'ample' || fields.kind === 'capped' || isCrowd(fields.kind)) &&
+    (fields.kind === 'ample' || fields.kind === 'capped' || fields.kind === 'neighbour-calm' || isCrowd(fields.kind)) &&
     STRING_FIELDS.every((name) => typeof fields[name] === 'string' && fields[name] !== '') &&
     Array.isArray(fields.supplierIds) &&
     fields.supplierIds.length > 0 &&

@@ -87,11 +87,23 @@ export const AMPLE_AGENTS = 10;
  */
 export const CROWD_AGENTS = 10;
 
-/** Every agent a run seeds: the ample ones, the capped one, and the two crowds. */
-export const SEEDED_AGENTS = AMPLE_AGENTS + 1 + 2 * CROWD_AGENTS;
+/**
+ * The neighbours phase's (4D2d, PL-63): ten calm agents, an organisation each,
+ * sending what the steady agents send, beside a busy organisation's ten and a
+ * stuck one's ten. Their own, so the steady traffic's numbers stay phases 1 and 2's.
+ */
+const NEIGHBOUR_AGENTS = 3 * CROWD_AGENTS;
 
-/** A run's k6 phases: 1 and 2 the steady traffic (2 with the spike); 3 and 4 the crowds, reported apart. */
-export type LoadPhase = 1 | 2 | 3 | 4;
+/** Every agent a run seeds: the ample ones, the capped one, the two crowds and the neighbours. */
+export const SEEDED_AGENTS = AMPLE_AGENTS + 1 + 2 * CROWD_AGENTS + NEIGHBOUR_AGENTS;
+
+/**
+ * A run's k6 phases: 1 and 2 the steady traffic (2 with the spike); 3 and 4 the
+ * crowds, reported apart; 5 the neighbours, one organisation's trouble beside others.
+ */
+export type LoadPhase = 1 | 2 | 3 | 4 | 5;
+
+export const NEIGHBOURS_PHASE = 5;
 
 /** Above AED 5 a request waits for a person, so the steady traffic is both allowed and held for approval. */
 export const APPROVAL_THRESHOLD_MINOR = 500n;
@@ -103,10 +115,13 @@ export const CAPPED_MONTHLY_MINOR = 10_000n;
 export const POLICY_P95_MS = 150;
 
 /** A crowd's agents: each with three suppliers of its own (phase 3), or all sharing the same three (phase 4). */
-export type CrowdKind = 'crowd-own' | 'crowd-shared';
+export type CrowdKind = 'crowd-own' | 'crowd-shared' | NeighbourCrowdKind;
+
+/** Phase 5's two organisations in trouble, ten agents each sharing three suppliers. */
+type NeighbourCrowdKind = 'neighbour-busy' | 'neighbour-stuck';
 
 export interface SeededAgent {
-  readonly kind: 'ample' | 'capped' | CrowdKind;
+  readonly kind: 'ample' | 'capped' | 'neighbour-calm' | CrowdKind;
   readonly orgId: string;
   readonly agentId: string;
   /** The agent's key as it sends it: a local, throwaway stack's, never kept. */

@@ -160,7 +160,7 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       const second = stepsWith(() => ({ finished: true, result: { ...NO_REQUESTS, phase: 2 } }));
       // No traffic stands in here, and the checks refuse to pass a run with none (the laptop's run holds them with it).
       expect(await secondJob(second.steps, 'job test', run.agents, 0)).toBe(1);
-      expect(second.k6Calls.map(({ phase }) => phase)).toEqual([2, 3, 4]);
+      expect(second.k6Calls.map(({ phase }) => phase)).toEqual([2, 3, 4, 5]);
       const secondKeys = second.k6Calls[0]?.seeded.agents.map(({ key }) => key) ?? [];
       expect(secondKeys.filter((key, n) => key === run.keys[n] || key.length <= 20)).toEqual([]);
       const checked = second.lineOf('load.checked');
