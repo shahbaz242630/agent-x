@@ -21,6 +21,7 @@ import {
   createDatabase,
   type Database,
   type GatheredId,
+  type GatheredRow,
   type SignedStateTable,
   StatusChangeFailed,
   TenantContextError,
@@ -32,6 +33,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { AuditEventRefused } from '../domain/event.ts';
+import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import {
   type AuditTrail,
   type AuditTransaction,
@@ -2148,6 +2150,32 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
         states.gather(tx, org, [{ table: { ...AGENTS, subject: 'integrity_hold' }, id: { id: org }, lock: 'share' }]),
       ),
     ).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('gathers behind another statement on one trip (P17), refusing what a gather refuses in either list', async () => {
+    const agent = await newAgent();
+    const other = await newAgent();
+    const row = (id: string) => ({ table: AGENTS, id: { id }, lock: 'share' as const });
+    const behind = (first: readonly GatheredRow[], second: readonly GatheredRow[]) =>
+      withTenant(app, org, (tx) =>
+        states.gatherBehind(
+          tx,
+          org,
+          tx.selectNoFrom((eb) => eb.val('ahead').as('said')),
+          first,
+          second,
+        ),
+      );
+
+    const { ahead, found } = await behind([row(agent)], [row(other)]);
+    expect(ahead.rows).toEqual([{ said: 'ahead' }]);
+    expect(found).toEqual([other]);
+
+    const hold = { ...row(agent), table: { ...AGENTS, subject: HOLD_SUBJECT } };
+    await expect(behind([hold], [row(other)])).rejects.toBeInstanceOf(RangeError);
+    await expect(behind([row(agent)], [hold])).rejects.toBeInstanceOf(RangeError);
+    const unknown = { ...row(agent), table: { ...AGENTS, subject: 'Not A Subject Type' } };
+    await expect(behind([row(agent)], [unknown])).rejects.toBeInstanceOf(AuditEventRefused);
   });
 });
 
