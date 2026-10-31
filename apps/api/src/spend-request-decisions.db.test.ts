@@ -818,6 +818,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
 });
 
 describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
+  /* eslint-disable agentx/no-string-built-sql -- this test's own fixed table names and bodies, as the owner. */
   /** `action` with every write to the table meeting `body` first. */
   async function withWritesTo<T>(table: string, body: string, action: () => Promise<T>): Promise<T> {
     const owner = database.as('owner');
@@ -832,6 +833,7 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       await owner.query(`drop function ${table}_forced()`);
     }
   }
+  /* eslint-enable agentx/no-string-built-sql */
 
   const left = (org: string) =>
     withTenant(app, org, async (tx) => ({
@@ -877,7 +879,7 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
     // The trip list's count on main was 24; these two batches take 3 off it.
-    expect(line?.['trips']).toBeLessThanOrEqual(22);
+    expect(line?.trips).toBeLessThanOrEqual(22);
   });
 });
 

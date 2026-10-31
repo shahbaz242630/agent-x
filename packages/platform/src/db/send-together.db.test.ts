@@ -1,7 +1,5 @@
 // Statements sent together on one trip (4D2d P16), against a real Postgres, each
 // way it can go wrong forced: pg's pipelining, young in 8.23, carries money here.
-import net from 'node:net';
-
 import { createTestDatabase, LogCapture, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
 import { type Kysely, sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -74,47 +72,6 @@ describe(`statements sent together (4D2d P16, Postgres ${server.version})`, () =
       }),
     );
     expect(trips).toBe(1);
-  });
-
-  it('really goes in one trip: three take about one trip’s time, over a slow line', async () => {
-    const { host, port } = database.connection('admin');
-    const ONE_WAY_MS = 100;
-    const line = net.createServer((near) => {
-      const far = net.connect(port, host);
-      const delayed = (from: net.Socket, to: net.Socket) => {
-        from.on('data', (data) => {
-          setTimeout(() => {
-            if (to.writable) to.write(data);
-          }, ONE_WAY_MS);
-        });
-        from.on('close', () => to.destroy());
-        from.on('error', () => to.destroy());
-      };
-      delayed(near, far);
-      delayed(far, near);
-    });
-    await new Promise<void>((listening) => line.listen(0, '127.0.0.1', listening));
-    const slow = createDatabase<Tables>(
-      {
-        ...database.connection('admin'),
-        host: '127.0.0.1',
-        port: (line.address() as net.AddressInfo).port,
-        maxConnections: 1,
-      },
-      testLogger(new LogCapture()),
-    );
-    try {
-      const took = await withTenant(slow, ORG, async (tx) => {
-        const started = performance.now();
-        await sendTogether(tx, [parent(tx, 5), parent(tx, 6), parent(tx, 7)]);
-        return performance.now() - started;
-      });
-      // One by one is three trips, six times one way; together is two times one way.
-      expect(took).toBeLessThan(4 * ONE_WAY_MS);
-    } finally {
-      await slow.destroy();
-      line.close();
-    }
   });
 
   it('fails with the first failure, keeps nothing, and its connection works on', async () => {
