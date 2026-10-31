@@ -899,9 +899,10 @@ var apps = [
       }
       // Ten of the server's 35 user connections, leaving Zitadel's ten, one for
       // each job, and room for the worker (ADR-002 Amendment G1). Twenty on the
-      // load run's larger server, as production needs: each organisation may hold
-      // 30% (organisation-shares.ts), so two in trouble leave the others room
-      // (4D2d, PL-63: on ten, others' p95 332 ms; on twenty, 100 ms).
+      // load run's larger server: each organisation's agents may hold 30%
+      // (organisation-shares.ts), so two in trouble leave the others room (4D2d,
+      // PL-63: on ten, others' p95 332 ms; on twenty, 100 ms). Production needs
+      // the same, on its own server's connections (Pre-Launch Checklist, PL-63).
       {
         name: 'AGENTX_DB_POOL_MAX'
         value: loadRun ? '20' : '10'

@@ -3,9 +3,18 @@
 // shared, so a stuck or busy organisation could hold every connection and make
 // all the others wait (the neighbours phase, S166: a calm organisation's decision
 // p95 100 ms to 16 s, most of its requests failing). Past its share, only that
-// organisation waits, holding no connection, and past a bound is answered busy
-// with nothing made. Counted per API process, so the real limit grows with
-// replicas, as the pool does.
+// organisation waits, holding no connection, and past a bound is answered busy.
+// Counted per API process, so the real limit grows with replicas, as the pool does.
+//
+// Agents' requests alone count against it (asAgentTraffic): they are what can
+// arrive by the thousand and pile up on a held row. People are held by their own
+// rate limit, and background jobs walk organisations one at a time. Neither may
+// queue here (the review of the first version, S166): an admin's freeze or a new
+// agent's shown-once key could be told busy after it had committed, the login
+// events' copy would stop for every organisation behind one busy one, and a
+// bank's answer could be refused after the bank had been called.
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { createKeyedSlots } from './keyed-slots.ts';
 
 /** How much of the pool one organisation may hold: with one more in the same trouble, others still have the rest. */
@@ -34,6 +43,14 @@ export class OrganisationBusy extends Error {
     this.waitedMs = waitedMs;
   }
 }
+
+const agentTraffic = new AsyncLocalStorage<true>();
+
+/** Runs `work` as an agent's request: its organisation's transactions inside count against its share. */
+export const asAgentTraffic = <T>(work: () => T): T => agentTraffic.run(true, work);
+
+/** Whether this is an agent's request, whose transactions count against its organisation's share. */
+export const isAgentTraffic = (): boolean => agentTraffic.getStore() === true;
 
 export interface OrganisationShares {
   /** Takes a place in the organisation's share, waiting its turn; rejects with OrganisationBusy past the wait. */

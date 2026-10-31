@@ -2,6 +2,7 @@
 // ADR-011 §4), and an agent's answers allowlisted: nothing a route doesn't
 // name reaches an agent (SEC-AG-05), with the key check stood in for.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
+import { isAgentTraffic } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, RouteShorthandOptions } from 'fastify';
@@ -85,6 +86,14 @@ async function server({ perAddress = 100, perAgent = 10 } = {}) {
     supplierId: '0199a0f0-0000-7000-8000-0000000000e1',
     name: 'Gulf Supplies LLC',
   }));
+  // Whether the handler runs as an agent's traffic, as its organisation's share counts it (PL-63).
+  const traffic = { schema: { response: { 200: z.object({ agentTraffic: z.boolean() }) } } };
+  const reply = () => ({ agentTraffic: isAgentTraffic() });
+  app.get('/test/traffic', { ...traffic, config: { access: ['agent'], agentScopes: [] } }, async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return reply();
+  });
+  app.get('/test/open-traffic', { ...traffic, config: { access: ['public'] } }, reply);
   app.get('/test/supplier', answer, () => ({
     supplierId: '0199a0f0-0000-7000-8000-0000000000e1',
     name: 'Gulf Supplies LLC',
@@ -99,6 +108,18 @@ const asAgent = (letter: string, remoteAddress = '198.51.100.1') => ({
   url: '/v1/agent',
   headers: { authorization: `Bearer ${KEY_TEXT(letter)}` },
   remoteAddress,
+});
+
+describe("an agent's request counts against its organisation's share of the connections (PL-63)", () => {
+  it('runs an agent’s handler as its traffic, through an await, and no one else’s', async () => {
+    const { app } = await server();
+    const asked = await app.inject({ ...asAgent('a'), url: '/test/traffic' });
+    expect(asked.statusCode).toBe(200);
+    expect(asked.json()).toEqual({ agentTraffic: true });
+    const open = await app.inject({ url: '/test/open-traffic' });
+    expect(open.statusCode).toBe(200);
+    expect(open.json()).toEqual({ agentTraffic: false });
+  });
 });
 
 describe("SEC-AG-06 C2-2 each agent's own rate limit, beside its address's", () => {

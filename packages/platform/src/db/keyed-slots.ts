@@ -1,7 +1,7 @@
 // Slots per key: at most so many at once for one key, the rest waiting in the
 // order they came, each for a bounded time, holding nothing. Behind an agent's
 // decision turns (apps/api agent-turns.ts) and an organisation's share of the
-// connections (connection-shares.ts). Only keys in hand have a line, so the
+// connections (organisation-shares.ts). Only keys in hand have a line, so the
 // memory never grows with keys seen.
 
 export interface KeyedSlots {

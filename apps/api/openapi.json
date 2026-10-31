@@ -422,7 +422,7 @@
                   {
                     "type": "string",
                     "const": "ORGANISATION_BUSY",
-                    "description": "The organisation has a lot of work in progress at Agent X right now, so this request waited too long and nothing was done with it. Other organisations aren't affected. Wait the number of seconds in the Retry-After header, then send the same request again, with the same Idempotency-Key if it has one."
+                    "description": "The organisation has a lot of work in progress at Agent X right now, so this request waited too long. Wait the number of seconds in the Retry-After header, then send the same request again, with the same Idempotency-Key if it has one: it won't be done twice."
                   },
                   {
                     "type": "string",

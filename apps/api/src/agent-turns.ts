@@ -12,6 +12,8 @@
 // decision is answered busy (503 AGENT_BUSY, with Retry-After), with nothing
 // made, so the agent sends it again (partner, S161).
 
+import { createKeyedSlots } from '@agentx/platform/db';
+
 /** Decisions of one agent at once in this process: two, so one can get its locks while another holds the month's. */
 export const TURNS_AN_AGENT = 2;
 
@@ -28,8 +30,6 @@ export class TurnWaitExceeded extends Error {
     this.waitedMs = waitedMs;
   }
 }
-
-import { createKeyedSlots } from '@agentx/platform/db';
 
 export interface AgentTurns {
   /** `work` in its agent's turn: at once while fewer than the limit run, otherwise after those before it. */

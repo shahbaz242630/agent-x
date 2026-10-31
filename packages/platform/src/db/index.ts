@@ -30,7 +30,13 @@ export {
   runMigrations,
 } from './migrate.ts';
 export { createKeyedSlots } from './keyed-slots.ts';
-export { isLockWaitRunOut, OrganisationBusy, organisationShareOf } from './organisation-shares.ts';
+export {
+  asAgentTraffic,
+  isAgentTraffic,
+  isLockWaitRunOut,
+  OrganisationBusy,
+  organisationShareOf,
+} from './organisation-shares.ts';
 export { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } from './retry.ts';
 export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
 export { liveSchemaProblems, type SchemaGuardOptions, type SchemaProblem } from './schema-guard.ts';

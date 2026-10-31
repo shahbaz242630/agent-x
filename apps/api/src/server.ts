@@ -40,7 +40,7 @@ import type {
 import type { FakeBank } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
-import { isLockWaitRunOut } from '@agentx/platform/db';
+import { asAgentTraffic, isLockWaitRunOut } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
@@ -383,6 +383,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // After the caller is known and counted, before the body is read.
   registerIdempotencyKeys(app);
   registerActivityLog(app, { sink: options.activity, logger, trust, placeOf: options.placeOf });
+  // An agent's request counts against its organisation's share of the connections (PL-63), from here to its
+  // answer. Here, not earlier: the body's been read, whose stream events would leave the scope behind.
+  app.addHook('preHandler', (request, _reply, done) => {
+    if (request.agent === null) done();
+    else asAgentTraffic(done);
+  });
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));

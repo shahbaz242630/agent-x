@@ -3,7 +3,7 @@
 // person's row with the organisation they only claimed, nothing written for a
 // line malformed, and no row ever changed or deleted by the app; L4: the
 // client's clues written beside them, or left empty, and none malformed.
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { asAgentTraffic, createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -84,14 +84,16 @@ describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () =>
     );
     const { promise: letGo, resolve } = Promise.withResolvers<undefined>();
     const { promise: open, resolve: opened } = Promise.withResolvers<undefined>();
-    const full = withTenant(shared, SHARED_ORG, async () => {
-      opened(undefined);
-      await letGo;
-    });
+    const full = asAgentTraffic(() =>
+      withTenant(shared, SHARED_ORG, async () => {
+        opened(undefined);
+        await letGo;
+      }),
+    );
     try {
       await open;
       const started = performance.now();
-      await log.recordForOrganisation(shared, forOrganisation({ orgId: SHARED_ORG }));
+      await asAgentTraffic(() => log.recordForOrganisation(shared, forOrganisation({ orgId: SHARED_ORG })));
       // Far under the 10 s a transaction waits for its share.
       expect(performance.now() - started).toBeLessThan(5_000);
     } finally {

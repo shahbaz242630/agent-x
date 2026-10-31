@@ -240,9 +240,11 @@ export const PLAIN_WORDS = {
     next: "Look at the update's own error, fix the cause and run the update job again.",
   },
   'db.organisation_busy': {
-    happened: 'One organisation had as much database work running as it may, and a request of its own waited too long.',
-    broke: 'That request was turned away as busy and nothing was saved. Other organisations carried on as normal.',
-    next: 'Nothing to do if rare. If often, look at what that organisation is sending, or what is holding its records.',
+    happened:
+      "One organisation's agents had as much database work running as they may, and a request of theirs waited too long.",
+    broke:
+      'That request was turned away as busy, told to send again; sending it again cannot do it twice. Other organisations carried on as normal.',
+    next: "Nothing to do if rare. If often, look at what that organisation's agents send, or what is holding its records.",
   },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',

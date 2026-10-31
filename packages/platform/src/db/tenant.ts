@@ -38,7 +38,12 @@ import {
 import type pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
-import { createOrganisationShares, OrganisationBusy, type OrganisationShares } from './organisation-shares.ts';
+import {
+  createOrganisationShares,
+  isAgentTraffic,
+  OrganisationBusy,
+  type OrganisationShares,
+} from './organisation-shares.ts';
 import { UUID } from './patterns.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { timedPoolWait, timedTrip } from './statement-times.ts';
@@ -89,7 +94,7 @@ interface Opening {
   /** The organisation, in lower case; none for a plain limited transaction, which is `limited`: an opening sets one or both. */
   readonly tenant: string | undefined;
   readonly limited: boolean;
-  /** Outside the organisation's share of the connections: an integrity hold's, which must not queue behind what it stops. */
+  /** Outside the organisation's share of the connections, though an agent's request: its integrity hold and its activity row must not queue. */
   readonly unshared: boolean;
   taken: boolean;
 }
@@ -106,7 +111,7 @@ const opening = new AsyncLocalStorage<Opening>();
  * end up waiting on another. `limited`: every statement is limited as
  * limitStatements limits them, set with the organisation in one round trip
  * (4D2d P4). `unshared`: outside the organisation's share of the connections
- * (organisation-shares.ts), for an integrity hold alone.
+ * (organisation-shares.ts) though an agent's request: for its integrity hold and activity row.
  */
 export async function withTenant<Schema, Result>(
   db: Kysely<Schema>,
@@ -483,8 +488,11 @@ class CheckedConnection implements DatabaseConnection {
   release(): void {
     const client = this.#client;
     this.#client = undefined;
-    client?.release(this.#broken ? true : undefined);
-    this.#leaveShare();
+    try {
+      client?.release(this.#broken ? true : undefined);
+    } finally {
+      this.#leaveShare();
+    }
   }
 
   #written(query: CompiledQuery): Promise<pg.QueryResult> {
@@ -580,16 +588,22 @@ class CheckedDriver implements Driver {
   }
 
   /**
-   * The share of the organisation whose transaction this connection is for: waited
-   * for holding no connection, past its bound answered busy. Only the transaction
-   * withTenant is opening: one begun inside its work has no share to wait for, so
-   * nothing holding a share can wait on its own organisation's.
+   * The share of the organisation whose transaction this connection is for, when
+   * an agent's request opens it: waited for holding no connection, past its bound
+   * answered busy. Only the transaction withTenant is opening: one begun inside its
+   * work has no share to wait for, so nothing holding a share can wait on its own.
    */
   async #enteredShare(): Promise<() => void> {
     const asked = opening.getStore();
     const shares = this.#shares;
     const organisation = asked?.tenant;
-    if (shares === undefined || organisation === undefined || asked?.taken === true || asked?.unshared === true) {
+    if (
+      shares === undefined ||
+      organisation === undefined ||
+      asked?.taken === true ||
+      asked?.unshared === true ||
+      !isAgentTraffic()
+    ) {
       return () => undefined;
     }
     try {

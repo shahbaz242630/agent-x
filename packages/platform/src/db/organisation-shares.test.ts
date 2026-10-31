@@ -25,10 +25,6 @@ describe('an organisation’s share of the pool', () => {
   ])('of %i connections is %i', (poolMax, share) => {
     expect(organisationShareOf(poolMax)).toBe(share);
   });
-
-  it('leaves others room with two organisations each at their share', () => {
-    expect(10 - 2 * organisationShareOf(10)).toBe(4);
-  });
 });
 
 describe('a lock’s wait run out', () => {

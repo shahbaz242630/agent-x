@@ -102,14 +102,15 @@ export function responseForStatus(status: number): ErrorResponse {
  */
 export class IntegrityFailure extends Error {}
 
-/** How long a request told it is busy waits before it sends the same request again. */
+/** How long a client is told to wait before sending a busy request again: as long as the store waited, time for most writes holding the key to end. */
 export const BUSY_RETRY_SECONDS = 5;
 
 /**
  * What to send for an error, from its own status; an integrity failure is 503
  * INTEGRITY_FAILED. Its organisation past its share of the connections, or a
- * lock's wait run out (held by its organisation's own work), rolled back and
- * made nothing: 503 busy, never a 500 (partner, S161).
+ * lock's wait run out (held by its organisation's own work): 503 busy, never a
+ * 500 (partner, S161). Its transaction made nothing; one before it may have, so
+ * the same request again, under its key, answers as that one did.
  */
 export function responseFor(error: unknown): ErrorResponse {
   if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };

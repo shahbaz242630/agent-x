@@ -26,7 +26,7 @@ export interface DatabaseConnectionOptions {
   /** Names the connection in Postgres's own views, e.g. `agentx-api`. Default `agentx`. */
   readonly applicationName?: string;
   /**
-   * The most connections one organisation's transactions may hold at once
+   * The most connections one organisation's agents' requests may hold at once
    * (organisation-shares.ts). The API's alone: a job or a test has no neighbours,
    * and a test holding many of one organisation's locks on purpose must not queue.
    */

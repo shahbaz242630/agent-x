@@ -166,7 +166,7 @@ export const REASON_CODES = {
   NO_INVESTIGATION:
     'The integrity hold can only be cleared after its investigation is recorded, and there is no investigation by this ID of the hold as it now stands. Record the investigation first.',
   ORGANISATION_BUSY:
-    "The organisation has a lot of work in progress at Agent X right now, so this request waited too long and nothing was done with it. Other organisations aren't affected. Wait the number of seconds in the Retry-After header, then send the same request again, with the same Idempotency-Key if it has one.",
+    "The organisation has a lot of work in progress at Agent X right now, so this request waited too long. Wait the number of seconds in the Retry-After header, then send the same request again, with the same Idempotency-Key if it has one: it won't be done twice.",
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
   ORG_FROZEN:
