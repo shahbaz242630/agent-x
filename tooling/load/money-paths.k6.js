@@ -179,7 +179,8 @@ export function replay() {
   const order = `P${PHASE}-R-${n}`;
   const agent = steadyAgents[n % steadyAgents.length];
   const first = counted(ask(agent, order, order, 200, supplierAt(n)), true);
-  const again = counted(ask(agent, order, order, 200, supplierAt(n)), false);
+  // A first ask refused as busy made nothing, so the same key's second is the one that makes it (phase 5, S166).
+  const again = counted(ask(agent, order, order, 200, supplierAt(n)), first.status !== 201);
   check(first, { 'decided (201)': decided });
   check(again, { 'replayed: the same request': (r) => decided(r) && r.json('id') === first.json('id') });
 }
