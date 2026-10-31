@@ -29,6 +29,8 @@ export class TurnWaitExceeded extends Error {
   }
 }
 
+import { createKeyedSlots } from '@agentx/platform/db';
+
 export interface AgentTurns {
   /** `work` in its agent's turn: at once while fewer than the limit run, otherwise after those before it. */
   run<T>(agentId: string, work: () => Promise<T>): Promise<T>;
@@ -36,58 +38,19 @@ export interface AgentTurns {
   agentsInHand(): number;
 }
 
-interface Line {
-  running: number;
-  readonly waiting: (() => void)[];
-}
-
 export function createAgentTurns({
   perAgent = TURNS_AN_AGENT,
   waitMs = TURN_WAIT_MS,
 }: { readonly perAgent?: number; readonly waitMs?: number } = {}): AgentTurns {
-  // Only agents with a decision running or waiting have a line, so the map stays the size of the work in hand.
-  const lines = new Map<string, Line>();
-
-  function turnIn(line: Line): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        line.waiting.splice(line.waiting.indexOf(go), 1);
-        reject(new TurnWaitExceeded(waitMs));
-      }, waitMs);
-      function go(): void {
-        clearTimeout(timer);
-        resolve();
-      }
-      line.waiting.push(go);
-    });
-  }
-
-  /** A turn ended: handed to the next in line, or the line closed when no one waits. */
-  function ended(agentId: string, line: Line): void {
-    const next = line.waiting.shift();
-    if (next !== undefined) {
-      next();
-      return;
-    }
-    line.running -= 1;
-    if (line.running === 0) lines.delete(agentId);
-  }
-
+  const turns = createKeyedSlots({ perKey: perAgent, waitMs, exceeded: () => new TurnWaitExceeded(waitMs) });
   return {
-    agentsInHand: () => lines.size,
+    agentsInHand: () => turns.keysInHand(),
     async run(agentId, work) {
-      let line = lines.get(agentId);
-      if (line === undefined) {
-        line = { running: 0, waiting: [] };
-        lines.set(agentId, line);
-      }
-      // A turn handed on keeps its count: the one ending passes its place to the next, never freeing it first.
-      if (line.running < perAgent) line.running += 1;
-      else await turnIn(line);
+      await turns.enter(agentId);
       try {
         return await work();
       } finally {
-        ended(agentId, line);
+        turns.leave(agentId);
       }
     },
   };

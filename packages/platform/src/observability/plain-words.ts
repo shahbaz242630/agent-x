@@ -127,6 +127,11 @@ export const PLAIN_WORDS = {
     broke: 'The API did not start, so no one can use the service through it.',
     next: 'Check the port is free and the hosting settings are right, then start it again.',
   },
+  'api.lock_wait_ran_out': {
+    happened: 'A request waited too long for a record that other work was holding.',
+    broke: 'That request was turned away as busy and nothing was saved; the sender was told to send it again.',
+    next: 'Nothing to do if rare. If it repeats, look for what is holding that record.',
+  },
   'api.start_not_recorded': {
     happened: "The API could not record its own start in the platform's signed history.",
     broke: 'The API refused to start, so no one can use the service through it.',
@@ -233,6 +238,11 @@ export const PLAIN_WORDS = {
     happened: 'A database update failed, and undoing it failed too.',
     broke: 'The connection is likely lost; closing it undoes the update anyway, so nothing half-done is kept.',
     next: "Look at the update's own error, fix the cause and run the update job again.",
+  },
+  'db.organisation_busy': {
+    happened: 'One organisation had as much database work running as it may, and a request of its own waited too long.',
+    broke: 'That request was turned away as busy and nothing was saved. Other organisations carried on as normal.',
+    next: 'Nothing to do if rare. If often, look at what that organisation is sending, or what is holding its records.',
   },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',

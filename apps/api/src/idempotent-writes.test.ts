@@ -9,14 +9,8 @@ import { z } from 'zod';
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import './route-server.helper.test.ts';
-import { errorBody } from './errors.ts';
-import {
-  answerAsked,
-  answerRefusal,
-  BUSY_RETRY_SECONDS,
-  canonicalJson,
-  idempotentRequest,
-} from './idempotent-writes.ts';
+import { BUSY_RETRY_SECONDS, errorBody } from './errors.ts';
+import { answerAsked, answerRefusal, canonicalJson, idempotentRequest } from './idempotent-writes.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 

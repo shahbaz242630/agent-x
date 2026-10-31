@@ -40,6 +40,7 @@ import type {
 import type { FakeBank } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
+import { isLockWaitRunOut } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
@@ -56,7 +57,7 @@ import { answerClientError } from './client-errors.ts';
 import { type ConsoleFiles, putConsoleInFront } from './console-files.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
-import { responseFor, sendErrorBody } from './errors.ts';
+import { BUSY_RETRY_SECONDS, responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
@@ -275,9 +276,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     for (const name of Object.keys(reply.getHeaders())) {
       if (!ERROR_HEADERS.has(name)) reply.removeHeader(name);
     }
+    if (code === 'ORGANISATION_BUSY') void reply.header('retry-after', String(BUSY_RETRY_SECONDS));
     void sendErrorBody(reply, status, code, request.id);
     // After sending, so a failure to log can't stop the plain answer going out.
     if (status === 500) logger.child({ correlationId: request.id }).error(REQUEST_FAILED, { err: error });
+    // The share's own refusal logs itself, naming the organisation; this one's lock is the line to look for.
+    if (isLockWaitRunOut(error)) logger.child({ correlationId: request.id }).warn('api.lock_wait_ran_out');
     return reply;
   };
 

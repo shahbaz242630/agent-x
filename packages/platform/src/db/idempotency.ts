@@ -53,6 +53,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
+import { isLockWaitRunOut } from './organisation-shares.ts';
 import { UUID } from './patterns.ts';
 import { assertTenant, lockWaitBounded, sendTogether, withTenant } from './tenant.ts';
 
@@ -250,9 +251,6 @@ const claimedIn = new WeakSet<object>();
  */
 const CLAIM_SAVEPOINT = 'agentx_idempotency_claim';
 
-/** Postgres's `lock_not_available`: a lock timeout ran out. */
-const LOCK_NOT_AVAILABLE = '55P03';
-
 /** The claim's wait ran out: answered `busy` once the claim is rolled back. */
 class ClaimBusy extends Error {
   constructor(cause: unknown) {
@@ -261,13 +259,10 @@ class ClaimBusy extends Error {
   }
 }
 
-const isLockTimeout = (error: unknown): boolean =>
-  typeof error === 'object' && error !== null && 'code' in error && error.code === LOCK_NOT_AVAILABLE;
-
 /** The claim's trip: a wait run out is the claim's busy. */
 const orBusy = <Answer>(sent: Promise<Answer>): Promise<Answer> =>
   sent.catch((error: unknown) => {
-    throw isLockTimeout(error) ? new ClaimBusy(error) : error;
+    throw isLockWaitRunOut(error) ? new ClaimBusy(error) : error;
   });
 
 const notFirst = (): IdempotencyFailed =>

@@ -38,6 +38,7 @@ import {
 import type pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
+import { createOrganisationShares, OrganisationBusy, type OrganisationShares } from './organisation-shares.ts';
 import { UUID } from './patterns.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { timedPoolWait, timedTrip } from './statement-times.ts';
@@ -88,6 +89,8 @@ interface Opening {
   /** The organisation, in lower case; none for a plain limited transaction, which is `limited`: an opening sets one or both. */
   readonly tenant: string | undefined;
   readonly limited: boolean;
+  /** Outside the organisation's share of the connections: an integrity hold's, which must not queue behind what it stops. */
+  readonly unshared: boolean;
   taken: boolean;
 }
 
@@ -102,13 +105,14 @@ const opening = new AsyncLocalStorage<Opening>();
  * connection, committed separately, and under load every connection could
  * end up waiting on another. `limited`: every statement is limited as
  * limitStatements limits them, set with the organisation in one round trip
- * (4D2d P4).
+ * (4D2d P4). `unshared`: outside the organisation's share of the connections
+ * (organisation-shares.ts), for an integrity hold alone.
  */
 export async function withTenant<Schema, Result>(
   db: Kysely<Schema>,
   orgId: string,
   work: (tx: Transaction<Schema>) => Promise<Result>,
-  { limited = false }: { readonly limited?: boolean } = {},
+  { limited = false, unshared = false }: { readonly limited?: boolean; readonly unshared?: boolean } = {},
 ): Promise<Result> {
   // Checked before the transaction opens; the ID itself is never echoed.
   if (!UUID.test(orgId)) throw new TenantContextError('the organisation ID is not a UUID');
@@ -117,7 +121,7 @@ export async function withTenant<Schema, Result>(
   }
   const scope = { open: true };
   const tenant = orgId.toLowerCase();
-  const asked: Opening = { tenant, limited, taken: false };
+  const asked: Opening = { tenant, limited, unshared, taken: false };
   try {
     return await insideTenant.run(scope, () =>
       openedWith(db, asked, async (tx) => {
@@ -147,7 +151,7 @@ export function limitedTransaction<Schema, Result>(
   db: Kysely<Schema>,
   work: (tx: Transaction<Schema>) => Promise<Result>,
 ): Promise<Result> {
-  const asked: Opening = { tenant: undefined, limited: true, taken: false };
+  const asked: Opening = { tenant: undefined, limited: true, unshared: true, taken: false };
   return openedWith(db, asked, async (tx) => {
     // Another driver: the limit in a round trip of its own.
     if (!asked.taken) await limitStatements(tx);
@@ -398,12 +402,15 @@ class CheckedConnection implements DatabaseConnection {
   #broken = false;
   /** The organisation of the transaction open on it, to read back with the commit. */
   #tenant: string | undefined;
+  /** Gives back the organisation's share of the connections this one came from, if it did. */
+  readonly #leaveShare: () => void;
 
-  constructor(pool: pg.Pool, logger: Logger, attempts: number, client: pg.PoolClient) {
+  constructor(pool: pg.Pool, logger: Logger, attempts: number, client: pg.PoolClient, leaveShare: () => void) {
     this.#pool = pool;
     this.#logger = logger;
     this.#attempts = attempts;
     this.#client = client;
+    this.#leaveShare = leaveShare;
   }
 
   async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
@@ -477,6 +484,7 @@ class CheckedConnection implements DatabaseConnection {
     const client = this.#client;
     this.#client = undefined;
     client?.release(this.#broken ? true : undefined);
+    this.#leaveShare();
   }
 
   #written(query: CompiledQuery): Promise<pg.QueryResult> {
@@ -547,11 +555,13 @@ class CheckedDriver implements Driver {
   readonly #pool: pg.Pool;
   readonly #logger: Logger;
   readonly #attempts: number;
+  readonly #shares: OrganisationShares | undefined;
 
-  constructor(pool: pg.Pool, logger: Logger, attempts: number) {
+  constructor(pool: pg.Pool, logger: Logger, attempts: number, shares: OrganisationShares | undefined) {
     this.#pool = pool;
     this.#logger = logger;
     this.#attempts = attempts;
+    this.#shares = shares;
   }
 
   async init(): Promise<void> {
@@ -559,8 +569,40 @@ class CheckedDriver implements Driver {
   }
 
   async acquireConnection(): Promise<DatabaseConnection> {
-    const client = await timedPoolWait(() => this.#pool.connect());
-    return new CheckedConnection(this.#pool, this.#logger, this.#attempts, client);
+    const leaveShare = await this.#enteredShare();
+    try {
+      const client = await timedPoolWait(() => this.#pool.connect());
+      return new CheckedConnection(this.#pool, this.#logger, this.#attempts, client, leaveShare);
+    } catch (error) {
+      leaveShare();
+      throw error;
+    }
+  }
+
+  /**
+   * The share of the organisation whose transaction this connection is for: waited
+   * for holding no connection, past its bound answered busy. Only the transaction
+   * withTenant is opening: one begun inside its work has no share to wait for, so
+   * nothing holding a share can wait on its own organisation's.
+   */
+  async #enteredShare(): Promise<() => void> {
+    const asked = opening.getStore();
+    const shares = this.#shares;
+    const organisation = asked?.tenant;
+    if (shares === undefined || organisation === undefined || asked?.taken === true || asked?.unshared === true) {
+      return () => undefined;
+    }
+    try {
+      await timedPoolWait(() => shares.enter(organisation));
+    } catch (error) {
+      if (error instanceof OrganisationBusy) {
+        this.#logger.child({ orgId: organisation }).warn('db.organisation_busy', { waitedMs: error.waitedMs });
+      }
+      throw error;
+    }
+    return () => {
+      shares.leave(organisation);
+    };
   }
 
   beginTransaction(connection: DatabaseConnection, settings: TransactionSettings): Promise<void> {
@@ -589,12 +631,19 @@ class CheckedDriver implements Driver {
  * Postgres for Kysely, through the pool, with every connection checked before
  * its first statement and every transaction opened and committed with the
  * checks that guard it (4D2d P11). `attempts`: how many connections to try
- * before giving up, every idle one and then a new one.
+ * before giving up, every idle one and then a new one. `organisationShare`: the
+ * most an organisation's transactions may hold at once; none, no limit.
  */
-export function tenantCheckedDialect(pool: pg.Pool, logger: Logger, attempts: number): PostgresDialect {
+export function tenantCheckedDialect(
+  pool: pg.Pool,
+  logger: Logger,
+  attempts: number,
+  organisationShare?: number,
+): PostgresDialect {
+  const shares = organisationShare === undefined ? undefined : createOrganisationShares(organisationShare);
   return new (class extends PostgresDialect {
     override createDriver(): Driver {
-      return new CheckedDriver(pool, logger, attempts);
+      return new CheckedDriver(pool, logger, attempts, shares);
     }
   })({ pool });
 }

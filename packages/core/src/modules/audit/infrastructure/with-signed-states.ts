@@ -108,7 +108,8 @@ async function setHold(
         await sql`set local lock_timeout = '5s'`.execute(tx);
         return holder.hold(tx, finding, count);
       },
-      { limited: true },
+      // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
+      { limited: true, unshared: true },
     );
     unrecorded.delete(held);
     if (outcome === 'set') {
