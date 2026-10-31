@@ -89,6 +89,7 @@ import {
   type Database,
   type DatabaseTransaction,
   sweepExpiredKeys,
+  timedRoundTrips,
   UnsafeDatabaseRole,
 } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
@@ -145,6 +146,7 @@ import { createPartnerEventIntake } from './partner-events.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
+import { createRoundTripTiming, ROUND_TRIP_EVERY_MS, ROUND_TRIPS_A_RUN } from './round-trip-timing.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { activitySinkOf } from './activity-recorder.ts';
 import { loadPlaces } from './client-clues.ts';
@@ -1073,6 +1075,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
+  const roundTripTiming = scheduleRuns(
+    createRoundTripTiming({ timed: () => timedRoundTrips(database, ROUND_TRIPS_A_RUN), logger }),
+    ROUND_TRIP_EVERY_MS,
+  );
   onStopSignals(
     host,
     server,
@@ -1105,6 +1111,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           downloadBuilding.stop(),
           sealChecking.stop(),
           recording.stop(),
+          roundTripTiming.stop(),
         ]);
       },
     },

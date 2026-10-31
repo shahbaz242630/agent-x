@@ -34,6 +34,13 @@ export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
 export { liveSchemaProblems, type SchemaGuardOptions, type SchemaProblem } from './schema-guard.ts';
 export { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
 export {
+  noStatementTimes,
+  type StatementTimes,
+  statementTimesForLog,
+  timedRoundTrips,
+  timingStatements,
+} from './statement-times.ts';
+export {
   type ServerSetupOptions,
   type ServerSetupOutcome,
   ServerSetupRefused,
