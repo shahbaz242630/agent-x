@@ -60,6 +60,7 @@ import {
   writeSignedRow,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
+import type { Compilable, QueryResult } from 'kysely';
 import type { Logger } from '@agentx/platform/observability';
 
 import { UUID } from '../../../shared-kernel/index.ts';
@@ -73,7 +74,6 @@ import {
   isIncidentReference,
   isInvestigationConclusion,
 } from '../domain/integrity-hold.ts';
-import type { Compilable, QueryResult } from 'kysely';
 import {
   type AuditTrail,
   type AuditTransaction,
@@ -383,19 +383,13 @@ export interface SignedStates {
    * ID as its read named it, in the order given, null for none found.
    */
   gather(tx: AuditTransaction, orgId: string, rows: readonly GatheredRow[]): Promise<readonly (string | null)[]>;
-  /**
-   * Two gathers, each of at least one row, behind `before` on one trip (4D2d
-   * P17), so what the first gather believed isn't asked before the second's
-   * locks are: refuse on it only once this returns. What `before` answered,
-   * and the second gather's IDs.
-   */
+  /** gather, with `before` on the same trip ahead of it (4D2d P17): what `before` answered. */
   gatherBehind(
     tx: AuditTransaction,
     orgId: string,
     before: Compilable,
-    first: readonly GatheredRow[],
-    second: readonly GatheredRow[],
-  ): Promise<{ readonly ahead: QueryResult<unknown>; readonly found: readonly (string | null)[] }>;
+    rows: readonly GatheredRow[],
+  ): Promise<QueryResult<unknown>>;
   /**
    * verifiedState for many rows of one table in the organisation, each locked
    * `share`: the rows in one statement and their signed states in another,
@@ -962,20 +956,17 @@ export function createSignedStates({
     tx: AuditTransaction,
     orgId: string,
     before: Compilable,
-    firstList: readonly GatheredRow[],
-    secondList: readonly GatheredRow[],
-  ) => {
-    gatherAllowed(tx, orgId, firstList);
-    gatherAllowed(tx, orgId, secondList);
-    const { ahead, first, second } = await trail.latestSignedStatesGatheredBehind(
+    list: readonly GatheredRow[],
+  ): Promise<QueryResult<unknown>> => {
+    gatherAllowed(tx, orgId, list);
+    const { ahead, answers } = await trail.latestSignedStatesGatheredBehind(
       tx,
       orgId,
       before,
-      gatheredRowReads(orgId, firstList),
-      gatheredRowReads(orgId, secondList),
+      gatheredRowReads(orgId, list),
     );
-    gatherJudged(tx, orgId, firstList, first);
-    return { ahead, found: gatherJudged(tx, orgId, secondList, second) };
+    gatherJudged(tx, orgId, list, answers);
+    return ahead;
   };
 
   /** What a gather believed of the row, once, if it was gathered with this lock: no trip (P8). */

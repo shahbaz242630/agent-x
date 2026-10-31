@@ -2152,30 +2152,29 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
     ).rejects.toBeInstanceOf(RangeError);
   });
 
-  it('gathers behind another statement on one trip (P17), refusing what a gather refuses in either list', async () => {
+  it('gathers behind another statement on one trip (P17), refusing what a gather refuses', async () => {
     const agent = await newAgent();
     const other = await newAgent();
     const row = (id: string) => ({ table: AGENTS, id: { id }, lock: 'share' as const });
-    const behind = (first: readonly GatheredRow[], second: readonly GatheredRow[]) =>
-      withTenant(app, org, (tx) =>
-        states.gatherBehind(
+    const behind = (rows: readonly GatheredRow[]) =>
+      withTenant(app, org, async (tx) => ({
+        ahead: await states.gatherBehind(
           tx,
           org,
           tx.selectNoFrom((eb) => eb.val('ahead').as('said')),
-          first,
-          second,
+          rows,
         ),
-      );
+        checked: await states.verifiedState(tx, AGENTS, { orgId: org, id: agent }, 'share'),
+      }));
 
-    const { ahead, found } = await behind([row(agent)], [row(other)]);
+    const { ahead, checked } = await behind([row(agent), row(other)]);
     expect(ahead.rows).toEqual([{ said: 'ahead' }]);
-    expect(found).toEqual([other]);
+    expect(checked).toMatchObject({ outcome: 'verified', version: 1 });
 
     const hold = { ...row(agent), table: { ...AGENTS, subject: HOLD_SUBJECT } };
-    await expect(behind([hold], [row(other)])).rejects.toBeInstanceOf(RangeError);
-    await expect(behind([row(agent)], [hold])).rejects.toBeInstanceOf(RangeError);
+    await expect(behind([hold])).rejects.toBeInstanceOf(RangeError);
     const unknown = { ...row(agent), table: { ...AGENTS, subject: 'Not A Subject Type' } };
-    await expect(behind([row(agent)], [unknown])).rejects.toBeInstanceOf(AuditEventRefused);
+    await expect(behind([unknown])).rejects.toBeInstanceOf(AuditEventRefused);
   });
 });
 

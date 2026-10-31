@@ -18,7 +18,12 @@
 //   agent's month and what it holds or spent in it; whether proposed rules
 //   were weighed. A request naming an order is checked for a duplicate too.
 import { agentMonth } from '@agentx/core/modules/limit-reservations';
-import { agentOfMandate, type PolicyRules as Rules, widerThanMandate } from '@agentx/core/modules/mandates';
+import {
+  agentOfMandate,
+  currencyAllowed,
+  type PolicyRules as Rules,
+  widerThanMandate,
+} from '@agentx/core/modules/mandates';
 import { decide, type DecisionMade } from '@agentx/core/modules/policies';
 import type { Clock, IdGenerator, Money } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
@@ -29,7 +34,6 @@ import { MandateRefused } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import {
   agentIn,
-  currencyTaken,
   type DecisionTables,
   type MandateWeighed,
   type PoliciesWeighed,
@@ -118,7 +122,7 @@ export function createPolicySimulations({
     simulate: (orgId, mandateId, asked, whatIf, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
         const now = clock.now();
-        await currencyTaken(tx, asked.amount.currency);
+        if (!(await currencyAllowed(tx, asked.amount.currency))) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
         // The organisation's own mandates alone, by its tenant wall.
         const agentId = await agentOfMandate(tx, orgId, mandateId);
         if (agentId === undefined) throw new MandateRefused(404, 'NOT_FOUND');

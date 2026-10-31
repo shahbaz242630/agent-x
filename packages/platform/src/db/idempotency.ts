@@ -26,9 +26,13 @@
 //
 // The row is claimed first in its transaction (ADR-006 §6, lock order 0): a
 // transaction that has already written or row-locked anything, or claimed a
-// key before, is refused, so two requests with one key never hold other row
-// locks while one waits for the other. (An advisory or table lock taken
-// before the claim isn't seen; tenant code takes neither.)
+// key before, is refused, so two requests with one key don't hold other row
+// locks while one waits for the other. The refusal is read after the trip the
+// claim goes on (4D2d P17), so a caller breaking this rule can wait on the key
+// up to its bound, or answer busy, before it is named: every caller claims
+// first (work.write), and with no one in the way it is refused every time.
+// (An advisory or table lock taken before the claim isn't seen; tenant code
+// takes neither.)
 //
 // The claim and the write run inside a savepoint. A write refused along the
 // way (a temporary refusal such as ORG_FROZEN, or any error) rolls back to it
@@ -260,6 +264,12 @@ class ClaimBusy extends Error {
 const isLockTimeout = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === LOCK_NOT_AVAILABLE;
 
+/** The claim's trip: a wait run out is the claim's busy. */
+const orBusy = <Answer>(sent: Promise<Answer>): Promise<Answer> =>
+  sent.catch((error: unknown) => {
+    throw isLockTimeout(error) ? new ClaimBusy(error) : error;
+  });
+
 const notFirst = (): IdempotencyFailed =>
   new IdempotencyFailed(
     'not_first',
@@ -315,7 +325,7 @@ export function createIdempotentWrites({
       // its claim ends: then nothing is inserted if it committed, and this
       // row is if it rolled back. A wait past the bound is answered `busy`. Every statement filters by org_id too
       // (ADR-005 §7).
-      const inserted = sql<{ claimed: number }>`
+      const inserted = sql`
         insert into idempotency.keys
           (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
         values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
@@ -323,20 +333,15 @@ export function createIdempotentWrites({
         on conflict (org_id, client_kind, client_id, operation, key) do nothing
         returning 1 as claimed
       `;
-      const busyIfLocked = (error: unknown): unknown => (isLockTimeout(error) ? new ClaimBusy(error) : error);
       try {
         // The savepoint, the check and the first claim on one trip (4D2d P17). A
         // transaction gets its ID when it first writes or row-locks (a savepoint
         // gives none), so none yet means nothing was written or row-locked before
         // the claim; asked with the wait's bound (4D2d P8), for the claim behind it.
         // A claim found not to be first is undone with the rest, below.
-        const [, first, claimed] = await sendTogether(tx, [
-          sql`savepoint ${savepoint}`,
-          firstWithClaimWaitBound,
-          inserted,
-        ]).catch((error: unknown) => {
-          throw busyIfLocked(error);
-        });
+        const [, first, claimed] = await orBusy(
+          sendTogether(tx, [sql`savepoint ${savepoint}`, firstWithClaimWaitBound, inserted]),
+        );
         if ((first.rows[0] as { first: boolean | null } | undefined)?.first !== true) throw notFirst();
         const done = async (): Promise<IdempotentWrite> =>
           Object.freeze({ outcome: 'done', result: await doAndRecord(at, work) });
@@ -348,9 +353,7 @@ export function createIdempotentWrites({
         // claimed again, once. A row still in the way and still unread is one
         // row security hides: someone past the app rewrote the table's policy.
         log.info('idempotency.claimed_again', facts);
-        const again = await inserted.execute(tx).catch((error: unknown) => {
-          throw busyIfLocked(error);
-        });
+        const again = await orBusy(inserted.execute(tx));
         if (again.rows.length === 1) return await done();
         const second = await answerFromRow(at, keys, message);
         if (second !== undefined) return second;
@@ -391,7 +394,7 @@ export function createIdempotentWrites({
  * (Postgres's `0` is no limit at all). Inside the claim's savepoint, so a
  * claim that fails leaves the caller's limit as it was.
  */
-const firstWithClaimWaitBound = sql<{ first: boolean | null }>`
+const firstWithClaimWaitBound = sql`
   select pg_catalog.pg_current_xact_id_if_assigned() is null as first, ${lockWaitBounded()} as bounded
 `;
 

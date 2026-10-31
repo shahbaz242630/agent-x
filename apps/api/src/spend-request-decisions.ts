@@ -48,7 +48,6 @@ import {
 } from '@agentx/core/modules/limit-reservations';
 import {
   allowedCurrencyRead,
-  currencyAllowed,
   MANDATE_VERSIONS,
   openMandateGathered,
   openMandateOfAgent,
@@ -176,10 +175,6 @@ const rulesOf = (read: { readonly current: PolicyVersionRecord } | null): Policy
 export type MandateWeighed = MandateInForce & { readonly timeZone: string; readonly splitWindowHours: number };
 
 /** A currency the deployment doesn't take is refused: nothing is weighed in it (422). */
-export async function currencyTaken(tx: DecisionTx, currency: string): Promise<void> {
-  if (!(await currencyAllowed(tx, currency))) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
-}
-
 /** A read tampered with refuses the request: nothing is decided on what can't be believed. */
 const believed = (read: { readonly outcome: string }): void => {
   if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
@@ -527,17 +522,18 @@ export function createSpendRequestDecisions({
     // Read before the lock waits below (each at most 5 s), so a request can be weighed seconds past a mandate's
     // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
-    // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them. All on
-    // one trip (P17), refused on in the order they were asked: nothing locked is kept when one is.
-    const { ahead: currency, found } = await states.gatherBehind(
+    // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them. The
+    // currency's read and the acting rows on one trip (P17); what is refused on them is refused here, before the
+    // supplier's lock below is asked for, so a request refused anyway never queues on it.
+    const currency = await states.gatherBehind(
       tx,
       orgId,
       allowedCurrencyRead(tx, asked.amount.currency),
       actingRows(acting),
-      decisionRows(orgId, agentId, asked),
     );
     if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
     const { agent, keyId } = await actingIn(tx, states, acting, now);
+    const found = await states.gather(tx, orgId, decisionRows(orgId, agentId, asked));
     const mandateId = found[AT.mandate] ?? null;
     const versionId = found[AT.version] ?? null;
     const policyVersionId = found[AT.organizationVersion] ?? null;

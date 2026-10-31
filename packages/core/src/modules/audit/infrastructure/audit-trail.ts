@@ -323,21 +323,13 @@ export interface AuditTrail {
     orgId: string,
     reads: readonly GatheredRead[],
   ): Promise<readonly GatheredLatest[]>;
-  /**
-   * Two latestSignedStatesGathered, each of at least one read, behind `before`
-   * on one trip (4D2d P17): each its own statement, on its own snapshot.
-   */
+  /** latestSignedStatesGathered of at least one read, with `before` on the same trip ahead of it (4D2d P17). */
   latestSignedStatesGatheredBehind(
     tx: AuditTransaction,
     orgId: string,
     before: Compilable,
-    firstReads: readonly GatheredRead[],
-    secondReads: readonly GatheredRead[],
-  ): Promise<{
-    readonly ahead: QueryResult<unknown>;
-    readonly first: readonly GatheredLatest[];
-    readonly second: readonly GatheredLatest[];
-  }>;
+    reads: readonly GatheredRead[],
+  ): Promise<{ readonly ahead: QueryResult<unknown>; readonly answers: readonly GatheredLatest[] }>;
   /**
    * latestSignedState for many objects of one type, in one statement: each
    * ID asked, in lower case, with its object's latest signed state, judged
@@ -1076,10 +1068,12 @@ export function createAuditTrail({
   const gatheredAnswers = (
     chain: Chain & { readonly kind: 'organisation' },
     reads: readonly GatheredRead[],
-    rows: readonly Readonly<Record<string, unknown>>[],
+    { rows }: QueryResult<unknown>,
   ): readonly GatheredLatest[] => {
     const byItem = reads.map((): Readonly<Record<string, unknown>>[] => []);
-    for (const row of rows) if (typeof row.item === 'number') byItem[row.item]?.push(row);
+    for (const row of rows as readonly Readonly<Record<string, unknown>>[]) {
+      if (typeof row.item === 'number') byItem[row.item]?.push(row);
+    }
     return byItem.map((own) => {
       const [first] = own;
       const asked = first?.asked_id;
@@ -1222,29 +1216,20 @@ export function createAuditTrail({
       if (reads.length === 0) return [];
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      return gatheredAnswers(chain, reads, (await gatheredWithHead(chain, reads).execute(tx)).rows);
+      return gatheredAnswers(chain, reads, await gatheredWithHead(chain, reads).execute(tx));
     },
 
     async latestSignedStatesGatheredBehind(
       tx: AuditTransaction,
       orgId: string,
       before: Compilable,
-      firstReads: readonly GatheredRead[],
-      secondReads: readonly GatheredRead[],
+      reads: readonly GatheredRead[],
     ) {
-      gatheredAllowed([...firstReads, ...secondReads]);
+      gatheredAllowed(reads);
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const [ahead, first, second] = await sendTogether(tx, [
-        before,
-        gatheredWithHead(chain, firstReads),
-        gatheredWithHead(chain, secondReads),
-      ]);
-      return {
-        ahead,
-        first: gatheredAnswers(chain, firstReads, first.rows as Readonly<Record<string, unknown>>[]),
-        second: gatheredAnswers(chain, secondReads, second.rows as Readonly<Record<string, unknown>>[]),
-      };
+      const [ahead, gathered] = await sendTogether(tx, [before, gatheredWithHead(chain, reads)]);
+      return { ahead, answers: gatheredAnswers(chain, reads, gathered) };
     },
 
     async latestSignedStates(
