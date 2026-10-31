@@ -570,6 +570,12 @@ describe('deciding a spend request and reserving it (D4)', () => {
     for (const line of decided()) {
       expect(Number.isInteger(line.durationMs)).toBe(true);
       expect(line.durationMs).toBeGreaterThan(0);
+      // Where its time went (4D2d): its trips, the commit's among them, each timed, in the line.
+      expect(line.trips).toBeGreaterThan(5);
+      expect(line.commitMs).toBeGreaterThan(0);
+      expect(line.databaseMs).toBeGreaterThanOrEqual(line.slowestTripMs as number);
+      expect(line.turnWaitMs).toBeGreaterThanOrEqual(0);
+      expect(line.poolWaitMs).toBeGreaterThanOrEqual(0);
     }
     // The signal alone: no order, amount or supplier in the line.
     const lines = JSON.stringify(decided());

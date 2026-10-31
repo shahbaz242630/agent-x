@@ -525,6 +525,11 @@ export const PLAIN_WORDS = {
     broke: 'Guards past their 30 days may not have been deleted; they only take up a little room.',
     next: 'The next clean-up runs about an hour later. If it repeats, a developer should look at it.',
   },
+  'db.round_trip_failed': {
+    happened: 'The timed check of how long a trip to the database takes failed or did not finish in time.',
+    broke: 'Nothing else: no request depends on it. If the database itself is failing, other alerts say so.',
+    next: 'It runs again within 15 seconds. If it keeps failing, check that the API can reach the database.',
+  },
   'idempotency.sweep_failed': {
     happened: 'The hourly clean-up of old repeat-request guards failed for one organisation or for all.',
     broke: 'Guards past their 30 days were not deleted this time; they only take up a little room.',

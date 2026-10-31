@@ -39,6 +39,7 @@ import type pg from 'pg';
 import type { Logger } from '../observability/index.ts';
 import { UUID } from './patterns.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
+import { timedPoolWait, timedTrip } from './statement-times.ts';
 
 /**
  * The tenant policy's expression as `pg_get_expr` prints it back, which the
@@ -407,7 +408,7 @@ class CheckedConnection implements DatabaseConnection {
   async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
     if (!this.#checked) await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)) }));
     // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
-    return resultOf<R>(await this.#taken().query(query.sql, [...query.parameters]));
+    return resultOf<R>(await timedTrip(() => this.#taken().query(query.sql, [...query.parameters])));
   }
 
   streamQuery<R>(): AsyncIterableIterator<QueryResult<R>> {
@@ -438,12 +439,12 @@ class CheckedConnection implements DatabaseConnection {
     const tenant = this.#tenant;
     this.#tenant = undefined;
     if (tenant === undefined) {
-      await this.#taken().query('commit');
+      await timedTrip(() => this.#taken().query('commit'), 'commit');
       return;
     }
     try {
       // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
-      await this.#taken().query(`${stillTenant(tenant)}; commit`);
+      await timedTrip(() => this.#taken().query(`${stillTenant(tenant)}; commit`), 'commit');
     } catch (error) {
       // Changed and put back in between is not seen here; row security still walls each statement to the setting it ran under.
       if (error instanceof Error && (error as { code?: unknown }).code === TENANT_CHANGED) {
@@ -457,7 +458,7 @@ class CheckedConnection implements DatabaseConnection {
 
   async rollback(): Promise<void> {
     this.#tenant = undefined;
-    await this.#taken().query('rollback');
+    await timedTrip(() => this.#taken().query('rollback'));
   }
 
   release(): void {
@@ -481,7 +482,7 @@ class CheckedConnection implements DatabaseConnection {
     for (let attempt = 1; attempt <= this.#attempts; attempt += 1) {
       let answer: { problem: string | undefined; value?: T };
       try {
-        answer = await trip(this.#taken());
+        answer = await timedTrip(() => trip(this.#taken()));
       } catch (error) {
         this.#broken = true;
         throw error;
@@ -493,7 +494,7 @@ class CheckedConnection implements DatabaseConnection {
       this.#taken().release(true);
       this.#client = undefined;
       this.#logger.error('db.tenant.leftover_discarded', { attempt, problem: answer.problem });
-      if (attempt < this.#attempts) this.#client = await this.#pool.connect();
+      if (attempt < this.#attempts) this.#client = await timedPoolWait(() => this.#pool.connect());
     }
     throw new TenantContextError(`no sound connection after ${String(this.#attempts)} tries`);
   }
@@ -521,7 +522,8 @@ class CheckedDriver implements Driver {
   }
 
   async acquireConnection(): Promise<DatabaseConnection> {
-    return new CheckedConnection(this.#pool, this.#logger, this.#attempts, await this.#pool.connect());
+    const client = await timedPoolWait(() => this.#pool.connect());
+    return new CheckedConnection(this.#pool, this.#logger, this.#attempts, client);
   }
 
   beginTransaction(connection: DatabaseConnection, settings: TransactionSettings): Promise<void> {

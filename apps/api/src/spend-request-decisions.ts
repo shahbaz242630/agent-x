@@ -88,7 +88,10 @@ import {
   type GatheredRow,
   type IdempotentRequest,
   isUnwritten,
+  noStatementTimes,
   retryingTransaction,
+  statementTimesForLog,
+  timingStatements,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -629,18 +632,22 @@ export function createSpendRequestDecisions({
       let fresh: SpendRequestRecord | undefined;
       // The whole decision, its turn's wait, lock waits and retries too, for the Pilot's policy target (PL-38).
       const started = performance.now();
+      // Where its time goes (4D2d): logged with it, so a slow one can be read on Azure.
+      const times = noStatementTimes();
+      let turnWaitMs = 0;
+      const attempt = () =>
+        work.write(agent, idempotent, correlationId, async (tx, states) => {
+          made = await decided(tx, states, agent, idempotent.key, asked);
+          fresh = made.answer;
+          return { status: 201, resourceId: made.id };
+        });
       // In its agent's turn, so a burst from one agent can't hold every connection while it waits on its month.
       let done: Awaited<ReturnType<typeof work.write>>;
       try {
-        done = await turns.run(agent.agentId, () =>
-          retryingTransaction(log, DECIDE_OPERATION, () =>
-            work.write(agent, idempotent, correlationId, async (tx, states) => {
-              made = await decided(tx, states, agent, idempotent.key, asked);
-              fresh = made.answer;
-              return { status: 201, resourceId: made.id };
-            }),
-          ),
-        );
+        done = await turns.run(agent.agentId, () => {
+          turnWaitMs = performance.now() - started;
+          return timingStatements(times, () => retryingTransaction(log, DECIDE_OPERATION, attempt));
+        });
       } catch (error) {
         if (!(error instanceof TurnWaitExceeded)) throw error;
         // Nothing of it was made, its key unclaimed: the agent sends it again (partner, S161: busy, never a 500).
@@ -657,6 +664,8 @@ export function createSpendRequestDecisions({
           decision: made.decision,
           reasons: made.reasons.join(' '),
           durationMs: Math.round(performance.now() - started),
+          turnWaitMs: Math.round(turnWaitMs),
+          ...statementTimesForLog(times),
         });
       }
       // A fresh decision answers as its own transaction sealed it (4D2d P4 and P8, partner decision 2);
