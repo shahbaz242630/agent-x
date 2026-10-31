@@ -58,6 +58,8 @@ export interface Config {
     readonly rateLimitPerUserPerMinute: number;
     /** ADR-011 §4 (C2-2, SEC-AG-06): the most requests one AI agent may make per minute, with any of its keys. */
     readonly rateLimitPerAgentPerMinute: number;
+    /** One organisation's, people and agents together (PL-63). */
+    readonly rateLimitPerOrganisationPerMinute: number;
   };
   /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
   readonly db: {
@@ -181,7 +183,10 @@ function trustedProxiesProblems(environment: Environment, proxies: readonly stri
  */
 function rateLimitProblems(
   name:
-    'AGENTX_RATE_LIMIT_PER_MINUTE' | 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE' | 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',
+    | 'AGENTX_RATE_LIMIT_PER_MINUTE'
+    | 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE'
+    | 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE'
+    | 'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE',
   perMinute: number,
   eventCapPerMinute: number,
 ): string[] {
@@ -189,6 +194,7 @@ function rateLimitProblems(
     AGENTX_RATE_LIMIT_PER_MINUTE: "one client's",
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: "one person's",
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: "one agent's",
+    AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: "one organisation's",
   }[name];
   return perMinute * 2 > eventCapPerMinute
     ? [
@@ -352,6 +358,7 @@ function readSettings(env: Env, location: LocationChecks) {
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
     rateLimitPerUser: setting(env, 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE'),
     rateLimitPerAgent: setting(env, 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE'),
+    rateLimitPerOrganisation: setting(env, 'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
     oidcIssuer: setting(env, 'AGENTX_OIDC_ISSUER'),
     oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
@@ -420,6 +427,8 @@ function rateLimitRuleProblems(checks: Settings): string[] {
     ['AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE', checks.rateLimitPerUser],
     // C2-2: an agent using several keys, or several addresses, is held by its own.
     ['AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE', checks.rateLimitPerAgent],
+    // PL-63: an organisation's people and agents together, each under their own, are held by its own.
+    ['AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE', checks.rateLimitPerOrganisation],
   ] as const;
   return limits.flatMap(([name, limit]) =>
     limit.ok && eventCap.ok ? rateLimitProblems(name, limit.value, eventCap.value) : [],
@@ -530,6 +539,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       rateLimitPerMinute: checks.rateLimit.value,
       rateLimitPerUserPerMinute: checks.rateLimitPerUser.value,
       rateLimitPerAgentPerMinute: checks.rateLimitPerAgent.value,
+      rateLimitPerOrganisationPerMinute: checks.rateLimitPerOrganisation.value,
     }),
     db: Object.freeze({
       host: checks.dbHost.value,

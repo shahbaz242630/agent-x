@@ -18,17 +18,20 @@ import { buildServer } from './server.ts';
 
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const OTHER_AGENT = '0199a0f0-0000-7000-8000-0000000000a2';
+const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
+const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000abce';
 const KEY_TEXT = (letter: string) => `axk_${letter.repeat(32)}_${'b'.repeat(43)}`;
-/** Two keys of one agent, as through a rotation's overlap, and one of another agent. */
+/** Two keys of one agent, as through a rotation's overlap, one of another agent, and one in another organisation. */
 const KEYS: ReadonlyMap<string, AcceptedKey> = new Map(
   [
     ['a', AGENT_ID, '0199a0f0-0000-7000-8000-0000000000b1'],
     ['c', AGENT_ID, '0199a0f0-0000-7000-8000-0000000000b2'],
     ['d', OTHER_AGENT, '0199a0f0-0000-7000-8000-0000000000b3'],
-  ].map(([letter = '', agentId = '', keyId = '']) => [
+    ['k', '0199a0f0-0000-7000-8000-0000000000a3', '0199a0f0-0000-7000-8000-0000000000b4', OTHER_ORG],
+  ].map(([letter = '', agentId = '', keyId = '', orgId = ORG]) => [
     KEY_TEXT(letter),
     {
-      orgId: '0199a0f0-0000-7000-8000-00000000abcd',
+      orgId,
       agentId,
       keyId,
       scopes: ['requests:read'],
@@ -43,7 +46,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
-async function server({ perAddress = 100, perAgent = 10 } = {}) {
+async function server({ perAddress = 100, perAgent = 10, perOrganisation = 100_000 } = {}) {
   const config = {
     http: {
       host: '127.0.0.1',
@@ -53,6 +56,7 @@ async function server({ perAddress = 100, perAgent = 10 } = {}) {
       rateLimitPerMinute: perAddress,
       rateLimitPerUserPerMinute: 100,
       rateLimitPerAgentPerMinute: perAgent,
+      rateLimitPerOrganisationPerMinute: perOrganisation,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
@@ -108,6 +112,45 @@ const asAgent = (letter: string, remoteAddress = '198.51.100.1') => ({
   url: '/v1/agent',
   headers: { authorization: `Bearer ${KEY_TEXT(letter)}` },
   remoteAddress,
+});
+
+describe("each organisation's own rate limit, beside its agents' (PL-63)", () => {
+  const ask = (letter: string, remoteAddress?: string) => ({
+    ...asAgent(letter, remoteAddress),
+    url: '/test/supplier',
+  });
+
+  it('refuses an organisation past its limit, whichever of its agents asks, and notes it', async () => {
+    const { app, noted } = await server({ perAddress: 1000, perAgent: 1000, perOrganisation: 3 });
+    for (const letter of ['a', 'a', 'd']) expect((await app.inject(ask(letter))).statusCode).toBe(200);
+    const refused = await app.inject(ask('d', '203.0.113.9'));
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toEqual(errorBody('RATE_LIMITED', refused.headers['x-correlation-id'] as string));
+    expect(refused.headers['x-ratelimit-limit']).toBe('3');
+    expect(refused.headers['retry-after']).toBeDefined();
+    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_organisation', ip: '203.0.113.9' }]);
+  });
+
+  it('never refuses another organisation', async () => {
+    const { app } = await server({ perAddress: 1000, perAgent: 1000, perOrganisation: 2 });
+    for (const letter of ['a', 'a']) expect((await app.inject(ask(letter))).statusCode).toBe(200);
+    expect((await app.inject(ask('a'))).statusCode).toBe(429);
+    expect((await app.inject(ask('k'))).statusCode).toBe(200);
+  });
+
+  it('leaves a request of no known organisation to its address’s limit', async () => {
+    const { app } = await server({ perAddress: 1000, perAgent: 1000, perOrganisation: 1 });
+    for (let at = 0; at < 3; at += 1) expect((await app.inject({ url: '/test/open-traffic' })).statusCode).toBe(200);
+  });
+
+  it('counts only what the agent’s own limit let through', async () => {
+    const { app, noted } = await server({ perAddress: 1000, perAgent: 1, perOrganisation: 2 });
+    expect((await app.inject(ask('a'))).statusCode).toBe(200);
+    expect((await app.inject(ask('a'))).statusCode).toBe(429);
+    expect((await app.inject(ask('a'))).statusCode).toBe(429);
+    expect((await app.inject(ask('d'))).statusCode).toBe(200);
+    expect(noted.map(({ reason }) => reason)).toEqual(['per_agent', 'per_agent']);
+  });
 });
 
 describe("an agent's request counts against its organisation's share of the connections (PL-63)", () => {

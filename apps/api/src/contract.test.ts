@@ -48,6 +48,7 @@ async function server(ids: IdGenerator = new SequentialIds()) {
       rateLimitPerMinute: 100,
       rateLimitPerUserPerMinute: 100,
       rateLimitPerAgentPerMinute: 100,
+      rateLimitPerOrganisationPerMinute: 100_000,
     },
     log: { level: 'debug' as const, eventCapPerMinute: 10_000 },
   };

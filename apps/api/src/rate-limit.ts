@@ -1,6 +1,6 @@
 // ADR-011 §4, SEC-AV-07: the rate limit per client address, counted for every
 // request, including 404s, refusals and malformed addresses; and, beside it,
-// each signed-in person's own (B2-5c).
+// each signed-in person's own (B2-5c), each agent's and each organisation's.
 //
 // It counts with the plugin's `createRateLimit`, not its `rateLimit` hook. That
 // hook marks each request as counted, which would stop any route's own limit
@@ -164,6 +164,41 @@ export function createAgentCounter(
     }
   };
 }
+
+/**
+ * The hook that counts each organisation's requests against its own limit
+ * (4D2d, PL-63), beside each person's and agent's: its people and agents
+ * together, so what it sends can't take another organisation's room, and only
+ * ever refuses the organisation that hit it. It runs after the access hook, and
+ * counts only a request it knows the organisation of. Counted per API process,
+ * so the real limit grows with replicas. Over the limit, it tells `limited` the
+ * client's address, sets the limit headers to the organisation's, and throws the
+ * same 429.
+ */
+export function createOrganisationCounter(
+  app: FastifyInstance,
+  perMinute: number,
+  trust: ProxyTrust,
+  limited: (ip: string | undefined) => void,
+): CountRequest {
+  const limiter = app.createRateLimit({
+    max: perMinute,
+    timeWindow: WINDOW_MS,
+    // Only called for a request with an organisation: the hook below looks first.
+    keyGenerator: (request) => organisationOf(request) ?? UNREADABLE_ADDRESS,
+  });
+  return async (request, reply) => {
+    if (organisationOf(request) === undefined) return;
+    if (await overLimit(limiter, request, reply, 'when-refused')) {
+      limited(rawClientIp(request, trust));
+      throw new RateLimited('rate limit exceeded');
+    }
+  };
+}
+
+/** The organisation a request is known to act in: its agent's, or the one its person was verified in. */
+const organisationOf = (request: FastifyRequest): string | undefined =>
+  request.agent?.orgId ?? request.verifiedOrg ?? undefined;
 
 /**
  * Counts the request and says whether it is over the limit. The limit headers

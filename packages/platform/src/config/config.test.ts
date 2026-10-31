@@ -91,6 +91,7 @@ describe('config: a correct config loads', () => {
         rateLimitPerMinute: 300,
         rateLimitPerUserPerMinute: 120,
         rateLimitPerAgentPerMinute: 120,
+        rateLimitPerOrganisationPerMinute: 300,
       },
       db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
@@ -157,6 +158,7 @@ describe('config: a correct config loads', () => {
         rateLimitPerMinute: 120,
         rateLimitPerUserPerMinute: 60,
         rateLimitPerAgentPerMinute: 30,
+        rateLimitPerOrganisationPerMinute: 300,
       },
       db: {
         host: '10.0.0.5',
@@ -608,6 +610,7 @@ describe('SEC-AV-03 logging settings', () => {
       AGENTX_RATE_LIMIT_PER_MINUTE: '10',
       AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '10',
       AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '10',
+      AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: '10',
     };
     expect(loadConfig(env).log.eventCapPerMinute).toBe(expected);
   });

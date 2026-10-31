@@ -777,6 +777,10 @@ var loadApiSettings = [
     value: '50000'
   }
   {
+    name: 'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE'
+    value: '50000'
+  }
+  {
     name: 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'
     value: '200000'
   }

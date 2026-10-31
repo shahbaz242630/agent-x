@@ -106,7 +106,7 @@ describe('the load stack (compose.load.yaml)', () => {
     expect(api.environment?.AGENTX_DB_POOL_MAX).toBe('20');
     const cap = Number(api.environment?.AGENTX_LOG_EVENT_CAP_PER_MINUTE);
     const limits = Object.entries(api.environment ?? {}).filter(([name]) => name.startsWith('AGENTX_RATE_LIMIT_'));
-    expect(limits).toHaveLength(3);
+    expect(limits).toHaveLength(4);
     for (const [name, value] of limits) expect(Number(value) * 2, name).toBeLessThanOrEqual(cap);
   });
 

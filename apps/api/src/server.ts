@@ -64,6 +64,7 @@ import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
 import {
   createAgentCounter,
   createCounter,
+  createOrganisationCounter,
   createPersonCounter,
   proxyTrust,
   RATE_LIMIT_HEADERS,
@@ -380,6 +381,13 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.addHook('onRequest', personCounter);
   // After the access hook too, which finds the agent.
   app.addHook('onRequest', agentCounter);
+  // Once they have, so a person or agent past their own limit doesn't use the organisation's (PL-63).
+  app.addHook(
+    'onRequest',
+    createOrganisationCounter(app, config.http.rateLimitPerOrganisationPerMinute, trust, (ip) => {
+      securityEvents.note({ kind: 'rate_limited', reason: 'per_organisation', ip });
+    }),
+  );
   // After the caller is known and counted, before the body is read.
   registerIdempotencyKeys(app);
   registerActivityLog(app, { sink: options.activity, logger, trust, placeOf: options.placeOf });

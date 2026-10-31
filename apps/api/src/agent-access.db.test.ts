@@ -126,6 +126,7 @@ beforeEach(async () => {
       rateLimitPerMinute: 1000,
       rateLimitPerUserPerMinute: 1000,
       rateLimitPerAgentPerMinute: 1000,
+      rateLimitPerOrganisationPerMinute: 100_000,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
