@@ -1200,6 +1200,49 @@ describe('the retention sweep (B1e, db/migrations/0009)', () => {
     expect(await kept(org)).toEqual([key]);
   });
 
+  it('B1e-2 answers busy when the claim made again runs out its wait', async () => {
+    const org = newId();
+    const key = await keyAged(org, '31 days', 'swept-then-busy');
+    const owner = database.as('owner');
+    await owner.query(
+      `create function probe.swept_then_read(swept text, result integer) returns boolean
+       language plpgsql set search_path = pg_catalog as $$
+       begin
+         if swept <> 'swept-then-busy' or result is null or current_setting('probe.swept', true) = 'yes' then return true; end if;
+         perform set_config('probe.swept', 'yes', true);
+         delete from idempotency.keys where key = swept;
+         return false;
+       end $$`,
+    );
+    await owner.query('grant execute on function probe.swept_then_read(text, integer) to agentx_app');
+    await owner.query(
+      'create policy swept_then_read on idempotency.keys as restrictive for select using (probe.swept_then_read(key, result_status))',
+    );
+    // Its second claim meets a lock it can't wait out, as one another request holds would be.
+    await owner.query(
+      `create function probe.busy_once_swept() returns trigger
+       language plpgsql set search_path = pg_catalog as $$
+       begin
+         if current_setting('probe.swept', true) = 'yes' then raise exception 'forced' using errcode = '55P03'; end if;
+         return new;
+       end $$`,
+    );
+    await owner.query(
+      'create trigger busy_once_swept before insert on idempotency.keys for each row execute function probe.busy_once_swept()',
+    );
+    let outcome: IdempotentWrite;
+    try {
+      outcome = await write(requestFor(key, { orgId: org, payload: '{"label":"again"}' }));
+    } finally {
+      await owner.query('drop trigger busy_once_swept on idempotency.keys');
+      await owner.query('drop function probe.busy_once_swept()');
+      await owner.query('drop policy swept_then_read on idempotency.keys');
+      await owner.query('drop function probe.swept_then_read(text, integer)');
+    }
+
+    expect(outcome).toEqual({ outcome: 'busy' });
+  });
+
   it('B1e-2 answers from the row of a request that claimed the swept key first, never taking it for hidden', async () => {
     const org = newId();
     const key = await keyAged(org, '31 days', 'swept-and-reclaimed');

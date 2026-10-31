@@ -1680,7 +1680,16 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
       await replaying;
       await replayer.query('commit');
 
-      expect(await checking).toMatchObject({ outcome: 'tampered', sign: 'pointer' });
+      // Once the change commits, Postgres has both waiters follow the row to its new version, and either can lock it
+      // first. The check that wins locks the real version 2 before anything is put back, so verified is true of it:
+      // then the next check is the one that finds it.
+      const seen = await checking;
+      if (seen.outcome === 'verified') {
+        expect(seen.version).toBe(2);
+        expect(await check(id)).toMatchObject({ outcome: 'tampered', sign: 'pointer' });
+      } else {
+        expect(seen).toMatchObject({ outcome: 'tampered', sign: 'pointer' });
+      }
     } finally {
       release();
       await replayer.end();

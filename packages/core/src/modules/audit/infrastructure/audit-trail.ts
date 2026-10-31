@@ -693,6 +693,12 @@ function gatheredWithHead(
   `;
 }
 
+/** Refuses reads of a subject type the log doesn't take. */
+function gatheredAllowed(reads: readonly GatheredRead[]): void {
+  const problems = reads.flatMap(({ subject }) => subjectTypeProblems(subject));
+  if (problems.length > 0) throw new AuditEventRefused(problems);
+}
+
 /** The caller's rows eventsWithHead read alongside (its `row_json`), none when it found none: undefined if they don't read as rows. */
 function rowsAlong(
   first: Readonly<Record<string, unknown>> | undefined,
@@ -1212,8 +1218,7 @@ export function createAuditTrail({
       orgId: string,
       reads: readonly GatheredRead[],
     ): Promise<readonly GatheredLatest[]> {
-      const problems = reads.flatMap(({ subject }) => subjectTypeProblems(subject));
-      if (problems.length > 0) throw new AuditEventRefused(problems);
+      gatheredAllowed(reads);
       if (reads.length === 0) return [];
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
@@ -1227,8 +1232,7 @@ export function createAuditTrail({
       firstReads: readonly GatheredRead[],
       secondReads: readonly GatheredRead[],
     ) {
-      const problems = [...firstReads, ...secondReads].flatMap(({ subject }) => subjectTypeProblems(subject));
-      if (problems.length > 0) throw new AuditEventRefused(problems);
+      gatheredAllowed([...firstReads, ...secondReads]);
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const [ahead, first, second] = await sendTogether(tx, [
