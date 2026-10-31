@@ -505,6 +505,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
         password: DB_LOGIN,
         tls: 'verify-full',
         maxConnections: 3,
+        organisationShare: 1,
         applicationName: 'agentx-api',
       },
     ]);
