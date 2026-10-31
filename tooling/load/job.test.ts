@@ -53,6 +53,22 @@ describe("the run's agents, as load.ts hands them to the second job", () => {
     expect(() => agentsOf(text)).toThrow(/AGENTX_LOAD_SEEDED/);
   });
 
+  it('lets the neighbours’ crowds share an organisation, but never the calm ones', () => {
+    for (const kind of ['neighbour-busy', 'neighbour-stuck']) {
+      const crowd = [
+        { ...AGENT, kind, agentId: 'a' },
+        { ...AGENT, kind, agentId: 'b' },
+      ];
+      expect(agentsOf(JSON.stringify(crowd))).toEqual(crowd);
+    }
+    const calm = [
+      { ...AGENT, kind: 'neighbour-calm', agentId: 'a' },
+      { ...AGENT, kind: 'neighbour-calm', agentId: 'b' },
+    ];
+    expect(() => agentsOf(JSON.stringify(calm))).toThrow('names an organisation twice');
+    expect(agentsOf(JSON.stringify(calm.slice(0, 1)))).toEqual(calm.slice(0, 1));
+  });
+
   it('lets a crowd’s agents share their organisation', () => {
     const crowd = [
       { ...AGENT, kind: 'crowd-shared', agentId: 'a' },

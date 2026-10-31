@@ -7,7 +7,8 @@
  * 4. the API restarted, so its holdings check runs over phase 1's requests,
  *    and a new key for each agent (keys.load.test.ts), as Azure's second job makes its own
  * 5. phase 2 of k6, with the spike, then phases 3 and 4: the same traffic from
- *    ten agents of one organisation, reported apart
+ *    ten agents of one organisation, reported apart; then phase 5: calm
+ *    organisations beside a busy and a stuck one, reported apart too
  * 6. the database checked (verify.load.test.ts), the run's organisations
  *    made inert (cleanup.load.test.ts), as Azure's run leaves them on
  *    staging, and the API's log read (logs.ts)
@@ -24,16 +25,22 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ENV_FILE, prepare } from '../../deploy/compose/prepare.ts';
-import { apartOrgsOf, logFailures, summariseLogs } from './logs.ts';
+import { createDatabase } from '../../packages/platform/src/db/index.ts';
+import { testLogger } from '../../packages/testing/src/index.ts';
+
+import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
+import { apartOrgsOf, logFailures, summariseLogs, troubleWindowOf } from './logs.ts';
 import {
   API_CPUS_VARIABLE,
   DELAY_VARIABLE,
   LEAST_API_CPUS,
+  loadConnection,
   type LoadOptions,
   type LoadPhase,
   LOAD_PROJECT,
   MOST_API_CPUS,
   MOST_DELAY_MS,
+  NEIGHBOURS_PHASE,
   optionsOf,
   OUT_DIR,
   POLICY_P95_MS,
@@ -41,6 +48,7 @@ import {
   REPORTS_DIR,
 } from './plan.ts';
 import { type PhaseResult, type PhaseStatements, phaseFailures, renderReport } from './report.ts';
+import { whileStuck } from './stuck.ts';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const COMPOSE = [
@@ -173,7 +181,20 @@ function reportFile(at: string, apiCpus: number, delayMs: number): string {
   }
 }
 
-function main({ keep, apiCpus, delayMs }: LoadOptions): number {
+/** Phase 5, the stuck organisation's suppliers held locked for it, on a connection of the runner's own. */
+async function neighboursPhase(password: string): Promise<ReturnType<typeof measured>> {
+  const database = createDatabase<MandateWorldTables>(
+    loadConnection({ AGENTX_LOAD_DB_PASSWORD: password }),
+    testLogger(),
+  );
+  try {
+    return await whileStuck(database, readSeeded().agents, () => measured(NEIGHBOURS_PHASE));
+  } finally {
+    await database.destroy();
+  }
+}
+
+async function main({ keep, apiCpus, delayMs }: LoadOptions): Promise<number> {
   preflight();
   // Read by compose.load.yaml: each docker call below inherits them.
   process.env[API_CPUS_VARIABLE] = String(apiCpus);
@@ -208,7 +229,7 @@ function main({ keep, apiCpus, delayMs }: LoadOptions): number {
     must('The API restarted', 'docker', [...COMPOSE, 'restart', 'api']);
     must('The API back', 'docker', [...COMPOSE, 'up', '--wait', '--no-deps', 'api']);
     must('New keys', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'keys'], login);
-    const all = [first, measured(2), measured(3), measured(4)];
+    const all = [first, measured(2), measured(3), measured(4), await neighboursPhase(login.AGENTX_LOAD_DB_PASSWORD)];
     const created = all.reduce((sum, { result }) => sum + result.created, 0);
     console.log('\n== The database after the run');
     const verified = run(process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'verify'], {
@@ -220,7 +241,11 @@ function main({ keep, apiCpus, delayMs }: LoadOptions): number {
     });
     const log = run('docker', [...COMPOSE, 'logs', '--no-log-prefix', '--no-color', 'api'], { shown: false });
     writeFileSync(path.join(OUT_DIR, 'api.log'), log.stdout);
-    const logs = summariseLogs(log.stdout, apartOrgsOf(readSeeded().agents));
+    const logs = summariseLogs(
+      log.stdout,
+      apartOrgsOf(readSeeded().agents),
+      troubleWindowOf(all.map(({ result }) => result)),
+    );
     const failures = [
       ...all.flatMap(({ result }) => phaseFailures(result)),
       ...(verified.code === 0 ? [] : ['The database checks failed: their output is above.']),
@@ -257,7 +282,7 @@ if (import.meta.main) {
         `Run it as \`corepack pnpm load [--keep] [--cpus <n>] [--delay-ms <ms>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}, ms a whole number from 0 to ${String(MOST_DELAY_MS)}.`,
       );
     }
-    process.exitCode = main(options);
+    process.exitCode = await main(options);
   } catch (error) {
     if (!(error instanceof LoadRefused)) throw error;
     console.error(`\n${error.message}`);

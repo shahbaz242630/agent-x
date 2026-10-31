@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { logFailures, percentile, percentilesOf, summariseLogs } from './logs.ts';
+import { logFailures, percentile, percentilesOf, summariseLogs, troubleWindowOf } from './logs.ts';
 
 const line = (fields: Record<string, unknown>) => JSON.stringify({ level: 'info', ...fields });
 const decided = (durationMs: number) => line({ event: 'spend_request.decided', durationMs });
 const checked = (requests: number, mismatched = 0, tampered = 0) =>
   line({ event: 'holdings_check.passed', requests, mismatched, tampered });
+const NO_NEIGHBOUR = { count: 0, p50: 0, p95: 0, p99: 0, max: 0, connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0 };
 
 describe('percentiles', () => {
   it('takes the nearest rank, and 0 of nothing', () => {
@@ -105,7 +106,71 @@ describe('the API’s log after a load run', () => {
       crowdOwnDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
       crowdSharedDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
       allowed: 0,
+      steadyParts: { connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0 },
+      neighbours: { calm: NO_NEIGHBOUR, busy: NO_NEIGHBOUR, stuck: NO_NEIGHBOUR },
+      neighbourProblems: {},
     });
+  });
+
+  it('times each neighbour apart with where its time went, none of it in the steady numbers or the allowed count', () => {
+    const inOrg = (orgId: string, durationMs: number, poolWaitMs: number, turnWaitMs: number, trips: number) =>
+      line({ event: 'spend_request.decided', orgId, durationMs, poolWaitMs, turnWaitMs, trips, decision: 'ALLOW' });
+    const summary = summariseLogs(
+      [
+        checked(1),
+        inOrg('steady', 10, 1, 2, 19),
+        inOrg('calm', 20, 3, 4, 20),
+        inOrg('busy', 30, 5, 6, 21),
+        inOrg('stuck', 40, 7, 8, 22),
+      ].join('\n'),
+      { calm: new Set(['calm']), busy: new Set(['busy']), stuck: new Set(['stuck']) },
+    );
+    expect(summary.decisions.count).toBe(1);
+    expect(summary.allowed).toBe(1);
+    expect(summary.steadyParts).toEqual({ connectionWaitP95: 1, turnWaitP95: 2, tripsP50: 19 });
+    const percentiles = (n: number) => ({ count: 1, p50: n, p95: n, p99: n, max: n });
+    expect(summary.neighbours).toEqual({
+      calm: { ...percentiles(20), connectionWaitP95: 3, turnWaitP95: 4, tripsP50: 20 },
+      busy: { ...percentiles(30), connectionWaitP95: 5, turnWaitP95: 6, tripsP50: 21 },
+      stuck: { ...percentiles(40), connectionWaitP95: 7, turnWaitP95: 8, tripsP50: 22 },
+    });
+    // Each neighbour's line accounts for a decision the run made.
+    expect(logFailures(summary, 4, 150)).toEqual([]);
+    expect(logFailures(summary, 3, 150)).toEqual(['The log has 4 decision line(s) for 3 decision(s).']);
+  });
+
+  it('keeps the trouble’s warnings apart, by phase 5’s window, and fails a run on any outside it', () => {
+    const window = { from: '2026-11-01T10:02:00.000Z', to: '2026-11-01T10:04:15.000Z' };
+    const warned = (time: string | undefined, event: string) => line({ level: 'error', event, time });
+    const summary = summariseLogs(
+      [
+        checked(3),
+        warned('2026-11-01T10:01:59.999Z', 'before'),
+        warned('2026-11-01T10:02:00.000Z', 'at.the.start'),
+        warned('2026-11-01T10:04:15.000Z', 'at.the.end'),
+        warned('2026-11-01T10:04:15.001Z', 'after'),
+        warned(undefined, 'no.time'),
+      ].join('\n'),
+      {},
+      window,
+    );
+    expect(summary.neighbourProblems).toEqual({ 'at.the.start': 1, 'at.the.end': 1 });
+    expect(summary.problems).toEqual({ before: 1, after: 1, 'no.time': 1 });
+    expect(logFailures(summary, 0, 150)).toHaveLength(3);
+  });
+
+  it('counts every warning as the run’s when no phase 5 ran', () => {
+    expect(troubleWindowOf([{}, {}])).toBeUndefined();
+    expect(troubleWindowOf([{ startedAt: '2026-11-01T10:02:00.000Z' }])).toBeUndefined();
+    const summary = summariseLogs(line({ level: 'warn', event: 'a', time: '2026-11-01T10:03:00.000Z' }));
+    expect(summary.problems).toEqual({ a: 1 });
+    expect(summary.neighbourProblems).toEqual({});
+  });
+
+  it('runs phase 5’s window from k6’s start to a margin past its end', () => {
+    expect(
+      troubleWindowOf([{}, { startedAt: '2026-11-01T10:02:00.000Z', endedAt: '2026-11-01T10:04:00.000Z' }]),
+    ).toEqual({ from: '2026-11-01T10:02:00.000Z', to: '2026-11-01T10:04:15.000Z' });
   });
 
   it('times the spike’s decisions apart, by the capped agent’s organisation, and counts both against the run', () => {

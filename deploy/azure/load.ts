@@ -16,7 +16,7 @@
 // 3. restarts the API's revision, so its holdings check runs over phase 1's
 //    requests at the start, and waits until it runs again
 // 4. writes the agents and phase 1's count onto load-second and runs it (new
-//    keys, k6's phases 2 to 4, the database checks, the clean-up)
+//    keys, k6's phases 2 to 5, the database checks, the clean-up)
 // 5. reads the API's own lines over the run and writes the report, as the
 //    laptop's run does, to tooling/load/reports/<day>-azure-<cpus>cpu.md
 // Each request is written as the operator's is (held-request.ts): the jobs
@@ -30,7 +30,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { agentsOf, LATER_PHASES } from '../../tooling/load/job.ts';
-import { apartOrgsOf, type LogSummary, logFailures, summariseLogs } from '../../tooling/load/logs.ts';
+import { apartOrgsOf, type LogSummary, logFailures, summariseLogs, troubleWindowOf } from '../../tooling/load/logs.ts';
 import { orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
@@ -517,7 +517,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   const flags: Readonly<Record<string, string>> = smoke ? { AGENTX_LOAD_SMOKE: '1' } : {};
   const first = await phaseOne(steps, subscription, { runId, smoke, agents: [] }, flags);
   await restartApi(steps, subscription, api.revision);
-  steps.say('Phases 2 to 4: new keys, k6, the database checks and the clean-up, in load-second...');
+  steps.say('Phases 2 to 5: new keys, k6, the database checks and the clean-up, in load-second...');
   const second = await runWith(steps, subscription, 'load-second', {
     AGENTX_LOAD_RUN_ID: runId,
     AGENTX_LOAD_SEEDED: JSON.stringify(first.agents),
@@ -529,8 +529,8 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   if (cleanedLine !== undefined && problemsIn(cleanedLine, '').length === 0) rmSync(steps.stateFile, { force: true });
   steps.say("Reading the API's own lines over the run...");
   const logText = await apiLog(steps, subscription, first.run.began, second.run.ended);
-  const logs: LogSummary = summariseLogs(logText, apartOrgsOf(first.agents));
   const phases = [first.phase, ...phasesOf(second.printed)];
+  const logs: LogSummary = summariseLogs(logText, apartOrgsOf(first.agents), troubleWindowOf(phases));
   const created = phases.reduce((sum, phase) => sum + phase.created, 0);
   const wiring = wiringFailures(second, checked, cleanedLine, logText);
   // The wiring run is judged on its wiring alone: its numbers are a few seconds' of k6 on staging's own sizes.

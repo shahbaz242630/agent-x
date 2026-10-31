@@ -59,7 +59,8 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
       summary(2, 1),
       summary(3, 1),
       summary(4, 1),
-      { event: 'load.checked', created: 5, finished: true, checks: [{ name: 'recorded', problems: [] }] },
+      summary(5, 1),
+      { event: 'load.checked', created: 6, finished: true, checks: [{ name: 'recorded', problems: [] }] },
       { event: 'load.cleaned', organizations: 2, problems: [] },
     ],
   }),
@@ -69,7 +70,7 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
 /** The API's own lines over a clean run: three decisions and the holdings check at the restart. */
 const API_LINES = [
   { level: 'info', event: 'holdings_check.passed', requests: 2, mismatched: 0, tampered: 0 },
-  ...[30, 40, 50, 60, 70].map((durationMs) => ({
+  ...[30, 40, 50, 60, 70, 80].map((durationMs) => ({
     level: 'info',
     event: 'spend_request.decided',
     durationMs,

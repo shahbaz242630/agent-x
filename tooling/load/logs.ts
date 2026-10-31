@@ -35,17 +35,40 @@ export interface LogSummary {
   readonly crowdSharedDecisions: Percentiles;
   /** How many of the steady traffic's decisions allowed the request at once: about half, as it means to. */
   readonly allowed: number;
+  /** Where the steady traffic's decisions spent their time, to set beside the neighbours'. */
+  readonly steadyParts: DecisionParts;
+  /** Phase 5's (PL-63): each kind of organisation's decisions, with the same parts. */
+  readonly neighbours: Readonly<Record<NeighbourKind, Percentiles & DecisionParts>>;
+  /** Warnings and errors while phase 5 ran, each by name: what trouble costs, reported and not yet failing a run. */
+  readonly neighbourProblems: Readonly<Record<string, number>>;
+}
+
+/** Phase 5's three kinds of organisation. */
+export type NeighbourKind = 'calm' | 'busy' | 'stuck';
+
+/** Where decisions spent their time, from their log lines (4D2d P15). */
+export interface DecisionParts {
+  /** The wait for a database connection. */
+  readonly connectionWaitP95: number;
+  /** The wait behind its own agent's other decisions. */
+  readonly turnWaitP95: number;
+  /** A typical decision's trips to the database. */
+  readonly tripsP50: number;
 }
 
 interface Line {
   readonly level?: string;
   readonly event?: string;
+  readonly time?: string;
   readonly durationMs?: number;
   readonly decision?: string;
   readonly orgId?: string;
   readonly requests?: number;
   readonly mismatched?: number;
   readonly tampered?: number;
+  readonly poolWaitMs?: number;
+  readonly turnWaitMs?: number;
+  readonly trips?: number;
 }
 
 /** The nearest-rank percentile of values sorted ascending: 0 when there are none. */
@@ -86,6 +109,30 @@ export interface ApartOrgs {
   readonly crowdOwn?: ReadonlySet<string>;
   /** Phase 4's crowd's. */
   readonly crowdShared?: ReadonlySet<string>;
+  /** Phase 5's calm organisations. */
+  readonly calm?: ReadonlySet<string>;
+  /** Phase 5's busy organisation. */
+  readonly busy?: ReadonlySet<string>;
+  /** Phase 5's stuck organisation. */
+  readonly stuck?: ReadonlySet<string>;
+}
+
+/** When phase 5 ran, as k6 says: the lines between are its trouble's. */
+export interface TroubleWindow {
+  readonly from: string;
+  readonly to: string;
+}
+
+/** Lines the API writes just after k6's last answer are still the phase's. */
+const WINDOW_MARGIN_MS = 15_000;
+
+/** The window of phase 5, from the phases that ran; none when it didn't. */
+export function troubleWindowOf(
+  phases: readonly { readonly startedAt?: string; readonly endedAt?: string }[],
+): TroubleWindow | undefined {
+  const ran = phases.find(({ startedAt, endedAt }) => startedAt !== undefined && endedAt !== undefined);
+  if (ran?.startedAt === undefined || ran.endedAt === undefined) return undefined;
+  return { from: ran.startedAt, to: new Date(Date.parse(ran.endedAt) + WINDOW_MARGIN_MS).toISOString() };
 }
 
 /** The organisations of the agents of one kind, from a run's seed or a job's printed lines. */
@@ -97,6 +144,15 @@ export const apartOrgsOf = (agents: readonly { readonly kind?: unknown; readonly
   spike: orgsOfKind(agents, 'capped'),
   crowdOwn: orgsOfKind(agents, 'crowd-own'),
   crowdShared: orgsOfKind(agents, 'crowd-shared'),
+  calm: orgsOfKind(agents, 'neighbour-calm'),
+  busy: orgsOfKind(agents, 'neighbour-busy'),
+  stuck: orgsOfKind(agents, 'neighbour-stuck'),
+});
+
+const partsOf = (lines: readonly Line[]): DecisionParts => ({
+  connectionWaitP95: percentilesOf(lines.map(({ poolWaitMs = 0 }) => poolWaitMs)).p95,
+  turnWaitP95: percentilesOf(lines.map(({ turnWaitMs = 0 }) => turnWaitMs)).p95,
+  tripsP50: percentilesOf(lines.map(({ trips = 0 }) => trips)).p50,
 });
 
 /** Below this share allowed, the steady traffic isn't the mix it means to be (S164: the split check made it 0.4%). */
@@ -106,20 +162,33 @@ const LEAST_ALLOWED_SHARE = 0.3;
 const LEAST_DECISIONS_FOR_THE_MIX = 100;
 
 /** The API's log, as `docker compose logs --no-log-prefix` prints it, summed up. */
-export function summariseLogs(text: string, apart: ApartOrgs = {}): LogSummary {
+export function summariseLogs(text: string, apart: ApartOrgs = {}, trouble?: TroubleWindow): LogSummary {
   const raws = text.split(/\r?\n/).filter((raw) => raw.trim() !== '');
   const lines = raws.map(readLine).filter((line) => line !== undefined);
   const problems: Record<string, number> = {};
-  for (const { event = '(no event)' } of lines.filter(isProblem)) problems[event] = (problems[event] ?? 0) + 1;
+  const neighbourProblems: Record<string, number> = {};
+  const inTrouble = ({ time }: Line) =>
+    trouble !== undefined && time !== undefined && time >= trouble.from && time <= trouble.to;
+  for (const line of lines.filter(isProblem)) {
+    const counts = inTrouble(line) ? neighbourProblems : problems;
+    const { event = '(no event)' } = line;
+    counts[event] = (counts[event] ?? 0) + 1;
+  }
   const decided = lines.filter((line) => line.event === 'spend_request.decided' && line.durationMs !== undefined);
-  const timesIn = (orgs: ReadonlySet<string> | undefined) =>
-    decided.filter(({ orgId = '' }) => orgs?.has(orgId) === true).map(({ durationMs = 0 }) => durationMs);
-  const steady = decided.filter(
-    ({ orgId = '' }) =>
-      apart.spike?.has(orgId) !== true && apart.crowdOwn?.has(orgId) !== true && apart.crowdShared?.has(orgId) !== true,
-  );
+  const linesIn = (orgs: ReadonlySet<string> | undefined) =>
+    decided.filter(({ orgId = '' }) => orgs?.has(orgId) === true);
+  const timesIn = (orgs: ReadonlySet<string> | undefined) => linesIn(orgs).map(({ durationMs = 0 }) => durationMs);
+  const neighbour = (orgs: ReadonlySet<string> | undefined) => ({
+    ...percentilesOf(timesIn(orgs)),
+    ...partsOf(linesIn(orgs)),
+  });
+  const everyApart = Object.values(apart) as readonly (ReadonlySet<string> | undefined)[];
+  const steady = decided.filter(({ orgId = '' }) => !everyApart.some((orgs) => orgs?.has(orgId) === true));
   return {
     problems,
+    neighbourProblems,
+    steadyParts: partsOf(steady),
+    neighbours: { calm: neighbour(apart.calm), busy: neighbour(apart.busy), stuck: neighbour(apart.stuck) },
     suppressed: lines.filter(({ event }) => event === 'log.suppressed').length,
     unreadable: raws.length - lines.length,
     holdingsChecks: lines.filter(isHoldingsCheck).map(({ requests = 0, mismatched = -1, tampered = -1 }) => ({
@@ -159,7 +228,10 @@ export function logFailures(summary: LogSummary, decided: number, policyP95Ms: n
     summary.decisions.count +
     summary.spikeDecisions.count +
     summary.crowdOwnDecisions.count +
-    summary.crowdSharedDecisions.count;
+    summary.crowdSharedDecisions.count +
+    summary.neighbours.calm.count +
+    summary.neighbours.busy.count +
+    summary.neighbours.stuck.count;
   if (lines !== decided) {
     failures.push(`The log has ${String(lines)} decision line(s) for ${String(decided)} decision(s).`);
   }

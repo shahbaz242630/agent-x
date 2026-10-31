@@ -3,8 +3,8 @@
 // answers stay right under load and how one version compares with another;
 // PL-38 closes only on the same run against a production-sized Azure stack
 // (D2c), whose report says so.
-import type { LogSummary, Percentiles } from './logs.ts';
-import { type LoadSite, POLICY_P95_MS, STAGING_API_CPUS } from './plan.ts';
+import type { DecisionParts, LogSummary, NeighbourKind, Percentiles } from './logs.ts';
+import { type LoadSite, NEIGHBOURS_PHASE, POLICY_P95_MS, STAGING_API_CPUS } from './plan.ts';
 
 /** One phase as k6 sums it up (money-paths.k6.js, handleSummary). */
 export interface PhaseResult {
@@ -21,6 +21,19 @@ export interface PhaseResult {
   readonly spikeMs: { readonly p50: number; readonly p95: number; readonly max: number } | null;
   /** Each threshold, as `metric rule`, and whether it held. */
   readonly thresholds: Readonly<Record<string, boolean>>;
+  /** Phase 5's: each kind of organisation's requests, as k6 saw them. */
+  readonly neighbours?: Readonly<Record<NeighbourKind, NeighbourRequests>>;
+  /** Phase 5's: when it ran, which lines of the API's log are its trouble's. */
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+}
+
+/** One kind of organisation's requests in phase 5, as k6 saw them. */
+interface NeighbourRequests {
+  readonly requests: number;
+  readonly serverErrors: number;
+  readonly rateLimited: number;
+  readonly p95Ms: number;
 }
 
 /** The statements the app's role ran while one phase ran: the API's for its requests, and its timers'. */
@@ -167,6 +180,56 @@ function crowdSection(run: RunResult): string[] {
       ];
 }
 
+/** Phase 5's calm organisations, if they missed the decision target beside the others' trouble: in plain words. */
+function neighbourMiss(run: RunResult): string[] {
+  const { p95, count } = run.logs.neighbours.calm;
+  const ran = run.phases.some(({ phase }) => phase === NEIGHBOURS_PHASE);
+  if (ran && count === 0) return ['Calm organisations beside the others: not measured.'];
+  return p95 >= POLICY_P95_MS
+    ? [
+        `Calm organisations beside a busy and a stuck one: a decision's p95 was ${String(p95)} ms, against the ${String(POLICY_P95_MS)} ms target.`,
+      ]
+    : [];
+}
+
+const partsCells = ({ connectionWaitP95, turnWaitP95, tripsP50 }: DecisionParts) =>
+  `${String(connectionWaitP95)} | ${String(turnWaitP95)} | ${String(tripsP50)}`;
+
+/** One organisation's trouble beside others (PL-63): the same target, each kind apart, beside the quiet phases. */
+function neighbourSection(run: RunResult): string[] {
+  const requests = run.phases.find(({ phase }) => phase === NEIGHBOURS_PHASE)?.neighbours;
+  if (requests === undefined) return [];
+  const { neighbours, decisions, steadyParts, neighbourProblems } = run.logs;
+  const row = (name: string, kind: NeighbourKind) => {
+    const r = requests[kind];
+    const d = neighbours[kind];
+    return (
+      `| ${name} | ${String(r.requests)} | ${ms(r.p95Ms)} | ${String(r.serverErrors)} | ${String(r.rateLimited)} | ${String(d.count)} | ` +
+      `${String(d.p50)} | ${String(d.p95)} | ${String(d.p99)} | ${partsCells(d)} |`
+    );
+  };
+  const miss = neighbourMiss(run);
+  const problems = Object.entries(neighbourProblems).map(([event, count]) => `${event} ${String(count)}`);
+  return [
+    '',
+    `## One organisation's trouble beside others (the same ${String(POLICY_P95_MS)} ms decision target, not yet failing a run)`,
+    '',
+    'Ten calm organisations, sending what the steady traffic sends, beside a busy organisation (25 requests a second on three shared suppliers) and a stuck one (5 a second, two of its three suppliers held locked for the phase). The calm ones should read as the quiet phases do.',
+    '',
+    '| Traffic | Requests | Request p95 ms | 5xx | 429 | Decisions | p50 ms | p95 ms | p99 ms | Connection wait p95 ms | Own agent wait p95 ms | Trips p50 |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    `| Quiet (phases 1 and 2) | | | | | ${String(decisions.count)} | ${String(decisions.p50)} | ${String(decisions.p95)} | ${String(decisions.p99)} | ${partsCells(steadyParts)} |`,
+    row('Calm, beside the others', 'calm'),
+    row('Busy organisation', 'busy'),
+    row('Stuck organisation', 'stuck'),
+    '',
+    miss.length === 0
+      ? `Decision target met by the calm organisations: p95 under ${String(POLICY_P95_MS)} ms.`
+      : `**${miss.join(' ')}**`,
+    `Warnings or errors while it ran: ${problems.length === 0 ? 'none' : problems.join(', ')}.`,
+  ];
+}
+
 const decisionRow = (traffic: string, { count, p50, p95, p99, max }: Percentiles) =>
   `| ${traffic} | ${String(count)} | ${String(p50)} | ${String(p95)} | ${String(p99)} | ${String(max)} |`;
 
@@ -185,6 +248,9 @@ export function renderReport(run: RunResult): string {
           '',
           `**But many agents in one organisation missed the ${String(POLICY_P95_MS)} ms decision target: see below.**`,
         ]),
+    ...(neighbourMiss(run).length === 0
+      ? []
+      : ['', `**But one organisation's trouble reached others. ${neighbourMiss(run).join(' ')} See below.**`]),
     '',
     ...(run.site === 'local' ? onTheLaptop(run) : onAzure(run)),
     '',
@@ -218,6 +284,7 @@ export function renderReport(run: RunResult): string {
     'Target: a steady decision p95 under 150 ms, timed over its whole transaction (lock waits, retries, the reservation, signing).',
     `Allowed at once: ${String(run.logs.allowed)} of the ${String(decisions.count)} steady decisions; the rest wait for a person, or are denied. Hand-offs are paused, so what follows an allowed request isn't timed.`,
     ...crowdSection(run),
+    ...neighbourSection(run),
     '',
     '## Checks',
     '',

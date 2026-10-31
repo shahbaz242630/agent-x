@@ -157,6 +157,79 @@ describe('the report', () => {
     expect(empty).not.toContain('Decision target met');
   });
 
+  describe('one organisation’s trouble beside others', () => {
+    const neighbours = {
+      calm: { requests: 3400, serverErrors: 1, rateLimited: 0, p95Ms: 210.25 },
+      busy: { requests: 3000, serverErrors: 2, rateLimited: 3, p95Ms: 400 },
+      stuck: { requests: 600, serverErrors: 4, rateLimited: 0, p95Ms: 5000 },
+    };
+    const orgs = { calm: new Set(['calm']), busy: new Set(['busy']), stuck: new Set(['stuck']) };
+    const inOrg = (orgId: string, durationMs: number) =>
+      JSON.stringify({
+        level: 'info',
+        event: 'spend_request.decided',
+        orgId,
+        durationMs,
+        poolWaitMs: 7,
+        turnWaitMs: 8,
+        trips: 19,
+      });
+    const withCalm = (calm: number) =>
+      summariseLogs(
+        [
+          inOrg('steady', 31),
+          inOrg('calm', calm),
+          inOrg('busy', 300),
+          inOrg('stuck', 5000),
+          JSON.stringify({ level: 'error', event: 'http.failed', time: '2026-11-01T10:03:00.000Z' }),
+        ].join('\n'),
+        orgs,
+        { from: '2026-11-01T10:02:00.000Z', to: '2026-11-01T10:04:15.000Z' },
+      );
+
+    it('has no section until it ran', () => {
+      expect(renderReport(clean)).not.toContain('trouble');
+    });
+
+    it('sets each kind beside the quiet phases, and says the target was met', () => {
+      const report = renderReport({
+        ...clean,
+        phases: [phase(1), phase(2), phase(5, { neighbours })],
+        logs: withCalm(90),
+      });
+      expect(report).toContain(
+        "## One organisation's trouble beside others (the same 150 ms decision target, not yet failing a run)",
+      );
+      expect(report).toContain('| Quiet (phases 1 and 2) | | | | | 1 | 31 | 31 | 31 | 7 | 8 | 19 |');
+      expect(report).toContain('| Calm, beside the others | 3400 | 210.3 | 1 | 0 | 1 | 90 | 90 | 90 | 7 | 8 | 19 |');
+      expect(report).toContain('| Busy organisation | 3000 | 400.0 | 2 | 3 | 1 | 300 | 300 | 300 | 7 | 8 | 19 |');
+      expect(report).toContain('| Stuck organisation | 600 | 5000.0 | 4 | 0 | 1 | 5000 | 5000 | 5000 | 7 | 8 | 19 |');
+      expect(report).toContain('Decision target met by the calm organisations: p95 under 150 ms.');
+      expect(report).toContain('Warnings or errors while it ran: http.failed 1.');
+      expect(report).not.toContain('**But one');
+      // The phase stays out of the table held to the targets.
+      expect(report).not.toContain('| 5 | 3300 |');
+    });
+
+    it('names a miss at the top, and never reads a phase with no calm decisions as met', () => {
+      const missed = renderReport({ ...clean, phases: [phase(5, { neighbours })], logs: withCalm(150) });
+      expect(missed).toContain(
+        "**Passed.**\n\n**But one organisation's trouble reached others. Calm organisations beside a busy and a stuck one: a decision's p95 was 150 ms, against the 150 ms target. See below.**",
+      );
+      expect(missed).not.toContain('Decision target met by');
+      const none = renderReport({ ...clean, phases: [phase(5, { neighbours })] });
+      expect(none).toContain('Calm organisations beside the others: not measured.');
+      expect(none).not.toContain('Decision target met by');
+      expect(none).toContain('Warnings or errors while it ran: none.');
+    });
+
+    it('says a phase 5 cut short was not measured, with no table to show', () => {
+      const cut = renderReport({ ...clean, phases: [phase(1), phase(5)] });
+      expect(cut).toContain('Calm organisations beside the others: not measured.');
+      expect(cut).not.toContain('| Calm, beside the others |');
+    });
+  });
+
   it('says when the API was given more than staging’s half a CPU', () => {
     const report = renderReport({ ...clean, apiCpus: 2 });
     expect(report).toContain('# Load test, 2026-10-22 (local, API 2 CPU)');

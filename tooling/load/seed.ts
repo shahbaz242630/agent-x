@@ -33,7 +33,8 @@ function worldOf(database: Database<MandateWorldTables>, keyring: KeyProvider) {
 /**
  * Seeds one run: the ample agents and the capped one, each in an organisation
  * of its own named for the run, with three verified suppliers, a mandate in
- * force and a key; then the two crowds, ten agents an organisation. `onSeeded`
+ * force and a key; then the two crowds, ten agents an organisation, and phase
+ * 5's neighbours: ten calm organisations, a busy one and a stuck one. `onSeeded`
  * hears of each agent as it is made, so a seed that stops half-way still leaves
  * every organisation it made findable.
  */
@@ -107,6 +108,9 @@ export async function seedRun({
     }),
   );
   agents.push(...(await crowded('crowd-own')), ...(await crowded('crowd-shared')));
+  for (let at = 0; at < CROWD_AGENTS; at += 1)
+    agents.push(await madeAgent('neighbour-calm', await verifiedWorld(3), ampleTerms));
+  agents.push(...(await crowded('neighbour-busy')), ...(await crowded('neighbour-stuck')));
   return { agents };
 }
 
