@@ -156,36 +156,21 @@ export async function claimsOnEach(
   return rows.map(({ duplicate, possible, key, bank_key: bankKey }) => ({ duplicate, possible, key, bankKey }));
 }
 
-/**
- * Claims a request's order, on its own supplier and order: `claimed`, or
- * `taken` when another request's open claim already holds it (left to the
- * caller to start again, the transaction still usable). A supplier or order
- * not the request's, a payee key not the supplier's, or a request not holding
- * capacity fails (0039's `for_its_request` and `claim_guard`).
- */
-export async function claimOrder(
-  tx: ClaimsTransaction,
-  claim: OrderOf & {
-    readonly orgId: string;
-    readonly id: string;
-    readonly requestId: string;
-    readonly claimedAt: Date;
-  },
-): Promise<'claimed' | 'taken'> {
-  const made = await claimStatement(tx, claim).executeTakeFirst();
-  return claimAnswered(tx, claim, made !== undefined);
+/** A request's order, to be claimed. */
+interface NewClaim extends OrderOf {
+  readonly orgId: string;
+  readonly id: string;
+  readonly requestId: string;
+  readonly claimedAt: Date;
 }
 
-/** The claim's insert, not run: for a trip with others, its answer given to claimAnswered. */
-export const claimStatement = (
-  tx: ClaimsTransaction,
-  claim: OrderOf & {
-    readonly orgId: string;
-    readonly id: string;
-    readonly requestId: string;
-    readonly claimedAt: Date;
-  },
-) =>
+/**
+ * The claim's insert, not run: for a trip with others, its answer given to
+ * claimAnswered. A supplier or order not the request's, a payee key not the
+ * supplier's, or a request not holding capacity fails (0039's
+ * `for_its_request` and `claim_guard`).
+ */
+export const claimStatement = (tx: ClaimsTransaction, claim: NewClaim) =>
   tx
     .insertInto('spend_requests.order_claims')
     .values({
@@ -199,13 +184,18 @@ export const claimStatement = (
       claimed_at: claim.claimedAt,
     })
     // Postgres takes one conflict target and the order has two partial keys, so any key's conflict lands here:
-    // checked below.
+    // checked by claimAnswered.
     .onConflict((conflict) => conflict.doNothing())
     .returning('id');
 
+/**
+ * What the claim's insert came to: `claimed`, or `taken` when another request's
+ * open claim already holds the order (left to the caller to start again, the
+ * transaction still usable).
+ */
 export async function claimAnswered(
   tx: ClaimsTransaction,
-  claim: OrderOf & { readonly requestId: string },
+  claim: NewClaim,
   made: boolean,
 ): Promise<'claimed' | 'taken'> {
   if (made) return 'claimed';

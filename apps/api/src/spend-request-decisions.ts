@@ -72,7 +72,6 @@ import {
   type HeldAs,
   holdsCapacity,
   type ApprovalWaitHours,
-  insertRequest,
   insertRequestStatement,
   LONGEST_APPROVAL_WAIT,
   type NewRequest,
@@ -588,13 +587,13 @@ export function createSpendRequestDecisions({
 
     let held: HeldAs | null = null;
     if (!holdsCapacity(made.decision)) {
-      await insertRequest(tx, request);
+      await insertRequestStatement(tx, request).execute();
     } else {
       // Capacity is held only on a mandate in force, by a supplier of the organisation's (decide's checks).
       if (mandate === null || month === null || order === null) throw new Error('capacity held with nothing weighed');
       const claim = { ...order, orgId, id: ids.next(), requestId, claimedAt: now };
       // One trip, in this order: each needs the one before it, and a failure in one fails those behind it.
-      const answers = await sendTogether(tx, [
+      const [, , claimAnswer] = await sendTogether(tx, [
         insertRequestStatement(tx, request),
         reserveStatement(tx, {
           orgId,
@@ -611,7 +610,7 @@ export function createSpendRequestDecisions({
         }),
         claimStatement(tx, claim),
       ]);
-      const claimed = await claimAnswered(tx, claim, answers[2]?.rows.length === 1);
+      const claimed = await claimAnswered(tx, claim, claimAnswer.rows.length === 1);
       // The supplier held and its payee key its own alone: see the top of this file.
       if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
       held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };

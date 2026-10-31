@@ -878,8 +878,8 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .lines()
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
-    // The trip list's count on main was 24; these two batches take 3 off it.
-    expect(line?.trips).toBeLessThanOrEqual(22);
+    // An agent's later decision made 25 before this; these two trips take 3 off it.
+    expect(line?.trips).toBe(22);
   });
 });
 

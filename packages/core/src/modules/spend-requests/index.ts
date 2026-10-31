@@ -39,7 +39,6 @@ export {
   type DecidedAgainst,
   decidedAgainst,
   holdsCapacity,
-  insertRequest,
   insertRequestStatement,
   MOST_REQUESTS_A_PAGE,
   type NewRequest,
@@ -91,7 +90,6 @@ export {
 } from './domain/voids.ts';
 export {
   claimAnswered,
-  claimOrder,
   claimStatement,
   claimsOnEach,
   lockClaimsOf,

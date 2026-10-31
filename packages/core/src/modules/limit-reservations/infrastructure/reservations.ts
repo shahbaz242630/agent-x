@@ -13,7 +13,7 @@
 //   for committed (§7.2);
 // - `splitHeldRead`: with the mandate's split check on, the payee's reservations
 //   in its rolling window, across agents, likewise (D5);
-// - `reserve`: the request's reservation, HELD, while the request is still
+// - `reserveStatement`: the request's reservation, HELD, while the request is still
 //   VALIDATING (level 11; 0039's `held_for_its_request`), at the very instant
 //   the month was worked out from.
 //
@@ -63,16 +63,19 @@ export async function lockAgentMonth(
       .insertInto('limit_reservations.agent_periods')
       .values({ org_id: orgId, agent_id: agentId, month, created_at: at })
       .onConflict((conflict) => conflict.doNothing()),
-    tx
-      .selectFrom('limit_reservations.agent_periods')
-      .select('month')
-      .where('agent_id', '=', agentId)
-      .where('month', '=', month)
-      .forNoKeyUpdate(),
+    periodLock(tx, { agentId, month }),
   ]);
-  if (locked?.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
+  if (locked.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
   return { outcome: 'locked', month, keptNow };
 }
+
+const periodLock = (tx: ReservationsTransaction, { agentId, month }: { agentId: string; month: string }) =>
+  tx
+    .selectFrom('limit_reservations.agent_periods')
+    .select('month')
+    .where('agent_id', '=', agentId)
+    .where('month', '=', month)
+    .forNoKeyUpdate();
 
 /**
  * The agent's `month`, a period it already has, locked FOR NO KEY UPDATE
@@ -84,13 +87,7 @@ export async function lockAgentPeriod(
   tx: ReservationsTransaction,
   { agentId, month }: { agentId: string; month: string },
 ): Promise<string> {
-  await tx
-    .selectFrom('limit_reservations.agent_periods')
-    .select('month')
-    .where('agent_id', '=', agentId)
-    .where('month', '=', month)
-    .forNoKeyUpdate()
-    .executeTakeFirstOrThrow();
+  await periodLock(tx, { agentId, month }).executeTakeFirstOrThrow();
   return month;
 }
 
@@ -280,10 +277,6 @@ export interface NewReservation {
 }
 
 /** Holds the request's capacity: HELD, in the agent's month. */
-export async function reserve(tx: ReservationsTransaction, reservation: NewReservation): Promise<void> {
-  await reserveStatement(tx, reservation).execute();
-}
-
 /** The reservation's insert, not run: for a trip with others. */
 export const reserveStatement = (tx: ReservationsTransaction, reservation: NewReservation) =>
   tx.insertInto('limit_reservations.reservations').values({

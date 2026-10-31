@@ -28,7 +28,7 @@ afterAll(async () => {
 describe(`one trip (4D2d P16, Postgres ${server.version})`, () => {
   it('really goes in one trip: three take about one trip’s time, over a slow line', async () => {
     const { host, port } = database.connection('admin');
-    const ONE_WAY_MS = 100;
+    const ONE_WAY_MS = 300;
     const line = net.createServer((near) => {
       const far = net.connect(port, host);
       const delayed = (from: net.Socket, to: net.Socket) => {
@@ -56,7 +56,10 @@ describe(`one trip (4D2d P16, Postgres ${server.version})`, () => {
     try {
       const took = await withTenant(slow, ORG, async (tx) => {
         const started = performance.now();
-        await sendTogether(tx, [...[5, 6, 7].map((id) => tx.insertInto('probe.parents').values({ id }))]);
+        await sendTogether(
+          tx,
+          [5, 6, 7].map((id) => tx.insertInto('probe.parents').values({ id })),
+        );
         return performance.now() - started;
       });
       // One by one is three trips, six times one way; together is two times one way.

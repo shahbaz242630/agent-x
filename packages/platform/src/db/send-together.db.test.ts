@@ -1,7 +1,7 @@
 // Statements sent together on one trip (4D2d P16), against a real Postgres, each
 // way it can go wrong forced: pg's pipelining, young in 8.23, carries money here.
 import { createTestDatabase, LogCapture, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
-import { type Kysely, sql } from 'kysely';
+import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createDatabase } from './database.ts';
@@ -130,21 +130,16 @@ describe(`statements sent together (4D2d P16, Postgres ${server.version})`, () =
       const answers = await withTenant(killed, ORG, (tx) =>
         sendTogether(tx, [tx.selectFrom('probe.locked').select('id')]),
       );
-      expect(answers[0]?.rows).toEqual([{ id: 1 }]);
+      expect(answers[0].rows).toEqual([{ id: 1 }]);
     } finally {
       await holder.end();
     }
   });
 
-  it('outside a transaction, throws away a connection left with a session-wide tenant before sending', async () => {
-    const capture = new LogCapture();
-    const single = createDatabase<Tables>({ ...database.connection('admin'), maxConnections: 1 }, testLogger(capture));
-    opened.push(single);
-    await withTenant(single, ORG, (tx) =>
-      sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG}, false)`.execute(tx),
+  it('refuses outside a transaction, where a failure would keep what went before it', async () => {
+    await expect(sendTogether(db as never, [db.selectFrom('probe.locked').select('id')])).rejects.toThrow(
+      'only inside a transaction',
     );
-    const answers = await sendTogether(single, [single.selectFrom('probe.locked').select('id')]);
-    expect(answers[0]?.rows).toEqual([{ id: 1 }]);
-    expect(capture.lines().map(({ event }) => event)).toEqual(['db.tenant.leftover_discarded']);
+    expect(await parentsAmong([1])).toBe(1);
   });
 });
