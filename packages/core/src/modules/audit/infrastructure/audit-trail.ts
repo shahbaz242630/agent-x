@@ -59,10 +59,10 @@ import {
   type StoredEntry,
   verifyChain,
 } from '@agentx/platform/audit-chain';
-import { assertTenant, type GatheredRead, withTenant } from '@agentx/platform/db';
+import { assertTenant, type GatheredRead, sendTogether, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
+import { type Compilable, type Kysely, type QueryResult, type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import {
@@ -323,6 +323,21 @@ export interface AuditTrail {
     orgId: string,
     reads: readonly GatheredRead[],
   ): Promise<readonly GatheredLatest[]>;
+  /**
+   * Two latestSignedStatesGathered, each of at least one read, behind `before`
+   * on one trip (4D2d P17): each its own statement, on its own snapshot.
+   */
+  latestSignedStatesGatheredBehind(
+    tx: AuditTransaction,
+    orgId: string,
+    before: Compilable,
+    firstReads: readonly GatheredRead[],
+    secondReads: readonly GatheredRead[],
+  ): Promise<{
+    readonly ahead: QueryResult<unknown>;
+    readonly first: readonly GatheredLatest[];
+    readonly second: readonly GatheredLatest[];
+  }>;
   /**
    * latestSignedState for many objects of one type, in one statement: each
    * ID asked, in lower case, with its object's latest signed state, judged
@@ -647,17 +662,16 @@ export interface GatheredLatest {
  * object's with its row. One row at least for each object, its `item` its
  * place in the list, in the list's order.
  */
-async function gatheredWithHead(
-  tx: AuditTransaction,
+function gatheredWithHead(
   chain: Chain & { readonly kind: 'organisation' },
   reads: readonly GatheredRead[],
-): Promise<readonly Readonly<Record<string, unknown>>[]> {
+): RawBuilder<Record<string, unknown>> {
   const each = reads.map(
     (read, item) =>
       sql`select ${item}::integer as item, ${read.subject}::text as subject_type, ${read.id} as subject_id,
         (select pg_catalog.json_agg(pg_catalog.row_to_json(r)) from ${read.name} r) as row_json`,
   );
-  const { rows } = await sql<Record<string, unknown>>`
+  return sql<Record<string, unknown>>`
     with ${sql.join(reads.map(({ cte }) => cte))},
     objects as materialized (${sql.join(each, sql` union all `)})
     select o.item, o.subject_id::text as asked_id, o.row_json,
@@ -676,8 +690,7 @@ async function gatheredWithHead(
       order by e.seq limit ${LATER_EVENTS_READ + 1}
     ) as e on true
     order by o.item, e.seq
-  `.execute(tx);
-  return rows;
+  `;
 }
 
 /** The caller's rows eventsWithHead read alongside (its `row_json`), none when it found none: undefined if they don't read as rows. */
@@ -1053,6 +1066,26 @@ export function createAuditTrail({
     });
   };
 
+  /** gatheredWithHead's rows, as each read's answer. */
+  const gatheredAnswers = (
+    chain: Chain & { readonly kind: 'organisation' },
+    reads: readonly GatheredRead[],
+    rows: readonly Readonly<Record<string, unknown>>[],
+  ): readonly GatheredLatest[] => {
+    const byItem = reads.map((): Readonly<Record<string, unknown>>[] => []);
+    for (const row of rows) if (typeof row.item === 'number') byItem[row.item]?.push(row);
+    return byItem.map((own) => {
+      const [first] = own;
+      const asked = first?.asked_id;
+      // A backlog, past the head or not, is left to the row's own read, which judges it as it always has.
+      return {
+        id: typeof asked === 'string' ? asked : null,
+        latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first),
+        rows: rowsAlong(first),
+      };
+    });
+  };
+
   /** latestSignedState, with the caller's row read in the same statement when `rowRead` is given. */
   const latestWith = async (
     tx: AuditTransaction,
@@ -1184,19 +1217,30 @@ export function createAuditTrail({
       if (reads.length === 0) return [];
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const rows = await gatheredWithHead(tx, chain, reads);
-      const byItem = reads.map((): Readonly<Record<string, unknown>>[] => []);
-      for (const row of rows) if (typeof row.item === 'number') byItem[row.item]?.push(row);
-      return byItem.map((own) => {
-        const [first] = own;
-        const asked = first?.asked_id;
-        // A backlog, past the head or not, is left to the row's own read, which judges it as it always has.
-        return {
-          id: typeof asked === 'string' ? asked : null,
-          latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first),
-          rows: rowsAlong(first),
-        };
-      });
+      return gatheredAnswers(chain, reads, (await gatheredWithHead(chain, reads).execute(tx)).rows);
+    },
+
+    async latestSignedStatesGatheredBehind(
+      tx: AuditTransaction,
+      orgId: string,
+      before: Compilable,
+      firstReads: readonly GatheredRead[],
+      secondReads: readonly GatheredRead[],
+    ) {
+      const problems = [...firstReads, ...secondReads].flatMap(({ subject }) => subjectTypeProblems(subject));
+      if (problems.length > 0) throw new AuditEventRefused(problems);
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      const [ahead, first, second] = await sendTogether(tx, [
+        before,
+        gatheredWithHead(chain, firstReads),
+        gatheredWithHead(chain, secondReads),
+      ]);
+      return {
+        ahead,
+        first: gatheredAnswers(chain, firstReads, first.rows as Readonly<Record<string, unknown>>[]),
+        second: gatheredAnswers(chain, secondReads, second.rows as Readonly<Record<string, unknown>>[]),
+      };
     },
 
     async latestSignedStates(

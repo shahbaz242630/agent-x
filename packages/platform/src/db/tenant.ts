@@ -23,12 +23,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
-  type Compilable,
   type CompiledQuery,
   type DatabaseConnection,
   type Driver,
   type Kysely,
   PostgresDialect,
+  type QueryExecutorProvider,
   type QueryResult,
   type RawBuilder,
   sql,
@@ -529,11 +529,14 @@ function checked(connection: DatabaseConnection): CheckedConnection {
  * none of whose text needs an answer to one before it. An answer checked in
  * code is checked after the trip, so a commit never goes on one.
  */
-export function sendTogether<Schema, const Statements extends readonly Compilable[]>(
+export function sendTogether<
+  Schema,
+  const Statements extends readonly { compile(executorProvider: QueryExecutorProvider): CompiledQuery }[],
+>(
   tx: Transaction<Schema>,
   statements: Statements,
 ): Promise<{ -readonly [At in keyof Statements]: QueryResult<unknown> }> {
-  const queries = statements.map((statement) => statement.compile());
+  const queries = statements.map((statement) => statement.compile(tx));
   return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries)) as Promise<{
     -readonly [At in keyof Statements]: QueryResult<unknown>;
   }>;

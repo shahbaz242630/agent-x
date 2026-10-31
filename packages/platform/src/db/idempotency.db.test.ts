@@ -503,6 +503,21 @@ describe('ADR-006 §6 the key is claimed first in its transaction', () => {
     expect(await storedKeys(key)).toEqual([]);
   };
 
+  it('undoes a claim sent on the check’s own trip, keeping what came before it when the caller goes on to commit', async () => {
+    const key = newKey();
+    const before = await items();
+
+    await withTenant(app, ORG, async (tx) => {
+      await createItem(tx, ORG);
+      await expect(writes().run(tx, requestFor(key), () => createItem(tx, ORG))).rejects.toMatchObject({
+        reason: 'not_first',
+      });
+    });
+
+    expect(await storedKeys(key)).toEqual([]);
+    expect(await items()).toHaveLength(before.length + 1);
+  });
+
   it('refuses a claim once its transaction has written', async () => {
     const key = newKey();
     const before = await items();

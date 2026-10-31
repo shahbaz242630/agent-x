@@ -47,6 +47,7 @@ import {
   sealNewZone,
 } from '@agentx/core/modules/limit-reservations';
 import {
+  allowedCurrencyRead,
   currencyAllowed,
   MANDATE_VERSIONS,
   openMandateGathered,
@@ -526,11 +527,17 @@ export function createSpendRequestDecisions({
     // Read before the lock waits below (each at most 5 s), so a request can be weighed seconds past a mandate's
     // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
-    await currencyTaken(tx, asked.amount.currency);
-    // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them.
-    await states.gather(tx, orgId, actingRows(acting));
+    // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them. All on
+    // one trip (P17), refused on in the order they were asked: nothing locked is kept when one is.
+    const { ahead: currency, found } = await states.gatherBehind(
+      tx,
+      orgId,
+      allowedCurrencyRead(tx, asked.amount.currency),
+      actingRows(acting),
+      decisionRows(orgId, agentId, asked),
+    );
+    if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
     const { agent, keyId } = await actingIn(tx, states, acting, now);
-    const found = await states.gather(tx, orgId, decisionRows(orgId, agentId, asked));
     const mandateId = found[AT.mandate] ?? null;
     const versionId = found[AT.version] ?? null;
     const policyVersionId = found[AT.organizationVersion] ?? null;

@@ -878,8 +878,8 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .lines()
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
-    // An agent's later decision made 25 before this; these two trips take 3 off it.
-    expect(line?.trips).toBe(22);
+    // An agent's later decision made 25 before P16, whose two trips took 3 off it; P17's two take 4 more.
+    expect(line?.trips).toBe(18);
   });
 });
 

@@ -301,10 +301,9 @@ export async function policyChangesSince(tx: MandatesTransaction, orgId: string,
 
 /** Whether the deployment takes the currency (0035's `allowed_currencies`: AED in the Pilot), in one statement. */
 export async function currencyAllowed(tx: MandatesTransaction, code: string): Promise<boolean> {
-  const row = await tx
-    .selectFrom('mandates.allowed_currencies')
-    .select('code')
-    .where('code', '=', code)
-    .executeTakeFirst();
-  return row !== undefined;
+  return (await allowedCurrencyRead(tx, code).executeTakeFirst()) !== undefined;
 }
+
+/** currencyAllowed's read, not run: for a trip with others, a row back if it is allowed. */
+export const allowedCurrencyRead = (tx: MandatesTransaction, code: string) =>
+  tx.selectFrom('mandates.allowed_currencies').select('code').where('code', '=', code);
