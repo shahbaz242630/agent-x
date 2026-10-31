@@ -411,6 +411,20 @@ class CheckedConnection implements DatabaseConnection {
     return resultOf<R>(await timedTrip(() => this.#taken().query(query.sql, [...query.parameters])));
   }
 
+  /**
+   * The statements in order, on one trip: each is written before any answer is
+   * read. One that fails fails those behind it, and its failure is what comes back.
+   */
+  async executeTogether(queries: readonly CompiledQuery[]): Promise<QueryResult<unknown>[]> {
+    if (!this.#checked) await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)) }));
+    const client = this.#taken();
+    const answers = await timedTrip(() =>
+      // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled queries, as executeQuery's.
+      Promise.all(queries.map((query) => client.query(query.sql, [...query.parameters]))),
+    );
+    return answers.map((answer) => resultOf<unknown>(answer));
+  }
+
   streamQuery<R>(): AsyncIterableIterator<QueryResult<R>> {
     throw new Error('streaming is not used');
   }
@@ -503,6 +517,21 @@ class CheckedConnection implements DatabaseConnection {
 function checked(connection: DatabaseConnection): CheckedConnection {
   if (!(connection instanceof CheckedConnection)) throw new TenantContextError('not a checked connection');
   return connection;
+}
+
+/**
+ * The statements on one trip of the transaction's connection, in the order
+ * given (4D2d P16). Kysely holds each of a transaction's statements back for
+ * the answer before it, so they go together only through here. For statements
+ * none of whose text needs an answer to one before it. An answer checked in
+ * code is checked after the trip, so a commit never goes on one.
+ */
+export function sendTogether(
+  tx: { getExecutor(): { provideConnection<T>(consumer: (connection: DatabaseConnection) => Promise<T>): Promise<T> } },
+  statements: readonly { compile(): CompiledQuery }[],
+): Promise<QueryResult<unknown>[]> {
+  const queries = statements.map((statement) => statement.compile());
+  return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries));
 }
 
 /** Kysely's driver for the pool, each connection checked and each transaction opened and closed as above. */

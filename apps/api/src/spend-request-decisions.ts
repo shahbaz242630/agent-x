@@ -43,7 +43,7 @@ import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources
 import {
   type LimitReservationsTables,
   lockAgentMonth,
-  reserve,
+  reserveStatement,
   sealNewZone,
 } from '@agentx/core/modules/limit-reservations';
 import {
@@ -66,12 +66,14 @@ import {
   type PolicyRules,
 } from '@agentx/core/modules/policies';
 import {
-  claimOrder,
+  claimAnswered,
+  claimStatement,
   totalsWeighed,
   type HeldAs,
   holdsCapacity,
   type ApprovalWaitHours,
   insertRequest,
+  insertRequestStatement,
   LONGEST_APPROVAL_WAIT,
   type NewRequest,
   requestOf,
@@ -92,6 +94,7 @@ import {
   retryingTransaction,
   statementTimesForLog,
   timingStatements,
+  sendTogether,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -583,25 +586,32 @@ export function createSpendRequestDecisions({
       createdAt: now,
     };
 
-    await insertRequest(tx, request);
     let held: HeldAs | null = null;
-    if (holdsCapacity(made.decision)) {
+    if (!holdsCapacity(made.decision)) {
+      await insertRequest(tx, request);
+    } else {
       // Capacity is held only on a mandate in force, by a supplier of the organisation's (decide's checks).
       if (mandate === null || month === null || order === null) throw new Error('capacity held with nothing weighed');
-      await reserve(tx, {
-        orgId,
-        id: ids.next(),
-        requestId,
-        agentId: agent.id,
-        mandateId: mandate.id,
-        month,
-        supplierId: order.supplierId,
-        payeeKey: order.payeeKey,
-        amountMinor: asked.amount.minor,
-        currency: asked.amount.currency,
-        reservedAt: now,
-      });
-      const claimed = await claimOrder(tx, { ...order, orgId, id: ids.next(), requestId, claimedAt: now });
+      const claim = { ...order, orgId, id: ids.next(), requestId, claimedAt: now };
+      // One trip, in this order: each needs the one before it, and a failure in one fails those behind it.
+      const answers = await sendTogether(tx, [
+        insertRequestStatement(tx, request),
+        reserveStatement(tx, {
+          orgId,
+          id: ids.next(),
+          requestId,
+          agentId: agent.id,
+          mandateId: mandate.id,
+          month,
+          supplierId: order.supplierId,
+          payeeKey: order.payeeKey,
+          amountMinor: asked.amount.minor,
+          currency: asked.amount.currency,
+          reservedAt: now,
+        }),
+        claimStatement(tx, claim),
+      ]);
+      const claimed = await claimAnswered(tx, claim, answers[2]?.rows.length === 1);
       // The supplier held and its payee key its own alone: see the top of this file.
       if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
       held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };

@@ -76,12 +76,15 @@ export interface NewRequest {
 
 /** Inserts the request, VALIDATING with its decision, unsigned yet: its reservation and claim go in next, then `sign`. */
 export async function insertRequest(tx: RequestsTransaction, request: NewRequest): Promise<void> {
-  await tx
+  await insertRequestStatement(tx, request).execute();
+}
+
+/** The request's insert, not run: for a trip with others. */
+export const insertRequestStatement = (tx: RequestsTransaction, request: NewRequest) =>
+  tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by recordNewAndMove in signRequest (see the top of this file)
     .insertInto(SPEND_REQUESTS.table)
-    .values({ org_id: request.orgId, id: request.id, ...fieldsOf(request), created_at: request.createdAt })
-    .execute();
-}
+    .values({ org_id: request.orgId, id: request.id, ...fieldsOf(request), created_at: request.createdAt });
 
 /**
  * Signs the request just inserted (`spend_request.received`) and moves it

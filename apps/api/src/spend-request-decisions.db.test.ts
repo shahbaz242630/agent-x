@@ -817,6 +817,70 @@ describe('deciding a spend request and reserving it (D4)', () => {
   });
 });
 
+describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
+  /** `action` with every write to the table meeting `body` first. */
+  async function withWritesTo<T>(table: string, body: string, action: () => Promise<T>): Promise<T> {
+    const owner = database.as('owner');
+    await owner.query(`create function ${table}_forced() returns trigger language plpgsql as $$ begin ${body} end $$`);
+    await owner.query(
+      `create trigger forced before insert on ${table} for each row execute function ${table}_forced()`,
+    );
+    try {
+      return await action();
+    } finally {
+      await owner.query(`drop trigger forced on ${table}`);
+      await owner.query(`drop function ${table}_forced()`);
+    }
+  }
+
+  const left = (org: string) =>
+    withTenant(app, org, async (tx) => ({
+      requests: await tx.selectFrom('spend_requests.requests').select('id').execute(),
+      reservations: await tx.selectFrom('limit_reservations.reservations').select('id').execute(),
+      claims: await tx.selectFrom('spend_requests.order_claims').select('id').execute(),
+    }));
+
+  it.each([
+    ['the request', 'spend_requests.requests'],
+    ['the reservation', 'limit_reservations.reservations'],
+    ['the claim', 'spend_requests.order_claims'],
+  ])('keeps nothing when %s fails, and says what failed', async (_, table) => {
+    const { w, acting } = await ready();
+    await withWritesTo(table, `raise exception 'forced on ${table}';`, async () => {
+      await expect(ask(acting, asking(w))).rejects.toThrow(`forced on ${table}`);
+    });
+    expect(await left(w.org)).toEqual({ requests: [], reservations: [], claims: [] });
+  });
+
+  it("refuses when the agent's month was not there to lock, keeping nothing", async () => {
+    const { w, acting } = await ready();
+    await withWritesTo('limit_reservations.agent_periods', 'return null;', async () => {
+      await expect(ask(acting, asking(w))).rejects.toThrow('was not there to lock');
+    });
+    expect(await left(w.org)).toEqual({ requests: [], reservations: [], claims: [] });
+  });
+
+  it('decides as usual once the writes go through again', async () => {
+    const { w, acting } = await ready();
+    await withWritesTo('spend_requests.order_claims', "raise exception 'forced';", async () => {
+      await expect(ask(acting, asking(w), 'again')).rejects.toThrow('forced');
+    });
+    expect(decidedOf(await ask(acting, asking(w), 'again'))).toMatchObject({ decision: 'ALLOW' });
+  });
+
+  it('counts its writes as one trip', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w)));
+    decidedOf(await ask(acting, asking(w, { orderReference: 'INV-ONE-TRIP' })));
+    const line = capture
+      .lines()
+      .filter(({ event }) => event === 'spend_request.decided')
+      .at(-1);
+    // The trip list's count on main was 24; these two batches take 3 off it.
+    expect(line?.['trips']).toBeLessThanOrEqual(22);
+  });
+});
+
 describe('the lock order (ADR-006 §6, forced)', () => {
   it('runs two decisions on one agent’s month one after the other: the second sees the first’s capacity (SEC-LIM-01)', async () => {
     const { w, acting } = await ready();

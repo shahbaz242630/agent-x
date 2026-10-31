@@ -172,7 +172,21 @@ export async function claimOrder(
     readonly claimedAt: Date;
   },
 ): Promise<'claimed' | 'taken'> {
-  const made = await tx
+  const made = await claimStatement(tx, claim).executeTakeFirst();
+  return claimAnswered(tx, claim, made !== undefined);
+}
+
+/** The claim's insert, not run: for a trip with others, its answer given to claimAnswered. */
+export const claimStatement = (
+  tx: ClaimsTransaction,
+  claim: OrderOf & {
+    readonly orgId: string;
+    readonly id: string;
+    readonly requestId: string;
+    readonly claimedAt: Date;
+  },
+) =>
+  tx
     .insertInto('spend_requests.order_claims')
     .values({
       org_id: claim.orgId,
@@ -187,9 +201,14 @@ export async function claimOrder(
     // Postgres takes one conflict target and the order has two partial keys, so any key's conflict lands here:
     // checked below.
     .onConflict((conflict) => conflict.doNothing())
-    .returning('id')
-    .executeTakeFirst();
-  if (made !== undefined) return 'claimed';
+    .returning('id');
+
+export async function claimAnswered(
+  tx: ClaimsTransaction,
+  claim: OrderOf & { readonly requestId: string },
+  made: boolean,
+): Promise<'claimed' | 'taken'> {
+  if (made) return 'claimed';
   // Taken only by another request's open claim: the request's own claim or a reused ID is a caller's bug,
   // which a restart would only meet again.
   const other = await openClaimsOn(tx, claim).where('request_id', '<>', claim.requestId).executeTakeFirst();

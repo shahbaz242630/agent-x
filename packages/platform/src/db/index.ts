@@ -76,6 +76,7 @@ export {
   lockName,
   STATEMENT_SECONDS,
   TenantContextError,
+  sendTogether,
   withTenant,
 } from './tenant.ts';
 export {

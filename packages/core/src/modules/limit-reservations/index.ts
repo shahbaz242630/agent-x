@@ -30,6 +30,7 @@ export {
   type ReservationSeen,
   type ReservationSettlement,
   reserve,
+  reserveStatement,
   settleReservationsOf,
   splitHeld,
   splitHeldRead,
