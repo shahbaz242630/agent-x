@@ -32,7 +32,13 @@ function held(orgId: string, options?: { readonly unshared?: boolean }) {
       options,
     ),
   );
-  return { open, ended, release: () => void release(undefined) };
+  return {
+    open,
+    ended,
+    release: () => {
+      release(undefined);
+    },
+  };
 }
 
 const answerIn = (orgId: string) =>
@@ -46,7 +52,14 @@ const aMoment = () => new Promise((resolve) => setTimeout(resolve, 200));
 
 /** Whether a promise has settled yet. */
 const settled = (promise: Promise<unknown>) =>
-  Promise.race([promise.then(() => true), new Promise<boolean>((resolve) => setImmediate(() => resolve(false)))]);
+  Promise.race([
+    promise.then(() => true),
+    new Promise<boolean>((resolve) => {
+      setImmediate(() => {
+        resolve(false);
+      });
+    }),
+  ]);
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });

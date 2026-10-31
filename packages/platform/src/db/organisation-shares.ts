@@ -6,8 +6,10 @@
 // organisation waits, holding no connection, and past a bound is answered busy.
 // Counted per API process, so the real limit grows with replicas, as the pool does.
 //
-// Agents' requests alone count against it (asAgentTraffic): they are what can
-// arrive by the thousand and pile up on a held row. People are held by their own
+// Agents' requests alone count against it (asAgentTraffic), their key's check
+// too: they are what can arrive by the thousand and pile up on a held row. Only
+// a key's own listing and its activity row stay outside: short, and on no row
+// an organisation's work holds. People are held by their own
 // rate limit, and background jobs walk organisations one at a time. Neither may
 // queue here (the review of the first version, S166): an admin's freeze or a new
 // agent's shown-once key could be told busy after it had committed, the login

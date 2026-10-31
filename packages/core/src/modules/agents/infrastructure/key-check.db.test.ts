@@ -15,7 +15,7 @@ import {
   testLogger,
   within,
 } from '@agentx/testing';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { asAgentTraffic, createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
@@ -171,6 +171,42 @@ beforeEach(async () => {
   await withSignedStates(app, org, quiet(), (tx, states) =>
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
+});
+
+describe(`the key check: its organisation's share of the connections (PL-63, Postgres ${server.version})`, () => {
+  it('waits its turn with the organisation’s agents, holding no connection, and goes on when one ends', async () => {
+    const agent = await newAgent();
+    const { text } = await issue(agent);
+    const shared = createDatabase<Tables>(
+      { ...database.connection('app'), maxConnections: 4, organisationShare: 1 },
+      testLogger(),
+    );
+    const letGo = Promise.withResolvers<undefined>();
+    const open = Promise.withResolvers<undefined>();
+    const full = asAgentTraffic(() =>
+      withTenant(shared, org, async () => {
+        open.resolve(undefined);
+        await letGo.promise;
+      }),
+    );
+    try {
+      await open.promise;
+      let answered = false;
+      const checked = createAgentKeyCheck({ database: shared, keys, ids, clock, logger: testLogger(capture) })
+        .check(text, '0199a0f0-0000-7000-8000-00000000c012')
+        .finally(() => {
+          answered = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(answered).toBe(false);
+      letGo.resolve(undefined);
+      await expect(checked).resolves.toMatchObject({ outcome: 'accepted' });
+    } finally {
+      letGo.resolve(undefined);
+      await full;
+      await shared.destroy();
+    }
+  });
 });
 
 describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`, () => {
