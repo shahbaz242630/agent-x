@@ -635,20 +635,18 @@ export function createSpendRequestDecisions({
       // Where its time goes (4D2d): logged with it, so a slow one can be read on Azure.
       const times = noStatementTimes();
       let turnWaitMs = 0;
+      const attempt = () =>
+        work.write(agent, idempotent, correlationId, async (tx, states) => {
+          made = await decided(tx, states, agent, idempotent.key, asked);
+          fresh = made.answer;
+          return { status: 201, resourceId: made.id };
+        });
       // In its agent's turn, so a burst from one agent can't hold every connection while it waits on its month.
       let done: Awaited<ReturnType<typeof work.write>>;
       try {
         done = await turns.run(agent.agentId, () => {
           turnWaitMs = performance.now() - started;
-          return timingStatements(times, () =>
-            retryingTransaction(log, DECIDE_OPERATION, () =>
-              work.write(agent, idempotent, correlationId, async (tx, states) => {
-                made = await decided(tx, states, agent, idempotent.key, asked);
-                fresh = made.answer;
-                return { status: 201, resourceId: made.id };
-              }),
-            ),
-          );
+          return timingStatements(times, () => retryingTransaction(log, DECIDE_OPERATION, attempt));
         });
       } catch (error) {
         if (!(error instanceof TurnWaitExceeded)) throw error;
