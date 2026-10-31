@@ -29,8 +29,8 @@ services:
       AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '50000'
       # Twice the rate limits (the API refuses less), so no line of the run is suppressed.
       AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000'
-      # Staging's API (deploy/azure/apps.bicep): ten connections, half a CPU, 1 GiB.
-      AGENTX_DB_POOL_MAX: '10'
+      # The load run's API on Azure (deploy/azure/apps.bicep): twenty connections. Staging's size otherwise: half a CPU, 1 GiB.
+      AGENTX_DB_POOL_MAX: '20'
     # Half a CPU unless the runner is given another size (`corepack pnpm load --cpus 2`).
     cpus: ${AGENTX_LOAD_API_CPUS:-0.5}
     mem_limit: 1g

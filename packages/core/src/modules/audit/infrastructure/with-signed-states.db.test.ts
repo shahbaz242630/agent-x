@@ -520,6 +520,31 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: org, findings: 1 })]);
   });
 
+  it('sets a hold at once though the organisation has its whole share of the connections taken (PL-63)', async () => {
+    await newAgent();
+    const shared = createDatabase<Tables>(
+      { ...database.connection('app'), maxConnections: 4, organisationShare: 1 },
+      testLogger(),
+    );
+    const { promise: letGo, resolve } = Promise.withResolvers<undefined>();
+    const { promise: open, resolve: opened } = Promise.withResolvers<undefined>();
+    const full = withTenant(shared, org, async () => {
+      opened(undefined);
+      await letGo;
+    });
+    try {
+      await open;
+      // Far under the 10 s a transaction waits for its share: past it, this would raise the alarm and set no hold.
+      await within(5_000, holdOrganisation(shared, org, services(), 'head'));
+    } finally {
+      resolve(undefined);
+      await full;
+      await shared.destroy();
+    }
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
   it('holdOrganisation: a chain failing the anchor check holds its organisation once, naming the chain (B1d-3)', async () => {
     await newAgent();
     await holdOrganisation(app, org.toUpperCase(), services(), 'head');

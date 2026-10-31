@@ -171,7 +171,8 @@ export function createActivityLog({ ids }: { readonly ids: IdGenerator }): Activ
             })
             .execute();
         },
-        { limited: true },
+        // Outside the organisation's share: one insert on no row anyone holds, and a row must never be lost to a queue (decision 26).
+        { limited: true, unshared: true },
       );
     },
 

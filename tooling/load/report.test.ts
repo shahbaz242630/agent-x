@@ -55,7 +55,7 @@ describe('the report', () => {
   it('gives a clean run’s numbers, and says a laptop run doesn’t close PL-38', () => {
     const report = renderReport(clean);
     expect(report).toContain('# Load test, 2026-10-22 (local, API 0.5 CPU)\n\n**Passed.**');
-    expect(report).toContain("the API\nsized as staging's (half a CPU, 1 GiB, ten connections)");
+    expect(report).toContain("the API\nsized as staging's (half a CPU, 1 GiB), with the load run's twenty connections");
     expect(report).toContain('| 1 | 3300 | 3150 | 0 | 21.3 | 88.5 | 140.0 | 310.8 | 0 | 0 | 0 |');
     expect(report).toContain('the hand-off is\npaused');
     expect(report).toContain('| Steady | 1 | 31 | 31 | 31 | 31 |');
@@ -233,7 +233,9 @@ describe('the report', () => {
   it('says when the API was given more than staging’s half a CPU', () => {
     const report = renderReport({ ...clean, apiCpus: 2 });
     expect(report).toContain('# Load test, 2026-10-22 (local, API 2 CPU)');
-    expect(report).toContain('the API\ngiven 2 CPU(s) (staging has half), 1 GiB and ten connections as staging, k6');
+    expect(report).toContain(
+      "the API\ngiven 2 CPU(s) (staging has half), 1 GiB and the load run's twenty connections, k6",
+    );
   });
 
   it('says an Azure run is the one PL-38 closes on, sized up on staging', () => {
@@ -245,7 +247,7 @@ describe('the report', () => {
     });
     expect(report).toContain('# Load test, 2026-10-22 (azure, API 2 CPU)\n\n**Passed.**');
     expect(report).toContain(
-      'on staging in Azure UAE North: the API\ngiven 2 CPU(s) and ten connections, the database Standard_D2ads_v5 (GeneralPurpose), k6',
+      'on staging in Azure UAE North: the API\ngiven 2 CPU(s) and twenty connections, the database Standard_D2ads_v5 (GeneralPurpose), k6',
     );
     expect(report).toContain('Sized up for the run, this is the run PL-38 closes on (D2c).');
     expect(report).not.toContain('--smoke');

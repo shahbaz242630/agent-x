@@ -898,10 +898,13 @@ var apps = [
         value: '127.0.0.1,${appsPrefix(networkAddressSpace)}'
       }
       // Ten of the server's 35 user connections, leaving Zitadel's ten, one for
-      // each job, and room for the worker (ADR-002 Amendment G1).
+      // each job, and room for the worker (ADR-002 Amendment G1). Twenty on the
+      // load run's larger server, as production needs: each organisation may hold
+      // 30% (organisation-shares.ts), so two in trouble leave the others room
+      // (4D2d, PL-63: on ten, others' p95 332 ms; on twenty, 100 ms).
       {
         name: 'AGENTX_DB_POOL_MAX'
-        value: '10'
+        value: loadRun ? '20' : '10'
       }
       // The login service (ADR-003 §5): its public address, which its tokens
       // name, and the API's client ID there.

@@ -20,6 +20,7 @@ const log = createActivityLog({ ids });
 
 const ORG = '0199a0f0-0000-7000-8000-00000000ac01';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000ac02';
+const SHARED_ORG = '0199a0f0-0000-7000-8000-00000000ac06';
 const PERSON = '0199a0f0-0000-7000-8000-00000000ac03';
 const AGENT = '0199a0f0-0000-7000-8000-00000000ac04';
 const AT = new Date('2026-10-18T10:00:00.000Z');
@@ -76,6 +77,31 @@ afterAll(async () => {
 });
 
 describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () => {
+  it("writes an organisation's row at once though its whole share of the connections is taken: a row is never lost to a queue (PL-63)", async () => {
+    const shared = createDatabase<ActivityTables>(
+      { ...database.connection('app'), maxConnections: 3, organisationShare: 1 },
+      testLogger(),
+    );
+    const { promise: letGo, resolve } = Promise.withResolvers<undefined>();
+    const { promise: open, resolve: opened } = Promise.withResolvers<undefined>();
+    const full = withTenant(shared, SHARED_ORG, async () => {
+      opened(undefined);
+      await letGo;
+    });
+    try {
+      await open;
+      const started = performance.now();
+      await log.recordForOrganisation(shared, forOrganisation({ orgId: SHARED_ORG }));
+      // Far under the 10 s a transaction waits for its share.
+      expect(performance.now() - started).toBeLessThan(5_000);
+    } finally {
+      resolve(undefined);
+      await full;
+      await shared.destroy();
+    }
+    expect(await rowsOf(SHARED_ORG)).toHaveLength(1);
+  });
+
   it("cuts off an organisation's row slowed past the app, never waited on for ever (4D2d P4: limited with the organisation)", async () => {
     const owner = database.as('owner');
     await owner.query('create schema if not exists probe');

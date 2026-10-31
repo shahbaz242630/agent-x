@@ -4471,6 +4471,10 @@ describe('the load run (D2c, PL-38)', () => {
       ]),
     );
     expect(settingNames(api).filter((name) => /EMAIL|DIRECTORY/.test(name))).toEqual([]);
+    const pool = (resource: PredictedResource) =>
+      settingsOf(resource as unknown as Mutable).find(({ name }) => name === 'AGENTX_DB_POOL_MAX')?.value;
+    expect(pool(api)).toBe('20');
+    expect(pool(found(staging, APP('api')))).toBe('10');
     expect(at(containerIn(found(staging, APP('api'))), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
     for (const workload of LOAD_JOBS) {
       const job = found(load.together, JOB(workload));

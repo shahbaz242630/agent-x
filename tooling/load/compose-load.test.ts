@@ -103,7 +103,7 @@ describe('the load stack (compose.load.yaml)', () => {
     const api = services.api ?? {};
     expect(api.cpus).toBe(`\${${API_CPUS_VARIABLE}:-${String(STAGING_API_CPUS)}}`);
     expect(api.mem_limit).toBe('1g');
-    expect(api.environment?.AGENTX_DB_POOL_MAX).toBe('10');
+    expect(api.environment?.AGENTX_DB_POOL_MAX).toBe('20');
     const cap = Number(api.environment?.AGENTX_LOG_EVENT_CAP_PER_MINUTE);
     const limits = Object.entries(api.environment ?? {}).filter(([name]) => name.startsWith('AGENTX_RATE_LIMIT_'));
     expect(limits).toHaveLength(3);
