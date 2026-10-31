@@ -408,8 +408,7 @@ class CheckedConnection implements DatabaseConnection {
 
   async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
     if (!this.#checked) await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)) }));
-    // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
-    return resultOf<R>(await timedTrip(() => this.#taken().query(query.sql, [...query.parameters])));
+    return resultOf<R>(await timedTrip(() => this.#written(query)));
   }
 
   /**
@@ -420,11 +419,7 @@ class CheckedConnection implements DatabaseConnection {
    */
   async executeTogether(queries: readonly CompiledQuery[]): Promise<QueryResult<unknown>[]> {
     if (!this.#checked) throw new TenantContextError('statements go together only inside a transaction');
-    const client = this.#taken();
-    const answers = await timedTrip(() =>
-      // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled queries, as executeQuery's.
-      Promise.all(queries.map((query) => client.query(query.sql, [...query.parameters]))),
-    );
+    const answers = await timedTrip(() => Promise.all(queries.map((query) => this.#written(query))));
     return answers.map((answer) => resultOf<unknown>(answer));
   }
 
@@ -482,6 +477,11 @@ class CheckedConnection implements DatabaseConnection {
     const client = this.#client;
     this.#client = undefined;
     client?.release(this.#broken ? true : undefined);
+  }
+
+  #written(query: CompiledQuery): Promise<pg.QueryResult> {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
+    return this.#taken().query(query.sql, [...query.parameters]);
   }
 
   #taken(): pg.PoolClient {
