@@ -29,7 +29,7 @@ export {
   reservationsFor,
   type ReservationSeen,
   type ReservationSettlement,
-  reserve,
+  reserveStatement,
   settleReservationsOf,
   splitHeld,
   splitHeldRead,

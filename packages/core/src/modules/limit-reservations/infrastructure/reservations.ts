@@ -13,7 +13,7 @@
 //   for committed (§7.2);
 // - `splitHeldRead`: with the mandate's split check on, the payee's reservations
 //   in its rolling window, across agents, likewise (D5);
-// - `reserve`: the request's reservation, HELD, while the request is still
+// - `reserveStatement`: the request's reservation, HELD, while the request is still
 //   VALIDATING (level 11; 0039's `held_for_its_request`), at the very instant
 //   the month was worked out from.
 //
@@ -24,6 +24,7 @@
 // `held_for_its_request` refuses it before). A handed-off one follows its
 // payment (C3): `settleReservationsOf` finalises, blocks or releases it, in
 // the transaction that records the payment's outcome.
+import { sendTogether } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
 import type { AuditTables, SignedStates } from '../../audit/index.ts';
@@ -57,13 +58,24 @@ export async function lockAgentMonth(
   // Not added now, its row is there (the insert waits for one being added to commit): none is one deleted.
   if (kept.outcome !== 'kept') return { outcome: 'tampered' };
   const month = periodOf(at, kept.zone).month;
-  await tx
-    .insertInto('limit_reservations.agent_periods')
-    .values({ org_id: orgId, agent_id: agentId, month, created_at: at })
-    .onConflict((conflict) => conflict.doNothing())
-    .execute();
-  return { outcome: 'locked', month: await lockAgentPeriod(tx, { agentId, month }), keptNow };
+  const [, locked] = await sendTogether(tx, [
+    tx
+      .insertInto('limit_reservations.agent_periods')
+      .values({ org_id: orgId, agent_id: agentId, month, created_at: at })
+      .onConflict((conflict) => conflict.doNothing()),
+    periodLock(tx, { agentId, month }),
+  ]);
+  if (locked.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
+  return { outcome: 'locked', month, keptNow };
 }
+
+const periodLock = (tx: ReservationsTransaction, { agentId, month }: { agentId: string; month: string }) =>
+  tx
+    .selectFrom('limit_reservations.agent_periods')
+    .select('month')
+    .where('agent_id', '=', agentId)
+    .where('month', '=', month)
+    .forNoKeyUpdate();
 
 /**
  * The agent's `month`, a period it already has, locked FOR NO KEY UPDATE
@@ -75,13 +87,7 @@ export async function lockAgentPeriod(
   tx: ReservationsTransaction,
   { agentId, month }: { agentId: string; month: string },
 ): Promise<string> {
-  await tx
-    .selectFrom('limit_reservations.agent_periods')
-    .select('month')
-    .where('agent_id', '=', agentId)
-    .where('month', '=', month)
-    .forNoKeyUpdate()
-    .executeTakeFirstOrThrow();
+  await periodLock(tx, { agentId, month }).executeTakeFirstOrThrow();
   return month;
 }
 
@@ -271,26 +277,23 @@ export interface NewReservation {
 }
 
 /** Holds the request's capacity: HELD, in the agent's month. */
-export async function reserve(tx: ReservationsTransaction, reservation: NewReservation): Promise<void> {
-  await tx
-    .insertInto('limit_reservations.reservations')
-    .values({
-      org_id: reservation.orgId,
-      id: reservation.id,
-      request_id: reservation.requestId,
-      agent_id: reservation.agentId,
-      mandate_id: reservation.mandateId,
-      month: reservation.month,
-      supplier_id: reservation.supplierId,
-      payee_key: reservation.payeeKey,
-      amount_minor: reservation.amountMinor,
-      currency: reservation.currency,
-      state: RESERVATION.initial,
-      reserved_at: reservation.reservedAt,
-      settled_at: null,
-    })
-    .execute();
-}
+/** The reservation's insert, not run: for a trip with others. */
+export const reserveStatement = (tx: ReservationsTransaction, reservation: NewReservation) =>
+  tx.insertInto('limit_reservations.reservations').values({
+    org_id: reservation.orgId,
+    id: reservation.id,
+    request_id: reservation.requestId,
+    agent_id: reservation.agentId,
+    mandate_id: reservation.mandateId,
+    month: reservation.month,
+    supplier_id: reservation.supplierId,
+    payee_key: reservation.payeeKey,
+    amount_minor: reservation.amountMinor,
+    currency: reservation.currency,
+    state: RESERVATION.initial,
+    reserved_at: reservation.reservedAt,
+    settled_at: null,
+  });
 
 /**
  * Locks the requests' reservations FOR NO KEY UPDATE (level 11), in one

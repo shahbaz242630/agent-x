@@ -134,7 +134,8 @@ export type DatabaseTransaction<Schema = unknown> = Transaction<Schema>;
  */
 export function createDatabase<Schema = unknown>(options: DatabaseConnectionOptions, logger: Logger): Database<Schema> {
   const config = poolConfig(options);
-  const pool = new pg.Pool(config);
+  // Only what sendTogether sends goes out unanswered: Kysely makes everything else wait for the answer before it.
+  const pool = new pg.Pool({ ...config, pipeline: true });
   // A connection that drops (a restart, a failover, a timeout) reports it as
   // an 'error' event on the connection, idle or in use; with no listener, Node
   // would stop the process. So each connection gets one listener for its whole

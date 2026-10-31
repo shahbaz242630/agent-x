@@ -17,7 +17,15 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { type SeededSupplier as Supplier, seedRows } from '../../../seed-rows.helper.test.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
-import { claimLooks, claimOrder, claimsOnEach, orderKeyOf, type OrderWeighed, releaseClaim } from './order-claims.ts';
+import {
+  claimAnswered,
+  claimLooks,
+  claimStatement,
+  claimsOnEach,
+  orderKeyOf,
+  type OrderWeighed,
+  releaseClaim,
+} from './order-claims.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -721,6 +729,9 @@ describe('the duplicate check and claiming an order (D3)', () => {
     reference: options.reference ?? 'PO-2026/0042',
     claimedAt: AT,
   });
+
+  const claimOrder = async (tx: Parameters<typeof claimStatement>[0], claim: Parameters<typeof claimStatement>[1]) =>
+    claimAnswered(tx, claim, (await claimStatement(tx, claim).executeTakeFirst()) !== undefined);
 
   const claimed = (org: Org, request: string, options: ClaimOptions = {}) =>
     inOrg(org, (tx) => claimOrder(tx, claimOf(org, request, options)));

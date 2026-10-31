@@ -156,23 +156,22 @@ export async function claimsOnEach(
   return rows.map(({ duplicate, possible, key, bank_key: bankKey }) => ({ duplicate, possible, key, bankKey }));
 }
 
+/** A request's order, to be claimed. */
+interface NewClaim extends OrderOf {
+  readonly orgId: string;
+  readonly id: string;
+  readonly requestId: string;
+  readonly claimedAt: Date;
+}
+
 /**
- * Claims a request's order, on its own supplier and order: `claimed`, or
- * `taken` when another request's open claim already holds it (left to the
- * caller to start again, the transaction still usable). A supplier or order
- * not the request's, a payee key not the supplier's, or a request not holding
- * capacity fails (0039's `for_its_request` and `claim_guard`).
+ * The claim's insert, not run: for a trip with others, its answer given to
+ * claimAnswered. A supplier or order not the request's, a payee key not the
+ * supplier's, or a request not holding capacity fails (0039's
+ * `for_its_request` and `claim_guard`).
  */
-export async function claimOrder(
-  tx: ClaimsTransaction,
-  claim: OrderOf & {
-    readonly orgId: string;
-    readonly id: string;
-    readonly requestId: string;
-    readonly claimedAt: Date;
-  },
-): Promise<'claimed' | 'taken'> {
-  const made = await tx
+export const claimStatement = (tx: ClaimsTransaction, claim: NewClaim) =>
+  tx
     .insertInto('spend_requests.order_claims')
     .values({
       org_id: claim.orgId,
@@ -185,11 +184,21 @@ export async function claimOrder(
       claimed_at: claim.claimedAt,
     })
     // Postgres takes one conflict target and the order has two partial keys, so any key's conflict lands here:
-    // checked below.
+    // checked by claimAnswered.
     .onConflict((conflict) => conflict.doNothing())
-    .returning('id')
-    .executeTakeFirst();
-  if (made !== undefined) return 'claimed';
+    .returning('id');
+
+/**
+ * What the claim's insert came to: `claimed`, or `taken` when another request's
+ * open claim already holds the order (left to the caller to start again, the
+ * transaction still usable).
+ */
+export async function claimAnswered(
+  tx: ClaimsTransaction,
+  claim: NewClaim,
+  made: boolean,
+): Promise<'claimed' | 'taken'> {
+  if (made) return 'claimed';
   // Taken only by another request's open claim: the request's own claim or a reused ID is a caller's bug,
   // which a restart would only meet again.
   const other = await openClaimsOn(tx, claim).where('request_id', '<>', claim.requestId).executeTakeFirst();

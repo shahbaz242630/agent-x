@@ -23,6 +23,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
+  type Compilable,
   type CompiledQuery,
   type DatabaseConnection,
   type Driver,
@@ -407,8 +408,19 @@ class CheckedConnection implements DatabaseConnection {
 
   async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
     if (!this.#checked) await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)) }));
-    // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
-    return resultOf<R>(await timedTrip(() => this.#taken().query(query.sql, [...query.parameters])));
+    return resultOf<R>(await timedTrip(() => this.#written(query)));
+  }
+
+  /**
+   * The statements in order, on one trip: each is written before any answer is
+   * read. One that fails fails those behind it, and its failure is what comes back:
+   * so in a transaction only, whose start checked this connection. Outside one, a
+   * failure would leave those before it kept and those behind it still to answer.
+   */
+  async executeTogether(queries: readonly CompiledQuery[]): Promise<QueryResult<unknown>[]> {
+    if (!this.#checked) throw new TenantContextError('statements go together only inside a transaction');
+    const answers = await timedTrip(() => Promise.all(queries.map((query) => this.#written(query))));
+    return answers.map((answer) => resultOf<unknown>(answer));
   }
 
   streamQuery<R>(): AsyncIterableIterator<QueryResult<R>> {
@@ -467,6 +479,11 @@ class CheckedConnection implements DatabaseConnection {
     client?.release(this.#broken ? true : undefined);
   }
 
+  #written(query: CompiledQuery): Promise<pg.QueryResult> {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
+    return this.#taken().query(query.sql, [...query.parameters]);
+  }
+
   #taken(): pg.PoolClient {
     if (this.#client === undefined) throw new TenantContextError('the connection was already given back');
     return this.#client;
@@ -503,6 +520,23 @@ class CheckedConnection implements DatabaseConnection {
 function checked(connection: DatabaseConnection): CheckedConnection {
   if (!(connection instanceof CheckedConnection)) throw new TenantContextError('not a checked connection');
   return connection;
+}
+
+/**
+ * The statements on one trip of the transaction's connection, in the order
+ * given (4D2d P16). Kysely holds each of a transaction's statements back for
+ * the answer before it, so they go together only through here. For statements
+ * none of whose text needs an answer to one before it. An answer checked in
+ * code is checked after the trip, so a commit never goes on one.
+ */
+export function sendTogether<Schema, const Statements extends readonly Compilable[]>(
+  tx: Transaction<Schema>,
+  statements: Statements,
+): Promise<{ -readonly [At in keyof Statements]: QueryResult<unknown> }> {
+  const queries = statements.map((statement) => statement.compile());
+  return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries)) as Promise<{
+    -readonly [At in keyof Statements]: QueryResult<unknown>;
+  }>;
 }
 
 /** Kysely's driver for the pool, each connection checked and each transaction opened and closed as above. */
