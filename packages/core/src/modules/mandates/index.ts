@@ -52,6 +52,7 @@ export {
   widerThanMandate,
 } from './domain/policy.ts';
 export {
+  allowedCurrencyRead,
   currencyAllowed,
   MOST_POLICY_CHANGES_A_DAY,
   onePolicyChangeAtATime,

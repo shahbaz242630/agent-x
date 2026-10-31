@@ -21,6 +21,7 @@ import {
   createDatabase,
   type Database,
   type GatheredId,
+  type GatheredRow,
   type SignedStateTable,
   StatusChangeFailed,
   TenantContextError,
@@ -32,6 +33,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { AuditEventRefused } from '../domain/event.ts';
+import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import {
   type AuditTrail,
   type AuditTransaction,
@@ -1680,7 +1682,16 @@ describe('FX-RACE: a check while the row changes never raises a false alarm', ()
       await replaying;
       await replayer.query('commit');
 
-      expect(await checking).toMatchObject({ outcome: 'tampered', sign: 'pointer' });
+      // Once the change commits, Postgres has both waiters follow the row to its new version, and either can lock it
+      // first. The check that wins locks the real version 2 before anything is put back, so verified is true of it:
+      // then the next check is the one that finds it.
+      const seen = await checking;
+      if (seen.outcome === 'verified') {
+        expect(seen.version).toBe(2);
+        expect(await check(id)).toMatchObject({ outcome: 'tampered', sign: 'pointer' });
+      } else {
+        expect(seen).toMatchObject({ outcome: 'tampered', sign: 'pointer' });
+      }
     } finally {
       release();
       await replayer.end();
@@ -2139,6 +2150,31 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
         states.gather(tx, org, [{ table: { ...AGENTS, subject: 'integrity_hold' }, id: { id: org }, lock: 'share' }]),
       ),
     ).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('gathers behind another statement on one trip (P17), refusing what a gather refuses', async () => {
+    const agent = await newAgent();
+    const other = await newAgent();
+    const row = (id: string) => ({ table: AGENTS, id: { id }, lock: 'share' as const });
+    const behind = (rows: readonly GatheredRow[]) =>
+      withTenant(app, org, async (tx) => ({
+        ahead: await states.gatherBehind(
+          tx,
+          org,
+          tx.selectNoFrom((eb) => eb.val('ahead').as('said')),
+          rows,
+        ),
+        checked: await states.verifiedState(tx, AGENTS, { orgId: org, id: agent }, 'share'),
+      }));
+
+    const { ahead, checked } = await behind([row(agent), row(other)]);
+    expect(ahead.rows).toEqual([{ said: 'ahead' }]);
+    expect(checked).toMatchObject({ outcome: 'verified', version: 1 });
+
+    const hold = { ...row(agent), table: { ...AGENTS, subject: HOLD_SUBJECT } };
+    await expect(behind([hold])).rejects.toBeInstanceOf(RangeError);
+    const unknown = { ...row(agent), table: { ...AGENTS, subject: 'Not A Subject Type' } };
+    await expect(behind([unknown])).rejects.toBeInstanceOf(AuditEventRefused);
   });
 });
 

@@ -125,11 +125,12 @@ const APP_STATEMENTS =
  * the connection's check and the transaction's settings; with a commit, its
  * read-back; a decision's reservation and claim behind its request, and its
  * month's lock behind its period's insert (P16: the insert is the one always
- * sent together, as the lock's select also goes alone). Counted out, so the
- * report's number stays round trips.
+ * sent together, as the lock's select also goes alone); a claim's check and
+ * insert behind its savepoint, and a decision's currency read behind its first
+ * gather (P17). Counted out, so the report's number stays round trips.
  */
 const RIDERS =
-  "coalesce(pg_catalog.sum(s.calls) filter (where s.query ~ '^(start transaction|begin)' or s.query like '% as unchanged' or s.query ~ '^select pg_catalog[.]set_config[(].*[)] as (org_id|statement_timeout)' or s.query ~ '^insert into \"(limit_reservations\"[.]\"(reservations|agent_periods)|spend_requests\"[.]\"order_claims)\"'), 0)";
+  "coalesce(pg_catalog.sum(s.calls) filter (where s.query ~ '^(start transaction|begin)' or s.query like '% as unchanged' or s.query ~ '^select pg_catalog[.]set_config[(].*[)] as (org_id|statement_timeout)' or s.query ~ '^insert into \"(limit_reservations\"[.]\"(reservations|agent_periods)|spend_requests\"[.]\"order_claims)\"' or s.query ~ 'pg_current_xact_id_if_assigned' or s.query ~ '^\\s*insert into idempotency[.]keys' or s.query ~ 'allowed_currencies'), 0)";
 
 /**
  * A phase with the statement counter reset before it and read after it: how

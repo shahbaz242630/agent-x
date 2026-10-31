@@ -60,6 +60,7 @@ import {
   writeSignedRow,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
+import type { Compilable, QueryResult } from 'kysely';
 import type { Logger } from '@agentx/platform/observability';
 
 import { UUID } from '../../../shared-kernel/index.ts';
@@ -382,6 +383,13 @@ export interface SignedStates {
    * ID as its read named it, in the order given, null for none found.
    */
   gather(tx: AuditTransaction, orgId: string, rows: readonly GatheredRow[]): Promise<readonly (string | null)[]>;
+  /** gather, with `before` on the same trip ahead of it (4D2d P17): what `before` answered. */
+  gatherBehind(
+    tx: AuditTransaction,
+    orgId: string,
+    before: Compilable,
+    rows: readonly GatheredRow[],
+  ): Promise<QueryResult<unknown>>;
   /**
    * verifiedState for many rows of one table in the organisation, each locked
    * `share`: the rows in one statement and their signed states in another,
@@ -888,11 +896,8 @@ export function createSignedStates({
     return 'sign' in judged ? undefined : judged;
   };
 
-  const gather = async (
-    tx: AuditTransaction,
-    orgId: string,
-    list: readonly GatheredRow[],
-  ): Promise<readonly (string | null)[]> => {
+  /** What a gather checks before its statement goes. */
+  const gatherAllowed = (tx: AuditTransaction, orgId: string, list: readonly GatheredRow[]): void => {
     for (const { table } of list) notTheHold(table);
     if (headLocked.has(tx)) checkLockOrder(tx, undefined, 'share');
     const rows = heldIn(tx);
@@ -900,7 +905,16 @@ export function createSignedStates({
     for (const { table, id, lock } of list) {
       if ('id' in id) checkLockOrder(tx, rows.get(rowName(table, { orgId, id: id.id })), lock);
     }
-    const answers = await trail.latestSignedStatesGathered(tx, orgId, gatheredRowReads(orgId, list));
+  };
+
+  /** What a gather read, judged and kept for each row's next verifiedState. */
+  const gatherJudged = (
+    tx: AuditTransaction,
+    orgId: string,
+    list: readonly GatheredRow[],
+    answers: readonly GatheredLatest[],
+  ): readonly (string | null)[] => {
+    const rows = heldIn(tx);
     const kept = gathered.get(tx) ?? new Map<string, { readonly lock: RowLock; readonly check: StateCheck }>();
     gathered.set(tx, kept);
     // Once a row isn't believed (it may have changed while the statement waited for its lock), the rows after it
@@ -922,6 +936,37 @@ export function createSignedStates({
       if (check !== undefined) kept.set(name, { lock, check });
       return answer.id;
     });
+  };
+
+  const gather = async (
+    tx: AuditTransaction,
+    orgId: string,
+    list: readonly GatheredRow[],
+  ): Promise<readonly (string | null)[]> => {
+    gatherAllowed(tx, orgId, list);
+    return gatherJudged(
+      tx,
+      orgId,
+      list,
+      await trail.latestSignedStatesGathered(tx, orgId, gatheredRowReads(orgId, list)),
+    );
+  };
+
+  const gatherBehind = async (
+    tx: AuditTransaction,
+    orgId: string,
+    before: Compilable,
+    list: readonly GatheredRow[],
+  ): Promise<QueryResult<unknown>> => {
+    gatherAllowed(tx, orgId, list);
+    const { ahead, answers } = await trail.latestSignedStatesGatheredBehind(
+      tx,
+      orgId,
+      before,
+      gatheredRowReads(orgId, list),
+    );
+    gatherJudged(tx, orgId, list, answers);
+    return ahead;
   };
 
   /** What a gather believed of the row, once, if it was gathered with this lock: no trip (P8). */
@@ -1428,6 +1473,7 @@ export function createSignedStates({
   return Object.freeze({
     verifiedState,
     gather,
+    gatherBehind,
 
     verifiedStates,
     pageStates,

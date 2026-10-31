@@ -870,6 +870,21 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect(decidedOf(await ask(acting, asking(w), 'again'))).toMatchObject({ decision: 'ALLOW' });
   });
 
+  it("refuses on what it is asked before the supplier's lock: a supplier held takes nothing from the refusal", async () => {
+    const { w, acting } = await ready();
+    const holder = await database.connect('admin');
+    try {
+      await holder.query('begin');
+      await holder.query('select 1 from suppliers.suppliers where id = $1 for update', [w.suppliers[0]]);
+      expect(await ask(acting, asking(w, { amount: money(1_000_000n, 'USD') }))).toEqual(
+        refused(422, 'CURRENCY_NOT_ALLOWED'),
+      );
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
   it('counts its writes as one trip', async () => {
     const { w, acting } = await ready();
     decidedOf(await ask(acting, asking(w)));
@@ -878,8 +893,8 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .lines()
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
-    // An agent's later decision made 25 before this; these two trips take 3 off it.
-    expect(line?.trips).toBe(22);
+    // An agent's later decision made 25 before P16, whose two trips took 3 off it; P17's two take 3 more.
+    expect(line?.trips).toBe(19);
   });
 });
 
