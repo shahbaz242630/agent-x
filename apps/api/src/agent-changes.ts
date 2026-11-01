@@ -49,7 +49,12 @@
 //   does. Its status and scopes stay as they are. The new owner and the
 //   organisation's admins are told, in the same transaction (0034).
 //
-// Lock order (ADR-006 §6): the idempotency key, the issue lock (a handover's
+// The kill switch and a reactivation take the agent's brake (1b, tenant.ts)
+// first, so its decisions and key checks can't starve them (PL-63 item 3, 4D2e
+// C3): new ones line up behind it, those inside drain. It waits at most 12 s; past
+// that nothing has changed, and it is answered busy, with an alarm (braked).
+//
+// Lock order (ADR-006 §6): the idempotency key, the agent's brake (1b), the issue lock (a handover's
 // confirm), the members' memberships (2a, in order of ID), the agent (3), its
 // keys (3a, in order of ID), a suspend's or a reactivation's pending
 // requests (8) and their holdings (11), the step-up challenge (a
@@ -75,7 +80,7 @@ import {
 import type { Notice, Outbox } from '@agentx/core/modules/notifications';
 import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { AGENT_BRAKE, type Database, holdBrake, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -90,7 +95,7 @@ import {
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
 import { cancelledInForce, choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
-import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
+import { braked, createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Suspending an agent: the kill switch. */
 export const SUSPEND_OPERATION = 'agents.suspend';
@@ -211,6 +216,14 @@ export function createAgentChanges({
   const work = createAgentWork({ database, keys, ids, logger });
   const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
+  /** The kill switch's write: its wait run out is answered busy, with its alarm. */
+  const brakeWrite = (
+    member: AgentMember,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    change: Parameters<typeof work.write>[3],
+  ) => braked(logger, member.orgId, correlationId, () => work.write(member, idempotent, correlationId, change));
+
   /** The agent, read for change and verified: NOT_FOUND, or INTEGRITY_FAILED, otherwise. */
   const agentToChange = async (tx: AgentTx, states: SignedStates, orgId: string, agentId: string) => {
     const read = await agentOf(tx, states, { orgId, id: agentId }, 'change');
@@ -269,7 +282,8 @@ export function createAgentChanges({
 
   return {
     async suspend(member, idempotent, agentId, pendingRequests, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
+        await holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const read = await agentToChange(tx, states, member.orgId, agentId);
         if (pendingRequests === 'cancel') {
@@ -303,7 +317,8 @@ export function createAgentChanges({
     },
 
     async reactivate(member, idempotent, agentId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
+        await holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const agent = await suspendedAgent(tx, states, member.orgId, agentId);
         return stepUps.ask(tx, member, {
@@ -316,8 +331,9 @@ export function createAgentChanges({
     },
 
     async reactivateConfirm(member, idempotent, agentId, stepUpChallengeId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
+        await holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const agent = await suspendedAgent(tx, states, member.orgId, agentId);
         const consumed = await stepUps.consumed(

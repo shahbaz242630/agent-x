@@ -25,7 +25,7 @@
 import { type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { TABLE, UUID } from './patterns.ts';
-import { assertTenant } from './tenant.ts';
+import { assertTenant, lockName } from './tenant.ts';
 
 /** The Postgres type of an authority field, which decides how it is read as text. */
 export type SignedFieldType = 'text' | 'uuid' | 'integer' | 'timestamptz';
@@ -403,6 +403,20 @@ function lookedUpId(
     where l.org_id = ${orgId} and l.id = ${id}::uuid
     limit 1
   )`;
+}
+
+/**
+ * The shared side of a brake named by a uuid field of another row, read as a gather's lookedUp reads it: for a caller
+ * that doesn't yet know the ID (a key check, of its agent). None found, or a field not a uuid, names no one: no brake
+ * is taken, the rows' own reads judging it.
+ */
+export function brakeSharedLookedUp(
+  scope: string,
+  orgId: string,
+  lookedUp: { readonly table: SignedStateTable; readonly id: string; readonly column: string },
+): RawBuilder<unknown> {
+  const name = sql`${lockName(scope, orgId, '')} || (${lookedUpId(orgId, lookedUp)})::text`;
+  return sql`select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(${name}, 0))`;
 }
 
 /** The read of an earlier row of the gather. */

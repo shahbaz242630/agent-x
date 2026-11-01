@@ -7,7 +7,9 @@
 // 2. The key's ID looked up in the directory, for its organisation alone:
 //    where to look, never what is found there.
 // 3. Inside that organisation's withSignedStates, each statement limited to
-//    10 seconds, one statement (4D2e C4): the key's row read unlocked for its
+//    10 seconds, ahead of all else on one trip, its agent's brake (4D2e C3): a
+//    kill switch waiting goes first, however many checks a stolen key sends;
+//    then one statement (4D2e C4): the key's row read unlocked for its
 //    agent's ID alone (where to look); the agent locked (`share`, level 3); then
 //    the key locked (`share`, 3a), so the lock order is the one a rotation
 //    takes. Each row is believed only if it agrees with its log and the row
@@ -38,7 +40,7 @@
 // The check's transaction ends before the request's own work: a request that
 // decides on the agent (Phase 3's Tx A) reads it again (SEC-AG-12), and one
 // that runs in the same transaction uses agentKeyAt with its own.
-import { asAgentTraffic } from '@agentx/platform/db';
+import { AGENT_BRAKE, asAgentTraffic, brakeSharedLookedUp } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
@@ -97,10 +99,19 @@ export async function agentKeyAt(
   presented: PresentedKey,
 ): Promise<KeyAtCheck> {
   const { keyId, secret } = presented;
-  const [agentId] = await states.gather(tx, orgId, [
-    { table: AGENTS, id: { lookedUp: { table: AGENT_KEYS, id: keyId, column: 'agent_id' } }, lock: 'share' },
-    { table: AGENT_KEYS, id: { id: keyId }, lock: 'share' },
-  ]);
+  const agentOfKey = { table: AGENT_KEYS, id: keyId, column: 'agent_id' };
+  // A row pointed elsewhere only waits on another's brake: its alarm is still the key's own read.
+  const {
+    found: [agentId],
+  } = await states.gatherBehind(
+    tx,
+    orgId,
+    [brakeSharedLookedUp(AGENT_BRAKE, orgId, agentOfKey)],
+    [
+      { table: AGENTS, id: { lookedUp: agentOfKey }, lock: 'share' },
+      { table: AGENT_KEYS, id: { id: keyId }, lock: 'share' },
+    ],
+  );
   // Both answered from the gather, or each read again alone (agentOf and agentKeyOf, through verifiedState).
   const agentRead =
     typeof agentId === 'string' ? await agentOf(tx, states, { orgId, id: agentId }, 'share') : undefined;

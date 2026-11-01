@@ -1,10 +1,10 @@
 import { TooManyEventsToRead } from '@agentx/core/modules/audit';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import { SequentialIds, testLogger } from '@agentx/testing';
+import { LogCapture, SequentialIds, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createUseCaseWork, movedAsRead, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
+import { braked, createUseCaseWork, movedAsRead, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 describe('movedAsRead', () => {
   it('lets a move the read allowed through', () => {
@@ -21,6 +21,38 @@ describe('movedAsRead', () => {
       }).toThrow(new Error(`an agent read as ACTIVE didn't suspend: ${outcome}`));
     },
   );
+});
+
+describe('braked: a brake that couldn’t take hold', () => {
+  const failing = (code: string) => () => Promise.reject(Object.assign(new Error('failed'), { code }));
+
+  it.each([
+    ['a lock wait run out', '55P03'],
+    ['a statement past its limit', '57014'],
+  ])('answers %s busy, and raises the alarm', async (_, code) => {
+    const capture = new LogCapture();
+
+    expect(await braked(testLogger(capture), ORG, 'corr-1', failing(code))).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'ORGANISATION_BUSY',
+    });
+    expect(capture.lines()).toMatchObject([
+      { event: 'brake.not_applied', level: 'error', orgId: ORG, correlationId: 'corr-1' },
+    ]);
+  });
+
+  it('throws anything else as it was, with no alarm', async () => {
+    const capture = new LogCapture();
+
+    await expect(braked(testLogger(capture), ORG, 'corr-1', failing('40P01'))).rejects.toThrow('failed');
+    expect(capture.lines()).toEqual([]);
+  });
+
+  it('answers what the write answered', async () => {
+    const written = { outcome: 'conflict' } as const;
+    expect(await braked(testLogger(), ORG, 'corr-1', () => Promise.resolve(written))).toBe(written);
+  });
 });
 
 class OwnRefused extends UseCaseRefused {}

@@ -25,6 +25,8 @@ import {
   type DatabaseTransaction,
   type IdempotentRequest,
   type IdempotentWrite,
+  isLockWaitRunOut,
+  isStatementLimit,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -63,6 +65,30 @@ export type Written = IdempotentWrite | Refused;
 
 // A status move the work's own read said it may make (the shared kernel's, also core's: D7).
 export { movedAsRead } from '@agentx/core/shared-kernel';
+
+/**
+ * A brake's write (an organisation's freeze, an agent's kill switch; PL-63 item 3): its wait for a lock run out, or a
+ * statement past its limit, rolled it all back, so nothing is stopped: answered busy, its key free to send again, and
+ * the alarm raised, as an admin's brake failing is never routine. A 57014 is taken as a wait: a brake's statements read
+ * and write a few rows, and row locks can restart their wait past the statement's limit.
+ */
+export async function braked(
+  logger: Logger,
+  orgId: string,
+  correlationId: string,
+  write: () => Promise<Written>,
+): Promise<Written> {
+  const started = performance.now();
+  try {
+    return await write();
+  } catch (error) {
+    if (!isLockWaitRunOut(error) && !isStatementLimit(error)) throw error;
+    logger
+      .child({ correlationId, orgId })
+      .error('brake.not_applied', { waitedMs: Math.round(performance.now() - started) });
+    return refused(503, 'ORGANISATION_BUSY');
+  }
+}
 
 export function createUseCaseWork<Tables extends UseCaseTables>({
   database,

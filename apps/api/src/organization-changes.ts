@@ -34,8 +34,15 @@
 // `organization_unfrozen`; 0045), in the same transaction; a brake pressed
 // twice tells no one twice.
 //
+// Each takes the organisation's brake (1a, tenant.ts) before its row, so a
+// stream of decisions can't starve it (PL-63 item 3, 4D2e C3): new ones line up
+// behind it, those inside drain, and it goes through; it waits at most 12 s. Past
+// that nothing has changed and it is answered busy, with an alarm (braked,
+// use-case-work.ts). A brake can't beat a transaction that never ends: nothing
+// takes a lock from a holder that keeps it.
+//
 // Lock order (ADR-006 §6): the idempotency key, the session's challenges
-// (0b, an unfreeze's confirm), the organisation (2) before the admin's
+// (0b, an unfreeze's confirm), the brake (1a), the organisation (2) before the admin's
 // membership (2a), as an approval reads them, the challenge consumed, the
 // pending requests (8) and their holdings (11), the chain head, then the
 // notices, new rows that wait on nothing.
@@ -46,7 +53,14 @@ import type { NotificationsTables, Outbox } from '@agentx/core/modules/notificat
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { type PendingChoice, type SpendRequestsTables, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import { type Clock, type IdGenerator, keptNote } from '@agentx/core/shared-kernel';
-import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import {
+  type Database,
+  type DatabaseTransaction,
+  holdBrake,
+  type IdempotentRequest,
+  isUnwritten,
+  ORGANISATION_BRAKE,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -54,6 +68,7 @@ import { toldAdminsAndApprovers } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { chosenAgain, freezeChoiceDetails, pausedOf, unfreezeChoiceDetails } from './suspensions.ts';
 import {
+  braked,
   createStepUps,
   createUseCaseWork,
   movedAsRead,
@@ -167,10 +182,18 @@ export function createOrganizationChanges({
     return { key: { orgId, id: orgId }, state: read, status: read.fields.get('status') };
   };
 
+  /** The brake's write: its wait run out is answered busy, with its alarm. */
+  const brakeWrite = (
+    member: SessionMember,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    change: Parameters<typeof work.write>[3],
+  ) => braked(logger, member.orgId, correlationId, () => work.write(member, idempotent, correlationId, change));
+
   /**
    * The organisation, FROZEN (ORG_NOT_FROZEN otherwise), and the admin, for
    * an unfreeze with `choice`: an un-pause refused PENDING_REQUESTS_CANCELLED
-   * when its freeze cancelled them (decision 14).
+   * when its freeze cancelled them (decision 14). Holds its brake first.
    */
   const unfreezable = async (
     tx: OrganizationTx,
@@ -178,6 +201,7 @@ export function createOrganizationChanges({
     member: SessionMember,
     choice: PendingChoice,
   ) => {
+    await holdBrake(tx, ORGANISATION_BRAKE, member.orgId);
     const organization = await organizationIn(tx, states, member.orgId, 'change');
     await work.memberIn(tx, states, member, UNFREEZING_ROLES);
     if (organization.status !== 'FROZEN') throw new OrganizationRefused(409, 'ORG_NOT_FROZEN');
@@ -205,7 +229,8 @@ export function createOrganizationChanges({
 
   return {
     async freeze(member, idempotent, pendingRequests, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
+        await holdBrake(tx, ORGANISATION_BRAKE, member.orgId);
         const { key, state, status } = await organizationIn(tx, states, member.orgId, 'change');
         await work.memberIn(tx, states, member, FREEZING_ROLES);
         if (pendingRequests === 'cancel') {
@@ -241,7 +266,7 @@ export function createOrganizationChanges({
     },
 
     async unfreeze(member, idempotent, asked, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
         const organization = await unfreezable(tx, states, member, asked.pendingRequests);
         return stepUps.ask(tx, member, {
           action: UNFREEZE_OPERATION,
@@ -253,7 +278,7 @@ export function createOrganizationChanges({
     },
 
     async unfreezeConfirm(member, idempotent, { stepUpChallengeId, ...asked }, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         const organization = await unfreezable(tx, states, member, asked.pendingRequests);
         const consumed = await stepUps.consumed(

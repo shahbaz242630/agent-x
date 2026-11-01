@@ -4,6 +4,7 @@ import { createKeyedSlots } from './keyed-slots.ts';
 import {
   createOrganisationShares,
   isLockWaitRunOut,
+  isStatementLimit,
   OrganisationBusy,
   organisationShareOf,
 } from './organisation-shares.ts';
@@ -34,6 +35,16 @@ describe('a lock’s wait run out', () => {
     expect(isLockWaitRunOut(new Error('x'))).toBe(false);
     expect(isLockWaitRunOut(null)).toBe(false);
     expect(isLockWaitRunOut('55P03')).toBe(false);
+  });
+});
+
+describe('a statement past its limit', () => {
+  it('is Postgres’s query_canceled, and nothing else', () => {
+    expect(isStatementLimit(Object.assign(new Error('x'), { code: '57014' }))).toBe(true);
+    expect(isStatementLimit(Object.assign(new Error('x'), { code: '55P03' }))).toBe(false);
+    expect(isStatementLimit(new Error('x'))).toBe(false);
+    expect(isStatementLimit(null)).toBe(false);
+    expect(isStatementLimit('57014')).toBe(false);
   });
 });
 

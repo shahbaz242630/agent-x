@@ -113,6 +113,16 @@ describe('POST /v1/organization/freeze: the brake, chosen and confirmed (decisio
     expect(asked).toEqual([]);
   });
 
+  it('answers a brake that could not take hold 503, with when to send it again', async () => {
+    const { app } = await withChanges({ outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' });
+
+    const response = await app.inject(post('/freeze', { pendingRequests: 'pause', confirmed: true }));
+
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBe('5');
+    expect(response.json()).toMatchObject({ error: { code: 'ORGANISATION_BUSY' } });
+  });
+
   it('answers a pause over a cancel as the use case refuses it', async () => {
     const { app } = await withChanges({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_CANCELLED' });
 

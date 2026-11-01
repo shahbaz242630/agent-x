@@ -415,6 +415,16 @@ describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)'
     ]);
   });
 
+  it('answers a kill switch that could not take hold 503, with when to send it again', async () => {
+    const { app } = await withAgents({ change: { outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' } });
+
+    const response = await app.inject(change('/suspend', { pendingRequests: 'pause' }));
+
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBe('5');
+    expect(response.json()).toMatchObject({ error: { code: 'ORGANISATION_BUSY' } });
+  });
+
   it('asks a step-up to reactivate: 202, then confirms it with the step-up’s ID: 200', async () => {
     const asked = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');
     const confirmed = await withAgents(

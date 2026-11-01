@@ -244,6 +244,11 @@ export const PLAIN_WORDS = {
     broke: 'It was told busy, send again; nothing of it began, and sending again cannot do it twice.',
     next: 'Look at how busy the database is and what holds connections. If it keeps coming, it needs more room.',
   },
+  'brake.not_applied': {
+    happened: 'An admin pressed a freeze or kill switch, and it could not get its lock in time.',
+    broke: 'Nothing was stopped, so agents can still act. The admin was told busy.',
+    next: 'Press it again. If it keeps failing, find the stuck database work and end it.',
+  },
   'db.organisation_busy': {
     happened: "An organisation's agents were using their full share of the database, and one request waited too long.",
     broke: 'That request was told busy, send again; that cannot do it twice. Other organisations carried on.',

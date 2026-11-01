@@ -266,6 +266,48 @@ export async function holdTransactionLock<Schema>(
   await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`.execute(tx);
 }
 
+/** Every decision and key check's side of the lock an organisation's freeze takes (ADR-006 level 1a). */
+export const ORGANISATION_BRAKE = 'organisation-brake';
+/** Every decision and key check's side of the lock an agent's kill switch takes (ADR-006 level 1b). */
+export const AGENT_BRAKE = 'agent-brake';
+/**
+ * The longest a brake waits for each lock. Past a statement's limit, as that is how long one inside can really take:
+ * a decision queued behind another for a stuck supplier's row waits its 5 s for the row's queue, then 5 s more on its
+ * holder, each wait timed alone (measured, S168: at 8 s a freeze behind them failed every time). New ones line up
+ * behind the brake from its first moment, so what it waits for is only those already inside.
+ */
+export const BRAKE_WAIT_SECONDS = STATEMENT_SECONDS + 2;
+const BRAKE_WAIT = `${String(BRAKE_WAIT_SECONDS)}s`;
+/** A brake's own limit on a statement, past its wait, so that the wait runs out as a lock's. */
+const BRAKE_STATEMENT = `${String(BRAKE_WAIT_SECONDS + 3)}s`;
+
+/**
+ * The shared side of a brake, a statement of its own ahead of what it guards, so that the read behind it takes its
+ * snapshot only once the wait is over (S157). Why a brake and not the row's own lock: a row's FOR SHARE doesn't queue
+ * behind a waiting FOR NO KEY UPDATE while its holders only hold locks, so a stream of them starves it, each new holder
+ * restarting its wait; an advisory lock honours whoever waits first. Takes no transaction ID.
+ */
+export const brakeShared = (scope: string, ...ids: readonly string[]): RawBuilder<unknown> =>
+  sql`select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(${lockName(scope, ...ids)}, 0))`;
+
+/**
+ * Takes a brake for the rest of the transaction: new takers of its shared side line up behind it, those inside drain.
+ * Its wait is bounded to BRAKE_WAIT_SECONDS, as is every lock's after it here, on the lock's own trip.
+ * That is a wait's bound and not the brake's whole: a statement behind it is held to BRAKE_STATEMENT.
+ */
+export async function holdBrake<Schema>(
+  tx: Transaction<Schema>,
+  scope: string,
+  ...ids: readonly string[]
+): Promise<void> {
+  const name = lockName(scope, ...ids);
+  await sendTogether(tx, [
+    sql`select pg_catalog.set_config('lock_timeout', ${BRAKE_WAIT}, true),
+      pg_catalog.set_config('statement_timeout', ${BRAKE_STATEMENT}, true)`,
+    sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`,
+  ]);
+}
+
 /**
  * What a connection must carry before any work runs on it: no tenant, and the
  * `search_path` the startup packet pinned. Both come back from one statement,
@@ -591,6 +633,16 @@ function checked(connection: DatabaseConnection): CheckedConnection {
   return connection;
 }
 
+/** A statement sendTogether takes. */
+export interface SentTogether {
+  compile(executorProvider: QueryExecutorProvider): CompiledQuery;
+}
+
+/** What each of the statements sent together answered, in their order. */
+export type AnswersOf<Statements extends readonly SentTogether[]> = {
+  -readonly [At in keyof Statements]: QueryResult<unknown>;
+};
+
 /**
  * The statements on one trip of the transaction's connection, in the order
  * given (4D2d P16). Kysely holds each of a transaction's statements back for
@@ -598,17 +650,14 @@ function checked(connection: DatabaseConnection): CheckedConnection {
  * none of whose text needs an answer to one before it. An answer checked in
  * code is checked after the trip, so a commit never goes on one.
  */
-export function sendTogether<
-  Schema,
-  const Statements extends readonly { compile(executorProvider: QueryExecutorProvider): CompiledQuery }[],
->(
+export function sendTogether<Schema, const Statements extends readonly SentTogether[]>(
   tx: Transaction<Schema>,
   statements: Statements,
-): Promise<{ -readonly [At in keyof Statements]: QueryResult<unknown> }> {
+): Promise<AnswersOf<Statements>> {
   const queries = statements.map((statement) => statement.compile(tx));
-  return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries)) as Promise<{
-    -readonly [At in keyof Statements]: QueryResult<unknown>;
-  }>;
+  return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries)) as Promise<
+    AnswersOf<Statements>
+  >;
 }
 
 /**
