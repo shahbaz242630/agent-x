@@ -115,7 +115,8 @@ export function createDecisionGate({
       }
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
-          organisation.waiting.splice(organisation.waiting.indexOf(go), 1);
+          // The first in its list: all wait equally long, in the order they came.
+          organisation.waiting.shift();
           if (organisation.waiting.length === 0) ring.delete(organisation);
           const refused = refusal(organisation, waitMs);
           forget(key, organisation);

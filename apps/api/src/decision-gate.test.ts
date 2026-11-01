@@ -241,7 +241,91 @@ describe('the fair gate (4D2e C, PL-63)', () => {
     expect(granted).toEqual(['first', 'a']);
   });
 
-  it('never runs a waiter that ran out, and drops the right one from the middle of a list', async () => {
+  it('counts a slot handed on: the total holds after a waiter is let in, for those who ask next', async () => {
+    const { gate, enter, granted } = gateWith({ active: 2, perOrganisation: 1 });
+    void enter('a');
+    void enter('b');
+    void enter('c');
+    await settled();
+    gate.leave('a');
+    await settled();
+    expect(granted).toEqual(['a', 'b', 'c']);
+    // Full again: b and c hold both, so d waits.
+    void enter('d');
+    await settled();
+    expect(granted).toEqual(['a', 'b', 'c']);
+  });
+
+  it('lets an organisation’s own waiters in the order they came', async () => {
+    const gate = createDecisionGate({ ...LIMITS, active: 1, perOrganisation: 1 });
+    const order: string[] = [];
+    void gate.enter('x');
+    for (const name of ['first', 'second', 'third']) {
+      void gate.enter('a').then(() => order.push(name));
+    }
+    gate.leave('x');
+    await settled();
+    expect(order).toEqual(['first']);
+    gate.leave('a');
+    await settled();
+    expect(order).toEqual(['first', 'second']);
+    gate.leave('a');
+    await settled();
+    expect(order).toEqual(['first', 'second', 'third']);
+  });
+
+  it('takes an organisation out of the turns the moment a handed slot brings it to its limit', async () => {
+    const { gate, enter, granted } = gateWith({ active: 2, perOrganisation: 1 });
+    void enter('x');
+    void enter('y');
+    void enter('a');
+    void enter('a');
+    await settled();
+    gate.leave('x');
+    await settled();
+    expect(granted).toEqual(['x', 'y', 'a']);
+    // A slot free, and a still waiting at its limit: the slot stays free, never going past a's limit.
+    gate.leave('y');
+    await settled();
+    expect(granted).toEqual(['x', 'y', 'a']);
+    void enter('b');
+    await settled();
+    expect(granted).toEqual(['x', 'y', 'a', 'b']);
+  });
+
+  it('keeps an organisation in the turns after a handed slot while it has room and others wait', async () => {
+    const { gate, enter, granted } = gateWith({ active: 2, perOrganisation: 2 });
+    void enter('x');
+    void enter('x');
+    void enter('a');
+    void enter('a');
+    await settled();
+    gate.leave('x');
+    await settled();
+    expect(granted).toEqual(['x', 'x', 'a']);
+    gate.leave('x');
+    await settled();
+    expect(granted).toEqual(['x', 'x', 'a', 'a']);
+  });
+
+  it('stops a let-in waiter’s clock: it can’t later turn away the one behind it', async () => {
+    vi.useFakeTimers();
+    const { gate, enter, granted, outcomes } = gateWith({ active: 1, perOrganisation: 1, waitMs: 1_000 });
+    void enter('x');
+    void enter('a');
+    await vi.advanceTimersByTimeAsync(500);
+    void enter('a');
+    await vi.advanceTimersByTimeAsync(100);
+    gate.leave('x');
+    // Past the moment the first waiter's own clock would have run out.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(outcomes).toEqual(['x', 'a']);
+    gate.leave('a');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(granted).toEqual(['x', 'a', 'a']);
+  });
+
+  it('never runs a waiter that ran out, and keeps the rest of its list', async () => {
     vi.useFakeTimers();
     const { gate, enter, granted, outcomes } = gateWith({ active: 1, perOrganisation: 1, waitMs: 1_000 });
     void enter('a');
