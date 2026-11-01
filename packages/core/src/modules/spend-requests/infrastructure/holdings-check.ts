@@ -112,7 +112,7 @@ async function claimsFor(tx: HoldingsTransaction, requestIds: readonly string[])
   }));
 }
 
-/** Each reference's canonical form, as 0039 makes a request's `order_key` (`orderKeyOf`), in one statement. */
+/** Each reference's canonical form, as a request's `order_key` is made (`orderKeyOf`), in one statement. */
 async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[]): Promise<Map<string, string>> {
   if (references.length === 0) return new Map();
   const { rows } = await sql<{ reference: string; key: string }>`
