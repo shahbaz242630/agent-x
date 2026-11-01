@@ -16,6 +16,10 @@ export interface StatementTimes {
   databaseMs: number;
   slowestTripMs: number;
   commitMs: number;
+  /** The round trip that asks for the supplier's row lock, its wait inside: within databaseMs (PL-62, 4D2e A). */
+  supplierLockMs: number;
+  /** The round trip that asks for the audit chain's head, its wait inside: within databaseMs. */
+  headLockMs: number;
 }
 
 export const noStatementTimes = (): StatementTimes => ({
@@ -24,6 +28,8 @@ export const noStatementTimes = (): StatementTimes => ({
   databaseMs: 0,
   slowestTripMs: 0,
   commitMs: 0,
+  supplierLockMs: 0,
+  headLockMs: 0,
 });
 
 const timing = new AsyncLocalStorage<StatementTimes>();
@@ -62,6 +68,13 @@ export function timedPoolWait<T>(connect: () => Promise<T>): Promise<T> {
   });
 }
 
+/** A statement that asks for a contended lock, its time added under that lock's name as well as its trip's. */
+export function timedLock<T>(lock: 'supplierLockMs' | 'headLockMs', asks: () => Promise<T>): Promise<T> {
+  return measured(asks, (times, took) => {
+    times[lock] += took;
+  });
+}
+
 /** A tenth of a millisecond is all a log line needs. */
 const tenths = (ms: number): number => Math.round(ms * 10) / 10;
 
@@ -71,6 +84,8 @@ export const statementTimesForLog = (times: StatementTimes): StatementTimes => (
   databaseMs: tenths(times.databaseMs),
   slowestTripMs: tenths(times.slowestTripMs),
   commitMs: tenths(times.commitMs),
+  supplierLockMs: tenths(times.supplierLockMs),
+  headLockMs: tenths(times.headLockMs),
 });
 
 /**

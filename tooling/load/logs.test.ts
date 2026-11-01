@@ -6,7 +6,8 @@ const line = (fields: Record<string, unknown>) => JSON.stringify({ level: 'info'
 const decided = (durationMs: number) => line({ event: 'spend_request.decided', durationMs });
 const checked = (requests: number, mismatched = 0, tampered = 0) =>
   line({ event: 'holdings_check.passed', requests, mismatched, tampered });
-const NO_NEIGHBOUR = { count: 0, p50: 0, p95: 0, p99: 0, max: 0, connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0 };
+const NO_PARTS = { connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0, supplierLockP95: 0, headLockP95: 0 };
+const NO_NEIGHBOUR = { count: 0, p50: 0, p95: 0, p99: 0, max: 0, ...NO_PARTS };
 
 describe('percentiles', () => {
   it('takes the nearest rank, and 0 of nothing', () => {
@@ -38,8 +39,8 @@ describe('the API’s log after a load run', () => {
       { spike: new Set(['spike']), crowdOwn: new Set(['own']), crowdShared: new Set(['shared']) },
     );
     expect(summary.decisions.count).toBe(2);
-    expect(summary.crowdOwnDecisions).toEqual({ count: 1, p50: 20, p95: 20, p99: 20, max: 20 });
-    expect(summary.crowdSharedDecisions).toEqual({ count: 1, p50: 30, p95: 30, p99: 30, max: 30 });
+    expect(summary.crowdOwnDecisions).toEqual({ count: 1, p50: 20, p95: 20, p99: 20, max: 20, ...NO_PARTS });
+    expect(summary.crowdSharedDecisions).toEqual({ count: 1, p50: 30, p95: 30, p99: 30, max: 30, ...NO_PARTS });
     expect(summary.spikeDecisions.count).toBe(1);
     expect(summary.allowed).toBe(1);
   });
@@ -103,10 +104,10 @@ describe('the API’s log after a load run', () => {
       ],
       decisions: { count: 2, p50: 12, p95: 40, p99: 40, max: 40 },
       spikeDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
-      crowdOwnDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
-      crowdSharedDecisions: { count: 0, p50: 0, p95: 0, p99: 0, max: 0 },
+      crowdOwnDecisions: NO_NEIGHBOUR,
+      crowdSharedDecisions: NO_NEIGHBOUR,
       allowed: 0,
-      steadyParts: { connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0 },
+      steadyParts: NO_PARTS,
       neighbours: { calm: NO_NEIGHBOUR, busy: NO_NEIGHBOUR, stuck: NO_NEIGHBOUR },
       neighbourProblems: {},
     });
@@ -114,7 +115,17 @@ describe('the API’s log after a load run', () => {
 
   it('times each neighbour apart with where its time went, none of it in the steady numbers or the allowed count', () => {
     const inOrg = (orgId: string, durationMs: number, poolWaitMs: number, turnWaitMs: number, trips: number) =>
-      line({ event: 'spend_request.decided', orgId, durationMs, poolWaitMs, turnWaitMs, trips, decision: 'ALLOW' });
+      line({
+        event: 'spend_request.decided',
+        orgId,
+        durationMs,
+        poolWaitMs,
+        turnWaitMs,
+        trips,
+        decision: 'ALLOW',
+        supplierLockMs: trips + 100,
+        headLockMs: trips + 200,
+      });
     const summary = summariseLogs(
       [
         checked(1),
@@ -127,12 +138,39 @@ describe('the API’s log after a load run', () => {
     );
     expect(summary.decisions.count).toBe(1);
     expect(summary.allowed).toBe(1);
-    expect(summary.steadyParts).toEqual({ connectionWaitP95: 1, turnWaitP95: 2, tripsP50: 19 });
+    expect(summary.steadyParts).toEqual({
+      connectionWaitP95: 1,
+      turnWaitP95: 2,
+      tripsP50: 19,
+      supplierLockP95: 119,
+      headLockP95: 219,
+    });
     const percentiles = (n: number) => ({ count: 1, p50: n, p95: n, p99: n, max: n });
     expect(summary.neighbours).toEqual({
-      calm: { ...percentiles(20), connectionWaitP95: 3, turnWaitP95: 4, tripsP50: 20 },
-      busy: { ...percentiles(30), connectionWaitP95: 5, turnWaitP95: 6, tripsP50: 21 },
-      stuck: { ...percentiles(40), connectionWaitP95: 7, turnWaitP95: 8, tripsP50: 22 },
+      calm: {
+        ...percentiles(20),
+        connectionWaitP95: 3,
+        turnWaitP95: 4,
+        tripsP50: 20,
+        supplierLockP95: 120,
+        headLockP95: 220,
+      },
+      busy: {
+        ...percentiles(30),
+        connectionWaitP95: 5,
+        turnWaitP95: 6,
+        tripsP50: 21,
+        supplierLockP95: 121,
+        headLockP95: 221,
+      },
+      stuck: {
+        ...percentiles(40),
+        connectionWaitP95: 7,
+        turnWaitP95: 8,
+        tripsP50: 22,
+        supplierLockP95: 122,
+        headLockP95: 222,
+      },
     });
     // Each neighbour's line accounts for a decision the run made.
     expect(logFailures(summary, 4, 150)).toEqual([]);

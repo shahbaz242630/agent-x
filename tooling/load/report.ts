@@ -150,10 +150,11 @@ function crowdSection(run: RunResult): string[] {
   const rows = CROWD_PHASES.flatMap(({ phase, setup, of }) => {
     const p = run.phases.find((candidate) => candidate.phase === phase);
     if (p === undefined) return [];
-    const { count, p50, p95, p99, max } = run.logs[of];
+    const parts = run.logs[of];
+    const { count, p50, p95, p99, max } = parts;
     return [
       `| ${setup} | ${String(p.requests)} | ${String(p.dropped)} | ${ms(p.asksMs.p95)} | ${String(count)} | ${String(p50)} | ${String(p95)} | ` +
-        `${String(p99)} | ${String(max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} |`,
+        `${String(p99)} | ${String(max)} | ${String(p.serverErrors)} | ${String(p.rateLimited)} | ${String(p.checksFailed)} | ${partsCells(parts)} |`,
     ];
   });
   const misses = crowdMisses(run);
@@ -170,8 +171,8 @@ function crowdSection(run: RunResult): string[] {
         '',
         'Ten agents of one organisation, 25 requests a second between them, picked at random, with the same duplicates and replays. They share its chain head, and in the second row each supplier’s lock too.',
         '',
-        '| Setup | Requests | Not sent | Request p95 ms | Decisions | p50 ms | p95 ms | p99 ms | Max ms | 5xx | 429 | Checks failed |',
-        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+        `| Setup | Requests | Not sent | Request p95 ms | Decisions | p50 ms | p95 ms | p99 ms | Max ms | 5xx | 429 | Checks failed | ${PARTS_HEADINGS} |`,
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
         ...rows,
         '',
         verdict.length === 0
@@ -192,8 +193,11 @@ function neighbourMiss(run: RunResult): string[] {
     : [];
 }
 
-const partsCells = ({ connectionWaitP95, turnWaitP95, tripsP50 }: DecisionParts) =>
-  `${String(connectionWaitP95)} | ${String(turnWaitP95)} | ${String(tripsP50)}`;
+const partsCells = ({ connectionWaitP95, turnWaitP95, tripsP50, supplierLockP95, headLockP95 }: DecisionParts) =>
+  [connectionWaitP95, turnWaitP95, tripsP50, supplierLockP95, headLockP95].map(String).join(' | ');
+
+const PARTS_HEADINGS =
+  "Connection wait p95 ms | Own agent wait p95 ms | Trips p50 | Supplier's lock trip p95 ms | Chain head trip p95 ms";
 
 /** One organisation's trouble beside others (PL-63): the same target, each kind apart, beside the quiet phases. */
 function neighbourSection(run: RunResult): string[] {
@@ -216,8 +220,8 @@ function neighbourSection(run: RunResult): string[] {
     '',
     'Ten calm organisations, sending what the steady traffic sends, beside a busy organisation (25 requests a second on three shared suppliers) and a stuck one (5 a second, two of its three suppliers held locked for the phase). The calm ones should read as the quiet phases do.',
     '',
-    '| Traffic | Requests | Request p95 ms | 5xx | 429 | Decisions | p50 ms | p95 ms | p99 ms | Connection wait p95 ms | Own agent wait p95 ms | Trips p50 |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    `| Traffic | Requests | Request p95 ms | 5xx | 429 | Decisions | p50 ms | p95 ms | p99 ms | ${PARTS_HEADINGS} |`,
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     `| Quiet (phases 1 and 2) | | | | | ${String(decisions.count)} | ${String(decisions.p50)} | ${String(decisions.p95)} | ${String(decisions.p99)} | ${partsCells(steadyParts)} |`,
     row('Calm, beside the others', 'calm'),
     row('Busy organisation', 'busy'),
