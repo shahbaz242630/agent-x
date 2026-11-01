@@ -652,9 +652,12 @@ export function createSpendRequestDecisions({
       return refused(503, 'ORGANISATION_BUSY');
     }
     if (error instanceof DecisionGateRefused) {
-      // The whole platform full is its own line, alerted: no one organisation's doing, and no limit of its own hit.
-      const line = error.reason === 'platform' ? 'spend_request.platform_full' : 'spend_request.organisation_busy';
-      log.warn(line, { agentId, waitedMs: error.waitedMs });
+      // The whole platform full is its own line, alerted, and its own answer: this organisation hit no limit of its own.
+      if (error.reason === 'platform') {
+        log.warn('spend_request.platform_full', { agentId, waitedMs: error.waitedMs });
+        return refused(503, 'PLATFORM_BUSY');
+      }
+      log.warn('spend_request.organisation_busy', { agentId, waitedMs: error.waitedMs });
       return refused(503, 'ORGANISATION_BUSY');
     }
     throw error;

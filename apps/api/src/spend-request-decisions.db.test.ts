@@ -1131,12 +1131,12 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       return { w, acting, letGo, holding };
     }
 
-    it('turns a calm organisation away as the platform’s, and the one at its limit as its own; each its own line, nothing made; the slot’s holder commits, never told busy', async () => {
+    it('turns a calm organisation away as the platform’s, and the one at its limit as its own; each its own answer and line, nothing made; the slot’s holder commits, never told busy', async () => {
       const calm = await ready();
       const { w, acting, letGo, holding } = await gateFilledBy();
 
       const busy = await ask(calm.acting, asking(calm.w), 'platform-full');
-      expect(busy).toEqual({ outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' });
+      expect(busy).toEqual({ outcome: 'refused', status: 503, code: 'PLATFORM_BUSY' });
       const own = await ask(
         acting,
         asking(w, { supplierId: w.suppliers[1] ?? '', orderReference: 'INV-OWN' }),

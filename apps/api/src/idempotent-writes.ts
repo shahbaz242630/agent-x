@@ -24,6 +24,9 @@ import { BUSY_RETRY_SECONDS, sendErrorBody } from './errors.ts';
 import { IDEMPOTENCY_KEY_HEADER } from './write-operations.ts';
 import type { Refused } from './refused.ts';
 
+/** The refusals that say when to send the same request again: a wait in a decision's lines ran out. */
+const SEND_AGAIN_CODES: ReadonlySet<string> = new Set(['AGENT_BUSY', 'ORGANISATION_BUSY', 'PLATFORM_BUSY']);
+
 /** Text that can't be hashed as it reads: a lone surrogate would be written as U+FFFD, so two requests could hash alike. */
 class IllFormedText extends Error {
   readonly statusCode = 400;
@@ -118,9 +121,7 @@ export function answerRefusal(
 ): FastifyReply {
   if (answer.outcome === 'refused') {
     // A wait in a decision's lines ran out: it says when to send the same request again (S161).
-    if (answer.code === 'AGENT_BUSY' || answer.code === 'ORGANISATION_BUSY') {
-      reply.header('retry-after', String(BUSY_RETRY_SECONDS));
-    }
+    if (SEND_AGAIN_CODES.has(answer.code)) reply.header('retry-after', String(BUSY_RETRY_SECONDS));
     return sendErrorBody(reply, answer.status, answer.code, request.id);
   }
   if (answer.outcome === 'conflict') return sendErrorBody(reply, 409, 'IDEMPOTENCY_KEY_REUSED', request.id);

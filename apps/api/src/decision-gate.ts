@@ -14,8 +14,9 @@
 // A limit slows only the organisation that hit it, with one case it can't cover: a
 // platform truly full queues a calm organisation that hit nothing (design S168,
 // finding 2). Taking turns keeps that short, and it is told apart, by `reason`, so
-// it can have its own line and alert. An organisation is refused as itself when it
-// is at its own limit, whether or not the platform is full too.
+// it has its own answer (503 PLATFORM_BUSY), line and alert: telling that customer
+// its organisation is busy would be untrue. An organisation is refused as itself
+// (503 ORGANISATION_BUSY) when it is at its own limit, the platform full or not.
 //
 // Only agents' decisions enter. People's and jobs' transactions never do: refusing
 // them is how an admin's freeze was told busy after it committed (S166). Counted

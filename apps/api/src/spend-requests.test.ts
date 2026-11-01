@@ -313,6 +313,11 @@ describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
     expect(turnedAway.statusCode).toBe(503);
     expect(turnedAway.json()).toMatchObject({ error: { code: 'ORGANISATION_BUSY' } });
     expect(turnedAway.headers['retry-after']).toBe('5');
+    const full = await withDecisions({ outcome: 'refused', status: 503, code: 'PLATFORM_BUSY' });
+    const platformFull = await full.app.inject(asAgent(BODY));
+    expect(platformFull.statusCode).toBe(503);
+    expect(platformFull.json()).toMatchObject({ error: { code: 'PLATFORM_BUSY' } });
+    expect(platformFull.headers['retry-after']).toBe('5');
     const frozen = await withDecisions({ outcome: 'refused', status: 409, code: 'ORG_FROZEN' });
     expect((await frozen.app.inject(asAgent(BODY))).headers['retry-after']).toBeUndefined();
   });
