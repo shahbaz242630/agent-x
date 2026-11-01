@@ -82,7 +82,7 @@ const judged = NEIGHBOURS
       // The Pilot's request target (PRD §8); a crowd's has none yet: named so k6 times it apart.
       [`http_req_duration{kind:${TRAFFIC}}`]: [CROWD === undefined ? 'p(95)<500' : 'max>=0'],
       // An arrival k6 had no free VU for is a request never sent: the run then sent less than it says. A crowd's
-      // is slowness the report shows and names (S164: slow, not wrong, doesn't fail a run); its errors still do.
+      // is slowness the report's crowd section names (S164: slow, not wrong, doesn't fail a run); its errors still do.
       dropped_iterations: [CROWD === undefined ? 'count==0' : 'count>=0'],
       server_errors: ['count==0'],
       rate_limited: ['count==0'],

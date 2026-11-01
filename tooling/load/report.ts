@@ -159,6 +159,12 @@ function crowdSection(run: RunResult): string[] {
   });
   const misses = crowdMisses(run);
   const unmeasured = crowdsUnmeasured(run);
+  const unsent = CROWD_PHASES.flatMap(({ phase, setup }) => {
+    const dropped = run.phases.find((candidate) => candidate.phase === phase)?.dropped ?? 0;
+    return dropped === 0
+      ? []
+      : [`**${setup}: ${String(dropped)} request(s) never sent, so it carried less than planned.**`];
+  });
   const verdict = [
     ...(misses.length === 0 ? [] : [`**Decision target missed (${String(POLICY_P95_MS)} ms).** ${misses.join(' ')}`]),
     ...unmeasured,
@@ -175,9 +181,12 @@ function crowdSection(run: RunResult): string[] {
         '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
         ...rows,
         '',
-        verdict.length === 0
-          ? `Decision target met in each: p95 under ${String(POLICY_P95_MS)} ms.`
-          : verdict.join(' '),
+        [
+          verdict.length === 0
+            ? `Decision target met in each: p95 under ${String(POLICY_P95_MS)} ms.`
+            : verdict.join(' '),
+          ...unsent,
+        ].join(' '),
       ];
 }
 
@@ -193,11 +202,11 @@ function neighbourMiss(run: RunResult): string[] {
     : [];
 }
 
-const partsCells = ({ connectionWaitP95, turnWaitP95, tripsP50, supplierLockP95, headLockP95 }: DecisionParts) =>
-  [connectionWaitP95, turnWaitP95, tripsP50, supplierLockP95, headLockP95].map(String).join(' | ');
+const partsCells = ({ connectionWaitP95, turnWaitP95, tripsP50, decisionRowsP95, headLockP95 }: DecisionParts) =>
+  [connectionWaitP95, turnWaitP95, tripsP50, decisionRowsP95, headLockP95].map(String).join(' | ');
 
 const PARTS_HEADINGS =
-  "Connection wait p95 ms | Own agent wait p95 ms | Trips p50 | Supplier's lock trip p95 ms | Chain head trip p95 ms";
+  "Connection wait p95 ms | Own agent wait p95 ms | Trips p50 | Decision rows trip p95 ms (the supplier's lock inside) | Chain head trip p95 ms";
 
 /** One organisation's trouble beside others (PL-63): the same target, each kind apart, beside the quiet phases. */
 function neighbourSection(run: RunResult): string[] {

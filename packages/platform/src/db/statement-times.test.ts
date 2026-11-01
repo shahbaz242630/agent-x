@@ -34,11 +34,11 @@ describe('timing statements', () => {
   it('adds a lock-asking statement under its lock, a failed one too, and nothing when no work is timed', async () => {
     const times = noStatementTimes();
     await timingStatements(times, async () => {
-      await timedLock('supplierLockMs', () => new Promise((resolve) => setTimeout(resolve, 5)));
+      await timedLock('decisionRowsMs', () => new Promise((resolve) => setTimeout(resolve, 5)));
       await expect(timedLock('headLockMs', () => Promise.reject(new Error('refused')))).rejects.toThrow('refused');
     });
-    expect(times.supplierLockMs).toBeGreaterThan(1);
-    expect(times.headLockMs).toBeLessThan(times.supplierLockMs);
+    expect(times.decisionRowsMs).toBeGreaterThan(1);
+    expect(times.headLockMs).toBeLessThan(times.decisionRowsMs);
     expect(statementTimesForLog({ ...times, headLockMs: 1.26 }).headLockMs).toBe(1.3);
     await expect(timedLock('headLockMs', () => Promise.resolve('untimed'))).resolves.toBe('untimed');
   });
@@ -87,7 +87,7 @@ describe('timing statements', () => {
         databaseMs: 12.345,
         slowestTripMs: 9.96,
         commitMs: 2.25,
-        supplierLockMs: 4.44,
+        decisionRowsMs: 4.44,
         headLockMs: 1.26,
       }),
     ).toEqual({
@@ -96,7 +96,7 @@ describe('timing statements', () => {
       databaseMs: 12.3,
       slowestTripMs: 10,
       commitMs: 2.3,
-      supplierLockMs: 4.4,
+      decisionRowsMs: 4.4,
       headLockMs: 1.3,
     });
   });

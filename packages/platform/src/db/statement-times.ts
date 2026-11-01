@@ -16,8 +16,8 @@ export interface StatementTimes {
   databaseMs: number;
   slowestTripMs: number;
   commitMs: number;
-  /** The round trip that asks for the supplier's row lock, its wait inside: within databaseMs (PL-62, 4D2e A). */
-  supplierLockMs: number;
+  /** The round trip that locks a decision's rows, the supplier's last and the only one for change: within databaseMs (PL-62, 4D2e A). */
+  decisionRowsMs: number;
   /** The round trip that asks for the audit chain's head, its wait inside: within databaseMs. */
   headLockMs: number;
 }
@@ -28,7 +28,7 @@ export const noStatementTimes = (): StatementTimes => ({
   databaseMs: 0,
   slowestTripMs: 0,
   commitMs: 0,
-  supplierLockMs: 0,
+  decisionRowsMs: 0,
   headLockMs: 0,
 });
 
@@ -69,7 +69,7 @@ export function timedPoolWait<T>(connect: () => Promise<T>): Promise<T> {
 }
 
 /** A statement that asks for a contended lock, its time added under that lock's name as well as its trip's. */
-export function timedLock<T>(lock: 'supplierLockMs' | 'headLockMs', asks: () => Promise<T>): Promise<T> {
+export function timedLock<T>(lock: 'decisionRowsMs' | 'headLockMs', asks: () => Promise<T>): Promise<T> {
   return measured(asks, (times, took) => {
     times[lock] += took;
   });
@@ -84,7 +84,7 @@ export const statementTimesForLog = (times: StatementTimes): StatementTimes => (
   databaseMs: tenths(times.databaseMs),
   slowestTripMs: tenths(times.slowestTripMs),
   commitMs: tenths(times.commitMs),
-  supplierLockMs: tenths(times.supplierLockMs),
+  decisionRowsMs: tenths(times.decisionRowsMs),
   headLockMs: tenths(times.headLockMs),
 });
 

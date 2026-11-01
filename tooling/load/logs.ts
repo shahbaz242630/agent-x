@@ -54,8 +54,8 @@ export interface DecisionParts {
   readonly turnWaitP95: number;
   /** A typical decision's trips to the database. */
   readonly tripsP50: number;
-  /** The trip asking for the supplier's row lock, its wait inside (PL-62). */
-  readonly supplierLockP95: number;
+  /** The trip locking a decision's rows, the supplier's among them, its wait inside (PL-62). */
+  readonly decisionRowsP95: number;
   /** The trip asking for the audit chain's head, its wait inside. */
   readonly headLockP95: number;
 }
@@ -73,7 +73,7 @@ interface Line {
   readonly poolWaitMs?: number;
   readonly turnWaitMs?: number;
   readonly trips?: number;
-  readonly supplierLockMs?: number;
+  readonly decisionRowsMs?: number;
   readonly headLockMs?: number;
 }
 
@@ -159,7 +159,7 @@ const partsOf = (lines: readonly Line[]): DecisionParts => ({
   connectionWaitP95: percentilesOf(lines.map(({ poolWaitMs = 0 }) => poolWaitMs)).p95,
   turnWaitP95: percentilesOf(lines.map(({ turnWaitMs = 0 }) => turnWaitMs)).p95,
   tripsP50: percentilesOf(lines.map(({ trips = 0 }) => trips)).p50,
-  supplierLockP95: percentilesOf(lines.map(({ supplierLockMs = 0 }) => supplierLockMs)).p95,
+  decisionRowsP95: percentilesOf(lines.map(({ decisionRowsMs = 0 }) => decisionRowsMs)).p95,
   headLockP95: percentilesOf(lines.map(({ headLockMs = 0 }) => headLockMs)).p95,
 });
 

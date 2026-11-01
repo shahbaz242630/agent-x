@@ -6,7 +6,7 @@ const line = (fields: Record<string, unknown>) => JSON.stringify({ level: 'info'
 const decided = (durationMs: number) => line({ event: 'spend_request.decided', durationMs });
 const checked = (requests: number, mismatched = 0, tampered = 0) =>
   line({ event: 'holdings_check.passed', requests, mismatched, tampered });
-const NO_PARTS = { connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0, supplierLockP95: 0, headLockP95: 0 };
+const NO_PARTS = { connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0, decisionRowsP95: 0, headLockP95: 0 };
 const NO_NEIGHBOUR = { count: 0, p50: 0, p95: 0, p99: 0, max: 0, ...NO_PARTS };
 
 describe('percentiles', () => {
@@ -123,7 +123,7 @@ describe('the API’s log after a load run', () => {
         turnWaitMs,
         trips,
         decision: 'ALLOW',
-        supplierLockMs: trips + 100,
+        decisionRowsMs: trips + 100,
         headLockMs: trips + 200,
       });
     const summary = summariseLogs(
@@ -142,7 +142,7 @@ describe('the API’s log after a load run', () => {
       connectionWaitP95: 1,
       turnWaitP95: 2,
       tripsP50: 19,
-      supplierLockP95: 119,
+      decisionRowsP95: 119,
       headLockP95: 219,
     });
     const percentiles = (n: number) => ({ count: 1, p50: n, p95: n, p99: n, max: n });
@@ -152,7 +152,7 @@ describe('the API’s log after a load run', () => {
         connectionWaitP95: 3,
         turnWaitP95: 4,
         tripsP50: 20,
-        supplierLockP95: 120,
+        decisionRowsP95: 120,
         headLockP95: 220,
       },
       busy: {
@@ -160,7 +160,7 @@ describe('the API’s log after a load run', () => {
         connectionWaitP95: 5,
         turnWaitP95: 6,
         tripsP50: 21,
-        supplierLockP95: 121,
+        decisionRowsP95: 121,
         headLockP95: 221,
       },
       stuck: {
@@ -168,7 +168,7 @@ describe('the API’s log after a load run', () => {
         connectionWaitP95: 7,
         turnWaitP95: 8,
         tripsP50: 22,
-        supplierLockP95: 122,
+        decisionRowsP95: 122,
         headLockP95: 222,
       },
     });
