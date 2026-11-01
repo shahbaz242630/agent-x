@@ -30,9 +30,9 @@ export interface LogSummary {
   /** Phase 2's spike's: 50 at once on one agent's month, queued on its lock by design, so apart. */
   readonly spikeDecisions: Percentiles;
   /** Phase 3's crowd's, ten agents of one organisation with suppliers of their own: apart, with no target yet. */
-  readonly crowdOwnDecisions: Percentiles;
+  readonly crowdOwnDecisions: Percentiles & DecisionParts;
   /** Phase 4's crowd's, ten agents of one organisation sharing three suppliers: apart, with no target yet. */
-  readonly crowdSharedDecisions: Percentiles;
+  readonly crowdSharedDecisions: Percentiles & DecisionParts;
   /** How many of the steady traffic's decisions allowed the request at once: about half, as it means to. */
   readonly allowed: number;
   /** Where the steady traffic's decisions spent their time, to set beside the neighbours'. */
@@ -54,6 +54,10 @@ export interface DecisionParts {
   readonly turnWaitP95: number;
   /** A typical decision's trips to the database. */
   readonly tripsP50: number;
+  /** The trip locking a decision's rows, the supplier's among them, its wait inside (PL-62). */
+  readonly decisionRowsP95: number;
+  /** The trip asking for the audit chain's head, its wait inside. */
+  readonly headLockP95: number;
 }
 
 interface Line {
@@ -69,6 +73,8 @@ interface Line {
   readonly poolWaitMs?: number;
   readonly turnWaitMs?: number;
   readonly trips?: number;
+  readonly decisionRowsMs?: number;
+  readonly headLockMs?: number;
 }
 
 /** The nearest-rank percentile of values sorted ascending: 0 when there are none. */
@@ -153,6 +159,8 @@ const partsOf = (lines: readonly Line[]): DecisionParts => ({
   connectionWaitP95: percentilesOf(lines.map(({ poolWaitMs = 0 }) => poolWaitMs)).p95,
   turnWaitP95: percentilesOf(lines.map(({ turnWaitMs = 0 }) => turnWaitMs)).p95,
   tripsP50: percentilesOf(lines.map(({ trips = 0 }) => trips)).p50,
+  decisionRowsP95: percentilesOf(lines.map(({ decisionRowsMs = 0 }) => decisionRowsMs)).p95,
+  headLockP95: percentilesOf(lines.map(({ headLockMs = 0 }) => headLockMs)).p95,
 });
 
 /** Below this share allowed, the steady traffic isn't the mix it means to be (S164: the split check made it 0.4%). */
@@ -198,8 +206,8 @@ export function summariseLogs(text: string, apart: ApartOrgs = {}, trouble?: Tro
     })),
     decisions: percentilesOf(steady.map(({ durationMs = 0 }) => durationMs)),
     spikeDecisions: percentilesOf(timesIn(apart.spike)),
-    crowdOwnDecisions: percentilesOf(timesIn(apart.crowdOwn)),
-    crowdSharedDecisions: percentilesOf(timesIn(apart.crowdShared)),
+    crowdOwnDecisions: neighbour(apart.crowdOwn),
+    crowdSharedDecisions: neighbour(apart.crowdShared),
     allowed: steady.filter(({ decision }) => decision === 'ALLOW').length,
   };
 }

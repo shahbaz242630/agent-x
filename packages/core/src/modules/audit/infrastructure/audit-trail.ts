@@ -59,7 +59,7 @@ import {
   type StoredEntry,
   verifyChain,
 } from '@agentx/platform/audit-chain';
-import { assertTenant, type GatheredRead, sendTogether, withTenant } from '@agentx/platform/db';
+import { assertTenant, type GatheredRead, sendTogether, timedLock, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
 import { type Compilable, type Kysely, type QueryResult, type RawBuilder, sql, type Transaction } from 'kysely';
@@ -771,14 +771,16 @@ function writerFor(
   return {
     async lockHead() {
       // The clock in the outer select, which reads a row only once the inner one has locked it.
-      const { rows } = await sql<Record<string, unknown>>`
+      const { rows } = await timedLock('headLockMs', () =>
+        sql<Record<string, unknown>>`
         with locked as materialized (
           select h.seq, h.hash, h.mac, h.mac_key_version from audit.heads h
           where h.org_id = ${orgId}
           for no key update
         )
         select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now from locked l
-      `.execute(tx);
+      `.execute(tx),
+      );
       const row = rows[0];
       return row === undefined ? undefined : { head: headFields(row), now: clockOf(row) };
     },
