@@ -676,7 +676,6 @@ export function createSpendRequestDecisions({
       if (done.outcome === 'done' && made !== undefined) {
         log.info('spend_request.decided', {
           agentId: agent.agentId,
-          supplierId: asked.supplierId,
           decision: made.decision,
           reasons: made.reasons.join(' '),
           durationMs: Math.round(performance.now() - started),
