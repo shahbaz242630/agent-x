@@ -249,6 +249,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet: it is tried again. If it lasts too long, it becomes the integrity alarm.',
     next: 'Nothing to do if it passes, as in a restart. If it repeats, look at what holds the connections.',
   },
+  'db.schema_release_drift_seen': {
+    happened: 'The routine security check found a database rule this copy of Agent X was not built with.',
+    broke: 'Nothing yet: if the next check finds such a rule too, it becomes the integrity alarm.',
+    next: 'Nothing to do during a release. With no release running, treat it as possible tampering.',
+  },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',
     broke:

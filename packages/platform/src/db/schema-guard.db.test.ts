@@ -19,7 +19,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
-import { liveSchemaProblems, retentionPolicyExpression } from './schema-guard.ts';
+import { liveSchemaDrift, liveSchemaProblems, retentionPolicyExpression } from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 import type { SignedStateTable } from './signed-rows.ts';
 
@@ -1752,6 +1752,18 @@ describe('the backup role, which only reads (ADR-005 §3)', () => {
       "do $$ begin execute pg_catalog.format('revoke temporary on database %I from agentx_backup', pg_catalog.current_database()); end $$",
       'agentx_backup may TEMPORARY on this database',
     ],
+    [
+      'the reading right on a table to hand on',
+      'grant select on audit.events to agentx_backup with grant option',
+      'revoke grant option for select on audit.events from agentx_backup',
+      'agentx_backup may grant SELECT on audit.events',
+    ],
+    [
+      'the reading right on a column to hand on',
+      'grant select (details) on audit.events to agentx_backup with grant option',
+      'revoke select (details) on audit.events from agentx_backup',
+      'agentx_backup may grant SELECT on column audit.events.details',
+    ],
   ])('names %s beyond reading', async (_what, tamper, undo, problem) => {
     // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
     await owner.query(tamper);
@@ -1762,6 +1774,113 @@ describe('the backup role, which only reads (ADR-005 §3)', () => {
       await owner.query(undo);
     }
     expect(await problems()).toEqual([]);
+  });
+});
+
+describe('which drift a release can also make (schema-check.ts holds it one run on the schedule)', () => {
+  const PLANTED =
+    'create function audit.planted() returns integer language sql set search_path = pg_catalog as $$ select 1 $$';
+  const AMOUNT = 'alter table spend_requests.requests';
+  const WITHOUT = `${AMOUNT} drop constraint requests_amount_minor_check`;
+  const PUT_BACK = `${AMOUNT} add constraint requests_amount_minor_check check (amount_minor > 0)`;
+  const NAME = `spend_requests.requests's CHECK constraint "requests_amount_minor_check"`;
+  const drift = () => liveSchemaDrift(app, ROLES);
+
+  it.each([
+    ['a CHECK gone', WITHOUT, PUT_BACK, `${NAME} is not there`],
+    [
+      'a CHECK reworded',
+      `${WITHOUT}; ${AMOUNT} add constraint requests_amount_minor_check check (amount_minor >= 0)`,
+      `${WITHOUT}; ${PUT_BACK}`,
+      `${NAME} reads differently`,
+    ],
+    [
+      'a CHECK not built',
+      `${AMOUNT} add constraint planted check (amount_minor < 1)`,
+      `${AMOUNT} drop constraint planted`,
+      `spend_requests.requests's CHECK constraint "planted" is not one the migrations built`,
+    ],
+    [
+      'a function unknown',
+      PLANTED,
+      'drop function audit.planted()',
+      'audit.planted is a function our schemas should not hold',
+    ],
+  ])('%s is release-shaped, and nothing else', async (_what, tamper, undo, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(tamper);
+    try {
+      expect(await drift()).toEqual({ atOnce: [], releaseShaped: [problem] });
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(undo);
+    }
+  });
+
+  it.each([
+    [
+      'a CHECK not validated',
+      `${WITHOUT}; ${PUT_BACK} not valid`,
+      `${WITHOUT}; ${PUT_BACK}`,
+      `${NAME} is not validated`,
+    ],
+    [
+      'a guard function rewritten',
+      `create or replace function state_rules.guard_made_once() returns trigger
+       language plpgsql set search_path = pg_catalog as $$ begin return new; end; $$`,
+      MADE_ONCE_FUNCTION_SQL,
+      'state_rules.guard_made_once is not the function the migration wrote',
+    ],
+    [
+      'a right beyond reading',
+      'grant insert on audit.events to agentx_backup',
+      'revoke insert on audit.events from agentx_backup',
+      'agentx_backup may INSERT on audit.events',
+    ],
+    [
+      // Its name is written as the release-shaped words, which must not make it so.
+      'a rule named like a release',
+      `create rule "x is not there" as on delete to audit.events do instead nothing`,
+      `drop rule "x is not there" on audit.events`,
+      'audit.events carries the rewrite rule "x is not there"',
+    ],
+  ])('%s is the alarm at once', async (_what, tamper, undo, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(tamper);
+    try {
+      expect(await drift()).toEqual({ atOnce: [problem], releaseShaped: [] });
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above, or 0032's own statement.
+      await owner.query(undo);
+    }
+  });
+
+  it('an unknown function that also runs with its owner’s rights is split: that part is the alarm at once', async () => {
+    await owner.query(
+      'create function audit.planted() returns integer language sql security definer set search_path = pg_catalog as $$ select 1 $$',
+    );
+    try {
+      expect(await drift()).toEqual({
+        atOnce: ["audit.planted runs with its owner's rights"],
+        releaseShaped: ['audit.planted is a function our schemas should not hold'],
+      });
+    } finally {
+      await owner.query('drop function audit.planted()');
+    }
+  });
+
+  it('liveSchemaProblems gives both lists as one, in order', async () => {
+    await owner.query(PLANTED);
+    await owner.query('grant insert on audit.events to agentx_backup');
+    try {
+      expect(await problems()).toEqual([
+        'agentx_backup may INSERT on audit.events',
+        'audit.planted is a function our schemas should not hold',
+      ]);
+    } finally {
+      await owner.query('drop function audit.planted()');
+      await owner.query('revoke insert on audit.events from agentx_backup');
+    }
   });
 });
 

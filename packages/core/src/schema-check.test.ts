@@ -7,6 +7,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const guard = vi.hoisted(() => ({
   result: (): Promise<string[]> => Promise.resolve([]),
+  /** The release-shaped drift it finds, beside `result`'s. */
+  released: [] as string[],
   /** What the check asked the guard to hold, each time. */
   asked: [] as unknown[],
 }));
@@ -15,20 +17,26 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/platform/db')>();
   return {
     ...actual,
-    liveSchemaProblems: (_database: unknown, asked: unknown) => {
+    // Handed on as a thenable, so a read's failure lands as soon as `result`'s does.
+    liveSchemaDrift: (_database: unknown, asked: unknown) => {
       guard.asked.push(asked);
-      return guard.result();
+      const atOnce = guard.result();
+      return {
+        then: (given: (drift: unknown) => unknown, refused: (error: unknown) => unknown) =>
+          atOnce.then((problems) => given({ atOnce: problems, releaseShaped: guard.released }), refused),
+      };
     },
   };
 });
 
 const schemaCheck = await import('./schema-check.ts');
-const { createFullServerWatch, OWNER_ROLE, schemaSoundAtStart } = schemaCheck;
+const { createFullServerWatch, createReleaseDriftWatch, OWNER_ROLE, schemaSoundAtStart } = schemaCheck;
 /** A watch that has never met a full server, for the runs that don't. */
 const checkSchemaOnSchedule = (asked: Parameters<typeof schemaCheck.checkSchemaOnSchedule>[0]) =>
   schemaCheck.checkSchemaOnSchedule(
     asked,
     createFullServerWatch(1_000, () => 0),
+    createReleaseDriftWatch(),
   );
 const { AUTHORITY_TABLES } = await import('./authority-tables.ts');
 
@@ -69,6 +77,7 @@ const SPEND_REQUESTS_FIXED = [
 
 beforeEach(() => {
   guard.result = (): Promise<string[]> => Promise.resolve([]);
+  guard.released = [];
 });
 
 describe('at start-up', () => {
@@ -169,6 +178,8 @@ describe('a server with every connection in use (decision 3)', () => {
   const WAIT = { limitMs: 1_000, retryMs: 1 };
   const events = (log: ReturnType<typeof logger>) => log.capture.lines().map((line) => [line.level, line.event]);
   const WARNED = ['warn', 'db.schema_check_full_server'];
+  const onSchedule = (log: ReturnType<typeof logger>, watch: ReturnType<typeof createFullServerWatch>) =>
+    schemaCheck.checkSchemaOnSchedule(options(log), watch, createReleaseDriftWatch());
   const ALARM = [
     ['error', 'audit.integrity_failed'],
     ['error', 'db.schema_unreadable'],
@@ -259,16 +270,16 @@ describe('a server with every connection in use (decision 3)', () => {
     let time = 0;
     const watch = createFullServerWatch(100, () => time);
     const log = logger();
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     time = 99;
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     expect(events(log)).toEqual([WARNED, WARNED]);
     time = 100;
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     expect(events(log)).toEqual([WARNED, WARNED, ...ALARM]);
     expect(log.capture.lines()[2]).toMatchObject({ check: 'schema', when: 'running', reason: 'unreadable' });
     time = 500;
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     expect(events(log)).toEqual([WARNED, WARNED, ...ALARM, ...ALARM]);
   });
 
@@ -280,14 +291,14 @@ describe('a server with every connection in use (decision 3)', () => {
     const watch = createFullServerWatch(100, () => time);
     const log = logger();
     guard.result = (): Promise<string[]> => Promise.reject(full());
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     time = 90;
     guard.result = between;
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     time = 150;
     guard.result = (): Promise<string[]> => Promise.reject(full());
     const seen = log.capture.lines().length;
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     expect(
       log.capture
         .lines()
@@ -301,14 +312,157 @@ describe('a server with every connection in use (decision 3)', () => {
     const watch = createFullServerWatch(100, () => time);
     const log = logger();
     guard.result = (): Promise<string[]> => Promise.reject(full());
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     const stopping = new AbortController();
     stopping.abort();
     time = 100;
-    await schemaCheck.checkSchemaOnSchedule({ ...options(log), signal: stopping.signal }, watch);
+    await schemaCheck.checkSchemaOnSchedule(
+      { ...options(log), signal: stopping.signal },
+      watch,
+      createReleaseDriftWatch(),
+    );
     expect(events(log)).toEqual([WARNED]);
-    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    await onSchedule(log, watch);
     expect(events(log)).toEqual([WARNED, ...ALARM]);
+  });
+});
+
+describe('drift a release can also make, on the schedule', () => {
+  const CHECK_GONE = 'a.b\'s CHECK constraint "c" is not there';
+  const FUNCTION_UNKNOWN = 'a.f is a function our schemas should not hold';
+  const OTHER = 'PUBLIC may SELECT on audit.events';
+  const WARNED = 'db.schema_release_drift_seen';
+  const ALARM = 'audit.integrity_failed';
+
+  /** One process's runs, with the watch it keeps between them. */
+  const runs = () => {
+    const log = logger();
+    const fullServer = createFullServerWatch(1_000, () => 0);
+    const releaseDrift = createReleaseDriftWatch();
+    const run = (released: string[], atOnce: string[] = [], extra: { signal?: AbortSignal } = {}) => {
+      guard.released = released;
+      guard.result = (): Promise<string[]> => Promise.resolve(atOnce);
+      return schemaCheck.checkSchemaOnSchedule({ ...options(log), ...extra }, fullServer, releaseDrift);
+    };
+    const refused = (error: Error) => {
+      guard.result = (): Promise<string[]> => Promise.reject(error);
+      return schemaCheck.checkSchemaOnSchedule(options(log), fullServer, releaseDrift);
+    };
+    const lines = () => log.capture.lines();
+    return { run, refused, lines, events: () => lines().map(({ event }) => event) };
+  };
+
+  it('warns on its first run, naming it, and raises no alarm', async () => {
+    const { run, lines } = runs();
+    await run([CHECK_GONE]);
+    expect(lines()).toMatchObject([{ level: 'warn', event: WARNED, problems: [CHECK_GONE] }]);
+  });
+
+  it('is the alarm on its second run in a row, and on each after it', async () => {
+    const { run, lines, events } = runs();
+    await run([CHECK_GONE]);
+    await run([CHECK_GONE]);
+    expect(lines()[1]).toMatchObject({
+      level: 'error',
+      event: ALARM,
+      check: 'schema',
+      when: 'running',
+      problems: [CHECK_GONE],
+    });
+    await run([CHECK_GONE]);
+    expect(events()).toEqual([WARNED, ALARM, ALARM]);
+  });
+
+  it('starts again after a clean run between', async () => {
+    const { run, events } = runs();
+    await run([CHECK_GONE]);
+    await run([]);
+    await run([CHECK_GONE]);
+    expect(events()).toEqual([WARNED, WARNED]);
+  });
+
+  it('is the alarm on the second run though the plant changed: rotating them never starts it again', async () => {
+    const { run, lines } = runs();
+    await run([CHECK_GONE]);
+    await run([FUNCTION_UNKNOWN]);
+    expect(lines()[1]).toMatchObject({ event: ALARM, problems: [FUNCTION_UNKNOWN] });
+  });
+
+  it('other drift beside it is the alarm at once, alone, and the first sighting is still only warned of', async () => {
+    const { run, lines } = runs();
+    await run([CHECK_GONE], [OTHER]);
+    expect(lines()).toMatchObject([
+      { level: 'warn', event: WARNED, problems: [CHECK_GONE] },
+      { level: 'error', event: ALARM, problems: [OTHER] },
+    ]);
+    expect(lines()[1]?.problems).toEqual([OTHER]);
+  });
+
+  it('both are in the alarm on the second run, in order', async () => {
+    const { run, lines } = runs();
+    await run([CHECK_GONE]);
+    await run([CHECK_GONE], [OTHER]);
+    expect(lines()[1]).toMatchObject({ event: ALARM, problems: [OTHER, CHECK_GONE] });
+  });
+
+  it('other drift alone is a run without it: the next sighting is a first', async () => {
+    const { run, events } = runs();
+    await run([CHECK_GONE]);
+    await run([], [OTHER]);
+    await run([CHECK_GONE]);
+    expect(events()).toEqual([WARNED, ALARM, WARNED]);
+  });
+
+  it('a stop leaves the watch alone: the run after it is still the second', async () => {
+    const { run, events } = runs();
+    await run([CHECK_GONE]);
+    const stopping = new AbortController();
+    stopping.abort();
+    await run([], [], { signal: stopping.signal });
+    expect(events()).toEqual([WARNED]);
+    await run([CHECK_GONE]);
+    expect(events()).toEqual([WARNED, ALARM]);
+  });
+
+  it.each([
+    ['a read that failed', new Error('connection reset'), [WARNED, ALARM, 'db.schema_unreadable', ALARM]],
+    [
+      'a full server',
+      Object.assign(new Error('sorry, too many clients already'), { code: '53300' }),
+      [WARNED, 'db.schema_check_full_server', ALARM],
+    ],
+  ])('%s says nothing of the drift: the run after it is still the second', async (_what, error, expected) => {
+    const { run, refused, events } = runs();
+    await run([CHECK_GONE]);
+    await refused(error);
+    await run([CHECK_GONE]);
+    expect(events()).toEqual(expected);
+  });
+
+  it('holds each process’s watch apart', async () => {
+    const one = runs();
+    const other = runs();
+    await one.run([CHECK_GONE]);
+    await other.run([CHECK_GONE]);
+    expect(one.events()).toEqual([WARNED]);
+    expect(other.events()).toEqual([WARNED]);
+  });
+
+  it('at start it waits for nothing: the first sighting refuses the start, with the whole list', async () => {
+    guard.released = [CHECK_GONE];
+    guard.result = (): Promise<string[]> => Promise.resolve([OTHER]);
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log))).toBe(false);
+    expect(log.capture.lines()).toMatchObject([
+      { level: 'error', event: ALARM, when: 'start', problems: [OTHER, CHECK_GONE] },
+    ]);
+  });
+
+  it('at start, release-shaped drift alone refuses it too', async () => {
+    guard.released = [FUNCTION_UNKNOWN];
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log))).toBe(false);
+    expect(log.capture.lines()).toMatchObject([{ event: ALARM, when: 'start', problems: [FUNCTION_UNKNOWN] }]);
   });
 });
 

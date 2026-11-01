@@ -381,6 +381,22 @@ export interface SchemaGuardOptions {
  */
 export type SchemaProblem = string;
 
+/**
+ * The drift found, split by what can have made it. Split here, where each is
+ * found, and never by the words: a problem's text holds names the owner chooses.
+ */
+export interface SchemaDrift {
+  readonly atOnce: readonly SchemaProblem[];
+  /**
+   * What a release's migration also makes to the image before it: a CHECK not
+   * as built, reworded or gone, or a function this image doesn't know.
+   */
+  readonly releaseShaped: readonly SchemaProblem[];
+}
+
+const inOrder = (problems: readonly SchemaProblem[]): SchemaProblem[] =>
+  problems.toSorted((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
 interface RelationRow {
   readonly name: string;
   /**
@@ -509,6 +525,8 @@ interface BackupRight {
   readonly kind: 'relation' | 'column' | 'schema' | 'database' | 'function';
   readonly object: string;
   readonly privilege: string;
+  /** Held WITH GRANT OPTION, which lets the role hand the right on to any other. */
+  readonly grantable: boolean;
 }
 
 /**
@@ -862,31 +880,32 @@ export async function checkConstraints<Schema>(db: Kysely<Schema>): Promise<Chec
 async function backupRights<Schema>(db: Kysely<Schema>): Promise<BackupRight[]> {
   const { rows } = await sql<BackupRight>`
     with backup as (select r.oid from pg_catalog.pg_roles r where r.rolname = ${BACKUP_ROLE}::text)
-    select 'relation' as kind, ${QUALIFIED} as object, acl.privilege_type as privilege
+    select 'relation' as kind, ${QUALIFIED} as object, acl.privilege_type as privilege, acl.is_grantable as grantable
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     cross join pg_catalog.aclexplode(c.relacl) as acl
     where ${OURS} and (${ROW_KINDS} or c.relkind = 'S') and acl.grantee in (select b.oid from backup b)
     union all
-    select 'column', pg_catalog.format('column %I.%I.%I', n.nspname, c.relname, a.attname), acl.privilege_type
+    select 'column', pg_catalog.format('column %I.%I.%I', n.nspname, c.relname, a.attname), acl.privilege_type,
+           acl.is_grantable
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
     cross join pg_catalog.aclexplode(a.attacl) as acl
     where ${OURS} and ${ROW_KINDS} and acl.grantee in (select b.oid from backup b)
     union all
-    select 'schema', pg_catalog.format('schema %I', n.nspname), acl.privilege_type
+    select 'schema', pg_catalog.format('schema %I', n.nspname), acl.privilege_type, acl.is_grantable
     from pg_catalog.pg_namespace n
     cross join pg_catalog.aclexplode(n.nspacl) as acl
     where ${OURS} and acl.grantee in (select b.oid from backup b)
     union all
-    select 'function', pg_catalog.format('function %I.%I', n.nspname, p.proname), acl.privilege_type
+    select 'function', pg_catalog.format('function %I.%I', n.nspname, p.proname), acl.privilege_type, acl.is_grantable
     from pg_catalog.pg_proc p
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     cross join pg_catalog.aclexplode(p.proacl) as acl
     where ${OURS} and acl.grantee in (select b.oid from backup b)
     union all
-    select 'database', 'this database', acl.privilege_type
+    select 'database', 'this database', acl.privilege_type, acl.is_grantable
     from pg_catalog.pg_database d
     cross join pg_catalog.aclexplode(d.datacl) as acl
     where d.datname = pg_catalog.current_database() and acl.grantee in (select b.oid from backup b)
@@ -1050,31 +1069,39 @@ function columnsByTable(rows: readonly ColumnRow[]): Map<string, string[]> {
 const same = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((each, index) => each === b[index]);
 
+const checkNamed = ({ table, name }: Pick<CheckConstraint, 'table' | 'name'>): string =>
+  `${table}'s CHECK constraint ${quoted(name)}`;
+
 /**
  * The running CHECK constraints against the ones the migrations built: each
- * still there and reading the same, none added beside them (a planted one can
- * refuse the very event that would set a hold), and every one validated.
+ * still there and reading the same, and none added beside them (a planted one
+ * can refuse the very event that would set a hold).
  */
-function checkProblems(
+function builtCheckProblems(
   live: readonly CheckConstraint[],
   built: readonly Omit<CheckConstraint, 'validated'>[],
 ): SchemaProblem[] {
   const id = ({ table, name }: Pick<CheckConstraint, 'table' | 'name'>): string => JSON.stringify([table, name]);
-  const named = ({ table, name }: Pick<CheckConstraint, 'table' | 'name'>): string =>
-    `${table}'s CHECK constraint ${quoted(name)}`;
   const liveById = new Map(live.map((one) => [id(one), one]));
   const builtIds = new Set(built.map(id));
   const problems: SchemaProblem[] = [];
   for (const one of built) {
     const found = liveById.get(id(one));
-    if (found === undefined) problems.push(`${named(one)} is not there`);
-    else if (found.expression !== one.expression) problems.push(`${named(one)} reads differently`);
+    if (found === undefined) problems.push(`${checkNamed(one)} is not there`);
+    else if (found.expression !== one.expression) problems.push(`${checkNamed(one)} reads differently`);
   }
   for (const one of live) {
-    if (!builtIds.has(id(one))) problems.push(`${named(one)} is not one the migrations built`);
-    if (!one.validated) problems.push(`${named(one)} is not validated`);
+    if (!builtIds.has(id(one))) problems.push(`${checkNamed(one)} is not one the migrations built`);
   }
   return problems;
+}
+
+/** Each right the backup role holds beyond reading, and each it could hand on. */
+function backupProblems({ kind, object, privilege, grantable }: BackupRight): SchemaProblem[] {
+  return [
+    ...(BACKUP_MAY[kind].includes(privilege) ? [] : [`${BACKUP_ROLE} may ${privilege} on ${object}`]),
+    ...(grantable ? [`${BACKUP_ROLE} may grant ${privilege} on ${object}`] : []),
+  ];
 }
 
 /** Each of our schemas owned by a role other than ours. */
@@ -1185,9 +1212,15 @@ function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
   if (fn.owner !== ownerRole) problems.push(`${fn.name} is owned by another role`);
   if (fn.config !== PINNED_FUNCTION_CONFIG) problems.push(`${fn.name} does not pin its search_path`);
   const body = GUARD_BODIES.get(fn.name);
-  if (body === undefined) problems.push(`${fn.name} is a function our schemas should not hold`);
-  else if (fn.body !== body) problems.push(`${fn.name} is not the function the migration wrote`);
+  if (body !== undefined && fn.body !== body) problems.push(`${fn.name} is not the function the migration wrote`);
   return problems;
+}
+
+/** Each function in our schemas that isn't one of the guards above. */
+function unknownFunctionProblems(allFunctions: readonly FunctionRow[]): SchemaProblem[] {
+  return allFunctions
+    .filter((fn) => !GUARD_BODIES.has(fn.name))
+    .map((fn) => `${fn.name} is a function our schemas should not hold`);
 }
 
 /**
@@ -1558,7 +1591,7 @@ function requiredKeyProblems(
  * database that refuses the read throws, and the caller treats that as a failed
  * check in its own right.
  */
-export async function liveSchemaProblems<Schema>(
+export async function liveSchemaDrift<Schema>(
   db: Kysely<Schema>,
   {
     appRole,
@@ -1569,7 +1602,7 @@ export async function liveSchemaProblems<Schema>(
     madeOnceTables = [],
     fixedAtCreation = {},
   }: SchemaGuardOptions,
-): Promise<SchemaProblem[]> {
+): Promise<SchemaDrift> {
   // One after another on one connection: this check must not be what fills a full server (run day 5, S168 review).
   const reading = async (one: Kysely<Schema>) => {
     const version = await serverVersion(one);
@@ -1589,6 +1622,8 @@ export async function liveSchemaProblems<Schema>(
       await roleSettings(one, [appRole, ownerRole]),
       await foreignKeys(one),
       await connectionLimits(one, [appRole, ownerRole]),
+      await checkConstraints(one),
+      await backupRights(one),
     ] as const;
   };
   const [
@@ -1607,6 +1642,8 @@ export async function liveSchemaProblems<Schema>(
     settings,
     allForeignKeys,
     limited,
+    allChecks,
+    backupHeld,
   ] = await db.connection().execute((one) => reading(one));
 
   const globalTables = new Set(Object.keys(policy.globalTables));
@@ -1625,9 +1662,6 @@ export async function liveSchemaProblems<Schema>(
       return relation === undefined ? [] : [[relation.name, call] as const];
     }),
   );
-
-  const allChecks = await checkConstraints(db);
-  const backupHeld = await backupRights(db);
 
   const problems: SchemaProblem[] = [
     ...schemaOwnerProblems(allSchemas, ownerRole),
@@ -1661,15 +1695,25 @@ export async function liveSchemaProblems<Schema>(
     ...forPublic.map((grant) => `PUBLIC may ${grant.privilege} on ${grant.table}`),
     ...columnProblems(allColumns, policy.globalTables, allRelations, globalTables),
     ...policy.requiredForeignKeys.flatMap((required) => requiredKeyProblems(required, keys)),
-    ...checkProblems(allChecks, BUILT_CHECKS),
-    ...backupHeld
-      .filter(({ kind, privilege }) => !BACKUP_MAY[kind].includes(privilege))
-      .map(({ object, privilege }) => `${BACKUP_ROLE} may ${privilege} on ${object}`),
+    ...allChecks.filter(({ validated }) => !validated).map((one) => `${checkNamed(one)} is not validated`),
+    ...backupHeld.flatMap(backupProblems),
   ];
 
   if (casts) problems.push('the database carries a cast Postgres did not ship');
   if (settings) problems.push('a setting is pinned to this database or to a role');
   if (limited) problems.push('a connection limit is set on this database or on a role');
 
-  return problems.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return {
+    atOnce: inOrder(problems),
+    releaseShaped: inOrder([...builtCheckProblems(allChecks, BUILT_CHECKS), ...unknownFunctionProblems(allFunctions)]),
+  };
+}
+
+/** All the drift as one list, in order: what a start refuses on, and what the tamper suites ask for. */
+export async function liveSchemaProblems<Schema>(
+  db: Kysely<Schema>,
+  options: SchemaGuardOptions,
+): Promise<SchemaProblem[]> {
+  const { atOnce, releaseShaped } = await liveSchemaDrift(db, options);
+  return inOrder([...atOnce, ...releaseShaped]);
 }
