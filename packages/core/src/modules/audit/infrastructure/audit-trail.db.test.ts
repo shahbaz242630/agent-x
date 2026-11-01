@@ -30,10 +30,12 @@ import { canonicalDetails } from '../../../shared-kernel/index.ts';
 import { type AuditEvent, AuditEventRefused, eventContent } from '../domain/event.ts';
 import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import {
+  type AuditTransaction,
   type AuditTrail,
   createAuditTrail,
   type HistoryToRead,
   type LogPageToRead,
+  signedEvent,
   TooManyEventsAboutObject,
   TooManyEventsToRead,
 } from './audit-trail.ts';
@@ -954,13 +956,14 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
     fields: [['status', status]],
   });
 
-  /** An event that signs the agent's state: its details carry the seal. */
-  const signed = (orgId: string, version: number, status: string, id = AGENT, type = 'agent'): AuditEvent => ({
-    actor: { type: 'user', id: USER },
-    action: `${type}.status_changed`,
-    subject: { type, id, version },
-    details: { status, ...stateSealDetails(sealState(keys, facts(orgId, version, status, id))) },
-  });
+  /** An event that signs the agent's state: its details carry the seal, marked as signed states mark theirs. */
+  const signed = (orgId: string, version: number, status: string, id = AGENT, type = 'agent'): AuditEvent =>
+    signedEvent({
+      actor: { type: 'user', id: USER },
+      action: `${type}.status_changed`,
+      subject: { type, id, version },
+      details: { status, ...stateSealDetails(sealState(keys, facts(orgId, version, status, id))) },
+    });
 
   /** An event about the agent that signs nothing, such as a rename. */
   const unsigned = (version: number, id = AGENT): AuditEvent => ({
@@ -1196,6 +1199,32 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       ]),
     );
     expect(await verify(org)).toMatchObject({ ok: true, seq: 0n });
+  });
+
+  describe('a state seal given to the public path', () => {
+    const SEAL_REFUSED = new AuditEventRefused([
+      'details.stateFingerprint and details.stateKeyVersion are a state seal, recorded by signed states alone',
+    ]);
+    /** A well-formed seal, under the app's own key, on an event signedEvent never marked. */
+    const copied = (): AuditEvent => ({ ...signed(org, 1, 'ACTIVE') });
+    const along = (eventId: string, gate: RawBuilder<unknown>) => sql`select ${eventId}::text as id where ${gate}`;
+
+    it.each<[string, (tx: AuditTransaction) => Promise<unknown>]>([
+      ['record', (tx) => trail.record(tx, org, copied())],
+      ['recordAlong', (tx) => trail.recordAlong(tx, org, copied(), along)],
+      ['recordAllAlong', (tx) => trail.recordAllAlong(tx, org, [event(1), copied()], along)],
+    ])('is refused by %s, and writes nothing', async (_way, recording) => {
+      await expect(withTenant(app, org, recording)).rejects.toEqual(SEAL_REFUSED);
+
+      expect(await latest(org)).toEqual({ kind: 'none' });
+      expect(await verify(org)).toMatchObject({ ok: true, seq: 0n });
+    });
+
+    it('is taken only on the marked event itself, which the signed state then reads', async () => {
+      await withTenant(app, org, (tx) => trail.record(tx, org, signed(org, 1, 'ACTIVE')));
+
+      expect(await latest(org)).toMatchObject({ kind: 'signed', version: 1 });
+    });
   });
 
   describe('FX-TAMPER: a signed event changed past the app is not believed', () => {

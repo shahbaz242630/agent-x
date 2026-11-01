@@ -90,6 +90,7 @@ import {
   type RecordedEventCheck,
   type RecordedEventsCheck,
   recordHoldEvent,
+  signedEvent,
   TooManyEventsAboutObject,
   TooManyEventsToRead,
 } from './audit-trail.ts';
@@ -1218,12 +1219,12 @@ export function createSignedStates({
   const sealedEvent = (table: SignedStateTable, key: SignedRowKey, row: FoundRow, change: SignedChange): AuditEvent => {
     const subject = { type: table.subject, id: key.id, version: row.version };
     const seal = sealState(keys, { orgId: key.orgId, subject, fields: row.fields });
-    return {
+    return signedEvent({
       actor: change.actor,
       action: change.action,
       subject,
       details: { ...change.details, ...stateSealDetails(seal) },
-    };
+    });
   };
 
   /**
