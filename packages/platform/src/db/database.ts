@@ -51,6 +51,9 @@ export const IDLE_IN_TRANSACTION_SECONDS = 60;
  */
 const IDLE_LIMIT = `-c idle_in_transaction_session_timeout=${String(IDLE_IN_TRANSACTION_SECONDS)}s`;
 
+/** Postgres's code when it ends a connection for that limit. */
+const IDLE_IN_TRANSACTION_ENDED = '25P03';
+
 /** The startup-packet option that makes every transaction read-only. */
 const READ_ONLY = '-c default_transaction_read_only=on';
 
@@ -161,7 +164,10 @@ export function createDatabase<Schema = unknown>(options: DatabaseConnectionOpti
   // the connection.
   pool.on('connect', (client) => {
     client.on('error', (error) => {
-      logger.warn('db.connection_lost', { err: error });
+      // Our own code left a transaction open: no fault of the database's, so an error of its own (S168 review).
+      if ((error as { code?: unknown }).code === IDLE_IN_TRANSACTION_ENDED)
+        logger.error('db.transaction_left_open', {});
+      else logger.warn('db.connection_lost', { err: error });
     });
   });
   // pg-pool also passes an idle connection's error on to the pool, which must

@@ -69,6 +69,9 @@ param postgresAdminPassword string
 ])
 param databaseSize string
 
+@description('The database disk as the server has it now, which deploy.ts reads: never smaller, which Azure refuses.')
+param databaseDiskGb int
+
 // The load size: 2 vCores, General Purpose (D2c: offered in UAE North and within quota, S152). Its storage, backups and
 // network stay the server's own; only the compute changes, with a restart of a few minutes.
 var postgresSkus = {
@@ -224,6 +227,7 @@ module database 'modules/postgres.bicep' = {
     sku: postgresSkus[databaseSize]
     zone: postgresZone
     measured: databaseSize == 'load'
+    diskGb: databaseDiskGb
     backupRetentionDays: postgresBackupRetentionDays
     geoRedundantBackup: postgresGeoRedundantBackup
     subnetId: ids.databaseSubnet

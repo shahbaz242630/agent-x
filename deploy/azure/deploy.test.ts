@@ -523,6 +523,8 @@ const listed = (held: Held) => {
 interface AzAnswers {
   /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
   readonly limit?: 'applied' | 'waiting' | 'stays' | 'refused' | 'unreadable';
+  /** What the server list answers: the servers, or a failure. */
+  readonly servers?: readonly unknown[] | 'unreadable';
   /** What `az bicep version` prints. */
   readonly bicep?: string;
   /** The key vaults the resource group holds. */
@@ -653,6 +655,12 @@ class RecordingAz implements Az {
   /** The database's connection limit: waiting on a restart until one takes, as `limit` says. */
   #database(args: readonly string[]): AzResult {
     const limit = this.options.limit ?? 'applied';
+    if (args[2] === 'list') {
+      const { servers } = this.options;
+      return servers === 'unreadable'
+        ? { status: 1, stdout: '', stderr: 'ERROR: ResourceGroupNotFound' }
+        : json(servers ?? []);
+    }
     if (limit === 'unreadable') return { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway' };
     if (args[2] === 'restart') {
       if (limit === 'refused') return { status: 1, stdout: '', stderr: 'ERROR: Conflict' };
@@ -826,6 +834,7 @@ describe('deploy foundation', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      'postgres flexible-server list',
       'deployment sub create',
       'deployment sub show',
       ...RECORDING,
@@ -937,6 +946,29 @@ describe('deploy foundation', () => {
       "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes, and the run's measurements (Query Store) switch on. Run foundation again without --load-size the same day to size it back and switch them off.",
     );
   });
+
+  it.each([
+    ['a server autogrow has grown', [{ storage: { storageSizeGb: 64 } }], '64'],
+    ['a server at the least', [{ storage: { storageSizeGb: 32 } }], '32'],
+    ['no server yet', [], '32'],
+    ['a list that says nothing of it', [{}], '32'],
+    ['a size that is no number', [{ storage: { storageSizeGb: '64' } }], '32'],
+    ['a list that fails, as a first deploy has no group', 'unreadable', '32'],
+  ] as const)(
+    'sends the disk as the server has it, never a shrink Azure would refuse: %s (S168)',
+    async (_, servers, disk) => {
+      const admin = aPaste();
+      const done = await run(['foundation'], {
+        answers: ['y', 'ops@example.invalid'],
+        hidden: [admin, admin],
+        az: new RecordingAz({ servers }),
+      });
+      expect(done.status).toBe(0);
+      expect(done.az.deployment?.values).toMatchObject({ AGENTX_AZURE_DATABASE_DISK_GB: disk });
+      const asked = done.az.calls.find((call) => call.args[2] === 'list');
+      expect(asked?.args).toEqual(expect.arrayContaining(['--resource-group', 'rg-agentx-staging']));
+    },
+  );
 
   it('restarts the database when its connection limit is waiting on one, and only then, naming the server (S167)', async () => {
     const admin = aPaste();

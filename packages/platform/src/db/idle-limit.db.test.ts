@@ -9,13 +9,14 @@ import { holdOpenOnPurpose, limitedTransaction } from './tenant.ts';
 const server = inject('postgres');
 let database: TestDatabase;
 let db: Kysely<unknown>;
+const logs = new LogCapture();
 const LIMIT = `${String(IDLE_IN_TRANSACTION_SECONDS / 60)}min`;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'empty' });
   db = createDatabase(
     { ...database.connection('admin'), applicationName: 'limits', maxConnections: 2 },
-    testLogger(new LogCapture()),
+    testLogger(logs),
   );
 });
 
@@ -33,6 +34,7 @@ const idleLimit = async (on: Kysely<unknown>) => {
 
 const pauseMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const shortly = sql`select pg_catalog.set_config('idle_in_transaction_session_timeout', '50ms', true)`;
+const inAWhile = sql`select pg_catalog.set_config('idle_in_transaction_session_timeout', '500ms', true)`;
 
 describe('how long a transaction may sit open', () => {
   it('every pool connection carries the limit from its start', async () => {
@@ -49,14 +51,19 @@ describe('how long a transaction may sit open', () => {
     ).rejects.toThrow();
     const { rows } = await sql<{ one: number }>`select 1 as one`.execute(db);
     expect(rows).toEqual([{ one: 1 }]);
+    // Named as our own code's fault, at a level the errors alert counts: not "check the database's health".
+    expect(logs.lines().map(({ level, event }) => [level, event])).toContainEqual([
+      'error',
+      'db.transaction_left_open',
+    ]);
   });
 
-  it('lifted on purpose, a transaction outlives it, and the limit is back after', async () => {
+  it('raised on purpose, a transaction outlives it, and the limit is back after', async () => {
     await limitedTransaction(db, async (tx) => {
-      await shortly.execute(tx);
+      await inAWhile.execute(tx);
       await holdOpenOnPurpose(tx);
-      expect(await idleLimit(tx)).toBe('0');
-      await pauseMs(300);
+      expect(await idleLimit(tx)).toBe('15min');
+      await pauseMs(1_000);
       await sql`select 1`.execute(tx);
     });
     expect(await idleLimit(db)).toBe(LIMIT);

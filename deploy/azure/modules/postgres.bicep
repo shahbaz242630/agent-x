@@ -22,6 +22,9 @@ param sku object
 param zone string
 @description('Whether the load run\'s measurements are on (D2c, 4D2d P5): Query Store and its wait sampling. Only on a size that isn\'t Burstable.')
 param measured bool
+@description('The disk\'s size as the server has it: 32 on a new one, more once autogrow has acted.')
+@minValue(32)
+param diskGb int
 param backupRetentionDays int
 param geoRedundantBackup bool
 param subnetId string
@@ -60,8 +63,9 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
       privateDnsZoneArmResourceId: privateDnsZoneId
     }
     storage: {
-      storageSizeGB: 32
-      // A full disk stops every write (4D2e A). Azure grows it at 80% used below 100 GiB (Microsoft), and it can
+      // What the server has now, which deploy.ts reads: autogrow changes it, and Azure refuses a smaller size.
+      storageSizeGB: diskGb
+      // A full disk stops every write (4D2e A). Azure grows it with 20% free at this size (Microsoft), and it can
       // never shrink, so the alert below says when it is getting there.
       autoGrow: 'Enabled'
     }

@@ -224,12 +224,13 @@ export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<
 }
 
 /**
- * Lifts the idle limit (database.ts) for this transaction alone: for the load
- * test's stuck organisation, which holds its rows open for a whole phase on
- * purpose, and for nothing in the product.
+ * Raises the idle limit (database.ts) for this transaction alone, to past a load
+ * phase, for the load test's stuck organisation, which holds its rows open for a
+ * whole phase on purpose, and for nothing in the product. Still a limit: a hung
+ * run must not hold back dead rows' clean-up for ever.
  */
 export async function holdOpenOnPurpose<Schema>(tx: Transaction<Schema>): Promise<void> {
-  await sql`select pg_catalog.set_config('idle_in_transaction_session_timeout', '0', true)`.execute(tx);
+  await sql`select pg_catalog.set_config('idle_in_transaction_session_timeout', '15min', true)`.execute(tx);
 }
 
 /**
