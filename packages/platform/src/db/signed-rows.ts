@@ -400,7 +400,7 @@ function lookedUpId(
   const field = sql`(${sql.ref('l.' + column)})::text`;
   return sql`(
     select ${asUuid(field)} from ${sql.table(table.table)} as l
-    where l.org_id = ${orgId} and l.id = ${id.toLowerCase()}::uuid
+    where l.org_id = ${orgId} and l.id = ${id}::uuid
     limit 1
   )`;
 }

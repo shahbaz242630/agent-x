@@ -378,7 +378,7 @@ describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${serve
   };
 
   const agentHeld = (id: string) =>
-    held((holder) => holder.query('select 1 from agents.agents where id = $1 for update', [id]));
+    held((holder) => holder.query('select 1 from agents.agents where id = $1 for no key update', [id]));
 
   const keyHeld = (id: string) =>
     held((holder) => holder.query('select 1 from agents.agent_keys where id = $1 for update', [id]));
@@ -464,6 +464,35 @@ describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${serve
     expect(await checking).toEqual({ checked: { outcome: 'refused', reason: 'agent_suspended' }, trips: 5 });
     expect(lines('audit.integrity_failed')).toEqual([]);
     await refusedFor(text, 'agent_suspended', id);
+  });
+
+  it('alarms for a key revoked and put back to its older signed state during the wait: the snapshot’s log would agree with it (S157)', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    const saved = await owner.saveRow(id);
+    try {
+      const checking = await owner.withoutStatusGuard(async () => {
+        const holding = await agentHeld(agent);
+        // The statement starts here: its snapshot's newest event for the key is the one the row is put back to.
+        const waiting = check(text);
+        try {
+          await waitUntilQueued(database.as('admin'), 1);
+          await revoke(id);
+          await owner.restoreRow(saved);
+        } finally {
+          await holding.end();
+        }
+        // Answered before the guard goes back on: that takes a lock on the table the statement has open.
+        return waiting;
+      });
+
+      expect(checking).toEqual({ outcome: 'refused' });
+      expect(lines('agent_key.refused')).toEqual([expect.objectContaining({ reason: 'tampered', keyId: id })]);
+      expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ subjectType: 'agent_key' })]);
+    } finally {
+      await owner.end();
+    }
   });
 
   it('accepts a key whose agent was reactivated during the wait, from the state the wait ended on', async () => {

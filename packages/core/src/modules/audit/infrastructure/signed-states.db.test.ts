@@ -1963,6 +1963,32 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
       expect(alarms()).toEqual([]);
     });
 
+    it('finds one row through a row copied past its key, never failing the statement, and that row alarms', async () => {
+      const agent = await newAgent();
+      const link = await newLink(agent);
+      await database.as('owner').query('alter table probe.links drop constraint links_pkey');
+      try {
+        await tamper(
+          'insert into probe.links (org_id, id, agent_id, kind, state_version, state_event_id) select org_id, id, agent_id, kind, state_version, state_event_id from probe.links where org_id = $1 and id = $2',
+          link,
+        );
+        const { using } = counted();
+
+        const outcome = await withTenant(app, org, async (tx) => {
+          const found = await using.gather(tx, org, [viaLink(link), { table: LINKS, id: { id: link }, lock: 'share' }]);
+          return { found, link: await using.verifiedState(tx, LINKS, key(link), 'share') };
+        });
+
+        expect(outcome).toEqual({ found: [agent, link], link: { outcome: 'tampered', sign: 'row' } });
+      } finally {
+        await tamper(
+          'delete from probe.links as a using probe.links as b where a.org_id = $1 and a.id = $2 and b.org_id = a.org_id and b.id = a.id and a.ctid > b.ctid',
+          link,
+        );
+        await database.as('owner').query('alter table probe.links add primary key (org_id, id)');
+      }
+    });
+
     it('finds nothing through a field tampered to hold no uuid, never failing the statement', async () => {
       const agent = await newAgent();
       const link = await newLink(agent);
