@@ -92,6 +92,7 @@ import {
   noStatementTimes,
   retryingTransaction,
   statementTimesForLog,
+  timedLock,
   timingStatements,
   sendTogether,
 } from '@agentx/platform/db';
@@ -533,7 +534,9 @@ export function createSpendRequestDecisions({
     );
     if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
     const { agent, keyId } = await actingIn(tx, states, acting, now);
-    const found = await states.gather(tx, orgId, decisionRows(orgId, agentId, asked));
+    const found = await timedLock('decisionRowsMs', () =>
+      states.gather(tx, orgId, decisionRows(orgId, agentId, asked)),
+    );
     const mandateId = found[AT.mandate] ?? null;
     const versionId = found[AT.version] ?? null;
     const policyVersionId = found[AT.organizationVersion] ?? null;

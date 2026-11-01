@@ -104,6 +104,11 @@ describe('the report', () => {
     );
     expect(report).toContain('Decision target met in each: p95 under 150 ms.');
     expect(report).not.toContain('**But many agents');
+    // Sending less than planned is named, though a crowd's doesn't fail the run: the column alone is easily missed.
+    expect(report).toContain(
+      '**All agents sharing three suppliers: 2 request(s) never sent, so it carried less than planned.**',
+    );
+    expect(report).not.toContain('**Each agent with its own three suppliers: 0 request');
     expect(report).toContain(
       '| Each agent with its own three suppliers | 3480 | 0 | 137.5 | 1 | 41 | 41 | 41 | 41 | 0 | 0 | 0 |',
     );

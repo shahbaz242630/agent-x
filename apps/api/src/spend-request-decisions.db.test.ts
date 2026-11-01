@@ -576,6 +576,10 @@ describe('deciding a spend request and reserving it (D4)', () => {
       expect(line.databaseMs).toBeGreaterThanOrEqual(line.slowestTripMs as number);
       expect(line.turnWaitMs).toBeGreaterThanOrEqual(0);
       expect(line.poolWaitMs).toBeGreaterThanOrEqual(0);
+      // Its two contended locks' trips, each within the whole (4D2e A).
+      expect(line.decisionRowsMs).toBeGreaterThan(0);
+      expect(line.headLockMs).toBeGreaterThan(0);
+      expect(line.databaseMs).toBeGreaterThanOrEqual((line.decisionRowsMs as number) + (line.headLockMs as number));
     }
     // The signal alone: no order, amount or supplier in the line.
     const lines = JSON.stringify(decided());
