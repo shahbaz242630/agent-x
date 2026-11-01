@@ -282,7 +282,7 @@ describe('a server with every connection in use (decision 3)', () => {
     guard.result = (): Promise<string[]> => Promise.reject(full());
     await schemaCheck.checkSchemaOnSchedule(options(log), watch);
     time = 90;
-    guard.result = between as () => Promise<string[]>;
+    guard.result = between;
     await schemaCheck.checkSchemaOnSchedule(options(log), watch);
     time = 150;
     guard.result = (): Promise<string[]> => Promise.reject(full());
