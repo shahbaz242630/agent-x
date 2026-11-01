@@ -342,7 +342,7 @@ function stillTenant(tenant: string): string {
 }
 
 /** What the start sets with it, in a statement of its own: the organisation, the statements' limit, or both. */
-function startSettings({ tenant, limited }: Opening): string {
+function startSettings({ tenant, limited }: Pick<Opening, 'tenant' | 'limited'>): string {
   const settings = [
     ...(tenant === undefined ? [] : [`pg_catalog.set_config('app.org_id', '${written(tenant)}', true) as org_id`]),
     ...(limited
@@ -372,6 +372,20 @@ function startOf({ isolationLevel, accessMode }: TransactionSettings): string {
   ].join(' ');
 }
 
+/**
+ * The start, with the connection's check and the opening's settings, in one text. Several statements take the
+ * simple protocol, which answers each in turn: the start, the check (answers[1]), the settings (answers[2]).
+ */
+function startSent(
+  client: pg.PoolClient,
+  settings: TransactionSettings,
+  asked: Pick<Opening, 'tenant' | 'limited'> | undefined,
+): Promise<pg.QueryResult[]> {
+  const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : [startSettings(asked)])];
+  // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
+  return client.query(statements.join('; ')) as unknown as Promise<pg.QueryResult[]>;
+}
+
 /** What a query answered, as Kysely's own driver gives it back. */
 function resultOf<R>(result: pg.QueryResult): QueryResult<R> {
   const rows = result.rows as R[];
@@ -379,6 +393,8 @@ function resultOf<R>(result: pg.QueryResult): QueryResult<R> {
     ? { numAffectedRows: BigInt(result.rowCount ?? 0), rows }
     : { rows };
 }
+
+const READ_ALONE: TransactionSettings = { isolationLevel: 'read committed', accessMode: 'read only' };
 
 /** The opening the first transaction begun in its scope takes, or none. */
 function taken(): Opening | undefined {
@@ -419,8 +435,31 @@ class CheckedConnection implements DatabaseConnection {
   }
 
   async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
-    if (!this.#checked) await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)) }));
+    if (!this.#checked) {
+      await this.#sound(async (client) => ({ problem: unusable(await stateOf(client)), value: undefined }));
+    }
     return resultOf<R>(await timedTrip(() => this.#written(query)));
+  }
+
+  /**
+   * One read in a read-only transaction of its own, on one trip (4D2e C5): the start with the connection's check and
+   * the statements' limit, the read with its values bound, and the commit, all written before any answer is read.
+   * The commit goes without waiting to see the check's answer, which sendTogether's rule forbids for a transaction
+   * that writes: this one can't, so its commit keeps nothing. The check is still judged before the read's answer is
+   * given to anyone: a connection that fails it is closed and its answer never used. A read that fails has the commit
+   * answered as a rollback, and its failure is what comes back, on a connection then closed.
+   */
+  async readAlone<R>(query: CompiledQuery<R>): Promise<QueryResult<R>> {
+    return resultOf<R>(
+      await this.#sound(async (client) => {
+        const [answers, read] = await Promise.all([
+          startSent(client, READ_ALONE, { tenant: undefined, limited: true }),
+          this.#written(query),
+          client.query('commit'),
+        ]);
+        return { problem: unusable(stateFrom(answers[1]?.rows[0] as StateRow)), value: read };
+      }),
+    );
   }
 
   /**
@@ -441,11 +480,8 @@ class CheckedConnection implements DatabaseConnection {
 
   /** The start, with the connection's check and the opening's settings, in one round trip. */
   async begin(settings: TransactionSettings, asked: Opening | undefined): Promise<void> {
-    const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : [startSettings(asked)])];
     const set = await this.#sound(async (client) => {
-      // Several statements take the simple protocol, which answers each in turn.
-      // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
-      const answers = (await client.query(statements.join('; '))) as unknown as pg.QueryResult[];
+      const answers = await startSent(client, settings, asked);
       // A connection closed for its state ends the transaction just begun on it.
       return { problem: unusable(stateFrom(answers[1]?.rows[0] as StateRow)), value: answers[2]?.rows[0] as StateRow };
     });
@@ -509,11 +545,9 @@ class CheckedConnection implements DatabaseConnection {
    * Runs `trip`, which checks the connection, until one is sound: one that
    * isn't is closed, logged and replaced. A trip that fails closes it too.
    */
-  async #sound<T>(
-    trip: (client: pg.PoolClient) => Promise<{ problem: string | undefined; value?: T }>,
-  ): Promise<T | undefined> {
+  async #sound<T>(trip: (client: pg.PoolClient) => Promise<{ problem: string | undefined; value: T }>): Promise<T> {
     for (let attempt = 1; attempt <= this.#attempts; attempt += 1) {
-      let answer: { problem: string | undefined; value?: T };
+      let answer: { problem: string | undefined; value: T };
       try {
         answer = await timedTrip(() => trip(this.#taken()));
       } catch (error) {
@@ -556,6 +590,22 @@ export function sendTogether<
   return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries)) as Promise<{
     -readonly [At in keyof Statements]: QueryResult<unknown>;
   }>;
+}
+
+/**
+ * One read across organisations, on one connection of its own and one trip
+ * (4D2e C5): CheckedConnection.readAlone. Never in a transaction: it opens its
+ * own. Only createDatabase's pool writes the three together; on any other the
+ * answers are the same, on three trips.
+ */
+export async function readAloneOnOneTrip<Schema, Row>(
+  db: Kysely<Schema>,
+  read: { compile(executorProvider: QueryExecutorProvider): CompiledQuery<Row> },
+): Promise<readonly Row[]> {
+  if (db.isTransaction) throw new TenantContextError('a read alone opens its own transaction');
+  const query = read.compile(db);
+  const { rows } = await db.getExecutor().provideConnection((connection) => checked(connection).readAlone(query));
+  return rows;
 }
 
 /** Kysely's driver for the pool, each connection checked and each transaction opened and closed as above. */

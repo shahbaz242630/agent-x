@@ -5,10 +5,9 @@
 // written without it. An entry grants nothing: the key, with its secret's
 // MAC, is read by that ID inside the organisation's own withTenant and
 // verified there.
-import { assertTenant } from '@agentx/platform/db';
+import { assertTenant, readAloneOnOneTrip } from '@agentx/platform/db';
 import { type Kysely, type Transaction } from 'kysely';
 
-import { readAlone } from './read-alone.ts';
 import type { DirectoryTables } from './tables.ts';
 
 /**
@@ -29,16 +28,13 @@ export async function registerAgentKey(
  * The organisation the key's ID is listed in, in lower case as Postgres
  * prints a uuid, or undefined: where to look, never what is found there, as
  * the key is then read and verified inside that organisation's withTenant.
- * One statement in a transaction of its own, limited to 10 seconds, so a hung
- * read gives its connection back.
+ * One statement in a read-only transaction of its own, limited to 10 seconds,
+ * so a hung read gives its connection back, all on one trip (4D2e C5).
  */
-export function listedAgentKey(db: Kysely<DirectoryTables>, keyId: string): Promise<string | undefined> {
-  return readAlone(db, async (tx) => {
-    const entry = await tx
-      .selectFrom('directory.agent_keys')
-      .select('org_id')
-      .where('key_id', '=', keyId)
-      .executeTakeFirst();
-    return entry?.org_id;
-  });
+export async function listedAgentKey(db: Kysely<DirectoryTables>, keyId: string): Promise<string | undefined> {
+  const [entry] = await readAloneOnOneTrip(
+    db,
+    db.selectFrom('directory.agent_keys').select('org_id').where('key_id', '=', keyId),
+  );
+  return entry?.org_id;
 }
