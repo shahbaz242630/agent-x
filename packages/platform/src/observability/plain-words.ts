@@ -106,12 +106,6 @@ export const PLAIN_WORDS = {
     broke: 'Downloads waiting to be made are held up until the next run, a minute later.',
     next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
   },
-  'agent_key.agent_disagrees': {
-    happened:
-      "An agent's key was turned away: while it was being checked its record pointed at another agent, then back again.",
-    broke: 'Nothing it asked for was done.',
-    next: 'Treat it as a security incident: only direct access to the database can do this, so find who had it.',
-  },
   'agent_key.refused': {
     happened:
       "An agent's key was turned away because the server no longer holds the security key version it was made with.",

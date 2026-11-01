@@ -16,7 +16,8 @@
 //    revocation or suspension committed during the wait is seen, and there is
 //    no cache for one to wait behind. The key's agent is sealed, so a row
 //    pointed at another agent is caught as tampering by the key's own read,
-//    and the agent locked must be the one sealed.
+//    and the agent locked must be the one sealed: a row pointed away and back
+//    during the wait reads sound by then, and alarms here (`moved_back`).
 // 4. The secret: HMAC-SHA-256 with the agent-key pepper's version the key was
 //    made with (a version this process no longer holds is a refusal, logged
 //    as an error), over ('agent-key', keyId, secret), compared with the sealed
@@ -67,7 +68,6 @@ export type KeyRefusal =
   | 'unlisted'
   | 'missing'
   | 'tampered'
-  | 'agent_disagrees'
   | 'key_not_held'
   | 'wrong_secret'
   | 'agent_suspended'
@@ -108,12 +108,15 @@ export async function agentKeyAt(
   // The key is judged even with no agent to be found: a row pointed nowhere, or deleted, is tampering, and alarms.
   const keyRead = await agentKeyOf(tx, states, { orgId, id: keyId }, 'share');
   if (keyRead.outcome !== 'found') return refused(keyRead.outcome);
-  if (agentRead?.outcome !== 'found') return refused('missing');
-  const { agent } = agentRead;
   const { key } = keyRead;
-  // The agent was found through the row as the statement's snapshot held it, the key's seal judged it as it now is:
-  // a row pointed away and back during the wait would otherwise act as the other agent.
-  if (key.agentId !== agent.id) return refused('agent_disagrees');
+  // The agent was found through the row as the statement's snapshot held it, the key's seal judged it as it now is. A
+  // key's agent is written only with its first seal and never changes, so a sound key whose agent is another, or none,
+  // was pointed away and back during the wait. Nothing else will ever show it: its alarm is raised here.
+  if (agentRead?.outcome !== 'found' || key.agentId !== agentRead.agent.id) {
+    states.movedBack(AGENT_KEYS.subject, { orgId, id: keyId });
+    return refused('tampered');
+  }
+  const { agent } = agentRead;
   // A pepper version retired while a key made with it still lives (Azure.md, "Rotating a key") can't
   // check its secret: refused, and logged as the fault it is, never taken for a wrong secret.
   const held = keys
@@ -168,8 +171,6 @@ export function createAgentKeyCheck({
         if (checked.outcome === 'accepted') return checked;
         // A pepper version this process doesn't hold is ours to fix, not the caller's doing.
         if (checked.reason === 'key_not_held') log.error('agent_key.refused', { reason: checked.reason, keyId });
-        // No read of it alarms (the row is sound again by then), so this line is what says someone past the app was here.
-        else if (checked.reason === 'agent_disagrees') log.error('agent_key.agent_disagrees', { keyId });
         else log.info('agent_key.refused', { reason: checked.reason, keyId });
         return { outcome: 'refused' };
       };

@@ -36,7 +36,7 @@ import { createOrganization, type OrganizationsTables } from '../../organization
 import { agentKeyText, keySecretMessage, parseAgentKey, type Scope } from '../domain/agent.ts';
 import { addAgentKey, AGENT_KEYS } from './agent-keys.ts';
 import { addAgent, AGENTS } from './agents.ts';
-import { agentKeyAt, createAgentKeyCheck } from './key-check.ts';
+import { agentKeyAt, createAgentKeyCheck, type KeyChecked } from './key-check.ts';
 import type { AgentsTables } from './tables.ts';
 
 type Tables = AgentsTables & OrganizationsTables & DirectoryTables & AuditTables;
@@ -331,8 +331,6 @@ describe('the key check: bounded', () => {
 });
 
 describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${server.version})`, () => {
-  const correlationId = '0199a0f0-0000-7000-8000-00000000c011';
-
   /** The key checked in its organisation's transaction alone, with the trips that took: the start, the gather and the commit, when all is believed. */
   const checkedInTransaction = async (text: string) => {
     const presented = parseAgentKey(text);
@@ -571,7 +569,18 @@ describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${serve
     await expect(within(20_000, check(text), 'the next check')).resolves.toMatchObject({ outcome: 'accepted' });
   });
 
-  it('refuses a key whose row reads another agent as the statement starts and its own after the wait: the sealed agent is judged', async () => {
+  /** Refused and held for the sign that says the key's row reads sound again: the one alarm, the hold set, naming it. */
+  const heldAsMovedBack = async (checking: Promise<KeyChecked>, id: string): Promise<void> => {
+    expect(await checking).toEqual({ outcome: 'refused' });
+    expect(lines('agent_key.refused')).toEqual([expect.objectContaining({ reason: 'tampered', keyId: id })]);
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ orgId: org, subjectType: 'agent_key', objectId: id, reason: 'moved_back' }),
+    ]);
+    expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ reason: 'moved_back' })]);
+    expect(await hold()).toMatchObject({ outcome: 'held' });
+  };
+
+  it('alarms and holds for a key pointed at another agent as the statement starts and back during the wait: the sealed agent is judged', async () => {
     const agent = await newAgent();
     const other = await newAgent(['requests:read', 'requests:write', 'suppliers:read']);
     const { id, text } = await issue(agent, { scopes: ['requests:read', 'suppliers:read'] });
@@ -584,14 +593,53 @@ describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${serve
       await owner.setColumn(id, 'agent_id', agent);
       await holding.end();
 
-      expect(await checking).toEqual({ outcome: 'refused' });
-      expect(lines('agent_key.agent_disagrees')).toEqual([
-        expect.objectContaining({ level: 'error', correlationId, keyId: id }),
-      ]);
+      await heldAsMovedBack(checking, id);
     } finally {
       await owner.end();
     }
   });
+
+  it.each([
+    ['that isn’t there', () => Promise.resolve(ids.next())],
+    [
+      'of another organisation',
+      async () => {
+        const home = org;
+        org = ids.next();
+        await withSignedStates(app, org, quiet(), (tx, states) =>
+          createOrganization(tx, states, { id: org, name: 'Other Trading LLC', actor: OPERATOR }),
+        );
+        const elsewhere = await newAgent();
+        org = home;
+        return elsewhere;
+      },
+    ],
+  ])(
+    'alarms and holds for a key pointed at an agent %s and back during the wait: a sound key with no agent has no other way here',
+    async (_, ghost) => {
+      const agent = await newAgent();
+      const { id, text } = await issue(agent);
+      const elsewhere = await ghost();
+      const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+      await owner.query('alter table agents.agent_keys drop constraint of_an_agent');
+      try {
+        await owner.setColumn(id, 'agent_id', elsewhere);
+        // Its setting back stays open: the check's snapshot reads the ghost, finds no agent, and waits at the key.
+        await owner.query('begin');
+        await owner.setColumn(id, 'agent_id', agent);
+        const checking = check(text);
+        await waitUntilQueued(database.as('admin'), 1);
+        await owner.query('commit');
+
+        await heldAsMovedBack(checking, id);
+      } finally {
+        await owner.query(
+          'alter table agents.agent_keys add constraint of_an_agent foreign key (org_id, agent_id) references agents.agents (org_id, id)',
+        );
+        await owner.end();
+      }
+    },
+  );
 
   it('alarms, once, for a key pointed at another agent, and acts as neither', async () => {
     const agent = await newAgent();
