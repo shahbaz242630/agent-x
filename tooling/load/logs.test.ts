@@ -47,6 +47,7 @@ describe('the API’s log after a load run', () => {
         refusal('spend_request.organisation_busy', 'busy'),
         refusal('db.organisation_busy', 'busy'),
         refusal('spend_request.platform_full', 'calm'),
+        JSON.stringify({ level: 'warn', event: 'db.pool_wait_ran_out' }),
         refusal('spend_request.supplier_busy', 'steady'),
         // Not a refusal, and with no organisation it counts for no one.
         refusal('http.request_failed', 'busy'),
@@ -56,7 +57,7 @@ describe('the API’s log after a load run', () => {
     expect(summary.steadyParts).toMatchObject({ supplierTurnWaitP95: 7, gateWaitP95: 9, busyRefusals: 1 });
     expect(summary.neighbours.busy).toMatchObject({ supplierTurnWaitP95: 70, gateWaitP95: 90, busyRefusals: 4 });
     expect(summary.neighbours.calm).toMatchObject({ count: 0, busyRefusals: 1 });
-    expect(summary.platformFull).toBe(1);
+    expect(summary.platformFull).toBe(2);
   });
 
   it('times each crowd’s decisions apart, and counts only the steady traffic’s allowed', () => {

@@ -784,6 +784,23 @@ var loadApiSettings = [
     name: 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'
     value: '200000'
   }
+  // The fair gate (4D2e C, PL-63), wide until the load run's sweep sets the numbers: tooling/load/plan.ts's LOAD_GATE.
+  {
+    name: 'AGENTX_DECISION_GATE_ACTIVE'
+    value: '20'
+  }
+  {
+    name: 'AGENTX_DECISION_GATE_PER_ORGANISATION'
+    value: '6'
+  }
+  {
+    name: 'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION'
+    value: '100'
+  }
+  {
+    name: 'AGENTX_DECISION_GATE_WAIT_MS'
+    value: '10000'
+  }
 ]
 
 // The three apps that serve traffic (ADR-002 Amendment G2d). Each is shaped

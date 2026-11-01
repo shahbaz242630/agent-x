@@ -93,6 +93,7 @@ describe('config: a correct config loads', () => {
         rateLimitPerAgentPerMinute: 120,
         rateLimitPerOrganisationPerMinute: 300,
       },
+      decisionGate: { active: null, perOrganisation: null, waitingPerOrganisation: 100, waitMs: 10_000 },
       db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
       signIn: undefined,
@@ -169,6 +170,7 @@ describe('config: a correct config loads', () => {
         tls: 'verify-full',
         poolMax: 25,
       },
+      decisionGate: { active: null, perOrganisation: null, waitingPerOrganisation: 100, waitMs: 10_000 },
       outbound: {
         allowedOrigins: [
           'https://api.partner.example:8443',
@@ -937,6 +939,60 @@ describe('SEC-AV-07 the rate limit per signed-in person (B2-5c)', () => {
   it('refuses more than 100000', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '100001' })).toEqual([
       'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: must be at most 100000 requests',
+    ]);
+  });
+});
+
+describe('the fair gate before an agent’s decision (4D2e C, PL-63)', () => {
+  it('stays wide unless set, and takes what is set', () => {
+    expect(loadConfig(MINIMAL).decisionGate).toEqual({
+      active: null,
+      perOrganisation: null,
+      waitingPerOrganisation: 100,
+      waitMs: 10_000,
+    });
+    expect(
+      loadConfig({
+        ...MINIMAL,
+        AGENTX_DECISION_GATE_ACTIVE: '6',
+        AGENTX_DECISION_GATE_PER_ORGANISATION: '2',
+        AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: '8',
+        AGENTX_DECISION_GATE_WAIT_MS: '2000',
+      }).decisionGate,
+    ).toEqual({ active: 6, perOrganisation: 2, waitingPerOrganisation: 8, waitMs: 2_000 });
+  });
+
+  it('refuses a whole limit past the pool, and an organisation’s past the whole limit, set or from the pool', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '11' })).toEqual([
+      'AGENTX_DECISION_GATE_ACTIVE: must be at most AGENTX_DB_POOL_MAX (10): past it, decisions queue for a connection, not in turn',
+    ]);
+    expect(loadConfig({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '10' }).decisionGate.active).toBe(10);
+    expect(
+      problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '4', AGENTX_DECISION_GATE_PER_ORGANISATION: '5' }),
+    ).toEqual(["AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (4)"]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '11' })).toEqual([
+      "AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (10)",
+    ]);
+    expect(loadConfig({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '10' }).decisionGate.perOrganisation).toBe(
+      10,
+    );
+  });
+
+  it('refuses each setting past its own bounds, and says nothing of the others then', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '0' })).toEqual([
+      'AGENTX_DECISION_GATE_ACTIVE: must be at least 1 decisions',
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '101' })).toEqual([
+      'AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most 100 decisions',
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: '0' })).toEqual([
+      'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: must be at least 1 decisions',
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_WAIT_MS: '99' })).toEqual([
+      'AGENTX_DECISION_GATE_WAIT_MS: must be at least 100 ms',
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_DB_POOL_MAX: '0', AGENTX_DECISION_GATE_ACTIVE: '5' })).toEqual([
+      'AGENTX_DB_POOL_MAX: must be at least 1 connections',
     ]);
   });
 });

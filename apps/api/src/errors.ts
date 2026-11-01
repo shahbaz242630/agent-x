@@ -4,7 +4,7 @@
 // unexpected error is logged with its detail instead. Addresses that don't
 // exist, and features that are off, get the same plain 404.
 import { isReasonCode, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
-import { isLockWaitRunOut, OrganisationBusy } from '@agentx/platform/db';
+import { isLockWaitRunOut, OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 
@@ -115,5 +115,7 @@ export const BUSY_RETRY_SECONDS = 5;
 export function responseFor(error: unknown): ErrorResponse {
   if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };
   if (error instanceof OrganisationBusy || isLockWaitRunOut(error)) return { status: 503, code: 'ORGANISATION_BUSY' };
+  // Every connection in use, past the pool's own wait: the platform's, for whichever organisation or job was next.
+  if (error instanceof PoolWaitRanOut) return { status: 503, code: 'PLATFORM_BUSY' };
   return responseForStatus(statusOf(error));
 }

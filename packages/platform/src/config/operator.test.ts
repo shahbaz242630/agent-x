@@ -304,6 +304,7 @@ describe("SEC-AV-03 the operator's command refuses to start on a bad config", ()
   it.each([
     ['AGENTX_HTTP_PORT', 'the app (apps/api)'],
     ['AGENTX_DB_POOL_MAX', 'the app (apps/api)'],
+    ['AGENTX_DECISION_GATE_ACTIVE', 'the app (apps/api)'],
     ['AGENTX_AUDIT_ANCHOR_SECONDS', 'the app (apps/api)'],
     ['AGENTX_DB_MIGRATION_USER', 'the migration job (apps/migrate)'],
     ['AGENTX_DB_MIGRATION_PASSWORD', 'the migration job (apps/migrate)'],

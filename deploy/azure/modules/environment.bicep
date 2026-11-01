@@ -41,6 +41,7 @@ param agentCancelsAlertName string
 param agentCancelCapAlertName string
 param dailyWordsAlertName string
 param handoffQueueAlertName string
+param platformFullAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -476,6 +477,48 @@ resource handoffQueueAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "handoff.queue_stale" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The whole platform full (4D2e C, PL-63): an agent's decision turned away with
+// its own organisation under its limits, the one case where a limit can slow an
+// organisation that hit nothing, or anything's wait for a connection run out with
+// all of them in use. Any one line tells someone. Stateful, as above.
+resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: platformFullAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Platform full: payment requests turned away'
+    description: 'SEV-2. Agent X was running as many agent payment requests as it can at once, with the organisation of one turned away under its limits, or every database connection was in use and work waited too long for one: calm organisations are being slowed, and that request was told busy. Runbook: Incident-Response-Playbook.md section Q.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

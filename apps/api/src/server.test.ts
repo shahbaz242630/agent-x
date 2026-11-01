@@ -1,5 +1,5 @@
 import type { Config } from '@agentx/platform/config';
-import { OrganisationBusy } from '@agentx/platform/db';
+import { OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 import { createLogger, type Logger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SENSITIVE_SAMPLES as SAMPLES, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
@@ -92,6 +92,9 @@ async function setup(options: SetupOptions = {}) {
   });
   app.get('/test/organisation-busy', OPEN, () => {
     throw new OrganisationBusy(10_000);
+  });
+  app.get('/test/pool-wait', OPEN, () => {
+    throw new PoolWaitRanOut(new Error('timeout exceeded when trying to connect'));
   });
   app.get('/test/lock-wait', OPEN, () => {
     throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
@@ -241,6 +244,15 @@ describe('an organisation too busy to answer (PL-63)', () => {
     expect(response.statusCode).toBe(503);
     expect(response.headers['retry-after']).toBe(String(BUSY_RETRY_SECONDS));
     expect(response.json()).toEqual(errorBody('ORGANISATION_BUSY', FIRST_ID));
+    expect(events(lines(), REQUEST_FAILED)).toEqual([]);
+  });
+
+  it('the pool’s wait run out: the platform’s answer, saying when to send it again, never a failure', async () => {
+    const { app, lines } = await setup();
+    const response = await app.inject('/test/pool-wait');
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBe(String(BUSY_RETRY_SECONDS));
+    expect(response.json()).toEqual(errorBody('PLATFORM_BUSY', FIRST_ID));
     expect(events(lines(), REQUEST_FAILED)).toEqual([]);
   });
 

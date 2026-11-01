@@ -275,6 +275,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
+    platformFullAlertName: 'alert-agentx-${short}-platform-full'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [

@@ -35,6 +35,7 @@ export {
   isAgentTraffic,
   isLockWaitRunOut,
   OrganisationBusy,
+  PoolWaitRanOut,
   organisationShareOf,
 } from './organisation-shares.ts';
 export { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } from './retry.ts';

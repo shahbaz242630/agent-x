@@ -41,7 +41,7 @@ export interface LogSummary {
   readonly neighbours: Readonly<Record<NeighbourKind, Percentiles & DecisionParts>>;
   /** Warnings and errors while phase 5 ran, each by name: what trouble costs, reported and not yet failing a run. */
   readonly neighbourProblems: Readonly<Record<string, number>>;
-  /** The times the whole platform, not one organisation, turned a decision away (PL-63): alerted, and named in the report. */
+  /** The times the whole platform, not one organisation, turned work away (PL-63), a full pool's included: alerted, and named in the report. */
   readonly platformFull: number;
 }
 
@@ -220,7 +220,9 @@ export function summariseLogs(text: string, apart: ApartOrgs = {}, trouble?: Tro
     problems,
     neighbourProblems,
     steadyParts: partsOf(steady, refusals.filter(isSteady).length),
-    platformFull: lines.filter(({ event }) => event === 'spend_request.platform_full').length,
+    platformFull: lines.filter(
+      ({ event }) => event === 'spend_request.platform_full' || event === 'db.pool_wait_ran_out',
+    ).length,
     neighbours: { calm: neighbour(apart.calm), busy: neighbour(apart.busy), stuck: neighbour(apart.stuck) },
     suppressed: lines.filter(({ event }) => event === 'log.suppressed').length,
     unreadable: raws.length - lines.length,

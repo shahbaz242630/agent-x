@@ -101,6 +101,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { TurnWaitExceeded } from './agent-turns.ts';
 import { createDecisionEntry, type DecisionEntry, type EntryWaits, SupplierTurnExceeded } from './decision-entry.ts';
+import { DecisionGateRefused } from './decision-gate.ts';
 import {
   choicesHistory,
   consentOf,
@@ -641,13 +642,30 @@ export function createSpendRequestDecisions({
   }
 
   /** A decision its entry turned away, logged: nothing of it was made, its key unclaimed, so the agent sends it again (partner, S161: busy, never a 500). */
-  function turnedAway(log: Logger, { agentId }: AgentActing, error: unknown): Refused {
+  function turnedAway(log: Logger, { agentId, orgId }: AgentActing, error: unknown): Refused {
+    // A turn's wait run out behind decisions a full platform is holding: the platform's doing, not its organisation's.
+    if (
+      (error instanceof TurnWaitExceeded || error instanceof SupplierTurnExceeded) &&
+      entry.heldByThePlatform(orgId)
+    ) {
+      log.warn('spend_request.platform_full', { agentId, waitedMs: error.waitedMs });
+      return refused(503, 'PLATFORM_BUSY');
+    }
     if (error instanceof TurnWaitExceeded) {
       log.warn('spend_request.agent_busy', { agentId, waitedMs: error.waitedMs });
       return refused(503, 'AGENT_BUSY');
     }
     if (error instanceof SupplierTurnExceeded) {
       log.warn('spend_request.supplier_busy', { agentId, waitedMs: error.waitedMs });
+      return refused(503, 'ORGANISATION_BUSY');
+    }
+    if (error instanceof DecisionGateRefused) {
+      // The whole platform full is its own line, alerted, and its own answer: this organisation hit no limit of its own.
+      if (error.reason === 'platform') {
+        log.warn('spend_request.platform_full', { agentId, waitedMs: error.waitedMs });
+        return refused(503, 'PLATFORM_BUSY');
+      }
+      log.warn('spend_request.organisation_busy', { agentId, waitedMs: error.waitedMs });
       return refused(503, 'ORGANISATION_BUSY');
     }
     throw error;
@@ -695,11 +713,13 @@ export function createSpendRequestDecisions({
           durationMs: Math.round(performance.now() - started),
           turnWaitMs: Math.round(waits?.turnWaitMs ?? 0),
           supplierTurnWaitMs: Math.round(waits?.supplierTurnWaitMs ?? 0),
+          gateWaitMs: Math.round(waits?.gateWaitMs ?? 0),
           ...statementTimesForLog(times),
         });
       }
       // A fresh decision answers as its own transaction sealed it (4D2d P4 and P8, partner decision 2);
-      // a replay of its key reads it in a transaction of its own, as it is now.
+      // a replay of its key has given its turns and slot back, and reads it in a transaction of its own, as it is
+      // now, outside the gate: it can be answered busy, safely, and sent again (PL-63 item 5).
       if (done.outcome === 'done' && fresh !== undefined) return { outcome: 'decided' as const, request: fresh };
       return work.answered(agent.orgId, correlationId, async (tx, states) => ({
         outcome: 'decided' as const,

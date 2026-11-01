@@ -61,6 +61,13 @@ export interface RunResult {
   readonly delayMs?: number;
   /** On the laptop (`--db-cpus`): the database's CPU cap; none or 0, no cap. */
   readonly dbCpus?: number;
+  /** The fair gate's numbers the API ran at: runs at other numbers don't compare. */
+  readonly gate?: {
+    readonly active: number;
+    readonly perOrganisation: number;
+    readonly waitingPerOrganisation: number;
+    readonly waitMs: number;
+  };
   /** An admin's freeze of the stuck organisation, asked near phase 5's end; none when the phase ended first. */
   readonly freezeProbe?: FreezeProbed;
   /** On the laptop: the app's round trips over each phase (pg_stat_statements, less statements sent in another's trip). */
@@ -96,6 +103,14 @@ const isCapped = (run: RunResult): run is RunResult & { readonly dbCpus: number 
 
 /** The title's words for a capped database. */
 const databaseSize = (run: RunResult): string => (isCapped(run) ? `, database ${String(run.dbCpus)} CPU` : '');
+
+/** The fair gate's numbers, when the run says them. */
+const gateLine = ({ gate }: RunResult): string[] =>
+  gate === undefined
+    ? []
+    : [
+        `The fair gate: ${String(gate.active)} decisions at once, ${String(gate.perOrganisation)} an organisation, ${String(gate.waitingPerOrganisation)} waiting an organisation, ${String(gate.waitMs)} ms wait.`,
+      ];
 
 /** Where a laptop run ran, and why its numbers don't close PL-38. */
 function onTheLaptop(run: RunResult): string[] {
@@ -249,7 +264,11 @@ const PARTS_HEADINGS =
 const freezeLine = ({ freezeProbe }: RunResult): string =>
   freezeProbe === undefined
     ? "An admin's freeze of the stuck organisation: not asked, the phase ended first."
-    : `An admin's freeze of the stuck organisation, asked near the phase's end: ${freezeProbe.answer}, after ${String(freezeProbe.ms)} ms.`;
+    : `An admin's freeze of the stuck organisation, asked near the phase's end: ${freezeProbe.answer}, after ${String(freezeProbe.ms)} ms. ${FREEZE_CHANGES_THE_PHASE}`;
+
+/** A freeze that takes turns the stuck organisation's last seconds into quick refusals: its numbers aren't the same phase then. */
+const FREEZE_CHANGES_THE_PHASE =
+  "A freeze that took makes the stuck organisation's last seconds quick 409s, so this phase's numbers compare only between runs whose freeze answered alike.";
 
 /** One organisation's trouble beside others (PL-63): the same target, each kind apart, beside the quiet phases. */
 function neighbourSection(run: RunResult): string[] {
@@ -279,11 +298,11 @@ function neighbourSection(run: RunResult): string[] {
     row('Busy organisation', 'busy'),
     row('Stuck organisation', 'stuck'),
     '',
+    freezeLine(run),
     miss.length === 0
       ? `Decision target met by the calm organisations: p95 under ${String(POLICY_P95_MS)} ms.`
       : `**${miss.join(' ')}**`,
     `Warnings or errors while it ran: ${problems.length === 0 ? 'none' : problems.join(', ')}.`,
-    freezeLine(run),
   ];
 }
 
@@ -310,6 +329,7 @@ export function renderReport(run: RunResult): string {
       : ['', `**But one organisation's trouble reached others. ${neighbourMiss(run).join(' ')} See below.**`]),
     '',
     ...(run.site === 'local' ? onTheLaptop(run) : onAzure(run)),
+    ...gateLine(run),
     '',
     '## Requests (k6)',
     '',
@@ -348,7 +368,7 @@ export function renderReport(run: RunResult): string {
     `- The database after the run: ${run.databaseChecksPassed ? 'passed' : 'failed'} (each request once, every month within its limit, holdings exactly matching decisions, one open claim an order, no integrity hold).`,
     `- The holdings check at the restart: ${String(run.logs.holdingsChecks.length)} run(s) over ${String(checked)} request(s).`,
     `- Warnings or errors logged: ${String(Object.values(run.logs.problems).reduce((sum, n) => sum + n, 0))}; lines suppressed: ${String(run.logs.suppressed)}.`,
-    `- Decisions turned away because the whole platform was full: ${String(run.logs.platformFull)}.`,
+    `- Requests turned away because the whole platform was full, a full pool's included: ${String(run.logs.platformFull)}.`,
   ];
   if (run.failures.length > 0) lines.push('', '## What failed', '', ...run.failures.map((failure) => `- ${failure}`));
   return `${lines.join('\n')}\n`;
