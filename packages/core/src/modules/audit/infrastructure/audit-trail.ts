@@ -28,9 +28,14 @@
 // signed states (recordHoldEvent): `record` refuses its subject type, so no
 // other module can write an event the hold is read from.
 //
-// A state seal is written only by the audit module's signed states too: every
-// way to record refuses one on an event signedEvent did not mark, so no other
-// module can make an event a row's latest signed state.
+// A state seal goes through this trail only from the audit module's signed
+// states: record, recordAlong and recordAllAlong refuse one on an event
+// signedEvent did not mark. That is this trail's rule and no more. appendEvents,
+// sealState and stateSealDetails are exported from @agentx/platform/audit-chain,
+// so code with the keys and a connection could seal and append past it. The
+// boundary rule audit-chain-only-where-a-chain-is-kept holds the other modules
+// off that package; platform-controls, which keeps its own chain, and the apps,
+// which are no modules, are not held by it.
 //
 // What this read can't see: a later event about the object deleted, or moved
 // to another object or organisation, which the chain's check and anchor find;
