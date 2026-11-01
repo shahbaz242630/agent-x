@@ -230,7 +230,27 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
         config: 'search_path=pg_catalog',
         definer: false,
       },
+      {
+        name: 'order_key_of',
+        body: 'bb6d9bf53645d25b221df7960884a98a1f8054002f2d2d480ea64246a726eabe',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
     ]);
+  });
+
+  it('refuses an order key function changed past its migration (0067, PL-39)', async () => {
+    const [kept] = /CREATE FUNCTION spend_requests\.order_key_of\(reference text\)[\s\S]*?\$\$;/.exec(
+      readFileSync(new URL('../../../../db/migrations/0067_order_key_full_fold.sql', import.meta.url), 'utf8'),
+    ) ?? [''];
+    await owner.query(`create or replace function spend_requests.order_key_of(reference text) returns text
+      language sql immutable set search_path = pg_catalog as $$ select reference $$`);
+    try {
+      expect(await problems()).toContain('spend_requests.order_key_of is not the function the migration wrote');
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- The migration's own text, put back for the tests after this one.
+      await owner.query(kept.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'));
+    }
   });
 
   it.each([

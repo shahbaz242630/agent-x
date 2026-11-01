@@ -509,6 +509,8 @@ describe('a spend request', () => {
     expect(await keyOf('\uff29\uff2e\uff36\u00a0\u2003\uff12\uff12')).toBe('inv 22');
     expect(await keyOf('ÉCOLE #9')).toBe('école #9');
     expect(await keyOf('  فاتورة   ١٢ ')).toBe('فاتورة ١٢');
+    // Unicode's full fold, not lower() (0067, PL-39): every one of its rules is in order-keys.db.test.ts.
+    expect(await keyOf('Straße #9')).toBe('strasse #9');
   });
 
   it('keeps a keyed hash of what it weighed, with its key’s version, and its idempotency key', async () => {
