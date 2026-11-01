@@ -162,8 +162,8 @@ describe('k6, for one phase', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("runs the script against the API with the seed's file, reads its summary, and leaves no file behind", () => {
-    expect(k6(2, seeded)).toEqual({
+  it("runs the script against the API with the seed's file, reads its summary, and leaves no file behind", async () => {
+    expect(await k6(2, seeded)).toEqual({
       finished: true,
       result: {
         phase: 2,
@@ -176,21 +176,21 @@ describe('k6, for one phase', () => {
     expect(left()).toEqual(before);
   });
 
-  it("tells the script it is the wiring run's short k6 only when asked (load.ts run --smoke)", () => {
-    expect(runK6('http://api.internal', [process.execPath, fake], true)(1, seeded).result).toMatchObject({
+  it("tells the script it is the wiring run's short k6 only when asked (load.ts run --smoke)", async () => {
+    expect((await runK6('http://api.internal', [process.execPath, fake], true)(1, seeded)).result).toMatchObject({
       smoke: '1',
     });
   });
 
-  it('counts a failed threshold (99) as run to the end: the report says which', () => {
+  it('counts a failed threshold (99) as run to the end: the report says which', async () => {
     process.env.FAKE_K6_EXIT = '99';
-    expect(k6(1, seeded).finished).toBe(true);
+    expect((await k6(1, seeded)).finished).toBe(true);
   });
 
-  it('counts any other exit, or a k6 that never started, as not finished, with no numbers', () => {
+  it('counts any other exit, or a k6 that never started, as not finished, with no numbers', async () => {
     process.env.FAKE_K6_EXIT = '2';
-    expect(k6(1, seeded)).toEqual({ finished: false, result: undefined });
-    expect(runK6('http://api.internal', ['agentx-no-such-k6'])(1, seeded)).toEqual({
+    expect(await k6(1, seeded)).toEqual({ finished: false, result: undefined });
+    expect(await runK6('http://api.internal', ['agentx-no-such-k6'])(1, seeded)).toEqual({
       finished: false,
       result: undefined,
     });

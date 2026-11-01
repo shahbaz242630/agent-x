@@ -16,29 +16,36 @@
  * It fails if any check does. `--keep` leaves the stack up to look at;
  * `--cpus 2` gives the API two CPUs instead of staging's half; `--delay-ms 2`
  * adds 2 ms to every packet the database sends, as Azure's network does
- * (4D2d P0). The report counts the database trips each request cost.
+ * (4D2d P0); `--db-cpus 2` holds the database to two CPUs, so it can fill up as
+ * Azure's does (4D2e C). The report counts the database trips each request cost.
  * Docker and Vitest run with argument lists and no shell.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ENV_FILE, prepare } from '../../deploy/compose/prepare.ts';
 import { createDatabase } from '../../packages/platform/src/db/index.ts';
+import { loadKeys } from '../../packages/platform/src/keys/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
+import { probeFreeze, withFreezeProbe } from './freeze-probe.ts';
 import { apartOrgsOf, logFailures, summariseLogs, troubleWindowOf } from './logs.ts';
 import {
   API_CPUS_VARIABLE,
+  APP_KEYS_DIR,
+  DB_CPUS_VARIABLE,
   DELAY_VARIABLE,
+  freezeProbeAfterMs,
   LEAST_API_CPUS,
   loadConnection,
   type LoadOptions,
   type LoadPhase,
   LOAD_PROJECT,
   MOST_API_CPUS,
+  MOST_DB_CPUS,
   MOST_DELAY_MS,
   NEIGHBOURS_PHASE,
   optionsOf,
@@ -146,9 +153,9 @@ const RIDERS =
  * folder to see where they went: calls, the server's total and mean time in
  * ms, then the statement, so a trip's cost can be set against its work (P10).
  */
-function measured(n: LoadPhase): { result: PhaseResult; statements: PhaseStatements } {
+async function measured(n: LoadPhase): Promise<{ result: PhaseResult; statements: PhaseStatements }> {
   asAdmin('select pg_stat_statements_reset()');
-  const result = phase(n);
+  const result = await phase(n);
   // A counter that ran out of room dropped entries and their counts: never a number short without saying so.
   if (asAdmin('select dealloc from pg_stat_statements_info') !== '0') {
     throw new LoadRefused(`The statement counter ran out of room in phase ${String(n)}: raise pg_stat_statements.max.`);
@@ -161,44 +168,58 @@ function measured(n: LoadPhase): { result: PhaseResult; statements: PhaseStateme
   return { result, statements: { phase: n, statements } };
 }
 
-function phase(n: LoadPhase): PhaseResult {
+/** A child beside this process's own work, never blocking it: phase 5's freeze is asked from here while k6 runs. */
+const runBeside = (command: string, args: readonly string[]) =>
+  new Promise<number | null>((resolve, reject) => {
+    spawn(command, args, { cwd: ROOT, stdio: 'inherit', windowsHide: true }).on('error', reject).on('close', resolve);
+  });
+
+async function phase(n: LoadPhase): Promise<PhaseResult> {
   console.log(`\n== Phase ${String(n)} (k6, about two minutes)`);
   const args = [...COMPOSE, '--profile', 'load', 'run', '--rm', '--no-deps', '-e', `PHASE=${String(n)}`, 'k6'];
   // k6 answers 99 when a threshold failed: the report says which, so the run goes on.
-  const { code } = run('docker', [...args, 'run', '--quiet', '/load/money-paths.k6.js']);
+  const code = await runBeside('docker', [...args, 'run', '--quiet', '/load/money-paths.k6.js']);
   if (code !== 0 && code !== 99) throw new LoadRefused(`k6 stopped in phase ${String(n)} (exit ${String(code)}).`);
   return JSON.parse(readFileSync(path.join(OUT_DIR, `k6-phase-${String(n)}.json`), 'utf8')) as PhaseResult;
 }
 
 /** The report's file for today, the API's size and any delay: a second run the same day gets its own. */
-function reportFile(at: string, apiCpus: number, delayMs: number): string {
+function reportFile(at: string, apiCpus: number, delayMs: number, dbCpus: number): string {
   mkdirSync(REPORTS_DIR, { recursive: true });
   const delayed = delayMs === 0 ? '' : `-${String(delayMs)}ms`;
-  const name = `${at.slice(0, 10)}-local-${String(apiCpus)}cpu${delayed}`;
+  const capped = dbCpus === 0 ? '' : `-db${String(dbCpus)}cpu`;
+  const name = `${at.slice(0, 10)}-local-${String(apiCpus)}cpu${delayed}${capped}`;
   for (let n = 1; ; n += 1) {
     const file = path.join(REPORTS_DIR, n === 1 ? `${name}.md` : `${name}-${String(n)}.md`);
     if (!existsSync(file)) return file;
   }
 }
 
-/** Phase 5, the stuck organisation's suppliers held locked for it, on a connection of the runner's own. */
-async function neighboursPhase(password: string): Promise<ReturnType<typeof measured>> {
+/** Phase 5, the stuck organisation's suppliers held locked for it, on a connection of the runner's own, and an admin's freeze asked near its end. */
+async function neighboursPhase(password: string) {
   const database = createDatabase<MandateWorldTables>(
     loadConnection({ AGENTX_LOAD_DB_PASSWORD: password }),
     testLogger(),
   );
   try {
-    return await whileStuck(database, readSeeded().agents, () => measured(NEIGHBOURS_PHASE));
+    const { agents } = readSeeded();
+    const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} });
+    return await withFreezeProbe(
+      freezeProbeAfterMs(false),
+      () => probeFreeze(database, keyring, agents),
+      () => whileStuck(database, agents, () => measured(NEIGHBOURS_PHASE)),
+    );
   } finally {
     await database.destroy();
   }
 }
 
-async function main({ keep, apiCpus, delayMs }: LoadOptions): Promise<number> {
+async function main({ keep, apiCpus, delayMs, dbCpus }: LoadOptions): Promise<number> {
   preflight();
   // Read by compose.load.yaml: each docker call below inherits them.
   process.env[API_CPUS_VARIABLE] = String(apiCpus);
   process.env[DELAY_VARIABLE] = String(delayMs);
+  process.env[DB_CPUS_VARIABLE] = String(dbCpus);
   prepare();
   const login = { AGENTX_LOAD_DB_PASSWORD: localLogin('AGENTX_LOCAL_DB_APP_PASSWORD') };
   const at = new Date().toISOString();
@@ -225,11 +246,13 @@ async function main({ keep, apiCpus, delayMs }: LoadOptions): Promise<number> {
       ...login,
       AGENTX_LOAD_RUN_ID: `local ${at}`,
     });
-    const first = measured(1);
+    const first = await measured(1);
     must('The API restarted', 'docker', [...COMPOSE, 'restart', 'api']);
     must('The API back', 'docker', [...COMPOSE, 'up', '--wait', '--no-deps', 'api']);
     must('New keys', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'keys'], login);
-    const all = [first, measured(2), measured(3), measured(4), await neighboursPhase(login.AGENTX_LOAD_DB_PASSWORD)];
+    const later = [await measured(2), await measured(3), await measured(4)];
+    const { ran: neighbours, probed: freezeProbe } = await neighboursPhase(login.AGENTX_LOAD_DB_PASSWORD);
+    const all = [first, ...later, neighbours];
     const created = all.reduce((sum, { result }) => sum + result.created, 0);
     console.log('\n== The database after the run');
     const verified = run(process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'verify'], {
@@ -252,7 +275,7 @@ async function main({ keep, apiCpus, delayMs }: LoadOptions): Promise<number> {
       ...(cleaned.code === 0 ? [] : ["The clean-up didn't leave every organisation inert: its output is above."]),
       ...logFailures(logs, created, POLICY_P95_MS),
     ];
-    const file = reportFile(at, apiCpus, delayMs);
+    const file = reportFile(at, apiCpus, delayMs, dbCpus);
     const report = renderReport({
       at,
       commit,
@@ -260,6 +283,8 @@ async function main({ keep, apiCpus, delayMs }: LoadOptions): Promise<number> {
       apiCpus,
       phases: all.map(({ result }) => result),
       delayMs,
+      dbCpus,
+      ...(freezeProbe === undefined ? {} : { freezeProbe }),
       statements: all.map(({ statements }) => statements),
       logs,
       databaseChecksPassed: verified.code === 0,
@@ -279,7 +304,7 @@ if (import.meta.main) {
     const options = optionsOf(process.argv.slice(2));
     if (options === undefined) {
       throw new LoadRefused(
-        `Run it as \`corepack pnpm load [--keep] [--cpus <n>] [--delay-ms <ms>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}, ms a whole number from 0 to ${String(MOST_DELAY_MS)}.`,
+        `Run it as \`corepack pnpm load [--keep] [--cpus <n>] [--delay-ms <ms>] [--db-cpus <d>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}, ms a whole number from 0 to ${String(MOST_DELAY_MS)}, d from ${String(LEAST_API_CPUS)} to ${String(MOST_DB_CPUS)}.`,
       );
     }
     process.exitCode = await main(options);

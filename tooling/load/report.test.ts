@@ -205,15 +205,44 @@ describe('the report', () => {
       expect(report).toContain(
         "## One organisation's trouble beside others (the same 150 ms decision target, not yet failing a run)",
       );
-      expect(report).toContain('| Quiet (phases 1 and 2) | | | | | 1 | 31 | 31 | 31 | 7 | 8 | 19 |');
-      expect(report).toContain('| Calm, beside the others | 3400 | 210.3 | 1 | 0 | 1 | 90 | 90 | 90 | 7 | 8 | 19 |');
-      expect(report).toContain('| Busy organisation | 3000 | 400.0 | 2 | 3 | 1 | 300 | 300 | 300 | 7 | 8 | 19 |');
-      expect(report).toContain('| Stuck organisation | 600 | 5000.0 | 4 | 0 | 1 | 5000 | 5000 | 5000 | 7 | 8 | 19 |');
+      expect(report).toContain('| Quiet (phases 1 and 2) | | | | | 1 | 31 | 31 | 31 | 7 | 8 | 0 | 0 | 19 |');
+      expect(report).toContain(
+        '| Calm, beside the others | 3400 | 210.3 | 1 | 0 | 1 | 90 | 90 | 90 | 7 | 8 | 0 | 0 | 19 |',
+      );
+      expect(report).toContain(
+        '| Busy organisation | 3000 | 400.0 | 2 | 3 | 1 | 300 | 300 | 300 | 7 | 8 | 0 | 0 | 19 |',
+      );
+      expect(report).toContain(
+        '| Stuck organisation | 600 | 5000.0 | 4 | 0 | 1 | 5000 | 5000 | 5000 | 7 | 8 | 0 | 0 | 19 |',
+      );
       expect(report).toContain('Decision target met by the calm organisations: p95 under 150 ms.');
       expect(report).toContain('Warnings or errors while it ran: http.failed 1.');
+      expect(report).toContain("An admin's freeze of the stuck organisation: not asked, the phase ended first.");
       expect(report).not.toContain('**But one');
       // The phase stays out of the table held to the targets.
       expect(report).not.toContain('| 5 | 3300 |');
+    });
+
+    it('says what an admin’s freeze was answered, and how long it took (PL-63 item 3)', () => {
+      const report = renderReport({
+        ...clean,
+        phases: [phase(5, { neighbours })],
+        freezeProbe: { ms: 5012, answer: "not frozen: its wait for the organisation's lock ran out" },
+      });
+      expect(report).toContain(
+        "An admin's freeze of the stuck organisation, asked near the phase's end: not frozen: its wait for the organisation's lock ran out, after 5012 ms.",
+      );
+    });
+
+    it('rules as many columns as each table has, the new waits among them', () => {
+      const rows = renderReport({ ...clean, phases: [phase(5, { neighbours })] })
+        .split('\n')
+        .filter((row) => row.startsWith('|'));
+      const heading = rows.findIndex((row) => row.startsWith('| Traffic | Requests'));
+      const cells = (row: string | undefined) => row?.split('|').length;
+      expect(rows[heading]).toContain('Supplier wait p95 ms | Gate wait p95 ms');
+      expect(rows[heading]).toContain('Turned away busy');
+      for (const row of rows.slice(heading + 1, heading + 6)) expect(cells(row)).toBe(cells(rows[heading]));
     });
 
     it('names a miss at the top, and never reads a phase with no calm decisions as met', () => {
@@ -233,6 +262,23 @@ describe('the report', () => {
       expect(cut).toContain('Calm organisations beside the others: not measured.');
       expect(cut).not.toContain('| Calm, beside the others |');
     });
+  });
+
+  it('says when the database was held to a size, in the title and with the laptop’s words (4D2e C)', () => {
+    const report = renderReport({ ...clean, dbCpus: 2 });
+    expect(report).toContain('# Load test, 2026-10-22 (local, API 0.5 CPU, database 2 CPU)');
+    expect(report).toContain("The database was held to 2 CPU(s), so it can fill up as Azure's does.");
+    const none = renderReport({ ...clean, dbCpus: 0 });
+    expect(none).toContain('# Load test, 2026-10-22 (local, API 0.5 CPU)');
+    expect(none).not.toContain('held to');
+  });
+
+  it('names decisions turned away because the whole platform was full, apart from any one organisation’s', () => {
+    expect(renderReport(clean)).toContain('Decisions turned away because the whole platform was full: 0.');
+    const full = JSON.stringify({ level: 'warn', event: 'spend_request.platform_full', orgId: 'o' });
+    expect(renderReport({ ...clean, logs: summariseLogs(full) })).toContain(
+      'Decisions turned away because the whole platform was full: 1.',
+    );
   });
 
   it('says when the API was given more than staging’s half a CPU', () => {
