@@ -41,7 +41,6 @@ export { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } fro
 export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
 export { liveSchemaProblems, type SchemaGuardOptions, type SchemaProblem } from './schema-guard.ts';
 export { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
-export { holdOpenOnPurpose } from './transaction-limits.ts';
 export { noStatementTimes, statementTimesForLog, timedRoundTrips, timingStatements } from './statement-times.ts';
 export {
   type ServerSetupOptions,
@@ -81,6 +80,7 @@ export {
   assertTenant,
   holdTransactionLock,
   limitedTransaction,
+  holdOpenOnPurpose,
   limitStatements,
   lockName,
   STATEMENT_SECONDS,
