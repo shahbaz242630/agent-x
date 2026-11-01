@@ -4505,6 +4505,22 @@ describe('the load run (D2c, PL-38)', () => {
     ).toEqual(['load-run']);
   });
 
+  it('load-run: the API off twenty connections in a load run, or over ten on staging out of one', () => {
+    const api = APP('api');
+    const poolAt = (value: string) => (app: Mutable) => {
+      for (const entry of settingsOf(app).filter(({ name }) => name === 'AGENTX_DB_POOL_MAX')) entry.value = value;
+    };
+    expect(brokenRules(loadChanged(api, poolAt('10')))).toEqual(['load-run']);
+    expect(brokenRules(changed(api, poolAt('11')))).toEqual(['load-run']);
+    expect(brokenRules(changed(api, poolAt('10')))).toEqual([]);
+    // Production's own server sizes its pool: PL-63 wants twenty or more there.
+    expect(
+      policyProblems(changed(api, poolAt('20')), { region: 'uaenorth', environment: 'production' }).filter(
+        ({ rule, message }) => rule === 'load-run' && message.includes('connections'),
+      ),
+    ).toEqual([]);
+  });
+
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {
     const api = APP('api');
     for (const change of [

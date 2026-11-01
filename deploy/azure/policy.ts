@@ -455,6 +455,10 @@ const LOAD_RUN = {
   reads: new Set(['db-app-password', ...APP_KEYS]),
   apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
+  // Twenty connections, on the larger server `foundation --load-size` gives. Staging's small server has 35
+  // for everyone, so out of a load run its API keeps to ten (PL-63).
+  apiPool: '20',
+  stagingPool: 10,
   apiSettings: {
     AGENTX_RATE_LIMIT_PER_MINUTE: '50000',
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '50000',
@@ -3313,32 +3317,55 @@ const apps: Check = (snapshot, _expected, add) => {
 const loadJobsIn = (snapshot: Snapshot): readonly PredictedResource[] =>
   ofType(snapshot, TYPES.job).filter((job) => isLoadJob(jobWorkloadOf(job.name)));
 
-/** The API in a load run (`LOAD_RUN`) or out of one: its size, its limits and its email, either way. */
-function loadApiProblems(api: PredictedResource, loadRun: boolean, problem: (message: string) => void): void {
+/** The API on its own, out of a load run: none of the load run's limits, size or, on staging, connections. */
+function apiOutOfLoadRunProblems(container: unknown, staging: boolean, problem: (message: string) => void): void {
+  const settings = settingsIn(container);
+  for (const name of Object.keys(LOAD_RUN.apiSettings).filter((setting) => settings.has(setting))) {
+    problem(`sets ${name}, which only the load run's API does (D2c): out of it the API keeps its own limits`);
+  }
+  if (at(container, 'resources', 'cpu') === LOAD_RUN.apiSize.cpu) {
+    problem("runs at the load run's size out of a load run (D2c): apps --load-run alone sets it");
+  }
+  if (staging && Number(settings.get('AGENTX_DB_POOL_MAX')) > LOAD_RUN.stagingPool) {
+    problem(
+      `keeps over ${String(LOAD_RUN.stagingPool)} connections on staging out of a load run (PL-63): its small server has 35 for everyone`,
+    );
+  }
+}
+
+/** The API in a load run: exactly its size, connections and limits, and no email. */
+function apiInLoadRunProblems(container: unknown, problem: (message: string) => void): void {
+  const settings = settingsIn(container);
+  if (
+    at(container, 'resources', 'cpu') !== LOAD_RUN.apiSize.cpu ||
+    at(container, 'resources', 'memory') !== LOAD_RUN.apiSize.memory
+  ) {
+    problem(
+      `must run at ${String(LOAD_RUN.apiSize.cpu)} CPUs and ${LOAD_RUN.apiSize.memory} in the load run (D2c), the size it is measured at`,
+    );
+  }
+  if (settings.get('AGENTX_DB_POOL_MAX') !== LOAD_RUN.apiPool) {
+    problem(`must keep ${LOAD_RUN.apiPool} connections in the load run (PL-63), the size it is measured at`);
+  }
+  for (const [name, wanted] of Object.entries(LOAD_RUN.apiSettings).filter(
+    ([setting, value]) => settings.get(setting) !== value,
+  )) {
+    problem(`must set ${name} to ${wanted} in the load run (D2c), so k6 meets the API rather than its limits`);
+  }
+  for (const name of [...settings.keys()].filter((setting) => setting.startsWith('AGENTX_EMAIL_'))) {
+    problem(`sets ${name} in the load run (D2c): its seeded admins have no address, so it sends no email`);
+  }
+}
+
+/** The API's containers, in a load run or out of one. */
+function apiLoadProblems(
+  api: PredictedResource,
+  { loadRun, staging }: { readonly loadRun: boolean; readonly staging: boolean },
+  problem: (message: string) => void,
+): void {
   for (const container of containersOf(api)) {
-    const settings = settingsIn(container);
-    const size = { cpu: at(container, 'resources', 'cpu'), memory: at(container, 'resources', 'memory') };
-    const limits = Object.entries(LOAD_RUN.apiSettings);
-    if (!loadRun) {
-      for (const [name] of limits.filter(([setting]) => settings.has(setting))) {
-        problem(`sets ${name}, which only the load run's API does (D2c): out of it the API keeps its own limits`);
-      }
-      if (size.cpu === LOAD_RUN.apiSize.cpu) {
-        problem("runs at the load run's size out of a load run (D2c): apps --load-run alone sets it");
-      }
-      continue;
-    }
-    if (size.cpu !== LOAD_RUN.apiSize.cpu || size.memory !== LOAD_RUN.apiSize.memory) {
-      problem(
-        `must run at ${String(LOAD_RUN.apiSize.cpu)} CPUs and ${LOAD_RUN.apiSize.memory} in the load run (D2c), the size it is measured at`,
-      );
-    }
-    for (const [name, wanted] of limits.filter(([setting, value]) => settings.get(setting) !== value)) {
-      problem(`must set ${name} to ${wanted} in the load run (D2c), so k6 meets the API rather than its limits`);
-    }
-    for (const name of [...settings.keys()].filter((setting) => setting.startsWith('AGENTX_EMAIL_'))) {
-      problem(`sets ${name} in the load run (D2c): its seeded admins have no address, so it sends no email`);
-    }
+    if (loadRun) apiInLoadRunProblems(container, problem);
+    else apiOutOfLoadRunProblems(container, staging, problem);
   }
 }
 
@@ -3370,8 +3397,9 @@ const loadTest: Check = (snapshot, expected, add) => {
       }
     }
   }
+  const staging = expected.environment === 'staging';
   for (const api of ofType(snapshot, TYPES.app).filter((app) => jobWorkloadOf(app.name) === LOAD_RUN.runsAs)) {
-    loadApiProblems(api, found.length > 0, (message) => {
+    apiLoadProblems(api, { loadRun: found.length > 0, staging }, (message) => {
       problem(api.name, message);
     });
   }
