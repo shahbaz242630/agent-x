@@ -313,6 +313,14 @@ describe('a read alone on one trip (4D2e C5)', () => {
   const READ = 'select 1 as answer';
   const reading = (db: Kysely<unknown>) => readAloneOnOneTrip(db, sql`select 1 as answer`);
 
+  /** The stand-in, its statements `fails` picks refused with `error`. */
+  const failingAt = (stand: Stand, fails: (text: string) => boolean, error: Error): Stand => {
+    const { query } = stand.client as unknown as { query: (text: string) => Promise<unknown> };
+    (stand.client as unknown as { query: unknown }).query = (text: string) =>
+      fails(text) ? Promise.reject(error) : query(text);
+    return stand;
+  };
+
   it('writes the start, the read and the commit before any answer is read, in that order', async () => {
     const sent: string[] = [];
     const answer = Promise.withResolvers<undefined>();
@@ -378,6 +386,42 @@ describe('a read alone on one trip (4D2e C5)', () => {
 
     await expect(reading(databaseOf(3, logger(), failed))).rejects.toThrow('the connection dropped');
     expect(failed.released).toEqual([true]);
+  });
+
+  it('closes a connection whose read failed, giving back the failure', async () => {
+    const refused = new Error('the read was refused');
+    const stand = failingAt(connection(null), (text) => text === READ, refused);
+
+    await expect(reading(databaseOf(3, logger(), stand))).rejects.toThrow(refused);
+    expect(stand.released).toEqual([true]);
+  });
+
+  it('closes a connection whose start failed, whatever the read answered', async () => {
+    const refused = new Error('the start was refused');
+    const stand = failingAt(connection(null), (text) => text.startsWith('start'), refused);
+
+    await expect(reading(databaseOf(3, logger(), stand))).rejects.toThrow(refused);
+    expect(stand.released).toEqual([true]);
+  });
+
+  it('judges a poisoned connection before its failed commit: logged, closed, and read on the next', async () => {
+    const poisoned = failingAt(
+      connection(ORG),
+      (text) => text === 'commit',
+      new Error('the connection dropped at the commit'),
+    );
+    const log = logger();
+
+    expect(await reading(databaseOf(3, log, poisoned, connection(null)))).toEqual([{ answer: 1 }]);
+    expect(log.capture.lines()).toMatchObject([{ event: 'db.tenant.leftover_discarded', attempt: 1 }]);
+  });
+
+  it('closes a connection whose commit failed, answering nothing though the read answered', async () => {
+    const dropped = new Error('the connection dropped at the commit');
+    const stand = failingAt(connection(null), (text) => text === 'commit', dropped);
+
+    await expect(reading(databaseOf(3, logger(), stand))).rejects.toThrow(dropped);
+    expect(stand.released).toEqual([true]);
   });
 
   it('runs on no database createDatabase didn’t make: nothing would check its connection', async () => {

@@ -445,21 +445,28 @@ class CheckedConnection implements DatabaseConnection {
    * One read in a read-only transaction of its own, on one trip (4D2e C5): the start with the connection's check and
    * the statements' limit, the read with its values bound, and the commit, all written before any answer is read.
    * The commit goes without waiting to see the check's answer, which sendTogether's rule forbids for a transaction
-   * that writes: this one can't, so its commit keeps nothing. The check is still judged before the read's answer is
-   * given to anyone: a connection that fails it is closed and its answer never used. A read that fails has the commit
-   * answered as a rollback, and its failure is what comes back, on a connection then closed.
+   * that writes: this one can't, so its commit keeps nothing. The check is judged first, whatever the read answered:
+   * a connection that fails it is closed and logged, its answer or failure never used, and the read goes again on the
+   * next. A read that fails on a sound one has the commit answered as a rollback, and its failure is what comes back,
+   * on a connection then closed.
    */
   async readAlone<R>(query: CompiledQuery<R>): Promise<QueryResult<R>> {
-    return resultOf<R>(
-      await this.#sound(async (client) => {
-        const [answers, read] = await Promise.all([
-          startSent(client, READ_ALONE, { tenant: undefined, limited: true }),
-          this.#written(query),
-          client.query('commit'),
-        ]);
-        return { problem: unusable(stateFrom(answers[1]?.rows[0] as StateRow)), value: read };
-      }),
-    );
+    const read = await this.#sound(async (client) => {
+      const [started, answered, ended] = await Promise.allSettled([
+        startSent(client, READ_ALONE, { tenant: undefined, limited: true }),
+        this.#written(query),
+        client.query('commit'),
+      ]);
+      if (started.status === 'rejected') throw started.reason;
+      const problem = unusable(stateFrom(started.value[1]?.rows[0] as StateRow));
+      if (problem === undefined && ended.status === 'rejected') throw ended.reason;
+      return { problem, value: answered };
+    });
+    if (read.status === 'rejected') {
+      this.#broken = true;
+      throw read.reason;
+    }
+    return resultOf<R>(read.value);
   }
 
   /**

@@ -375,6 +375,21 @@ describe(`a read alone on one trip (4D2e C5, Postgres ${server.version})`, () =>
     }
   });
 
+  it('logs a connection carrying a tenant even when its read fails too, and gives back the failure from the next', async () => {
+    const { capture, logger } = capturedLogger();
+    const single = appDatabase(1, logger);
+    try {
+      await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_A}, false)`.execute(single);
+
+      await expect(readAloneOnOneTrip(single, sql`select 1 / 0`)).rejects.toMatchObject({ code: '22012' });
+
+      expect(capture.lines()).toMatchObject([{ level: 'error', event: 'db.tenant.leftover_discarded', attempt: 1 }]);
+      expect(await settingOutside(single)).toBeNull();
+    } finally {
+      await single.destroy();
+    }
+  });
+
   it('gives back the failure of a read that fails, and leaves nothing open for the next', async () => {
     const single = appDatabase(1);
     try {
