@@ -440,6 +440,26 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(decidedOf(await ask(acting, another)).decision).toBe('ALLOW');
   });
 
+  it('denies an order written in another case by Unicode’s full fold, and keeps its own claim on the new key (PL-39)', async () => {
+    const { w, acting } = await ready();
+    const small = (orderReference: string) => asking(w, { amount: AED(10_000n), orderReference });
+    const first = decidedOf(await ask(acting, small('Straße-1')));
+    expect(first.decision).toBe('ALLOW');
+    expect((await heldBy(w.org, first.id)).claim).toMatchObject({ order_reference: 'strasse-1', released_at: null });
+
+    for (const written of ['STRASSE-1', 'strasse-1', 'STRAẞE-1']) {
+      expect(decidedOf(await ask(acting, small(written)))).toMatchObject({
+        decision: 'DENY',
+        reasons: ['DUPLICATE_ORDER_REFERENCE'],
+      });
+    }
+    expect(decidedOf(await ask(acting, small('KIZ-1'))).decision).toBe('ALLOW');
+    expect(decidedOf(await ask(acting, small('kız-1')))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['DUPLICATE_ORDER_REFERENCE'],
+    });
+  });
+
   it('sends for approval an order an open claim’s looks like on the rail, holding it; the exact one still denied (decision 11a)', async () => {
     const { w, acting } = await ready();
     const small = (orderReference: string, supplierId = w.suppliers[0] ?? '') =>
