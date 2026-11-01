@@ -38,6 +38,7 @@ import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createAgentTurns } from './agent-turns.ts';
+import { createDecisionEntry } from './decision-entry.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import {
   AED,
@@ -69,7 +70,10 @@ type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables
 
 // Every request at the database at once, as many replicas would send them: the locks alone serialise them here,
 // never one replica's turns (agent-turns.ts).
-const UNQUEUED = createAgentTurns({ perAgent: Number.MAX_SAFE_INTEGER });
+const UNQUEUED = createDecisionEntry({
+  turns: createAgentTurns({ perAgent: Number.MAX_SAFE_INTEGER }),
+  perSupplier: Number.MAX_SAFE_INTEGER,
+});
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -204,7 +208,7 @@ beforeEach(() => {
     ids,
     clock,
     logger,
-    turns: UNQUEUED,
+    entry: UNQUEUED,
   });
   approvals = createSpendRequestApprovals({
     database: app,
@@ -459,7 +463,7 @@ describe('the model: random batches all at once (SEC-LIM-01, SEC-LIM-04, SEC-DP-
           ids,
           clock,
           logger: testLogger(capture),
-          turns: UNQUEUED,
+          entry: UNQUEUED,
         });
         const { w, acting } = await ready();
         const agents = [acting, await shared.secondAgent(registry, w, TERMS)];

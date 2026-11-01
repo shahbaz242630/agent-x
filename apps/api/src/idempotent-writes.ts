@@ -117,8 +117,10 @@ export function answerRefusal(
   reply: FastifyReply,
 ): FastifyReply {
   if (answer.outcome === 'refused') {
-    // An agent's turn waited past its bound: it says when to send the same request again (S161).
-    if (answer.code === 'AGENT_BUSY') reply.header('retry-after', String(BUSY_RETRY_SECONDS));
+    // A wait in a decision's lines ran out: it says when to send the same request again (S161).
+    if (answer.code === 'AGENT_BUSY' || answer.code === 'ORGANISATION_BUSY') {
+      reply.header('retry-after', String(BUSY_RETRY_SECONDS));
+    }
     return sendErrorBody(reply, answer.status, answer.code, request.id);
   }
   if (answer.outcome === 'conflict') return sendErrorBody(reply, 409, 'IDEMPOTENCY_KEY_REUSED', request.id);
