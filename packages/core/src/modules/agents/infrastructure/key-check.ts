@@ -7,11 +7,16 @@
 // 2. The key's ID looked up in the directory, for its organisation alone:
 //    where to look, never what is found there.
 // 3. Inside that organisation's withSignedStates, each statement limited to
-//    10 seconds: the key's row read for its agent's ID alone (where to look);
-//    the agent read and verified (`share`, level 3); then the key read and
-//    verified (`share`, 3a), so the lock order is the one a rotation takes.
-//    The key's agent is sealed, so a row pointed at another agent is caught
-//    as tampering by the key's own read.
+//    10 seconds, one statement (4D2e C4): the key's row read unlocked for its
+//    agent's ID alone (where to look); the agent locked (`share`, level 3); then
+//    the key locked (`share`, 3a), so the lock order is the one a rotation
+//    takes. Each row is believed only if it agrees with its log and the row
+//    locked is the version the statement's snapshot saw; a row that isn't, and
+//    any row after it, is read again alone, which alone raises an alarm: so a
+//    revocation or suspension committed during the wait is seen, and there is
+//    no cache for one to wait behind. The key's agent is sealed, so a row
+//    pointed at another agent is caught as tampering by the key's own read,
+//    and the agent locked must be the one sealed.
 // 4. The secret: HMAC-SHA-256 with the agent-key pepper's version the key was
 //    made with (a version this process no longer holds is a refusal, logged
 //    as an error), over ('agent-key', keyId, secret), compared with the sealed
@@ -42,7 +47,7 @@ import { type AuditTables, type SignedStates, withSignedStates } from '../../aud
 import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { keySecretMessage, parseAgentKey, type PresentedKey, type Scope } from '../domain/agent.ts';
 import { AGENT_KEYS, agentKeyOf } from './agent-keys.ts';
-import { agentOf, type AgentsTransaction } from './agents.ts';
+import { AGENTS, agentOf, type AgentsTransaction } from './agents.ts';
 import type { AgentsTables } from './tables.ts';
 
 /** A key that may act: its organisation, agent and ID, and the scopes it may use now. */
@@ -62,6 +67,7 @@ export type KeyRefusal =
   | 'unlisted'
   | 'missing'
   | 'tampered'
+  | 'agent_disagrees'
   | 'key_not_held'
   | 'wrong_secret'
   | 'agent_suspended'
@@ -91,20 +97,23 @@ export async function agentKeyAt(
   presented: PresentedKey,
 ): Promise<KeyAtCheck> {
   const { keyId, secret } = presented;
-  const row = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone: the agent is read and verified next, then the key, whose agent is sealed
-    .selectFrom(AGENT_KEYS.table)
-    .select('agent_id')
-    .where('org_id', '=', orgId)
-    .where('id', '=', keyId)
-    .executeTakeFirst();
-  if (row === undefined) return refused('missing');
-  const agentRead = await agentOf(tx, states, { orgId, id: row.agent_id }, 'share');
-  if (agentRead.outcome !== 'found') return refused(agentRead.outcome);
+  const [agentId] = await states.gather(tx, orgId, [
+    { table: AGENTS, id: { lookedUp: { table: AGENT_KEYS, id: keyId, column: 'agent_id' } }, lock: 'share' },
+    { table: AGENT_KEYS, id: { id: keyId }, lock: 'share' },
+  ]);
+  // Both answered from the gather, or each read again alone (agentOf and agentKeyOf, through verifiedState).
+  const agentRead =
+    typeof agentId === 'string' ? await agentOf(tx, states, { orgId, id: agentId }, 'share') : undefined;
+  if (agentRead?.outcome === 'tampered') return refused('tampered');
+  // The key is judged even with no agent to be found: a row pointed nowhere, or deleted, is tampering, and alarms.
   const keyRead = await agentKeyOf(tx, states, { orgId, id: keyId }, 'share');
   if (keyRead.outcome !== 'found') return refused(keyRead.outcome);
+  if (agentRead?.outcome !== 'found') return refused('missing');
   const { agent } = agentRead;
   const { key } = keyRead;
+  // The agent was found through the row as the statement's snapshot held it, the key's seal judged it as it now is:
+  // a row pointed away and back during the wait would otherwise act as the other agent.
+  if (key.agentId !== agent.id) return refused('agent_disagrees');
   // A pepper version retired while a key made with it still lives (Azure.md, "Rotating a key") can't
   // check its secret: refused, and logged as the fault it is, never taken for a wrong secret.
   const held = keys
@@ -159,6 +168,8 @@ export function createAgentKeyCheck({
         if (checked.outcome === 'accepted') return checked;
         // A pepper version this process doesn't hold is ours to fix, not the caller's doing.
         if (checked.reason === 'key_not_held') log.error('agent_key.refused', { reason: checked.reason, keyId });
+        // No read of it alarms (the row is sound again by then), so this line is what says someone past the app was here.
+        else if (checked.reason === 'agent_disagrees') log.error('agent_key.agent_disagrees', { keyId });
         else log.info('agent_key.refused', { reason: checked.reason, keyId });
         return { outcome: 'refused' };
       };

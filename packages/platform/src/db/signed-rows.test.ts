@@ -16,6 +16,11 @@ const MANDATES = {
 
 const given: GatheredRow = { table: MANDATES, id: { id: ID }, lock: 'share' };
 
+const lookedUp = (fault: { id?: string; column?: string; table?: SignedStateTable }): GatheredRow => ({
+  ...given,
+  id: { lookedUp: { table: MANDATES, id: ID, column: 'current_version_id', ...fault } },
+});
+
 describe('gatheredRowReads (4D2d P8): refused before any SQL is built', () => {
   it('builds one read a row, each named in order', () => {
     expect(gatheredRowReads(ORG, [given, { ...given, id: { sameAs: 0 } }])).toHaveLength(2);
@@ -37,7 +42,19 @@ describe('gatheredRowReads (4D2d P8): refused before any SQL is built', () => {
     ],
     ['a row found in no status', ORG, [{ ...given, id: { findBy: { column: 'agent_id', value: ID, statusIn: [] } } }]],
     ['a table not named as ours', ORG, [{ ...given, table: { ...MANDATES, table: 'Probe.Mandates' } }]],
+    ['a looked-up row not named by a UUID', ORG, [lookedUp({ id: 'not-a-uuid' })]],
+    ['an ID looked up in a field not a uuid', ORG, [lookedUp({ column: 'status' })]],
+    ['an ID looked up in a field the row lacks', ORG, [lookedUp({ column: 'pending_version_id' })]],
+    [
+      'an ID looked up in a table not named as ours',
+      ORG,
+      [lookedUp({ table: { ...MANDATES, table: 'Probe.Mandates' } })],
+    ],
   ] as const)('refuses %s', (_, orgId, rows) => {
     expect(() => gatheredRowReads(orgId, rows)).toThrow(RangeError);
+  });
+
+  it('looks an ID up in a uuid field of another row', () => {
+    expect(gatheredRowReads(ORG, [lookedUp({}), given])).toHaveLength(2);
   });
 });
