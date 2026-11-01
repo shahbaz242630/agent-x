@@ -17,7 +17,7 @@
  * first: every organisation named for the run, every ID in it its own, so a
  * wrong line can never freeze anyone else's organisation (S153 review).
  */
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -35,7 +35,9 @@ import { testLogger } from '../../packages/testing/src/index.ts';
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { LOAD_CHECKS } from './checks.ts';
 import { cleanUpFailures, cleanUpRun } from './cleanup.ts';
+import { probeFreeze, withFreezeProbe } from './freeze-probe.ts';
 import {
+  freezeProbeAfterMs,
   loadConnection,
   type LoadPhase,
   loadOrgName,
@@ -67,6 +69,8 @@ export interface JobSteps {
   readonly keyring: KeyProvider;
   readonly k6: (phase: LoadPhase, seeded: Seeded) => PhaseRun | Promise<PhaseRun>;
   readonly print: (line: PrintedLine) => void;
+  /** How long into phase 5 an admin's freeze is asked of the stuck organisation. */
+  readonly freezeProbeAfterMs: number;
 }
 
 /** A job's refusal, said in its own words: it has changed nothing. */
@@ -208,8 +212,8 @@ async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], create
   let created = createdFirst;
   let finished = true;
   for (const n of LATER_PHASES) {
-    const send = () => steps.k6(n, seeded);
-    const phase = await (n === NEIGHBOURS_PHASE ? whileStuck(steps.database, seeded.agents, send) : send());
+    const send = async () => steps.k6(n, seeded);
+    const phase = await (n === NEIGHBOURS_PHASE ? neighboursPhase(steps, seeded, send) : send());
     created += phase.result?.created ?? 0;
     finished = phase.finished;
     if (!finished) break;
@@ -221,6 +225,17 @@ async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], create
   }
   steps.print({ event: 'load.checked', created, finished, checks });
   return finished && stillPaused && checks.every(({ problems }) => problems.length === 0);
+}
+
+/** Phase 5: the stuck organisation's suppliers held locked for it, and an admin's freeze asked near its end, printed for the report. */
+async function neighboursPhase(steps: JobSteps, seeded: Seeded, send: () => Promise<PhaseRun>): Promise<PhaseRun> {
+  const { ran, probed } = await withFreezeProbe(
+    steps.freezeProbeAfterMs,
+    () => probeFreeze(steps.database, steps.keyring, seeded.agents),
+    () => whileStuck(steps.database, seeded.agents, send),
+  );
+  if (probed !== undefined) steps.print({ event: 'load.freeze_probe', ...probed });
+  return ran;
 }
 
 /** The second job's phases, in order: the steady traffic with its spike, the two crowds, then the neighbours. */
@@ -242,21 +257,26 @@ export function runK6(
   api: string,
   k6: readonly [string, ...string[]] = ['k6'],
   smoke = false,
-): (phase: LoadPhase, seeded: Seeded) => PhaseRun {
+): (phase: LoadPhase, seeded: Seeded) => Promise<PhaseRun> {
   const [command, ...first] = k6;
-  return (phase, seeded) => {
+  return async (phase, seeded) => {
     const dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-'));
     try {
       const seed = path.join(dir, 'seed.json');
       writeFileSync(seed, JSON.stringify(seeded), { mode: 0o600 });
-      const done = spawnSync(command, [...first, 'run', '--quiet', K6_SCRIPT], {
-        env: { ...process.env, PHASE: String(phase), API: api, SEED: seed, OUT: dir, SMOKE: smoke ? '1' : '0' },
-        stdio: 'inherit',
-        windowsHide: true,
+      // Beside this process's own work, never blocking it: phase 5's freeze is asked from here while k6 runs.
+      const status = await new Promise<number | null>((resolve) => {
+        spawn(command, [...first, 'run', '--quiet', K6_SCRIPT], {
+          env: { ...process.env, PHASE: String(phase), API: api, SEED: seed, OUT: dir, SMOKE: smoke ? '1' : '0' },
+          stdio: 'inherit',
+          windowsHide: true,
+        })
+          .on('error', () => {
+            resolve(null);
+          })
+          .on('close', resolve);
       });
-      if (done.error !== undefined || (done.status !== 0 && done.status !== K6_THRESHOLD_FAILED)) {
-        return { finished: false, result: undefined };
-      }
+      if (status !== 0 && status !== K6_THRESHOLD_FAILED) return { finished: false, result: undefined };
       const summary = path.join(dir, `k6-phase-${String(phase)}.json`);
       return { finished: true, result: JSON.parse(readFileSync(summary, 'utf8')) as PhaseResult };
     } finally {
@@ -375,6 +395,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
       print: (line) => {
         console.log(JSON.stringify(line));
       },
+      freezeProbeAfterMs: freezeProbeAfterMs(run.AGENTX_LOAD_SMOKE === '1'),
     };
     if (job === 'first') return await firstJob(steps, runId);
     const agents = agentsOf(needed(run, 'AGENTX_LOAD_SEEDED'));

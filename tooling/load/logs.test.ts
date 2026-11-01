@@ -6,7 +6,16 @@ const line = (fields: Record<string, unknown>) => JSON.stringify({ level: 'info'
 const decided = (durationMs: number) => line({ event: 'spend_request.decided', durationMs });
 const checked = (requests: number, mismatched = 0, tampered = 0) =>
   line({ event: 'holdings_check.passed', requests, mismatched, tampered });
-const NO_PARTS = { connectionWaitP95: 0, turnWaitP95: 0, tripsP50: 0, decisionRowsP95: 0, headLockP95: 0 };
+const NO_PARTS = {
+  connectionWaitP95: 0,
+  turnWaitP95: 0,
+  supplierTurnWaitP95: 0,
+  gateWaitP95: 0,
+  tripsP50: 0,
+  decisionRowsP95: 0,
+  headLockP95: 0,
+  busyRefusals: 0,
+};
 const NO_NEIGHBOUR = { count: 0, p50: 0, p95: 0, p99: 0, max: 0, ...NO_PARTS };
 
 describe('percentiles', () => {
@@ -25,6 +34,31 @@ describe('percentiles', () => {
 });
 
 describe('the API’s log after a load run', () => {
+  it('reads each decision’s supplier and gate waits, and counts those turned away, each with its organisation', () => {
+    const decidedIn = (orgId: string, waits: Record<string, number>) =>
+      line({ event: 'spend_request.decided', orgId, durationMs: 10, ...waits });
+    const refusal = (event: string, orgId: string) => JSON.stringify({ level: 'warn', event, orgId });
+    const summary = summariseLogs(
+      [
+        decidedIn('steady', { supplierTurnWaitMs: 7, gateWaitMs: 9 }),
+        decidedIn('busy', { supplierTurnWaitMs: 70, gateWaitMs: 90 }),
+        refusal('spend_request.agent_busy', 'busy'),
+        refusal('spend_request.supplier_busy', 'busy'),
+        refusal('spend_request.organisation_busy', 'busy'),
+        refusal('db.organisation_busy', 'busy'),
+        refusal('spend_request.platform_full', 'calm'),
+        refusal('spend_request.supplier_busy', 'steady'),
+        // Not a refusal, and with no organisation it counts for no one.
+        refusal('http.request_failed', 'busy'),
+      ].join('\n'),
+      { busy: new Set(['busy']), calm: new Set(['calm']) },
+    );
+    expect(summary.steadyParts).toMatchObject({ supplierTurnWaitP95: 7, gateWaitP95: 9, busyRefusals: 1 });
+    expect(summary.neighbours.busy).toMatchObject({ supplierTurnWaitP95: 70, gateWaitP95: 90, busyRefusals: 4 });
+    expect(summary.neighbours.calm).toMatchObject({ count: 0, busyRefusals: 1 });
+    expect(summary.platformFull).toBe(1);
+  });
+
   it('times each crowd’s decisions apart, and counts only the steady traffic’s allowed', () => {
     const inOrg = (orgId: string, durationMs: number, decision: string) =>
       line({ event: 'spend_request.decided', orgId, durationMs, decision });
@@ -95,6 +129,7 @@ describe('the API’s log after a load run', () => {
 
     expect(summary).toEqual({
       problems: { 'db.transaction_retried': 2, 'holdings_check.failed': 1, 'log.suppressed': 1 },
+      platformFull: 0,
       suppressed: 1,
       unreadable: 2,
       holdingsChecks: [
@@ -141,9 +176,12 @@ describe('the API’s log after a load run', () => {
     expect(summary.steadyParts).toEqual({
       connectionWaitP95: 1,
       turnWaitP95: 2,
+      supplierTurnWaitP95: 0,
+      gateWaitP95: 0,
       tripsP50: 19,
       decisionRowsP95: 119,
       headLockP95: 219,
+      busyRefusals: 0,
     });
     const percentiles = (n: number) => ({ count: 1, p50: n, p95: n, p99: n, max: n });
     expect(summary.neighbours).toEqual({
@@ -151,25 +189,34 @@ describe('the API’s log after a load run', () => {
         ...percentiles(20),
         connectionWaitP95: 3,
         turnWaitP95: 4,
+        supplierTurnWaitP95: 0,
+        gateWaitP95: 0,
         tripsP50: 20,
         decisionRowsP95: 120,
         headLockP95: 220,
+        busyRefusals: 0,
       },
       busy: {
         ...percentiles(30),
         connectionWaitP95: 5,
         turnWaitP95: 6,
+        supplierTurnWaitP95: 0,
+        gateWaitP95: 0,
         tripsP50: 21,
         decisionRowsP95: 121,
         headLockP95: 221,
+        busyRefusals: 0,
       },
       stuck: {
         ...percentiles(40),
         connectionWaitP95: 7,
         turnWaitP95: 8,
+        supplierTurnWaitP95: 0,
+        gateWaitP95: 0,
         tripsP50: 22,
         decisionRowsP95: 122,
         headLockP95: 222,
+        busyRefusals: 0,
       },
     });
     // Each neighbour's line accounts for a decision the run made.

@@ -27,43 +27,59 @@ export const API_CPUS_VARIABLE = 'AGENTX_LOAD_API_CPUS';
 /** The least a run may give the API: Docker refuses less, and only once the stack starts. */
 export const LEAST_API_CPUS = 0.01;
 
+/** How the runner tells compose.load.yaml the database's CPUs: 0 is no cap. */
+export const DB_CPUS_VARIABLE = 'AGENTX_LOAD_DB_CPUS';
+
+/** The most `--db-cpus` may give the database: past this it is no cap on a laptop. */
+export const MOST_DB_CPUS = 16;
+
 /** How the runner tells compose.load.yaml's `delay` the milliseconds to add. */
 export const DELAY_VARIABLE = 'AGENTX_LOAD_DELAY_MS';
 
 /** The most `--delay-ms` adds: past this it measures a network no one runs on. */
 export const MOST_DELAY_MS = 20;
 
-/** What the runner was asked: whether to leave the stack up, the API's CPUs (staging's unless given), the database's added delay. */
+/** What the runner was asked: whether to leave the stack up, the API's CPUs (staging's unless given), the database's added delay and its CPUs. */
 export interface LoadOptions {
   readonly keep: boolean;
   readonly apiCpus: number;
   /** Whole milliseconds added to every packet the database sends (4D2d P0): 0 is the laptop as it is. */
   readonly delayMs: number;
+  /** The database's CPUs (4D2e C): the laptop has never shown Azure's saturation without a cap. 0 is no cap. */
+  readonly dbCpus: number;
 }
 
+/** The arguments that take a number: what each sets, and which numbers it takes. */
+const VALUED_OPTIONS: ReadonlyMap<
+  string,
+  { readonly name: 'apiCpus' | 'delayMs' | 'dbCpus'; readonly fits: (value: number) => boolean }
+> = new Map([
+  ['--cpus', { name: 'apiCpus', fits: (value) => value >= LEAST_API_CPUS && value <= MOST_API_CPUS }],
+  ['--delay-ms', { name: 'delayMs', fits: (value) => Number.isInteger(value) && value >= 0 && value <= MOST_DELAY_MS }],
+  ['--db-cpus', { name: 'dbCpus', fits: (value) => value >= LEAST_API_CPUS && value <= MOST_DB_CPUS }],
+]);
+
 /**
- * The runner's arguments (`--keep`, `--cpus 2`, `--delay-ms 2`), or undefined
+ * The runner's arguments (`--keep`, `--cpus 2`, `--delay-ms 2`, `--db-cpus 2`), or undefined
  * for any it can't run: an unknown one (`--cpus=2`, `--cpu 2`) is refused,
  * never a run at another size or delay than asked.
  */
 export function optionsOf(args: readonly string[]): LoadOptions | undefined {
-  let keep = false;
-  let apiCpus = STAGING_API_CPUS;
-  let delayMs = 0;
+  const options = { keep: false, apiCpus: STAGING_API_CPUS, delayMs: 0, dbCpus: 0 };
   for (let at = 0; at < args.length; at++) {
-    if (args[at] === '--keep') {
-      keep = true;
-    } else if (args[at] === '--cpus') {
-      apiCpus = Number(args[++at]);
-      if (!(apiCpus >= LEAST_API_CPUS && apiCpus <= MOST_API_CPUS)) return undefined;
-    } else if (args[at] === '--delay-ms') {
-      delayMs = Number(args[++at]);
-      if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MOST_DELAY_MS) return undefined;
-    } else {
+    const arg = args[at] ?? '';
+    const valued = VALUED_OPTIONS.get(arg);
+    if (arg === '--keep') {
+      options.keep = true;
+    } else if (valued === undefined) {
       return undefined;
+    } else {
+      const value = Number(args[++at]);
+      if (!valued.fits(value)) return undefined;
+      options[valued.name] = value;
     }
   }
-  return { keep, apiCpus, delayMs };
+  return options;
 }
 
 /** The run's working files (the seed's agent keys, k6's results, the API's log): gitignored. */
@@ -104,6 +120,14 @@ export const SEEDED_AGENTS = AMPLE_AGENTS + 1 + 2 * CROWD_AGENTS + NEIGHBOUR_AGE
 export type LoadPhase = 1 | 2 | 3 | 4 | 5;
 
 export const NEIGHBOURS_PHASE = 5;
+
+/**
+ * How long into phase 5 an admin's freeze is asked of the stuck organisation
+ * (PL-63 item 3), k6's phase being 120 s, or 20 for the wiring run
+ * (money-paths.k6.js holds its own, running no TypeScript): near its end, so the
+ * trouble has built up, with room for a freeze's own wait and for k6 to see its answer.
+ */
+export const freezeProbeAfterMs = (smoke: boolean): number => (smoke ? 15_000 : 100_000);
 
 /** Above AED 5 a request waits for a person, so the steady traffic is both allowed and held for approval. */
 export const APPROVAL_THRESHOLD_MINOR = 500n;

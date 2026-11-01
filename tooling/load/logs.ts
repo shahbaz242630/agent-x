@@ -41,6 +41,8 @@ export interface LogSummary {
   readonly neighbours: Readonly<Record<NeighbourKind, Percentiles & DecisionParts>>;
   /** Warnings and errors while phase 5 ran, each by name: what trouble costs, reported and not yet failing a run. */
   readonly neighbourProblems: Readonly<Record<string, number>>;
+  /** The times the whole platform, not one organisation, turned a decision away (PL-63): alerted, and named in the report. */
+  readonly platformFull: number;
 }
 
 /** Phase 5's three kinds of organisation. */
@@ -52,12 +54,18 @@ export interface DecisionParts {
   readonly connectionWaitP95: number;
   /** The wait behind its own agent's other decisions. */
   readonly turnWaitP95: number;
+  /** The wait behind its supplier's other decisions (4D2e C). */
+  readonly supplierTurnWaitP95: number;
+  /** The wait for a place at the decisions' gate (4D2e C). */
+  readonly gateWaitP95: number;
   /** A typical decision's trips to the database. */
   readonly tripsP50: number;
   /** The trip locking a decision's rows, the supplier's among them, its wait inside (PL-62). */
   readonly decisionRowsP95: number;
   /** The trip asking for the audit chain's head, its wait inside. */
   readonly headLockP95: number;
+  /** Decisions turned away as busy, none of them made: these have no `spend_request.decided` line. */
+  readonly busyRefusals: number;
 }
 
 interface Line {
@@ -72,6 +80,8 @@ interface Line {
   readonly tampered?: number;
   readonly poolWaitMs?: number;
   readonly turnWaitMs?: number;
+  readonly supplierTurnWaitMs?: number;
+  readonly gateWaitMs?: number;
   readonly trips?: number;
   readonly decisionRowsMs?: number;
   readonly headLockMs?: number;
@@ -155,12 +165,24 @@ export const apartOrgsOf = (agents: readonly { readonly kind?: unknown; readonly
   stuck: orgsOfKind(agents, 'neighbour-stuck'),
 });
 
-const partsOf = (lines: readonly Line[]): DecisionParts => ({
+/** A decision turned away with nothing made, whichever line it waited in; each line names its organisation. */
+const BUSY_REFUSALS: ReadonlySet<string | undefined> = new Set([
+  'spend_request.agent_busy',
+  'spend_request.supplier_busy',
+  'spend_request.organisation_busy',
+  'spend_request.platform_full',
+  'db.organisation_busy',
+]);
+
+const partsOf = (lines: readonly Line[], busyRefusals: number): DecisionParts => ({
   connectionWaitP95: percentilesOf(lines.map(({ poolWaitMs = 0 }) => poolWaitMs)).p95,
   turnWaitP95: percentilesOf(lines.map(({ turnWaitMs = 0 }) => turnWaitMs)).p95,
+  supplierTurnWaitP95: percentilesOf(lines.map(({ supplierTurnWaitMs = 0 }) => supplierTurnWaitMs)).p95,
+  gateWaitP95: percentilesOf(lines.map(({ gateWaitMs = 0 }) => gateWaitMs)).p95,
   tripsP50: percentilesOf(lines.map(({ trips = 0 }) => trips)).p50,
   decisionRowsP95: percentilesOf(lines.map(({ decisionRowsMs = 0 }) => decisionRowsMs)).p95,
   headLockP95: percentilesOf(lines.map(({ headLockMs = 0 }) => headLockMs)).p95,
+  busyRefusals,
 });
 
 /** Below this share allowed, the steady traffic isn't the mix it means to be (S164: the split check made it 0.4%). */
@@ -186,16 +208,19 @@ export function summariseLogs(text: string, apart: ApartOrgs = {}, trouble?: Tro
   const linesIn = (orgs: ReadonlySet<string> | undefined) =>
     decided.filter(({ orgId = '' }) => orgs?.has(orgId) === true);
   const timesIn = (orgs: ReadonlySet<string> | undefined) => linesIn(orgs).map(({ durationMs = 0 }) => durationMs);
+  const refusals = lines.filter(({ event }) => BUSY_REFUSALS.has(event));
   const neighbour = (orgs: ReadonlySet<string> | undefined) => ({
     ...percentilesOf(timesIn(orgs)),
-    ...partsOf(linesIn(orgs)),
+    ...partsOf(linesIn(orgs), refusals.filter(({ orgId = '' }) => orgs?.has(orgId) === true).length),
   });
   const everyApart = Object.values(apart) as readonly (ReadonlySet<string> | undefined)[];
-  const steady = decided.filter(({ orgId = '' }) => !everyApart.some((orgs) => orgs?.has(orgId) === true));
+  const isSteady = ({ orgId = '' }: Line) => !everyApart.some((orgs) => orgs?.has(orgId) === true);
+  const steady = decided.filter(isSteady);
   return {
     problems,
     neighbourProblems,
-    steadyParts: partsOf(steady),
+    steadyParts: partsOf(steady, refusals.filter(isSteady).length),
+    platformFull: lines.filter(({ event }) => event === 'spend_request.platform_full').length,
     neighbours: { calm: neighbour(apart.calm), busy: neighbour(apart.busy), stuck: neighbour(apart.stuck) },
     suppressed: lines.filter(({ event }) => event === 'log.suppressed').length,
     unreadable: raws.length - lines.length,
