@@ -207,23 +207,39 @@ describe('a server with every connection in use (decision 3)', () => {
   it('at start, a stop during the wait ends it at once, with no alarm', async () => {
     const stopping = new AbortController();
     guard.result = (): Promise<string[]> => {
-      queueMicrotask(() => {
+      setTimeout(() => {
         stopping.abort();
-      });
+      }, 10);
       return Promise.reject(full());
     };
     const log = logger();
     const started = performance.now();
     const sound = await schemaSoundAtStart(
       { ...options(log), signal: stopping.signal },
-      {
-        limitMs: 60_000,
-        retryMs: 60_000,
-      },
+      { limitMs: 60_000, retryMs: 60_000 },
     );
     expect(sound).toBe(false);
     expect(performance.now() - started).toBeLessThan(5_000);
-    expect(log.capture.lines().filter(({ level }) => level === 'error')).toEqual([]);
+    expect(events(log)).toEqual([WARNED]);
+  });
+
+  it('at start, a stop just before the wait ends it at once too', async () => {
+    const stopping = new AbortController();
+    const refusal = {
+      then: (_resolve: unknown, reject: (error: Error) => void) => {
+        reject(full());
+        stopping.abort();
+      },
+    } as unknown as Promise<string[]>;
+    guard.result = (): Promise<string[]> => refusal;
+    const log = logger();
+    const started = performance.now();
+    const sound = await schemaSoundAtStart(
+      { ...options(log), signal: stopping.signal },
+      { limitMs: 60_000, retryMs: 60_000 },
+    );
+    expect(sound).toBe(false);
+    expect(performance.now() - started).toBeLessThan(5_000);
   });
 
   it('any other refusal at start is the alarm at once, never a wait', async () => {

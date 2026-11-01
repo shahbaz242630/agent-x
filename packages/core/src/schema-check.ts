@@ -179,6 +179,11 @@ interface FullServerWait {
 /** Resolves after `ms`, or at once when the process stops: the check after it then says so. */
 function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve) => {
+    // A listener never fires on a signal already aborted.
+    if (signal?.aborted === true) {
+      resolve();
+      return;
+    }
     const timer = setTimeout(resolve, ms);
     signal?.addEventListener(
       'abort',
