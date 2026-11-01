@@ -344,10 +344,10 @@ export interface Ended {
   readonly ended: string;
 }
 
-/** A failed run can stay without an end for good (S116, run day 5): its lines are what say why, so look up to now. */
-function endToLookTo(steps: JobSteps, { status, began, ended }: Ended): string {
-  if (status !== 'Failed' || ended !== '' || !Number.isFinite(Date.parse(began))) return ended;
-  steps.say('Azure gave this failed run no end, so its log is looked for up to now.');
+/** A run that didn't succeed can stay without an end for good (S116, run day 5): its lines say why, so look up to now. */
+function endToLookTo(steps: JobSteps, { status, ended }: Ended): string {
+  if (status === 'Succeeded' || Number.isFinite(Date.parse(ended))) return ended;
+  steps.say('Azure gave this run no end, so its log is looked for up to now.');
   return steps.now().toISOString();
 }
 

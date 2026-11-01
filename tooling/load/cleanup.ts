@@ -122,7 +122,7 @@ async function cleanUpOrg(database: Database<MandateWorldTables>, keyring: KeyPr
  * Organisations cleaned up at once. Voiding runs ~7 requests a second within
  * one organisation (its lock and chain head serialise it), so the laptop's
  * ~6,800 took 16 minutes one after another; organisations share neither, and
- * four keep well inside the pool's ten connections and staging's database.
+ * four keep inside the job's six connections and staging's database.
  */
 const ORGS_AT_ONCE = 4;
 

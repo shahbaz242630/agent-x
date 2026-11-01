@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { agentsOf, main, type PrintedAgent, requestOf, runK6 } from './job.ts';
+import { agentsOf, jobConnection, main, type PrintedAgent, requestOf, runK6 } from './job.ts';
 
 const AGENT: PrintedAgent = {
   kind: 'ample',
@@ -79,6 +79,10 @@ describe("the run's agents, as load.ts hands them to the second job", () => {
 });
 
 describe('the command line and settings', () => {
+  it("holds the job to six connections, whatever a step asks for at once, and keeps the rest of the connection's settings (run day 5)", () => {
+    expect(jobConnection({ host: 'db', maxConnections: 10 })).toEqual({ host: 'db', maxConnections: 6 });
+  });
+
   it.each([[[]], [['third']], [['first', 'extra']]])('refuses %j before reading any setting', async (argv) => {
     await expect(main(argv, {})).rejects.toThrow('Run it as node tooling/load/job.ts <first|second|cleanup>.');
   });

@@ -89,7 +89,9 @@ interface World {
   startRefused?: LoadJob;
   /** This job's runs never end, while it says so. */
   timesOut?: LoadJob | undefined;
+  /** Azure never gives a failed run its end, or its start. */
   failedHasNoEnd?: boolean;
+  failedHasNoStart?: boolean;
   /** Azure refuses {} put back on this job. */
   putBackRefused?: LoadJob;
   /** The API's replicas never change after a restart. */
@@ -126,6 +128,7 @@ class FakeAzure implements Az {
   readonly restarted: string[] = [];
   readonly deleted: LoadJob[] = [];
   apiReadings = 0;
+  readonly apiQueries: string[] = [];
   /** How many times each run's lines have been read. */
   readonly #runReadings = new Map<string, number>();
   readonly #modified = new Map<LoadJob, number>(LOAD_JOBS.map((job) => [job, 0]));
@@ -158,24 +161,26 @@ class FakeAzure implements Az {
         return json(this.#world.going === job ? [{ name: `${name}-old1`, properties: { status: 'Running' } }] : []);
       case `containerapp job start --subscription`:
         return this.#start(job, name);
-      case 'containerapp job execution show': {
-        const run = this.runs.find((each) => each.name === args[args.indexOf('--job-execution-name') + 1]);
-        const going = run?.job === this.#world.timesOut;
-        return json({
-          properties: {
-            status: going ? 'Running' : run?.status,
-            startTime: '2026-10-27T10:00:00+00:00',
-            endTime: going
-              ? null
-              : run?.status === 'Failed' && this.#world.failedHasNoEnd === true
-                ? ''
-                : '2026-10-27T10:05:00+00:00',
-          },
-        });
-      }
+      case 'containerapp job execution show':
+        return json(this.#execution(args[args.indexOf('--job-execution-name') + 1]));
       default:
         throw new Error(`unexpected az ${args.join(' ')}`);
     }
+  }
+
+  #execution(name: string | undefined) {
+    const run = this.runs.find((each) => each.name === name);
+    const failed = run?.status === 'Failed';
+    if (run?.job === this.#world.timesOut) {
+      return { properties: { status: 'Running', startTime: '2026-10-27T10:00:00+00:00', endTime: null } };
+    }
+    return {
+      properties: {
+        status: run?.status,
+        startTime: failed && this.#world.failedHasNoStart === true ? '' : '2026-10-27T10:00:00+00:00',
+        endTime: failed && this.#world.failedHasNoEnd === true ? '' : '2026-10-27T10:05:00+00:00',
+      },
+    };
   }
 
   #start(job: LoadJob, name: string): AzResult {
@@ -306,6 +311,7 @@ class FakeAzure implements Az {
   #query(args: readonly string[]) {
     const { query } = JSON.parse(args[args.indexOf('--body') + 1] ?? '{}') as { query: string };
     if (query.includes("ContainerAppName == 'ca-agentx-stg-api'")) {
+      this.apiQueries.push(query);
       this.apiReadings += 1;
       const late = this.apiReadings <= (this.#world.apiLinesLate ?? 0);
       return {
@@ -501,6 +507,21 @@ describe('a run', () => {
     const report = readFileSync(path.join(done.steps.reportsDir, done.reports[0] ?? ''), 'utf8');
     expect(report).toContain('- load-second ended Failed.');
     expect(report).toContain('The database checks said nothing.');
+    // The API's lines are read up to now, not up to the fake's start: an empty window would lose them.
+    const [, from, to] = /between \(datetime\('(.+?)'\) \.\. datetime\('(.+?)'\)\)/.exec(az.apiQueries[0] ?? '') ?? [];
+    expect(Date.parse(to ?? '')).toBeGreaterThan(Date.parse(from ?? ''));
+  });
+
+  it('still writes the report when the second job fails with no start either: phase 1 is not lost', async () => {
+    const az = new FakeAzure({
+      failedHasNoEnd: true,
+      failedHasNoStart: true,
+      behaviour: { 'load-second': () => ({ status: 'Failed', lines: [] }) },
+    });
+    const done = await run(['run'], az);
+    expect(done.status).toBe(1);
+    const report = readFileSync(path.join(done.steps.reportsDir, done.reports[0] ?? ''), 'utf8');
+    expect(report).toContain('- load-second ended Failed.');
   });
 
   it('refuses a job Azure gives no time of its last change for', async () => {
@@ -659,13 +680,22 @@ describe('a run', () => {
     expect(JSON.parse(readFileSync(done.steps.stateFile, 'utf8'))).toMatchObject({ agents: [AMPLE, CAPPED] });
   });
 
-  it('says a first job that made nothing left nothing to clean up', async () => {
+  it('says a first job that succeeded and made nothing left nothing to clean up', async () => {
+    const az = new FakeAzure({ behaviour: { 'load-first': () => ({ status: 'Succeeded', lines: [] }) } });
+    const done = await run(['run'], az);
+    expect(done.error).toMatchObject({
+      message: "Phase 1 didn't finish (load-first ended Succeeded). It made no organisation.",
+    });
+    expect(existsSync(done.steps.stateFile)).toBe(false);
+  });
+
+  it("keeps a failed first job open with no lines yet, since its seed's may be late, and finish reads them", async () => {
     const az = new FakeAzure({ behaviour: { 'load-first': () => ({ status: 'Failed', lines: [] }) } });
     const done = await run(['run'], az);
     expect(done.error).toMatchObject({
-      message: "Phase 1 didn't finish (load-first ended Failed). It made no organisation.",
+      message: "Phase 1 didn't finish (load-first ended Failed). Run load.ts finish to clean up its organisations.",
     });
-    expect(existsSync(done.steps.stateFile)).toBe(false);
+    expect(JSON.parse(readFileSync(done.steps.stateFile, 'utf8'))).toMatchObject({ firstRun: az.runs[0]?.name });
   });
 
   it('puts {} back on the job when its start is refused', async () => {
