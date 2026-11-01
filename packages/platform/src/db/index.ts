@@ -95,7 +95,6 @@ export {
   AGENT_BRAKE,
   type AnswersOf,
   assertTenant,
-  BRAKE_WAIT_SECONDS,
   brakeShared,
   holdBrake,
   holdTransactionLock,

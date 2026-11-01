@@ -266,7 +266,7 @@ export async function holdTransactionLock<Schema>(
   await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`.execute(tx);
 }
 
-/** Every decision and key check's side of the lock an organisation's freeze takes (ADR-006 level 1a). */
+/** Every decision's side of the lock an organisation's freeze takes (ADR-006 level 1a). */
 export const ORGANISATION_BRAKE = 'organisation-brake';
 /** Every decision and key check's side of the lock an agent's kill switch takes (ADR-006 level 1b). */
 export const AGENT_BRAKE = 'agent-brake';
@@ -276,7 +276,7 @@ export const AGENT_BRAKE = 'agent-brake';
  * holder, each wait timed alone (measured, S168: at 8 s a freeze behind them failed every time). New ones line up
  * behind the brake from its first moment, so what it waits for is only those already inside.
  */
-export const BRAKE_WAIT_SECONDS = STATEMENT_SECONDS + 2;
+const BRAKE_WAIT_SECONDS = STATEMENT_SECONDS + 2;
 const BRAKE_WAIT = `${String(BRAKE_WAIT_SECONDS)}s`;
 /** A brake's own limit on a statement, past its wait, so that the wait runs out as a lock's. */
 const BRAKE_STATEMENT = `${String(BRAKE_WAIT_SECONDS + 3)}s`;

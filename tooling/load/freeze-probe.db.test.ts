@@ -69,7 +69,7 @@ describe('an admin’s freeze asked of the stuck organisation', () => {
     expect((await probeFreeze(app, keys, agents)).answer).toBe('frozen');
   });
 
-  it('says its lock’s wait ran out when decisions hold the organisation’s row past it, and freezes nothing', async () => {
+  it('says it was answered busy when a transaction holds the organisation’s row past its wait, and freezes nothing', async () => {
     const { w, agents } = await stuckOrg();
     const { promise: held, resolve: holds } = Promise.withResolvers<undefined>();
     const { promise: release, resolve: lets } = Promise.withResolvers<undefined>();
@@ -88,7 +88,7 @@ describe('an admin’s freeze asked of the stuck organisation', () => {
       lets(undefined);
       await holder;
     }
-    expect(probed.answer).toBe("not frozen: its wait for the organisation's lock ran out");
+    expect(probed.answer).toBe('not frozen: refused ORGANISATION_BUSY');
     expect(probed.ms).toBeGreaterThan(1_000);
     expect(await statusOf(w.org)).toEqual({ status: 'ACTIVE' });
   });

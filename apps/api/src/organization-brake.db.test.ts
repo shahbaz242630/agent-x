@@ -15,7 +15,6 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
   AGENT_BRAKE,
-  BRAKE_WAIT_SECONDS,
   brakeShared,
   createDatabase,
   createIdempotentWrites,
@@ -48,6 +47,7 @@ import {
   SUSPEND_OPERATION,
 } from './agent-changes.ts';
 import { createAgentTurns } from './agent-turns.ts';
+import { createDecisionEntry } from './decision-entry.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
   AED,
@@ -67,7 +67,10 @@ import {
 import { createSpendRequestDecisions, DECIDE_OPERATION, type SpendRequestDecided } from './spend-request-decisions.ts';
 
 // Every decision at the database at once, as many replicas would send them.
-const UNQUEUED = createAgentTurns({ perAgent: Number.MAX_SAFE_INTEGER });
+const UNQUEUED = createDecisionEntry({
+  turns: createAgentTurns({ perAgent: Number.MAX_SAFE_INTEGER }),
+  perSupplier: Number.MAX_SAFE_INTEGER,
+});
 
 /** Well past the longest test's waits: a slow laptop mustn't fail one. */
 const LONG = 60_000;
@@ -135,7 +138,7 @@ const decision = (w: World, acting: Acting, supplierId = w.suppliers[0] ?? ''): 
     orderReference: `INV-${String(asked)}`,
     purpose: 'Printer paper',
   };
-  return createSpendRequestDecisions({ ...services(), turns: UNQUEUED }).decideAndReserve(
+  return createSpendRequestDecisions({ ...services(), entry: UNQUEUED }).decideAndReserve(
     acting,
     {
       orgId: acting.orgId,
@@ -270,10 +273,13 @@ const agentStatusOf = (w: World) =>
     return read.outcome === 'verified' ? read.fields.get('status') : read.outcome;
   });
 
-/** The brake's whole wait and no more, by this laptop's clock, against which its container's reads about 3% fast. */
+/** The brake's wait, written out: past a statement's 10 s limit. A test reads no number the code could move. */
+const BRAKE_WAIT_MS = 12_000;
+
+/** The brake's whole wait and no more, with room: this laptop has timed a 10 s limit from 9.6 s to 10.6 s. */
 const expectBrakeWait = (ms: number) => {
-  expect(ms).toBeGreaterThan(BRAKE_WAIT_SECONDS * 900);
-  expect(ms).toBeLessThan(BRAKE_WAIT_SECONDS * 1100);
+  expect(ms).toBeGreaterThan(BRAKE_WAIT_MS * 0.9);
+  expect(ms).toBeLessThan(BRAKE_WAIT_MS * 1.1);
 };
 
 const alarms = () => capture.lines().filter(({ event }) => event === 'brake.not_applied');
@@ -344,7 +350,7 @@ describe('the freeze', () => {
       await letGo(stuck);
 
       expect(answer).toMatchObject(FROZEN_NOW);
-      expect(ms).toBeLessThan(BRAKE_WAIT_SECONDS * 1000);
+      expect(ms).toBeLessThan(BRAKE_WAIT_MS);
       expect(answers.length).toBeGreaterThan(5);
       expect(await settled(decision(w, acting))).toEqual(refused(409, 'ORG_FROZEN'));
       expect(alarms()).toEqual([]);
@@ -550,7 +556,7 @@ describe('the kill switch: the agent’s own brake', () => {
       await letGo(stuck);
 
       expect(answer).toMatchObject({ outcome: 'changed', agent: { agent: { status: 'SUSPENDED' } } });
-      expect(ms).toBeLessThan(BRAKE_WAIT_SECONDS * 1000);
+      expect(ms).toBeLessThan(BRAKE_WAIT_MS);
       expect(await keyCheck().check(acting.text, CORRELATION)).toEqual({ outcome: 'refused' });
       expect(alarms()).toEqual([]);
     },
