@@ -92,7 +92,7 @@ vi.mock('@agentx/core/schema-check', () => ({
     schemaCheck.fullServerLimits.push({ limitMs, now: now() });
     return { withinLimit: () => true, ended: () => undefined };
   },
-  createReleaseDriftWatch: () => ({ seenAgain: () => false, ended: () => undefined }),
+  createReleaseDriftWatch: () => ({ seenAgain: () => false }),
   whileServerFull: <T>(ask: () => Promise<T>) => ask(),
   OWNER_ROLE: 'agentx_owner',
   schemaSoundAtStart: () => {

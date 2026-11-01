@@ -7,12 +7,14 @@
 // is drift to the image before it until the new image is in. That image refuses
 // a start on it, as on any drift.
 //
-// **On the schedule that drift is a warning first, and the alarm on the second
-// run in a row.** It compares whether any such drift was seen, never which, so
-// rotating plants can't start it again, and every other problem is the alarm in
-// the same run. The cost: a planted CHECK or function gone within about 10
-// minutes rather than 5 goes unseen on the schedule, its warning line aside. A
-// process restarted meanwhile meets the start check, which waits for nothing.
+// **On the schedule, the first sighting of that drift in a process's life is a
+// warning, and every later one the alarm**, however many clean runs lie between:
+// a migration doesn't undo itself, and the old image is replaced at release, so
+// drift that goes and comes back is nothing a release does. It compares whether
+// any such drift was seen, never which, so rotating plants gain nothing, and every
+// other problem is the alarm in the same run. The cost: one planted CHECK or
+// function, seen by one run and gone by the next, stays one warning line a process.
+// A restart forgets the sighting, and meets the start check, which waits for nothing.
 //
 // **At start it refuses to start.** A database whose walls have been rewritten
 // must not be served from, the same way A2b-2 refuses to start on a broken
@@ -285,24 +287,17 @@ export async function checkSchemaOnSchedule<Schema>(
   }
   // A check that reached the catalogue, or failed for anything else, ends the full server's stretch.
   if (outcome.kind !== 'full') watch.ended();
-  if (outcome.kind === 'clean') {
-    releaseDrift.ended();
-  } else if (outcome.kind === 'drift') {
-    driftOnSchedule(options.logger, outcome, releaseDrift);
-  } else {
-    // No read of the catalogue, so no word on the drift either way: the watch stays as it was.
-    raiseUnreadableAlarm(options.logger, 'running', outcome.error);
-  }
+  if (outcome.kind === 'drift') driftOnSchedule(options.logger, outcome, releaseDrift);
+  else if (outcome.kind !== 'clean') raiseUnreadableAlarm(options.logger, 'running', outcome.error);
 }
 
-/** Release-shaped drift warned of on its first run in a row and raised from its second; all else raised at once. */
+/** Release-shaped drift warned of at its first sighting in this process and raised at each later one; all else raised at once. */
 function driftOnSchedule(
   logger: Logger,
   { atOnce, releaseShaped }: Extract<SchemaCheckOutcome, { kind: 'drift' }>,
   releaseDrift: ReleaseDriftWatch,
 ): void {
   const seen = releaseShaped.length > 0;
-  if (!seen) releaseDrift.ended();
   const again = seen && releaseDrift.seenAgain();
   if (seen && !again) logger.warn('db.schema_release_drift_seen', { problems: releaseShaped });
   const raised = again ? [...atOnce, ...releaseShaped] : atOnce;
@@ -331,14 +326,12 @@ export function createFullServerWatch(limitMs: number, now: () => number): FullS
 }
 
 /**
- * Whether release-shaped drift was seen on the run before. Kept in this process
- * alone, and fed by nothing the database holds.
+ * Whether this process has seen release-shaped drift before. Kept in memory alone,
+ * and fed by nothing the database holds. Nothing clears it: see the file's header.
  */
 export interface ReleaseDriftWatch {
-  /** A run saw some: whether the run before it did too. */
+  /** A run saw some: whether an earlier run did. */
   seenAgain(): boolean;
-  /** A run read the catalogue and saw none. */
-  ended(): void;
 }
 
 export function createReleaseDriftWatch(): ReleaseDriftWatch {
@@ -348,9 +341,6 @@ export function createReleaseDriftWatch(): ReleaseDriftWatch {
       const before = seen;
       seen = true;
       return before;
-    },
-    ended() {
-      seen = false;
     },
   };
 }

@@ -251,7 +251,7 @@ export const PLAIN_WORDS = {
   },
   'db.schema_release_drift_seen': {
     happened: 'The routine security check found a database rule this copy of Agent X was not built with.',
-    broke: 'Nothing yet: if the next check finds such a rule too, it becomes the integrity alarm.',
+    broke: 'Nothing yet: if any later check finds such a rule, it becomes the integrity alarm.',
     next: 'Nothing to do during a release. With no release running, treat it as possible tampering.',
   },
   'db.schema_unreadable': {

@@ -358,7 +358,7 @@ describe('drift a release can also make, on the schedule', () => {
     expect(lines()).toMatchObject([{ level: 'warn', event: WARNED, problems: [CHECK_GONE] }]);
   });
 
-  it('is the alarm on its second run in a row, and on each after it', async () => {
+  it('is the alarm on its second sighting, and a third sighting alarms again', async () => {
     const { run, lines, events } = runs();
     await run([CHECK_GONE]);
     await run([CHECK_GONE]);
@@ -373,15 +373,17 @@ describe('drift a release can also make, on the schedule', () => {
     expect(events()).toEqual([WARNED, ALARM, ALARM]);
   });
 
-  it('starts again after a clean run between', async () => {
+  it('a clean run between clears nothing: the second sighting is still the alarm', async () => {
     const { run, events } = runs();
     await run([CHECK_GONE]);
     await run([]);
+    await run([]);
+    expect(events()).toEqual([WARNED]);
     await run([CHECK_GONE]);
-    expect(events()).toEqual([WARNED, WARNED]);
+    expect(events()).toEqual([WARNED, ALARM]);
   });
 
-  it('is the alarm on the second run though the plant changed: rotating them never starts it again', async () => {
+  it('is the alarm on the second sighting though the plant changed: rotating them gains nothing', async () => {
     const { run, lines } = runs();
     await run([CHECK_GONE]);
     await run([FUNCTION_UNKNOWN]);
@@ -398,53 +400,66 @@ describe('drift a release can also make, on the schedule', () => {
     expect(lines()[1]?.problems).toEqual([OTHER]);
   });
 
-  it('both are in the alarm on the second run, in order', async () => {
+  it('both are in the alarm on the second sighting, in order', async () => {
     const { run, lines } = runs();
     await run([CHECK_GONE]);
     await run([CHECK_GONE], [OTHER]);
     expect(lines()[1]).toMatchObject({ event: ALARM, problems: [OTHER, CHECK_GONE] });
   });
 
-  it('other drift alone is a run without it: the next sighting is a first', async () => {
+  it('other drift alone clears nothing either: the next sighting is the alarm', async () => {
     const { run, events } = runs();
     await run([CHECK_GONE]);
     await run([], [OTHER]);
     await run([CHECK_GONE]);
-    expect(events()).toEqual([WARNED, ALARM, WARNED]);
+    expect(events()).toEqual([WARNED, ALARM, ALARM]);
   });
 
-  it('a stop leaves the watch alone: the run after it is still the second', async () => {
+  it('other drift alone is no sighting: the first one after it is still only warned of', async () => {
     const { run, events } = runs();
+    await run([], [OTHER]);
     await run([CHECK_GONE]);
+    expect(events()).toEqual([ALARM, WARNED]);
+  });
+
+  it('a clean run is no sighting', async () => {
+    const { run, events } = runs();
+    await run([]);
+    await run([CHECK_GONE]);
+    expect(events()).toEqual([WARNED]);
+  });
+
+  it('a stopped run is no sighting', async () => {
+    const { run, events } = runs();
     const stopping = new AbortController();
     stopping.abort();
-    await run([], [], { signal: stopping.signal });
-    expect(events()).toEqual([WARNED]);
+    await run([CHECK_GONE], [], { signal: stopping.signal });
+    expect(events()).toEqual([]);
     await run([CHECK_GONE]);
-    expect(events()).toEqual([WARNED, ALARM]);
+    expect(events()).toEqual([WARNED]);
   });
 
   it.each([
-    ['a read that failed', new Error('connection reset'), [WARNED, ALARM, 'db.schema_unreadable', ALARM]],
+    ['a read that failed', new Error('connection reset'), [ALARM, 'db.schema_unreadable', WARNED]],
     [
       'a full server',
       Object.assign(new Error('sorry, too many clients already'), { code: '53300' }),
-      [WARNED, 'db.schema_check_full_server', ALARM],
+      ['db.schema_check_full_server', WARNED],
     ],
-  ])('%s says nothing of the drift: the run after it is still the second', async (_what, error, expected) => {
+  ])('%s is no sighting', async (_what, error, expected) => {
     const { run, refused, events } = runs();
-    await run([CHECK_GONE]);
     await refused(error);
     await run([CHECK_GONE]);
     expect(events()).toEqual(expected);
   });
 
-  it('holds each process’s watch apart', async () => {
+  it('two processes share nothing: one past its first sighting leaves the other on its own', async () => {
     const one = runs();
     const other = runs();
     await one.run([CHECK_GONE]);
+    await one.run([CHECK_GONE]);
     await other.run([CHECK_GONE]);
-    expect(one.events()).toEqual([WARNED]);
+    expect(one.events()).toEqual([WARNED, ALARM]);
     expect(other.events()).toEqual([WARNED]);
   });
 
