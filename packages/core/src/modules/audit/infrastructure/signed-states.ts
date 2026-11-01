@@ -115,9 +115,22 @@ import {
  *   reservation or order claim, Phase 2 E1) isn't what its signed state
  *   says it must be (`mismatch`), or the log lacks an event its signed
  *   state stands on (a pending request's decision: a chain wound back, H7)
+ * - `moved_back`: a sealed field that never changes held something else as a
+ *   statement began, and the row reads sound again now, so nothing is left in
+ *   the row or the log to find: whoever clears the hold will see it verify
  */
 export type TamperSign =
-  'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status' | 'chain' | 'holding';
+  | 'row'
+  | 'deleted'
+  | 'unsigned'
+  | 'log'
+  | 'pointer'
+  | 'version'
+  | 'seal'
+  | 'status'
+  | 'chain'
+  | 'holding'
+  | 'moved_back';
 
 /** A tamper sign, as the alarm names it: the organisation and the object's type and ID (IDs in lower case), and the sign. */
 export interface TamperFinding {
@@ -646,6 +659,13 @@ export interface SignedStates {
    * transaction ends (withSignedStates).
    */
   mismatch(subjectType: string, key: SignedRowKey): void;
+  /**
+   * Raises the integrity alarm for a row that now verifies but whose sealed
+   * field, one that never changes, read otherwise as the caller's statement
+   * began (`moved_back`, 4D2e C4): its only evidence, so no later read will.
+   * The organisation is put on hold as for any tamper sign.
+   */
+  movedBack(subjectType: string, key: SignedRowKey): void;
 }
 
 /**
@@ -1481,6 +1501,10 @@ export function createSignedStates({
 
     mismatch(subjectType: string, key: SignedRowKey): void {
       alarm(subjectType, key, 'holding');
+    },
+
+    movedBack(subjectType: string, key: SignedRowKey): void {
+      alarm(subjectType, key, 'moved_back');
     },
 
     async verifyAll(

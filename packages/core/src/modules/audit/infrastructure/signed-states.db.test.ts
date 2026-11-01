@@ -1929,6 +1929,90 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
     }
   });
 
+  describe("an ID looked up in another row's field (4D2e C4)", () => {
+    const viaLink = (link: string) =>
+      ({ table: AGENTS, id: { lookedUp: { table: LINKS, id: link, column: 'agent_id' } }, lock: 'share' }) as const;
+
+    it('finds the row, whatever the case of the ID asked, and answers it verified from the one read', async () => {
+      const agent = await newAgent();
+      const link = await newLink(agent);
+      await newAgent();
+      const { reads, using } = counted();
+
+      const outcome = await withTenant(app, org, async (tx) => {
+        const ids = await using.gather(tx, org, [
+          viaLink(link.toUpperCase()),
+          { table: LINKS, id: { id: link }, lock: 'share' },
+        ]);
+        return { ids, agent: await using.verifiedState(tx, AGENTS, key(agent), 'share') };
+      });
+
+      expect(outcome).toMatchObject({ ids: [agent, link], agent: { outcome: 'verified' } });
+      expect(reads).toEqual({ one: 0, apart: 0 });
+    });
+
+    it('finds nothing through a row that is not there, or is another organisation’s', async () => {
+      const agent = await newAgent();
+      const link = await newLink(agent);
+      const elsewhere = newId();
+      const { using } = counted();
+
+      expect(await withTenant(app, org, (tx) => using.gather(tx, org, [viaLink(newId())]))).toEqual([null]);
+      // Row security walls the other organisation's transaction off, and the filter names the organisation as well.
+      expect(await withTenant(app, elsewhere, (tx) => using.gather(tx, elsewhere, [viaLink(link)]))).toEqual([null]);
+      expect(alarms()).toEqual([]);
+    });
+
+    it('finds one row through a row copied past its key, never failing the statement, and that row alarms', async () => {
+      const agent = await newAgent();
+      const link = await newLink(agent);
+      await database.as('owner').query('alter table probe.links drop constraint links_pkey');
+      try {
+        await tamper(
+          'insert into probe.links (org_id, id, agent_id, kind, state_version, state_event_id) select org_id, id, agent_id, kind, state_version, state_event_id from probe.links where org_id = $1 and id = $2',
+          link,
+        );
+        const { using } = counted();
+
+        const outcome = await withTenant(app, org, async (tx) => {
+          const found = await using.gather(tx, org, [viaLink(link), { table: LINKS, id: { id: link }, lock: 'share' }]);
+          return { found, link: await using.verifiedState(tx, LINKS, key(link), 'share') };
+        });
+
+        expect(outcome).toEqual({ found: [agent, link], link: { outcome: 'tampered', sign: 'row' } });
+      } finally {
+        await tamper(
+          'delete from probe.links as a using probe.links as b where a.org_id = $1 and a.id = $2 and b.org_id = a.org_id and b.id = a.id and a.ctid > b.ctid',
+          link,
+        );
+        await database.as('owner').query('alter table probe.links add primary key (org_id, id)');
+      }
+    });
+
+    it('finds nothing through a field tampered to hold no uuid, never failing the statement', async () => {
+      const agent = await newAgent();
+      const link = await newLink(agent);
+      await database.as('owner').query('alter table probe.links alter column agent_id type text');
+      try {
+        await tamper("update probe.links set agent_id = 'not-a-uuid' where org_id = $1 and id = $2", link);
+        const { using } = counted();
+
+        const outcome = await withTenant(app, org, async (tx) => {
+          const found = await using.gather(tx, org, [viaLink(link), { table: LINKS, id: { id: link }, lock: 'share' }]);
+          return { found, link: await using.verifiedState(tx, LINKS, key(link), 'share') };
+        });
+
+        expect(outcome).toEqual({ found: [null, link], link: { outcome: 'tampered', sign: 'row' } });
+      } finally {
+        await database
+          .as('owner')
+          .query(
+            "alter table probe.links alter column agent_id type uuid using (case when agent_id like '%-%-%-%-%' then agent_id::uuid end)",
+          );
+      }
+    });
+  });
+
   it('leaves a row with a backlog of events to its own read, as the one-statement read does', async () => {
     const agent = await newAgent();
     await withTenant(app, org, async (tx) => {
