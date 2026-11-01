@@ -249,6 +249,11 @@ export const PLAIN_WORDS = {
     broke: 'That request was told busy, send again; that cannot do it twice. Other organisations carried on.',
     next: "Nothing to do if rare. If often, look at what that organisation's agents send or hold.",
   },
+  'db.transaction_left_open': {
+    happened: 'A piece of Agent X left a database transaction open for over a minute, so the database ended it.',
+    broke: 'That one piece of work was undone and its locks were freed. Other work carries on.',
+    next: 'Tell the developer: this is a bug in Agent X, not a fault in the database.',
+  },
   'db.schema_check_full_server': {
     happened: "The database's routine security check could not run: every connection was in use.",
     broke: 'Nothing yet: it is tried again. If it lasts too long, it becomes the integrity alarm.',

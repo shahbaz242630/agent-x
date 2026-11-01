@@ -39,6 +39,21 @@ export interface DatabaseConnectionOptions {
   readonly readOnly?: boolean;
 }
 
+/** How long a pool's transaction may sit between two statements: no transaction of ours waits on anything but the database this long. */
+export const IDLE_IN_TRANSACTION_SECONDS = 60;
+
+/**
+ * Past it Postgres ends the connection, so the transaction rolls back and its
+ * locks go (PL-63 item 6): one left open by a bug or a hung process stops dead
+ * rows being cleared for every organisation (147 s took them from about 2,000
+ * to about 39,000 on the laptop). In the startup packet, as the search path is,
+ * and on the pool alone: a migration or the set-up job has its own client.
+ */
+const IDLE_LIMIT = `-c idle_in_transaction_session_timeout=${String(IDLE_IN_TRANSACTION_SECONDS)}s`;
+
+/** Postgres's code when it ends a connection for that limit. */
+const IDLE_IN_TRANSACTION_ENDED = '25P03';
+
 /** The startup-packet option that makes every transaction read-only. */
 const READ_ONLY = '-c default_transaction_read_only=on';
 
@@ -141,7 +156,7 @@ export type DatabaseTransaction<Schema = unknown> = Transaction<Schema>;
 export function createDatabase<Schema = unknown>(options: DatabaseConnectionOptions, logger: Logger): Database<Schema> {
   const config = poolConfig(options);
   // Only what sendTogether sends goes out unanswered: Kysely makes everything else wait for the answer before it.
-  const pool = new pg.Pool({ ...config, pipeline: true });
+  const pool = new pg.Pool({ ...config, pipeline: true, options: `${String(config.options)} ${IDLE_LIMIT}` });
   // A connection that drops (a restart, a failover, a timeout) reports it as
   // an 'error' event on the connection, idle or in use; with no listener, Node
   // would stop the process. So each connection gets one listener for its whole
@@ -149,7 +164,10 @@ export function createDatabase<Schema = unknown>(options: DatabaseConnectionOpti
   // the connection.
   pool.on('connect', (client) => {
     client.on('error', (error) => {
-      logger.warn('db.connection_lost', { err: error });
+      // Our own code left a transaction open: no fault of the database's, so an error of its own (S168 review).
+      if ((error as { code?: unknown }).code === IDLE_IN_TRANSACTION_ENDED)
+        logger.error('db.transaction_left_open', {});
+      else logger.warn('db.connection_lost', { err: error });
     });
   });
   // pg-pool also passes an idle connection's error on to the pool, which must

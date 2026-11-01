@@ -93,6 +93,7 @@ export {
   assertTenant,
   holdTransactionLock,
   limitedTransaction,
+  holdOpenOnPurpose,
   limitStatements,
   lockName,
   readAloneOnOneTrip,

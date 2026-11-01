@@ -163,6 +163,10 @@ const ADMIN_PASSWORD = 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD';
 const ALERT_EMAIL = 'AGENTX_AZURE_ALERT_EMAIL';
 /** staging.bicepparam's databaseSize: always set by the foundation, so a value left in the shell is never what's sent. */
 const DATABASE_SIZE = 'AGENTX_AZURE_DATABASE_SIZE';
+/** staging.bicepparam's databaseDiskGb: as the server has it, since autogrow changes it and Azure refuses a smaller one. */
+const DATABASE_DISK = 'AGENTX_AZURE_DATABASE_DISK_GB';
+/** A new server's disk (postgres.bicep's least). */
+const LEAST_DISK_GB = 32;
 /**
  * staging.apps.bicepparam's load run and the load image's digest (D2c): always
  * set by apps, the run only with --load-run, so a plain apps puts the API back.
@@ -932,7 +936,12 @@ async function deployFoundation(steps: Steps, loadSize: boolean): Promise<number
     "The database admin's password is set on the server by this run. It must be the one in the password manager: a different one replaces it.",
   );
   const admin = await askPassword(steps.terminal, PERSON_LABELS['db-admin-password'] ?? 'the password');
-  const values = { [ALERT_EMAIL]: email, [ADMIN_PASSWORD]: admin, [DATABASE_SIZE]: loadSize ? 'load' : 'normal' };
+  const values = {
+    [ALERT_EMAIL]: email,
+    [ADMIN_PASSWORD]: admin,
+    [DATABASE_SIZE]: loadSize ? 'load' : 'normal',
+    [DATABASE_DISK]: String(diskNow(steps, subscription)),
+  };
   steps.terminal.say(
     loadSize
       ? "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes, and the run's measurements (Query Store) switch on. Run foundation again without --load-size the same day to size it back and switch them off."
@@ -953,6 +962,29 @@ async function deployFoundation(steps: Steps, loadSize: boolean): Promise<number
     'The foundation is deployed, but no alert email can reach you yet. Once the address is confirmed, run node deploy/azure/deploy.ts alerts to check.',
   );
   return 1;
+}
+
+/**
+ * The disk as the server has it: autogrow changes it and the deployment can't know (S168 review), so sending the
+ * first size would ask Azure to shrink it, which it refuses, and no foundation could run. A first deploy has no
+ * server to read; a read that fails sends the least, and a grown disk is then refused by the deployment, not harmed.
+ */
+function diskNow(steps: Steps, subscription: string): number {
+  try {
+    const servers = azJson(steps.az, [
+      'postgres',
+      'flexible-server',
+      'list',
+      '--subscription',
+      subscription,
+      '--resource-group',
+      RESOURCE_GROUP,
+    ]) as readonly { storage?: { storageSizeGb?: unknown } }[];
+    const size = servers[0]?.storage?.storageSizeGb;
+    return typeof size === 'number' && Number.isSafeInteger(size) && size > LEAST_DISK_GB ? size : LEAST_DISK_GB;
+  } catch {
+    return LEAST_DISK_GB;
+  }
 }
 
 /**

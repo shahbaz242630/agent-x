@@ -31,6 +31,7 @@ export type RuleId =
   | 'database-tls'
   | 'database-backup'
   | 'database-size'
+  | 'database-disk'
   | 'database-zone'
   | 'database-measures'
   | 'load-run'
@@ -93,6 +94,7 @@ export interface Expectations {
 const TYPES = {
   actionGroup: 'Microsoft.Insights/actionGroups',
   alert: 'Microsoft.Insights/scheduledQueryRules',
+  metricAlert: 'Microsoft.Insights/metricAlerts',
   budget: 'Microsoft.Consumption/budgets',
   communication: 'Microsoft.Communication/communicationServices',
   emailService: 'Microsoft.Communication/emailServices',
@@ -129,12 +131,13 @@ const TYPES = {
 } as const;
 
 /**
- * Types Azure offers only as global resources. The first three hold no
+ * Types Azure offers only as global resources. The first four hold no
  * customer data or logs; email's three keep what they hold at rest in the data
  * location they are given, which rule `email` holds to the UAE.
  */
 const GLOBAL_TYPES: ReadonlySet<string> = new Set([
   TYPES.actionGroup,
+  TYPES.metricAlert,
   TYPES.dnsZone,
   TYPES.dnsLink,
   TYPES.communication,
@@ -1256,6 +1259,29 @@ const databaseSize: Check = (snapshot, expected, add) => {
         rule: 'database-size',
         resource: server.name,
         message: `runs ${STAGING_DATABASE_SIZES.join(' or ')} on staging (ADR-002; the load run, D2c)`,
+      });
+    }
+  }
+};
+
+/** Every server grows its disk and an alert says so first (4D2e A): a full disk stops every write. */
+const databaseDisk: Check = (snapshot, _expected, add) => {
+  for (const server of ofType(snapshot, TYPES.server)) {
+    if (at(server.properties, 'storage', 'autoGrow') !== 'Enabled') {
+      add({ rule: 'database-disk', resource: server.name, message: 'grows its disk: a full disk stops every write' });
+    }
+    const watched = ofType(snapshot, TYPES.metricAlert).some(
+      (alert) =>
+        at(alert.properties, 'enabled') === true &&
+        list(at(alert.properties, 'scopes')).includes(server.id) &&
+        list(at(alert.properties, 'criteria', 'allOf')).some((one) => at(one, 'metricName') === 'storage_percent') &&
+        list(at(alert.properties, 'actions')).some((one) => deliversAlerts(snapshot, at(one, 'actionGroupId'))),
+    );
+    if (!watched) {
+      add({
+        rule: 'database-disk',
+        resource: server.name,
+        message: 'has an alert on how full its disk is, switched on, that reaches someone',
       });
     }
   }
@@ -2513,16 +2539,16 @@ const appsLogs: Check = (snapshot, _expected, add) => {
  */
 const appErrorsAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
-    const alerted = workspaceAlerted(snapshot, 'any', (criterion) => {
-      const threshold = at(criterion, 'threshold');
-      return (
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion) =>
         saysCountColumn(criterion) !== undefined &&
         kqlStages(String(at(criterion, 'query')))[1] === ERROR_LINES &&
         at(criterion, 'operator') === 'GreaterThan' &&
-        typeof threshold === 'number' &&
-        threshold >= 0
-      );
-    });
+        // One error is enough, in every environment: a record past its event cap logs one and refuses the action (PL-41).
+        at(criterion, 'threshold') === 0,
+    );
     if (!alerted) {
       add({
         rule: 'app-errors-alert',
@@ -3833,6 +3859,7 @@ const CHECKS: readonly Check[] = [
   noSecretLiterals,
   database,
   databaseSize,
+  databaseDisk,
   databaseZoneAndMeasures,
   databaseNetwork,
   appsNetwork,

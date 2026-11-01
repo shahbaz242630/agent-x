@@ -22,6 +22,9 @@ param sku object
 param zone string
 @description('Whether the load run\'s measurements are on (D2c, 4D2d P5): Query Store and its wait sampling. Only on a size that isn\'t Burstable.')
 param measured bool
+@description('The disk\'s size as the server has it: 32 on a new one, more once autogrow has acted.')
+@minValue(32)
+param diskGb int
 param backupRetentionDays int
 param geoRedundantBackup bool
 param subnetId string
@@ -60,8 +63,11 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
       privateDnsZoneArmResourceId: privateDnsZoneId
     }
     storage: {
-      storageSizeGB: 32
-      autoGrow: 'Disabled'
+      // What the server has now, which deploy.ts reads: autogrow changes it, and Azure refuses a smaller size.
+      storageSizeGB: diskGb
+      // A full disk stops every write (4D2e A). Azure grows it with 20% free at this size (Microsoft), and it can
+      // never shrink, so the alert below says when it is getting there.
+      autoGrow: 'Enabled'
     }
     backup: {
       backupRetentionDays: backupRetentionDays
@@ -309,6 +315,42 @@ resource ownerLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     }
   }
   dependsOn: [serverLogs]
+}
+
+// Before autogrow's 80%: a growing disk costs more each month and can't shrink, so a person should know (4D2e A).
+// A metric, not a log query: it still fires when the logs have stopped at their daily cap.
+resource diskFilling 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-${name}-disk'
+  location: 'global'
+  tags: tags
+  properties: {
+    description: 'SEV-2. The database server\'s disk is over 75% full; autogrow takes it to the next size at 80%, and a disk can never shrink. Runbook: Incident-Response-Playbook.md section P.'
+    severity: 2
+    enabled: true
+    scopes: [server.id]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'disk-used'
+          criterionType: 'StaticThresholdCriterion'
+          metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+          metricName: 'storage_percent'
+          timeAggregation: 'Maximum'
+          operator: 'GreaterThan'
+          threshold: 75
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: [
+      {
+        actionGroupId: actionGroupId
+      }
+    ]
+  }
 }
 
 output host string = server.properties.fullyQualifiedDomainName

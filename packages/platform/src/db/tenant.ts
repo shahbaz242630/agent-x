@@ -226,6 +226,16 @@ export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<
 }
 
 /**
+ * Raises the idle limit (database.ts) for this transaction alone, to past a load
+ * phase, for the load test's stuck organisation, which holds its rows open for a
+ * whole phase on purpose, and for nothing in the product. Still a limit: a hung
+ * run must not hold back dead rows' clean-up for ever.
+ */
+export async function holdOpenOnPurpose<Schema>(tx: Transaction<Schema>): Promise<void> {
+  await sql`select pg_catalog.set_config('idle_in_transaction_session_timeout', '15min', true)`.execute(tx);
+}
+
+/**
  * An expression that bounds how long the rest of the transaction waits for a
  * lock to 5 seconds, unless a shorter limit is set already, which is kept
  * (Postgres's `0` is no limit at all): set for the transaction alone, as SET

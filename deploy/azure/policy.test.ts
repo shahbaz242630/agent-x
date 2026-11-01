@@ -514,6 +514,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
       ),
       expect.stringMatching(/^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-owner-login$/),
+      expect.stringMatching(/^Microsoft\.Insights\/metricAlerts alert-psql-agentx-stg-[a-z0-9]{6}-disk$/),
       'Microsoft.App/managedEnvironments cae-agentx-staging',
       'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
       ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'].map(
@@ -1125,6 +1126,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(sized('Standard_D4ads_v5', 'GeneralPurpose'), { region: 'uaenorth', environment: 'production' }),
     ).not.toContain('database-size');
+  });
+
+  it("database-disk: a disk that can't grow, or no alert that is on, on this server, on its fullness, reaching someone", () => {
+    const DISK_ALERT = type('Microsoft.Insights/metricAlerts');
+    const broken = [
+      changed(SERVER, (server) => (inside(server, 'properties', 'storage').autoGrow = 'Disabled')),
+      changed(DISK_ALERT, (alert) => (inside(alert, 'properties').enabled = false)),
+      changed(DISK_ALERT, (alert) => (inside(alert, 'properties').scopes = ['another server'])),
+      changed(DISK_ALERT, (alert) => (inside(alert, 'properties').actions = [])),
+      changed(DISK_ALERT, (alert) => (inside(alert, 'properties').actions = [{ actionGroupId: 'nobody' }])),
+      changed(DISK_ALERT, (alert) => (inside(alert, 'properties', 'criteria').allOf = [{ metricName: 'cpu_percent' }])),
+    ];
+    for (const snapshotted of broken) expect(brokenRules(snapshotted)).toEqual(['database-disk']);
   });
 
   it('database-zone: a server whose zone is left to Azure, or not one of the three', () => {
@@ -1902,6 +1916,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual(['alert-delivery']);
     expect(brokenRules(changed(ACTION_GROUP, (group) => (properties(group).enabled = false)))).toEqual([
+      'database-disk',
       'alert-delivery',
     ]);
     expect(
@@ -1911,7 +1926,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           properties(group).azureAppPushReceivers = [];
         }),
       ),
-    ).toEqual(['alert-delivery']);
+    ).toEqual(['database-disk', 'alert-delivery']);
     // A SEV-1 alert muted after it fires tells nobody of the next window; a
     // SEV-2 one may be.
     for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT]) {
@@ -2444,6 +2459,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
   });
 
   it("app-errors-alert: no alert on the apps' error events, or one that can't fire", () => {
+    // PL-41: a higher bar would let one refused record's error through unseen.
+    expect(brokenRules(changed(ERRORS_ALERT, (alert) => (criterion(alert).threshold = 1)))).toEqual([
+      'app-errors-alert',
+    ]);
     const query = (from: string, to: string) => (alert: Mutable) =>
       (criterion(alert).query = String(criterion(alert).query).replace(from, to));
     expect(brokenRules(without(ERRORS_ALERT))).toEqual(['app-errors-alert']);
@@ -2472,8 +2491,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'alert-delivery',
       'app-errors-alert',
     ]);
-    // A higher threshold is a choice, not a break.
-    expect(brokenRules(changed(ERRORS_ALERT, (alert) => (criterion(alert).threshold = 5)))).toEqual([]);
   });
 
   it("daily-words-alert: no daily alert on the warnings and errors, or one that can't notify each day", () => {
