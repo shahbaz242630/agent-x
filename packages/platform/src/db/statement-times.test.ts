@@ -7,6 +7,7 @@ import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import {
   noStatementTimes,
   statementTimesForLog,
+  timedLock,
   timedPoolWait,
   timedRoundTrips,
   timedTrip,
@@ -28,6 +29,18 @@ describe('timing statements', () => {
     expect(times.slowestTripMs).toBeGreaterThan(1);
     expect(times.databaseMs).toBeGreaterThanOrEqual(times.slowestTripMs);
     expect(times.commitMs).toBeLessThan(times.slowestTripMs);
+  });
+
+  it('adds a lock-asking statement under its lock, a failed one too, and nothing when no work is timed', async () => {
+    const times = noStatementTimes();
+    await timingStatements(times, async () => {
+      await timedLock('decisionRowsMs', () => new Promise((resolve) => setTimeout(resolve, 5)));
+      await expect(timedLock('headLockMs', () => Promise.reject(new Error('refused')))).rejects.toThrow('refused');
+    });
+    expect(times.decisionRowsMs).toBeGreaterThan(1);
+    expect(times.headLockMs).toBeLessThan(times.decisionRowsMs);
+    expect(statementTimesForLog({ ...times, headLockMs: 1.26 }).headLockMs).toBe(1.3);
+    await expect(timedLock('headLockMs', () => Promise.resolve('untimed'))).resolves.toBe('untimed');
   });
 
   it('counts a failed trip and lets its failure through', async () => {
@@ -68,8 +81,24 @@ describe('timing statements', () => {
 
   it('rounds to a tenth of a millisecond for the log', () => {
     expect(
-      statementTimesForLog({ poolWaitMs: 0.04, trips: 3, databaseMs: 12.345, slowestTripMs: 9.96, commitMs: 2.25 }),
-    ).toEqual({ poolWaitMs: 0, trips: 3, databaseMs: 12.3, slowestTripMs: 10, commitMs: 2.3 });
+      statementTimesForLog({
+        poolWaitMs: 0.04,
+        trips: 3,
+        databaseMs: 12.345,
+        slowestTripMs: 9.96,
+        commitMs: 2.25,
+        decisionRowsMs: 4.44,
+        headLockMs: 1.26,
+      }),
+    ).toEqual({
+      poolWaitMs: 0,
+      trips: 3,
+      databaseMs: 12.3,
+      slowestTripMs: 10,
+      commitMs: 2.3,
+      decisionRowsMs: 4.4,
+      headLockMs: 1.3,
+    });
   });
 });
 
