@@ -408,6 +408,15 @@ describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${serve
     expect(await checkedInTransaction(text)).toMatchObject({ checked: { outcome }, trips: 3 });
   });
 
+  it('takes four trips for the whole check: the listing’s one and its transaction’s three', async () => {
+    const agent = await newAgent();
+    const { text } = await issue(agent);
+    const times = noStatementTimes();
+
+    expect(await timingStatements(times, () => check(text))).toMatchObject({ outcome: 'accepted' });
+    expect(times.trips).toBe(4);
+  });
+
   it('takes three trips for a listed key with no row', async () => {
     const id = ids.next();
     await tamperAsOwner(database, AGENT_KEYS, org).then(async (owner) => {
