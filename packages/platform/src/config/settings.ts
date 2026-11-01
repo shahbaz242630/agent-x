@@ -329,6 +329,16 @@ const SETTINGS = {
   AGENTX_DB_PASSWORD: { schema: text },
   AGENTX_DB_PASSWORD_FILE: { schema: text },
   AGENTX_DB_POOL_MAX: { schema: wholeNumber({ min: 1, max: 100, unit: 'connections' }), default: '10' },
+  // The fair gate before an agent's decision (4D2e C, PL-63), each a limit per API process. Wide until a load run
+  // sets the numbers: unset, as many decisions as connections, one organisation's as many as its share of them.
+  AGENTX_DECISION_GATE_ACTIVE: { schema: wholeNumber({ min: 1, max: 100, unit: 'decisions' }).optional() },
+  AGENTX_DECISION_GATE_PER_ORGANISATION: { schema: wholeNumber({ min: 1, max: 100, unit: 'decisions' }).optional() },
+  AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: {
+    schema: wholeNumber({ min: 1, max: 10_000, unit: 'decisions' }),
+    default: '100',
+  },
+  // The pool's own wait for a connection, as the organisation's share and an agent's turn wait.
+  AGENTX_DECISION_GATE_WAIT_MS: { schema: wholeNumber({ min: 100, max: 30_000, unit: 'ms' }), default: '10000' },
   // The migration job's own role (agentx_owner). The running app never holds it.
   AGENTX_DB_MIGRATION_USER: { schema: identifier, default: 'agentx_owner' },
   AGENTX_DB_MIGRATION_PASSWORD: { schema: text },
@@ -413,6 +423,10 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_DB_PASSWORD',
       'AGENTX_DB_PASSWORD_FILE',
       'AGENTX_DB_POOL_MAX',
+      'AGENTX_DECISION_GATE_ACTIVE',
+      'AGENTX_DECISION_GATE_PER_ORGANISATION',
+      'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION',
+      'AGENTX_DECISION_GATE_WAIT_MS',
     ],
     reason: "the running app holds no login but its own role's (ADR-005 §3)",
   },

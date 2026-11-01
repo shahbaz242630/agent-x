@@ -804,6 +804,16 @@ export const PLAIN_WORDS = {
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
+  'spend_request.organisation_busy': {
+    happened: "An organisation's agents had as many payment requests running as they may, and one waited too long.",
+    broke: 'That one was turned away as busy and nothing was saved. Other organisations carried on.',
+    next: "Nothing to do if rare. If often, look at what that organisation's agents send or hold.",
+  },
+  'spend_request.platform_full': {
+    happened: 'Agent X was running as many payment requests as it can at once, and one waited too long.',
+    broke: 'That one was turned away as busy and nothing was saved. Calm organisations can be slowed meanwhile.',
+    next: 'Look at how busy the database is and who sends most. If it keeps coming, it needs more room.',
+  },
   'spend_request.supplier_busy': {
     happened: 'Many payment requests to one supplier came at once, and one waited too long for its turn.',
     broke: 'That one was turned away as busy and nothing was saved; the agent was told to send it again.',

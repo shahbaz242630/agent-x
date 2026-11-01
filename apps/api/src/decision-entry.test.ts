@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createAgentTurns } from './agent-turns.ts';
+import { createDecisionGate, DecisionGateRefused, type GateLimits } from './decision-gate.ts';
 import {
   createDecisionEntry,
   type DecisionAsked,
@@ -78,7 +79,8 @@ describe('a decision’s way to a connection (4D2e C, PL-62)', () => {
     void entry.run(asked('agent-2', SUPPLIER, OTHER_ORG), held(started, 'theirs').work);
     await settled();
     expect(started).toEqual(['ours', 'theirs']);
-    expect(entry.linesInHand()).toBe(4);
+    // Two agents' turns, two suppliers' lines, two organisations at the gate.
+    expect(entry.linesInHand()).toBe(6);
   });
 
   it('counts a supplier or organisation written in capitals as the same line', async () => {
@@ -180,6 +182,73 @@ describe('a decision’s way to a connection (4D2e C, PL-62)', () => {
     await vi.advanceTimersByTimeAsync(40);
     inTheWay.finish();
     expect(await answer).toBe('done');
-    expect(waits).toEqual({ turnWaitMs: 100, supplierTurnWaitMs: 40 });
+    expect(waits).toEqual({ turnWaitMs: 100, supplierTurnWaitMs: 40, gateWaitMs: 0 });
+  });
+
+  describe('with the fair gate', () => {
+    const LIMITS: GateLimits = { active: 2, perOrganisation: 2, waitingPerOrganisation: 8, waitMs: 1_000 };
+
+    it('takes its slot last: one waiting on a supplier’s turn holds none, so another decision has it', async () => {
+      const entry = createDecisionEntry({ perSupplier: 1, gate: createDecisionGate(LIMITS) });
+      const started: string[] = [];
+      void entry.run(asked('agent-1'), held(started, 'a').work);
+      void entry.run(asked('agent-2'), held(started, 'waits its turn').work);
+      void entry.run(asked('agent-3', OTHER_SUPPLIER), held(started, 'b').work);
+      await settled();
+      expect(started).toEqual(['a', 'b']);
+    });
+
+    it('holds its slot and its turns the whole way through, giving all back at the end, failure too', async () => {
+      const gate = createDecisionGate({ ...LIMITS, active: 1 });
+      const entry = createDecisionEntry({ perSupplier: 1, gate });
+      const started: string[] = [];
+      const failing = held(started, 'a');
+      const failed = entry.run(asked('agent-1'), failing.work);
+      const next = held(started, 'b');
+      const answer = entry.run(asked('agent-2', OTHER_SUPPLIER), next.work);
+      await settled();
+      expect(started).toEqual(['a']);
+      failing.fail();
+      await expect(failed).rejects.toThrow('a failed');
+      await settled();
+      expect(started).toEqual(['a', 'b']);
+      next.finish();
+      expect(await answer).toBe('b');
+      expect(entry.linesInHand()).toBe(0);
+    });
+
+    it('gives back the supplier’s turn when the gate turns it away, running nothing, and holds no slot', async () => {
+      vi.useFakeTimers();
+      const entry = createDecisionEntry({ perSupplier: 1, gate: createDecisionGate({ ...LIMITS, active: 1 }) });
+      const started: string[] = [];
+      const first = held(started, 'a');
+      void entry.run(asked('agent-1'), first.work);
+      const late = entry.run(asked('agent-2', OTHER_SUPPLIER), held(started, 'b').work);
+      const rejected = expect(late).rejects.toEqual(new DecisionGateRefused('platform', 1_000));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await rejected;
+      expect(started).toEqual(['a']);
+      first.finish();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(entry.linesInHand()).toBe(0);
+    });
+
+    it('says how long the gate took, and lines an organisation up whichever way its ID is written', async () => {
+      vi.useFakeTimers();
+      const entry = createDecisionEntry({ gate: createDecisionGate({ ...LIMITS, perOrganisation: 1 }) });
+      const started: string[] = [];
+      const first = held(started, 'a');
+      const answer = entry.run(asked('agent-1', SUPPLIER, ORG), first.work);
+      let waits: unknown;
+      const later = entry.run(asked('agent-2', OTHER_SUPPLIER, ORG.toUpperCase()), (waited) => {
+        waits = waited;
+        return Promise.resolve('done');
+      });
+      await vi.advanceTimersByTimeAsync(70);
+      first.finish();
+      await answer;
+      expect(await later).toBe('done');
+      expect(waits).toEqual({ turnWaitMs: 0, supplierTurnWaitMs: 0, gateWaitMs: 70 });
+    });
   });
 });

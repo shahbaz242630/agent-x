@@ -41,7 +41,13 @@ import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
+import {
+  createDatabase,
+  type Database,
+  type DatabaseTransaction,
+  TRANSACTION_RETRIED,
+  withTenant,
+} from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -57,6 +63,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { createAgentTurns, TURNS_AN_AGENT, TurnWaitExceeded } from './agent-turns.ts';
 import { createDecisionEntry, type DecisionEntry, TURNS_A_SUPPLIER } from './decision-entry.ts';
+import { createOrganizationChanges, FREEZE_OPERATION } from './organization-changes.ts';
+import { createDecisionGate, type DecisionGate, NO_GATE_LIMITS } from './decision-gate.ts';
 import { createMandateMoves } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
@@ -1098,17 +1106,137 @@ describe('the lock order (ADR-006 §6, forced)', () => {
   it('logs how long a decided request waited in each line, and still no supplier, order or amount on its line', async () => {
     const { w, acting } = await ready();
     decisionsThrough({
-      run: (_asked, work) => work({ turnWaitMs: 12.4, supplierTurnWaitMs: 34.4 }),
+      run: (_asked, work) => work({ turnWaitMs: 12.4, supplierTurnWaitMs: 34.4, gateWaitMs: 56.4 }),
       linesInHand: () => 0,
     });
     const asked = asking(w);
     decidedOf(await ask(acting, asked));
     const [line] = capture.lines().filter(({ event }) => event === 'spend_request.decided');
-    expect(line).toMatchObject({ turnWaitMs: 12, supplierTurnWaitMs: 34 });
+    expect(line).toMatchObject({ turnWaitMs: 12, supplierTurnWaitMs: 34, gateWaitMs: 56 });
     const said = JSON.stringify(line);
     expect(said).not.toContain(asked.supplierId);
     expect(said).not.toContain(asked.orderReference);
     expect(said).not.toContain(String(asked.amount.minor));
+  });
+
+  describe('at the fair gate (4D2e C, PL-63)', () => {
+    /** The gate these decisions pass, one running at once, and a world with its first decision stuck in that slot. */
+    async function gateFilledBy(waitMs = 100) {
+      const gate = createDecisionGate({ active: 1, perOrganisation: 1, waitingPerOrganisation: 8, waitMs });
+      decisionsThrough(createDecisionEntry({ gate }));
+      const { w, acting } = await ready();
+      const letGo = await supplierHeld(w, w.suppliers[0] ?? '');
+      const holding = within(20_000, ask(acting, asking(w, { amount: AED(10_000n) })), 'the one in the slot');
+      await waitUntilQueued(database.as('admin'), 1);
+      return { w, acting, letGo, holding };
+    }
+
+    it('turns a calm organisation away as the platform’s, and the one at its limit as its own; each its own line, nothing made; the slot’s holder commits, never told busy', async () => {
+      const calm = await ready();
+      const { w, acting, letGo, holding } = await gateFilledBy();
+
+      const busy = await ask(calm.acting, asking(calm.w), 'platform-full');
+      expect(busy).toEqual({ outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' });
+      const own = await ask(
+        acting,
+        asking(w, { supplierId: w.suppliers[1] ?? '', orderReference: 'INV-OWN' }),
+        'own-limit',
+      );
+      expect(own).toEqual({ outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' });
+
+      expect(capture.lines().filter((line) => line.event === 'spend_request.platform_full')).toEqual([
+        expect.objectContaining({ level: 'warn', orgId: calm.w.org, agentId: calm.acting.agentId, waitedMs: 100 }),
+      ]);
+      expect(capture.lines().filter((line) => line.event === 'spend_request.organisation_busy')).toEqual([
+        expect.objectContaining({ level: 'warn', orgId: w.org, agentId: acting.agentId, waitedMs: 100 }),
+      ]);
+      for (const [org, key] of [
+        [calm.w.org, 'platform-full'],
+        [w.org, 'own-limit'],
+      ] as const) {
+        const nothing = await withTenant(app, org, (tx) =>
+          tx.selectFrom('spend_requests.requests').select('id').where('idempotency_key', '=', key).execute(),
+        );
+        expect(nothing).toEqual([]);
+      }
+
+      await letGo();
+      // Let in, it can only be decided: the gate has no way to refuse it now.
+      expect(decidedOf(await holding).decision).toBe('ALLOW');
+      // Sent again with its room back: decided, as a first ask.
+      expect(decidedOf(await ask(calm.acting, asking(calm.w), 'platform-full')).decision).toBe('ALLOW');
+    });
+
+    it('never stops a person: a freeze of another organisation goes straight through with the gate full', async () => {
+      const calm = await ready();
+      const { letGo, holding } = await gateFilledBy(60_000);
+      const changes = createOrganizationChanges({
+        database: app,
+        keys,
+        ids,
+        clock,
+        challenges: createStepUpChallenges({ ids, clock }),
+        outbox: createOutbox({ ids, clock }),
+        logger: testLogger(capture),
+      });
+      const member = { orgId: calm.w.org, userId: calm.w.admin.userId, sessionId: calm.w.admin.sessionId };
+      const frozen = await within(
+        10_000,
+        changes.freeze(
+          member,
+          {
+            orgId: member.orgId,
+            client: { kind: 'user', id: member.userId },
+            operation: FREEZE_OPERATION,
+            key: 'freeze-gate-full',
+            payload: '{}',
+          },
+          'pause',
+          CORRELATION,
+        ),
+        'the freeze',
+      );
+      expect(frozen).toMatchObject({ outcome: 'changed', organization: { status: 'FROZEN' } });
+      await letGo();
+      decidedOf(await holding);
+    });
+
+    it('holds one slot across a deadlock’s retry: one request, one place, given back once', async () => {
+      const { w, acting } = await ready();
+      const counted: string[] = [];
+      const inner = createDecisionGate(NO_GATE_LIMITS);
+      const gate: DecisionGate = {
+        organisationsInHand: () => inner.organisationsInHand(),
+        enter: (organisation) => {
+          counted.push('enter');
+          return inner.enter(organisation);
+        },
+        leave: (organisation) => {
+          counted.push('leave');
+          inner.leave(organisation);
+        },
+      };
+      // Its first attempt fails as a deadlock would, inside its transaction: forced, so no race says which side loses.
+      let attempts = 0;
+      decisions = createSpendRequestDecisions({
+        database: app,
+        outbox: createOutbox({ ids, clock }),
+        keys,
+        ids,
+        clock: {
+          now: () => {
+            attempts += 1;
+            if (attempts === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+            return clock.now();
+          },
+        },
+        logger: testLogger(capture),
+        entry: createDecisionEntry({ gate }),
+      });
+      expect(decidedOf(await ask(acting, asking(w, { amount: AED(10_000n) }))).decision).toBe('ALLOW');
+      expect(capture.lines().filter((line) => line.event === TRANSACTION_RETRIED).length).toBeGreaterThan(0);
+      expect(counted).toEqual(['enter', 'leave']);
+    });
   });
 
   it('fails a decision whose turn fails otherwise, as it always did', async () => {

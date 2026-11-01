@@ -60,6 +60,7 @@ export type RuleId =
   | 'denial-surge-alert'
   | 'holdings-check-alert'
   | 'handoff-queue-alert'
+  | 'platform-full-alert'
   | 'integrity-runs-alert'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
@@ -298,6 +299,9 @@ const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_
 
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
+
+/** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
+const PLATFORM_FULL_LINES = 'where tostring(parse_json(Log).event) == "spend_request.platform_full"';
 
 /** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
 const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
@@ -2255,7 +2259,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-O]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-Q]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -2733,6 +2737,30 @@ const handoffQueueAlert: Check = (snapshot, _expected, add) => {
         resource: environment.name,
         message:
           "needs an enabled alert on this deployment's workspace that fires on any handoff.queue_stale line, watching every window and firing on the first",
+      });
+    }
+  }
+};
+
+/** An enabled alert on the workspace fires on any decision turned away with the whole platform full (4D2e C, PL-63). */
+const platformFullAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [PLATFORM_FULL_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'platform-full-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any spend_request.platform_full line, watching every window and firing on the first",
       });
     }
   }
@@ -3824,6 +3852,7 @@ const CHECKS: readonly Check[] = [
   denialSurgeAlert,
   holdingsCheckAlert,
   handoffQueueAlert,
+  platformFullAlert,
   integrityRunsAlert,
   agentCancelsAlert,
   agentCancelCapAlert,

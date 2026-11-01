@@ -101,6 +101,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { TurnWaitExceeded } from './agent-turns.ts';
 import { createDecisionEntry, type DecisionEntry, type EntryWaits, SupplierTurnExceeded } from './decision-entry.ts';
+import { DecisionGateRefused } from './decision-gate.ts';
 import {
   choicesHistory,
   consentOf,
@@ -650,6 +651,12 @@ export function createSpendRequestDecisions({
       log.warn('spend_request.supplier_busy', { agentId, waitedMs: error.waitedMs });
       return refused(503, 'ORGANISATION_BUSY');
     }
+    if (error instanceof DecisionGateRefused) {
+      // The whole platform full is its own line, alerted: no one organisation's doing, and no limit of its own hit.
+      const line = error.reason === 'platform' ? 'spend_request.platform_full' : 'spend_request.organisation_busy';
+      log.warn(line, { agentId, waitedMs: error.waitedMs });
+      return refused(503, 'ORGANISATION_BUSY');
+    }
     throw error;
   }
 
@@ -695,6 +702,7 @@ export function createSpendRequestDecisions({
           durationMs: Math.round(performance.now() - started),
           turnWaitMs: Math.round(waits?.turnWaitMs ?? 0),
           supplierTurnWaitMs: Math.round(waits?.supplierTurnWaitMs ?? 0),
+          gateWaitMs: Math.round(waits?.gateWaitMs ?? 0),
           ...statementTimesForLog(times),
         });
       }

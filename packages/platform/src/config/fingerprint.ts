@@ -87,6 +87,12 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
       tls: config.db.tls,
       poolMax: config.db.poolMax,
     },
+    decisionGate: {
+      active: config.decisionGate.active,
+      perOrganisation: config.decisionGate.perOrganisation,
+      waitingPerOrganisation: config.decisionGate.waitingPerOrganisation,
+      waitMs: config.decisionGate.waitMs,
+    },
     outbound: { allowedOrigins: config.outbound.allowedOrigins },
     // The client secret is left out: it's a secret.
     signIn:
