@@ -128,6 +128,15 @@ var settings = [
     name: 'track_io_timing'
     value: measured ? 'on' : 'off'
   }
+  // Azure keeps a server's connection limit through a resize: the load size
+  // read 50 on run day 5, 35 for everyone, and refused the API's twenty beside
+  // Zitadel's ten and the load job (S167). So it is stated. The API's two
+  // copies in a restart, Zitadel and the job come to 56. Takes effect only on
+  // a restart, which deploy.ts does when Azure says one is waiting.
+  {
+    name: 'max_connections'
+    value: measured ? '100' : '50'
+  }
 ]
 
 // One at a time: the server refuses a second change while one is in progress.

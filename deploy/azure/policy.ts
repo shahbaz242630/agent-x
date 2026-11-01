@@ -157,14 +157,16 @@ const BACKUP_ROLE = 'agentx_backup';
 const STAGING_DATABASE_SIZES: readonly string[] = ['Standard_B1ms/Burstable', 'Standard_D2ads_v5/GeneralPurpose'];
 
 /**
- * The load run's measurements and the value that turns each off (postgres.bicep, 4D2d P5). Microsoft: "Don't enable
- * query store on the Burstable pricing tier as it causes performance problems."
+ * The load run's settings at their Burstable values (postgres.bicep): its measurements off (4D2d P5; Microsoft: "Don't
+ * enable query store on the Burstable pricing tier as it causes performance problems.") and the size's own connection
+ * limit (S167).
  */
-const MEASURES_OFF: ReadonlyMap<string, string> = new Map([
+const BURSTABLE_VALUES: ReadonlyMap<string, string> = new Map([
   ['pg_qs.query_capture_mode', 'none'],
   ['pg_qs.store_query_plans', 'off'],
   ['pgms_wait_sampling.query_capture_mode', 'none'],
   ['track_io_timing', 'off'],
+  ['max_connections', '50'],
 ]);
 
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
@@ -455,8 +457,8 @@ const LOAD_RUN = {
   reads: new Set(['db-app-password', ...APP_KEYS]),
   apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
-  // Twenty connections, on the larger server `foundation --load-size` gives. Staging's small server has 35
-  // for everyone, so out of a load run its API keeps to ten (PL-63).
+  // Twenty connections, on the larger server `foundation --load-size` gives, whose limit postgres.bicep states.
+  // Staging's small server has 35 for everyone, so out of a load run its API keeps to ten (PL-63).
   apiPool: '20',
   stagingPool: 10,
   apiSettings: {
@@ -1268,12 +1270,14 @@ const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
       });
     }
     const settings = serverSettings(snapshot, server);
-    const measuring = [...MEASURES_OFF].filter(([name, off]) => settings.get(name) !== off).map(([name]) => name);
-    if (at(server, 'sku', 'tier') === 'Burstable' && measuring.length > 0) {
+    const differing = [...BURSTABLE_VALUES]
+      .filter(([name, value]) => settings.get(name) !== value)
+      .map(([name]) => name);
+    if (at(server, 'sku', 'tier') === 'Burstable' && differing.length > 0) {
       add({
         rule: 'database-measures',
         resource: server.name,
-        message: `turns every measurement off on a Burstable size (Microsoft); on or not stated: ${measuring.join(', ')}`,
+        message: `holds a Burstable size to its own values, measurements off (Microsoft) and a connection limit of 50; differing or not stated: ${differing.join(', ')}`,
       });
     }
   }

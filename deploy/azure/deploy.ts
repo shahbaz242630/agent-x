@@ -942,15 +942,56 @@ async function deployFoundation(steps: Steps, loadSize: boolean): Promise<number
   const outputs = sendWithWhatIf(steps, subscription, 'foundation', values);
   if (outputs === undefined) return 1;
   steps.terminal.say('Deployed. What the foundation reports:');
-  for (const [key, output] of Object.entries(outputs as Record<string, { value?: unknown }>)) {
+  const reported = outputs as Record<string, { value?: unknown }>;
+  for (const [key, output] of Object.entries(reported)) {
     steps.terminal.say(`  ${key}: ${text(output.value)}`);
   }
   const recorded = leaveRecord(steps, subscription, 'foundation', commit);
-  if (await alertsReachable(steps, subscription)) return recorded ? 0 : 1;
+  const settled = settleDatabase(steps, subscription, text(reported.databaseHost?.value), loadSize);
+  if (await alertsReachable(steps, subscription)) return recorded && settled ? 0 : 1;
   steps.terminal.say(
     'The foundation is deployed, but no alert email can reach you yet. Once the address is confirmed, run node deploy/azure/deploy.ts alerts to check.',
   );
   return 1;
+}
+
+/**
+ * Restarts the database when its connection limit is waiting on one, which a deployment doesn't do (postgres.bicep,
+ * S167; Microsoft: "you need to restart your server for the new limit to start working"). False, having said what to
+ * do, when it's still waiting or can't be told: the deployment itself is done and recorded by then.
+ */
+function settleDatabase(steps: Steps, subscription: string, host: string, loadSize: boolean): boolean {
+  const server = host.split('.')[0] ?? '';
+  const where = ['--subscription', subscription, '--resource-group', RESOURCE_GROUP];
+  const waiting = () =>
+    (
+      azJson(steps.az, [
+        'postgres',
+        'flexible-server',
+        'parameter',
+        'show',
+        ...where,
+        '--server-name',
+        server,
+        '--name',
+        'max_connections',
+      ]) as { isConfigPendingRestart?: unknown }
+    ).isConfigPendingRestart === true;
+  try {
+    if (!waiting()) return true;
+    steps.terminal.say("The database's new connection limit needs a restart, so it restarts now, for a few minutes...");
+    const done = steps.az.run(['postgres', 'flexible-server', 'restart', ...where, '--name', server]);
+    if (done.status === 0 && !waiting()) return true;
+  } catch {
+    // Said below: a read that failed leaves the limit as unknown as one still waiting.
+  }
+  const effect = loadSize
+    ? 'so a load run would be refused connections as on run day 5'
+    : "so the small server may still hold the load run's limit";
+  steps.terminal.say(
+    `The database's connection limit may not have taken effect, ${effect}. Run node deploy/azure/deploy.ts foundation${loadSize ? ' --load-size' : ''} again; if this repeats, restart ${server} in the Azure portal.`,
+  );
+  return false;
 }
 
 /** Where Azure Resource Manager answers: a list's next page must be there too. */

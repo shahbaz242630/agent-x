@@ -521,6 +521,8 @@ const listed = (held: Held) => {
 };
 
 interface AzAnswers {
+  /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
+  readonly limit?: 'applied' | 'waiting' | 'stays' | 'refused' | 'unreadable';
   /** What `az bicep version` prints. */
   readonly bicep?: string;
   /** The key vaults the resource group holds. */
@@ -642,9 +644,23 @@ class RecordingAz implements Az {
   readonly tags: Record<string, string | undefined> = { environment: 'staging', product: 'agent-x' };
   #deployed = false;
   #readings = 0;
+  #limitApplied = false;
 
   constructor(options: AzAnswers = {}) {
     this.options = options;
+  }
+
+  /** The database's connection limit: waiting on a restart until one takes, as `limit` says. */
+  #database(args: readonly string[]): AzResult {
+    const limit = this.options.limit ?? 'applied';
+    if (limit === 'unreadable') return { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway' };
+    if (args[2] === 'restart') {
+      if (limit === 'refused') return { status: 1, stdout: '', stderr: 'ERROR: Conflict' };
+      if (limit === 'waiting') this.#limitApplied = true;
+      return json({});
+    }
+    const waiting = limit !== 'applied' && !this.#limitApplied;
+    return json({ value: '100', isConfigPendingRestart: limit === 'stays' || waiting });
   }
 
   interactive(args: readonly string[], values: Readonly<Record<string, string>>): number | null {
@@ -658,6 +674,8 @@ class RecordingAz implements Az {
     switch (args.slice(0, 2).join(' ')) {
       case 'account show':
         return json({ name: 'Azure subscription 1', id: SUBSCRIPTION });
+      case 'postgres flexible-server':
+        return this.#database(args);
       case 'bicep version':
         return {
           status: 0,
@@ -811,6 +829,7 @@ describe('deploy foundation', () => {
       'deployment sub create',
       'deployment sub show',
       ...RECORDING,
+      'postgres flexible-server parameter',
       'rest --method get',
     ]);
     // The commit it sent, recorded on the migration job once Azure said it succeeded, and read back.
@@ -917,6 +936,66 @@ describe('deploy foundation', () => {
     expect(done.terminal.said).toContain(
       "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes, and the run's measurements (Query Store) switch on. Run foundation again without --load-size the same day to size it back and switch them off.",
     );
+  });
+
+  it('restarts the database when its connection limit is waiting on one, and only then, naming the server (S167)', async () => {
+    const admin = aPaste();
+    const foundation = (limit: NonNullable<AzAnswers['limit']>) =>
+      run(['foundation', '--load-size'], {
+        answers: ['y', 'ops@example.invalid'],
+        hidden: [admin, admin],
+        az: new RecordingAz({ limit }),
+      });
+    const restarted = await foundation('waiting');
+    expect(restarted.status).toBe(0);
+    const restart = restarted.az.calls.find((call) => call.args[2] === 'restart');
+    expect(restart?.args).toEqual([
+      'postgres',
+      'flexible-server',
+      'restart',
+      '--subscription',
+      SUBSCRIPTION,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--name',
+      'db',
+    ]);
+    const read = restarted.az.calls.find((call) => call.args[2] === 'parameter');
+    expect(read?.args).toEqual(expect.arrayContaining(['--server-name', 'db', '--name', 'max_connections']));
+    expect(restarted.terminal.said).toContain(
+      "The database's new connection limit needs a restart, so it restarts now, for a few minutes...",
+    );
+    const applied = await foundation('applied');
+    expect(applied.status).toBe(0);
+    expect(applied.az.calls.some((call) => call.args[2] === 'restart')).toBe(false);
+  });
+
+  it("fails, naming the very command to run, when the database's connection limit can't be said to have taken effect (S167)", async () => {
+    for (const limit of ['stays', 'refused', 'unreadable'] as const) {
+      for (const [argv, said] of [
+        [
+          ['foundation', '--load-size'],
+          "The database's connection limit may not have taken effect, so a load run would be refused connections as on run day 5. Run node deploy/azure/deploy.ts foundation --load-size again; if this repeats, restart db in the Azure portal.",
+        ],
+        [
+          ['foundation'],
+          "The database's connection limit may not have taken effect, so the small server may still hold the load run's limit. Run node deploy/azure/deploy.ts foundation again; if this repeats, restart db in the Azure portal.",
+        ],
+      ] as const) {
+        const admin = aPaste();
+        const done = await run([...argv], {
+          answers: ['y', 'ops@example.invalid'],
+          hidden: [admin, admin],
+          az: new RecordingAz({ limit }),
+        });
+        expect(done.error).toBeUndefined();
+        expect(done.status).toBe(1);
+        expect(done.terminal.said).toContain(said);
+        // The deployment did happen: its record is left, and the alert address still checked.
+        expect(done.az.calls.some((call) => call.args[1] === 'update')).toBe(true);
+        expect(done.terminal.said).toContain('Alert email: confirmed, so every alert reaches it.');
+      }
+    }
   });
 
   it('stops before asking for anything when the operator declines the subscription', async () => {

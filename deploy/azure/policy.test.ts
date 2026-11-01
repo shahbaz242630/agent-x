@@ -507,6 +507,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pg_qs\.store_query_plans$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pgms_wait_sampling\.query_capture_mode$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/track_io_timing$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/max_connections$/),
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
@@ -664,6 +665,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'pg_qs.store_query_plans': 'off',
       'pgms_wait_sampling.query_capture_mode': 'none',
       track_io_timing: 'off',
+      max_connections: '50',
     };
     const measures = (resources: readonly PredictedResource[]): Record<string, unknown> => {
       const found: Record<string, unknown> = {};
@@ -679,6 +681,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'pg_qs.store_query_plans': 'on',
       'pgms_wait_sampling.query_capture_mode': 'all',
       track_io_timing: 'on',
+      max_connections: '100',
     });
     expect(at(load.foundation.predictedResources.find(SERVER)?.properties, 'availabilityZone')).toBe('2');
     const sizeless = (resource: PredictedResource) =>
@@ -1137,6 +1140,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'pg_qs.store_query_plans': 'on',
       'pgms_wait_sampling.query_capture_mode': 'all',
       track_io_timing: 'on',
+      max_connections: '100',
     };
     for (const [name, value] of Object.entries(on)) {
       const measured = changed(MEASURE(name), (setting) => (inside(setting, 'properties').value = value));
