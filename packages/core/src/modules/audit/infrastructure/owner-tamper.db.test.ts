@@ -69,7 +69,7 @@ const TENANT_POLICY =
 /** Made by the owner, as a migration would make it, so the schema guard starts with nothing to report. */
 const FIXTURE = [
   'create schema probe',
-  "create table probe.agents (org_id uuid not null, id uuid not null, status text not null check (status in ('ACTIVE', 'SUSPENDED', 'REVOKED')), role text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))",
+  'create table probe.agents (org_id uuid not null, id uuid not null, status text not null, role text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))',
   'alter table probe.agents enable row level security',
   'alter table probe.agents force row level security',
   `create policy tenant_isolation on probe.agents ${TENANT_POLICY}`,

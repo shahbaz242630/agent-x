@@ -2,6 +2,11 @@
 // what the migrations built, at start and on every anchor-check run; the
 // operator's command (B1c) checks it at its start, before it writes anything.
 //
+// It holds CHECK constraints to the image's own built-checks.json, and the
+// backup role to reading. So a release's migration that adds or changes a CHECK
+// is drift to the image before it, raising the alarm below and refusing that
+// image a start, until the new image is in: as one replacing a guard function is.
+//
 // **At start it refuses to start.** A database whose walls have been rewritten
 // must not be served from, the same way A2b-2 refuses to start on a broken
 // platform chain. Nothing is lost by refusing: the in-memory anchor store is

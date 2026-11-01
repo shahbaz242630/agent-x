@@ -1648,6 +1648,123 @@ describe('the directory, and the key the organisations rest on (B1d-1)', () => {
   });
 });
 
+describe('a CHECK constraint, held to what the migrations built', () => {
+  const AMOUNT = 'alter table spend_requests.requests';
+  const PUT_AMOUNT_BACK = `${AMOUNT} add constraint requests_amount_minor_check check (amount_minor > 0)`;
+  const WITHOUT_AMOUNT = `${AMOUNT} drop constraint requests_amount_minor_check`;
+  const AGENTS = 'alter table agents.agents';
+  const STATUS_RULE = "status in ('ACTIVE', 'SUSPENDED')";
+  const PUT_STATUS_BACK = `${AGENTS} add constraint agents_status_check check (${STATUS_RULE})`;
+  const WITHOUT_STATUS = `${AGENTS} drop constraint agents_status_check`;
+  const AMOUNT_NAME = `spend_requests.requests's CHECK constraint "requests_amount_minor_check"`;
+  const STATUS_NAME = `agents.agents's CHECK constraint "agents_status_check"`;
+
+  it.each([
+    ['dropped from a money table', WITHOUT_AMOUNT, PUT_AMOUNT_BACK, `${AMOUNT_NAME} is not there`],
+    ['dropped from an authority table', WITHOUT_STATUS, PUT_STATUS_BACK, `${STATUS_NAME} is not there`],
+    [
+      'made wider under its own name',
+      `${WITHOUT_AMOUNT}; ${AMOUNT} add constraint requests_amount_minor_check check (amount_minor >= 0)`,
+      `${WITHOUT_AMOUNT}; ${PUT_AMOUNT_BACK}`,
+      `${AMOUNT_NAME} reads differently`,
+    ],
+    [
+      'given a new status under its own name',
+      `${WITHOUT_STATUS}; ${AGENTS} add constraint agents_status_check check (status in ('ACTIVE', 'SUSPENDED', 'X'))`,
+      `${WITHOUT_STATUS}; ${PUT_STATUS_BACK}`,
+      `${STATUS_NAME} reads differently`,
+    ],
+    [
+      'put back not validated',
+      `${WITHOUT_AMOUNT}; ${PUT_AMOUNT_BACK} not valid`,
+      `${WITHOUT_AMOUNT}; ${PUT_AMOUNT_BACK}`,
+      `${AMOUNT_NAME} is not validated`,
+    ],
+    [
+      'planted beside the rest',
+      `${AMOUNT} add constraint planted check (amount_minor < 1)`,
+      `${AMOUNT} drop constraint planted`,
+      `spend_requests.requests's CHECK constraint "planted" is not one the migrations built`,
+    ],
+  ])('names one %s', async (_what, tamper, undo, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(tamper);
+    try {
+      expect(await problems()).toEqual([problem]);
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(undo);
+    }
+    expect(await problems()).toEqual([]);
+  });
+
+  it.runIf(Number(server.version.split('.')[0]) >= 18)(
+    'names one made NOT ENFORCED, which Postgres marks not valid (Postgres 18 on)',
+    async () => {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+      await owner.query(`${WITHOUT_AMOUNT}; ${PUT_AMOUNT_BACK} not enforced`);
+      try {
+        expect(await problems()).toEqual([`${AMOUNT_NAME} is not validated`]);
+      } finally {
+        // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+        await owner.query(`${WITHOUT_AMOUNT}; ${PUT_AMOUNT_BACK}`);
+      }
+      expect(await problems()).toEqual([]);
+    },
+  );
+});
+
+describe('the backup role, which only reads (ADR-005 §3)', () => {
+  it.each([
+    [
+      'a right on a table',
+      'grant insert on audit.events to agentx_backup',
+      'revoke insert on audit.events from agentx_backup',
+      'agentx_backup may INSERT on audit.events',
+    ],
+    [
+      'a right on a column',
+      'grant update (details) on audit.events to agentx_backup',
+      'revoke update (details) on audit.events from agentx_backup',
+      'agentx_backup may UPDATE on column audit.events.details',
+    ],
+    [
+      'a right on a sequence',
+      'create sequence audit.planted; grant usage on sequence audit.planted to agentx_backup',
+      'drop sequence audit.planted',
+      'agentx_backup may USAGE on audit.planted',
+    ],
+    [
+      'a right on a schema',
+      'grant create on schema audit to agentx_backup',
+      'revoke create on schema audit from agentx_backup',
+      'agentx_backup may CREATE on schema audit',
+    ],
+    [
+      'a function to run',
+      'grant execute on function state_rules.guard_status() to agentx_backup',
+      'revoke execute on function state_rules.guard_status() from agentx_backup',
+      'agentx_backup may EXECUTE on function state_rules.guard_status',
+    ],
+    [
+      'a right on the database',
+      "do $$ begin execute pg_catalog.format('grant temporary on database %I to agentx_backup', pg_catalog.current_database()); end $$",
+      "do $$ begin execute pg_catalog.format('revoke temporary on database %I from agentx_backup', pg_catalog.current_database()); end $$",
+      'agentx_backup may TEMPORARY on this database',
+    ],
+  ])('names %s beyond reading', async (_what, tamper, undo, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(tamper);
+    try {
+      expect(await problems()).toEqual([problem]);
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(undo);
+    }
+    expect(await problems()).toEqual([]);
+  });
+});
+
 describe('what only the server admin can do', () => {
   // A role of this file's own to hand things to. The shared agentx_* roles
   // belong to the whole test server, and other files check them while this one
@@ -1676,6 +1793,26 @@ describe('what only the server admin can do', () => {
       // planted cast. Nothing the guard reads is cast to text any more.
       expect(await problems()).toContain('the database carries a cast Postgres did not ship');
     } finally {
+      await admin.query('drop cast (bigint as text)');
+      await admin.query('drop function pg_temp.big2text(bigint)');
+    }
+  });
+
+  it('sees a CHECK constraint dropped with a planted cast in place', async () => {
+    // The read is uncast and compared here, so the cast that blinded the first draft (see PresentRow) can't hide it.
+    const admin = database.as('admin');
+    await admin.query(`create function pg_temp.big2text(bigint) returns text language sql immutable as 'select ''x'''`);
+    await admin.query('create cast (bigint as text) with function pg_temp.big2text(bigint) as assignment');
+    await owner.query('alter table spend_requests.requests drop constraint requests_amount_minor_check');
+    try {
+      expect(await problems()).toEqual([
+        'spend_requests.requests\'s CHECK constraint "requests_amount_minor_check" is not there',
+        'the database carries a cast Postgres did not ship',
+      ]);
+    } finally {
+      await owner.query(
+        'alter table spend_requests.requests add constraint requests_amount_minor_check check (amount_minor > 0)',
+      );
       await admin.query('drop cast (bigint as text)');
       await admin.query('drop function pg_temp.big2text(bigint)');
     }

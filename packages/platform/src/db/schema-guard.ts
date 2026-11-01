@@ -23,10 +23,15 @@
 // CI-06 checks the same policy against a freshly migrated database on Postgres
 // 16 and 18, so the rules can't drift from db/migrations without CI going red.
 //
+// **CHECK constraints** are held to built-checks.json, every one a freshly
+// migrated database has, written by built-checks.db.test.ts, never by hand, so
+// a new migration needs no pin here and CI goes red until the file is refreshed.
+// Each is compared as Postgres prints it, in this process, with no cast read.
+//
 // **What it can read.** Everything here is readable by an ordinary role —
 // checked on 16 and 18 before it was written (pg_class, pg_namespace,
 // pg_attribute, pg_policy, pg_trigger, pg_rewrite, pg_cast, pg_db_role_setting,
-// pg_constraint; pg_authid is not, and is not needed). So no SECURITY DEFINER helper is
+// pg_constraint, pg_proc, pg_database; pg_authid is not, and is not needed). So no SECURITY DEFINER helper is
 // required, which CI-06 forbids anyway.
 //
 // **What it deliberately does not do.** It never writes, never creates a
@@ -35,6 +40,7 @@
 // line can't carry tampered text out.
 import { type Kysely, sql } from 'kysely';
 
+import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
 import { OWN_COLUMNS, type SignedStateTable } from './signed-rows.ts';
 import { TENANT_POLICY_EXPRESSION } from './tenant.ts';
@@ -294,6 +300,22 @@ const MAINTAIN_FROM = 170_000;
  */
 const COLUMN_RIGHTS = new Set(['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']);
 
+/** The backup job's role, fixed by `db/bootstrap/roles.sql` (proven in tooling/checks/database-roles.test.ts). */
+export const BACKUP_ROLE = 'agentx_backup';
+
+/**
+ * What the backup role may hold (ADR-005 §3), CI-06's BACKUP_MAY on the running
+ * database. It bypasses row security, so one grant more than reading would let
+ * it change every organisation's rows.
+ */
+const BACKUP_MAY: Readonly<Record<BackupRight['kind'], readonly string[]>> = {
+  relation: ['SELECT'],
+  column: ['SELECT'],
+  schema: ['USAGE'],
+  database: ['CONNECT'],
+  function: [],
+};
+
 /** The oldest version we support (16.0), as `server_version_num` counts. */
 const OLDEST_SUPPORTED = 160_000;
 
@@ -471,6 +493,22 @@ interface ForeignKeyRow {
    * leaves out (B1d-1 review).
    */
   readonly not_null: boolean;
+}
+
+/** A CHECK constraint on one of our tables, as a migrated database and the running one print it. */
+export interface CheckConstraint {
+  readonly table: string;
+  readonly name: string;
+  readonly expression: string;
+  /** False for one added NOT VALID, and for one made NOT ENFORCED (Postgres 18 on), which Postgres marks not valid too. */
+  readonly validated: boolean;
+}
+
+/** One right granted to the backup role, on the object the problem names. */
+interface BackupRight {
+  readonly kind: 'relation' | 'column' | 'schema' | 'database' | 'function';
+  readonly object: string;
+  readonly privilege: string;
 }
 
 /**
@@ -678,8 +716,8 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
  * are asked again through has_any_column_privilege and the two are unioned.
  * Found by the A3e-1b review.
  *
- * The `::text` here, and on the bound values in updatableColumns and
- * roleSettings, and the `'{0}'::pg_catalog.oid[]` in policies, are the only
+ * The `::text` here, and on the bound values in updatableColumns,
+ * roleSettings and backupRights, and the `'{0}'::pg_catalog.oid[]` in policies, are the only
  * ones left in this file, and they are not casts in the sense that matters:
  * they give a type to a bound parameter or a literal that arrives untyped,
  * which is an input coercion and never looks in `pg_cast`.
@@ -791,6 +829,67 @@ async function foreignKeys<Schema>(db: Kysely<Schema>): Promise<ForeignKeyRow[]>
     join pg_catalog.pg_attribute ta on ta.attrelid = con.confrelid and ta.attnum = k.to_attnum
     where ${OURS} and con.contype = 'f'
     order by 1, 2, k.position
+  `.execute(db);
+  return [...rows];
+}
+
+/**
+ * Every CHECK constraint on our tables. Compared here, not in SQL, and read
+ * uncast (see PresentRow): the owner can drop or reword one, or re-add it NOT
+ * VALID, without touching a row. A table's status or amount rule goes that way.
+ */
+export async function checkConstraints<Schema>(db: Kysely<Schema>): Promise<CheckConstraint[]> {
+  const { rows } = await sql<CheckConstraint>`
+    select ${QUALIFIED} as table,
+           con.conname as name,
+           pg_catalog.pg_get_expr(con.conbin, con.conrelid) as expression,
+           con.convalidated as validated
+    from pg_catalog.pg_constraint con
+    join pg_catalog.pg_class c on c.oid = con.conrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS} and con.contype = 'c'
+    order by 1, 2
+  `.execute(db);
+  return [...rows];
+}
+
+/**
+ * Every right the backup role was granted on what the database owner can grant:
+ * our tables, sequences, columns, schemas and functions, and this database. Read
+ * from the access lists, as publicGrants reads PUBLIC's, so a privilege a later
+ * Postgres adds (as 17 added MAINTAIN) is seen with no list here to update.
+ */
+async function backupRights<Schema>(db: Kysely<Schema>): Promise<BackupRight[]> {
+  const { rows } = await sql<BackupRight>`
+    with backup as (select r.oid from pg_catalog.pg_roles r where r.rolname = ${BACKUP_ROLE}::text)
+    select 'relation' as kind, ${QUALIFIED} as object, acl.privilege_type as privilege
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    cross join pg_catalog.aclexplode(c.relacl) as acl
+    where ${OURS} and (${ROW_KINDS} or c.relkind = 'S') and acl.grantee in (select b.oid from backup b)
+    union all
+    select 'column', pg_catalog.format('column %I.%I.%I', n.nspname, c.relname, a.attname), acl.privilege_type
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+    cross join pg_catalog.aclexplode(a.attacl) as acl
+    where ${OURS} and ${ROW_KINDS} and acl.grantee in (select b.oid from backup b)
+    union all
+    select 'schema', pg_catalog.format('schema %I', n.nspname), acl.privilege_type
+    from pg_catalog.pg_namespace n
+    cross join pg_catalog.aclexplode(n.nspacl) as acl
+    where ${OURS} and acl.grantee in (select b.oid from backup b)
+    union all
+    select 'function', pg_catalog.format('function %I.%I', n.nspname, p.proname), acl.privilege_type
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    cross join pg_catalog.aclexplode(p.proacl) as acl
+    where ${OURS} and acl.grantee in (select b.oid from backup b)
+    union all
+    select 'database', 'this database', acl.privilege_type
+    from pg_catalog.pg_database d
+    cross join pg_catalog.aclexplode(d.datacl) as acl
+    where d.datname = pg_catalog.current_database() and acl.grantee in (select b.oid from backup b)
   `.execute(db);
   return [...rows];
 }
@@ -950,6 +1049,33 @@ function columnsByTable(rows: readonly ColumnRow[]): Map<string, string[]> {
 /** Two column lists alike, in order. */
 const same = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((each, index) => each === b[index]);
+
+/**
+ * The running CHECK constraints against the ones the migrations built: each
+ * still there and reading the same, none added beside them (a planted one can
+ * refuse the very event that would set a hold), and every one validated.
+ */
+function checkProblems(
+  live: readonly CheckConstraint[],
+  built: readonly Omit<CheckConstraint, 'validated'>[],
+): SchemaProblem[] {
+  const id = ({ table, name }: Pick<CheckConstraint, 'table' | 'name'>): string => JSON.stringify([table, name]);
+  const named = ({ table, name }: Pick<CheckConstraint, 'table' | 'name'>): string =>
+    `${table}'s CHECK constraint ${quoted(name)}`;
+  const liveById = new Map(live.map((one) => [id(one), one]));
+  const builtIds = new Set(built.map(id));
+  const problems: SchemaProblem[] = [];
+  for (const one of built) {
+    const found = liveById.get(id(one));
+    if (found === undefined) problems.push(`${named(one)} is not there`);
+    else if (found.expression !== one.expression) problems.push(`${named(one)} reads differently`);
+  }
+  for (const one of live) {
+    if (!builtIds.has(id(one))) problems.push(`${named(one)} is not one the migrations built`);
+    if (!one.validated) problems.push(`${named(one)} is not validated`);
+  }
+  return problems;
+}
 
 /** Each of our schemas owned by a role other than ours. */
 function schemaOwnerProblems(allSchemas: readonly SchemaRow[], ownerRole: string): SchemaProblem[] {
@@ -1500,6 +1626,9 @@ export async function liveSchemaProblems<Schema>(
     }),
   );
 
+  const allChecks = await checkConstraints(db);
+  const backupHeld = await backupRights(db);
+
   const problems: SchemaProblem[] = [
     ...schemaOwnerProblems(allSchemas, ownerRole),
     ...allRelations.flatMap((relation) => relationProblems(relation, ownerRole, globalTables.has(relation.name))),
@@ -1532,6 +1661,10 @@ export async function liveSchemaProblems<Schema>(
     ...forPublic.map((grant) => `PUBLIC may ${grant.privilege} on ${grant.table}`),
     ...columnProblems(allColumns, policy.globalTables, allRelations, globalTables),
     ...policy.requiredForeignKeys.flatMap((required) => requiredKeyProblems(required, keys)),
+    ...checkProblems(allChecks, BUILT_CHECKS),
+    ...backupHeld
+      .filter(({ kind, privilege }) => !BACKUP_MAY[kind].includes(privilege))
+      .map(({ object, privilege }) => `${BACKUP_ROLE} may ${privilege} on ${object}`),
   ];
 
   if (casts) problems.push('the database carries a cast Postgres did not ship');
