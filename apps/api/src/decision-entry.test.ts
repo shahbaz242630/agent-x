@@ -136,6 +136,16 @@ describe('a decision’s way to a connection (4D2e C, PL-62)', () => {
     expect(entry.linesInHand()).toBe(0);
   });
 
+  it('waits as long as it is told, when told', async () => {
+    vi.useFakeTimers();
+    const entry = createDecisionEntry({ perSupplier: 1, supplierWaitMs: 50 });
+    void entry.run(asked('agent-1'), () => new Promise(() => undefined));
+    const late = entry.run(asked('agent-2'), () => Promise.resolve('never'));
+    const rejected = expect(late).rejects.toEqual(new SupplierTurnExceeded(50));
+    await vi.advanceTimersByTimeAsync(50);
+    await rejected;
+  });
+
   it('hands the supplier’s turn on when a decision fails, answering that failure to its own caller alone', async () => {
     const entry = createDecisionEntry({ perSupplier: 1 });
     const started: string[] = [];
