@@ -222,6 +222,15 @@ interface JobRun {
 }
 
 /**
+ * A run's lines. One that didn't succeed and has no readable start never ran, as far as anything can tell, and has
+ * none to look for: the report says it failed, where a refused read would lose every phase already measured.
+ */
+const runLines = async (steps: JobSteps, target: Target, execution: string, run: Ended, lastEvent?: string) =>
+  run.status !== 'Succeeded' && !Number.isFinite(Date.parse(run.began))
+    ? []
+    : printedLines(await readLog(steps, target, execution, run, lastEvent));
+
+/**
  * One run of a load job with `request` written onto it first and {} put back
  * whatever happened, `started` told the run's name as soon as it has one. A
  * put-back that failed after a run that ended is said with its lines, never in
@@ -258,7 +267,7 @@ async function runWith(
   if (execution === undefined || run === undefined) {
     throw new Error(`${String(execution)} didn't end in time: wait for it, then load.ts finish.${also}`);
   }
-  return { run, printed: printedLines(await readLog(steps, target, execution, run, LAST_EVENT[job])), putBack };
+  return { run, printed: await runLines(steps, target, execution, run, LAST_EVENT[job]), putBack };
 }
 
 /** The line each load job prints last when it succeeds: its log is read until that line has arrived. */
@@ -469,10 +478,12 @@ async function phaseOne(
     },
   );
   const agents = seededAgents(first.printed);
-  if (agents.length === 0) rmSync(steps.stateFile, { force: true });
-  else keep(steps, { ...open, agents });
+  // Only a run that succeeded waits for its last line: a failed one's seed lines may be yet to come, for finish to read.
+  const noneMade = agents.length === 0 && first.run.status === 'Succeeded';
+  if (noneMade) rmSync(steps.stateFile, { force: true });
+  else if (agents.length > 0) keep(steps, { ...open, agents });
   const [phase] = phasesOf(first.printed);
-  const next = agents.length > 0 ? 'Run load.ts finish to clean up its organisations.' : 'It made no organisation.';
+  const next = noneMade ? 'It made no organisation.' : 'Run load.ts finish to clean up its organisations.';
   if (first.run.status !== 'Succeeded' || phase === undefined) {
     throw new Error(`Phase 1 didn't finish (load-first ended ${endedAs(first.run, first.printed)}). ${next}`);
   }
@@ -579,7 +590,7 @@ async function openAgents(steps: LoadSteps, subscription: string, open: OpenRun)
   const target: Target = { subscription, job: 'load-first' };
   const run = await waitFor(steps, target, open.firstRun, limitOf(steps, subscription, 'load-first'));
   if (run === undefined) throw new Error(`${open.firstRun} hasn't ended: run load.ts finish again once it has.`);
-  return seededAgents(printedLines(await readLog(steps, target, open.firstRun, run, LAST_EVENT['load-first'])));
+  return seededAgents(await runLines(steps, target, open.firstRun, run, LAST_EVENT['load-first']));
 }
 
 /** Cleans up the run left open, if any: its own organisations alone, in load-cleanup. */
