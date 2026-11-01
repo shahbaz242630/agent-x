@@ -2529,16 +2529,16 @@ const appsLogs: Check = (snapshot, _expected, add) => {
  */
 const appErrorsAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
-    const alerted = workspaceAlerted(snapshot, 'any', (criterion) => {
-      const threshold = at(criterion, 'threshold');
-      return (
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion) =>
         saysCountColumn(criterion) !== undefined &&
         kqlStages(String(at(criterion, 'query')))[1] === ERROR_LINES &&
         at(criterion, 'operator') === 'GreaterThan' &&
-        typeof threshold === 'number' &&
-        threshold >= 0
-      );
-    });
+        // One error is enough, in every environment: a record past its event cap logs one and refuses the action (PL-41).
+        at(criterion, 'threshold') === 0,
+    );
     if (!alerted) {
       add({
         rule: 'app-errors-alert',

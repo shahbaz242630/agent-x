@@ -2457,6 +2457,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
   });
 
   it("app-errors-alert: no alert on the apps' error events, or one that can't fire", () => {
+    // PL-41: a higher bar would let one refused record's error through unseen.
+    expect(brokenRules(changed(ERRORS_ALERT, (alert) => (criterion(alert).threshold = 1)))).toEqual([
+      'app-errors-alert',
+    ]);
     const query = (from: string, to: string) => (alert: Mutable) =>
       (criterion(alert).query = String(criterion(alert).query).replace(from, to));
     expect(brokenRules(without(ERRORS_ALERT))).toEqual(['app-errors-alert']);
@@ -2485,8 +2489,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'alert-delivery',
       'app-errors-alert',
     ]);
-    // A higher threshold is a choice, not a break.
-    expect(brokenRules(changed(ERRORS_ALERT, (alert) => (criterion(alert).threshold = 5)))).toEqual([]);
   });
 
   it("daily-words-alert: no daily alert on the warnings and errors, or one that can't notify each day", () => {
