@@ -894,6 +894,28 @@ async function roleSettings<Schema>(db: Kysely<Schema>, roles: readonly string[]
   return rows[0]?.present === true;
 }
 
+/**
+ * Whether this database or either role has a connection limit of its own. The
+ * owner can set one on its database, and Postgres answers it with the same
+ * "too many connections" as a full server, which the check treats as a warning
+ * for a time (schema-check.ts): so setting one is a change this check names.
+ */
+async function connectionLimits<Schema>(db: Kysely<Schema>, roles: readonly string[]): Promise<boolean> {
+  const { rows } = await sql<PresentRow>`
+    select (
+      exists (
+        select from pg_catalog.pg_database d
+        where d.datname = pg_catalog.current_database() and d.datconnlimit <> -1
+      )
+      or exists (
+        select from pg_catalog.pg_roles r
+        where r.rolname = any(${sql.val([...roles])}::text[]) and r.rolconnlimit <> -1
+      )
+    ) as present
+  `.execute(db);
+  return rows[0]?.present === true;
+}
+
 const quoted = (name: string): string => `"${name}"`;
 
 type FillInSweep = NonNullable<SchemaPolicy['fillInTables'][string]['sweptAfter']>;
@@ -1422,7 +1444,27 @@ export async function liveSchemaProblems<Schema>(
     fixedAtCreation = {},
   }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
-  const version = await serverVersion(db);
+  // One after another on one connection: this check must not be what fills a full server (run day 5, S168 review).
+  const reading = async (one: Kysely<Schema>) => {
+    const version = await serverVersion(one);
+    return [
+      await relations(one),
+      await schemas(one),
+      await policies(one),
+      await triggers(one),
+      await functions(one),
+      await rules(one),
+      await indexes(one),
+      await grants(one, appRole, version),
+      await publicGrants(one),
+      await columns(one),
+      await updatableColumns(one, appRole),
+      await plantedCasts(one),
+      await roleSettings(one, [appRole, ownerRole]),
+      await foreignKeys(one),
+      await connectionLimits(one, [appRole, ownerRole]),
+    ] as const;
+  };
   const [
     allRelations,
     allSchemas,
@@ -1438,22 +1480,8 @@ export async function liveSchemaProblems<Schema>(
     casts,
     settings,
     allForeignKeys,
-  ] = await Promise.all([
-    relations(db),
-    schemas(db),
-    policies(db),
-    triggers(db),
-    functions(db),
-    rules(db),
-    indexes(db),
-    grants(db, appRole, version),
-    publicGrants(db),
-    columns(db),
-    updatableColumns(db, appRole),
-    plantedCasts(db),
-    roleSettings(db, [appRole, ownerRole]),
-    foreignKeys(db),
-  ]);
+    limited,
+  ] = await db.connection().execute((one) => reading(one));
 
   const globalTables = new Set(Object.keys(policy.globalTables));
   const known = new Set(allRelations.map((relation) => relation.name));
@@ -1508,6 +1536,7 @@ export async function liveSchemaProblems<Schema>(
 
   if (casts) problems.push('the database carries a cast Postgres did not ship');
   if (settings) problems.push('a setting is pinned to this database or to a role');
+  if (limited) problems.push('a connection limit is set on this database or on a role');
 
   return problems.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }

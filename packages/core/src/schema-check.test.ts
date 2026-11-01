@@ -22,7 +22,14 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
   };
 });
 
-const { checkSchemaOnSchedule, OWNER_ROLE, schemaSoundAtStart } = await import('./schema-check.ts');
+const schemaCheck = await import('./schema-check.ts');
+const { createFullServerWatch, OWNER_ROLE, schemaSoundAtStart } = schemaCheck;
+/** A watch that has never met a full server, for the runs that don't. */
+const checkSchemaOnSchedule = (asked: Parameters<typeof schemaCheck.checkSchemaOnSchedule>[0]) =>
+  schemaCheck.checkSchemaOnSchedule(
+    asked,
+    createFullServerWatch(1_000, () => 0),
+  );
 const { AUTHORITY_TABLES } = await import('./authority-tables.ts');
 
 function logger(): { capture: LogCapture; logger: ReturnType<typeof testLogger> } {
@@ -154,6 +161,200 @@ describe('on a scheduled run', () => {
     const log = logger();
     await expect(checkSchemaOnSchedule(options(log))).resolves.toBeUndefined();
     expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'db.schema_unreadable']);
+  });
+});
+
+describe('a server with every connection in use (decision 3)', () => {
+  const full = () => Object.assign(new Error('sorry, too many clients already'), { code: '53300' });
+  const WAIT = { limitMs: 1_000, retryMs: 1 };
+  const events = (log: ReturnType<typeof logger>) => log.capture.lines().map((line) => [line.level, line.event]);
+  const WARNED = ['warn', 'db.schema_check_full_server'];
+  const ALARM = [
+    ['error', 'audit.integrity_failed'],
+    ['error', 'db.schema_unreadable'],
+  ];
+
+  it('at start, warns and asks again until the server answers: no alarm', async () => {
+    let asks = 0;
+    guard.result = (): Promise<string[]> => {
+      asks += 1;
+      return asks < 3 ? Promise.reject(full()) : Promise.resolve([]);
+    };
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log), WAIT)).toBe(true);
+    expect(events(log)).toEqual([WARNED, WARNED, ['info', 'db.schema_checked']]);
+  });
+
+  it('at start, a server still full past the limit is the alarm, and the start is refused', async () => {
+    guard.result = (): Promise<string[]> => Promise.reject(full());
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log), { limitMs: 0, retryMs: 1 })).toBe(false);
+    expect(events(log)).toEqual(ALARM);
+    expect(log.capture.lines()[0]).toMatchObject({ check: 'schema', when: 'start', reason: 'unreadable' });
+  });
+
+  it('at start, drift found after the wait is the alarm', async () => {
+    let asks = 0;
+    guard.result = (): Promise<string[]> => {
+      asks += 1;
+      return asks < 2 ? Promise.reject(full()) : Promise.resolve(['audit.events carries a rewrite rule']);
+    };
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log), WAIT)).toBe(false);
+    expect(events(log)).toEqual([WARNED, ['error', 'audit.integrity_failed']]);
+  });
+
+  it('at start, a stop during the wait ends it at once, with no alarm', async () => {
+    const stopping = new AbortController();
+    guard.result = (): Promise<string[]> => {
+      setTimeout(() => {
+        stopping.abort();
+      }, 10);
+      return Promise.reject(full());
+    };
+    const log = logger();
+    const started = performance.now();
+    const sound = await schemaSoundAtStart(
+      { ...options(log), signal: stopping.signal },
+      { limitMs: 60_000, retryMs: 60_000 },
+    );
+    expect(sound).toBe(false);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(events(log)).toEqual([WARNED]);
+  });
+
+  it('at start, a stop just before the wait ends it at once too', async () => {
+    const stopping = new AbortController();
+    const refusal = {
+      then: (_resolve: unknown, reject: (error: Error) => void) => {
+        reject(full());
+        stopping.abort();
+      },
+    } as unknown as Promise<string[]>;
+    guard.result = (): Promise<string[]> => refusal;
+    const log = logger();
+    const started = performance.now();
+    const sound = await schemaSoundAtStart(
+      { ...options(log), signal: stopping.signal },
+      { limitMs: 60_000, retryMs: 60_000 },
+    );
+    expect(sound).toBe(false);
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
+
+  it('any other refusal at start is the alarm at once, never a wait', async () => {
+    let asks = 0;
+    guard.result = (): Promise<string[]> => {
+      asks += 1;
+      return Promise.reject(Object.assign(new Error('permission denied'), { code: '42501' }));
+    };
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log), WAIT)).toBe(false);
+    expect(asks).toBe(1);
+    expect(events(log)).toEqual(ALARM);
+  });
+
+  it('on the schedule, warns within the limit, then is the alarm, and repeats the alarm while it lasts', async () => {
+    guard.result = (): Promise<string[]> => Promise.reject(full());
+    let time = 0;
+    const watch = createFullServerWatch(100, () => time);
+    const log = logger();
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    time = 99;
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    expect(events(log)).toEqual([WARNED, WARNED]);
+    time = 100;
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    expect(events(log)).toEqual([WARNED, WARNED, ...ALARM]);
+    expect(log.capture.lines()[2]).toMatchObject({ check: 'schema', when: 'running', reason: 'unreadable' });
+    time = 500;
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    expect(events(log)).toEqual([WARNED, WARNED, ...ALARM, ...ALARM]);
+  });
+
+  it.each([
+    ['a clean check', () => Promise.resolve([])],
+    ['another failure', () => Promise.reject(new Error('connection reset'))],
+  ])('on the schedule, %s ends the stretch: the limit counts afresh', async (_, between) => {
+    let time = 0;
+    const watch = createFullServerWatch(100, () => time);
+    const log = logger();
+    guard.result = (): Promise<string[]> => Promise.reject(full());
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    time = 90;
+    guard.result = between;
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    time = 150;
+    guard.result = (): Promise<string[]> => Promise.reject(full());
+    const seen = log.capture.lines().length;
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    expect(
+      log.capture
+        .lines()
+        .slice(seen)
+        .map(({ event }) => event),
+    ).toEqual(['db.schema_check_full_server']);
+  });
+
+  it('on the schedule, a stop raises nothing and leaves the stretch running', async () => {
+    let time = 0;
+    const watch = createFullServerWatch(100, () => time);
+    const log = logger();
+    guard.result = (): Promise<string[]> => Promise.reject(full());
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    const stopping = new AbortController();
+    stopping.abort();
+    time = 100;
+    await schemaCheck.checkSchemaOnSchedule({ ...options(log), signal: stopping.signal }, watch);
+    expect(events(log)).toEqual([WARNED]);
+    await schemaCheck.checkSchemaOnSchedule(options(log), watch);
+    expect(events(log)).toEqual([WARNED, ...ALARM]);
+  });
+});
+
+describe('asking for the first connection on a full server', () => {
+  const full = () => Object.assign(new Error('sorry, too many clients already'), { code: '53300' });
+
+  it('warns and asks again until it answers', async () => {
+    let asks = 0;
+    const log = logger();
+    const answer = await schemaCheck.whileServerFull(
+      () => {
+        asks += 1;
+        return asks < 3 ? Promise.reject(full()) : Promise.resolve('connected');
+      },
+      log.logger,
+      { limitMs: 1_000, retryMs: 1 },
+    );
+    expect(answer).toBe('connected');
+    expect(log.capture.lines()).toMatchObject([
+      { level: 'warn', event: 'db.schema_check_full_server', when: 'connecting' },
+      { level: 'warn', event: 'db.schema_check_full_server', when: 'connecting' },
+    ]);
+  });
+
+  it('gives its failure to the caller past the limit', async () => {
+    const log = logger();
+    await expect(
+      schemaCheck.whileServerFull(() => Promise.reject(full()), log.logger, { limitMs: 0, retryMs: 1 }),
+    ).rejects.toThrow('too many clients');
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('gives any other failure to the caller at once', async () => {
+    let asks = 0;
+    const log = logger();
+    await expect(
+      schemaCheck.whileServerFull(
+        () => {
+          asks += 1;
+          return Promise.reject(new Error('password authentication failed'));
+        },
+        log.logger,
+        { limitMs: 1_000, retryMs: 1 },
+      ),
+    ).rejects.toThrow('password');
+    expect(asks).toBe(1);
   });
 });
 

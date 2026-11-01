@@ -615,6 +615,59 @@ describe('what the database owner can really do', () => {
     }
   });
 
+  /** Sets this database's connection limit: fixed text, so each limit a test needs has its own. */
+  const LIMIT_OF_FIFTY = `do $$ begin execute pg_catalog.format('alter database %I connection limit 50', pg_catalog.current_database()); end $$`;
+  const NO_LIMIT = `do $$ begin execute pg_catalog.format('alter database %I connection limit -1', pg_catalog.current_database()); end $$`;
+  /** What is open now, plus one; and what is open now, so no ordinary role gets another. */
+  const ONE_LEFT = `do $$ begin execute pg_catalog.format('alter database %I connection limit %s', pg_catalog.current_database(), (select pg_catalog.count(*) + 1 from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database())); end $$`;
+  const NONE_LEFT = `do $$ begin execute pg_catalog.format('alter database %I connection limit %s', pg_catalog.current_database(), (select pg_catalog.count(*) from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database())); end $$`;
+  const NAMED = 'a connection limit is set on this database or on a role';
+
+  it('sees a connection limit on the database, which answers as a full server would', async () => {
+    await owner.query(LIMIT_OF_FIFTY);
+    try {
+      expect(await problems()).toContain(NAMED);
+    } finally {
+      await owner.query(NO_LIMIT);
+    }
+    expect(await problems()).not.toContain(NAMED);
+  });
+
+  describe('on a server with one connection left, and with none', () => {
+    /** A pool that may hold twenty, opened once the limit is set. */
+    const pooled = () =>
+      createDatabase(
+        { ...database.connection('app'), tls: 'disable', applicationName: 'one-left', maxConnections: 20 },
+        createLogger({
+          service: 'test',
+          config: { environment: 'test', release: 'r-1', log: { level: 'error', eventCapPerMinute: 1000 } },
+          destination: { write: () => undefined },
+        }),
+      );
+
+    it('reads on the one connection left: it never asks for a second', async () => {
+      const pool = pooled();
+      await owner.query(ONE_LEFT);
+      try {
+        await expect(liveSchemaProblems(pool, ROLES)).resolves.toContain(NAMED);
+      } finally {
+        await owner.query(NO_LIMIT);
+        await pool.destroy();
+      }
+    });
+
+    it("gives Postgres's own refusal, unchanged, when there is none: what the check's warning goes by", async () => {
+      const pool = pooled();
+      await owner.query(NONE_LEFT);
+      try {
+        await expect(liveSchemaProblems(pool, ROLES)).rejects.toMatchObject({ code: '53300' });
+      } finally {
+        await owner.query(NO_LIMIT);
+        await pool.destroy();
+      }
+    });
+  });
+
   it('sees a new table that carries no tenant wall at all', async () => {
     // A table the policy has never heard of: not a listed global table, so it
     // must carry org_id and the walls, and it carries none of them.
