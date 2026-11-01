@@ -109,11 +109,12 @@ export interface AnchorCheckOptions {
 const CHANGED_DATABASE = new Set(['42501', '42P01', '42703']);
 
 /**
- * How many organisations a list may hold before it is read as padded: far past
- * any real list (4D2e: 10k accounts at launch, each individual an organisation,
- * and entries are never deleted), and small enough to hold in memory.
+ * How many organisations a list may hold before it is read as padded. Each one
+ * this process has seen holds about 885 bytes for its life (measured, S168), so
+ * 100,000 is about 88 MB, which the API's 1 GiB can carry; a million would not
+ * fit. Ten times the 10k accounts we plan for (4D2e); entries are never deleted.
  */
-export const MOST_ORGANIZATIONS = 1_000_000;
+export const MOST_ORGANIZATIONS = 100_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

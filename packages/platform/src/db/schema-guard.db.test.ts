@@ -615,6 +615,55 @@ describe('what the database owner can really do', () => {
     }
   });
 
+  it('sees a connection limit on the database, which answers as a full server would', async () => {
+    const limit = (to: number) =>
+      owner.query(
+        `do $$ begin execute pg_catalog.format('alter database %I connection limit ${String(to)}', pg_catalog.current_database()); end $$`,
+      );
+    await limit(50);
+    try {
+      expect(await problems()).toContain('a connection limit is set on this database or on a role');
+    } finally {
+      await limit(-1);
+    }
+    expect(await problems()).not.toContain('a connection limit is set on this database or on a role');
+  });
+
+  describe('on a server with one connection left, and with none', () => {
+    const NAMED = 'a connection limit is set on this database or on a role';
+    /** Sets the database's limit to what is open now, plus `room`, and opens a pool that may hold twenty. */
+    const withRoom = async <T>(room: number, work: (pool: Kysely<unknown>) => Promise<T>): Promise<T> => {
+      const pool = createDatabase(
+        { ...database.connection('app'), tls: 'disable', applicationName: 'one-left', maxConnections: 20 },
+        createLogger({
+          service: 'test',
+          config: { environment: 'test', release: 'r-1', log: { level: 'error', eventCapPerMinute: 1000 } },
+          destination: { write: () => undefined },
+        }),
+      );
+      await owner.query(
+        `do $$ begin execute pg_catalog.format('alter database %I connection limit %s', pg_catalog.current_database(),
+          (select pg_catalog.count(*) + ${String(room)} from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database())); end $$`,
+      );
+      try {
+        return await work(pool);
+      } finally {
+        await owner.query(
+          `do $$ begin execute pg_catalog.format('alter database %I connection limit -1', pg_catalog.current_database()); end $$`,
+        );
+        await pool.destroy();
+      }
+    };
+
+    it('reads on the one connection left: it never asks for a second', async () => {
+      await expect(withRoom(1, (pool) => liveSchemaProblems(pool, ROLES))).resolves.toContain(NAMED);
+    });
+
+    it("gives Postgres's own refusal, unchanged, when there is none: what the check's warning goes by", async () => {
+      await expect(withRoom(0, (pool) => liveSchemaProblems(pool, ROLES))).rejects.toMatchObject({ code: '53300' });
+    });
+  });
+
   it('sees a new table that carries no tenant wall at all', async () => {
     // A table the policy has never heard of: not a listed global table, so it
     // must carry org_id and the walls, and it carries none of them.

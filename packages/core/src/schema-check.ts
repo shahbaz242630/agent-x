@@ -22,8 +22,11 @@
 // raised a false tamper alarm on run day 5. Only Postgres's own "too many
 // connections" counts: anything else that stops the read is still the alarm at
 // once. It becomes the alarm too if it lasts: at start past FULL_SERVER_START_MS,
-// and on the schedule past the watch's limit, so filling the server can delay
-// the alarm and never silence it.
+// and on the schedule past the watch's limit, so filling the server delays the
+// alarm. A server too full to give the process its first connection stops the
+// start earlier, as whileServerFull says: nothing is served, and the error line
+// raises its own alert. A connection limit set on the database or a role answers
+// the same way, so the guard names that as drift (schema-guard.ts).
 import { type Database, liveSchemaProblems, type SchemaProblem } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -194,6 +197,29 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
       { once: true },
     );
   });
+}
+
+/**
+ * `ask`'s answer, asking again while the server has no connection to give, up to
+ * the same limit. Past it, or on any other failure, its error goes to the caller,
+ * which refuses the start: for the first connection a process needs, before the
+ * check can run at all.
+ */
+export async function whileServerFull<T>(
+  ask: () => Promise<T>,
+  logger: Logger,
+  { limitMs = FULL_SERVER_START_MS, retryMs = FULL_SERVER_RETRY_MS }: FullServerWait = {},
+): Promise<T> {
+  const started = performance.now();
+  for (;;) {
+    try {
+      return await ask();
+    } catch (error) {
+      if (!fullServer(error) || performance.now() - started >= limitMs) throw error;
+      logger.warn('db.schema_check_full_server', { when: 'connecting', err: error });
+    }
+    await pause(retryMs, undefined);
+  }
 }
 
 /**

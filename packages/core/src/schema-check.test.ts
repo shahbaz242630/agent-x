@@ -312,6 +312,52 @@ describe('a server with every connection in use (decision 3)', () => {
   });
 });
 
+describe('asking for the first connection on a full server', () => {
+  const full = () => Object.assign(new Error('sorry, too many clients already'), { code: '53300' });
+
+  it('warns and asks again until it answers', async () => {
+    let asks = 0;
+    const log = logger();
+    const answer = await schemaCheck.whileServerFull(
+      () => {
+        asks += 1;
+        return asks < 3 ? Promise.reject(full()) : Promise.resolve('connected');
+      },
+      log.logger,
+      { limitMs: 1_000, retryMs: 1 },
+    );
+    expect(answer).toBe('connected');
+    expect(log.capture.lines()).toMatchObject([
+      { level: 'warn', event: 'db.schema_check_full_server', when: 'connecting' },
+      { level: 'warn', event: 'db.schema_check_full_server', when: 'connecting' },
+    ]);
+  });
+
+  it('gives its failure to the caller past the limit', async () => {
+    const log = logger();
+    await expect(
+      schemaCheck.whileServerFull(() => Promise.reject(full()), log.logger, { limitMs: 0, retryMs: 1 }),
+    ).rejects.toThrow('too many clients');
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('gives any other failure to the caller at once', async () => {
+    let asks = 0;
+    const log = logger();
+    await expect(
+      schemaCheck.whileServerFull(
+        () => {
+          asks += 1;
+          return Promise.reject(new Error('password authentication failed'));
+        },
+        log.logger,
+        { limitMs: 1_000, retryMs: 1 },
+      ),
+    ).rejects.toThrow('password');
+    expect(asks).toBe(1);
+  });
+});
+
 describe('the deadline', () => {
   it('ends a read that never answers, rather than leaving the run pending for ever', async () => {
     // Without this, a database that accepts the read and stalls would hold the
