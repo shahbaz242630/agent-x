@@ -108,8 +108,12 @@ export interface AnchorCheckOptions {
  */
 const CHANGED_DATABASE = new Set(['42501', '42P01', '42703']);
 
-/** How many organisations a list may hold before it is read as padded: each run checks them one by one. */
-const MOST_ORGANIZATIONS = 10_000;
+/**
+ * How many organisations a list may hold before it is read as padded: far past
+ * any real list (4D2e: 10k accounts at launch, each individual an organisation,
+ * and entries are never deleted), and small enough to hold in memory.
+ */
+export const MOST_ORGANIZATIONS = 1_000_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

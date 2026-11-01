@@ -12,6 +12,7 @@ import {
   type AnchorCheck,
   type CheckedChain,
   createAnchorCheck,
+  MOST_ORGANIZATIONS,
   type OrganisationChains,
   scheduleAnchorCheck,
 } from './anchor-check.ts';
@@ -644,7 +645,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
   });
 
   it('takes a list of the most organisations it allows', async () => {
-    const { organizations, verified } = directory([Array.from({ length: 10_000 }, () => ORG)]);
+    const { organizations, verified } = directory([Array.from({ length: MOST_ORGANIZATIONS }, () => ORG)]);
     const { check } = checking([], undefined, organizations);
     await check.run();
 
@@ -694,7 +695,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     ['an ID with more after it', [`${ORG}0`]],
     ['an ID with more before it', [`x${ORG}`]],
     ['an entry that is not an ID', [ORG, 'not-an-id']],
-    ['more organisations than any real list', Array.from({ length: 10_001 }, () => ORG)],
+    ['more organisations than any real list', Array.from({ length: MOST_ORGANIZATIONS + 1 }, () => ORG)],
   ])('raises the alarm for a list holding %s, and checks none of it', async (_, list) => {
     const { organizations, verified } = directory([list]);
     const { check, events } = checking([], undefined, organizations);

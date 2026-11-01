@@ -16,6 +16,14 @@
 // the SEV-1 alert rule A2c-2 installed already matches, so this needs no new
 // alert. The problems name rules and objects, never a value read from the
 // database, so the alarm can't carry tampered text into the log.
+//
+// **A server with every connection in use is a warning first (partner decision
+// 3, S168).** Two copies of the API overlapping in a restart fill it, and that
+// raised a false tamper alarm on run day 5. Only Postgres's own "too many
+// connections" counts: anything else that stops the read is still the alarm at
+// once. It becomes the alarm too if it lasts: at start past FULL_SERVER_START_MS,
+// and on the schedule past the watch's limit, so filling the server can delay
+// the alarm and never silence it.
 import { type Database, liveSchemaProblems, type SchemaProblem } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -43,6 +51,15 @@ export interface SchemaCheckOptions<Schema = unknown> {
   /** Ends the check at once when the process is stopping. */
   readonly signal?: AbortSignal | undefined;
 }
+
+/** Postgres's answer when every connection is in use (`too_many_connections`). */
+const TOO_MANY_CONNECTIONS = '53300';
+
+/** How long a start keeps asking a full server before that is the alarm: longer than two copies overlap in a restart. */
+const FULL_SERVER_START_MS = 60_000;
+
+/** How long a start waits between asks. */
+const FULL_SERVER_RETRY_MS = 5_000;
 
 /**
  * The default deadline. These are a dozen reads of system catalogues; a server
@@ -99,7 +116,11 @@ type SchemaCheckOutcome =
   | { readonly kind: 'clean' }
   | { readonly kind: 'drift'; readonly problems: readonly SchemaProblem[] }
   | { readonly kind: 'unreadable'; readonly error: unknown }
+  | { readonly kind: 'full'; readonly error: unknown }
   | { readonly kind: 'stopped' };
+
+const fullServer = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === TOO_MANY_CONNECTIONS;
 
 /**
  * Reads the live catalogue once, within its deadline. It never throws: a
@@ -145,8 +166,29 @@ async function checkSchema<Schema>({
     // the process began stopping just after (the API's anchor-check.ts draws
     // the same line).
     if (error instanceof Stopped) return { kind: 'stopped' };
-    return { kind: 'unreadable', error };
+    return fullServer(error) ? { kind: 'full', error } : { kind: 'unreadable', error };
   }
+}
+
+/** How long a start keeps asking a full server, and how often: the defaults but in tests. */
+interface FullServerWait {
+  readonly limitMs?: number;
+  readonly retryMs?: number;
+}
+
+/** Resolves after `ms`, or at once when the process stops: the check after it then says so. */
+function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 /**
@@ -155,8 +197,17 @@ async function checkSchema<Schema>({
  * unreadable catalogue has already been logged, and one because the process
  * was stopped needs no line.
  */
-export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Schema>): Promise<boolean> {
-  const outcome = await checkSchema(options);
+export async function schemaSoundAtStart<Schema>(
+  options: SchemaCheckOptions<Schema>,
+  { limitMs = FULL_SERVER_START_MS, retryMs = FULL_SERVER_RETRY_MS }: FullServerWait = {},
+): Promise<boolean> {
+  const started = performance.now();
+  let outcome = await checkSchema(options);
+  while (outcome.kind === 'full' && performance.now() - started < limitMs) {
+    options.logger.warn('db.schema_check_full_server', { when: 'start', err: outcome.error });
+    await pause(retryMs, options.signal);
+    outcome = await checkSchema(options);
+  }
   if (outcome.kind === 'clean') {
     options.logger.info('db.schema_checked', { problems: 0 });
     return true;
@@ -171,17 +222,47 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
  * The check on the API's scheduled run. It raises the alarm and returns; the
  * API keeps serving, for the reason in this file's header.
  */
-export async function checkSchemaOnSchedule<Schema>(options: SchemaCheckOptions<Schema>): Promise<void> {
+export async function checkSchemaOnSchedule<Schema>(
+  options: SchemaCheckOptions<Schema>,
+  watch: FullServerWatch,
+): Promise<void> {
   const outcome = await checkSchema(options);
-  if (outcome.kind === 'clean' || outcome.kind === 'stopped') return;
-  raiseSchemaAlarm(options.logger, 'running', outcome);
+  if (outcome.kind === 'stopped') return;
+  if (outcome.kind === 'full' && watch.withinLimit()) {
+    options.logger.warn('db.schema_check_full_server', { when: 'running', err: outcome.error });
+    return;
+  }
+  // A check that reached the catalogue, or failed for anything else, ends the full server's stretch.
+  if (outcome.kind !== 'full') watch.ended();
+  if (outcome.kind !== 'clean') raiseSchemaAlarm(options.logger, 'running', outcome);
+}
+
+/** How long a running check has met a full server in a row. */
+export interface FullServerWatch {
+  /** One more check met it: whether its stretch is still within the limit. */
+  withinLimit(): boolean;
+  ended(): void;
+}
+
+/** A watch whose limit counts from the first check to meet a full server. */
+export function createFullServerWatch(limitMs: number, now: () => number): FullServerWatch {
+  let since: number | undefined;
+  return {
+    withinLimit() {
+      since ??= now();
+      return now() - since < limitMs;
+    },
+    ended() {
+      since = undefined;
+    },
+  };
 }
 
 /** The alarm for drift or an unreadable catalogue, at start-up or on the scheduled run. */
 function raiseSchemaAlarm(
   logger: Logger,
   when: 'start' | 'running',
-  outcome: Extract<SchemaCheckOutcome, { kind: 'drift' | 'unreadable' }>,
+  outcome: Extract<SchemaCheckOutcome, { kind: 'drift' | 'unreadable' | 'full' }>,
 ): void {
   if (outcome.kind === 'drift') {
     logger.error('audit.integrity_failed', { check: 'schema', when, problems: outcome.problems });

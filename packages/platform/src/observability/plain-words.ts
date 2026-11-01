@@ -244,6 +244,11 @@ export const PLAIN_WORDS = {
     broke: 'That request was told busy, send again; that cannot do it twice. Other organisations carried on.',
     next: "Nothing to do if rare. If often, look at what that organisation's agents send or hold.",
   },
+  'db.schema_check_full_server': {
+    happened: "The database's routine security check could not run: every connection was in use.",
+    broke: 'Nothing yet: it is tried again. If it lasts too long, it becomes the integrity alarm.',
+    next: 'Nothing to do if it passes, as in a restart. If it repeats, look at what holds the connections.',
+  },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',
     broke:

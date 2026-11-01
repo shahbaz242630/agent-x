@@ -72,7 +72,7 @@ import { type ActivityExportTables, type ActivityTables, createActivityLog } fro
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
-import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
+import { checkSchemaOnSchedule, createFullServerWatch, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import {
@@ -862,13 +862,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // The schema is checked on the same schedule as the chains, so the two share
   // one timer and one pace (the retention sweep has its own, below). It runs first: a chain read through rewritten walls is
   // worth less than knowing the walls were rewritten.
+  // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
+  const fullServer = createFullServerWatch(config.audit.anchorSeconds * 3 * 1000, () => systemClock.now().getTime());
   const anchorCheck = scheduleAnchorCheck(
     {
       async run(signal?: AbortSignal): Promise<void> {
         // Within its own deadline and ending at once when the API stops, so a
         // database that accepts a read and never answers cannot hold the
         // schedule open and silence every later check.
-        await checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal });
+        await checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal }, fullServer);
         if (signal?.aborted === true) return;
         await anchors.run(signal);
       },
