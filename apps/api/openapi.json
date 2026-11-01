@@ -537,7 +537,7 @@
                   {
                     "type": "string",
                     "const": "PLATFORM_BUSY",
-                    "description": "Agent X is running as many payment requests as it can right now, so this one waited too long and wasn't made. Your organisation is within its limits. Wait the number of seconds in the Retry-After header, then send the same request again with the same Idempotency-Key."
+                    "description": "Agent X as a whole has as much work in progress as it can take right now, so this request waited too long. Wait the number of seconds in the Retry-After header, then send the same request again, with the same Idempotency-Key if it has one: it won't be done twice."
                   },
                   {
                     "type": "string",

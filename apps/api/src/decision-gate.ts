@@ -2,8 +2,11 @@
 // organisation's trouble must never touch another's speed. At most so many of an
 // agent's decisions run at once in this process, at most so many of those any one
 // organisation's, the rest waiting here, holding no connection, for a bounded time.
-// A slot lasts the whole request, retries included. So a decision let in is never
+// A slot lasts the whole decision, retries included. So a decision let in is never
 // refused by the gate later: it can't answer busy once it has committed (S166).
+// The replay of a committed decision gives its slot back, then reads its answer
+// outside the gate, on the organisation's share: so a retry of a committed decision
+// can be answered busy, safely, its key answering as the first did once it is read.
 //
 // When a slot comes free it goes to the organisations in turn, not to whoever
 // queued first: `ring` holds those with someone waiting and room under their own
@@ -57,6 +60,12 @@ export interface DecisionGate {
   enter(organisation: string): Promise<void>;
   /** Gives a slot back, to whichever organisation's turn it is. */
   leave(organisation: string): void;
+  /**
+   * Whether the organisation's decisions are held here only by the platform being
+   * full: under its own limit, with someone waiting. Whoever waits behind them in
+   * a turn has hit no limit of its organisation's either.
+   */
+  heldByThePlatform(organisation: string): boolean;
   /** The organisations with a slot taken or waited for: none once all are given back, so the memory never grows with organisations seen. */
   organisationsInHand(): number;
 }
@@ -97,6 +106,11 @@ export function createDecisionGate({
 
   return {
     organisationsInHand: () => organisations.size,
+    heldByThePlatform(key) {
+      const organisation = organisations.get(key);
+      // Someone waiting with room under its own limit: only a full platform leaves that.
+      return organisation !== undefined && organisation.active < perOrganisation && organisation.waiting.length > 0;
+    },
     enter(key) {
       let found = organisations.get(key);
       if (found === undefined) {

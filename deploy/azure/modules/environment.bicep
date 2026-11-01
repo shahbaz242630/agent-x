@@ -498,7 +498,8 @@ resource handoffQueueAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
 
 // The whole platform full (4D2e C, PL-63): an agent's decision turned away with
 // its own organisation under its limits, the one case where a limit can slow an
-// organisation that hit nothing. Any one line tells someone. Stateful, as above.
+// organisation that hit nothing, or anything's wait for a connection run out with
+// all of them in use. Any one line tells someone. Stateful, as above.
 resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: platformFullAlertName
   location: location
@@ -506,7 +507,7 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
   kind: 'LogAlert'
   properties: {
     displayName: 'Platform full: payment requests turned away'
-    description: 'SEV-2. Agent X was running as many agent payment requests as it can at once, and one waited too long, with its own organisation under its limits: calm organisations are being slowed, and that request was turned away as busy with nothing saved. Runbook: Incident-Response-Playbook.md section Q.'
+    description: 'SEV-2. Agent X was running as many agent payment requests as it can at once, with the organisation of one turned away under its limits, or every database connection was in use and work waited too long for one: calm organisations are being slowed, and that request was told busy. Runbook: Incident-Response-Playbook.md section Q.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -517,7 +518,7 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.platform_full" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

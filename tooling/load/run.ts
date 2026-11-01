@@ -39,6 +39,8 @@ import {
   DB_CPUS_VARIABLE,
   DELAY_VARIABLE,
   freezeProbeAfterMs,
+  GATE_VARIABLES,
+  LOAD_GATE,
   LEAST_API_CPUS,
   loadConnection,
   type LoadOptions,
@@ -214,12 +216,18 @@ async function neighboursPhase(password: string) {
   }
 }
 
-async function main({ keep, apiCpus, delayMs, dbCpus }: LoadOptions): Promise<number> {
+async function main(options: LoadOptions): Promise<number> {
+  const { keep, apiCpus, delayMs, dbCpus } = options;
   preflight();
   // Read by compose.load.yaml: each docker call below inherits them.
   process.env[API_CPUS_VARIABLE] = String(apiCpus);
   process.env[DELAY_VARIABLE] = String(delayMs);
   process.env[DB_CPUS_VARIABLE] = String(dbCpus);
+  for (const [option, variable] of Object.entries(GATE_VARIABLES)) {
+    const given = options[option as keyof typeof GATE_VARIABLES];
+    if (given === undefined) Reflect.deleteProperty(process.env, variable);
+    else process.env[variable] = String(given);
+  }
   prepare();
   const login = { AGENTX_LOAD_DB_PASSWORD: localLogin('AGENTX_LOCAL_DB_APP_PASSWORD') };
   const at = new Date().toISOString();
@@ -284,6 +292,12 @@ async function main({ keep, apiCpus, delayMs, dbCpus }: LoadOptions): Promise<nu
       phases: all.map(({ result }) => result),
       delayMs,
       dbCpus,
+      gate: {
+        active: options.gateActive ?? LOAD_GATE.active,
+        perOrganisation: options.gatePerOrganisation ?? LOAD_GATE.perOrganisation,
+        waitingPerOrganisation: options.gateWaitingPerOrganisation ?? LOAD_GATE.waitingPerOrganisation,
+        waitMs: options.gateWaitMs ?? LOAD_GATE.waitMs,
+      },
       ...(freezeProbe === undefined ? {} : { freezeProbe }),
       statements: all.map(({ statements }) => statements),
       logs,
@@ -304,7 +318,7 @@ if (import.meta.main) {
     const options = optionsOf(process.argv.slice(2));
     if (options === undefined) {
       throw new LoadRefused(
-        `Run it as \`corepack pnpm load [--keep] [--cpus <n>] [--delay-ms <ms>] [--db-cpus <d>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}, ms a whole number from 0 to ${String(MOST_DELAY_MS)}, d from ${String(LEAST_API_CPUS)} to ${String(MOST_DB_CPUS)}.`,
+        `Run it as \`corepack pnpm load [--keep] [--cpus <n>] [--delay-ms <ms>] [--db-cpus <d>] [--gate-active <a>] [--gate-per-org <p>] [--gate-waiting <w>] [--gate-wait-ms <t>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}, ms a whole number from 0 to ${String(MOST_DELAY_MS)}, d from ${String(LEAST_API_CPUS)} to ${String(MOST_DB_CPUS)}, a and p whole numbers from 1 to 20, w from 1 to 10000, t from 100 to 30000.`,
       );
     }
     process.exitCode = await main(options);

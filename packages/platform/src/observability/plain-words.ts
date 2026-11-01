@@ -239,6 +239,11 @@ export const PLAIN_WORDS = {
     broke: 'The connection is likely lost; closing it undoes the update anyway, so nothing half-done is kept.',
     next: "Look at the update's own error, fix the cause and run the update job again.",
   },
+  'db.pool_wait_ran_out': {
+    happened: 'Every database connection this API holds was in use, and one piece of work waited too long for one.',
+    broke: 'It was told busy, send again; nothing of it began, and sending again cannot do it twice.',
+    next: 'Look at how busy the database is and what holds connections. If it keeps coming, it needs more room.',
+  },
   'db.organisation_busy': {
     happened: "An organisation's agents were using their full share of the database, and one request waited too long.",
     broke: 'That request was told busy, send again; that cannot do it twice. Other organisations carried on.',

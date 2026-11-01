@@ -301,7 +301,8 @@ const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
 
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
-const PLATFORM_FULL_LINES = 'where tostring(parse_json(Log).event) == "spend_request.platform_full"';
+const PLATFORM_FULL_LINES =
+  'where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out")';
 
 /** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
 const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
@@ -471,6 +472,11 @@ const LOAD_RUN = {
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '50000',
     AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: '50000',
     AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000',
+    // The fair gate's numbers it is measured at (tooling/load/plan.ts's LOAD_GATE).
+    AGENTX_DECISION_GATE_ACTIVE: '20',
+    AGENTX_DECISION_GATE_PER_ORGANISATION: '6',
+    AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: '100',
+    AGENTX_DECISION_GATE_WAIT_MS: '10000',
   } as Readonly<Record<string, string>>,
 };
 
@@ -2760,7 +2766,7 @@ const platformFullAlert: Check = (snapshot, _expected, add) => {
         rule: 'platform-full-alert',
         resource: environment.name,
         message:
-          "needs an enabled alert on this deployment's workspace that fires on any spend_request.platform_full line, watching every window and firing on the first",
+          "needs an enabled alert on this deployment's workspace that fires on any spend_request.platform_full or db.pool_wait_ran_out line, watching every window and firing on the first",
       });
     }
   }

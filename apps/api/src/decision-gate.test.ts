@@ -372,6 +372,41 @@ describe('the fair gate (4D2e C, PL-63)', () => {
     expect(granted).toEqual(['a', 'b']);
   });
 
+  it('says the platform holds an organisation only while full, with it under its limit and someone waiting', async () => {
+    const { gate, enter } = gateWith({ active: 2, perOrganisation: 2 });
+    const held = () => gate.heldByThePlatform('calm');
+    expect(held()).toBe(false);
+    void enter('busy');
+    void enter('calm');
+    await settled();
+    // At the total, but no one of its waiting.
+    expect(held()).toBe(false);
+    void enter('busy');
+    await settled();
+    expect(held()).toBe(false);
+    void enter('calm');
+    await settled();
+    expect(held()).toBe(true);
+    // Room again, and everyone let in: held by nothing.
+    gate.leave('busy');
+    gate.leave('calm');
+    await settled();
+    expect(held()).toBe(false);
+  });
+
+  it('never says the platform holds one at its own limit, the platform full too, or under it with room', async () => {
+    const { gate, enter } = gateWith({ active: 3, perOrganisation: 1 });
+    void enter('a');
+    void enter('a');
+    await settled();
+    // Waiting, under no limit but its own, with room on the platform.
+    expect(gate.heldByThePlatform('a')).toBe(false);
+    void enter('b');
+    void enter('c');
+    await settled();
+    expect(gate.heldByThePlatform('a')).toBe(false);
+  });
+
   it('says what stopped it', () => {
     expect(new DecisionGateRefused('platform', 7).message).toBe(
       "A decision was turned away after 7 ms at the gate, by the platform's limit",

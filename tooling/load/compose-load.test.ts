@@ -12,7 +12,9 @@ import {
   DB_CPUS_VARIABLE,
   DELAY_VARIABLE,
   freezeProbeAfterMs,
+  GATE_VARIABLES,
   LOAD_DB_PORT,
+  LOAD_GATE,
   loadConnection,
   loadOrgName,
   optionsOf,
@@ -144,6 +146,36 @@ describe('the load stack (compose.load.yaml)', () => {
         delayMs: 2,
         dbCpus: 2,
       });
+    });
+
+    it('runs the fair gate at the wide numbers unless told, each option reaching its own variable, within what the API takes', () => {
+      const environment = services.api?.environment;
+      expect(environment?.AGENTX_DECISION_GATE_ACTIVE).toBe(
+        `\${${GATE_VARIABLES.gateActive}:-${String(LOAD_GATE.active)}}`,
+      );
+      expect(environment?.AGENTX_DECISION_GATE_PER_ORGANISATION).toBe(
+        `\${${GATE_VARIABLES.gatePerOrganisation}:-${String(LOAD_GATE.perOrganisation)}}`,
+      );
+      expect(environment?.AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION).toBe(
+        `\${${GATE_VARIABLES.gateWaitingPerOrganisation}:-${String(LOAD_GATE.waitingPerOrganisation)}}`,
+      );
+      expect(environment?.AGENTX_DECISION_GATE_WAIT_MS).toBe(
+        `\${${GATE_VARIABLES.gateWaitMs}:-${String(LOAD_GATE.waitMs)}}`,
+      );
+      expect(
+        optionsOf(['--gate-active', '12', '--gate-per-org', '3', '--gate-waiting', '8', '--gate-wait-ms', '2000']),
+      ).toMatchObject({ gateActive: 12, gatePerOrganisation: 3, gateWaitingPerOrganisation: 8, gateWaitMs: 2_000 });
+      for (const bad of [
+        ['--gate-active', '0'],
+        ['--gate-active', '21'],
+        ['--gate-active', '2.5'],
+        ['--gate-per-org', '21'],
+        ['--gate-waiting', '10001'],
+        ['--gate-wait-ms', '99'],
+        ['--gate-wait-ms', '30001'],
+      ]) {
+        expect(optionsOf(bad), bad.join(' ')).toBeUndefined();
+      }
     });
 
     it('asks the freeze near the end of a phase, in the wiring run too, with room for its wait', () => {

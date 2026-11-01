@@ -1,7 +1,7 @@
 import { REASON_CODES } from '@agentx/core/shared-kernel';
 import { describe, expect, it } from 'vitest';
 
-import { OrganisationBusy } from '@agentx/platform/db';
+import { OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 
 import { errorBody, IntegrityFailure, responseFor } from './errors.ts';
 
@@ -32,6 +32,16 @@ describe('SEC-DATA-04 an error response carries a reason code, never the error',
 
   it('sends a record a shared helper can’t believe as 503 INTEGRITY_FAILED, never a plain 500', () => {
     expect(responseFor(new OrganisationBusy(10_000))).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
+    expect(responseFor(new PoolWaitRanOut(new Error('x')))).toEqual({ status: 503, code: 'PLATFORM_BUSY' });
+    // Only that: a database that is down stays what it was.
+    expect(responseFor(new Error('Connection terminated due to connection timeout'))).toEqual({
+      status: 500,
+      code: 'INTERNAL_ERROR',
+    });
+    expect(responseFor(Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' }))).toEqual({
+      status: 500,
+      code: 'INTERNAL_ERROR',
+    });
     expect(responseFor(Object.assign(new Error('lock timeout'), { code: '55P03' }))).toEqual({
       status: 503,
       code: 'ORGANISATION_BUSY',

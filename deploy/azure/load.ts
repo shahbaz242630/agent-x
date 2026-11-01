@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { agentsOf, LATER_PHASES } from '../../tooling/load/job.ts';
 import type { FreezeProbed } from '../../tooling/load/freeze-probe.ts';
 import { apartOrgsOf, type LogSummary, logFailures, summariseLogs, troubleWindowOf } from '../../tooling/load/logs.ts';
-import { orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
+import { LOAD_GATE, orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
 import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
@@ -563,6 +563,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
     smoke,
     phases,
     logs,
+    gate: LOAD_GATE,
     ...(freezeProbe === undefined ? {} : { freezeProbe }),
     databaseChecksPassed: checked !== undefined && checkProblems(checked).length === 0,
     failures,

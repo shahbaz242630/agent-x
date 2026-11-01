@@ -42,6 +42,8 @@ import {
   createOrganisationShares,
   isAgentTraffic,
   OrganisationBusy,
+  POOL_WAIT_WORDS,
+  PoolWaitRanOut,
   type OrganisationShares,
 } from './organisation-shares.ts';
 import { UUID } from './patterns.ts';
@@ -568,7 +570,7 @@ class CheckedConnection implements DatabaseConnection {
       this.#taken().release(true);
       this.#client = undefined;
       this.#logger.error('db.tenant.leftover_discarded', { attempt, problem: answer.problem });
-      if (attempt < this.#attempts) this.#client = await timedPoolWait(() => this.#pool.connect());
+      if (attempt < this.#attempts) this.#client = await connectionFrom(this.#pool, this.#logger);
     }
     throw new TenantContextError(`no sound connection after ${String(this.#attempts)} tries`);
   }
@@ -615,6 +617,17 @@ export async function readAloneOnOneTrip<Schema, Row>(
   return rows;
 }
 
+/** A connection from the pool, with a full pool's wait run out said as such, its own line (S161: busy, never a 500). */
+async function connectionFrom(pool: pg.Pool, logger: Logger): Promise<pg.PoolClient> {
+  try {
+    return await timedPoolWait(() => pool.connect());
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== POOL_WAIT_WORDS) throw error;
+    logger.warn('db.pool_wait_ran_out');
+    throw new PoolWaitRanOut(error);
+  }
+}
+
 /** Kysely's driver for the pool, each connection checked and each transaction opened and closed as above. */
 class CheckedDriver implements Driver {
   readonly #pool: pg.Pool;
@@ -636,7 +649,7 @@ class CheckedDriver implements Driver {
   async acquireConnection(): Promise<DatabaseConnection> {
     const leaveShare = await this.#enteredShare();
     try {
-      const client = await timedPoolWait(() => this.#pool.connect());
+      const client = await connectionFrom(this.#pool, this.#logger);
       return new CheckedConnection(this.#pool, this.#logger, this.#attempts, client, leaveShare);
     } catch (error) {
       leaveShare();

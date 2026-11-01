@@ -233,6 +233,17 @@ describe('a decision’s way to a connection (4D2e C, PL-62)', () => {
       expect(entry.linesInHand()).toBe(0);
     });
 
+    it('says the platform holds an organisation only behind a full gate, whichever way its ID is written', async () => {
+      const entry = createDecisionEntry({ gate: createDecisionGate({ ...LIMITS, active: 1 }) });
+      const started: string[] = [];
+      void entry.run(asked('agent-1', SUPPLIER, OTHER_ORG), held(started, 'a').work);
+      await settled();
+      expect(entry.heldByThePlatform(ORG)).toBe(false);
+      void entry.run(asked('agent-2', SUPPLIER, ORG), held(started, 'b').work);
+      await settled();
+      expect(entry.heldByThePlatform(ORG.toUpperCase())).toBe(true);
+    });
+
     it('says how long the gate took, and lines an organisation up whichever way its ID is written', async () => {
       vi.useFakeTimers();
       const entry = createDecisionEntry({ gate: createDecisionGate({ ...LIMITS, perOrganisation: 1 }) });

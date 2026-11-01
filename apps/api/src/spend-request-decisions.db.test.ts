@@ -973,7 +973,11 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       ids,
       clock,
       logger: testLogger(capture),
-      entry: { run: () => Promise.reject(new TurnWaitExceeded(7_500)), linesInHand: () => 0 },
+      entry: {
+        run: () => Promise.reject(new TurnWaitExceeded(7_500)),
+        heldByThePlatform: () => false,
+        linesInHand: () => 0,
+      },
     });
 
     expect(await ask(acting, asking(w), 'busy-turn')).toEqual({ outcome: 'refused', status: 503, code: 'AGENT_BUSY' });
@@ -1107,6 +1111,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
     const { w, acting } = await ready();
     decisionsThrough({
       run: (_asked, work) => work({ turnWaitMs: 12.4, supplierTurnWaitMs: 34.4, gateWaitMs: 56.4 }),
+      heldByThePlatform: () => false,
       linesInHand: () => 0,
     });
     const asked = asking(w);
@@ -1167,6 +1172,54 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       expect(decidedOf(await ask(calm.acting, asking(calm.w), 'platform-full')).decision).toBe('ALLOW');
     });
 
+    it('answers a calm organisation’s turn run out behind the full gate as the platform’s, for its supplier’s turn and its agent’s (review)', async () => {
+      const calm = await ready();
+      const theirKey = await shared.secondAgent(registry, calm.w);
+      const gate = createDecisionGate({ active: 1, perOrganisation: 1, waitingPerOrganisation: 8, waitMs: 60_000 });
+      decisionsThrough(
+        createDecisionEntry({
+          gate,
+          turns: createAgentTurns({ perAgent: 1, waitMs: 100 }),
+          perSupplier: 1,
+          supplierWaitMs: 100,
+        }),
+      );
+      const { w, acting } = await ready();
+      const letGo = await supplierHeld(w, w.suppliers[0] ?? '');
+      const holding = within(20_000, ask(acting, asking(w, { amount: AED(10_000n) })), 'the one in the slot');
+      await waitUntilQueued(database.as('admin'), 1);
+
+      // Waiting at the gate, holding its agent's turn and its supplier's, its organisation at none running.
+      const atTheGate = within(20_000, ask(calm.acting, asking(calm.w, { amount: AED(10_000n) })), 'at the gate');
+      while (!gate.heldByThePlatform(calm.w.org)) await new Promise((resolve) => setImmediate(resolve));
+      const behindItsSupplier = asking(calm.w, { amount: AED(10_000n), orderReference: 'INV-2' });
+      expect(await ask(theirKey, behindItsSupplier, 'behind-supplier')).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'PLATFORM_BUSY',
+      });
+      const behindItsAgent = asking(calm.w, {
+        amount: AED(10_000n),
+        supplierId: calm.w.suppliers[1] ?? '',
+        orderReference: 'INV-3',
+      });
+      expect(await ask(calm.acting, behindItsAgent, 'behind-agent')).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'PLATFORM_BUSY',
+      });
+      expect(capture.lines().filter((line) => line.event === 'spend_request.platform_full')).toEqual([
+        expect.objectContaining({ level: 'warn', orgId: calm.w.org, agentId: theirKey.agentId, waitedMs: 100 }),
+        expect.objectContaining({ level: 'warn', orgId: calm.w.org, agentId: calm.acting.agentId, waitedMs: 100 }),
+      ]);
+      expect(capture.lines().filter((line) => line.event === 'spend_request.supplier_busy')).toEqual([]);
+      expect(capture.lines().filter((line) => line.event === 'spend_request.agent_busy')).toEqual([]);
+
+      await letGo();
+      decidedOf(await holding);
+      decidedOf(await atTheGate);
+    });
+
     it('never stops a person: a freeze of another organisation goes straight through with the gate full', async () => {
       const calm = await ready();
       const { letGo, holding } = await gateFilledBy(60_000);
@@ -1207,6 +1260,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       const inner = createDecisionGate(NO_GATE_LIMITS);
       const gate: DecisionGate = {
         organisationsInHand: () => inner.organisationsInHand(),
+        heldByThePlatform: (organisation) => inner.heldByThePlatform(organisation),
         enter: (organisation) => {
           counted.push('enter');
           return inner.enter(organisation);
@@ -1248,7 +1302,11 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       ids,
       clock,
       logger: testLogger(capture),
-      entry: { run: () => Promise.reject(new Error('the pool is gone')), linesInHand: () => 0 },
+      entry: {
+        run: () => Promise.reject(new Error('the pool is gone')),
+        heldByThePlatform: () => false,
+        linesInHand: () => 0,
+      },
     });
 
     await expect(ask(acting, asking(w))).rejects.toThrow('the pool is gone');

@@ -10,7 +10,9 @@
 //   whatever an agent names, it can only join its own organisation's lines. Those
 //   lines slow only the organisation whose supplier it is.
 // - A slot at the fair gate (decision-gate.ts), last, so none is held while waiting
-//   on a turn. It lasts the whole request, retries included.
+//   on a turn. It lasts the whole decision, retries included; a replay's read of its
+//   answer comes after it (decision-gate.ts). Those waiting in a turn behind a
+//   decision held by a full platform are held by the platform too (heldByThePlatform).
 // The row lock stays the guarantee: other replicas and every other writer still
 // serialise on it. This only stops waiters holding the pool. Counted per process,
 // so across N copies a supplier's limit is N times this.
@@ -55,6 +57,8 @@ export interface EntryWaits {
 export interface DecisionEntry {
   /** `work`, once its decision's turns have come, told how long each took. Rejects unrun, with what its wait ran out as. */
   run<T>(asked: DecisionAsked, work: (waits: EntryWaits) => Promise<T>): Promise<T>;
+  /** Whether this organisation's decisions, under its own limit, are held at the gate by the whole platform being full. */
+  heldByThePlatform(orgId: string): boolean;
   /** The lines with anyone in them: none once all have ended, so the memory never grows with suppliers named. */
   linesInHand(): number;
 }
@@ -76,6 +80,7 @@ export function createDecisionEntry({
     exceeded: () => new SupplierTurnExceeded(supplierWaitMs),
   });
   return {
+    heldByThePlatform: (orgId) => gate.heldByThePlatform(orgId.toLowerCase()),
     linesInHand: () => turns.agentsInHand() + suppliers.keysInHand() + gate.organisationsInHand(),
     run({ agentId, orgId, supplierId }, work) {
       const asked = performance.now();

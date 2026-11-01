@@ -277,7 +277,9 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     for (const name of Object.keys(reply.getHeaders())) {
       if (!ERROR_HEADERS.has(name)) reply.removeHeader(name);
     }
-    if (code === 'ORGANISATION_BUSY') void reply.header('retry-after', String(BUSY_RETRY_SECONDS));
+    if (code === 'ORGANISATION_BUSY' || code === 'PLATFORM_BUSY') {
+      void reply.header('retry-after', String(BUSY_RETRY_SECONDS));
+    }
     void sendErrorBody(reply, status, code, request.id);
     // After sending, so a failure to log can't stop the plain answer going out.
     if (status === 500) logger.child({ correlationId: request.id }).error(REQUEST_FAILED, { err: error });

@@ -2755,7 +2755,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.organisation_busy" | summarize Events = count()',
       ),
       query(
-        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "spend_request.platform_full" | summarize Events = count()',
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out") | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.platform_full" | summarize Events = count()',
       ),
       (alert: Mutable) => (criterion(alert).threshold = 1),
       ...LATE_OR_BLIND,
