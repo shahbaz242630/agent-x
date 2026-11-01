@@ -8,8 +8,9 @@
 //
 // Lock order (ADR-006 §6), each read through its signed state:
 // - 0: the idempotency key (the work's write);
-// - 1a, 1b: the organisation's and the agent's brakes, shared, so a freeze or a
-//   kill switch waiting goes first (PL-63 item 3, 4D2e C3; tenant.ts);
+// - 1a, 1b, 1c: the organisation's, the agent's and the source's brakes, shared,
+//   so any stop or change of them waiting goes first (PL-63 item 3, 4D2e C3;
+//   tenant.ts);
 // - 2: the organisation FOR SHARE, refused while FROZEN (ORG_FROZEN: nothing
 //   made, the key unused, ADR-007 §4);
 // - 3, 3a: the agent and the key it came with FOR SHARE, the key live and
@@ -100,6 +101,7 @@ import {
   timedLock,
   timingStatements,
   sendTogether,
+  SOURCE_BRAKE,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -536,13 +538,14 @@ export function createSpendRequestDecisions({
     // is refused on them is refused here, before the supplier's lock below is asked for, so a request refused
     // anyway never queues on it.
     const {
-      ahead: [, , currency],
+      ahead: [, , , currency],
     } = await states.gatherBehind(
       tx,
       orgId,
       [
         brakeShared(ORGANISATION_BRAKE, orgId),
         brakeShared(AGENT_BRAKE, orgId, agentId),
+        brakeShared(SOURCE_BRAKE, orgId, asked.fundingSourceId),
         allowedCurrencyRead(tx, asked.amount.currency),
       ],
       actingRows(acting),

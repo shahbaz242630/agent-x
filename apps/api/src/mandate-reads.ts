@@ -32,7 +32,7 @@ import type { ApprovalWaitHours, SpendRequestsTables } from '@agentx/core/module
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { monthlyCapOf, type MonthlyCapFrom } from '@agentx/core/modules/policies';
 import { compare, type Money, money } from '@agentx/core/shared-kernel';
-import type { DatabaseTransaction } from '@agentx/platform/db';
+import { AGENT_BRAKE, type DatabaseTransaction, holdBrakeLookedUp } from '@agentx/platform/db';
 
 import { waitChoiceIn } from './approval-wait-choice.ts';
 import { capChoiceIn, type MonthlyCapChoice } from './monthly-cap-choice.ts';
@@ -48,6 +48,13 @@ export type MandateTables = UseCaseTables &
   SpendRequestsTables &
   LimitReservationsTables;
 export type MandateTx = DatabaseTransaction<MandateTables>;
+
+/**
+ * The brake of the mandate's agent, taken before any row (1b, tenant.ts): a mandate's change, which its agent's decisions
+ * would starve. Its agent read unlocked, a field that never changes; none found holds none, for its read to refuse.
+ */
+export const agentBrakeOfMandate = (tx: MandateTx, orgId: string, mandateId: string): Promise<void> =>
+  holdBrakeLookedUp(tx, AGENT_BRAKE, orgId, { table: MANDATES, id: mandateId, column: 'agent_id' });
 
 /** The mandates' UseCaseRefused: the only refusal their work answers. */
 export class MandateRefused extends UseCaseRefused {}

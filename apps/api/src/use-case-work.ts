@@ -144,9 +144,27 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
     );
   };
 
+  /**
+   * write, with `hold` taking a brake first, before any row: braked's answer if it can't.
+   */
+  const brakeWrite = (
+    member: Pick<Member, 'orgId'>,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    hold: (tx: Tx) => Promise<void>,
+    work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+  ): Promise<Written> =>
+    braked(logger, member.orgId, correlationId, () =>
+      write(member, idempotent, correlationId, async (tx, states) => {
+        await hold(tx);
+        return work(tx, states);
+      }),
+    );
+
   return {
     inOrganisation,
     write,
+    brakeWrite,
 
     /** The write, a history past its read's cap (the two-person rule's, a supplier's versions) answered HISTORY_TOO_LONG. */
     historyBounded: async (...args: Parameters<typeof write>): Promise<Written> => {

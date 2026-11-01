@@ -89,7 +89,7 @@ const { world, keyed, agentKey, quiet, stepUp } = shared;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<MandateWorldTables>({ ...database.connection('app'), maxConnections: 40 }, testLogger());
+  app = createDatabase<MandateWorldTables>({ ...database.connection('app'), maxConnections: 16 }, testLogger());
 });
 
 afterAll(async () => {
@@ -341,7 +341,7 @@ describe('the freeze', () => {
     async () => {
       const { w, acting } = await ready();
       const stuck = await stuckSupplier(w.suppliers[0] ?? '');
-      const stop = stream(() => decision(w, acting), 400);
+      const stop = stream(() => decision(w, acting), 800);
       // Decisions inside, each holding the organisation's row while it waits on the stuck supplier: the load run's phase 5.
       await waitUntilQueued(database.as('admin'), 3);
 
@@ -478,10 +478,11 @@ describe('the brake itself', () => {
       const waiting = settled(decision(w, acting));
       await waitUntilQueued(database.as('admin'), 1);
 
-      expect(await decision(w, acting, w.suppliers[1])).toMatchObject({
-        outcome: 'decided',
-        request: { decision: 'ALLOW' },
-      });
+      const { answer, ms } = await timed(() => decision(w, acting, w.suppliers[1]));
+
+      expect(answer).toMatchObject({ outcome: 'decided', request: { decision: 'ALLOW' } });
+      // Its own speed, not the other's 5 s: an exclusive side would hold it until that wait ran out.
+      expect(ms).toBeLessThan(2_000);
 
       await letGo(stuck);
       await waiting;
@@ -547,8 +548,8 @@ describe('the kill switch: the agent’s own brake', () => {
       const { w, acting } = await ready();
       const stuck = await stuckSupplier(w.suppliers[0] ?? '');
       const check = keyCheck();
-      const stopDecisions = stream(() => decision(w, acting), 400);
-      const stopChecks = Array.from({ length: 6 }, () => stream(() => check.check(acting.text, CORRELATION), 1));
+      const stopDecisions = stream(() => decision(w, acting), 800);
+      const stopChecks = Array.from({ length: 3 }, () => stream(() => check.check(acting.text, CORRELATION), 5));
       await waitUntilQueued(database.as('admin'), 3);
 
       const { answer, ms } = await timed(() => suspended(w));
@@ -556,7 +557,8 @@ describe('the kill switch: the agent’s own brake', () => {
       await letGo(stuck);
 
       expect(answer).toMatchObject({ outcome: 'changed', agent: { agent: { status: 'SUSPENDED' } } });
-      expect(ms).toBeLessThan(BRAKE_WAIT_MS);
+      // Its whole call: the brake's wait, then the change and its answer's read, on a laptop kept busy by the checks.
+      expect(ms).toBeLessThan(BRAKE_WAIT_MS * 1.25);
       expect(await keyCheck().check(acting.text, CORRELATION)).toEqual({ outcome: 'refused' });
       expect(alarms()).toEqual([]);
     },

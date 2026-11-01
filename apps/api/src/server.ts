@@ -273,7 +273,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
 
   /** Sends the error's plain response, then logs a failure on our side with its detail. */
   const sendError = (error: unknown, request: FastifyRequest, reply: FastifyReply): FastifyReply => {
-    const { status, code } = responseFor(error);
+    const { status, code } = responseFor(error, request.routeOptions.config.operation);
     for (const name of Object.keys(reply.getHeaders())) {
       if (!ERROR_HEADERS.has(name)) reply.removeHeader(name);
     }

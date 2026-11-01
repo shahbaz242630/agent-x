@@ -245,7 +245,7 @@ export const PLAIN_WORDS = {
     next: 'Look at how busy the database is and what holds connections. If it keeps coming, it needs more room.',
   },
   'brake.not_applied': {
-    happened: 'An admin pressed a freeze or kill switch, and it could not get its lock in time.',
+    happened: 'An admin pressed a stop or changed an authority, and it could not get its lock in time.',
     broke: 'Nothing was stopped, so agents can still act. The admin was told busy.',
     next: 'Press it again. If it keeps failing, find the stuck database work and end it.',
   },

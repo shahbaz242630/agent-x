@@ -41,7 +41,11 @@
 //   consumed; then SUSPENDED > ACTIVE, with the step-up's evidence on its
 //   event. The partner's own word still decides whether it may fund.
 //
-// Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
+// Each change takes the source's brake first (1c, tenant.ts), so the decisions naming
+// it can't starve it (PL-63 item 3, 4D2e C3); past its wait, busy, nothing changed,
+// with an alarm.
+//
+// Lock order (ADR-006 §6): the idempotency key, the source's brake, the member's membership (2a),
 // the source (5), a suspend's or an end's pending requests (8) and their
 // holdings (11), the step-up challenge (a reactivation's held first, 0b,
 // before its requests), the chain head last.
@@ -57,7 +61,7 @@ import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core
 import { type FinancialRailAdapter, limitsInAccountCurrency, type SourceLookup } from '@agentx/core/modules/providers';
 import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { type Database, holdBrake, type IdempotentRequest, isUnwritten, SOURCE_BRAKE } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -256,7 +260,8 @@ export function createFundingSourceChanges({
           lookup = asking;
         }
       }
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
+      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         await work.memberIn(tx, states, member, REFRESHING_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
         const found = await work.sourceIn(tx, states, key, 'change');
@@ -296,7 +301,8 @@ export function createFundingSourceChanges({
     },
 
     async suspend(member, idempotent, sourceId, pendingRequests, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
+      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
         const { source, state } = await work.sourceIn(tx, states, key, 'change');
@@ -332,7 +338,8 @@ export function createFundingSourceChanges({
     },
 
     async chooseConsentExpiry(member, idempotent, sourceId, consentExpiry, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
+      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         await work.memberIn(tx, states, member, CONSENT_EXPIRY_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
         const read = await work.sourceIn(tx, states, key, 'change');
@@ -374,7 +381,8 @@ export function createFundingSourceChanges({
     },
 
     async reactivate(member, idempotent, sourceId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
+      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const source = await suspendedSource(tx, states, member.orgId, sourceId);
         return stepUps.ask(tx, member, {
@@ -387,7 +395,8 @@ export function createFundingSourceChanges({
     },
 
     async reactivateConfirm(member, idempotent, sourceId, stepUpChallengeId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
+      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const source = await suspendedSource(tx, states, member.orgId, sourceId);

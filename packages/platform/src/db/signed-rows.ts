@@ -25,7 +25,7 @@
 import { type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { TABLE, UUID } from './patterns.ts';
-import { assertTenant, lockName } from './tenant.ts';
+import { assertTenant, holdBrakeNamed, lockName } from './tenant.ts';
 
 /** The Postgres type of an authority field, which decides how it is read as text. */
 export type SignedFieldType = 'text' | 'uuid' | 'integer' | 'timestamptz';
@@ -405,19 +405,32 @@ function lookedUpId(
   )`;
 }
 
+/** A uuid field of another row, as a gather's lookedUp reads it. */
+export interface LookedUp {
+  readonly table: SignedStateTable;
+  readonly id: string;
+  readonly column: string;
+}
+
+/** The name of a brake whose last ID is a uuid field of another row, as lockName would write it: null for none found. */
+const brakeNameLookedUp = (scope: string, orgId: string, lookedUp: LookedUp): RawBuilder<unknown> =>
+  sql`${lockName(scope, orgId, '')} || (${lookedUpId(orgId, lookedUp)})::text`;
+
 /**
- * The shared side of a brake named by a uuid field of another row, read as a gather's lookedUp reads it: for a caller
- * that doesn't yet know the ID (a key check, of its agent). None found, or a field not a uuid, names no one: no brake
- * is taken, the rows' own reads judging it.
+ * The shared side of a brake named by a uuid field of another row: for a caller that doesn't yet know the ID (a key
+ * check, of its agent). None found, or a field not a uuid, names no one: no brake is taken, the rows' own reads judging
+ * it. The row is read unlocked: where to look, as a gather's lookedUp is, of a field that never changes.
  */
-export function brakeSharedLookedUp(
+export const brakeSharedLookedUp = (scope: string, orgId: string, lookedUp: LookedUp): RawBuilder<unknown> =>
+  sql`select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(${brakeNameLookedUp(scope, orgId, lookedUp)}, 0))`;
+
+/** holdBrake for a brake named as brakeSharedLookedUp's is (a mandate's change, of its agent): none found holds none. */
+export const holdBrakeLookedUp = <Schema>(
+  tx: Transaction<Schema>,
   scope: string,
   orgId: string,
-  lookedUp: { readonly table: SignedStateTable; readonly id: string; readonly column: string },
-): RawBuilder<unknown> {
-  const name = sql`${lockName(scope, orgId, '')} || (${lookedUpId(orgId, lookedUp)})::text`;
-  return sql`select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(${name}, 0))`;
-}
+  lookedUp: LookedUp,
+): Promise<void> => holdBrakeNamed(tx, brakeNameLookedUp(scope, orgId, lookedUp));
 
 /** The read of an earlier row of the gather. */
 function earlier(reads: readonly GatheredRead[], index: number): GatheredRead {

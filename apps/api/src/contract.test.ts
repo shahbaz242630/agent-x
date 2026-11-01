@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 
 import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
@@ -8,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
+import { STOP_OPERATIONS } from './errors.ts';
 import './route-server.helper.test.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ContractBroken, NOT_FOUND_CHECKS, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
@@ -92,6 +94,16 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     await app.ready();
     // Run `corepack pnpm vitest run -u apps/api/src/contract.test.ts` to write it after a deliberate change.
     await expect(`${JSON.stringify(app.swagger(), null, 2)}\n`).toMatchFileSnapshot('../openapi.json');
+  });
+
+  it('holds every stop the error answer names to an operation of the API: a name gone stale answers a 500', () => {
+    const document = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')) as {
+      paths: Record<string, Record<string, { operationId?: string }>>;
+    };
+    const operations = new Set(
+      Object.values(document.paths).flatMap((item) => Object.values(item).map(({ operationId }) => operationId)),
+    );
+    expect([...STOP_OPERATIONS].filter((operation) => !operations.has(operation))).toEqual([]);
   });
 
   it("documents every route the server serves, and the HEAD Fastify adds to each GET, whatever the route's shape", async () => {

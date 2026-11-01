@@ -49,8 +49,8 @@
 //   does. Its status and scopes stay as they are. The new owner and the
 //   organisation's admins are told, in the same transaction (0034).
 //
-// The kill switch and a reactivation take the agent's brake (1b, tenant.ts)
-// first, so its decisions and key checks can't starve them (PL-63 item 3, 4D2e
+// The kill switch, a reactivation and a handover take the agent's brake (1b,
+// tenant.ts) first, so its decisions and key checks can't starve them (PL-63 item 3, 4D2e
 // C3): new ones line up behind it, those inside drain. It waits at most 12 s; past
 // that nothing has changed, and it is answered busy, with an alarm (braked).
 //
@@ -95,7 +95,7 @@ import {
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
 import { cancelledInForce, choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
-import { braked, createStepUps, movedAsRead, type Written } from './use-case-work.ts';
+import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Suspending an agent: the kill switch. */
 export const SUSPEND_OPERATION = 'agents.suspend';
@@ -216,13 +216,9 @@ export function createAgentChanges({
   const work = createAgentWork({ database, keys, ids, logger });
   const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
-  /** The kill switch's write: its wait run out is answered busy, with its alarm. */
-  const brakeWrite = (
-    member: AgentMember,
-    idempotent: IdempotentRequest,
-    correlationId: string,
-    change: Parameters<typeof work.write>[3],
-  ) => braked(logger, member.orgId, correlationId, () => work.write(member, idempotent, correlationId, change));
+  /** The agent's brake, before any row: all a change of it needs against its own decisions and key checks. */
+  const brakeOf = (member: AgentMember, agentId: string) => (tx: AgentTx) =>
+    holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
 
   /** The agent, read for change and verified: NOT_FOUND, or INTEGRITY_FAILED, otherwise. */
   const agentToChange = async (tx: AgentTx, states: SignedStates, orgId: string, agentId: string) => {
@@ -282,151 +278,178 @@ export function createAgentChanges({
 
   return {
     async suspend(member, idempotent, agentId, pendingRequests, correlationId) {
-      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
-        await holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
-        await work.memberIn(tx, states, member, SUSPENDING_ROLES);
-        const read = await agentToChange(tx, states, member.orgId, agentId);
-        if (pendingRequests === 'cancel') {
-          const braked = { agentId: read.agent.id };
-          await voidPendingOf(tx, states, keys, member.orgId, braked, 'AGENT_SUSPENDED', clock.now());
-        }
-        // Pressed twice: already stopped, and answered as it is, unless the choice changes (chosenAgain).
-        if (read.agent.status !== 'ACTIVE') {
-          const key = { orgId: member.orgId, id: read.agent.id };
-          const again = await chosenAgain(
-            tx,
-            states,
-            { which: 'agent', table: AGENTS, key, state: read.state },
-            pendingRequests,
-            { type: 'user', id: member.userId },
-          );
-          if (again === 'refused') throw new AgentRefused(409, 'PENDING_REQUESTS_CANCELLED');
-        } else {
-          movedAsRead(
-            await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: read.agent.id }, 'suspend', {
-              actor: { type: 'user', id: member.userId },
-              action: SUSPENDS.agent.action,
-              details: choiceDetails(pendingRequests),
-            }),
-            "an agent read as ACTIVE didn't suspend",
-          );
-        }
-        return { status: 200, resourceId: read.agent.id };
-      });
+      const done = await work.brakeWrite(
+        member,
+        idempotent,
+        correlationId,
+        brakeOf(member, agentId),
+        async (tx, states) => {
+          await work.memberIn(tx, states, member, SUSPENDING_ROLES);
+          const read = await agentToChange(tx, states, member.orgId, agentId);
+          if (pendingRequests === 'cancel') {
+            const braked = { agentId: read.agent.id };
+            await voidPendingOf(tx, states, keys, member.orgId, braked, 'AGENT_SUSPENDED', clock.now());
+          }
+          // Pressed twice: already stopped, and answered as it is, unless the choice changes (chosenAgain).
+          if (read.agent.status !== 'ACTIVE') {
+            const key = { orgId: member.orgId, id: read.agent.id };
+            const again = await chosenAgain(
+              tx,
+              states,
+              { which: 'agent', table: AGENTS, key, state: read.state },
+              pendingRequests,
+              { type: 'user', id: member.userId },
+            );
+            if (again === 'refused') throw new AgentRefused(409, 'PENDING_REQUESTS_CANCELLED');
+          } else {
+            movedAsRead(
+              await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: read.agent.id }, 'suspend', {
+                actor: { type: 'user', id: member.userId },
+                action: SUSPENDS.agent.action,
+                details: choiceDetails(pendingRequests),
+              }),
+              "an agent read as ACTIVE didn't suspend",
+            );
+          }
+          return { status: 200, resourceId: read.agent.id };
+        },
+      );
       return answer(member, correlationId, done);
     },
 
     async reactivate(member, idempotent, agentId, correlationId) {
-      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
-        await holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
-        await work.memberIn(tx, states, member, REACTIVATING_ROLES);
-        const agent = await suspendedAgent(tx, states, member.orgId, agentId);
-        return stepUps.ask(tx, member, {
-          action: REACTIVATE_OPERATION,
-          changeHash: reactivationHash(member.orgId, agent.suspendedBy),
-        });
-      });
+      const done = await work.brakeWrite(
+        member,
+        idempotent,
+        correlationId,
+        brakeOf(member, agentId),
+        async (tx, states) => {
+          await work.memberIn(tx, states, member, REACTIVATING_ROLES);
+          const agent = await suspendedAgent(tx, states, member.orgId, agentId);
+          return stepUps.ask(tx, member, {
+            action: REACTIVATE_OPERATION,
+            changeHash: reactivationHash(member.orgId, agent.suspendedBy),
+          });
+        },
+      );
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
     async reactivateConfirm(member, idempotent, agentId, stepUpChallengeId, correlationId) {
-      const done = await brakeWrite(member, idempotent, correlationId, async (tx, states) => {
-        const held = await challenges.hold(tx, member.sessionId);
-        await holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
-        await work.memberIn(tx, states, member, REACTIVATING_ROLES);
-        const agent = await suspendedAgent(tx, states, member.orgId, agentId);
-        const consumed = await stepUps.consumed(
-          tx,
-          member,
-          held,
-          stepUpChallengeId,
-          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(member.orgId, agent.suspendedBy) },
-          { passkeyRequired: true },
-        );
-        // Its suspension cancelled them: those its brake left are voided first, the job any past this batch (F1 G1).
-        if (await cancelledInForce(tx, states, member.orgId, 'agent', agent.id)) {
-          const braked = { agentId: agent.id };
-          await voidPendingOf(tx, states, keys, member.orgId, braked, 'AGENT_SUSPENDED', clock.now());
-        }
-        movedAsRead(
-          await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: agent.id }, 'reactivate', {
-            actor: { type: 'user', id: member.userId },
-            action: 'agent.reactivated',
-            details: stepUpDetails(consumed),
-          }),
-          "an agent read as SUSPENDED didn't reactivate",
-        );
-        return { status: 200, resourceId: agent.id };
-      });
+      const done = await work.brakeWrite(
+        member,
+        idempotent,
+        correlationId,
+        brakeOf(member, agentId),
+        async (tx, states) => {
+          const held = await challenges.hold(tx, member.sessionId);
+          await work.memberIn(tx, states, member, REACTIVATING_ROLES);
+          const agent = await suspendedAgent(tx, states, member.orgId, agentId);
+          const consumed = await stepUps.consumed(
+            tx,
+            member,
+            held,
+            stepUpChallengeId,
+            { action: REACTIVATE_OPERATION, changeHash: reactivationHash(member.orgId, agent.suspendedBy) },
+            { passkeyRequired: true },
+          );
+          // Its suspension cancelled them: those its brake left are voided first, the job any past this batch (F1 G1).
+          if (await cancelledInForce(tx, states, member.orgId, 'agent', agent.id)) {
+            const braked = { agentId: agent.id };
+            await voidPendingOf(tx, states, keys, member.orgId, braked, 'AGENT_SUSPENDED', clock.now());
+          }
+          movedAsRead(
+            await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: agent.id }, 'reactivate', {
+              actor: { type: 'user', id: member.userId },
+              action: 'agent.reactivated',
+              details: stepUpDetails(consumed),
+            }),
+            "an agent read as SUSPENDED didn't reactivate",
+          );
+          return { status: 200, resourceId: agent.id };
+        },
+      );
       return answer(member, correlationId, done);
     },
 
     async handOver(member, idempotent, agentId, owner, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        const read = await handOverRead(tx, states, member, agentId, owner);
-        // Counted early, so an ask that can't be confirmed today is refused now.
-        await work.keyBudgetLeft(tx, member.orgId, clock.now());
-        return stepUps.ask(tx, member, {
-          action: HAND_OVER_OPERATION,
-          changeHash: handOverHash(read.state.eventId, read.owner),
-        });
-      });
+      const done = await work.brakeWrite(
+        member,
+        idempotent,
+        correlationId,
+        brakeOf(member, agentId),
+        async (tx, states) => {
+          const read = await handOverRead(tx, states, member, agentId, owner);
+          // Counted early, so an ask that can't be confirmed today is refused now.
+          await work.keyBudgetLeft(tx, member.orgId, clock.now());
+          return stepUps.ask(tx, member, {
+            action: HAND_OVER_OPERATION,
+            changeHash: handOverHash(read.state.eventId, read.owner),
+          });
+        },
+      );
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
     async handOverConfirm(member, idempotent, agentId, owner, stepUpChallengeId, correlationId) {
       let key: string | null = null;
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        await oneKeyIssueAtATime(tx, member.orgId);
-        const held = await challenges.hold(tx, member.sessionId);
-        const read = await handOverRead(tx, states, member, agentId, owner);
-        const now = clock.now();
-        await work.keyBudgetLeft(tx, member.orgId, now);
-        const listed = await agentKeysOf(tx, states, member.orgId, read.agent.id, 'change');
-        if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
-        const consumed = await stepUps.consumed(
-          tx,
-          member,
-          held,
-          stepUpChallengeId,
-          { action: HAND_OVER_OPERATION, changeHash: handOverHash(read.state.eventId, read.owner) },
-          { passkeyRequired: true },
-        );
-        const actor = { type: 'user' as const, id: member.userId };
-        await handAgentOver(tx, states, {
-          orgId: member.orgId,
-          agent: read.agent,
-          state: read.state,
-          owner: read.owner,
-          actor,
-          details: stepUpDetails(consumed),
-        });
-        await outbox.add(tx, toldOfHandover(member.orgId, read.agent.id, read.ownerUserId));
-        for (const old of listed.keys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
-          movedAsRead(
-            await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.id }, 'revoke', {
-              actor,
-              action: 'agent_key.revoked',
-              details: { reason: 'handed_over' },
-            }),
-            "a key read as ACTIVE didn't revoke",
+      const done = await work.brakeWrite(
+        member,
+        idempotent,
+        correlationId,
+        brakeOf(member, agentId),
+        async (tx, states) => {
+          await oneKeyIssueAtATime(tx, member.orgId);
+          const held = await challenges.hold(tx, member.sessionId);
+          const read = await handOverRead(tx, states, member, agentId, owner);
+          const now = clock.now();
+          await work.keyBudgetLeft(tx, member.orgId, now);
+          const listed = await agentKeysOf(tx, states, member.orgId, read.agent.id, 'change');
+          if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
+          const consumed = await stepUps.consumed(
+            tx,
+            member,
+            held,
+            stepUpChallengeId,
+            { action: HAND_OVER_OPERATION, changeHash: handOverHash(read.state.eventId, read.owner) },
+            { passkeyRequired: true },
           );
-        }
-        // Keys are in order of ID, so the newest live one is the last.
-        const newest = listed.keys.filter((listedKey) => isLiveKey(listedKey, now)).at(-1);
-        const issued = await work.issueKey(tx, states, {
-          orgId: member.orgId,
-          agentId: read.agent.id,
-          scopes: newest?.scopes.filter((scope) => read.agent.scopes.includes(scope)) ?? read.agent.scopes,
-          now,
-          actor,
-          details: { handedOverTo: read.owner },
-        });
-        key = issued.text;
-        return { status: 201, resourceId: read.agent.id };
-      });
+          const actor = { type: 'user' as const, id: member.userId };
+          await handAgentOver(tx, states, {
+            orgId: member.orgId,
+            agent: read.agent,
+            state: read.state,
+            owner: read.owner,
+            actor,
+            details: stepUpDetails(consumed),
+          });
+          await outbox.add(tx, toldOfHandover(member.orgId, read.agent.id, read.ownerUserId));
+          for (const old of listed.keys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
+            movedAsRead(
+              await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.id }, 'revoke', {
+                actor,
+                action: 'agent_key.revoked',
+                details: { reason: 'handed_over' },
+              }),
+              "a key read as ACTIVE didn't revoke",
+            );
+          }
+          // Keys are in order of ID, so the newest live one is the last.
+          const newest = listed.keys.filter((listedKey) => isLiveKey(listedKey, now)).at(-1);
+          const issued = await work.issueKey(tx, states, {
+            orgId: member.orgId,
+            agentId: read.agent.id,
+            scopes: newest?.scopes.filter((scope) => read.agent.scopes.includes(scope)) ?? read.agent.scopes,
+            now,
+            actor,
+            details: { handedOverTo: read.owner },
+          });
+          key = issued.text;
+          return { status: 201, resourceId: read.agent.id };
+        },
+      );
       if (isUnwritten(done)) return done;
       // The key is set only by a write done now: a retry answers it as null, as it was shown once.
       const agent = await work.answered(member.orgId, correlationId, (tx, states) =>

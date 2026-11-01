@@ -30,6 +30,14 @@ describe('SEC-DATA-04 an error response carries a reason code, never the error',
     expect(responseFor(withStatus(status))).toEqual({ status: 400, code: 'BAD_REQUEST' });
   });
 
+  it.each(['57014', '40P01'])('answers %s on a stop busy, and on anything else as it was', (code) => {
+    const failed = Object.assign(new Error('x'), { code });
+    expect(responseFor(failed, 'agents.suspend')).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
+    expect(responseFor(failed, 'spend-requests.decide')).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
+    expect(responseFor(failed)).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
+    expect(responseFor(new Error('other'), 'agents.suspend')).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
+  });
+
   it('sends a record a shared helper can’t believe as 503 INTEGRITY_FAILED, never a plain 500', () => {
     expect(responseFor(new OrganisationBusy(10_000))).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
     expect(responseFor(new PoolWaitRanOut(new Error('x')))).toEqual({ status: 503, code: 'PLATFORM_BUSY' });

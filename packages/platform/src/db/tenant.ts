@@ -266,10 +266,12 @@ export async function holdTransactionLock<Schema>(
   await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`.execute(tx);
 }
 
-/** Every decision's side of the lock an organisation's freeze takes (ADR-006 level 1a). */
+/** Every decision's side of the lock a freeze or a policy change takes (ADR-006 level 1a). */
 export const ORGANISATION_BRAKE = 'organisation-brake';
-/** Every decision and key check's side of the lock an agent's kill switch takes (ADR-006 level 1b). */
+/** Every decision and key check's side of the lock a change to an agent, its keys or its mandates takes (level 1b). */
 export const AGENT_BRAKE = 'agent-brake';
+/** Every decision's side of the lock a change to the funding source it names takes (level 1c). */
+export const SOURCE_BRAKE = 'source-brake';
 /**
  * The longest a brake waits for each lock. Past a statement's limit, as that is how long one inside can really take:
  * a decision queued behind another for a stuck supplier's row waits its 5 s for the row's queue, then 5 s more on its
@@ -291,22 +293,31 @@ export const brakeShared = (scope: string, ...ids: readonly string[]): RawBuilde
   sql`select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(${lockName(scope, ...ids)}, 0))`;
 
 /**
- * Takes a brake for the rest of the transaction: new takers of its shared side line up behind it, those inside drain.
- * Its wait is bounded to BRAKE_WAIT_SECONDS, as is every lock's after it here, on the lock's own trip.
- * That is a wait's bound and not the brake's whole: a statement behind it is held to BRAKE_STATEMENT.
+ * Holds the exclusive side of the brake `name` gives for the rest of the transaction: new takers of its shared side
+ * line up behind it, those inside drain. Its wait is bounded to BRAKE_WAIT_SECONDS, as is every lock's after it here, on
+ * the lock's own trip. That is a wait's bound and not the brake's whole: a statement behind it is held to BRAKE_STATEMENT.
+ * First in a transaction, its key's claim and that brake's own alone before it: it never waits holding a row.
  */
-export async function holdBrake<Schema>(
+export async function holdBrakeNamed<Schema>(
   tx: Transaction<Schema>,
-  scope: string,
-  ...ids: readonly string[]
+  name: RawBuilder<unknown> | string,
 ): Promise<void> {
-  const name = lockName(scope, ...ids);
   await sendTogether(tx, [
     sql`select pg_catalog.set_config('lock_timeout', ${BRAKE_WAIT}, true),
       pg_catalog.set_config('statement_timeout', ${BRAKE_STATEMENT}, true)`,
     sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`,
   ]);
 }
+
+/** holdBrakeNamed for a brake named by its scope and IDs. */
+export const holdBrake = <Schema>(tx: Transaction<Schema>, scope: string, ...ids: readonly string[]): Promise<void> =>
+  holdBrakeNamed(tx, lockName(scope, ...ids));
+
+/**
+ * A statement of its own that bounds the rest of the transaction's waits as a claim's does, for one with no claim:
+ * so a read behind a brake waiting is told busy, not cut off by a statement's limit.
+ */
+export const lockWaitBoundedAlone = (): RawBuilder<unknown> => sql`select ${lockWaitBounded()}`;
 
 /**
  * What a connection must carry before any work runs on it: no tenant, and the

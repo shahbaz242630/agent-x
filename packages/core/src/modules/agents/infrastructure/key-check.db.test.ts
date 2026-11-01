@@ -313,7 +313,7 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
 });
 
 describe('the key check: bounded', () => {
-  it('gives up after 10 seconds, a wait for a lock included, rather than hold the request', async () => {
+  it('gives up on a lock after 5 seconds, rather than hold the request: told busy, not cut off at its 10 (4D2e C3)', async () => {
     const agent = await newAgent();
     const { text } = await issue(agent);
     const holder = await database.connect('admin');
@@ -321,8 +321,8 @@ describe('the key check: bounded', () => {
     await holder.query('lock table agents.agent_keys in access exclusive mode');
     try {
       const began = performance.now();
-      await expect(within(20_000, check(text), 'the check')).rejects.toThrow(/statement timeout/);
-      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+      await expect(within(20_000, check(text), 'the check')).rejects.toThrow(/lock timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(4_500);
     } finally {
       await holder.query('rollback');
       await holder.end();

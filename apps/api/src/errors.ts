@@ -4,7 +4,7 @@
 // unexpected error is logged with its detail instead. Addresses that don't
 // exist, and features that are off, get the same plain 404.
 import { isReasonCode, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
-import { isLockWaitRunOut, OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
+import { isLockWaitRunOut, isRetryable, isStatementLimit, OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 
@@ -106,14 +106,52 @@ export class IntegrityFailure extends Error {}
 export const BUSY_RETRY_SECONDS = 5;
 
 /**
+ * Every stop an admin presses, ask and confirm: under trouble, a statement past its limit or a deadlock rolled it back
+ * and is answered busy like a lock's wait, never a plain 500, on any statement of it, its answer's read after it
+ * included (partner, 4D2e C3). Those committed are replayed by the same key. Written out; contract.test.ts holds each to
+ * an operation of the API. A decision's stays as it is (S166).
+ */
+export const STOP_OPERATIONS: ReadonlySet<string> = new Set([
+  'organization.freeze',
+  'organization.unfreeze',
+  'organization.unfreeze.confirm',
+  'agents.suspend',
+  'agents.reactivate',
+  'agents.reactivate.confirm',
+  'agents.owner',
+  'agents.owner.confirm',
+  'agents.keys.revoke',
+  'agents.keys.revoke.confirm',
+  'agents.keys.rotate',
+  'agents.keys.rotate.confirm',
+  'mandates.suspend',
+  'mandates.suspend.confirm',
+  'mandates.resume',
+  'mandates.resume.confirm',
+  'mandates.revoke',
+  'mandates.revoke.confirm',
+  'funding-sources.suspend',
+  'funding-sources.reactivate',
+  'funding-sources.reactivate.confirm',
+  'funding-sources.refresh',
+  'suppliers.suspend',
+  'suppliers.reactivate',
+  'suppliers.reactivate.confirm',
+]);
+
+const isStopTrouble = (error: unknown, operation: string | undefined): boolean =>
+  operation !== undefined && STOP_OPERATIONS.has(operation) && (isStatementLimit(error) || isRetryable(error));
+
+/**
  * What to send for an error, from its own status; an integrity failure is 503
  * INTEGRITY_FAILED. Its organisation past its share of the connections, or a
  * lock's wait run out (held by its organisation's own work): 503 busy, never a
  * 500 (partner, S161). Its transaction made nothing; one before it may have, so
  * the same request again, under its key, answers as that one did.
  */
-export function responseFor(error: unknown): ErrorResponse {
+export function responseFor(error: unknown, operation?: string): ErrorResponse {
   if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };
+  if (isStopTrouble(error, operation)) return { status: 503, code: 'ORGANISATION_BUSY' };
   if (error instanceof OrganisationBusy || isLockWaitRunOut(error)) return { status: 503, code: 'ORGANISATION_BUSY' };
   // Every connection in use, past the pool's own wait: the platform's, for whichever organisation or job was next.
   if (error instanceof PoolWaitRanOut) return { status: 503, code: 'PLATFORM_BUSY' };
