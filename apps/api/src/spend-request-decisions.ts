@@ -99,7 +99,8 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type AgentTurns, createAgentTurns, TurnWaitExceeded } from './agent-turns.ts';
+import { TurnWaitExceeded } from './agent-turns.ts';
+import { createDecisionEntry, type DecisionEntry, type EntryWaits, SupplierTurnExceeded } from './decision-entry.ts';
 import {
   choicesHistory,
   consentOf,
@@ -496,7 +497,7 @@ export function createSpendRequestDecisions({
   ids,
   clock,
   logger,
-  turns = createAgentTurns(),
+  entry = createDecisionEntry(),
 }: {
   readonly database: Database<DecisionTables>;
   /** Where a request waiting for approval is told, in its decision's own transaction (Phase 3 B2). */
@@ -505,8 +506,8 @@ export function createSpendRequestDecisions({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
-  /** Whose decisions may hold a connection now, in this process (agent-turns.ts); the race suites' own, unqueued. */
-  readonly turns?: AgentTurns;
+  /** Which decisions may hold a connection now, in this process (decision-entry.ts); the race suites' own, unqueued. */
+  readonly entry?: DecisionEntry;
 }): SpendRequestDecisions {
   // The mandates' refusal: the decision reads mandates, versions and policies through their reads.
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
@@ -639,6 +640,19 @@ export function createSpendRequestDecisions({
     return { id: requestId, answer, decision: made.decision, reasons: made.reasons };
   }
 
+  /** A decision its entry turned away, logged: nothing of it was made, its key unclaimed, so the agent sends it again (partner, S161: busy, never a 500). */
+  function turnedAway(log: Logger, { agentId }: AgentActing, error: unknown): Refused {
+    if (error instanceof TurnWaitExceeded) {
+      log.warn('spend_request.agent_busy', { agentId, waitedMs: error.waitedMs });
+      return refused(503, 'AGENT_BUSY');
+    }
+    if (error instanceof SupplierTurnExceeded) {
+      log.warn('spend_request.supplier_busy', { agentId, waitedMs: error.waitedMs });
+      return refused(503, 'ORGANISATION_BUSY');
+    }
+    throw error;
+  }
+
   return {
     async decideAndReserve(agent, idempotent, asked, correlationId) {
       const log = logger.child({ correlationId, orgId: agent.orgId });
@@ -649,25 +663,25 @@ export function createSpendRequestDecisions({
       const started = performance.now();
       // Where its time goes (4D2d): logged with it, so a slow one can be read on Azure.
       const times = noStatementTimes();
-      let turnWaitMs = 0;
+      let waits: EntryWaits | undefined;
       const attempt = () =>
         work.write(agent, idempotent, correlationId, async (tx, states) => {
           made = await decided(tx, states, agent, idempotent.key, asked);
           fresh = made.answer;
           return { status: 201, resourceId: made.id };
         });
-      // In its agent's turn, so a burst from one agent can't hold every connection while it waits on its month.
+      // Through its entry, so decisions waiting on one agent's month or one supplier's lock can't hold every connection.
       let done: Awaited<ReturnType<typeof work.write>>;
       try {
-        done = await turns.run(agent.agentId, () => {
-          turnWaitMs = performance.now() - started;
-          return timingStatements(times, () => retryingTransaction(log, DECIDE_OPERATION, attempt));
-        });
+        done = await entry.run(
+          { agentId: agent.agentId, orgId: agent.orgId, supplierId: asked.supplierId },
+          (waited) => {
+            waits = waited;
+            return timingStatements(times, () => retryingTransaction(log, DECIDE_OPERATION, attempt));
+          },
+        );
       } catch (error) {
-        if (!(error instanceof TurnWaitExceeded)) throw error;
-        // Nothing of it was made, its key unclaimed: the agent sends it again (partner, S161: busy, never a 500).
-        log.warn('spend_request.agent_busy', { agentId: agent.agentId, waitedMs: error.waitedMs });
-        return refused(503, 'AGENT_BUSY');
+        return turnedAway(log, agent, error);
       }
       if (isUnwritten(done)) return done;
       // Once a decision is committed, and once only (never for its key's replay), from the write itself, so a
@@ -679,7 +693,8 @@ export function createSpendRequestDecisions({
           decision: made.decision,
           reasons: made.reasons.join(' '),
           durationMs: Math.round(performance.now() - started),
-          turnWaitMs: Math.round(turnWaitMs),
+          turnWaitMs: Math.round(waits?.turnWaitMs ?? 0),
+          supplierTurnWaitMs: Math.round(waits?.supplierTurnWaitMs ?? 0),
           ...statementTimesForLog(times),
         });
       }
