@@ -8,6 +8,7 @@ import pg, { type PoolConfig } from 'pg';
 import type { Logger } from '../observability/index.ts';
 import { PINNED_SEARCH_PATH } from './search-path.ts';
 import { refuseTenantPreset, tenantCheckedDialect } from './tenant.ts';
+import { limitTransactions } from './transaction-limits.ts';
 
 export interface DatabaseConnectionOptions {
   readonly host: string;
@@ -141,7 +142,15 @@ export type DatabaseTransaction<Schema = unknown> = Transaction<Schema>;
 export function createDatabase<Schema = unknown>(options: DatabaseConnectionOptions, logger: Logger): Database<Schema> {
   const config = poolConfig(options);
   // Only what sendTogether sends goes out unanswered: Kysely makes everything else wait for the answer before it.
-  const pool = new pg.Pool({ ...config, pipeline: true });
+  const pool = new pg.Pool({
+    ...config,
+    pipeline: true,
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises -- as poolConfig's onConnect: pg-pool awaits it, and closes the connection when it rejects.
+    onConnect: async (client: pg.ClientBase) => {
+      await refuseTenantPreset(client);
+      await limitTransactions(client);
+    },
+  });
   // A connection that drops (a restart, a failover, a timeout) reports it as
   // an 'error' event on the connection, idle or in use; with no listener, Node
   // would stop the process. So each connection gets one listener for its whole

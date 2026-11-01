@@ -4,7 +4,7 @@
 // Its requests to them wait on the lock, each up to its limit; to the third
 // they go on, so it still holds money for the database checks to compare. The
 // laptop's run (run.ts) and, on Azure, the second job (job.ts) both call this.
-import { type Database, withTenant } from '../../packages/platform/src/db/index.ts';
+import { type Database, holdOpenOnPurpose, withTenant } from '../../packages/platform/src/db/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
 import type { SeededAgent } from './plan.ts';
@@ -21,6 +21,8 @@ export function whileStuck<T>(
   const stuck = agents.find(({ kind }) => kind === 'neighbour-stuck');
   if (stuck === undefined) throw new Error('The neighbours phase needs the run’s stuck organisation.');
   return withTenant(database, stuck.orgId, async (tx) => {
+    // Longer than any real transaction may stay open: this is the trouble the phase is about.
+    await holdOpenOnPurpose(tx);
     await tx
       .selectFrom('suppliers.suppliers')
       .select('id')

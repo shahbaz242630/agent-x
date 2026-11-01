@@ -61,7 +61,9 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
     }
     storage: {
       storageSizeGB: 32
-      autoGrow: 'Disabled'
+      // A full disk stops every write (4D2e A). Azure grows it at 80% used below 100 GiB (Microsoft), and it can
+      // never shrink, so the alert below says when it is getting there.
+      autoGrow: 'Enabled'
     }
     backup: {
       backupRetentionDays: backupRetentionDays
@@ -309,6 +311,42 @@ resource ownerLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     }
   }
   dependsOn: [serverLogs]
+}
+
+// Before autogrow's 80%: a growing disk costs more each month and can't shrink, so a person should know (4D2e A).
+// A metric, not a log query: it still fires when the logs have stopped at their daily cap.
+resource diskFilling 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-${name}-disk'
+  location: 'global'
+  tags: tags
+  properties: {
+    description: 'SEV-2. The database server\'s disk is over 75% full; autogrow takes it to the next size at 80%, and a disk can never shrink. Runbook: Incident-Response-Playbook.md section P.'
+    severity: 2
+    enabled: true
+    scopes: [server.id]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'disk-used'
+          criterionType: 'StaticThresholdCriterion'
+          metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+          metricName: 'storage_percent'
+          timeAggregation: 'Maximum'
+          operator: 'GreaterThan'
+          threshold: 75
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: [
+      {
+        actionGroupId: actionGroupId
+      }
+    ]
+  }
 }
 
 output host string = server.properties.fullyQualifiedDomainName
