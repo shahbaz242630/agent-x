@@ -129,7 +129,7 @@ export const PLAIN_WORDS = {
   },
   'api.lock_wait_ran_out': {
     happened: 'A request waited too long for a record that other work was holding.',
-    broke: 'That request was turned away as busy and nothing was saved; the sender was told to send it again.',
+    broke: 'That request was told busy and to send it again; sending it again cannot do it twice.',
     next: 'Nothing to do if rare. If it repeats, look for what is holding that record.',
   },
   'api.start_not_recorded': {
@@ -240,11 +240,9 @@ export const PLAIN_WORDS = {
     next: "Look at the update's own error, fix the cause and run the update job again.",
   },
   'db.organisation_busy': {
-    happened:
-      "One organisation's agents had as much database work running as they may, and a request of theirs waited too long.",
-    broke:
-      'That request was turned away as busy, told to send again; sending it again cannot do it twice. Other organisations carried on as normal.',
-    next: "Nothing to do if rare. If often, look at what that organisation's agents send, or what is holding its records.",
+    happened: "An organisation's agents were using their full share of the database, and one request waited too long.",
+    broke: 'That request was told busy, send again; that cannot do it twice. Other organisations carried on.',
+    next: "Nothing to do if rare. If often, look at what that organisation's agents send or hold.",
   },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',
