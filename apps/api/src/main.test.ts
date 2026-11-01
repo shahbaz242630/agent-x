@@ -84,10 +84,14 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 const schemaCheck = vi.hoisted(() => ({
   sound: (): Promise<boolean> => Promise.resolve(true),
   scheduledRuns: 0,
+  fullServerLimits: [] as { limitMs: number; now: number }[],
 }));
 
 vi.mock('@agentx/core/schema-check', () => ({
-  createFullServerWatch: () => ({ withinLimit: () => true, ended: () => undefined }),
+  createFullServerWatch: (limitMs: number, now: () => number) => {
+    schemaCheck.fullServerLimits.push({ limitMs, now: now() });
+    return { withinLimit: () => true, ended: () => undefined };
+  },
   whileServerFull: <T>(ask: () => Promise<T>) => ask(),
   OWNER_ROLE: 'agentx_owner',
   schemaSoundAtStart: () => {
@@ -653,6 +657,14 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     expect(schemaCheck.scheduledRuns).toBe(runsBefore);
     expect(anchorChecks.runs).toBe(chainsBefore + 1);
     expect(schemaCheck.scheduledRuns).toBeGreaterThan(0);
+  });
+
+  it('decision 3: a full server is the alarm only past three anchor intervals, on the real clock', async () => {
+    const before = Date.now();
+    await start();
+    const watched = schemaCheck.fullServerLimits.at(-1);
+    expect(watched?.limitMs).toBe((anchorChecks.intervals.at(-1) ?? 0) * 3);
+    expect(watched?.now).toBeGreaterThanOrEqual(before);
   });
 
   it('refuses to start when the start cannot be recorded, closes the pool, and builds nothing', async () => {
