@@ -38,17 +38,18 @@ export const LOAD_CHECKS: readonly LoadCheck[] = [
   {
     name: 'recorded each request k6 was answered 201 for, once',
     async run(database, agents, created) {
-      const counts = await Promise.all(
-        orgsOf(agents).map((orgId) =>
-          withTenant(database, orgId, (tx) =>
-            tx
-              .selectFrom('spend_requests.requests')
-              .select((eb) => eb.fn.countAll<string>().as('n'))
-              .executeTakeFirstOrThrow(),
-          ),
-        ),
-      );
-      const recorded = counts.reduce((sum, { n }) => sum + Number(n), 0);
+      // One organisation at a time: all at once took ten connections while the API held twenty, and the
+      // server refused the rest, which ended the run before any check reported (run day 5, S167).
+      let recorded = 0;
+      for (const orgId of orgsOf(agents)) {
+        const { n } = await withTenant(database, orgId, (tx) =>
+          tx
+            .selectFrom('spend_requests.requests')
+            .select((eb) => eb.fn.countAll<string>().as('n'))
+            .executeTakeFirstOrThrow(),
+        );
+        recorded += Number(n);
+      }
       // NaN too: a runner that passed no count must fail, never compare.
       if (!Number.isFinite(created) || created <= 0)
         return ['k6 recorded no new request, so nothing could be checked.'];

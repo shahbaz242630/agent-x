@@ -362,7 +362,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
   });
   const run = requestOf(readFileSync(needed(env, 'AGENTX_LOAD_REQUEST_FILE'), 'utf8'));
   const runId = needed(run, 'AGENTX_LOAD_RUN_ID');
-  const database = createDatabase<LoadTables>(connection, testLogger());
+  const database = createDatabase<LoadTables>(jobConnection(connection), testLogger());
   try {
     const steps: JobSteps = {
       database,
@@ -388,6 +388,17 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
     await database.destroy();
   }
 }
+
+/**
+ * The connections a job may hold: the clean-up's four workers and two to spare, what job.db.test.ts runs on. A step
+ * asking for more queues rather than being refused by a server the API is also using (run day 5, S167).
+ */
+const JOB_CONNECTIONS = 6;
+
+export const jobConnection = <T extends object>(connection: T): T & { readonly maxConnections: number } => ({
+  ...connection,
+  maxConnections: JOB_CONNECTIONS,
+});
 
 if (import.meta.main) {
   try {

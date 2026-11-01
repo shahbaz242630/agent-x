@@ -484,6 +484,27 @@ describe('run', () => {
     expect(stateLines(done.said)).toEqual(['  05:46:30 UTC  Running', '  05:46:45 UTC  Succeeded']);
   });
 
+  it('reads the log of a failed run Azure never gives an end, up to now (run day 5)', async () => {
+    for (const endTime of ['', 'later']) {
+      const done = await run(['run', 'db-setup'], { states: ['Running', 'Failed'], endTime });
+      expect(done.said).toContain('Azure gave this run no end, so its log is looked for up to now.');
+      expect(done.az.sequence).toContain('rest --method get');
+      expect(done.status).toBe(1);
+    }
+  });
+
+  it('still looks for no log of a failed run with no start, or a succeeded run with no end', async () => {
+    for (const [state, startTime, endTime] of [
+      ['Failed', 'soon', ''],
+      ['Succeeded', '2026-09-17T05:46:43+00:00', ''],
+    ] as const) {
+      const done = await run(['run', 'db-setup'], { states: [state], startTime, endTime });
+      expect(done.error).toMatchObject({
+        message: "Azure gave no start and end for job-agentx-stg-db-setup-o2jp673, so its log can't be looked for.",
+      });
+    }
+  });
+
   it('says the times as Azure gave them when they are not times, after two minutes of asking, and then looks for no log', async () => {
     for (const [startTime, endTime] of [
       ['soon', ''],
