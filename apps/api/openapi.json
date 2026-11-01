@@ -421,6 +421,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "ORGANISATION_BUSY",
+                    "description": "The organisation has a lot of work in progress at Agent X right now, so this request waited too long. Wait the number of seconds in the Retry-After header, then send the same request again, with the same Idempotency-Key if it has one: it won't be done twice."
+                  },
+                  {
+                    "type": "string",
                     "const": "ORGANIZATION_INVALID",
                     "description": "This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused."
                   },

@@ -1,6 +1,8 @@
 import { REASON_CODES } from '@agentx/core/shared-kernel';
 import { describe, expect, it } from 'vitest';
 
+import { OrganisationBusy } from '@agentx/platform/db';
+
 import { errorBody, IntegrityFailure, responseFor } from './errors.ts';
 
 const withStatus = (statusCode: unknown): Error => Object.assign(new Error('internal detail'), { statusCode });
@@ -29,6 +31,15 @@ describe('SEC-DATA-04 an error response carries a reason code, never the error',
   });
 
   it('sends a record a shared helper can’t believe as 503 INTEGRITY_FAILED, never a plain 500', () => {
+    expect(responseFor(new OrganisationBusy(10_000))).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
+    expect(responseFor(Object.assign(new Error('lock timeout'), { code: '55P03' }))).toEqual({
+      status: 503,
+      code: 'ORGANISATION_BUSY',
+    });
+    expect(responseFor(Object.assign(new Error('other'), { code: '57014' }))).toEqual({
+      status: 500,
+      code: 'INTERNAL_ERROR',
+    });
     expect(responseFor(new IntegrityFailure('a history can’t be believed'))).toEqual({
       status: 503,
       code: 'INTEGRITY_FAILED',

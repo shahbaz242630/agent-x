@@ -14,6 +14,7 @@ import {
   waitUntilQueued,
 } from '@agentx/testing';
 import {
+  asAgentTraffic,
   createDatabase,
   type Database,
   type SignedStateTable,
@@ -518,6 +519,36 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect((await holdEvents()).at(-1)?.details).toMatchObject({ objectId: id, findings: 1 });
     expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ orgId: org, objectId: id })]);
     expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: org, findings: 1 })]);
+  });
+
+  it('sets a hold at once though its agents have their whole share of the connections taken (PL-63)', async () => {
+    await newAgent();
+    const shared = createDatabase<Tables>(
+      { ...database.connection('app'), maxConnections: 4, organisationShare: 1 },
+      testLogger(),
+    );
+    const { promise: letGo, resolve } = Promise.withResolvers<undefined>();
+    const { promise: open, resolve: opened } = Promise.withResolvers<undefined>();
+    const full = asAgentTraffic(() =>
+      withTenant(shared, org, async () => {
+        opened(undefined);
+        await letGo;
+      }),
+    );
+    try {
+      await open;
+      // Far under the 10 s a transaction waits for its share: past it, this would raise the alarm and set no hold.
+      await within(
+        5_000,
+        asAgentTraffic(() => holdOrganisation(shared, org, services(), 'head')),
+      );
+    } finally {
+      resolve(undefined);
+      await full;
+      await shared.destroy();
+    }
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
   it('holdOrganisation: a chain failing the anchor check holds its organisation once, naming the chain (B1d-3)', async () => {

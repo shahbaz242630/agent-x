@@ -1,4 +1,5 @@
 import type { Config } from '@agentx/platform/config';
+import { OrganisationBusy } from '@agentx/platform/db';
 import { createLogger, type Logger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SENSITIVE_SAMPLES as SAMPLES, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
@@ -8,7 +9,7 @@ import { z } from 'zod';
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import './route-server.helper.test.ts';
 import { CORRELATION_HEADER } from './correlation.ts';
-import { errorBody } from './errors.ts';
+import { BUSY_RETRY_SECONDS, errorBody } from './errors.ts';
 import { FRAMEWORK_EVENT } from './framework-logger.ts';
 import { CHECK_FAILED, type HealthCheck } from './health.ts';
 import { REQUEST_COMPLETED, REQUEST_FAILED, REQUEST_RATE_LIMITED } from './request-log.ts';
@@ -40,6 +41,7 @@ const HTTP: Config['http'] = {
   rateLimitPerMinute: 100,
   rateLimitPerUserPerMinute: 100,
   rateLimitPerAgentPerMinute: 100,
+  rateLimitPerOrganisationPerMinute: 100_000,
 };
 const LOG: Config['log'] = { level: 'debug', eventCapPerMinute: 10_000 };
 
@@ -87,6 +89,12 @@ async function setup(options: SetupOptions = {}) {
   });
   app.get('/test/fail', OPEN, () => {
     throw new Error(`database said: password rejected for ${SAMPLES.email}`);
+  });
+  app.get('/test/organisation-busy', OPEN, () => {
+    throw new OrganisationBusy(10_000);
+  });
+  app.get('/test/lock-wait', OPEN, () => {
+    throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
   });
   // A route bug a later route could have: it replies twice.
   app.get('/test/items/:ref', OPEN, (_request, reply) => {
@@ -223,6 +231,30 @@ describe('SEC-WEB-01 a request that can change something must come from our own 
     expect(
       (await app.inject({ method: 'POST', url: '/nothing-here', headers: { origin: PUBLIC_ORIGIN } })).statusCode,
     ).toBe(404);
+  });
+});
+
+describe('an organisation too busy to answer (PL-63)', () => {
+  it('past its share of the connections: 503 busy with when to send again, and no failure logged', async () => {
+    const { app, lines } = await setup();
+    const response = await app.inject('/test/organisation-busy');
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBe(String(BUSY_RETRY_SECONDS));
+    expect(response.json()).toEqual(errorBody('ORGANISATION_BUSY', FIRST_ID));
+    expect(events(lines(), REQUEST_FAILED)).toEqual([]);
+  });
+
+  it('a lock’s wait run out: the same answer, and its own warning, never a failure', async () => {
+    const { app, lines } = await setup();
+    const response = await app.inject('/test/lock-wait');
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBe(String(BUSY_RETRY_SECONDS));
+    expect(response.json()).toEqual(errorBody('ORGANISATION_BUSY', FIRST_ID));
+    expect(response.body).not.toContain('lock timeout');
+    expect(events(lines(), REQUEST_FAILED)).toEqual([]);
+    expect(events(lines(), 'api.lock_wait_ran_out')).toEqual([
+      expect.objectContaining({ level: 'warn', correlationId: FIRST_ID }),
+    ]);
   });
 });
 

@@ -195,6 +195,18 @@ const SETTINGS = {
     }),
     default: '120',
   },
+  // 4D2d (PL-63): one organisation's agents together, so what they send can't take another's
+  // room. As high as the log's default cap lets it: they can't fill the request log, which every
+  // organisation shares. A production number with the log's cap: Pre-Launch Checklist, PL-63.
+  AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: {
+    schema: wholeNumber({
+      min: 10,
+      max: 100_000,
+      unit: 'requests',
+      minimumReason: 'fewer would stop an organisation’s agents checking on their own requests',
+    }),
+    default: '300',
+  },
   AGENTX_OUTBOUND_ALLOWED_ORIGINS: { schema: originList.optional() },
   // ADR-003 §5: the login service the API is the OIDC client of, all three
   // or none (sign-in is off without them). The issuer is its origin exactly,
@@ -369,6 +381,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_RATE_LIMIT_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',
+      'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
       'AGENTX_OIDC_ISSUER',
       'AGENTX_OIDC_CLIENT_ID',

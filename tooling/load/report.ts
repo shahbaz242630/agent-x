@@ -90,8 +90,8 @@ const CROWD_PHASES: readonly {
 function onTheLaptop(run: RunResult): string[] {
   const size =
     run.apiCpus === STAGING_API_CPUS
-      ? "sized as staging's (half a CPU, 1 GiB, ten connections)"
-      : `given ${String(run.apiCpus)} CPU(s) (staging has half), 1 GiB and ten connections as staging`;
+      ? "sized as staging's (half a CPU, 1 GiB), with the load run's twenty connections"
+      : `given ${String(run.apiCpus)} CPU(s) (staging has half), 1 GiB and the load run's twenty connections`;
   const delayed =
     run.delayMs === undefined || run.delayMs === 0
       ? ''
@@ -108,7 +108,7 @@ function onTheLaptop(run: RunResult): string[] {
 function onAzure(run: RunResult): string[] {
   const lines = [
     `Commit \`${run.commit}\`, run at ${run.at}, on staging in Azure UAE North: the API`,
-    `given ${String(run.apiCpus)} CPU(s) and ten connections, the database ${run.database ?? 'of a size not read'}, k6 in a job inside`,
+    `given ${String(run.apiCpus)} CPU(s) and twenty connections, the database ${run.database ?? 'of a size not read'}, k6 in a job inside`,
     "staging's own network, through the API's internal address. The hand-off is paused, as on staging today: its timer",
     're-checks the approved requests each run, and that work is in these numbers.',
   ];

@@ -505,6 +505,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
         password: DB_LOGIN,
         tls: 'verify-full',
         maxConnections: 3,
+        organisationShare: 1,
         applicationName: 'agentx-api',
       },
     ]);
@@ -976,6 +977,7 @@ describe("every exit writes the log's held-back counts first", () => {
     AGENTX_RATE_LIMIT_PER_MINUTE: '10',
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '10',
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '10',
+    AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: '10',
   };
 
   // The log cap counts per minute of the clock: held near one instant (vi.waitFor

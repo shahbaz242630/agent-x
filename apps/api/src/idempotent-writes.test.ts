@@ -9,14 +9,8 @@ import { z } from 'zod';
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import './route-server.helper.test.ts';
-import { errorBody } from './errors.ts';
-import {
-  answerAsked,
-  answerRefusal,
-  BUSY_RETRY_SECONDS,
-  canonicalJson,
-  idempotentRequest,
-} from './idempotent-writes.ts';
+import { BUSY_RETRY_SECONDS, errorBody } from './errors.ts';
+import { answerAsked, answerRefusal, canonicalJson, idempotentRequest } from './idempotent-writes.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -68,6 +62,7 @@ async function withWrite(answer: (asked: IdempotentRequest) => IdempotentWrite) 
       rateLimitPerMinute: 1000,
       rateLimitPerUserPerMinute: 1000,
       rateLimitPerAgentPerMinute: 1000,
+      rateLimitPerOrganisationPerMinute: 100_000,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };

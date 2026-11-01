@@ -26,6 +26,12 @@ export interface DatabaseConnectionOptions {
   /** Names the connection in Postgres's own views, e.g. `agentx-api`. Default `agentx`. */
   readonly applicationName?: string;
   /**
+   * The most connections one organisation's agents' requests may hold at once
+   * (organisation-shares.ts). The API's alone: a job or a test has no neighbours,
+   * and a test holding many of one organisation's locks on purpose must not queue.
+   */
+  readonly organisationShare?: number;
+  /**
    * Every transaction read-only (the restore drill's check, S78): set in the
    * startup packet like the search path, so it beats any setting on the
    * database or the role, and a write is refused by Postgres itself.
@@ -151,7 +157,7 @@ export function createDatabase<Schema = unknown>(options: DatabaseConnectionOpti
   pool.on('error', () => undefined);
   // Every idle connection could need replacing, and then one new one.
   const attempts = config.max + 1;
-  return new Kysely<Schema>({ dialect: tenantCheckedDialect(pool, logger, attempts) });
+  return new Kysely<Schema>({ dialect: tenantCheckedDialect(pool, logger, attempts, options.organisationShare) });
 }
 
 /** Whether a connection's transactions are read-only, as Postgres itself says (`readOnly`): proof asked before anything is read. */

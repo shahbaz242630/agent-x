@@ -1,6 +1,6 @@
 // ADR-011 §4, SEC-AV-07: the rate limit per client address, counted for every
 // request, including 404s, refusals and malformed addresses; and, beside it,
-// each signed-in person's own (B2-5c).
+// each signed-in person's own (B2-5c), each agent's and each organisation's.
 //
 // It counts with the plugin's `createRateLimit`, not its `rateLimit` hook. That
 // hook marks each request as counted, which would stop any route's own limit
@@ -160,6 +160,37 @@ export function createAgentCounter(
     if (agent === null) return;
     if (await overLimit(limiter, request, reply, 'when-refused')) {
       limited(rawClientIp(request, trust), agent.agentId);
+      throw new RateLimited('rate limit exceeded');
+    }
+  };
+}
+
+/**
+ * The hook that counts each organisation's agents' requests against its own
+ * limit (4D2d, PL-63), beside each agent's: what they send together can't take
+ * another organisation's room, and it only ever refuses the organisation that
+ * hit it. Never its people's: runaway agents using the count up would lock an
+ * admin out of the brakes (the review, S166), and each person has their own limit.
+ * It runs after the access hook. Counted per API process, so the real limit grows
+ * with replicas. Over the limit, it tells `limited` the client's address, sets
+ * the limit headers to the organisation's, and throws the same 429.
+ */
+export function createOrganisationCounter(
+  app: FastifyInstance,
+  perMinute: number,
+  trust: ProxyTrust,
+  limited: (ip: string | undefined) => void,
+): CountRequest {
+  const limiter = app.createRateLimit({
+    max: perMinute,
+    timeWindow: WINDOW_MS,
+    // Only called for a request with an agent: the hook below looks first.
+    keyGenerator: (request) => request.agent?.orgId ?? UNREADABLE_ADDRESS,
+  });
+  return async (request, reply) => {
+    if (request.agent === null) return;
+    if (await overLimit(limiter, request, reply, 'when-refused')) {
+      limited(rawClientIp(request, trust));
       throw new RateLimited('rate limit exceeded');
     }
   };
