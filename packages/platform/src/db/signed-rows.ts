@@ -290,15 +290,19 @@ function rowRead(
 /**
  * Where a gathered row's ID comes from (4D2d P8): given; the ID an earlier
  * row of the gather holds in a uuid field, as that row was locked; the same
- * ID as an earlier row's; or the first row of the table whose `column` is
+ * ID as an earlier row's; the first row of the table whose `column` is
  * `value`, in one of `statusIn` (an ID alone, as openMandateOfAgent finds a
- * mandate). `from` and `sameAs` name an earlier row by its place in the list.
+ * mandate); or the ID a uuid field of another table's row holds, read unlocked
+ * on the statement's snapshot, where to look alone (4D2e C4: a key's agent,
+ * locked before the key). `from` and `sameAs` name an earlier row by its place
+ * in the list.
  */
 export type GatheredId =
   | { readonly id: string }
   | { readonly from: number; readonly column: string }
   | { readonly sameAs: number }
-  | { readonly findBy: { readonly column: string; readonly value: string; readonly statusIn: readonly string[] } };
+  | { readonly findBy: { readonly column: string; readonly value: string; readonly statusIn: readonly string[] } }
+  | { readonly lookedUp: { readonly table: SignedStateTable; readonly id: string; readonly column: string } };
 
 /** A row to gather: its table, where its ID comes from, and its lock. */
 export interface GatheredRow {
@@ -369,12 +373,34 @@ function gatheredId(
     const field = sql.ref(`g.f${String(index)}`);
     return sql`(select ${asUuid(field)} from ${earlier(reads, id.from).name} as g limit 1)`;
   }
+  if ('lookedUp' in id) return lookedUpId(orgId, id.lookedUp);
   const { column, value, statusIn } = id.findBy;
   if (!COLUMN.test(column) || statusIn.length === 0) throw new RangeError('A gathered row is found by one column');
   return sql`(
     select f.id from ${sql.table(table.table)} as f
     where f.org_id = ${orgId} and ${sql.ref(`f.${column}`)} = ${value}
       and f.status in (${sql.join(statusIn.map((status) => sql`${status}`))})
+    limit 1
+  )`;
+}
+
+/**
+ * The ID a uuid field of another row holds, as an expression. Read as text, so a column swapped for another type
+ * gives null, for that row's own read to call unreadable, rather than failing the statement.
+ */
+function lookedUpId(
+  orgId: string,
+  { table, id, column }: { readonly table: SignedStateTable; readonly id: string; readonly column: string },
+): RawBuilder<unknown> {
+  checkTable(table);
+  if (!UUID.test(id)) throw new RangeError('A signed row is named by UUIDs');
+  if (!table.fields.some((field) => field.column === column && field.type === 'uuid')) {
+    throw new RangeError("A gathered ID is looked up in a row's uuid field");
+  }
+  const field = sql`(${sql.ref('l.' + column)})::text`;
+  return sql`(
+    select ${asUuid(field)} from ${sql.table(table.table)} as l
+    where l.org_id = ${orgId} and l.id = ${id}::uuid
     limit 1
   )`;
 }
