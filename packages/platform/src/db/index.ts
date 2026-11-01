@@ -94,6 +94,7 @@ export {
   limitedTransaction,
   limitStatements,
   lockName,
+  readAloneOnOneTrip,
   STATEMENT_SECONDS,
   TenantContextError,
   sendTogether,
