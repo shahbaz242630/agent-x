@@ -89,6 +89,7 @@ interface World {
   startRefused?: LoadJob;
   /** This job's runs never end, while it says so. */
   timesOut?: LoadJob | undefined;
+  failedHasNoEnd?: boolean;
   /** Azure refuses {} put back on this job. */
   putBackRefused?: LoadJob;
   /** The API's replicas never change after a restart. */
@@ -164,7 +165,11 @@ class FakeAzure implements Az {
           properties: {
             status: going ? 'Running' : run?.status,
             startTime: '2026-10-27T10:00:00+00:00',
-            endTime: going ? null : '2026-10-27T10:05:00+00:00',
+            endTime: going
+              ? null
+              : run?.status === 'Failed' && this.#world.failedHasNoEnd === true
+                ? ''
+                : '2026-10-27T10:05:00+00:00',
           },
         });
       }
@@ -482,6 +487,20 @@ describe('a run', () => {
     expect(report).toContain('The clean-up left work undone: Org org-c still has a key. Run load.ts finish.');
     expect(report).toContain('The database after the run: failed');
     expect(JSON.parse(readFileSync(done.steps.stateFile, 'utf8'))).toMatchObject({ agents: [AMPLE, CAPPED] });
+  });
+
+  it('still writes the report when the second job fails and Azure never gives it an end (run day 5)', async () => {
+    const az = new FakeAzure({
+      failedHasNoEnd: true,
+      behaviour: {
+        'load-second': () => ({ status: 'Failed', lines: [summary(2, 1), { event: 'load.cleaned', problems: [] }] }),
+      },
+    });
+    const done = await run(['run'], az);
+    expect(done.status).toBe(1);
+    const report = readFileSync(path.join(done.steps.reportsDir, done.reports[0] ?? ''), 'utf8');
+    expect(report).toContain('- load-second ended Failed.');
+    expect(report).toContain('The database checks said nothing.');
   });
 
   it('refuses a job Azure gives no time of its last change for', async () => {

@@ -344,6 +344,13 @@ export interface Ended {
   readonly ended: string;
 }
 
+/** A failed run can stay without an end for good (S116, run day 5): its lines are what say why, so look up to now. */
+function endToLookTo(steps: JobSteps, { status, began, ended }: Ended): string {
+  if (status !== 'Failed' || ended !== '' || !Number.isFinite(Date.parse(began))) return ended;
+  steps.say('Azure gave this failed run no end, so its log is looked for up to now.');
+  return steps.now().toISOString();
+}
+
 /** Waits for a run to end, `limit` being the job's time limit: how it ended, or nothing when it didn't in time. */
 export async function waitFor(
   steps: JobSteps,
@@ -384,7 +391,7 @@ export async function waitFor(
       }
       const took = timed ? ` (${String((end - start) / 1000)} s)` : '';
       steps.say(`${execution} ended ${status}: started ${clock(began)}, ended ${clock(ended)}${took}.`);
-      return { status, began, ended };
+      return { status, began, ended: endToLookTo(steps, { status, began, ended }) };
     }
     if (steps.now().getTime() >= deadline) {
       steps.say(
