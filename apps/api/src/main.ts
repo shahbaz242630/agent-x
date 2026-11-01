@@ -72,7 +72,13 @@ import { type ActivityExportTables, type ActivityTables, createActivityLog } fro
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
-import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
+import {
+  checkSchemaOnSchedule,
+  createFullServerWatch,
+  createReleaseDriftWatch,
+  schemaSoundAtStart,
+  whileServerFull,
+} from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import {
@@ -364,7 +370,7 @@ async function connectDatabase(config: Config, logger: Logger): Promise<Database
     logger,
   );
   try {
-    await assertRuntimeRole(database);
+    await whileServerFull(() => assertRuntimeRole(database), logger);
   } catch (error) {
     if (error instanceof UnsafeDatabaseRole) {
       // The problems name the role's rights and other roles, never a value.
@@ -859,22 +865,20 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     ...SWEEP,
   });
-  // The schema is checked on the same schedule as the chains, so the two share
-  // one timer and one pace (the retention sweep has its own, below). It runs first: a chain read through rewritten walls is
-  // worth less than knowing the walls were rewritten.
-  const anchorCheck = scheduleAnchorCheck(
+  // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
+  const fullServer = createFullServerWatch(config.audit.anchorSeconds * 3 * 1000, () => systemClock.now().getTime());
+  const releaseDrift = createReleaseDriftWatch();
+  // The schema has a timer of its own: the chains' run grows with the organisations, and walls rewritten must not
+  // wait for it (S168 review). Within its own deadline and ending at once when the API stops, so a database that
+  // accepts a read and never answers cannot hold the schedule open.
+  const schemaCheck = scheduleRuns(
     {
-      async run(signal?: AbortSignal): Promise<void> {
-        // Within its own deadline and ending at once when the API stops, so a
-        // database that accepts a read and never answers cannot hold the
-        // schedule open and silence every later check.
-        await checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal });
-        if (signal?.aborted === true) return;
-        await anchors.run(signal);
-      },
+      run: (signal?: AbortSignal) =>
+        checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal }, fullServer, releaseDrift),
     },
     config.audit.anchorSeconds * 1000,
   );
+  const anchorCheck = scheduleAnchorCheck(anchors, config.audit.anchorSeconds * 1000);
   // On a timer of its own (B1e-3): a long sweep must never hold up the anchor
   // check. The two share the pool, and both start at once: each statement is
   // bounded, and a pool at its limit queues rather than refuses. Nothing orders
@@ -1089,6 +1093,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       stop: async () => {
         await Promise.all([
           anchorCheck.stop(),
+          schemaCheck.stop(),
           sweeping.stop(),
           flowSweeping.stop(),
           sessionSweeping.stop(),

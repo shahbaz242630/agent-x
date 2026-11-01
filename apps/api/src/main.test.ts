@@ -84,9 +84,16 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 const schemaCheck = vi.hoisted(() => ({
   sound: (): Promise<boolean> => Promise.resolve(true),
   scheduledRuns: 0,
+  fullServerLimits: [] as { limitMs: number; now: number }[],
 }));
 
 vi.mock('@agentx/core/schema-check', () => ({
+  createFullServerWatch: (limitMs: number, now: () => number) => {
+    schemaCheck.fullServerLimits.push({ limitMs, now: now() });
+    return { withinLimit: () => true, ended: () => undefined };
+  },
+  createReleaseDriftWatch: () => ({ seenAgain: () => false }),
+  whileServerFull: <T>(ask: () => Promise<T>) => ask(),
   OWNER_ROLE: 'agentx_owner',
   schemaSoundAtStart: () => {
     fake.steps.push('schema checked');
@@ -639,34 +646,26 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     expect(built).toHaveLength(serversBefore);
   });
 
-  it('A3e-1b: checks the live schema on every scheduled run, before the chains, and keeps both', async () => {
-    // One timer and one pace for both checks. The schema goes first: a chain
-    // read through rewritten walls is worth less than knowing they were
-    // rewritten. Drift while running raises the alarm but must not stop the
-    // process — a restart would empty the in-memory anchor store, which is
-    // what someone tampering would want.
+  it('A3e-1b: checks the live schema on a timer of its own, so a long run of the chains can never hold it up', async () => {
+    // Drift while running raises the alarm but must not stop the process: a
+    // restart would empty the in-memory anchor store, which is what someone
+    // tampering would want. The chains' run grows with the organisations (S168).
     const { server } = await start();
     expect(server).toBeDefined();
-    const scheduled = anchorChecks.scheduled.at(-1);
-    expect(scheduled).toBeDefined();
-
-    fake.steps.length = 0;
-    await scheduled?.run();
-    expect(schemaCheck.scheduledRuns).toBe(1);
-    expect(anchorChecks.runs).toBe(1);
-    expect(fake.steps).toEqual(['chains checked']);
+    const runsBefore = schemaCheck.scheduledRuns;
+    const chainsBefore = anchorChecks.runs;
+    await anchorChecks.scheduled.at(-1)?.run();
+    expect(schemaCheck.scheduledRuns).toBe(runsBefore);
+    expect(anchorChecks.runs).toBe(chainsBefore + 1);
+    expect(schemaCheck.scheduledRuns).toBeGreaterThan(0);
   });
 
-  it('A3e-1b: a stopped run does not go on to the chains', async () => {
-    const { server } = await start();
-    expect(server).toBeDefined();
-    const scheduled = anchorChecks.scheduled.at(-1);
-
-    const stopping = new AbortController();
-    stopping.abort();
-    await scheduled?.run(stopping.signal);
-    expect(schemaCheck.scheduledRuns).toBe(1);
-    expect(anchorChecks.runs).toBe(0);
+  it('decision 3: a full server is the alarm only past three anchor intervals, on the real clock', async () => {
+    const before = Date.now();
+    await start();
+    const watched = schemaCheck.fullServerLimits.at(-1);
+    expect(watched?.limitMs).toBe((anchorChecks.intervals.at(-1) ?? 0) * 3);
+    expect(watched?.now).toBeGreaterThanOrEqual(before);
   });
 
   it('refuses to start when the start cannot be recorded, closes the pool, and builds nothing', async () => {

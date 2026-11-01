@@ -10,7 +10,14 @@ import {
   testLogger,
   within,
 } from '@agentx/testing';
-import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
+import {
+  createDatabase,
+  type Database,
+  noStatementTimes,
+  TenantContextError,
+  timingStatements,
+  withTenant,
+} from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -396,6 +403,18 @@ describe("the directory's lookup of a key (C1-1)", () => {
       ),
     ).rejects.toMatchObject({ code: '23505', constraint: 'agent_keys_pkey' });
     expect(await listedAgentKey(app, id)).toBe(org);
+  });
+
+  it('finds the listing on one trip (4D2e C5), listed or not', async () => {
+    const org = await organization();
+    const { id: agent } = await addAnAgent(org);
+    const { id } = await issue(org, agent);
+    const times = noStatementTimes();
+
+    const found = await timingStatements(times, () => listedAgentKey(app, id));
+    const none = await timingStatements(times, () => listedAgentKey(app, ids.next()));
+
+    expect({ found, none, trips: times.trips }).toEqual({ found: org, none: undefined, trips: 2 });
   });
 
   it('gives up after 10 seconds, a wait for a lock included, rather than hold the request', async () => {

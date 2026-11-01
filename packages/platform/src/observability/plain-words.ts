@@ -249,6 +249,16 @@ export const PLAIN_WORDS = {
     broke: 'That one piece of work was undone and its locks were freed. Other work carries on.',
     next: 'Tell the developer: this is a bug in Agent X, not a fault in the database.',
   },
+  'db.schema_check_full_server': {
+    happened: "The database's routine security check could not run: every connection was in use.",
+    broke: 'Nothing yet: it is tried again. If it lasts too long, it becomes the integrity alarm.',
+    next: 'Nothing to do if it passes, as in a restart. If it repeats, look at what holds the connections.',
+  },
+  'db.schema_release_drift_seen': {
+    happened: 'The routine security check found a database rule this copy of Agent X was not built with.',
+    broke: 'Nothing yet: if any later check finds such a rule, it becomes the integrity alarm.',
+    next: 'Nothing to do during a release. With no release running, treat it as possible tampering.',
+  },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',
     broke:
@@ -798,6 +808,11 @@ export const PLAIN_WORDS = {
     happened: 'Security counts could not be saved to the database.',
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
+  },
+  'spend_request.supplier_busy': {
+    happened: 'Many payment requests to one supplier came at once, and one waited too long for its turn.',
+    broke: 'That one was turned away as busy and nothing was saved; the agent was told to send it again.',
+    next: "Nothing to do if rare. If often, look at what that organisation's agents send or hold on that supplier.",
   },
   'spend_request.agent_busy': {
     happened: 'An agent sent many payment requests at once, and one waited too long for its turn.',

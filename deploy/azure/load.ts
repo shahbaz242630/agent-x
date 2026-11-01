@@ -30,6 +30,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { agentsOf, LATER_PHASES } from '../../tooling/load/job.ts';
+import type { FreezeProbed } from '../../tooling/load/freeze-probe.ts';
 import { apartOrgsOf, type LogSummary, logFailures, summariseLogs, troubleWindowOf } from '../../tooling/load/logs.ts';
 import { orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
@@ -517,6 +518,10 @@ const checkProblems = (checked: Readonly<Record<string, unknown>>): string[] =>
     (Array.isArray(check.problems) ? check.problems : []).map((problem) => `${text(check.name)}: ${String(problem)}`),
   );
 
+/** What an admin's freeze was answered in phase 5, as the job printed it; none when the phase ended first. */
+const freezeProbeOf = (line: Line): FreezeProbed | undefined =>
+  typeof line?.ms === 'number' && typeof line.answer === 'string' ? { ms: line.ms, answer: line.answer } : undefined;
+
 async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
   const api = preflight(steps, subscription, smoke);
@@ -548,6 +553,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   const failures = smoke
     ? wiring
     : [...wiring, ...phases.flatMap(phaseFailures), ...logFailures(logs, created, POLICY_P95_MS)];
+  const freezeProbe = freezeProbeOf(lineOf(second.printed, 'load.freeze_probe'));
   const report = renderReport({
     at,
     commit: api.release.slice(0, 7),
@@ -557,6 +563,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
     smoke,
     phases,
     logs,
+    ...(freezeProbe === undefined ? {} : { freezeProbe }),
     databaseChecksPassed: checked !== undefined && checkProblems(checked).length === 0,
     failures,
   });

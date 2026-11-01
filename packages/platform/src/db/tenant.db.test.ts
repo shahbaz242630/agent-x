@@ -13,11 +13,13 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
+import { noStatementTimes, timingStatements } from './statement-times.ts';
 import {
   assertTenant,
   holdTransactionLock,
   limitStatements,
   lockName,
+  readAloneOnOneTrip,
   STATEMENT_SECONDS,
   TenantContextError,
   withTenant,
@@ -285,6 +287,165 @@ describe('SEC-TEN-06 a pooled connection never carries a tenant', () => {
       // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above.
       await database.as('admin').query(`alter database ${database.name} reset all`);
     }
+  });
+});
+
+describe(`a read alone on one trip (4D2e C5, Postgres ${server.version})`, () => {
+  const inside = (db: Kysely<ProbeSchema>) =>
+    readAloneOnOneTrip(
+      db,
+      sql<{ pid: number; limit: string; level: string; readOnly: string; tenant: string | null }>`
+        select pg_catalog.pg_backend_pid() as pid,
+          pg_catalog.current_setting('statement_timeout') as limit,
+          pg_catalog.current_setting('transaction_isolation') as level,
+          pg_catalog.current_setting('transaction_read_only') as "readOnly",
+          pg_catalog.current_setting('app.org_id', true) as tenant
+      `,
+    ).then(([row]) => row);
+
+  /** The session's state and open transaction's start, as the server sees them. */
+  const stateOfSession = async (pid: number | undefined) => {
+    const [row] = await database
+      .as('admin')
+      .query<{ state: string; xact_start: Date | null }>(
+        'select state, xact_start from pg_catalog.pg_stat_activity where pid = $1',
+        [pid],
+      );
+    return row;
+  };
+
+  it('takes one trip, read committed, read only and limited, with a parameter bound, and leaves no transaction open', async () => {
+    const single = appDatabase(1);
+    try {
+      const times = noStatementTimes();
+      const row = await timingStatements(times, () => inside(single));
+
+      expect(row).toMatchObject({ limit: `${String(STATEMENT_SECONDS)}s`, level: 'read committed', readOnly: 'on' });
+      expect(row?.tenant ?? '').toBe('');
+      expect(times.trips).toBe(1);
+      // The commit was answered with the read: the session is idle with the answer in hand.
+      expect(await stateOfSession(row?.pid)).toEqual({ state: 'idle', xact_start: null });
+      // What it set ended with it, on the same connection.
+      const { rows } = await sql<{ limit: string; pid: number }>`
+        select pg_catalog.current_setting('statement_timeout') as limit, pg_catalog.pg_backend_pid() as pid
+      `.execute(single);
+      expect(rows).toEqual([{ limit: '0', pid: row?.pid }]);
+
+      const bound = await readAloneOnOneTrip(single, sql<{ echoed: string }>`select ${"it's bound"}::text as echoed`);
+      expect(bound).toEqual([{ echoed: "it's bound" }]);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('keeps nothing: a write inside it is refused by the transaction’s read-only mode', async () => {
+    const single = appDatabase(1);
+    try {
+      await expect(
+        readAloneOnOneTrip(
+          single,
+          sql`insert into probe.items (org_id, id, label) values (${ORG_A}, ${ITEM(900)}, 'written')`,
+        ),
+      ).rejects.toMatchObject({ code: '25006' });
+      expect(await labelsSeenBy(ORG_A)).not.toContain('written');
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it.each([
+    ['a tenant', sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_A}, false)`, 'organisation'],
+    ['a changed search path', sql`select pg_catalog.set_config('search_path', 'public', false)`, 'search_path'],
+  ])('discards a connection carrying %s, its answer never used, and answers from the next', async (_, poison, word) => {
+    const { capture, logger } = capturedLogger();
+    const single = appDatabase(1, logger);
+    try {
+      const poisoned = await backendId(single);
+      await poison.execute(single);
+
+      const row = await inside(single);
+
+      expect(row?.pid).not.toBe(poisoned);
+      expect(row?.tenant ?? '').toBe('');
+      expect(capture.lines()).toMatchObject([
+        { level: 'error', event: 'db.tenant.leftover_discarded', problem: expect.stringContaining(word) as unknown },
+      ]);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('logs a connection carrying a tenant even when its read fails too, and gives back the failure from the next', async () => {
+    const { capture, logger } = capturedLogger();
+    const single = appDatabase(1, logger);
+    try {
+      await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_A}, false)`.execute(single);
+
+      await expect(readAloneOnOneTrip(single, sql`select 1 / 0`)).rejects.toMatchObject({ code: '22012' });
+
+      expect(capture.lines()).toMatchObject([{ level: 'error', event: 'db.tenant.leftover_discarded', attempt: 1 }]);
+      expect(await settingOutside(single)).toBeNull();
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('gives back the failure of a read that fails, and leaves nothing open for the next', async () => {
+    const single = appDatabase(1);
+    try {
+      await expect(readAloneOnOneTrip(single, sql`select 1 / 0`)).rejects.toMatchObject({ code: '22012' });
+      const row = await inside(single);
+      expect(row).toMatchObject({ readOnly: 'on' });
+      expect(
+        (await sql<{ limit: string }>`select pg_catalog.current_setting('statement_timeout') as limit`.execute(single))
+          .rows,
+      ).toEqual([{ limit: '0' }]);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('never hangs when the connection is killed mid-trip, and the next read is answered', async () => {
+    const single = appDatabase(1);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table probe.items in access exclusive mode');
+    try {
+      const reading = within(
+        20_000,
+        readAloneOnOneTrip(single, single.selectFrom('probe.items').select('label')),
+        'the read',
+      );
+      const outcome = expect(reading).rejects.toThrow();
+      const [pid] = await waitUntilQueued(database.as('admin'), 1);
+      await database.as('admin').query('select pg_catalog.pg_terminate_backend($1)', [pid]);
+      await outcome;
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    await expect(within(20_000, inside(single), 'the next read')).resolves.toMatchObject({ readOnly: 'on' });
+    await single.destroy();
+  });
+
+  it('gives up after 10 seconds, a wait for a lock included', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table probe.items in access exclusive mode');
+    try {
+      await expect(
+        within(20_000, readAloneOnOneTrip(app, app.selectFrom('probe.items').select('label')), 'the read'),
+      ).rejects.toThrow(/statement timeout/);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('is refused inside a transaction, which has a connection of its own already', async () => {
+    await expect(
+      withTenant(app, ORG_A, (tx) => readAloneOnOneTrip<ProbeSchema, unknown>(tx, sql`select 1`)),
+    ).rejects.toThrow(new TenantContextError('a read alone opens its own transaction'));
   });
 });
 

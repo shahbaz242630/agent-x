@@ -11,11 +11,21 @@ import {
   type OwnerTamper,
   SequentialIds,
   tamperAsOwner,
+  type TestClient,
   type TestDatabase,
   testLogger,
+  waitUntilBlocked,
+  waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { asAgentTraffic, createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import {
+  asAgentTraffic,
+  createDatabase,
+  type Database,
+  noStatementTimes,
+  timingStatements,
+  withTenant,
+} from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
@@ -23,10 +33,10 @@ import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
-import { agentKeyText, keySecretMessage, type Scope } from '../domain/agent.ts';
+import { agentKeyText, keySecretMessage, parseAgentKey, type Scope } from '../domain/agent.ts';
 import { addAgentKey, AGENT_KEYS } from './agent-keys.ts';
 import { addAgent, AGENTS } from './agents.ts';
-import { createAgentKeyCheck } from './key-check.ts';
+import { agentKeyAt, createAgentKeyCheck, type KeyChecked } from './key-check.ts';
 import type { AgentsTables } from './tables.ts';
 
 type Tables = AgentsTables & OrganizationsTables & DirectoryTables & AuditTables;
@@ -153,6 +163,13 @@ const revoke = (id: string) =>
   );
 
 const hold = () => withSignedStates(app, org, quiet(), (tx, states) => states.integrityHold(tx, org, 'none'));
+
+/** The one session of this database waiting for a lock. */
+const waitingPid = async (): Promise<number> => {
+  const [pid] = await waitUntilQueued(database.as('admin'), 1);
+  if (pid === undefined) throw new Error('No session is waiting');
+  return pid;
+};
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -309,6 +326,394 @@ describe('the key check: bounded', () => {
     } finally {
       await holder.query('rollback');
       await holder.end();
+    }
+  });
+});
+
+describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${server.version})`, () => {
+  /** The key checked in its organisation's transaction alone, with the trips that took: the start, the gather and the commit, when all is believed. */
+  const checkedInTransaction = async (text: string) => {
+    const presented = parseAgentKey(text);
+    if (presented === undefined) throw new Error('not a key');
+    const times = noStatementTimes();
+    const checked = await timingStatements(times, () =>
+      withSignedStates(app, org, { ...quiet(), logger: testLogger(capture) }, (tx, states) =>
+        agentKeyAt(tx, states, { keys, now: clock.now() }, org, presented),
+      ),
+    );
+    return { checked, trips: times.trips };
+  };
+
+  /** Runs `change` in a transaction of its own and holds it open, its row's lock with it, until `commit` is called. */
+  const heldChange = async (change: Parameters<typeof withSignedStates<Tables, unknown>>[3]) => {
+    const made = Promise.withResolvers<undefined>();
+    const letGo = Promise.withResolvers<undefined>();
+    const done = withSignedStates(app, org, quiet(), async (tx, states) => {
+      await change(tx, states);
+      made.resolve(undefined);
+      await letGo.promise;
+    });
+    await Promise.race([made.promise, done]);
+    return {
+      commit: async () => {
+        letGo.resolve(undefined);
+        await done;
+      },
+    };
+  };
+
+  /** Holds what `lock` locks, on a connection of its own, until `end`. */
+  const held = async (lock: (holder: TestClient) => Promise<unknown>) => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await lock(holder);
+    return {
+      end: async () => {
+        await holder.query('rollback');
+        await holder.end();
+      },
+    };
+  };
+
+  const agentHeld = (id: string) =>
+    held((holder) => holder.query('select 1 from agents.agents where id = $1 for no key update', [id]));
+
+  const keyHeld = (id: string) =>
+    held((holder) => holder.query('select 1 from agents.agent_keys where id = $1 for update', [id]));
+
+  /** Whether `lock` is granted at once, on a connection of its own. */
+  const grantedNow = async (lock: (asker: TestClient) => Promise<unknown>): Promise<boolean> => {
+    const asker = await database.connect('admin');
+    try {
+      await asker.query('begin');
+      await lock(asker);
+      return true;
+    } catch (error) {
+      expect(error).toMatchObject({ code: '55P03' });
+      return false;
+    } finally {
+      await asker.end();
+    }
+  };
+
+  it.each([
+    ['an accepted key', 'accepted', (_agent: string, _id: string) => Promise.resolve()],
+    ['a revoked key', 'refused', (_agent: string, id: string) => revoke(id).then(() => undefined)],
+    ['a suspended agent', 'refused', (agent: string) => moveAgent(agent, 'suspend').then(() => undefined)],
+  ] as const)('takes three trips for %s: the start, the gather, the commit', async (_, outcome, before) => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    await before(agent, id);
+
+    expect(await checkedInTransaction(text)).toMatchObject({ checked: { outcome }, trips: 3 });
+  });
+
+  it('takes four trips for the whole check: the listing’s one and its transaction’s three', async () => {
+    const agent = await newAgent();
+    const { text } = await issue(agent);
+    const times = noStatementTimes();
+
+    expect(await timingStatements(times, () => check(text))).toMatchObject({ outcome: 'accepted' });
+    expect(times.trips).toBe(4);
+  });
+
+  it('takes three trips for a listed key with no row', async () => {
+    const id = ids.next();
+    await tamperAsOwner(database, AGENT_KEYS, org).then(async (owner) => {
+      await owner.query('insert into directory.agent_keys (key_id, org_id) values ($1, $2)', [id, org]);
+      await owner.end();
+    });
+
+    expect(await checkedInTransaction(agentKeyText(id, Buffer.alloc(32, 1)))).toEqual({
+      checked: { outcome: 'refused', reason: 'missing' },
+      trips: 3,
+    });
+  });
+
+  it('refuses a key revoked while the check waited for its lock, on the very call that waited', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    expect(await check(text)).toMatchObject({ outcome: 'accepted' });
+
+    const revoking = await heldChange((tx, states) =>
+      states.changeStatus(tx, AGENT_KEYS, { orgId: org, id }, 'revoke', {
+        actor: OPERATOR,
+        action: 'agent_key.revoked',
+        details: {},
+      }),
+    );
+    const checking = checkedInTransaction(text);
+    await waitUntilQueued(database.as('admin'), 1);
+    await revoking.commit();
+
+    // The agent believed, the key not: its read alone, on a snapshot after the wait, one trip more.
+    expect(await checking).toEqual({ checked: { outcome: 'refused', reason: 'revoked' }, trips: 4 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    await refusedFor(text, 'revoked', id);
+  });
+
+  it('refuses a key whose agent was suspended while the check waited for its lock, reading the key again as well', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+
+    const suspending = await heldChange((tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: org, id: agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspend',
+        details: {},
+      }),
+    );
+    const checking = checkedInTransaction(text);
+    await waitUntilQueued(database.as('admin'), 1);
+    await suspending.commit();
+
+    // The agent not believed, so nothing after it is: both read alone (S161), two trips more.
+    expect(await checking).toEqual({ checked: { outcome: 'refused', reason: 'agent_suspended' }, trips: 5 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    await refusedFor(text, 'agent_suspended', id);
+  });
+
+  it('alarms for a key revoked and put back to its older signed state during the wait: the snapshot’s log would agree with it (S157)', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    const saved = await owner.saveRow(id);
+    try {
+      const checking = await owner.withoutStatusGuard(async () => {
+        const holding = await agentHeld(agent);
+        // The statement starts here: its snapshot's newest event for the key is the one the row is put back to.
+        const waiting = check(text);
+        try {
+          await waitUntilQueued(database.as('admin'), 1);
+          await revoke(id);
+          await owner.restoreRow(saved);
+        } finally {
+          await holding.end();
+        }
+        // Answered before the guard goes back on: that takes a lock on the table the statement has open.
+        return waiting;
+      });
+
+      expect(checking).toEqual({ outcome: 'refused' });
+      expect(lines('agent_key.refused')).toEqual([expect.objectContaining({ reason: 'tampered', keyId: id })]);
+      expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ subjectType: 'agent_key' })]);
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it('accepts a key whose agent was reactivated during the wait, from the state the wait ended on', async () => {
+    const agent = await newAgent();
+    const { text } = await issue(agent);
+    await moveAgent(agent, 'suspend');
+
+    const reactivating = await heldChange((tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: org, id: agent }, 'reactivate', {
+        actor: OPERATOR,
+        action: 'agent.reactivate',
+        details: {},
+      }),
+    );
+    const checking = checkedInTransaction(text);
+    await waitUntilQueued(database.as('admin'), 1);
+    await reactivating.commit();
+
+    expect((await checking).checked).toMatchObject({ outcome: 'accepted' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('locks the agent before the key: waiting for the agent it holds neither', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    const holding = await agentHeld(agent);
+    try {
+      const checking = check(text);
+      await waitUntilBlocked(database.as('admin'), await waitingPid());
+      expect(
+        await grantedNow((asker) =>
+          asker.query('select 1 from agents.agent_keys where id = $1 for update nowait', [id]),
+        ),
+      ).toBe(true);
+      await holding.end();
+      await expect(checking).resolves.toMatchObject({ outcome: 'accepted' });
+    } catch (error) {
+      await holding.end().catch(() => undefined);
+      throw error;
+    }
+  });
+
+  it('locks the agent before the key: waiting for the key it holds the agent, and a change of the agent waits', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    const holding = await keyHeld(id);
+    try {
+      const checking = check(text);
+      await waitUntilBlocked(database.as('admin'), await waitingPid());
+      expect(
+        await grantedNow((asker) =>
+          asker.query('select 1 from agents.agents where id = $1 for update nowait', [agent]),
+        ),
+      ).toBe(false);
+      await holding.end();
+      await expect(checking).resolves.toMatchObject({ outcome: 'accepted' });
+    } catch (error) {
+      await holding.end().catch(() => undefined);
+      throw error;
+    }
+  });
+
+  it('never hangs when the connection is killed in the middle of the gather, and the next check is answered', async () => {
+    const agent = await newAgent();
+    const { text } = await issue(agent);
+    const holding = await agentHeld(agent);
+    try {
+      const checking = within(20_000, check(text), 'the check');
+      const pid = await waitingPid();
+      const outcomeOf = expect(checking).rejects.toThrow();
+      await database.as('admin').query('select pg_catalog.pg_terminate_backend($1)', [pid]);
+      await outcomeOf;
+    } finally {
+      await holding.end();
+    }
+    await expect(within(20_000, check(text), 'the next check')).resolves.toMatchObject({ outcome: 'accepted' });
+  });
+
+  /** Refused and held for the sign that says the key's row reads sound again: the one alarm, the hold set, naming it. */
+  const heldAsMovedBack = async (checking: Promise<KeyChecked>, id: string): Promise<void> => {
+    expect(await checking).toEqual({ outcome: 'refused' });
+    expect(lines('agent_key.refused')).toEqual([expect.objectContaining({ reason: 'tampered', keyId: id })]);
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ orgId: org, subjectType: 'agent_key', objectId: id, reason: 'moved_back' }),
+    ]);
+    expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ reason: 'moved_back' })]);
+    expect(await hold()).toMatchObject({ outcome: 'held' });
+  };
+
+  it('alarms and holds for a key pointed at another agent as the statement starts and back during the wait: the sealed agent is judged', async () => {
+    const agent = await newAgent();
+    const other = await newAgent(['requests:read', 'requests:write', 'suppliers:read']);
+    const { id, text } = await issue(agent, { scopes: ['requests:read', 'suppliers:read'] });
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    try {
+      await owner.setColumn(id, 'agent_id', other);
+      const holding = await agentHeld(other);
+      const checking = check(text);
+      await waitUntilQueued(database.as('admin'), 1);
+      await owner.setColumn(id, 'agent_id', agent);
+      await holding.end();
+
+      await heldAsMovedBack(checking, id);
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it.each([
+    ['that isn’t there', () => Promise.resolve(ids.next())],
+    [
+      'of another organisation',
+      async () => {
+        const home = org;
+        org = ids.next();
+        await withSignedStates(app, org, quiet(), (tx, states) =>
+          createOrganization(tx, states, { id: org, name: 'Other Trading LLC', actor: OPERATOR }),
+        );
+        const elsewhere = await newAgent();
+        org = home;
+        return elsewhere;
+      },
+    ],
+  ])(
+    'alarms and holds for a key pointed at an agent %s and back during the wait: a sound key with no agent has no other way here',
+    async (_, ghost) => {
+      const agent = await newAgent();
+      const { id, text } = await issue(agent);
+      const elsewhere = await ghost();
+      const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+      await owner.query('alter table agents.agent_keys drop constraint of_an_agent');
+      try {
+        await owner.setColumn(id, 'agent_id', elsewhere);
+        // Its setting back stays open: the check's snapshot reads the ghost, finds no agent, and waits at the key.
+        await owner.query('begin');
+        await owner.setColumn(id, 'agent_id', agent);
+        const checking = check(text);
+        await waitUntilQueued(database.as('admin'), 1);
+        await owner.query('commit');
+
+        await heldAsMovedBack(checking, id);
+      } finally {
+        await owner.query(
+          'alter table agents.agent_keys add constraint of_an_agent foreign key (org_id, agent_id) references agents.agents (org_id, id)',
+        );
+        await owner.end();
+      }
+    },
+  );
+
+  it('alarms, once, for a key pointed at another agent, and acts as neither', async () => {
+    const agent = await newAgent();
+    const other = await newAgent();
+    const { id, text } = await issue(agent);
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    try {
+      await owner.setColumn(id, 'agent_id', other);
+
+      await refusedFor(text, 'tampered', id);
+      expect(lines('audit.integrity_failed')).toEqual([
+        expect.objectContaining({ subjectType: 'agent_key', orgId: org }),
+      ]);
+      expect(await hold()).toMatchObject({ outcome: 'held' });
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it('alarms for a key row deleted past the app, whose log says it was made', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    try {
+      await owner.query('delete from agents.agent_keys where org_id = $1 and id = $2', [org, id]);
+
+      await refusedFor(text, 'tampered', id);
+      expect(lines('audit.integrity_failed')).toEqual([
+        expect.objectContaining({ subjectType: 'agent_key', reason: 'deleted' }),
+      ]);
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it('alarms for a key pointed at an agent that isn’t there: the key is judged with no agent to be found', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    await owner.query('alter table agents.agent_keys drop constraint of_an_agent');
+    try {
+      await owner.setColumn(id, 'agent_id', ids.next());
+
+      await refusedFor(text, 'tampered', id);
+      expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ subjectType: 'agent_key' })]);
+    } finally {
+      await owner.setColumn(id, 'agent_id', agent);
+      await owner.query(
+        'alter table agents.agent_keys add constraint of_an_agent foreign key (org_id, agent_id) references agents.agents (org_id, id)',
+      );
+      await owner.end();
+    }
+  });
+
+  it('alarms for the agent alone when the agent is tampered with, and stops there', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    const owner = await tamperAsOwner(database, AGENTS, org);
+    try {
+      await owner.setColumn(agent, 'status', 'SUSPENDED');
+
+      await refusedFor(text, 'tampered', id);
+      expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ subjectType: 'agent' })]);
+    } finally {
+      await owner.end();
     }
   });
 });

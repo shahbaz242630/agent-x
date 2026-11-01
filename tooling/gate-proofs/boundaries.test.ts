@@ -17,6 +17,9 @@ const FIXTURES = 'tooling/gate-proofs/fixtures/boundaries';
 /** Fixture folder → the rules its files break. */
 const EXPECTED: Record<string, string[]> = {
   'application-to-infrastructure': ['application-not-to-infrastructure'],
+  'audit-chain': ['audit-chain-only-where-a-chain-is-kept'],
+  // The two modules that keep a chain.
+  'audit-chain-allowed': [],
   'business-to-platform': ['business-code-not-to-platform'],
   circular: ['no-circular'],
   // Also holds allowed cases: the outbound client importing node:https, and a

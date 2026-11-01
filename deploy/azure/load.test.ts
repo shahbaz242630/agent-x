@@ -59,7 +59,13 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
       summary(2, 1),
       summary(3, 1),
       summary(4, 1),
-      summary(5, 1),
+      { event: 'load.freeze_probe', ms: 41, answer: 'frozen' },
+      {
+        ...summary(5, 1),
+        neighbours: Object.fromEntries(
+          ['calm', 'busy', 'stuck'].map((kind) => [kind, { requests: 1, serverErrors: 0, rateLimited: 0, p95Ms: 1 }]),
+        ),
+      },
       { event: 'load.checked', created: 6, finished: true, checks: [{ name: 'recorded', problems: [] }] },
       { event: 'load.cleaned', organizations: 2, problems: [] },
     ],
@@ -437,6 +443,9 @@ describe('a run', () => {
     const report = readFileSync(path.join(done.steps.reportsDir, done.reports[0] ?? ''), 'utf8');
     expect(report).toContain('**Passed.**');
     expect(report).toContain(`Commit \`${RELEASE.slice(0, 7)}\``);
+    expect(report).toContain(
+      "An admin's freeze of the stuck organisation, asked near the phase's end: frozen, after 41 ms.",
+    );
     expect(report).toContain('the database Standard_B1ms (Burstable)');
     // Cleaned up, so no run is left open.
     expect(existsSync(done.steps.stateFile)).toBe(false);

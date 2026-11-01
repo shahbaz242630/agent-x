@@ -9,11 +9,17 @@ import {
   type Transaction,
 } from 'kysely';
 import type pg from 'pg';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
-import { limitedTransaction, TenantContextError, tenantCheckedDialect, withTenant } from './tenant.ts';
+import {
+  limitedTransaction,
+  readAloneOnOneTrip,
+  TenantContextError,
+  tenantCheckedDialect,
+  withTenant,
+} from './tenant.ts';
 
 /** What a sound connection reports: the pin poolConfig puts in the startup packet. */
 const PINNED = PINNED_SEARCH_PATH_VALUE;
@@ -302,6 +308,126 @@ const elsewhere = (seen: string[] = []): Kysely<unknown> =>
       createQueryCompiler: () => new PostgresQueryCompiler(),
     },
   });
+
+describe('a read alone on one trip (4D2e C5)', () => {
+  const READ = 'select 1 as answer';
+  const reading = (db: Kysely<unknown>) => readAloneOnOneTrip(db, sql`select 1 as answer`);
+
+  /** The stand-in, its statements `fails` picks refused with `error`. */
+  const failingAt = (stand: Stand, fails: (text: string) => boolean, error: Error): Stand => {
+    const { query } = stand.client as unknown as { query: (text: string) => Promise<unknown> };
+    (stand.client as unknown as { query: unknown }).query = (text: string) =>
+      fails(text) ? Promise.reject(error) : query(text);
+    return stand;
+  };
+
+  it('writes the start, the read and the commit before any answer is read, in that order', async () => {
+    const sent: string[] = [];
+    const answer = Promise.withResolvers<undefined>();
+    const client = {
+      query: async (text: string) => {
+        sent.push(text);
+        await answer.promise;
+        return text.includes('; ')
+          ? [{ rows: [] }, { rows: [{ org_id: null, search_path: PINNED }] }, { rows: [{}] }]
+          : { command: 'SELECT', rows: text === READ ? [{ answer: 1 }] : [] };
+      },
+      release: () => undefined,
+    };
+    const stand = { client: client as unknown as pg.PoolClient, sent, released: [] };
+
+    const answered = reading(databaseOf(1, logger(), stand));
+    // Nothing has been answered, and all three have gone.
+    await vi.waitFor(() => {
+      expect(sent).toHaveLength(3);
+    });
+    answer.resolve(undefined);
+
+    expect(await answered).toEqual([{ answer: 1 }]);
+    expect(sent).toEqual([
+      `start transaction isolation level read committed read only; ${CHECK}; select pg_catalog.set_config('statement_timeout', '10s', true) as statement_timeout`,
+      READ,
+      'commit',
+    ]);
+  });
+
+  it('closes a connection left with a tenant, using nothing it answered, and reads on the next', async () => {
+    const poisoned = connection(ORG);
+    const clean = connection(null);
+    const log = logger();
+
+    expect(await reading(databaseOf(3, log, poisoned, clean))).toEqual([{ answer: 1 }]);
+    expect(poisoned.released).toEqual([true]);
+    expect(clean.released).toEqual([undefined]);
+    expect(log.capture.lines()).toMatchObject([{ level: 'error', event: 'db.tenant.leftover_discarded', attempt: 1 }]);
+    expect(log.capture.text).not.toContain(ORG);
+  });
+
+  it('closes a connection whose search path was changed, the same way', async () => {
+    const moved = connection(null, { searchPath: 'public' });
+    const clean = connection(null);
+    const log = logger();
+
+    expect(await reading(databaseOf(3, log, moved, clean))).toEqual([{ answer: 1 }]);
+    expect(moved.released).toEqual([true]);
+    expect(log.capture.lines()).toMatchObject([{ event: 'db.tenant.leftover_discarded' }]);
+  });
+
+  it('gives up after the allowed tries, answering nothing', async () => {
+    const tries = [connection(ORG), connection(ORG)];
+
+    await expect(reading(databaseOf(2, logger(), ...tries))).rejects.toThrow(
+      new TenantContextError('no sound connection after 2 tries'),
+    );
+  });
+
+  it('closes a connection whose trip failed, and gives back the failure', async () => {
+    const failed = connection(new Error('the connection dropped'));
+
+    await expect(reading(databaseOf(3, logger(), failed))).rejects.toThrow('the connection dropped');
+    expect(failed.released).toEqual([true]);
+  });
+
+  it('closes a connection whose read failed, giving back the failure', async () => {
+    const refused = new Error('the read was refused');
+    const stand = failingAt(connection(null), (text) => text === READ, refused);
+
+    await expect(reading(databaseOf(3, logger(), stand))).rejects.toThrow(refused);
+    expect(stand.released).toEqual([true]);
+  });
+
+  it('closes a connection whose start failed, whatever the read answered', async () => {
+    const refused = new Error('the start was refused');
+    const stand = failingAt(connection(null), (text) => text.startsWith('start'), refused);
+
+    await expect(reading(databaseOf(3, logger(), stand))).rejects.toThrow(refused);
+    expect(stand.released).toEqual([true]);
+  });
+
+  it('judges a poisoned connection before its failed commit: logged, closed, and read on the next', async () => {
+    const poisoned = failingAt(
+      connection(ORG),
+      (text) => text === 'commit',
+      new Error('the connection dropped at the commit'),
+    );
+    const log = logger();
+
+    expect(await reading(databaseOf(3, log, poisoned, connection(null)))).toEqual([{ answer: 1 }]);
+    expect(log.capture.lines()).toMatchObject([{ event: 'db.tenant.leftover_discarded', attempt: 1 }]);
+  });
+
+  it('closes a connection whose commit failed, answering nothing though the read answered', async () => {
+    const dropped = new Error('the connection dropped at the commit');
+    const stand = failingAt(connection(null), (text) => text === 'commit', dropped);
+
+    await expect(reading(databaseOf(3, logger(), stand))).rejects.toThrow(dropped);
+    expect(stand.released).toEqual([true]);
+  });
+
+  it('runs on no database createDatabase didn’t make: nothing would check its connection', async () => {
+    await expect(reading(elsewhere())).rejects.toThrow(new TenantContextError('not a checked connection'));
+  });
+});
 
 describe("a database createDatabase didn't make", () => {
   it('runs no tenant work, as it could not set the organisation', async () => {

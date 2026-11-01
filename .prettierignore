@@ -6,6 +6,8 @@ Documents/
 .claude/
 # Deliberately broken files that the gate proofs check are rejected.
 tooling/gate-proofs/fixtures/
+# Written from a freshly migrated database by packages/platform/src/db/built-checks.db.test.ts, never by hand.
+packages/platform/src/db/built-checks.json
 # Written from the routes by apps/api/src/contract.test.ts, never by hand.
 apps/api/openapi.json
 # Written by `corepack pnpm load` (tooling/load/run.ts), never by hand.

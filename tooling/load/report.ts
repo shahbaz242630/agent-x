@@ -3,6 +3,7 @@
 // answers stay right under load and how one version compares with another;
 // PL-38 closes only on the same run against a production-sized Azure stack
 // (D2c), whose report says so.
+import type { FreezeProbed } from './freeze-probe.ts';
 import type { DecisionParts, LogSummary, NeighbourKind, Percentiles } from './logs.ts';
 import { type LoadSite, NEIGHBOURS_PHASE, POLICY_P95_MS, STAGING_API_CPUS } from './plan.ts';
 
@@ -58,6 +59,10 @@ export interface RunResult {
   readonly phases: readonly PhaseResult[];
   /** On the laptop (`--delay-ms`): whole ms added to every packet the database sent, as Azure's network adds them. */
   readonly delayMs?: number;
+  /** On the laptop (`--db-cpus`): the database's CPU cap; none or 0, no cap. */
+  readonly dbCpus?: number;
+  /** An admin's freeze of the stuck organisation, asked near phase 5's end; none when the phase ended first. */
+  readonly freezeProbe?: FreezeProbed;
   /** On the laptop: the app's round trips over each phase (pg_stat_statements, less statements sent in another's trip). */
   readonly statements?: readonly PhaseStatements[];
   readonly logs: LogSummary;
@@ -86,6 +91,12 @@ const CROWD_PHASES: readonly {
   { phase: 4, setup: 'All agents sharing three suppliers', of: 'crowdSharedDecisions' },
 ];
 
+/** Whether `--db-cpus` held the laptop's database to a size. */
+const isCapped = (run: RunResult): run is RunResult & { readonly dbCpus: number } => (run.dbCpus ?? 0) > 0;
+
+/** The title's words for a capped database. */
+const databaseSize = (run: RunResult): string => (isCapped(run) ? `, database ${String(run.dbCpus)} CPU` : '');
+
 /** Where a laptop run ran, and why its numbers don't close PL-38. */
 function onTheLaptop(run: RunResult): string[] {
   const size =
@@ -96,9 +107,12 @@ function onTheLaptop(run: RunResult): string[] {
     run.delayMs === undefined || run.delayMs === 0
       ? ''
       : ` ${String(run.delayMs)} ms was added to every packet the database sent, as Azure's network adds it.`;
+  const capped = isCapped(run)
+    ? ` The database was held to ${String(run.dbCpus)} CPU(s), so it can fill up as Azure's does.`
+    : '';
   return [
     `Commit \`${run.commit}\`, run at ${run.at}, on a laptop: the compose stack's database and API only, the API`,
-    `${size}, k6 straight to it.${delayed} As on staging today, the hand-off is`,
+    `${size}, k6 straight to it.${delayed}${capped} As on staging today, the hand-off is`,
     'paused: its timer re-checks the approved requests each run, and that work is in these numbers. Laptop numbers compare versions;',
     'they do not close PL-38, which closes on the same run on Azure, production-sized, before live.',
   ];
@@ -178,7 +192,7 @@ function crowdSection(run: RunResult): string[] {
         'Ten agents of one organisation, 25 requests a second between them, picked at random, with the same duplicates and replays. They share its chain head, and in the second row each supplier’s lock too.',
         '',
         `| Setup | Requests | Not sent | Request p95 ms | Decisions | p50 ms | p95 ms | p99 ms | Max ms | 5xx | 429 | Checks failed | ${PARTS_HEADINGS} |`,
-        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+        `| ${Array.from({ length: 12 + PARTS_COLUMNS }, () => '---').join(' | ')} |`,
         ...rows,
         '',
         [
@@ -202,11 +216,40 @@ function neighbourMiss(run: RunResult): string[] {
     : [];
 }
 
-const partsCells = ({ connectionWaitP95, turnWaitP95, tripsP50, decisionRowsP95, headLockP95 }: DecisionParts) =>
-  [connectionWaitP95, turnWaitP95, tripsP50, decisionRowsP95, headLockP95].map(String).join(' | ');
+const partsCells = ({
+  connectionWaitP95,
+  turnWaitP95,
+  supplierTurnWaitP95,
+  gateWaitP95,
+  tripsP50,
+  decisionRowsP95,
+  headLockP95,
+  busyRefusals,
+}: DecisionParts) =>
+  [
+    connectionWaitP95,
+    turnWaitP95,
+    supplierTurnWaitP95,
+    gateWaitP95,
+    tripsP50,
+    decisionRowsP95,
+    headLockP95,
+    busyRefusals,
+  ]
+    .map(String)
+    .join(' | ');
+
+/** As many as partsCells gives: the tables' dashes are counted from it. */
+const PARTS_COLUMNS = 8;
 
 const PARTS_HEADINGS =
-  "Connection wait p95 ms | Own agent wait p95 ms | Trips p50 | Decision rows trip p95 ms (the supplier's lock inside) | Chain head trip p95 ms";
+  "Connection wait p95 ms | Own agent wait p95 ms | Supplier wait p95 ms | Gate wait p95 ms | Trips p50 | Decision rows trip p95 ms (the supplier's lock inside) | Chain head trip p95 ms | Turned away busy";
+
+/** What an admin's freeze was answered under the stuck organisation's trouble (PL-63 item 3): reported, never failing a run. */
+const freezeLine = ({ freezeProbe }: RunResult): string =>
+  freezeProbe === undefined
+    ? "An admin's freeze of the stuck organisation: not asked, the phase ended first."
+    : `An admin's freeze of the stuck organisation, asked near the phase's end: ${freezeProbe.answer}, after ${String(freezeProbe.ms)} ms.`;
 
 /** One organisation's trouble beside others (PL-63): the same target, each kind apart, beside the quiet phases. */
 function neighbourSection(run: RunResult): string[] {
@@ -230,7 +273,7 @@ function neighbourSection(run: RunResult): string[] {
     'Ten calm organisations, sending what the steady traffic sends, beside a busy organisation (25 requests a second on three shared suppliers) and a stuck one (5 a second, two of its three suppliers held locked for the phase). The calm ones should read as the quiet phases do.',
     '',
     `| Traffic | Requests | Request p95 ms | 5xx | 429 | Decisions | p50 ms | p95 ms | p99 ms | ${PARTS_HEADINGS} |`,
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    `| ${Array.from({ length: 9 + PARTS_COLUMNS }, () => '---').join(' | ')} |`,
     `| Quiet (phases 1 and 2) | | | | | ${String(decisions.count)} | ${String(decisions.p50)} | ${String(decisions.p95)} | ${String(decisions.p99)} | ${partsCells(steadyParts)} |`,
     row('Calm, beside the others', 'calm'),
     row('Busy organisation', 'busy'),
@@ -240,6 +283,7 @@ function neighbourSection(run: RunResult): string[] {
       ? `Decision target met by the calm organisations: p95 under ${String(POLICY_P95_MS)} ms.`
       : `**${miss.join(' ')}**`,
     `Warnings or errors while it ran: ${problems.length === 0 ? 'none' : problems.join(', ')}.`,
+    freezeLine(run),
   ];
 }
 
@@ -251,7 +295,7 @@ export function renderReport(run: RunResult): string {
   const spiked = run.phases.flatMap(({ phase, spikeMs }) => (spikeMs === null ? [] : [{ phase, spikeMs }]));
   const checked = run.logs.holdingsChecks.reduce((sum, { requests }) => sum + requests, 0);
   const lines = [
-    `# Load test, ${run.at.slice(0, 10)} (${run.site}${run.smoke === true ? ', smoke' : ''}, API ${String(run.apiCpus)} CPU)`,
+    `# Load test, ${run.at.slice(0, 10)} (${run.site}${run.smoke === true ? ', smoke' : ''}, API ${String(run.apiCpus)} CPU${databaseSize(run)})`,
     '',
     run.failures.length === 0 ? '**Passed.**' : `**Failed: ${String(run.failures.length)} check(s).**`,
     // Never only "Passed" above a miss further down (partner's heads-up, S164).
@@ -304,6 +348,7 @@ export function renderReport(run: RunResult): string {
     `- The database after the run: ${run.databaseChecksPassed ? 'passed' : 'failed'} (each request once, every month within its limit, holdings exactly matching decisions, one open claim an order, no integrity hold).`,
     `- The holdings check at the restart: ${String(run.logs.holdingsChecks.length)} run(s) over ${String(checked)} request(s).`,
     `- Warnings or errors logged: ${String(Object.values(run.logs.problems).reduce((sum, n) => sum + n, 0))}; lines suppressed: ${String(run.logs.suppressed)}.`,
+    `- Decisions turned away because the whole platform was full: ${String(run.logs.platformFull)}.`,
   ];
   if (run.failures.length > 0) lines.push('', '## What failed', '', ...run.failures.map((failure) => `- ${failure}`));
   return `${lines.join('\n')}\n`;

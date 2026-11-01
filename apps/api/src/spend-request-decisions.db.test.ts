@@ -55,7 +55,8 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { TURNS_AN_AGENT, TurnWaitExceeded } from './agent-turns.ts';
+import { createAgentTurns, TURNS_AN_AGENT, TurnWaitExceeded } from './agent-turns.ts';
+import { createDecisionEntry, type DecisionEntry, TURNS_A_SUPPLIER } from './decision-entry.ts';
 import { createMandateMoves } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
@@ -438,6 +439,26 @@ describe('deciding a spend request and reserving it (D4)', () => {
     }
     const another = asking(w, { amount: AED(10_000n), supplierId: w.suppliers[1] ?? '' });
     expect(decidedOf(await ask(acting, another)).decision).toBe('ALLOW');
+  });
+
+  it('denies an order written in another case by Unicode’s full fold, and keeps its own claim on the new key (PL-39)', async () => {
+    const { w, acting } = await ready();
+    const small = (orderReference: string) => asking(w, { amount: AED(10_000n), orderReference });
+    const first = decidedOf(await ask(acting, small('Straße-1')));
+    expect(first.decision).toBe('ALLOW');
+    expect((await heldBy(w.org, first.id)).claim).toMatchObject({ order_reference: 'strasse-1', released_at: null });
+
+    for (const written of ['STRASSE-1', 'strasse-1', 'STRAẞE-1']) {
+      expect(decidedOf(await ask(acting, small(written)))).toMatchObject({
+        decision: 'DENY',
+        reasons: ['DUPLICATE_ORDER_REFERENCE'],
+      });
+    }
+    expect(decidedOf(await ask(acting, small('KIZ-1'))).decision).toBe('ALLOW');
+    expect(decidedOf(await ask(acting, small('kız-1')))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['DUPLICATE_ORDER_REFERENCE'],
+    });
   });
 
   it('sends for approval an order an open claim’s looks like on the rail, holding it; the exact one still denied (decision 11a)', async () => {
@@ -944,7 +965,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       ids,
       clock,
       logger: testLogger(capture),
-      turns: { run: () => Promise.reject(new TurnWaitExceeded(7_500)), agentsInHand: () => 0 },
+      entry: { run: () => Promise.reject(new TurnWaitExceeded(7_500)), linesInHand: () => 0 },
     });
 
     expect(await ask(acting, asking(w), 'busy-turn')).toEqual({ outcome: 'refused', status: 503, code: 'AGENT_BUSY' });
@@ -967,6 +988,129 @@ describe('the lock order (ADR-006 §6, forced)', () => {
     expect(await ask(acting, asking(w), 'busy-turn')).toMatchObject({ outcome: 'decided' });
   });
 
+  /** The decisions, through `entry`, as a use case of their own. */
+  const decisionsThrough = (entry: DecisionEntry) => {
+    decisions = createSpendRequestDecisions({
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      entry,
+    });
+  };
+
+  /** Holds the supplier's row as a stuck piece of the organisation's work would, until let go. */
+  async function supplierHeld(w: World, supplier: string) {
+    const { promise: held, resolve: holds } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const holder = withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      await supplierOf(tx, states, { orgId: w.org, id: supplier }, 'change');
+      holds(undefined);
+      await gate;
+    });
+    await held;
+    return async () => {
+      open(undefined);
+      await holder;
+    };
+  }
+
+  it('answers a decision whose supplier’s turn ran out busy, with nothing made and the key unused; sent again, it is decided (4D2e C)', async () => {
+    const { w, acting } = await ready();
+    const theirKey = await shared.secondAgent(registry, w);
+    const supplier = w.suppliers[0] ?? '';
+    decisionsThrough(createDecisionEntry({ perSupplier: 1, supplierWaitMs: 100 }));
+    const letGo = await supplierHeld(w, supplier);
+    const first = within(20_000, ask(acting, asking(w, { amount: AED(10_000n) })), 'the one at the lock');
+    await waitUntilQueued(database.as('admin'), 1);
+
+    const turnedAway = await ask(theirKey, asking(w, { amount: AED(10_000n), orderReference: 'INV-2' }), 'stuck-turn');
+    expect(turnedAway).toEqual({ outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' });
+    expect(capture.lines().filter((line) => line.event === 'spend_request.supplier_busy')).toEqual([
+      expect.objectContaining({ level: 'warn', agentId: theirKey.agentId, waitedMs: 100 }),
+    ]);
+    const nothing = await withTenant(app, w.org, (tx) =>
+      tx.selectFrom('spend_requests.requests').select('id').where('idempotency_key', '=', 'stuck-turn').execute(),
+    );
+    expect(nothing).toEqual([]);
+    // The line said no supplier: an existing rule, for decided lines, kept for this one too.
+    expect(
+      JSON.stringify(capture.lines().filter((line) => line.event === 'spend_request.supplier_busy')),
+    ).not.toContain(supplier);
+
+    await letGo();
+    expect(decidedOf(await first).decision).toBe('ALLOW');
+    expect(
+      decidedOf(await ask(theirKey, asking(w, { amount: AED(10_000n), orderReference: 'INV-2' }), 'stuck-turn'))
+        .decision,
+    ).toBe('ALLOW');
+  });
+
+  it('lets two decisions wait on a held supplier, the rest in its line holding no connection, so another supplier’s goes on (4D2e C)', async () => {
+    const { w, acting } = await ready();
+    const theirKey = await shared.secondAgent(registry, w);
+    decisionsThrough(createDecisionEntry());
+    const letGo = await supplierHeld(w, w.suppliers[0] ?? '');
+    // Two agents, two of each: four through their agents' turns, more than the supplier's two.
+    const waiting = [acting, theirKey, acting, theirKey].map((who, n) =>
+      within(
+        20_000,
+        ask(who, asking(w, { amount: AED(10_000n), orderReference: `INV-${String(n + 1)}` })),
+        `decision ${String(n)}`,
+      ),
+    );
+    const queued = await waitUntilQueued(database.as('admin'), TURNS_A_SUPPLIER);
+    expect(queued).toHaveLength(TURNS_A_SUPPLIER);
+    // A pool of six: the holder and two at the lock leave three, whatever the line's length.
+    const theirs = asking(w, { supplierId: w.suppliers[1] ?? '', orderReference: 'INV-THEIRS', amount: AED(10_000n) });
+    const other = await shared.secondAgent(registry, w);
+    expect(decidedOf(await within(20_000, ask(other, theirs), 'another supplier')).decision).toBe('ALLOW');
+    expect(await waitUntilQueued(database.as('admin'), 1)).toHaveLength(TURNS_A_SUPPLIER);
+
+    await letGo();
+    expect((await Promise.all(waiting)).map((answer) => decidedOf(answer).decision)).toEqual(
+      Array.from({ length: 4 }, () => 'ALLOW'),
+    );
+  });
+
+  it('keeps the row lock the guarantee: with no turns at all, one order’s duplicates are still denied (4D2e C)', async () => {
+    const { w, acting } = await ready();
+    const theirKey = await shared.secondAgent(registry, w);
+    decisionsThrough(
+      createDecisionEntry({
+        turns: createAgentTurns({ perAgent: Number.MAX_SAFE_INTEGER }),
+        perSupplier: Number.MAX_SAFE_INTEGER,
+      }),
+    );
+    const answers = await whileHeld(
+      (wait) =>
+        withSignedStates(app, w.org, quiet(), async (tx, states) => {
+          await supplierOf(tx, states, { orgId: w.org, id: w.suppliers[0] ?? '' }, 'change');
+          await wait();
+        }),
+      () => [acting, theirKey, acting].map((who) => ask(who, asking(w, { amount: AED(100_000n) }))),
+    );
+    expect(answers.map((answer) => decidedOf(answer).decision).sort()).toEqual(['ALLOW', 'DENY', 'DENY']);
+  });
+
+  it('logs how long a decided request waited in each line, and still no supplier, order or amount on its line', async () => {
+    const { w, acting } = await ready();
+    decisionsThrough({
+      run: (_asked, work) => work({ turnWaitMs: 12.4, supplierTurnWaitMs: 34.4 }),
+      linesInHand: () => 0,
+    });
+    const asked = asking(w);
+    decidedOf(await ask(acting, asked));
+    const [line] = capture.lines().filter(({ event }) => event === 'spend_request.decided');
+    expect(line).toMatchObject({ turnWaitMs: 12, supplierTurnWaitMs: 34 });
+    const said = JSON.stringify(line);
+    expect(said).not.toContain(asked.supplierId);
+    expect(said).not.toContain(asked.orderReference);
+    expect(said).not.toContain(String(asked.amount.minor));
+  });
+
   it('fails a decision whose turn fails otherwise, as it always did', async () => {
     const { w, acting } = await ready();
     decisions = createSpendRequestDecisions({
@@ -976,7 +1120,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       ids,
       clock,
       logger: testLogger(capture),
-      turns: { run: () => Promise.reject(new Error('the pool is gone')), agentsInHand: () => 0 },
+      entry: { run: () => Promise.reject(new Error('the pool is gone')), linesInHand: () => 0 },
     });
 
     await expect(ask(acting, asking(w))).rejects.toThrow('the pool is gone');

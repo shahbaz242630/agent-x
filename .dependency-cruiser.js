@@ -133,6 +133,15 @@ export default {
       to: { pathNot: [`${MODULES}$1/domain/`, `${CORE}shared-kernel/`] },
     },
     {
+      // It sees files, not names, so it holds the whole package off: appendEvents, sealState and stateSealDetails
+      // would let a module write an event past the audit trail's rule on state seals.
+      name: 'audit-chain-only-where-a-chain-is-kept',
+      comment: 'ADR-012 §2: only the audit and platform-controls modules, which keep the chains, use the chain steps.',
+      severity: 'error',
+      from: { path: MODULES, pathNot: `${MODULES}(?:audit|platform-controls)/` },
+      to: { path: `(?:${ROOT}packages/platform/src/audit-chain/|${npm('@agentx/platform/audit-chain')})` },
+    },
+    {
       name: 'application-not-to-infrastructure',
       comment: 'ADR-004: use cases depend on ports, never on SQL or adapters.',
       severity: 'error',

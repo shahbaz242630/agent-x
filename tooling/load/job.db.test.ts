@@ -79,6 +79,7 @@ function stepsWith(
       return answer(phase);
     },
     print: (line) => printed.push(line),
+    freezeProbeAfterMs: 3_600_000,
   };
   const lineOf = (event: string) => printed.find((line) => line.event === event);
   return { steps, printed, k6Calls, lineOf };

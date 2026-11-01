@@ -9,7 +9,9 @@ import { parse } from 'yaml';
 
 import {
   API_CPUS_VARIABLE,
+  DB_CPUS_VARIABLE,
   DELAY_VARIABLE,
+  freezeProbeAfterMs,
   LOAD_DB_PORT,
   loadConnection,
   loadOrgName,
@@ -112,18 +114,41 @@ describe('the load stack (compose.load.yaml)', () => {
 
   describe('the runner’s arguments', () => {
     it('runs the API at staging’s half a CPU unless `--cpus` gives a size from 0.01 to 4, in either order with `--keep`', () => {
-      expect(optionsOf([])).toEqual({ keep: false, apiCpus: 0.5, delayMs: 0 });
-      expect(optionsOf(['--keep'])).toEqual({ keep: true, apiCpus: 0.5, delayMs: 0 });
-      expect(optionsOf(['--cpus', '2'])).toEqual({ keep: false, apiCpus: 2, delayMs: 0 });
-      expect(optionsOf(['--keep', '--cpus', '1.5'])).toEqual({ keep: true, apiCpus: 1.5, delayMs: 0 });
-      expect(optionsOf(['--cpus', '0.01', '--keep'])).toEqual({ keep: true, apiCpus: 0.01, delayMs: 0 });
-      expect(optionsOf(['--cpus', '4'])).toEqual({ keep: false, apiCpus: 4, delayMs: 0 });
+      expect(optionsOf([])).toEqual({ keep: false, apiCpus: 0.5, delayMs: 0, dbCpus: 0 });
+      expect(optionsOf(['--keep'])).toEqual({ keep: true, apiCpus: 0.5, delayMs: 0, dbCpus: 0 });
+      expect(optionsOf(['--cpus', '2'])).toEqual({ keep: false, apiCpus: 2, delayMs: 0, dbCpus: 0 });
+      expect(optionsOf(['--keep', '--cpus', '1.5'])).toEqual({ keep: true, apiCpus: 1.5, delayMs: 0, dbCpus: 0 });
+      expect(optionsOf(['--cpus', '0.01', '--keep'])).toEqual({ keep: true, apiCpus: 0.01, delayMs: 0, dbCpus: 0 });
+      expect(optionsOf(['--cpus', '4'])).toEqual({ keep: false, apiCpus: 4, delayMs: 0, dbCpus: 0 });
     });
 
     it('adds no delay unless `--delay-ms` gives a whole number of ms from 0 to 20', () => {
-      expect(optionsOf(['--delay-ms', '2'])).toEqual({ keep: false, apiCpus: 0.5, delayMs: 2 });
-      expect(optionsOf(['--cpus', '2', '--delay-ms', '0', '--keep'])).toEqual({ keep: true, apiCpus: 2, delayMs: 0 });
-      expect(optionsOf(['--delay-ms', '20'])).toEqual({ keep: false, apiCpus: 0.5, delayMs: 20 });
+      expect(optionsOf(['--delay-ms', '2'])).toEqual({ keep: false, apiCpus: 0.5, delayMs: 2, dbCpus: 0 });
+      expect(optionsOf(['--cpus', '2', '--delay-ms', '0', '--keep'])).toEqual({
+        keep: true,
+        apiCpus: 2,
+        delayMs: 0,
+        dbCpus: 0,
+      });
+      expect(optionsOf(['--delay-ms', '20'])).toEqual({ keep: false, apiCpus: 0.5, delayMs: 20, dbCpus: 0 });
+    });
+
+    it('caps the database only when `--db-cpus` gives a size from 0.01 to 16, and holds the cap in compose', () => {
+      expect(services.db?.cpus).toBe(`\${${DB_CPUS_VARIABLE}:-0}`);
+      expect(optionsOf(['--db-cpus', '2'])).toEqual({ keep: false, apiCpus: 0.5, delayMs: 0, dbCpus: 2 });
+      expect(optionsOf(['--db-cpus', '0.01'])?.dbCpus).toBe(0.01);
+      expect(optionsOf(['--db-cpus', '16'])?.dbCpus).toBe(16);
+      expect(optionsOf(['--cpus', '2', '--delay-ms', '2', '--db-cpus', '2'])).toEqual({
+        keep: false,
+        apiCpus: 2,
+        delayMs: 2,
+        dbCpus: 2,
+      });
+    });
+
+    it('asks the freeze near the end of a phase, in the wiring run too, with room for its wait', () => {
+      expect(freezeProbeAfterMs(false)).toBe(100_000);
+      expect(freezeProbeAfterMs(true)).toBe(15_000);
     });
 
     it.each([
@@ -134,6 +159,11 @@ describe('the load stack (compose.load.yaml)', () => {
       ['--cpus', 'two'],
       ['--cpus', '-1'],
       ['--cpus', '--keep'],
+      ['--db-cpus'],
+      ['--db-cpus', '0'],
+      ['--db-cpus', '0.009'],
+      ['--db-cpus', '16.5'],
+      ['--db-cpus', 'two'],
       ['--cpus=2'],
       ['--cpu', '2'],
       ['2'],
