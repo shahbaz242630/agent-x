@@ -73,6 +73,16 @@ export interface Config {
     /** The most connections the pool keeps open. */
     readonly poolMax: number;
   };
+  /**
+   * The fair gate before an agent's decision (4D2e C, PL-63), per API process.
+   * `active` and `perOrganisation` null: wide, from the pool's size.
+   */
+  readonly decisionGate: {
+    readonly active: number | null;
+    readonly perOrganisation: number | null;
+    readonly waitingPerOrganisation: number;
+    readonly waitMs: number;
+  };
   /** SEC-WEB-05: the only origins the app may call, as `scheme://host[:port]`. */
   readonly outbound: { readonly allowedOrigins: readonly string[] };
   /**
@@ -388,6 +398,10 @@ function readSettings(env: Env, location: LocationChecks) {
     dbUser: setting(env, 'AGENTX_DB_USER'),
     dbPassword: secretSetting(env, 'AGENTX_DB_PASSWORD'),
     dbPoolMax: setting(env, 'AGENTX_DB_POOL_MAX'),
+    gateActive: setting(env, 'AGENTX_DECISION_GATE_ACTIVE'),
+    gatePerOrganisation: setting(env, 'AGENTX_DECISION_GATE_PER_ORGANISATION'),
+    gateWaitingPerOrganisation: setting(env, 'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION'),
+    gateWaitMs: setting(env, 'AGENTX_DECISION_GATE_WAIT_MS'),
   };
 }
 
@@ -433,6 +447,22 @@ function rateLimitRuleProblems(checks: Settings): string[] {
   return limits.flatMap(([name, limit]) =>
     limit.ok && eventCap.ok ? rateLimitProblems(name, limit.value, eventCap.value) : [],
   );
+}
+
+/** The gate's limits against each other and the pool, where they are valid: past either, a limit can never bind. */
+function decisionGateProblems({ dbPoolMax, gateActive, gatePerOrganisation }: Settings): string[] {
+  if (!dbPoolMax.ok || !gateActive.ok || !gatePerOrganisation.ok) return [];
+  const active = gateActive.value ?? dbPoolMax.value;
+  return [
+    ...(active > dbPoolMax.value
+      ? [
+          `AGENTX_DECISION_GATE_ACTIVE: must be at most AGENTX_DB_POOL_MAX (${String(dbPoolMax.value)}): past it, decisions queue for a connection, not in turn`,
+        ]
+      : []),
+    ...((gatePerOrganisation.value ?? 0) > active
+      ? [`AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (${String(active)})`]
+      : []),
+  ];
 }
 
 /** Rules between the login, email, factor reset and session settings, where those are valid. */
@@ -512,6 +542,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     // so one start reports it alongside any other problem.
     ...httpRuleProblems(checks),
     ...rateLimitRuleProblems(checks),
+    ...decisionGateProblems(checks),
     ...serviceRuleProblems(checks),
     ...partnerRuleProblems(checks, built),
     ...(environment.ok && checks.downloadsDirectory.ok && checks.downloadsContainer.ok && checks.downloadsClientId.ok
@@ -549,6 +580,12 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       password: checks.dbPassword.value,
       tls: checks.dbTls.value,
       poolMax: checks.dbPoolMax.value,
+    }),
+    decisionGate: Object.freeze({
+      active: checks.gateActive.value ?? null,
+      perOrganisation: checks.gatePerOrganisation.value ?? null,
+      waitingPerOrganisation: checks.gateWaitingPerOrganisation.value,
+      waitMs: checks.gateWaitMs.value,
     }),
     outbound: Object.freeze({ allowedOrigins: Object.freeze(checks.allowedOrigins.value ?? []) }),
     signIn: signInFrom(

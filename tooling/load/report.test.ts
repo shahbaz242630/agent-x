@@ -234,6 +234,18 @@ describe('the report', () => {
       );
     });
 
+    it('sets the freeze’s answer right under the calm numbers, saying runs compare only when it answered alike', () => {
+      const report = renderReport({
+        ...clean,
+        phases: [phase(5, { neighbours })],
+        freezeProbe: { ms: 12, answer: 'frozen' },
+      });
+      expect(report).toMatch(
+        /\| Stuck organisation \|[^\n]*\n\nAn admin's freeze of the stuck organisation, asked near/,
+      );
+      expect(report).toContain('compare only between runs whose freeze answered alike');
+    });
+
     it('rules as many columns as each table has, the new waits among them', () => {
       const rows = renderReport({ ...clean, phases: [phase(5, { neighbours })] })
         .split('\n')
@@ -273,11 +285,20 @@ describe('the report', () => {
     expect(none).not.toContain('held to');
   });
 
+  it('says the fair gate’s numbers, when the run gives them', () => {
+    expect(renderReport(clean)).not.toContain('The fair gate:');
+    expect(
+      renderReport({ ...clean, gate: { active: 12, perOrganisation: 3, waitingPerOrganisation: 8, waitMs: 2_000 } }),
+    ).toContain('The fair gate: 12 decisions at once, 3 an organisation, 8 waiting an organisation, 2000 ms wait.');
+  });
+
   it('names decisions turned away because the whole platform was full, apart from any one organisation’s', () => {
-    expect(renderReport(clean)).toContain('Decisions turned away because the whole platform was full: 0.');
+    expect(renderReport(clean)).toContain(
+      "turned away because the whole platform was full, a full pool's included: 0.",
+    );
     const full = JSON.stringify({ level: 'warn', event: 'spend_request.platform_full', orgId: 'o' });
     expect(renderReport({ ...clean, logs: summariseLogs(full) })).toContain(
-      'Decisions turned away because the whole platform was full: 1.',
+      "Requests turned away because the whole platform was full, a full pool's included: 1.",
     );
   });
 

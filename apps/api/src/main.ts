@@ -135,6 +135,8 @@ import { createSpendRequestCancels } from './spend-request-cancels.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createSpendRequestRejects } from './spend-request-rejects.ts';
 import { createSpendRequestApprovals } from './spend-request-approvals.ts';
+import { createDecisionEntry } from './decision-entry.ts';
+import { createDecisionGate, gateLimitsOf } from './decision-gate.ts';
 import { createSpendRequestDecisions } from './spend-request-decisions.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
@@ -689,6 +691,9 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       logger,
+      entry: createDecisionEntry({
+        gate: createDecisionGate(gateLimitsOf(config.db.poolMax, config.decisionGate)),
+      }),
     }),
     spendRequestCancels: createSpendRequestCancels({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     spendRequestReads: createSpendRequestReads({ database, keys, ids: uuidV7Ids, logger }),

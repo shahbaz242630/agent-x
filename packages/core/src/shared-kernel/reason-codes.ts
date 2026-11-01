@@ -209,6 +209,8 @@ export const REASON_CODES = {
     'No longer returned: a move now cancels what it can at once and the rest within minutes (kept so the list of codes stays stable).',
   PENDING_REQUESTS_TOO_MANY_TO_CARRY:
     'More requests are pending under the version in force than can be checked again at once (20), so nothing was changed. Choose cancel, or approve, reject or cancel some first, then try again.',
+  PLATFORM_BUSY:
+    "Agent X as a whole has as much work in progress as it can take right now, so this request waited too long. Wait the number of seconds in the Retry-After header, then send the same request again, with the same Idempotency-Key if it has one: it won't be done twice.",
   POLICY_CHANGES_SPENT:
     "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
   POLICY_CURRENCY_REFUSED:

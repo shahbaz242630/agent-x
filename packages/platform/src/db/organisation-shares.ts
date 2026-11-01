@@ -46,6 +46,23 @@ export class OrganisationBusy extends Error {
   }
 }
 
+/**
+ * pg-pool's words when a caller's wait for a connection ran out, every connection
+ * being in use (pg-pool index.js, connect): only a full pool's queue says this. A
+ * new connection failing says otherwise (refused, or "Connection terminated due to
+ * connection timeout"), and stays what it is: a database that is down is a failure,
+ * not busy. Held to the pinned pg-pool by tooling/test-db/pool-wait.db.test.ts, on a real pool.
+ */
+export const POOL_WAIT_WORDS = 'timeout exceeded when trying to connect';
+
+/** A transaction that waited its whole bound for a connection, every one of them in use: it never began, so nothing of it was made. */
+export class PoolWaitRanOut extends Error {
+  constructor(cause: unknown) {
+    super('A transaction waited its whole bound for a connection, every one in use', { cause });
+    this.name = 'PoolWaitRanOut';
+  }
+}
+
 const agentTraffic = new AsyncLocalStorage<true>();
 
 /** Runs `work` as an agent's request: its organisation's transactions inside count against its share. */

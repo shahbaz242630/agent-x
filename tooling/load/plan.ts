@@ -33,11 +33,28 @@ export const DB_CPUS_VARIABLE = 'AGENTX_LOAD_DB_CPUS';
 /** The most `--db-cpus` may give the database: past this it is no cap on a laptop. */
 export const MOST_DB_CPUS = 16;
 
+/**
+ * The fair gate's numbers in a load run (4D2e C), each a process's: wide until PR
+ * 8's sweep sets them, as the API's own defaults at the load run's twenty connections.
+ * compose.load.yaml and, on Azure, apps.bicep and policy.ts hold the same.
+ */
+export const LOAD_GATE = { active: 20, perOrganisation: 6, waitingPerOrganisation: 100, waitMs: 10_000 } as const;
+
+/** How the runner tells compose.load.yaml the gate's numbers, by option. */
+export const GATE_VARIABLES = {
+  gateActive: 'AGENTX_LOAD_GATE_ACTIVE',
+  gatePerOrganisation: 'AGENTX_LOAD_GATE_PER_ORGANISATION',
+  gateWaitingPerOrganisation: 'AGENTX_LOAD_GATE_WAITING_PER_ORGANISATION',
+  gateWaitMs: 'AGENTX_LOAD_GATE_WAIT_MS',
+} as const;
+
 /** How the runner tells compose.load.yaml's `delay` the milliseconds to add. */
 export const DELAY_VARIABLE = 'AGENTX_LOAD_DELAY_MS';
 
 /** The most `--delay-ms` adds: past this it measures a network no one runs on. */
 export const MOST_DELAY_MS = 20;
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 /** What the runner was asked: whether to leave the stack up, the API's CPUs (staging's unless given), the database's added delay and its CPUs. */
 export interface LoadOptions {
@@ -47,16 +64,34 @@ export interface LoadOptions {
   readonly delayMs: number;
   /** The database's CPUs (4D2e C): the laptop has never shown Azure's saturation without a cap. 0 is no cap. */
   readonly dbCpus: number;
+  /** The fair gate's numbers, where given: LOAD_GATE's otherwise. */
+  readonly gateActive?: number;
+  readonly gatePerOrganisation?: number;
+  readonly gateWaitingPerOrganisation?: number;
+  readonly gateWaitMs?: number;
 }
 
+const wholeFrom =
+  (least: number, most: number) =>
+  (value: number): boolean =>
+    Number.isInteger(value) && value >= least && value <= most;
+
 /** The arguments that take a number: what each sets, and which numbers it takes. */
-const VALUED_OPTIONS: ReadonlyMap<
+const VALUED_OPTIONS = new Map<
   string,
-  { readonly name: 'apiCpus' | 'delayMs' | 'dbCpus'; readonly fits: (value: number) => boolean }
-> = new Map([
+  {
+    readonly name: 'apiCpus' | 'delayMs' | 'dbCpus' | keyof typeof GATE_VARIABLES;
+    readonly fits: (value: number) => boolean;
+  }
+>([
   ['--cpus', { name: 'apiCpus', fits: (value) => value >= LEAST_API_CPUS && value <= MOST_API_CPUS }],
   ['--delay-ms', { name: 'delayMs', fits: (value) => Number.isInteger(value) && value >= 0 && value <= MOST_DELAY_MS }],
   ['--db-cpus', { name: 'dbCpus', fits: (value) => value >= LEAST_API_CPUS && value <= MOST_DB_CPUS }],
+  // As the API's config takes them, at the load run's twenty connections.
+  ['--gate-active', { name: 'gateActive', fits: wholeFrom(1, 20) }],
+  ['--gate-per-org', { name: 'gatePerOrganisation', fits: wholeFrom(1, 20) }],
+  ['--gate-waiting', { name: 'gateWaitingPerOrganisation', fits: wholeFrom(1, 10_000) }],
+  ['--gate-wait-ms', { name: 'gateWaitMs', fits: wholeFrom(100, 30_000) }],
 ]);
 
 /**
@@ -65,7 +100,7 @@ const VALUED_OPTIONS: ReadonlyMap<
  * never a run at another size or delay than asked.
  */
 export function optionsOf(args: readonly string[]): LoadOptions | undefined {
-  const options = { keep: false, apiCpus: STAGING_API_CPUS, delayMs: 0, dbCpus: 0 };
+  const options: Mutable<LoadOptions> = { keep: false, apiCpus: STAGING_API_CPUS, delayMs: 0, dbCpus: 0 };
   for (let at = 0; at < args.length; at++) {
     const arg = args[at] ?? '';
     const valued = VALUED_OPTIONS.get(arg);
