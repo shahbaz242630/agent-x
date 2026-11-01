@@ -75,6 +75,7 @@ import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import {
   checkSchemaOnSchedule,
   createFullServerWatch,
+  createReleaseDriftWatch,
   schemaSoundAtStart,
   whileServerFull,
 } from '@agentx/core/schema-check';
@@ -866,13 +867,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
   const fullServer = createFullServerWatch(config.audit.anchorSeconds * 3 * 1000, () => systemClock.now().getTime());
+  const releaseDrift = createReleaseDriftWatch();
   // The schema has a timer of its own: the chains' run grows with the organisations, and walls rewritten must not
   // wait for it (S168 review). Within its own deadline and ending at once when the API stops, so a database that
   // accepts a read and never answers cannot hold the schedule open.
   const schemaCheck = scheduleRuns(
     {
       run: (signal?: AbortSignal) =>
-        checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal }, fullServer),
+        checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal }, fullServer, releaseDrift),
     },
     config.audit.anchorSeconds * 1000,
   );

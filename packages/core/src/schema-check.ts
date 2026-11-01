@@ -2,6 +2,20 @@
 // what the migrations built, at start and on every anchor-check run; the
 // operator's command (B1c) checks it at its start, before it writes anything.
 //
+// It holds CHECK constraints to the image's own built-checks.json, and the
+// backup role to reading. A release migrates first, so its new CHECK or function
+// is drift to the image before it until the new image is in. That image refuses
+// a start on it, as on any drift.
+//
+// **On the schedule, the first sighting of that drift in a process's life is a
+// warning, and every later one the alarm**, however many clean runs lie between:
+// a migration doesn't undo itself, and the old image is replaced at release, so
+// drift that goes and comes back is nothing a release does. It compares whether
+// any such drift was seen, never which, so rotating plants gain nothing, and every
+// other problem is the alarm in the same run. The cost: one planted CHECK or
+// function, seen by one run and gone by the next, stays one warning line a process.
+// A restart forgets the sighting, and meets the start check, which waits for nothing.
+//
 // **At start it refuses to start.** A database whose walls have been rewritten
 // must not be served from, the same way A2b-2 refuses to start on a broken
 // platform chain. Nothing is lost by refusing: the in-memory anchor store is
@@ -27,7 +41,7 @@
 // start earlier, as whileServerFull says: nothing is served, and the error line
 // raises its own alert. A connection limit set on the database or a role answers
 // the same way, so the guard names that as drift (schema-guard.ts).
-import { type Database, liveSchemaProblems, type SchemaProblem } from '@agentx/platform/db';
+import { type Database, liveSchemaDrift, type SchemaProblem } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
 import { AUTHORITY_TABLES } from './authority-tables.ts';
@@ -117,7 +131,11 @@ async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: A
  */
 type SchemaCheckOutcome =
   | { readonly kind: 'clean' }
-  | { readonly kind: 'drift'; readonly problems: readonly SchemaProblem[] }
+  | {
+      readonly kind: 'drift';
+      readonly atOnce: readonly SchemaProblem[];
+      readonly releaseShaped: readonly SchemaProblem[];
+    }
   | { readonly kind: 'unreadable'; readonly error: unknown }
   | { readonly kind: 'full'; readonly error: unknown }
   | { readonly kind: 'stopped' };
@@ -147,7 +165,7 @@ async function checkSchema<Schema>({
   try {
     // The authority tables are the product's own list, the one CI checks the migrations against (A3f-2).
     const reading = Promise.resolve().then(() =>
-      liveSchemaProblems(database, {
+      liveSchemaDrift(database, {
         appRole,
         ownerRole: OWNER_ROLE,
         authorityTables: AUTHORITY_TABLES,
@@ -162,8 +180,10 @@ async function checkSchema<Schema>({
     );
     // Handled here too, so a read that finishes after its deadline never goes unhandled.
     void reading.catch(() => undefined);
-    const problems = await withinDeadline(reading, deadlineMs, signal);
-    return problems.length === 0 ? { kind: 'clean' } : { kind: 'drift', problems };
+    const { atOnce, releaseShaped } = await withinDeadline(reading, deadlineMs, signal);
+    return atOnce.length === 0 && releaseShaped.length === 0
+      ? { kind: 'clean' }
+      : { kind: 'drift', atOnce, releaseShaped };
   } catch (error) {
     // Only the stop itself: a read that failed on its own is the alarm, even if
     // the process began stopping just after (the API's anchor-check.ts draws
@@ -245,7 +265,8 @@ export async function schemaSoundAtStart<Schema>(
   }
   // Stopped while starting: the process isn't going on either way, and a stop is no alarm.
   if (outcome.kind === 'stopped') return false;
-  raiseSchemaAlarm(options.logger, 'start', outcome);
+  if (outcome.kind === 'drift') raiseDriftAlarm(options.logger, 'start', [...outcome.atOnce, ...outcome.releaseShaped]);
+  else raiseUnreadableAlarm(options.logger, 'start', outcome.error);
   return false;
 }
 
@@ -256,6 +277,7 @@ export async function schemaSoundAtStart<Schema>(
 export async function checkSchemaOnSchedule<Schema>(
   options: SchemaCheckOptions<Schema>,
   watch: FullServerWatch,
+  releaseDrift: ReleaseDriftWatch,
 ): Promise<void> {
   const outcome = await checkSchema(options);
   if (outcome.kind === 'stopped') return;
@@ -265,7 +287,21 @@ export async function checkSchemaOnSchedule<Schema>(
   }
   // A check that reached the catalogue, or failed for anything else, ends the full server's stretch.
   if (outcome.kind !== 'full') watch.ended();
-  if (outcome.kind !== 'clean') raiseSchemaAlarm(options.logger, 'running', outcome);
+  if (outcome.kind === 'drift') driftOnSchedule(options.logger, outcome, releaseDrift);
+  else if (outcome.kind !== 'clean') raiseUnreadableAlarm(options.logger, 'running', outcome.error);
+}
+
+/** Release-shaped drift warned of at its first sighting in this process and raised at each later one; all else raised at once. */
+function driftOnSchedule(
+  logger: Logger,
+  { atOnce, releaseShaped }: Extract<SchemaCheckOutcome, { kind: 'drift' }>,
+  releaseDrift: ReleaseDriftWatch,
+): void {
+  const seen = releaseShaped.length > 0;
+  const again = seen && releaseDrift.seenAgain();
+  if (seen && !again) logger.warn('db.schema_release_drift_seen', { problems: releaseShaped });
+  const raised = again ? [...atOnce, ...releaseShaped] : atOnce;
+  if (raised.length > 0) raiseDriftAlarm(logger, 'running', raised);
 }
 
 /** How long a running check has met a full server in a row. */
@@ -289,17 +325,32 @@ export function createFullServerWatch(limitMs: number, now: () => number): FullS
   };
 }
 
-/** The alarm for drift or an unreadable catalogue, at start-up or on the scheduled run. */
-function raiseSchemaAlarm(
-  logger: Logger,
-  when: 'start' | 'running',
-  outcome: Extract<SchemaCheckOutcome, { kind: 'drift' | 'unreadable' | 'full' }>,
-): void {
-  if (outcome.kind === 'drift') {
-    logger.error('audit.integrity_failed', { check: 'schema', when, problems: outcome.problems });
-    return;
-  }
-  // A database that won't answer is not a database we can vouch for.
+/**
+ * Whether this process has seen release-shaped drift before. Kept in memory alone,
+ * and fed by nothing the database holds. Nothing clears it: see the file's header.
+ */
+export interface ReleaseDriftWatch {
+  /** A run saw some: whether an earlier run did. */
+  seenAgain(): boolean;
+}
+
+export function createReleaseDriftWatch(): ReleaseDriftWatch {
+  let seen = false;
+  return {
+    seenAgain() {
+      const before = seen;
+      seen = true;
+      return before;
+    },
+  };
+}
+
+function raiseDriftAlarm(logger: Logger, when: 'start' | 'running', problems: readonly SchemaProblem[]): void {
+  logger.error('audit.integrity_failed', { check: 'schema', when, problems: problems.toSorted() });
+}
+
+/** The alarm for an unreadable catalogue: a database that won't answer is not a database we can vouch for. */
+function raiseUnreadableAlarm(logger: Logger, when: 'start' | 'running', error: unknown): void {
   logger.error('audit.integrity_failed', { check: 'schema', when, reason: 'unreadable' });
-  logger.error('db.schema_unreadable', { err: outcome.error });
+  logger.error('db.schema_unreadable', { err: error });
 }

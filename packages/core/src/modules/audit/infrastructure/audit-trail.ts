@@ -28,6 +28,15 @@
 // signed states (recordHoldEvent): `record` refuses its subject type, so no
 // other module can write an event the hold is read from.
 //
+// A state seal goes through this trail only from the audit module's signed
+// states: record, recordAlong and recordAllAlong refuse one on an event
+// signedEvent did not mark. That is this trail's rule and no more. appendEvents,
+// sealState and stateSealDetails are exported from @agentx/platform/audit-chain,
+// so code with the keys and a connection could seal and append past it. The
+// boundary rule audit-chain-only-where-a-chain-is-kept holds the other modules
+// off that package; platform-controls, which keeps its own chain, and the apps,
+// which are no modules, are not held by it.
+//
 // What this read can't see: a later event about the object deleted, or moved
 // to another object or organisation, which the chain's check and anchor find;
 // an event sealed with a key the app still holds, though rotated out, which
@@ -229,7 +238,8 @@ export interface AuditTrail {
    * Adds the event to the organisation's chain, in the caller's transaction:
    * it commits or rolls back with the change it records. Takes the chain
    * head's lock, which comes last (ADR-006 §6). Throws AuditEventRefused for
-   * an event that breaks the rules, and ChainBroken if the chain fails its
+   * an event that breaks the rules, a state seal among them (signedEvent), and
+   * ChainBroken if the chain fails its
    * check at the head or holds events past it, so nothing more is added to a
    * chain someone has tampered with.
    */
@@ -914,6 +924,20 @@ export function recordHoldEvent(
   return record(tx, orgId, event);
 }
 
+/** The events signedEvent marked, the only ones outside the hold's own steps that may carry a state seal. */
+const signedEvents = new WeakSet<AuditEvent>();
+
+/**
+ * Marks an event carrying a state seal as one to record, by this very object:
+ * a copy is not marked. For the audit module's signed states alone, like
+ * recordHoldEvent: a seal on any other event is refused, or any caller could
+ * make its event an object's latest signed state.
+ */
+export function signedEvent(event: AuditEvent): AuditEvent {
+  signedEvents.add(event);
+  return event;
+}
+
 /**
  * Locks the organisation's chain head, when it has one, to the end of the
  * transaction, as recording does. For the integrity hold, a state kept in the
@@ -964,9 +988,15 @@ export function createAuditTrail({
           : `subject.type ${event.subject.type} is the integrity hold's, recorded by its own steps`,
       ]);
     }
-    if (stateSealIn(event.details) === 'malformed') {
+    const seal = stateSealIn(event.details);
+    if (seal === 'malformed') {
       throw new AuditEventRefused([
         'details.stateFingerprint and details.stateKeyVersion must hold a state seal, both of them or neither',
+      ]);
+    }
+    if (seal !== undefined && !hold && !signedEvents.has(input)) {
+      throw new AuditEventRefused([
+        'details.stateFingerprint and details.stateKeyVersion are a state seal, recorded by signed states alone',
       ]);
     }
     const details = canonicalDetails(

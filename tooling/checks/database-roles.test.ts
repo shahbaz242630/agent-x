@@ -12,9 +12,16 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { OWNER_ROLE } from '../../packages/core/src/schema-check.ts';
+import { BACKUP_ROLE } from '../../packages/platform/src/db/schema-guard.ts';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const roles = (): string => readFileSync(path.join(ROOT, 'db', 'bootstrap', 'roles.sql'), 'utf8');
+
+describe('the backup role the schema check holds to reading', () => {
+  it('is the role db/bootstrap/roles.sql creates: renamed there alone, the check would find no rights to name', () => {
+    expect(roles()).toContain(`CREATE ROLE ${BACKUP_ROLE}`);
+  });
+});
 
 describe('the owner role the schema check compares against', () => {
   it('is the role db/bootstrap/roles.sql creates', () => {
