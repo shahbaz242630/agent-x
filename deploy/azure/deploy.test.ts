@@ -875,6 +875,7 @@ describe('deploy foundation', () => {
     ]);
     expect(deployment?.values).toEqual({
       AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid',
+      AGENTX_AZURE_DATABASE_DISK_GB: '32',
       AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: admin,
       // Always sent: a load size left in the operator's shell never reaches Azure.
       AGENTX_AZURE_DATABASE_SIZE: 'normal',
