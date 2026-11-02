@@ -339,16 +339,47 @@ afterEach(() => {
   for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true });
 });
 
+/** Every process a test made, to be stopped when it ends. */
+const hosts: FakeProcess[] = [];
+
 class FakeProcess extends EventEmitter implements ApiProcess {
+  stopAsked = false;
   readonly written: string[] = [];
   readonly stdout: Output = { write: (chunk) => this.written.push(String(chunk)) > 0 };
   readonly stderr: Output = { write: (chunk) => this.written.push(String(chunk)) > 0 };
   readonly exits: number[] = [];
   exitCode: number | string | null | undefined = undefined;
 
+  constructor() {
+    super();
+    hosts.push(this);
+  }
+
+  override emit(event: string | symbol, ...args: unknown[]): boolean {
+    if (event === 'SIGTERM' || event === 'SIGINT') this.stopAsked = true;
+    return super.emit(event, ...args);
+  }
+
   exit(code: number): void {
     this.exits.push(code);
   }
+}
+
+/**
+ * Stops a process as production does, so its timers end with its test: a leadership left running would renew onto
+ * `fake.steps`, which the whole file shares. One whose stop was already asked for only needs it finished; one that
+ * refused to start never listened for a signal, and a crash's exit, a fake one here, stopped nothing.
+ */
+async function stopProcess(host: FakeProcess): Promise<void> {
+  if (host.listenerCount('SIGTERM') === 0) return;
+  const exitsBefore = host.stopAsked ? 0 : host.exits.length;
+  host.emit('SIGTERM', 'SIGTERM');
+  await vi.waitFor(
+    () => {
+      expect(host.exits.length).toBeGreaterThan(exitsBefore);
+    },
+    { timeout: 10_000 },
+  );
 }
 
 const servers: FastifyInstance[] = [];
@@ -383,6 +414,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  await Promise.all(hosts.splice(0).map(stopProcess));
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
