@@ -4,6 +4,7 @@
 // Product code can't open a socket (SEC-WEB-05), so these live here.
 import net from 'node:net';
 
+import type { FastifyRequest } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -56,7 +57,10 @@ async function listening() {
   let release = (): void => undefined;
   let entered = (): void => undefined;
   const inHandler = new Promise<void>((resolve) => (entered = resolve));
-  const slow = async () => {
+  let sawHangUp = (): void => undefined;
+  const hungUp = new Promise<void>((resolve) => (sawHangUp = resolve));
+  const slow = async (asked: FastifyRequest) => {
+    asked.raw.socket.once('close', sawHangUp);
     entered();
     await new Promise<void>((resolve) => (release = resolve));
     return { done: true };
@@ -97,6 +101,7 @@ async function listening() {
     port,
     capture,
     inHandler,
+    hungUp,
     release: () => {
       release();
     },
@@ -214,13 +219,14 @@ describe('4D2e Stage F a request and its lines', () => {
   });
 
   it('says the right request on a line for an answer the client hung up on; Fastify runs no after-answer work then', async () => {
-    const { port, capture, inHandler, release } = await listening();
+    const { port, capture, inHandler, hungUp, release } = await listening();
     const connection = connect(port);
     await connection.opened;
     connection.socket.write(postHeaders('/test/slow', ID_A, 'keep-alive') + BODY);
     await inHandler;
     connection.socket.destroy();
-    await connection.closed;
+    // The server's own side: the client's closing first, a handler let go now would answer as usual (seen on CI).
+    await hungUp;
     release();
     await vi.waitFor(() => {
       expect(capture.lines().find((line) => line.event === 'http.request_aborted')?.correlationId).toBe(ID_A);
