@@ -192,6 +192,32 @@ export const PLAIN_WORDS = {
     broke: 'One audit history went unchecked this time, or all of them if the list could not be read.',
     next: 'It is tried again at the next check. Three misses in a row raise the integrity alarm.',
   },
+  'audit.anchor_store_foreign': {
+    happened: 'The store that keeps the audit anchors holds files the app would never have named.',
+    broke: 'Nothing: those files were left unread and the check went on without them.',
+    next: 'Find out who added them from the store logs. Only the API should be able to add files there.',
+  },
+  'audit.anchor_store_read_failed': {
+    happened:
+      'A regular read of the store that keeps the audit anchors failed, after it had been read fine since the start.',
+    broke: 'Nothing yet: the tamper check went on with the anchors already in memory.',
+    next: 'It is tried again at the next check. If it keeps repeating, look at the store on Azure.',
+  },
+  'audit.anchor_store_unreadable': {
+    happened: 'After a start, the API could not read the store that keeps the audit anchors.',
+    broke: 'Payments wait for every organisation, with nothing to compare them with. Agent decisions go on.',
+    next: 'It is tried again at each check and payments resume alone. Look at the store on Azure: playbook section H.',
+  },
+  'audit.anchor_store_unwritable': {
+    happened: 'For some time the API has not been able to write to the store that keeps the audit anchors.',
+    broke: 'Payments go on and nobody is held. New anchors are in memory alone, so a restart would forget them.',
+    next: 'Look at the store on Azure before the next restart or release: playbook section H.',
+  },
+  'audit.anchor_store_write_failed': {
+    happened: 'Writing the latest audit anchors to their store failed or ran out of time.',
+    broke: 'Nothing yet: they stay in memory and payments go on.',
+    next: 'It is tried again at the next check. If this was at a stop, the next start reads the last ones written.',
+  },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',
     broke: 'That record was left off the list; the rest of the list was shown.',

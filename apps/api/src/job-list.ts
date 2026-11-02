@@ -27,6 +27,7 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
+import { anchorLogOf } from './anchor-store.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
@@ -153,8 +154,18 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const list = () => listedOrganizations(database);
   const organisationJob = { list, database, keys, ids: uuidV7Ids, logger };
   const clocked = { ...organisationJob, clock: systemClock };
-  // The audit chains' last anchors, in this process's memory (ADR-012 §2): the anchor check keeps them, Tx A reads them.
-  const anchorStore = createMemoryAnchorStore();
+  // Three missed checks in a row are the alarm, not just a warning.
+  const staleAfterMs = config.audit.anchorSeconds * 3 * 1000;
+  // The audit chains' last anchors (ADR-012 §2): the anchor check keeps them, Tx A reads them from memory. Durable where
+  // the config names a store (PL-58). The check's first run reads it, and where a lease decides who runs the jobs, that
+  // run waits for the lease: a copy that doesn't lead reads nothing, and one that comes to lead reads it then.
+  const anchorLog = anchorLogOf(config, {
+    keys,
+    logger,
+    now: () => systemClock.now(),
+    unwritableAfterMs: staleAfterMs,
+  });
+  const anchorStore = anchorLog ?? createMemoryAnchorStore();
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
@@ -169,10 +180,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     keys,
     clock: systemClock,
     logger,
-    // Three missed checks in a row are the alarm, not just a warning.
-    staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
+    staleAfterMs,
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     anchors: anchorStore,
+    ...(anchorLog === undefined ? {} : { durable: anchorLog }),
   });
   // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
   // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.
@@ -226,7 +237,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       config.audit.anchorSeconds * 1000,
       QUICK_MS,
     ),
-    job('anchor_check', anchors, config.audit.anchorSeconds * 1000, HOUR_MS, undefined, scheduleAnchorCheck),
+    job('anchor_check', anchors, config.audit.anchorSeconds * 1000, HOUR_MS, undefined, (work, everyMs) =>
+      scheduleAnchorCheck(work, everyMs, () => anchors.finish()),
+    ),
     // On a timer of its own (B1e-3): a long sweep must never hold up the anchor
     // check. The two share the pool, and both start at once: each statement is
     // bounded, and a pool at its limit queues rather than refuses. Nothing orders
