@@ -77,6 +77,7 @@
 // reason, not every run; the sweep takes every page of those past their wait.
 import {
   type AuditTables,
+  createAuditTrail,
   type SignedStates,
   type SignedStatesServices,
   withSignedStates,
@@ -126,6 +127,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { alertAdmins } from './payment-alerts.ts';
+import { createRailHealth, type RailHealth, type RailHold } from './rail-health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** The statuses a late refusal goes back on: the bank's word read as under way, or paid (decision 37b). */
@@ -258,6 +260,7 @@ export function createHandoff({
   ids,
   clock,
   logger,
+  health = createRailHealth({ clock, logger }),
   page = HANDOFF_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
   unknownAfterMs = UNKNOWN_AFTER_MS,
@@ -273,6 +276,12 @@ export function createHandoff({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
+  /**
+   * The bank breaker (rail-health.ts), shared with what reopens it: main.ts
+   * gives the bank check its `watchedRail`. A test may leave it out: its own,
+   * which only its own answers reach.
+   */
+  readonly health?: RailHealth;
   /** How many of an organisation's requests are read at once (HANDOFF_PAGE unless a test names fewer). */
   readonly page?: number;
   /** How long the partner is given (PARTNER_CALL_TIMEOUT_MS unless a test names less). */
@@ -306,8 +315,16 @@ export function createHandoff({
   const waitingIn = new Map<string, string[]>();
   // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
   const staleSaid = new Map<string, number>();
+  // The organisations already told their payments wait for the bank: one signed event an outage, not one a run.
+  const toldHeld = new Set<string>();
   const beatNow = (): void => {
     beat = clock.now().getTime();
+  };
+  /** A request left waiting noted. Said once a reason, not every run it still waits (gate H5): a long hold is one line a request. */
+  const noteWaiting = (orgId: string, id: string, why: string, log: Logger): void => {
+    if (waitedFor.get(id) !== why) log.info('handoff.waiting', { requestId: id, why });
+    waitingNow.set(id, why);
+    waitingIn.set(orgId, [...(waitingIn.get(orgId) ?? []), id]);
   };
 
   /** A page of the organisation's approved requests after `after`, oldest first, by their rows, unverified: each read through its signed state in Tx A. */
@@ -587,38 +604,79 @@ export function createHandoff({
     requestId: string,
   ): Promise<TransactionStatus> => (await lockPayment(tx, states, key, requestId)).transaction.status;
 
-  /** The partner's answer to the intent, within its time; any it can't give is `unknown` (never resent). */
+  /**
+   * The partner's answer to the intent, within its time; any it can't give is
+   * `unknown` (never resent). Noted for the bank breaker the moment it is known,
+   * before Tx B, so no new Tx A can start between the outage's answers.
+   */
   const answerOf = async (intent: ApprovedPaymentIntent, id: string, log: Logger): Promise<Answer> => {
+    const { organizationId: orgId } = intent;
     try {
       const submitted = await withinTime(rail.submitApprovedIntent(intent), callTimeoutMs);
+      health.answered(orgId);
+      toldHeld.delete(orgId);
       return submitted.kind === 'accepted' ? submitted : { kind: 'refused', code: submitted.code };
     } catch (error) {
+      health.unknown(orgId);
       if (error instanceof PartnerTimedOut) log.warn('handoff.partner_timeout', { requestId: id });
       else if (!(error instanceof RailUnavailable)) log.error('handoff.partner_failed', { requestId: id, err: error });
       return { kind: 'unknown' };
     }
   };
 
-  /** One request handed off if it may go, its outcome logged. */
-  const handOff = async (orgId: string, id: string, log: Logger): Promise<void> => {
+  /**
+   * The organisation told, in its audit log, that its payments wait for the
+   * bank (partner S119, S140: background actions kept where it can read them):
+   * once, until one of its payments is answered again. One that can't be
+   * written is said and tried again next run; the payments stay held either way.
+   */
+  const tellHeld = async (orgId: string, hold: RailHold, log: Logger): Promise<void> => {
+    if (toldHeld.has(orgId)) return;
+    try {
+      await withSignedStates(database, orgId, services(log), (tx) =>
+        createAuditTrail({ keys, ids }).record(tx, orgId, {
+          actor: ACTOR,
+          action: 'handoff.held_for_bank',
+          subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
+          details: { hold },
+        }),
+      );
+      toldHeld.add(orgId);
+    } catch (error) {
+      log.error('handoff.held_unrecorded', { err: error });
+    }
+  };
+
+  /** One request handed off if it may go, its outcome logged; false where the bank's hold ended the organisation's turn. */
+  const handOff = async (orgId: string, id: string, log: Logger): Promise<boolean> => {
     beatNow();
     let done: TxA;
+    const hold = health.heldFor(orgId);
+    if (hold !== undefined) {
+      noteWaiting(orgId, id, `hold_${hold}`, log);
+      await tellHeld(orgId, hold, log);
+      return false;
+    }
     try {
       done = await withSignedStates(database, orgId, services(log), (tx, states) => txA(tx, states, orgId, id, log));
     } catch (error) {
       // Tx A's outcome unclear (a commit lost with the connection) or a bug: the partner is never called.
       log.error('handoff.failed', { requestId: id, err: error });
-      return;
+      return true;
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
-    if (done.outcome === 'waiting') {
-      // Said once a reason, not every run it still waits (gate H5): a long hold is one line a request.
-      if (waitedFor.get(id) !== done.why) log.info('handoff.waiting', { requestId: id, why: done.why });
-      waitingNow.set(id, done.why);
-      waitingIn.set(orgId, [...(waitingIn.get(orgId) ?? []), id]);
-    }
-    if (done.outcome !== 'handed_off') return;
-    const { intent, transactionId } = done;
+    if (done.outcome === 'waiting') noteWaiting(orgId, id, done.why, log);
+    if (done.outcome === 'handed_off') await sent(orgId, id, done, log);
+    return true;
+  };
+
+  /** Tx A committed, known by this run: the partner called (ADR-007 §8), and Tx B records what it answered. */
+  const sent = async (
+    orgId: string,
+    id: string,
+    { intent, transactionId }: Extract<TxA, { outcome: 'handed_off' }>,
+    log: Logger,
+  ): Promise<void> => {
     const answer = await answerOf(intent, id, log);
     try {
       const recorded = await txB(orgId, id, transactionId, answer, log);
@@ -634,8 +692,22 @@ export function createHandoff({
     }
   };
 
-  /** The organisation's approved requests handed off, a page at a time; false if the signal stopped the run. */
-  const handOffAll = async (orgId: string, log: Logger, signal: AbortSignal | undefined): Promise<boolean> => {
+  /** A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first. */
+  const anchorFirstIn = (orgId: string, signal: AbortSignal | undefined): Promise<void> | undefined => {
+    const held = anchoring?.anchors.latest({ kind: 'organisation', orgId });
+    return anchoring === undefined || held !== undefined ? undefined : anchoring.anchorFirst(orgId, signal);
+  };
+
+  /**
+   * The organisation's approved requests handed off, a page at a time:
+   * `stopped` if the signal stopped the run, `held` if the bank's hold ended its
+   * turn (its requests behind it unread, so never counted as left standing).
+   */
+  const handOffAll = async (
+    orgId: string,
+    log: Logger,
+    signal: AbortSignal | undefined,
+  ): Promise<'done' | 'stopped' | 'held'> => {
     let after: string | undefined;
     for (;;) {
       let approved: string[];
@@ -643,18 +715,14 @@ export function createHandoff({
         approved = await approvedOf(orgId, after, log);
       } catch (error) {
         log.error('handoff.failed', { err: error });
-        return true;
+        return 'done';
       }
-      // A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first.
-      const chain = { kind: 'organisation', orgId } as const;
-      if (approved.length > 0 && anchoring !== undefined && anchoring.anchors.latest(chain) === undefined) {
-        await anchoring.anchorFirst(orgId, signal);
-      }
+      if (approved.length > 0) await anchorFirstIn(orgId, signal);
       for (const id of approved) {
-        if (signal?.aborted === true) return false;
-        await handOff(orgId, id, log);
+        if (signal?.aborted === true) return 'stopped';
+        if (!(await handOff(orgId, id, log))) return 'held';
       }
-      if (approved.length < page) return true;
+      if (approved.length < page) return 'done';
       after = approved.at(-1);
     }
   };
@@ -770,8 +838,9 @@ export function createHandoff({
   ): Promise<boolean> => {
     const log = logger.child({ orgId });
     if (handingOff) {
-      if (!(await handOffAll(orgId, log, signal))) return false;
-      await staleIn(orgId, log);
+      const turn = await handOffAll(orgId, log, signal);
+      if (turn === 'stopped') return false;
+      if (turn === 'done') await staleIn(orgId, log);
     }
     if (sweeping) await sweepIn(orgId, log);
     return true;

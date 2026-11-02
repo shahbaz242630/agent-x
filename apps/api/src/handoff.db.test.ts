@@ -79,6 +79,7 @@ import { heartbeatChecks } from './health.ts';
 import { createHoldingsCheck } from './holdings-check.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestVoids } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
@@ -1439,6 +1440,8 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
               ids,
               clock,
               logger: testLogger(capture),
+              // Many unknowns in a row are this model's point: the breaker has tests of its own (handoff-lanes.db.test.ts).
+              health: createRailHealth({ clock, logger: testLogger(capture), laneUnknowns: 1_000 }),
               ...LIMITS,
             }).run();
 

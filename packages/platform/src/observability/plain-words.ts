@@ -454,6 +454,22 @@ export const PLAIN_WORDS = {
     broke: 'Approved payments wait, their money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
+  'handoff.bank_held': {
+    happened: 'The bank gave no clear answer to new payments from several organisations, so none are being sent to it.',
+    broke: 'Approved payments wait, their money still held. Nothing already sent is sent again.',
+    next: 'Sending starts again by itself once the bank answers a status check. If it lasts, ask the bank what is wrong.',
+  },
+  'handoff.lane_held': {
+    happened:
+      "The bank gave no clear answer to three of one organisation's payments in a row, so its are held 5 minutes.",
+    broke: 'Its approved payments wait, their money still held. Other organisations carry on.',
+    next: 'After 5 minutes they go one at a time until the bank answers one. If it repeats, ask the bank why.',
+  },
+  'handoff.held_unrecorded': {
+    happened: "An organisation's payments were held for the bank, but that could not be written in its audit log.",
+    broke: 'The payments are still held and safe; the audit log is missing that one note for now.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
+  },
   'partner_event.refused': {
     happened:
       "A message sent as the payment partner's was refused: a bad signature, an old time or an unreadable body.",
