@@ -599,7 +599,7 @@ resource anchorStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
   kind: 'LogAlert'
   properties: {
     displayName: 'Audit: the anchor check has stopped'
-    description: 'SEV-1. No audit chain check has finished for 20 minutes (no audit.anchor_check_done): the jobs have stopped, so tampering would go unseen. Runbook: Incident-Response-Playbook.md section H.'
+    description: 'SEV-1. No audit chain check has finished for 20 minutes (no audit.anchor_check_done): the jobs have stopped, so tampering would go unseen. Runbook: Incident-Response-Playbook.md section R.'
     severity: 1
     enabled: alwaysOn
     scopes: [workspaceId]
@@ -638,7 +638,7 @@ resource jobsStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
   kind: 'LogAlert'
   properties: {
     displayName: 'Jobs: no pulse'
-    description: 'SEV-2. No process running the background jobs has said it is alive for 15 minutes (no jobs.pulse): it is down, or none holds the lease. Runbook: Incident-Response-Playbook.md section O.'
+    description: 'SEV-2. No process running the background jobs has said it is alive for 15 minutes (no jobs.pulse): it is down, or none holds the lease. Runbook: Incident-Response-Playbook.md section R.'
     severity: 2
     enabled: alwaysOn
     scopes: [workspaceId]
