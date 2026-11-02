@@ -26,11 +26,15 @@
 -- leaving the alarm's line, and the tampering sets its hold when next found.
 --
 -- The key to the directory's list: a forged row can't start a chain for an
--- organisation that doesn't exist.
+-- organisation that doesn't exist. The checks hold a row to what the app can
+-- write: every finding names a UUID in lower case (a record's own, or the
+-- organisation's for its chain) and a type as the audit log holds one. A row
+-- past them could never be recorded, so stop payments for good; one that still
+-- arrives, these checks dropped, is recorded under a fixed name instead.
 CREATE TABLE directory.holds_waiting (
   org_id uuid NOT NULL REFERENCES directory.orgs (org_id),
-  subject_type text NOT NULL CHECK (subject_type ~ '^[a-z][a-z_]{0,63}$'),
-  object_id text NOT NULL CHECK (pg_catalog.length(object_id) BETWEEN 1 AND 200),
+  subject_type text NOT NULL CHECK (subject_type ~ '^[a-z][a-z_]{0,62}$'),
+  object_id text NOT NULL CHECK (object_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
   reason text NOT NULL CHECK (reason ~ '^[a-z][a-z_]{0,31}$'),
   PRIMARY KEY (org_id, subject_type, object_id)
 );

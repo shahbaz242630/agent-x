@@ -4,6 +4,7 @@
 import { limitedTransaction, readAloneOnOneTrip } from '@agentx/platform/db';
 import type { Kysely, Transaction } from 'kysely';
 
+import { subjectKeyProblems } from '../domain/event.ts';
 import type { AuditTables } from './tables.ts';
 
 /** One hold waiting: IDs and the sign, naming the record as a hold found directly names it. */
@@ -15,11 +16,15 @@ export interface HoldWaiting {
 }
 
 /** What names a row: the record, in its organisation. */
-interface NamedRecord {
+export interface NamedRecord {
   readonly orgId: string;
   readonly subjectType: string;
   readonly objectId: string;
 }
+
+/** Whether the app could have written this naming: what every finding names, and what 0069's checks hold a row to. */
+export const namedAsTheAppWrites = ({ subject_type: type, object_id: id }: HoldWaiting): boolean =>
+  subjectKeyProblems({ type, id }).length === 0 && id === id.toLowerCase();
 
 const named = (tx: Transaction<AuditTables>, { orgId, subjectType, objectId }: NamedRecord) =>
   tx

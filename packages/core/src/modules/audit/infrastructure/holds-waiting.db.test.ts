@@ -173,6 +173,25 @@ async function withTableRefusing(what: 'insert' | 'delete', work: () => Promise<
   }
 }
 
+/** The table's checks on the row's naming dropped while `work` runs: a row can still reach us so, past the app. */
+async function withChecksDropped(work: () => Promise<void>): Promise<void> {
+  const owner = database.as('owner');
+  const checks = await owner.query<{ name: string; definition: string }>(
+    "select conname as name, pg_get_constraintdef(oid) as definition from pg_constraint where conrelid = 'directory.holds_waiting'::regclass and contype = 'c' and conname <> 'holds_waiting_reason_check'",
+  );
+  /* eslint-disable agentx/no-string-built-sql -- names and definitions Postgres gave back for this table. */
+  for (const { name } of checks) await owner.query(`alter table directory.holds_waiting drop constraint ${name}`);
+  try {
+    await work();
+  } finally {
+    await attacker.query('delete from directory.holds_waiting');
+    for (const { name, definition } of checks) {
+      await owner.query(`alter table directory.holds_waiting add constraint ${name} ${definition}`);
+    }
+  }
+  /* eslint-enable agentx/no-string-built-sql */
+}
+
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<AuditTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
@@ -387,6 +406,78 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
     await expect(
       database.as('app').query("update directory.holds_waiting set reason = 'log' where org_id = $1", [org]),
     ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('the table refuses an ID or a type the app could never write (no finding names anything else)', async () => {
+    const id = newId();
+    for (const bad of ['a\nb', 'x', id.toUpperCase(), `${id}\n`, `${id}0`, ` ${id}`]) {
+      await expect(plant('seal', org, 'agent', bad)).rejects.toMatchObject({ code: '23514' });
+    }
+    // The audit log's own limit on a type, 63 characters.
+    await expect(plant('seal', org, 'a'.repeat(64), id)).rejects.toMatchObject({ code: '23514' });
+    await plant('seal', org, 'a'.repeat(63), id);
+  });
+
+  it.each([
+    ['control characters in its ID', 'agent', 'a\nb'],
+    ['an ID that is no UUID', 'membership', 'not-a-uuid'],
+    ['an ID in capitals', 'membership', '0199A0F0-0000-7000-8000-000000000001'],
+    ['a type the log refuses', 'A Type', '0199a0f0-0000-7000-8000-000000000001'],
+  ])(
+    'a row with %s, its check dropped, is still caution: a hold under a fixed name, with the alarm',
+    async (_, type, id) => {
+      await withChecksDropped(async () => {
+        await plant('seal', org, type, id);
+        const other = await aProcess();
+        expect(await other.read('head')).toEqual({ outcome: 'tampered', sign: 'seal' });
+
+        await other.poll();
+
+        expect(await other.read('head')).toMatchObject({ outcome: 'held', version: 2 });
+        expect((await holdEvents()).at(-1)?.details).toMatchObject({
+          reason: 'row',
+          foundOn: 'audit_chain',
+          objectId: org,
+        });
+        expect(await waitingRows()).toEqual([]);
+        expect(notRecorded()).toEqual([]);
+        expect(fromRow()).toEqual([
+          expect.objectContaining({ level: 'error', orgId: org, subjectType: 'audit_chain', objectId: org }),
+        ]);
+      });
+    },
+  );
+
+  it('such a row meeting a locked head waits on: no row of another name, and it goes when the hold is recorded', async () => {
+    await withChecksDropped(async () => {
+      await plant('seal', org, 'agent', 'a\nb');
+      const other = await aProcess();
+      await withHeadLocked(() => other.poll());
+      expect(notRecorded()).toHaveLength(1);
+      expect(await attacker.query('select object_id from directory.holds_waiting where org_id = $1', [org])).toEqual([
+        { object_id: 'a\nb' },
+      ]);
+
+      await other.hold(undefined);
+
+      expect(await actions()).toEqual(ONE_SET);
+      expect(await waitingRows()).toEqual([]);
+    });
+  });
+
+  it('such a row deleted before its hold is recorded: the alarm, and the hold all the same', async () => {
+    await withChecksDropped(async () => {
+      await plant('seal', org, 'agent', 'a\nb');
+      const other = await aProcess();
+      await withHeadLocked(() => other.poll());
+      await attacker.query('delete from directory.holds_waiting where org_id = $1', [org]);
+
+      await other.poll();
+
+      expect(await actions()).toEqual(ONE_SET);
+      expect(rowGone()).toHaveLength(1);
+      expect(await waitingRows()).toEqual([]);
+    });
   });
 
   it('a second record is a row of its own: Tx A waits on either, and each hold names its own', async () => {

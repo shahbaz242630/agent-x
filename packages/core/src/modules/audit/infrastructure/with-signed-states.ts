@@ -64,6 +64,8 @@ import {
   holdsWaiting,
   type HoldWaiting,
   keepHoldWaiting,
+  namedAsTheAppWrites,
+  type NamedRecord,
 } from './holds-waiting.ts';
 import {
   CHAIN_SUBJECT,
@@ -92,6 +94,8 @@ interface Found {
   readonly inTable?: boolean;
   /** This process knows it from its row alone: whoever found it may have raised the alarm, or no one did (a row forged). */
   readonly fromRow?: boolean;
+  /** Its row's own naming, where the app could not have written it: the finding then names the fixed name instead. */
+  readonly row?: NamedRecord;
 }
 
 /** How often every process looks for holds another left waiting. */
@@ -121,6 +125,11 @@ function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
  */
 async function keepWaiting(db: Kysely<AuditTables>, held: string, found: Found, log: Logger): Promise<void> {
   unrecorded.set(held, { ...found, inTable: false });
+  // A row the app couldn't have written is never written again: it stands or it doesn't, and this entry says which.
+  if (found.row !== undefined) {
+    unrecorded.set(held, found);
+    return;
+  }
   try {
     await keepHoldWaiting(db, found.finding, found.finding.sign);
     unrecorded.set(held, { ...found, inTable: true });
@@ -163,10 +172,11 @@ async function setHold(
       held,
       async (tx) => {
         await sql`set local lock_timeout = '5s'`.execute(tx);
-        if (rowMustStand && !(await holdStillWaiting(tx, finding))) return 'already';
+        const itsRow = found.row ?? finding;
+        if (rowMustStand && !(await holdStillWaiting(tx, itsRow))) return 'already';
         const recorded = await holder.hold(tx, finding, count);
         // Named elsewhere: clearing won't check this record, so its row stays to be the next hold.
-        if (recorded !== 'named_elsewhere') await holdNoLongerWaiting(tx, finding);
+        if (recorded !== 'named_elsewhere') await holdNoLongerWaiting(tx, itsRow);
         return recorded;
       },
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
@@ -206,12 +216,19 @@ async function setHold(
   }
 }
 
-/** What a row says of a hold this process hadn't heard of: how many were found, and how a chain failed, stay in the alarm's line. */
-const foundInRow = ({ org_id: orgId, subject_type: subjectType, object_id: objectId, reason }: HoldWaiting): Found => ({
-  finding: { orgId, subjectType, objectId, sign: signOfWaiting(reason) },
-  count: 1,
-  fromRow: true,
-});
+/**
+ * What a row says of a hold this process hadn't heard of: how many were found, and how a chain failed, stay in the
+ * alarm's line. A row the app couldn't have written (0069's checks dropped) is still caution, but `hold` couldn't
+ * write what it names, so it is recorded on the organisation's chain as a row not as the app writes one.
+ */
+function foundInRow(row: HoldWaiting): Found {
+  const { org_id: orgId, subject_type: subjectType, object_id: objectId, reason } = row;
+  const own = { count: 1, fromRow: true };
+  if (namedAsTheAppWrites(row))
+    return { ...own, finding: { orgId, subjectType, objectId, sign: signOfWaiting(reason) } };
+  const finding: TamperFinding = { orgId, subjectType: CHAIN_SUBJECT, objectId: orgId, sign: 'row' };
+  return { ...own, finding, row: { orgId, subjectType, objectId } };
+}
 
 /**
  * Tries once more a hold this process knew of whose row isn't there. Recorded
