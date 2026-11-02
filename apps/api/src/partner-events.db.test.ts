@@ -542,7 +542,7 @@ describe('a message the check can’t take yet waits for the next run', () => {
   }
 
   it('ends a message’s checks at 3 unanswered in a row, and leaves it for the next run', async () => {
-    const w = await messageOverPayments(3);
+    const w = await messageOverPayments(4);
     let asked = 0;
     const down: FakeRail = {
       ...w.rail,

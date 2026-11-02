@@ -425,6 +425,61 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(asked).toBeGreaterThanOrEqual(3);
     expect(asked).toBeLessThanOrEqual(4);
     expect(lines('payment_check.bank_unavailable')).toEqual([expect.objectContaining({ stopped: true })]);
+
+    // One at a time: the third exactly.
+    asked = 0;
+    capture = new LogCapture();
+    await createPaymentChecks({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      rail: down,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
+      databaseGate: handoffDatabaseGate(6),
+      limits: { total: 1, perOrganisation: 1 },
+    }).run();
+    expect(asked).toBe(3);
+  });
+
+  it('counts each organisation’s unanswered calls in a row of its own', async () => {
+    const worlds: World[] = [];
+    for (let n = 0; n < 2; n += 1) {
+      const { w, acting } = await ready();
+      for (let at = 0; at < 4; at += 1) await ask(acting, w, { amount: AED(10_000n) });
+      await handoffOf(w).run();
+      worlds.push(w);
+    }
+    const asked: string[] = [];
+    const [first] = worlds;
+    if (first === undefined) throw new Error('no world');
+    const down: FakeRail = {
+      ...first.rail,
+      getExecution: (ref) => {
+        asked.push(ref.organizationId);
+        return Promise.reject(new RailUnavailable());
+      },
+    };
+
+    await createPaymentChecks({
+      list: () => Promise.resolve(worlds.map(({ org }) => org)),
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      rail: down,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
+      databaseGate: handoffDatabaseGate(6),
+      limits: { total: 1, perOrganisation: 1 },
+    }).run();
+
+    // Turn about, each to its own third: not ended by the other's.
+    for (const { org } of worlds) expect(asked.filter((asker) => asker === org)).toHaveLength(3);
   });
 
   it.each([
@@ -1225,8 +1280,20 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
 
   it('a stop never waits out a hung bank: it ends clean, a late answer moving nothing', async () => {
     const { w, requests } = await paymentsUnderWay(1);
-    // Past its own answer's time, as one still under way at the bank.
-    const { rail, waiting } = railOf([w], () => true);
+    const { rail: hanging, waiting } = railOf([w], () => true);
+    // Its late answer would move it, were it read: credited.
+    const rail: FakeRail = {
+      ...hanging,
+      getExecution: async (ref): Promise<ExecutionLookup> => {
+        const found = await hanging.getExecution(ref);
+        return found.kind === 'found'
+          ? {
+              kind: 'found',
+              execution: { ...found.execution, providerStatus: 'AcceptedCreditSettlementCompleted' as const },
+            }
+          : found;
+      },
+    };
     const stopping = new AbortController();
     const run = checksOver([w], rail, breaker(), { stopWaitMs: 50 }).run(stopping.signal);
     await expect.poll(() => waiting.length, { timeout: 20_000 }).toBe(1);
@@ -1237,7 +1304,9 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     const before = await transactionOf(w, requests[0] ?? '');
     waiting[0]?.(false);
     await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(before).toMatchObject({ status: 'PROCESSING' });
     expect(await transactionOf(w, requests[0] ?? '')).toEqual(before);
+    expect(lines('payment_check.checked')).toEqual([]);
     expect(capture.lines().filter((line) => line.level === 'error')).toEqual([]);
   });
 

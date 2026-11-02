@@ -355,7 +355,7 @@ export function createPaymentChecks({
   const stepOf = (orgId: string, checked: CheckOutcome): LaneStep => {
     const inRow = checked === 'unreached' ? (run.inRow.get(orgId) ?? 0) + 1 : 0;
     run.inRow.set(orgId, inRow);
-    if (inRow !== UNREACHED_IN_A_ROW) return 'next';
+    if (inRow < UNREACHED_IN_A_ROW) return 'next';
     run.endedTurns += 1;
     return 'end_turn';
   };
@@ -518,8 +518,7 @@ export function createPaymentChecks({
     // The run gave up waiting for this call at a stop: its move would meet a closing pool, and the next check makes it.
     if (gaveUpWaiting) return 'unreached';
     try {
-      // Ahead of a new payment's start: it speaks for money already at the bank.
-      const checked = await databaseGate.run(orgId, () => applied(orgId, listed, word, log), true);
+      const checked = await databaseGate.run(orgId, () => applied(orgId, listed, word, log));
       log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
       return 'checked';
     } catch (error) {
