@@ -304,8 +304,6 @@ describe('what a brake is up against: a stream of share holders and the row (no 
       const { answer, ms } = await timed(() =>
         settled(change.query('select 1 from organizations.organizations where id = $1 for no key update', [w.org])),
       );
-      // Ended before the relay is asked to stop: a failed transaction keeps its locks until it ends, and a next holder
-      // caught behind them would never come, leaving the relay and the test waiting for each other.
       await letGo(change);
       const { took, waited } = await stop();
 
@@ -558,14 +556,16 @@ describe('the kill switch: the agent’s own brake', () => {
       const stopChecks = Array.from({ length: 3 }, () => stream(() => check.check(acting.text, CORRELATION), 5));
       await waitUntilQueued(database.as('admin'), 3);
 
-      const { answer, ms } = await timed(() => suspended(w));
+      const times = noStatementTimes();
+      const { answer, ms } = await timed(() => timingStatements(times, () => suspended(w)));
       await Promise.all([stopDecisions(), ...stopChecks.map((stop) => stop())]);
       await letGo(stuck);
 
       expect(answer).toMatchObject({ outcome: 'changed', agent: { agent: { status: 'SUSPENDED' } } });
-      // Its whole call: any wait for a connection (this stream goes round the gate and can fill the pool, so CI read 16.3 s,
-      // about 4 s past the brake), the brake's wait, then the change and its answer's read.
-      expect(ms).toBeLessThan(BRAKE_WAIT_MS * 1.75);
+      // Apart, as this stream goes round the gate and can fill the pool: the brake's wait with the change and its
+      // answer (8.5 s, six runs), and the wait for a connection, the rig's own (0.9 s to 2 s).
+      expect(ms - times.poolWaitMs).toBeLessThan(BRAKE_WAIT_MS);
+      expect(times.poolWaitMs).toBeLessThan(BRAKE_WAIT_MS);
       expect(await keyCheck().check(acting.text, CORRELATION)).toEqual({ outcome: 'refused' });
       expect(alarms()).toEqual([]);
     },

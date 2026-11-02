@@ -61,12 +61,15 @@
 // reactivation's held first, 0b), the chain head last.
 import {
   AGENT_KEYS,
+  type AgentKeyRecord,
   agentKeysOf,
   AGENTS,
   agentOf,
   handAgentOver,
   isLiveKey,
+  keysOnceIssued,
   oneKeyIssueAtATime,
+  roomForAKey,
 } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { listedMembership } from '@agentx/core/modules/directory';
@@ -409,6 +412,8 @@ export function createAgentChanges({
           await work.keyBudgetLeft(tx, member.orgId, now);
           const listed = await agentKeysOf(tx, states, member.orgId, read.agent.id, 'change');
           if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
+          roomForAKey(listed.keys);
+          const shown = await work.shown(tx, member.orgId, read.agent);
           const consumed = await stepUps.consumed(
             tx,
             member,
@@ -447,9 +452,14 @@ export function createAgentChanges({
             actor,
             details: { handedOverTo: read.owner },
           });
-          // Read in the transaction that issues it, on rows it holds: nothing after its commit can lose the key shown
-          // this once. A read that fails here rolls it all back, for the same request to do it again.
-          answered = await work.withKeys(tx, states, member.orgId, read.agent.id);
+          // Made from what it read before its first event, so no answer is read under the chain head (ADR-006 §6), and
+          // in the transaction that issues it, so nothing after its commit can lose the key shown this once.
+          const revoked = (listedKey: AgentKeyRecord) =>
+            listedKey.status === 'ACTIVE' ? { ...listedKey, status: 'REVOKED' as const } : listedKey;
+          answered = {
+            agent: { ...shown, owner: read.owner },
+            keys: keysOnceIssued(listed.keys, revoked, issued.issued),
+          };
           key = issued.text;
           return { status: 201, resourceId: read.agent.id };
         },
