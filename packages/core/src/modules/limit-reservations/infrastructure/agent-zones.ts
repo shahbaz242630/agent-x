@@ -7,7 +7,7 @@
 //
 // A row kept before 0054 has no signed event: `sealKeptZone` seals it once,
 // from the zone of the mandate its agent's first request was decided under,
-// which is the zone that decision kept (lockAgentMonth's `zoneIfNew`). The
+// which is the zone that decision kept (zoneInForce's `zoneIfNew`). The
 // caller (the API, at start) reads that mandate through its signed state, so
 // only a zone the signed records already name is sealed, never one an owner
 // planted; one that differs is a tamper sign.
@@ -56,6 +56,37 @@ function zoneOf(state: StateCheck): ZoneCheck {
   if (state.outcome === 'missing') return { outcome: 'none' };
   // 0040's check holds the column to a zone's name (never null), and the seal to what was written.
   return { outcome: 'kept', zone: String(state.fields.get('time_zone')) };
+}
+
+/** The zone a decision names the agent's month in, and whether it kept it (sealNewZone's to seal); or its zone tampered with. */
+export type ZoneInForce =
+  { readonly outcome: 'kept'; readonly zone: string; readonly keptNow: boolean } | { readonly outcome: 'tampered' };
+
+/**
+ * The agent's zone for a decision, from `read`, its keptZoneOf before its supplier's lock (4D2e C6), so a later decision
+ * costs no trip here and a tampered one is refused before that queue. Called once that lock is held, so a first decision
+ * stuck on a supplier holds up no other supplier's: only then does it add one, `zoneIfNew`, the mandate in force's.
+ * `read` saw none on a snapshot older than that wait, so the insert may find a row: another's, committed since, or one
+ * being added, which it waits for. Two first decisions keep one. That row is read again, on a snapshot from after those
+ * waits, and judged against its seal; a row still not there is one deleted.
+ */
+export async function zoneInForce(
+  tx: ZonesTransaction,
+  states: SignedStates,
+  read: Exclude<ZoneCheck, { readonly outcome: 'tampered' }>,
+  {
+    orgId,
+    agentId,
+    zoneIfNew,
+    at,
+  }: { readonly orgId: string; readonly agentId: string; readonly zoneIfNew: string; readonly at: Date },
+): Promise<ZoneInForce> {
+  if (read.outcome === 'kept') return { outcome: 'kept', zone: read.zone, keptNow: false };
+  if (await addZone(tx, { orgId, agentId, zone: zoneIfNew, at })) {
+    return { outcome: 'kept', zone: zoneIfNew, keptNow: true };
+  }
+  const kept = await keptZoneOf(tx, states, { orgId, agentId });
+  return kept.outcome === 'kept' ? { outcome: 'kept', zone: kept.zone, keptNow: false } : { outcome: 'tampered' };
 }
 
 /**
