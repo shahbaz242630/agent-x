@@ -40,6 +40,7 @@
 // own admin, would do an attacker's work for them. People look at the alarm.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
+  type Anchor,
   type AnchorLog,
   type AnchorPoint,
   type AnchorStore,
@@ -208,6 +209,28 @@ export function createAnchorCheck({
     return 'failed';
   };
 
+  /** What a completed check comes to: the alarm, nothing moved, or the chain anchored where it stands. */
+  const afterCheck = (chain: Chain, log: Logger, report: ChainReport, last: Anchor | undefined): Outcome => {
+    if (!report.ok) return alarmed(chain, log, report.problem.reason, report.problem.seq);
+    // A store's read past its deadline, or another copy's anchor, can land during the check, and the head read before
+    // it says nothing against it: an honest copy may have moved on since. The next run compares with it, the alarm a run
+    // late at most, one interval and that run's length; Tx A compares with it at once, so a payment is refused meanwhile.
+    if (anchors.latest(chain) !== last) return 'unanchored';
+    // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
+    if (last !== undefined && !stillHolds(report, last)) return alarmed(chain, log, 'anchor', last.seq);
+    if (last?.seq === report.seq) return 'unchanged';
+    if (storeUnread()) return 'unanchored';
+    const anchor = signAnchor(keys, chain, report, clock.now());
+    anchors.keep(anchor);
+    log.info('audit.anchored', {
+      chain: chain.kind,
+      seq: report.seq,
+      headHash: report.hash.toString('hex'),
+      keyVersion: anchor.keyVersion,
+    });
+    return 'anchored';
+  };
+
   const checkOne = async ({ chain, verify }: CheckedChain, signal: AbortSignal | undefined): Promise<Outcome> => {
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
     const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
@@ -234,24 +257,7 @@ export function createAnchorCheck({
         return clock.now().getTime() - since(key) >= staleAfterMs ? alarm('unchecked') : 'unchecked';
       }
       lastChecked.set(key, clock.now().getTime());
-      if (!report.ok) return alarm(report.problem.reason, report.problem.seq);
-      // A store's read past its deadline, or another copy's anchor, can land during the check, and the head read before
-      // it says nothing against it: an honest copy may have moved on since. The next run compares with it, the alarm a run
-      // late at most, one interval and that run's length; Tx A compares with it at once, so a payment is refused meanwhile.
-      if (anchors.latest(chain) !== last) return 'unanchored';
-      // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
-      if (last !== undefined && !stillHolds(report, last)) return alarm('anchor', last.seq);
-      if (last?.seq === report.seq) return 'unchanged';
-      if (storeUnread()) return 'unanchored';
-      const anchor = signAnchor(keys, chain, report, clock.now());
-      anchors.keep(anchor);
-      log.info('audit.anchored', {
-        chain: chain.kind,
-        seq: report.seq,
-        headHash: report.hash.toString('hex'),
-        keyVersion: anchor.keyVersion,
-      });
-      return 'anchored';
+      return afterCheck(chain, log, report, last);
     } catch (error) {
       // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
       log.error('audit.anchor_check_crashed', { chain: chain.kind, err: error });
