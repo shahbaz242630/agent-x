@@ -44,13 +44,16 @@
 // head last.
 import {
   agentKeyOf,
+  type AgentKeyRecord,
   agentKeysOf,
   agentOf,
   AGENT_KEYS,
   bringKeyExpiryForward,
   isLiveKey,
+  keysOnceIssued,
   MOST_LIVE_KEYS,
   oneKeyIssueAtATime,
+  roomForAKey,
   rotatedKeyExpiresAt,
 } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
@@ -207,7 +210,8 @@ export function createAgentKeyChanges({
     if (listed.keys.filter((key) => isLiveKey(key, now)).length - ending >= MOST_LIVE_KEYS) {
       throw new AgentRefused(409, 'AGENT_KEYS_FULL');
     }
-    return read;
+    roomForAKey(listed.keys);
+    return { ...read, keys: listed.keys };
   };
 
   /**
@@ -294,6 +298,7 @@ export function createAgentKeyChanges({
           await work.keyBudgetLeft(tx, member.orgId, now);
           const old = await keyToRotate(tx, states, member.orgId, { named, oldKey }, now);
           mayRotate(role, membershipId, old.agent.owner);
+          const shown = await work.shown(tx, member.orgId, old.agent);
           const consumed = await steppedUp(
             tx,
             member,
@@ -316,6 +321,7 @@ export function createAgentKeyChanges({
             details: { ...stepUpDetails(consumed), rotates: old.key.id, ...chosen },
           });
           const ended = { rotatedTo: issued.id, ...chosen };
+          let oldNow: AgentKeyRecord;
           if (oldKey === 'end_now') {
             movedAsRead(
               await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.key.id }, 'revoke', {
@@ -325,20 +331,24 @@ export function createAgentKeyChanges({
               }),
               "a live key didn't revoke",
             );
+            oldNow = { ...old.key, status: 'REVOKED' };
           } else {
+            const expiresAt = rotatedKeyExpiresAt(old.key.expiresAt, now);
             await bringKeyExpiryForward(tx, states, {
               orgId: member.orgId,
               key: old.key,
               state: old.state,
-              expiresAt: rotatedKeyExpiresAt(old.key.expiresAt, now),
+              expiresAt,
               actor,
               action: 'agent_key.rotated',
               details: ended,
             });
+            oldNow = { ...old.key, expiresAt };
           }
-          // Read in the transaction that issues it, on rows it holds: nothing after its commit can lose the key shown
-          // this once. A read that fails here rolls it all back, for the same request to do it again.
-          answered = await work.withKeys(tx, states, member.orgId, old.agent.id);
+          // Made from what it read before its first event, so no answer is read under the chain head (ADR-006 §6), and
+          // in the transaction that issues it, so nothing after its commit can lose the key shown this once.
+          const changed = (listed: AgentKeyRecord) => (listed.id === oldNow.id ? oldNow : listed);
+          answered = { agent: shown, keys: keysOnceIssued(old.keys, changed, issued.issued) };
           key = issued.text;
           return { status: 201, resourceId: old.agent.id };
         },

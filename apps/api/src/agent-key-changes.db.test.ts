@@ -14,8 +14,10 @@ import {
   createAgentKeyCheck,
   handAgentOver,
   keySecretMessage,
+  MOST_KEYS_LISTED,
   parseAgentKey,
   type Scope,
+  TooManyAgentKeys,
 } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import {
@@ -60,7 +62,7 @@ import {
   ROTATE_OPERATION,
 } from './agent-key-changes.ts';
 import type { OldKeyChoice } from './key-rotation-choice.ts';
-import type { AgentMember, AgentTables } from './agent-writes.ts';
+import { type AgentMember, type AgentTables, createAgentWork } from './agent-writes.ts';
 
 type Tables = AgentTables & OrganizationsTables;
 
@@ -283,6 +285,56 @@ const eventsAbout = (org: string, keyId: string) =>
 
 const keysIn = (org: string) =>
   withTenant(app, org, (tx) => tx.selectFrom('agents.agent_keys').select('id').execute()).then((rows) => rows.length);
+
+/** The agent and its keys read afresh: what a write's answer must equal. */
+const readBack = (org: string, agentId: string) => {
+  const work = createAgentWork({ database: app, keys, ids, logger: testLogger() });
+  return work.answered(org, CORRELATION, (tx, states) => work.withKeys(tx, states, org, agentId));
+};
+
+/** `database` as a use case takes it, with every statement it sends logged in order: Kysely's node for it, as text. */
+const statementLog = () => {
+  const sent: string[] = [];
+  const logged = app.withPlugin({
+    transformQuery: ({ node }) => {
+      sent.push(JSON.stringify(node, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value)));
+      return node;
+    },
+    transformResult: ({ result }) => Promise.resolve(result),
+  });
+  return { sent, logged };
+};
+
+/**
+ * What was read for an answer once the chain head was locked: a plain or shared read naming a key or an agent. A status
+ * change's own read of the row it moves locks it for change, so it isn't counted: that is the write itself.
+ */
+const readsUnderTheHead = (sent: readonly string[]) => {
+  const head = sent.findIndex((statement) => statement.includes('from audit.heads h'));
+  expect(head).toBeGreaterThan(-1);
+  return sent
+    .slice(head + 1)
+    .filter((statement) => /"SelectQueryNode"|for share/iu.test(statement))
+    .filter((statement) => /agent_keys|agents\.agents|"agents"/u.test(statement));
+};
+
+/** `count` more keys of the agent, lapsed long ago: none live, none of the day's budget, so only their number counts. */
+const keysLongEnded = (org: string, agentId: string, count: number) =>
+  withSignedStates(app, org, quiet(), async (tx, states) => {
+    for (let made = 0; made < count; made += 1) {
+      await addAgentKey(tx, states, {
+        orgId: org,
+        id: ids.next(),
+        agentId,
+        scopes: ['requests:read'],
+        secretMac: Buffer.alloc(32, 1),
+        secretKeyVersion: 1,
+        expiresAt: new Date(START.getTime() - 5 * DAY_MS),
+        createdAt: new Date(START.getTime() - 10 * DAY_MS),
+        actor: OPERATOR,
+      });
+    }
+  });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -600,6 +652,121 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
       await holder.query('rollback');
       await holder.end();
     }
+  });
+});
+
+describe('a rotation’s answer, made before the chain head (ADR-006 §6, 4D2e)', () => {
+  /** An agent with a key to rotate, one ended, one lapsed, and a developer owning it. */
+  async function agentWithHistory() {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const key = await agentWithKey(org, developer);
+    const gone = await keyFor(org, key.agentId, ['requests:read'], new Date(START.getTime() + 30 * DAY_MS));
+    await revoked(developer, { agentId: key.agentId, keyId: gone.keyId });
+    await keysLongEnded(org, key.agentId, 1);
+    return { org, developer, key };
+  }
+
+  it.each(['overlap', 'end_now'] as const)(
+    'answers just what a read of the agent gives after it: %s',
+    async (oldKey) => {
+      const { org, developer, key } = await agentWithHistory();
+
+      const { agent } = await rotated(developer, key, PASSKEY, oldKey);
+
+      expect(agent.keys).toHaveLength(4);
+      expect(agent).toEqual(await readBack(org, key.agentId));
+    },
+  );
+
+  it.each(['overlap', 'end_now'] as const)(
+    'in the order of a read, the new key’s ID sorting first: %s',
+    async (oldKey) => {
+      const { org, developer, key } = await agentWithHistory();
+      const challengeId = askedFor(await rotate(developer, key, oldKey));
+      await stepUp(developer, challengeId);
+      // Lower than every ID made so far, as another replica's clock can give.
+      const low = new SequentialIds(oldKey === 'overlap' ? 0x10_0000 : 0x20_0000);
+      const write = await createAgentKeyChanges({
+        database: app,
+        keys,
+        ids: low,
+        clock,
+        challenges: challenges(),
+        logger: testLogger(),
+      }).rotateConfirm(
+        developer,
+        keyed(developer, ROTATE_CONFIRM_OPERATION, JSON.stringify({ challengeId, oldKey })),
+        named(key),
+        oldKey,
+        challengeId,
+        CORRELATION,
+      );
+
+      if (write.outcome !== 'rotated') throw new Error(`not rotated: ${JSON.stringify(write)}`);
+      expect(write.agent.keys.at(0)?.status).toBe('ACTIVE');
+      expect(write.agent).toEqual(await readBack(org, key.agentId));
+    },
+  );
+
+  it.each(['overlap', 'end_now'] as const)(
+    'reads neither a key nor the agent once it holds the chain head: %s',
+    async (oldKey) => {
+      const { developer, key } = await agentWithHistory();
+      const challengeId = askedFor(await rotate(developer, key, oldKey));
+      await stepUp(developer, challengeId);
+      const { sent, logged } = statementLog();
+
+      const write = await createAgentKeyChanges({
+        database: logged,
+        keys,
+        ids,
+        clock,
+        challenges: challenges(),
+        logger: testLogger(),
+      }).rotateConfirm(
+        developer,
+        keyed(developer, ROTATE_CONFIRM_OPERATION, JSON.stringify({ challengeId, oldKey })),
+        named(key),
+        oldKey,
+        challengeId,
+        CORRELATION,
+      );
+
+      expect(write.outcome).toBe('rotated');
+      expect(readsUnderTheHead(sent)).toEqual([]);
+    },
+  );
+
+  it(`rotates up to ${String(MOST_KEYS_LISTED)} keys, and no further: past it no read of the agent would answer`, async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const key = await agentWithKey(org, developer);
+    await keysLongEnded(org, key.agentId, MOST_KEYS_LISTED - 2);
+
+    const { agent, key: text } = await rotated(developer, key, PASSKEY, 'end_now');
+    expect(agent.keys).toHaveLength(MOST_KEYS_LISTED);
+    expect(agent).toEqual(await readBack(org, key.agentId));
+
+    const newest = { agentId: key.agentId, keyId: agent.keys.at(-1)?.id ?? '' };
+    await expect(rotate(developer, newest)).rejects.toBeInstanceOf(TooManyAgentKeys);
+    expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
+    expect(await check(text ?? '')).toMatchObject({ outcome: 'accepted' });
+    expect(await readBack(org, key.agentId)).toEqual(agent);
+  });
+
+  it(`refuses a confirm that would pass ${String(MOST_KEYS_LISTED)} keys, asked before: nothing changed`, async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const key = await agentWithKey(org, developer);
+    const challengeId = askedFor(await rotate(developer, key));
+    await stepUp(developer, challengeId);
+    await keysLongEnded(org, key.agentId, MOST_KEYS_LISTED - 1);
+
+    await expect(rotateConfirm(developer, key, challengeId)).rejects.toBeInstanceOf(TooManyAgentKeys);
+
+    expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
+    expect((await eventsAbout(org, key.keyId)).map(({ action }) => action)).toEqual(['agent_key.issued']);
   });
 });
 
@@ -982,6 +1149,105 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(await handOverAsk(admin, key.agentId, next.membershipId)).toEqual(refusal(409, 'AGENT_KEYS_SPENT'));
     expect(await keysIn(org)).toBe(20);
     expect(await check(key.text)).toMatchObject({ outcome: 'accepted' });
+  });
+
+  /** An agent with live, ended and lapsed keys, and who it can go to. */
+  async function handedAgent() {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, developer);
+    const gone = await keyFor(org, key.agentId, ['requests:read'], new Date(START.getTime() + 30 * DAY_MS));
+    await revoked(developer, { agentId: key.agentId, keyId: gone.keyId });
+    await keyFor(org, key.agentId, ['requests:read'], new Date(START.getTime() + 30 * DAY_MS));
+    await keysLongEnded(org, key.agentId, 1);
+    return { org, admin, next, key };
+  }
+
+  it('answers just what a read of the agent gives after it, its new owner too', async () => {
+    const { org, admin, next, key } = await handedAgent();
+
+    const { agent } = await handedOver(admin, key.agentId, next.membershipId);
+
+    expect(agent.keys).toHaveLength(5);
+    expect(agent).toEqual(await readBack(org, key.agentId));
+  });
+
+  it('in the order of a read, the new key’s ID sorting first', async () => {
+    const { org, admin, next, key } = await handedAgent();
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
+    await stepUp(admin, challengeId);
+
+    const write = handedOf(
+      await createAgentChanges({
+        database: app,
+        keys,
+        // Lower than every ID made so far, as another replica's clock can give.
+        ids: new SequentialIds(0x30_0000),
+        clock,
+        challenges: challenges(),
+        outbox: createOutbox({ ids, clock }),
+        logger: testLogger(),
+      }).handOverConfirm(
+        admin,
+        keyed(admin, HAND_OVER_CONFIRM_OPERATION, challengeId),
+        key.agentId,
+        next.membershipId,
+        challengeId,
+        CORRELATION,
+      ),
+    );
+
+    expect(write.agent.keys.at(0)?.status).toBe('ACTIVE');
+    expect(write.agent).toEqual(await readBack(org, key.agentId));
+  });
+
+  it('reads neither a key nor the agent once it holds the chain head', async () => {
+    const { admin, next, key } = await handedAgent();
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
+    await stepUp(admin, challengeId);
+    const { sent, logged } = statementLog();
+
+    const write = await createAgentChanges({
+      database: logged,
+      keys,
+      ids,
+      clock,
+      challenges: challenges(),
+      outbox: createOutbox({ ids, clock }),
+      logger: testLogger(),
+    }).handOverConfirm(
+      admin,
+      keyed(admin, HAND_OVER_CONFIRM_OPERATION, challengeId),
+      key.agentId,
+      next.membershipId,
+      challengeId,
+      CORRELATION,
+    );
+
+    expect(write.outcome).toBe('handedOver');
+    expect(readsUnderTheHead(sent)).toEqual([]);
+  });
+
+  it(`hands over up to ${String(MOST_KEYS_LISTED)} keys, and no further: nothing changed past it`, async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, admin);
+    await keysLongEnded(org, key.agentId, MOST_KEYS_LISTED - 2);
+
+    const { agent } = await handedOver(admin, key.agentId, next.membershipId);
+    expect(agent.keys).toHaveLength(MOST_KEYS_LISTED);
+    expect(agent).toEqual(await readBack(org, key.agentId));
+
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, admin.membershipId));
+    await stepUp(admin, challengeId);
+    await expect(handOverConfirm(admin, key.agentId, admin.membershipId, challengeId)).rejects.toBeInstanceOf(
+      TooManyAgentKeys,
+    );
+    expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
+    expect(await readBack(org, key.agentId)).toEqual(agent);
   });
 });
 

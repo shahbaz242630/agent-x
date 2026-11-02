@@ -221,6 +221,40 @@ export async function agentKeysOf(
 }
 
 /**
+ * Refuses a key that would take the agent past what a list reads: past it, every read of the agent would throw
+ * TooManyAgentKeys for good. For a write issuing one, from its own list, before its first event.
+ */
+export function roomForAKey(keys: readonly AgentKeyRecord[]): void {
+  if (keys.length >= MOST_KEYS_LISTED) throw new TooManyAgentKeys();
+}
+
+/** A new key's own fields, as addAgentKey takes them. */
+export type IssuedAgentKey = Omit<NewAgentKey, 'orgId' | 'createdAt' | 'actor' | 'details'>;
+
+/**
+ * The agent's keys once a write has changed some and issued one, as agentKeysOf would list them: for a write that
+ * answers with them, as it reads none after its first event, holding the chain head (ADR-006 §6). `listed` is its list
+ * from before that event, with the `changed` it recorded since; `issued`, the new key as addAgentKey took it.
+ */
+export function keysOnceIssued(
+  listed: readonly AgentKeyRecord[],
+  changed: (key: AgentKeyRecord) => AgentKeyRecord,
+  { id, agentId, scopes, secretMac, secretKeyVersion, expiresAt }: IssuedAgentKey,
+): readonly AgentKeyRecord[] {
+  const issued: AgentKeyRecord = {
+    id: id.toLowerCase(),
+    agentId: agentId.toLowerCase(),
+    status: AGENT_KEY.initial,
+    scopes: scopesOf(scopesText(scopes)),
+    secretMac,
+    secretKeyVersion,
+    expiresAt,
+  };
+  // An ID from another replica's clock can sort before a key already listed.
+  return [...listed.map(changed), issued].sort((one, other) => (one.id < other.id ? -1 : 1));
+}
+
+/**
  * Takes the organisation's lock for issuing keys by rotation or by a
  * handover until the transaction ends, so two issues at once can't both take
  * the last of the day's budget. Taken right after the idempotency key's claim, before any row lock.
