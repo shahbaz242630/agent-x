@@ -230,10 +230,11 @@ async function decisionsLocks({ w, mandateId, acting }: Ready): Promise<TestClie
  * A relay of those, forced: each takes them while the one before it still holds them, so there is never a moment
  * with none, and lets go only once the next has them or waits for them. Stops when told, every one gone.
  */
-function relayOf(ready_: Ready, stepMs = 150) {
+async function relayOf(ready_: Ready, stepMs = 150) {
   const relaying = { on: true };
+  // Holding before this answers: a change sent first would take the rows, and the relay would wait behind it.
+  let inside = await decisionsLocks(ready_);
   const running = (async () => {
-    let inside = await decisionsLocks(ready_);
     while (relaying.on) {
       await sleep(stepMs);
       const next = decisionsLocks(ready_);
@@ -520,7 +521,7 @@ describe('every change a decision holds up beats a forced stream of what it hold
     async (_, prepared) => {
       const r = await ready();
       const change = await prepared(r);
-      const stop = relayOf(r);
+      const stop = await relayOf(r);
       await sleep(400);
 
       const { answer, ms } = await timed(() => settled(change()));
