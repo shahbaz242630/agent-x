@@ -69,6 +69,7 @@ import {
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createAgentTurns, TURNS_AN_AGENT, TurnWaitExceeded } from './agent-turns.ts';
+import { responseFor } from './errors.ts';
 import { createDecisionEntry, type DecisionEntry, TURNS_A_SUPPLIER } from './decision-entry.ts';
 import { createOrganizationChanges, FREEZE_OPERATION } from './organization-changes.ts';
 import { createDecisionGate, type DecisionGate, NO_GATE_LIMITS } from './decision-gate.ts';
@@ -967,10 +968,10 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
     // An agent's later decision made 25 before P16, whose two trips took 3 off it; P17's two take 3 more; C6's zone
-    // read in the gather takes 1.
-    expect(line?.trips).toBe(18);
-    // From the supplier's lock to the commit, both counted: 16 with the lock in the gather (C6).
-    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(13);
+    // read in the gather takes 1, and C7's month and totals on one trip 1 more.
+    expect(line?.trips).toBe(17);
+    // From the supplier's lock to the commit, both counted: 16 with the lock in the gather, 13 after C6.
+    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
   });
 
   it("makes an agent's first decision's zone after the supplier's lock, its trips all held", async () => {
@@ -982,8 +983,8 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .at(-1);
     // Its gather reads the zone as not there, the insert comes after the supplier's lock, and the zone's seal adds trips.
     expect(line?.supplierLockTrip).toBe(6);
-    expect(line?.trips).toBe(24);
-    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(19);
+    expect(line?.trips).toBe(23);
+    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(18);
   });
 });
 
@@ -1379,6 +1380,179 @@ describe('refusable reads before the supplier’s lock (4D2e C6, forced)', () =>
         reasons: simulation.made.reasons,
       });
     }
+  });
+});
+
+describe('the month’s lock and the totals on one trip (4D2e C7, forced)', () => {
+  const retried = () => capture.lines().filter((line) => line.event === TRANSACTION_RETRIED);
+
+  it('counts in the month’s total a reservation committed during its wait for the month', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-0' })));
+    // AED 12,000 twice is past the AED 20,000 cap, on two suppliers: only the month serialises them.
+    const [ahead, behind] = await headHeld(
+      w,
+      () => ask(acting, asking(w, { amount: AED(1_200_000n), orderReference: 'INV-1' })),
+      () =>
+        ask(acting, asking(w, { amount: AED(1_200_000n), orderReference: 'INV-2', supplierId: w.suppliers[1] ?? '' })),
+    );
+
+    expect(decidedOf(ahead ?? { outcome: 'busy' }).decision).toBe('ALLOW');
+    expect(decidedOf(behind ?? { outcome: 'busy' })).toMatchObject({
+      decision: 'DENY',
+      reasons: ['POLICY_MONTHLY_CAP'],
+    });
+    expect(retried()).toEqual([]);
+  });
+
+  it('counts in the split total a holder’s reservation, across agents, each with its own month', async () => {
+    const { w, acting } = await ready({ terms: { approvalThreshold: AED(1_500_000n) } });
+    const theirKey = await shared.secondAgent(registry, w, { approvalThreshold: AED(1_500_000n) });
+    for (const key of [acting, theirKey]) {
+      // Past each agent's first decision, so the second waits at the supplier, not on a zone.
+      decidedOf(
+        await ask(
+          key,
+          asking(w, { amount: AED(10_000n), orderReference: `INV-${key.agentId}`, supplierId: w.suppliers[1] ?? '' }),
+        ),
+      );
+    }
+
+    const [ahead, behind] = await headHeld(
+      w,
+      () => ask(acting, asking(w, { amount: AED(1_000_000n), orderReference: 'INV-1' })),
+      () => ask(theirKey, asking(w, { amount: AED(1_000_000n), orderReference: 'INV-2' })),
+    );
+
+    expect(decidedOf(ahead ?? { outcome: 'busy' }).decision).toBe('ALLOW');
+    expect(decidedOf(behind ?? { outcome: 'busy' }).decision).toBe('REQUIRE_APPROVAL');
+    expect(retried()).toEqual([]);
+  });
+
+  it('counts a later decision’s duplicate order, on the holder’s claim', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-0' })));
+
+    const [ahead, behind] = await headHeld(
+      w,
+      () => ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-SAME' })),
+      () => ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-SAME' })),
+    );
+
+    expect(decidedOf(ahead ?? { outcome: 'busy' }).decision).toBe('ALLOW');
+    expect(decidedOf(behind ?? { outcome: 'busy' })).toMatchObject({
+      decision: 'DENY',
+      reasons: ['DUPLICATE_ORDER_REFERENCE'],
+    });
+  });
+
+  /** The agent's month's row held as a stuck transaction would, while `work` runs; let go after. */
+  async function withMonthStuck<T>(w: World, work: (holder: TestClient) => Promise<T>): Promise<T> {
+    const holder = await database.connect('admin');
+    try {
+      await holder.query('begin');
+      await holder.query(
+        "select 1 from limit_reservations.agent_periods where agent_id = $1 and month = '2026-10' for update",
+        [w.agent],
+      );
+      return await work(holder);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  }
+
+  it('holds the supplier before asking for the month, and not the other way', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-0' })));
+    const looker = await database.connect('admin');
+    try {
+      // The month stuck: its supplier is already held.
+      const { waiting } = await withMonthStuck(w, async () => {
+        const asked = within(
+          20_000,
+          ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-1' })),
+          'month',
+        );
+        await waitUntilQueued(database.as('admin'), 1);
+        await expect(
+          looker.query('select 1 from suppliers.suppliers where id = $1 for no key update nowait', [w.suppliers[0]]),
+        ).rejects.toMatchObject({ code: '55P03' });
+        // In an object, or returning it would wait for it with the month still held.
+        return { waiting: asked };
+      });
+      decidedOf(await waiting);
+
+      // The supplier stuck: its month is still free.
+      const holder = await database.connect('admin');
+      try {
+        await holder.query('begin');
+        await holder.query('select 1 from suppliers.suppliers where id = $1 for update', [w.suppliers[0]]);
+        const asked = within(
+          20_000,
+          ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-2' })),
+          'supplier',
+        );
+        await waitUntilQueued(database.as('admin'), 1);
+        await looker.query('begin');
+        await looker.query(
+          "select 1 from limit_reservations.agent_periods where agent_id = $1 and month = '2026-10' for no key update nowait",
+          [w.agent],
+        );
+        await looker.query('rollback');
+        await holder.query('rollback');
+        decidedOf(await asked);
+      } finally {
+        await holder.end();
+      }
+    } finally {
+      await looker.end();
+    }
+  });
+
+  it('answers a wait for the month run out as itself, 503 at the route, with nothing made and the key unused', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-0' })));
+    const before = await made(w.org);
+
+    const failure: unknown = await withMonthStuck(w, () =>
+      ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-RUNOUT' }), 'run-out').catch(
+        (error: unknown) => error,
+      ),
+    );
+
+    // Not 25P02, from the totals behind it on the trip.
+    expect(failure).toMatchObject({ code: '55P03' });
+    expect(responseFor(failure)).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
+    expect(await made(w.org)).toEqual(before);
+    expect(
+      decidedOf(await ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-RUNOUT' }), 'run-out')),
+    ).toMatchObject({
+      decision: 'ALLOW',
+    });
+  });
+
+  it('surfaces a deadlock on the month as a deadlock, not as the totals behind it, and tries it again', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-0' })));
+
+    const answer = await withMonthStuck(w, async (holder) => {
+      // Never this one's detector: the decision, waiting first, finds the cycle and fails.
+      await holder.query("set local deadlock_timeout = '30s'");
+      const asked = within(
+        20_000,
+        ask(acting, asking(w, { amount: AED(10_000n), orderReference: 'INV-1' })),
+        'deadlock',
+      );
+      await waitUntilQueued(database.as('admin'), 1);
+      // The holder of the month now wants the supplier the decision holds: backwards, as nothing in the product does.
+      await holder.query('select 1 from suppliers.suppliers where id = $1 for no key update', [w.suppliers[0]]);
+      await holder.query('rollback');
+      return asked;
+    });
+
+    expect(decidedOf(answer)).toMatchObject({ decision: 'ALLOW' });
+    expect(retried()).toEqual([expect.objectContaining({ failure: 'deadlock' })]);
   });
 });
 

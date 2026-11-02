@@ -25,7 +25,7 @@
 // - 7: the agent's month FOR NO KEY UPDATE, serialising the monthly check
 //   (decision 4: the agent's, under all its mandates);
 // - then the checks, in one statement of their own after the locks, never the
-//   locking one (4D2d P12; with the mandate's split check on, the payee's
+//   locking one, on the month's lock's trip (4D2d P12, 4D2e C7; with the mandate's split check on, the payee's
 //   reservations in its rolling window, across agents: D5, serialised by the
 //   supplier's lock); the
 //   request (8); its reservation and claim (11); its two signed events (12).
@@ -50,7 +50,6 @@ import {
   AGENT_ZONES,
   keptZoneOf,
   type LimitReservationsTables,
-  lockAgentMonth,
   reserveStatement,
   sealNewZone,
   zoneInForce,
@@ -77,6 +76,7 @@ import {
 import {
   claimAnswered,
   claimStatement,
+  monthLockedAndTotalsWeighed,
   totalsWeighed,
   type HeldAs,
   holdsCapacity,
@@ -91,7 +91,7 @@ import {
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf } from '@agentx/core/modules/suppliers';
-import { type Clock, type IdGenerator, type Money, money, windowStart } from '@agentx/core/shared-kernel';
+import { type Clock, type IdGenerator, type Money, money, periodOf, windowStart } from '@agentx/core/shared-kernel';
 import {
   AGENT_BRAKE,
   brakeShared,
@@ -370,16 +370,18 @@ interface ReadToWeigh {
   readonly except?: string | undefined;
 }
 
+/** The currency weighed: the mandate's, as its limits are (a request in another is denied by decide). */
+const currencyWeighed = ({ mandate, asked }: ReadToWeigh): string =>
+  mandate?.perOrderLimit.currency ?? asked.amount.currency;
+
 /**
- * The engine's input from what was read, with the totals read for it in one statement after the supplier's and the month's
- * locks (4D2d P12): one way for a decision and for weigh, so the two never weigh apart. The split total only where it is
- * weighed: the mandate's split check on, for a supplier of the organisation's.
+ * What to read in one statement after the supplier's and the month's locks (4D2d P12). The split total only where it
+ * is weighed: the mandate's split check on, for a supplier of the organisation's.
  */
-async function inputRead(tx: DecisionTx, read: ReadToWeigh): Promise<DecisionInput> {
-  const { asked, now, agent, mandate, supplier, order, month, except } = read;
-  // The currency weighed: the mandate's, as its limits are (a request in another is denied by decide).
-  const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
-  const { spent, split, claims } = await totalsWeighed(tx, {
+function totalsToWeigh(read: ReadToWeigh) {
+  const { now, agent, mandate, supplier, order, month, except } = read;
+  const currency = currencyWeighed(read);
+  return {
     month: month === null ? null : { agentId: agent.id, month, currency, except },
     split:
       mandate?.splitCheck === true && supplier !== null
@@ -391,7 +393,15 @@ async function inputRead(tx: DecisionTx, read: ReadToWeigh): Promise<DecisionInp
           }
         : null,
     order: order === null ? null : { ...order, except },
-  });
+  };
+}
+
+/** The engine's input from what was read and those totals: one way for a decision and for weigh, so the two never weigh apart. */
+function inputWith(
+  read: ReadToWeigh,
+  { spent, split, claims }: Awaited<ReturnType<typeof totalsWeighed>>,
+): DecisionInput {
+  const currency = currencyWeighed(read);
   return inputOf({ ...read, spent: money(spent, currency), split: money(split, currency), claims });
 }
 
@@ -406,7 +416,7 @@ export interface PoliciesWeighed {
 
 /**
  * Levels 4–7 and what the engine weighs, for the simulator (C4) and an approval
- * (a decision reads its own, on fewer trips, and weighs by the same inputRead): the
+ * (a decision reads its own, on fewer trips, and weighs by the same totalsToWeigh and inputWith): the
  * agent's authority, the source and supplier, the agent's month and its
  * total. An approval locks the supplier and the month (`decides`, `monthOf`
  * locking it); the simulator only reads them, and `rules` lets it put
@@ -442,7 +452,8 @@ export async function weigh(
   const { supplier, order } = await supplierIn(tx, states, orgId, asked, decides ? 'change' : 'share');
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
-  const input = await inputRead(tx, { asked, now, agent, mandate, policies, source, supplier, order, month, except });
+  const read = { asked, now, agent, mandate, policies, source, supplier, order, month, except };
+  const input = inputWith(read, await totalsWeighed(tx, totalsToWeigh(read)));
   return { input, mandate, supplier, order, month, approvalWait: inForce.approvalWait };
 }
 
@@ -605,8 +616,16 @@ export function createSpendRequestDecisions({
         ? null
         : await zoneInForce(tx, states, zoneRead, { orgId, agentId, zoneIfNew: mandate.timeZone, at: now });
     if (zone?.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    const month = zone === null ? null : await lockAgentMonth(tx, { orgId, agentId, zone: zone.zone, at: now });
-    const input = await inputRead(tx, { asked, now, agent, mandate, policies, source, supplier, order, month });
+    // The month named at the instant asked, however long the locks take.
+    const month = zone === null ? null : periodOf(now, zone.zone).month;
+    const read = { asked, now, agent, mandate, policies, source, supplier, order, month };
+    const toWeigh = totalsToWeigh(read);
+    // Its lock and the totals on one trip, each its own statement, so the totals see what its holder committed.
+    const totals =
+      toWeigh.month === null
+        ? await totalsWeighed(tx, toWeigh)
+        : await monthLockedAndTotalsWeighed(tx, { orgId, at: now }, { ...toWeigh, month: toWeigh.month });
+    const input = inputWith(read, totals);
     const made = decide(input);
     const requestId = ids.next();
     const hash = keys.mac('decision-hash', [

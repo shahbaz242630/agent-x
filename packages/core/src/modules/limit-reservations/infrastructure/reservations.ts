@@ -6,12 +6,12 @@
 // holds the agent's zone (zoneInForce, read before the supplier's lock, added
 // after it from the mandate in force on its first decision, then kept for good:
 // D2's review; a signed record, 0054, agent-zones.ts), then:
-// - `lockAgentMonth`: its month at `at` in that zone, and that month's period
-//   row locked FOR NO KEY UPDATE (level 7);
+// - `agentMonthLocking`: its month's period row locked FOR NO KEY UPDATE (level
+//   7), named by the month at `at` in that zone (`periodOf`);
 // - `monthSpentRead`: the agent's month, every reservation but a released one,
-//   read in a statement after the lock, never the locking one, so READ
-//   COMMITTED's fresh snapshot sees every reservation the transaction it waited
-//   for committed (§7.2);
+//   read in a statement after the lock, never the locking one, though on the same
+//   trip (4D2e C7), so READ COMMITTED's fresh snapshot sees every reservation the
+//   transaction it waited for committed (§7.2);
 // - `splitHeldRead`: with the mandate's split check on, the payee's reservations
 //   in its rolling window, across agents, likewise (D5);
 // - `reserveStatement`: the request's reservation, HELD, while the request is still
@@ -25,7 +25,6 @@
 // `held_for_its_request` refuses it before). A handed-off one follows its
 // payment (C3): `settleReservationsOf` finalises, blocks or releases it, in
 // the transaction that records the payment's outcome.
-import { sendTogether } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
 import type { AuditTables, SignedStates } from '../../audit/index.ts';
@@ -37,25 +36,21 @@ import type { LimitReservationsTables } from './tables.ts';
 type ReservationsTransaction = Transaction<LimitReservationsTables & AuditTables>;
 
 /**
- * The agent's month at `at` (`YYYY-MM`) in its `zone`, zoneInForce's, its
- * period row locked FOR NO KEY UPDATE: two decisions for one agent's month run
- * one after the other.
+ * The agent's `month`'s period row added if new, then locked FOR NO KEY UPDATE, two statements not run, for the trip
+ * that also reads what the lock serialises, in a statement of its own behind them: two decisions for one agent's month
+ * run one after the other. The lock's answer is one row, or something past the app stopped the insert.
  */
-export async function lockAgentMonth(
+export const agentMonthLocking = (
   tx: ReservationsTransaction,
-  { orgId, agentId, zone, at }: { orgId: string; agentId: string; zone: string; at: Date },
-): Promise<string> {
-  const { month } = periodOf(at, zone);
-  const [, locked] = await sendTogether(tx, [
+  { orgId, agentId, month, at }: { orgId: string; agentId: string; month: string; at: Date },
+) =>
+  [
     tx
       .insertInto('limit_reservations.agent_periods')
       .values({ org_id: orgId, agent_id: agentId, month, created_at: at })
       .onConflict((conflict) => conflict.doNothing()),
     periodLock(tx, { agentId, month }),
-  ]);
-  if (locked.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
-  return month;
-}
+  ] as const;
 
 const periodLock = (tx: ReservationsTransaction, { agentId, month }: { agentId: string; month: string }) =>
   tx
@@ -255,7 +250,7 @@ export interface NewReservation {
   readonly requestId: string;
   readonly agentId: string;
   readonly mandateId: string;
-  /** The month lockAgentMonth gave for `reservedAt`. */
+  /** The month its decision locked, named at `reservedAt` in the agent's zone. */
   readonly month: string;
   readonly supplierId: string;
   readonly payeeKey: string | null;

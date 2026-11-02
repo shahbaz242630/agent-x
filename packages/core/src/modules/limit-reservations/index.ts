@@ -18,7 +18,7 @@ export {
 } from './infrastructure/agent-zones.ts';
 export {
   agentMonth,
-  lockAgentMonth,
+  agentMonthLocking,
   lockAgentPeriod,
   lockReservationsOf,
   monthSpentRead,
