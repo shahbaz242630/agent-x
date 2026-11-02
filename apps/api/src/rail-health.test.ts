@@ -367,7 +367,9 @@ describe('the platform', () => {
     expect(health.heldFor('w')).toBe('bank');
     expect(lines('handoff.bank_step')).toEqual([]);
     expect(lines('handoff.bank_back')).toEqual([]);
-    expect(third).toHaveLength(3);
+    // Nor counts for the step: the step's own three refused, and no acceptance of its own, it climbs nowhere.
+    for (const place of third) place.settle('refused');
+    expect(lines('handoff.bank_step')).toEqual([]);
   });
 
   it('clears a lane at an acceptance begun before its hold', () => {
@@ -674,10 +676,12 @@ describe('a bank that refuses everything', () => {
     expect(lines('handoff.bank_refusing')).toEqual([]);
   });
 
-  it('says nothing of few across many', () => {
+  it('says nothing of 9 across three; the tenth is said', () => {
     refusals(['a', 'b', 'c'], 3);
-
     expect(lines('handoff.bank_refusing')).toEqual([]);
+
+    refusals(['a'], 1);
+    expect(lines('handoff.bank_refusing')).toHaveLength(1);
   });
 
   it('warns once of a run across three organisations with no acceptance; an error once it lasts; no hold on anyone', () => {
