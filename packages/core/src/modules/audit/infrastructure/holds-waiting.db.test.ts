@@ -1406,6 +1406,39 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
       expect(await rowsNamedElsewhere()).toHaveLength(1);
     });
 
+    it('at the bound exactly, a finding stays here, though rows have others of its organisation here', async () => {
+      const bound = await aProcessBoundAtOne();
+      await bound.hold('head');
+      await plant('seal', org, 'membership', newId());
+      await bound.poll();
+
+      await found(bound, newId());
+
+      expect(past()).toEqual([]);
+    });
+
+    it('what a row brought in is not left by the bound on what a process found itself', async () => {
+      const bound = await aProcessBoundAtOne();
+      await bound.hold('head');
+      await found(bound, newId());
+      // The neighbour's first: past the bound, kept as all that organisation has here.
+      const elsewhere = org;
+      org = await newOrganisation();
+      await withHeadLocked(() => found(bound, newId()));
+      const neighbour = org;
+      org = elsewhere;
+      const forged = newId();
+      await plant('seal', org, 'membership', forged);
+
+      await bound.poll();
+      await bound.poll();
+
+      expect(past()).toEqual([]);
+      // Kept, so its alarm isn't raised again as new.
+      expect(fromRow().filter(({ objectId }) => objectId === forged)).toHaveLength(1);
+      expect(await waitingRows(neighbour)).toEqual([{ reason: 'holding' }]);
+    });
+
     it('said at most once for each poll in which one is left out', async () => {
       const bound = await aProcessBoundAtOne();
       await bound.hold('head');
@@ -1431,9 +1464,10 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     await attacker.query('delete from directory.holds_waiting where org_id = $1', [org]);
     const crowded = await newOrganisation();
     const hidden = await newOrganisation();
-    // Past the limit by enough that the holds this test's polls set don't bring it back under.
-    await plantInBulk(1010, crowded);
+    // Written first, so only the read's order puts it after the crowded one. Past the limit by enough that the holds
+    // this test's polls set don't bring it back under.
     await plant('seal', hidden);
+    await plantInBulk(1010, crowded);
     const spoke = () => lines('audit.holds_waiting_past_limit');
 
     await finder.poll();
