@@ -177,8 +177,12 @@ describe(`the API process (Postgres ${server.version})`, () => {
       expect(files).toHaveLength(1);
       const text = gunzipSync(readFileSync(path.join(folder, 'e1', 'snapshots', String(files[0])))).toString('utf8');
       expect(
-        text.split('\n').map((line) => (line === '' ? 'end' : (JSON.parse(line) as { chain: string }).chain)),
-      ).toEqual(['platform', 'end']);
+        text.split('\n').map((line) => {
+          if (line === '') return 'end';
+          const { chain, k } = JSON.parse(line) as { chain?: string; k: string };
+          return chain ?? k;
+        }),
+      ).toEqual(['platform', 'c', 'end']);
     } finally {
       jobs.kill();
       await new Promise((resolve) => jobs.once('exit', resolve));

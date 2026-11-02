@@ -625,8 +625,23 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
   });
 
   describe('what the store holds that fails', () => {
-    const fileOf = (...lines: readonly unknown[]): Buffer =>
-      gzipSync(`${lines.map((line) => JSON.stringify(line)).join('\n')}\n`);
+    const fileOf = (name: string, ...lines: readonly unknown[]): Buffer => {
+      const { signature, keyVersion } = keys.sign('audit-anchor', [
+        'audit-anchor-file',
+        name,
+        '1',
+        String(lines.length),
+      ]);
+      const closing = {
+        k: 'c',
+        name,
+        epoch: 1,
+        lines: lines.length,
+        kv: keyVersion,
+        sig: signature.toString('base64'),
+      };
+      return gzipSync(`${[...lines, closing].map((line) => JSON.stringify(line)).join('\n')}\n`);
+    };
     const lineFrom = (signing: typeof keys, seq: bigint, fill: number, at = AT) => {
       const anchor = signAnchor(signing, CHAIN, ok(seq, fill) as Extract<ChainReport, { ok: true }>, at);
       return {
@@ -646,7 +661,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
 
     it('SEC-DB-11 a line with a bad signature is skipped and is the alarm: no hold, payments as if it were not there', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(deltaName(0), fileOf(lineFrom(keysFilled(50), 99n, 9)));
+      fake.files.set(deltaName(0), fileOf(deltaName(0), lineFrom(keysFilled(50), 99n, 9)));
       const chains = chainsHolding({ [ORG]: ok(3n) });
       const after = process(fake, chains.organizations);
       await after.check.run();
@@ -669,8 +684,8 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
         [5, false],
       ] as const) {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(deltaName(0), fileOf(older));
-        fake.files.set(deltaName(1), fileOf(newer));
+        fake.files.set(deltaName(0), fileOf(deltaName(0), older));
+        fake.files.set(deltaName(1), fileOf(deltaName(1), newer));
         const given: bigint[] = [];
         const holds: unknown[] = [];
         const organizations: OrganisationChains = {
@@ -698,6 +713,61 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
         expect(after.lines('audit.integrity_failed')[0]).toMatchObject({ check: 'anchor_store', reason: 'fork' });
         expect(holds).toEqual(held ? [[ORG, 'anchor']] : []);
       }
+    });
+  });
+
+  describe("files added by someone with the store's add right and not the signing key", () => {
+    const ID = '00000000-0000-4000-8000-00000000000a';
+    const snapshotDated = (at: number): string =>
+      `e1/snapshots/${String(9_999_999_999_999 - at).padStart(13, '0')}-${ID}`;
+
+    /** A chain anchored at 100 and written, and what a restart then finds with the head wound back to 50. */
+    async function woundBackAfter(plant: (fake: FakeWriteOnceStore, oldest: Buffer) => void) {
+      const fake = createFakeWriteOnceStore();
+      const chains = chainsHolding({ [ORG]: ok(10n) });
+      const first = process(fake, chains.organizations);
+      await first.check.run();
+      const oldest = fake.files.values().next().value as Buffer;
+      chains.held[ORG] = ok(100n);
+      await first.check.run();
+      expect(first.log.latest(CHAIN)?.seq).toBe(100n);
+
+      plant(fake, oldest);
+      chains.held[ORG] = ok(50n);
+      const after = process(fake, chains.organizations);
+      await after.check.run();
+      return { after, chains };
+    }
+
+    it.each([
+      [
+        'an empty file as the newest snapshot',
+        (fake: FakeWriteOnceStore) => {
+          fake.files.set(snapshotDated(AT.getTime() + 60_000), gzipSync(''));
+        },
+      ],
+      [
+        'an old signed snapshot copied under a new name',
+        (fake: FakeWriteOnceStore, oldest: Buffer) => {
+          fake.files.set(snapshotDated(AT.getTime() + 60_000), oldest);
+        },
+      ],
+      [
+        'an old signed snapshot under a name far in the future',
+        (fake: FakeWriteOnceStore, oldest: Buffer) => {
+          fake.files.set(snapshotDated(AT.getTime() + 365 * 24 * 3_600_000), oldest);
+        },
+      ],
+    ])('SEC-DB-11 %s hides nothing: the wound-back head is the alarm and the hold', async (_what, plant) => {
+      const { after, chains } = await woundBackAfter(plant);
+
+      expect(after.log.latest(CHAIN)?.seq).toBe(100n);
+      expect(after.lines('audit.anchored')).toEqual([]);
+      expect(after.lines('audit.integrity_failed')).toContainEqual(
+        expect.objectContaining({ check: 'anchor', reason: 'anchor', anchorSeq: '100', orgId: ORG }),
+      );
+      expect(after.lines('audit.integrity_failed')).toContainEqual(expect.objectContaining({ check: 'anchor_store' }));
+      expect(chains.holds).toEqual([[ORG, 'anchor']]);
     });
   });
 

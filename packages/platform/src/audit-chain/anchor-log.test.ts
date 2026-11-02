@@ -37,9 +37,31 @@ const ALERT_AFTER_MS = 15 * MINUTE;
 const anchorAt = (chain: Chain, seq: bigint, at = START, fill = Number(seq), signing = keys): Anchor =>
   signAnchor(signing, chain, { seq, hash: Buffer.alloc(32, fill), macKeyVersion: 2 }, at);
 
-/** A file as the log writes one. */
-const fileOf = (...lines: readonly (Anchor | string)[]): Buffer =>
-  gzipSync(`${lines.map((line) => (typeof line === 'string' ? line : lineOf(line))).join('\n')}\n`);
+/** A closing line, as the log writes one. */
+const closingOf = (
+  name: string,
+  lines: number,
+  signing = keys,
+  epoch = Number(/^e(\d+)\//.exec(name)?.[1]),
+): string => {
+  const { signature, keyVersion } = signing.sign('audit-anchor', [
+    'audit-anchor-file',
+    name,
+    String(epoch),
+    String(lines),
+  ]);
+  return JSON.stringify({ k: 'c', name, epoch, lines, kv: keyVersion, sig: signature.toString('base64') });
+};
+
+const gzippedLines = (lines: readonly string[]): Buffer => gzipSync(`${lines.join('\n')}\n`);
+
+/** A file as the log writes one, closed for the name it goes under by `signing`. */
+const signedFile = (signing: typeof keys, name: string, ...lines: readonly (Anchor | string)[]): Buffer =>
+  gzippedLines([
+    ...lines.map((line) => (typeof line === 'string' ? line : lineOf(line))),
+    closingOf(name, lines.length, signing),
+  ]);
+const fileOf = (name: string, ...lines: readonly (Anchor | string)[]): Buffer => signedFile(keys, name, ...lines);
 
 const lineOf = (anchor: Anchor): string =>
   JSON.stringify({
@@ -57,16 +79,22 @@ const lineOf = (anchor: Anchor): string =>
 const nameOf = (kind: 'deltas' | 'snapshots', minutes: number, id = 1, epoch = 1): string =>
   `e${String(epoch)}/${kind}/${String(9_999_999_999_999 - (START.getTime() + minutes * MINUTE))}-00000000-0000-4000-8000-${String(id).padStart(12, '0')}`;
 
-const linesIn = (bytes: Buffer | undefined): Record<string, unknown>[] =>
+/** A file's lines, its closing one too. */
+const allLinesIn = (bytes: Buffer | undefined): Record<string, unknown>[] =>
   gunzipSync(bytes ?? Buffer.alloc(0))
     .toString('utf8')
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+const linesIn = (bytes: Buffer | undefined): Record<string, unknown>[] =>
+  allLinesIn(bytes).filter((line) => line.k !== 'c');
 
-const logOver = (fake: FakeWriteOnceStore = createFakeWriteOnceStore(), epoch = 1, holding = keys) => {
+/** A day on: a read past the files a test names, each minutes from START, so none is dated ahead of the clock. */
+const LATER = new Date(START.getTime() + 24 * 60 * MINUTE);
+
+const logOver = (fake: FakeWriteOnceStore = createFakeWriteOnceStore(), epoch = 1, holding = keys, at = LATER) => {
   const capture = new LogCapture();
-  const clock = { at: START };
+  const clock = { at };
   const log = createAnchorLog({
     store: fake.store,
     keys: holding,
@@ -84,7 +112,7 @@ const logOver = (fake: FakeWriteOnceStore = createFakeWriteOnceStore(), epoch = 
 
 /** A log that read the store and has written its first file, a snapshot. */
 async function started(fake?: FakeWriteOnceStore) {
-  const made = logOver(fake);
+  const made = logOver(fake, 1, keys, START);
   await made.log.read();
   made.log.keep(anchorAt(PLATFORM, 1n));
   await made.log.flush();
@@ -99,7 +127,7 @@ const files = (fake: FakeWriteOnceStore, kind: 'deltas' | 'snapshots') =>
 describe('the durable anchors (4D2e E, PL-58)', () => {
   describe('what is written', () => {
     it('writes each anchor as one signed line, gzipped, whole on the first write', async () => {
-      const { log, fake, lines } = logOver();
+      const { log, fake, lines } = logOver(undefined, 1, keys, START);
       await log.read();
       const anchor = anchorAt(CHAIN, 812n);
       log.keep(anchor);
@@ -160,7 +188,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('keeps the new anchors in the epoch the setting names, and reads no other', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('snapshots', 0, 1, 1), fileOf(anchorAt(CHAIN, 9n)));
+      fake.files.set(nameOf('snapshots', 0, 1, 1), fileOf(nameOf('snapshots', 0, 1, 1), anchorAt(CHAIN, 9n)));
       const { log } = logOver(fake, 2);
       await log.read();
       expect(log.latest(CHAIN)).toBeUndefined();
@@ -216,7 +244,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       fake.calls.lists = 0;
       fake.calls.gets = 0;
 
-      const { log, lines } = logOver(fake);
+      // As the hour's up only a minute on, its first write stays a delta.
+      const { log, lines } = logOver(fake, 1, keys, new Date(START.getTime() + 59 * MINUTE));
       expect(log.state()).toBe('unread');
       expect(log.latest(CHAIN)).toBeUndefined();
       await log.read();
@@ -238,10 +267,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('reads no delta older than the snapshot it read, and only the newest snapshot', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(OTHER_CHAIN, 40n)));
-      fake.files.set(nameOf('deltas', 5), fileOf(anchorAt(OTHER_CHAIN, 41n)));
-      fake.files.set(nameOf('snapshots', 60), fileOf(anchorAt(CHAIN, 50n)));
-      fake.files.set(nameOf('deltas', 65), fileOf(anchorAt(CHAIN, 51n)));
+      fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(OTHER_CHAIN, 40n)));
+      fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), anchorAt(OTHER_CHAIN, 41n)));
+      fake.files.set(nameOf('snapshots', 60), fileOf(nameOf('snapshots', 60), anchorAt(CHAIN, 50n)));
+      fake.files.set(nameOf('deltas', 65), fileOf(nameOf('deltas', 65), anchorAt(CHAIN, 51n)));
       const { log } = logOver(fake);
       await log.read();
 
@@ -252,8 +281,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('takes the highest place of a chain, whichever file it is in', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 5), fileOf(anchorAt(CHAIN, 9n)));
-      fake.files.set(nameOf('deltas', 10), fileOf(anchorAt(CHAIN, 4n)));
+      fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), anchorAt(CHAIN, 9n)));
+      fake.files.set(nameOf('deltas', 10), fileOf(nameOf('deltas', 10), anchorAt(CHAIN, 4n)));
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -264,7 +293,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     it('reads on over a page of deltas, as a store a snapshot could not reach would have', async () => {
       const fake = createFakeWriteOnceStore();
       for (let delta = 1; delta <= 101; delta += 1) {
-        fake.files.set(nameOf('deltas', delta), fileOf(anchorAt(CHAIN, BigInt(delta))));
+        fake.files.set(nameOf('deltas', delta), fileOf(nameOf('deltas', delta), anchorAt(CHAIN, BigInt(delta))));
       }
       const { log } = logOver(fake);
       await log.read();
@@ -277,7 +306,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const fake = createFakeWriteOnceStore();
       fake.files.set(
         nameOf('snapshots', 0),
-        fileOf(anchorAt(CHAIN, 1n), anchorAt(PLATFORM, 2n), anchorAt(OTHER_CHAIN, 1n)),
+        fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 1n), anchorAt(PLATFORM, 2n), anchorAt(OTHER_CHAIN, 1n)),
       );
       const { log } = logOver(fake);
       await log.read();
@@ -287,8 +316,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('a call that fails leaves nothing read: no part of the store is taken for the whole', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 1n)));
-      fake.files.set(nameOf('deltas', 5), fileOf(anchorAt(OTHER_CHAIN, 2n)));
+      fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 1n)));
+      fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), anchorAt(OTHER_CHAIN, 2n)));
       const { log, lines } = logOver(fake);
       fake.instead.get = (name) => (name.includes('/deltas/') ? failing() : fake.real.get(name));
       await log.read();
@@ -335,8 +364,11 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     it('SEC-DB-11 skips a line with a bad signature and is the alarm, keeping the good ones', async () => {
       const fake = createFakeWriteOnceStore();
       const forged = anchorAt(CHAIN, 99n, START, 99, otherKeys);
-      fake.files.set(nameOf('snapshots', -60), fileOf(anchorAt(CHAIN, 2n), anchorAt(OTHER_CHAIN, 1n)));
-      fake.files.set(nameOf('snapshots', 0), fileOf(forged, anchorAt(OTHER_CHAIN, 3n)));
+      fake.files.set(
+        nameOf('snapshots', -60),
+        fileOf(nameOf('snapshots', -60), anchorAt(CHAIN, 2n), anchorAt(OTHER_CHAIN, 1n)),
+      );
+      fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), forged, anchorAt(OTHER_CHAIN, 3n)));
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -371,7 +403,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       ['a signature cut short', withField({ sig: good.signature.subarray(1).toString('base64') })],
     ])('refuses a line signed for something else: %s', async (_what, line) => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 0), fileOf(line));
+      fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), line));
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -404,7 +436,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       ['a signature not text', withField({ sig: 7 })],
     ])('refuses a line of no form: %s', async (_what, line) => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 0), fileOf(line, good));
+      fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), line, good));
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -414,7 +446,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it("passes over the lines a later piece writes, with no alarm: going back a release isn't tampering", async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 0), fileOf(JSON.stringify({ k: 'p' }), JSON.stringify({ k: 'r' }), good));
+      fake.files.set(
+        nameOf('deltas', 0),
+        fileOf(nameOf('deltas', 0), JSON.stringify({ k: 'p' }), JSON.stringify({ k: 'r' }), good),
+      );
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -430,8 +465,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         [newer, older],
       ] as const) {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('deltas', 0), fileOf(first));
-        fake.files.set(nameOf('deltas', 5), fileOf(second));
+        fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), first));
+        fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), second));
         const { log, lines } = logOver(fake);
         await log.read();
 
@@ -450,7 +485,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('the platform chain forked is the alarm too, naming no organisation', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 0), fileOf(anchorAt(PLATFORM, 5n, START, 5), anchorAt(PLATFORM, 5n, START, 6)));
+      fake.files.set(
+        nameOf('deltas', 0),
+        fileOf(nameOf('deltas', 0), anchorAt(PLATFORM, 5n, START, 5), anchorAt(PLATFORM, 5n, START, 6)),
+      );
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -463,8 +501,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('the same line twice is nothing', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 0), fileOf(good));
-      fake.files.set(nameOf('deltas', 5), fileOf(good));
+      fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), good));
+      fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), good));
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -473,7 +511,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('a newest snapshot that will not open is the alarm, and must not hide the one before it', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n)));
+      fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
       fake.files.set(nameOf('snapshots', 60), Buffer.from('not gzip'));
       const { log, lines } = logOver(fake);
       await log.read();
@@ -489,14 +527,17 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     });
 
     describe('a snapshot with a line that fails can not stand for the whole', () => {
-      const spoiled = (): Buffer => fileOf('not a line');
+      const spoiled = (name: string): Buffer => fileOf(name, 'not a line');
 
       it('the one before it is read too, and every delta since that one', async () => {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)));
-        fake.files.set(nameOf('deltas', 30), fileOf(anchorAt(CHAIN, 5n)));
-        fake.files.set(nameOf('snapshots', 60), spoiled());
-        fake.files.set(nameOf('deltas', 65), fileOf(anchorAt(OTHER_CHAIN, 6n)));
+        fake.files.set(
+          nameOf('snapshots', 0),
+          fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)),
+        );
+        fake.files.set(nameOf('deltas', 30), fileOf(nameOf('deltas', 30), anchorAt(CHAIN, 5n)));
+        fake.files.set(nameOf('snapshots', 60), spoiled(nameOf('snapshots', 60)));
+        fake.files.set(nameOf('deltas', 65), fileOf(nameOf('deltas', 65), anchorAt(OTHER_CHAIN, 6n)));
         const { log, lines } = logOver(fake);
         await log.read();
 
@@ -513,8 +554,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       it('reads none of them twice: the next read starts from the newest, spoiled or not', async () => {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n)));
-        fake.files.set(nameOf('snapshots', 60), spoiled());
+        fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('snapshots', 60), spoiled(nameOf('snapshots', 60)));
         const { log, lines } = logOver(fake);
         await log.read();
         fake.calls.gets = 0;
@@ -527,10 +568,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       it('goes no further back than the first one with nothing wrong', async () => {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('snapshots', -60), fileOf(anchorAt(OTHER_CHAIN, 1n)));
-        fake.files.set(nameOf('deltas', -30), fileOf(anchorAt(OTHER_CHAIN, 2n)));
-        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n)));
-        fake.files.set(nameOf('snapshots', 60), spoiled());
+        fake.files.set(nameOf('snapshots', -60), fileOf(nameOf('snapshots', -60), anchorAt(OTHER_CHAIN, 1n)));
+        fake.files.set(nameOf('deltas', -30), fileOf(nameOf('deltas', -30), anchorAt(OTHER_CHAIN, 2n)));
+        fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('snapshots', 60), spoiled(nameOf('snapshots', 60)));
         const { log } = logOver(fake);
         await log.read();
 
@@ -540,10 +581,18 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       it('a key version gone: the newest signed with it, the one before still read, every chain still seen', async () => {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)));
+        fake.files.set(
+          nameOf('snapshots', 0),
+          fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)),
+        );
         fake.files.set(
           nameOf('snapshots', 60),
-          fileOf(anchorAt(CHAIN, 5n, START, 5, LATER_KEYS), anchorAt(OTHER_CHAIN, 6n, START, 6, LATER_KEYS)),
+          signedFile(
+            LATER_KEYS,
+            nameOf('snapshots', 60),
+            anchorAt(CHAIN, 5n, START, 5, LATER_KEYS),
+            anchorAt(OTHER_CHAIN, 6n, START, 6, LATER_KEYS),
+          ),
         );
         const { log, lines } = logOver(fake);
         await log.read();
@@ -551,13 +600,16 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(log.state()).toBe('read');
         expect(log.latest(CHAIN)?.seq).toBe(3n);
         expect(log.organisations().toSorted()).toEqual([ORG, OTHER_ORG].toSorted());
-        expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 2 })]);
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ reason: 'signature', lines: 2 }),
+          expect.objectContaining({ reason: 'unclosed' }),
+        ]);
       });
 
       it('SEC-DB-11 none with nothing wrong: the store reads as unreadable, nothing is taken from it, until the key is back', async () => {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n)));
-        fake.files.set(nameOf('snapshots', 60), fileOf(anchorAt(CHAIN, 4n)));
+        fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('snapshots', 60), fileOf(nameOf('snapshots', 60), anchorAt(CHAIN, 4n)));
         const { log, lines } = logOver(fake, 1, LATER_KEYS);
         await log.read();
 
@@ -581,7 +633,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       it('no snapshot that opens is the same', async () => {
         const fake = createFakeWriteOnceStore();
         fake.files.set(nameOf('snapshots', 0), Buffer.from('not gzip'));
-        fake.files.set(nameOf('deltas', 5), fileOf(anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), anchorAt(CHAIN, 3n)));
         const { log } = logOver(fake);
         await log.read();
 
@@ -591,15 +643,16 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       it('goes back a day of snapshots, and no further: past that the store reads as unreadable', async () => {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('snapshots', -25 * 60), fileOf(anchorAt(CHAIN, 3n)));
-        for (let hour = 0; hour < 24; hour += 1) fake.files.set(nameOf('snapshots', -hour * 60), spoiled());
+        fake.files.set(nameOf('snapshots', -25 * 60), fileOf(nameOf('snapshots', -25 * 60), anchorAt(CHAIN, 3n)));
+        for (let hour = 0; hour < 24; hour += 1)
+          fake.files.set(nameOf('snapshots', -hour * 60), spoiled(nameOf('snapshots', -hour * 60)));
         const reached = logOver(fake);
         await reached.log.read();
         expect(reached.log.state()).toBe('read');
         expect(reached.log.latest(CHAIN)?.seq).toBe(3n);
         expect(fake.calls.gets).toBe(25);
 
-        fake.files.set(nameOf('snapshots', 60), spoiled());
+        fake.files.set(nameOf('snapshots', 60), spoiled(nameOf('snapshots', 60)));
         fake.calls.gets = 0;
         const past = logOver(fake);
         await past.log.read();
@@ -609,11 +662,13 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       it('what it found goes in the next snapshot, so a later restart needs neither older file', async () => {
         const fake = createFakeWriteOnceStore();
-        fake.files.set(nameOf('snapshots', -60), fileOf(anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)));
-        fake.files.set(nameOf('snapshots', 0), spoiled());
-        const { log, advance } = logOver(fake);
+        fake.files.set(
+          nameOf('snapshots', -60),
+          fileOf(nameOf('snapshots', -60), anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)),
+        );
+        fake.files.set(nameOf('snapshots', 0), spoiled(nameOf('snapshots', 0)));
+        const { log } = logOver(fake);
         await log.read();
-        advance(60);
         log.keep(anchorAt(CHAIN, 5n));
         await log.flush();
         fake.calls.gets = 0;
@@ -627,8 +682,9 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       it('once read, another copy spoiling a snapshot costs nothing: what it read before is in memory', async () => {
         const fake = createFakeWriteOnceStore();
-        const { log, lines } = await started(fake);
-        fake.files.set(nameOf('snapshots', 60, 7), spoiled());
+        const { log, lines, advance } = await started(fake);
+        advance(60);
+        fake.files.set(nameOf('snapshots', 60, 7), spoiled(nameOf('snapshots', 60, 7)));
         fake.calls.gets = 0;
         await log.read();
 
@@ -642,9 +698,248 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       });
     });
 
+    describe('a file closes for its own name', () => {
+      const line = anchorAt(CHAIN, 7n);
+      const NAME = nameOf('snapshots', 60);
+      const older = (fake: FakeWriteOnceStore): void => {
+        fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('deltas', 30), fileOf(nameOf('deltas', 30), anchorAt(CHAIN, 5n)));
+      };
+
+      it('every file the log writes ends in a closing line, signed for its name, its epoch and its count', async () => {
+        const { log, fake } = logOver(createFakeWriteOnceStore(), 3);
+        await log.read();
+        log.keep(anchorAt(CHAIN, 2n));
+        log.keep(anchorAt(OTHER_CHAIN, 3n));
+        await log.flush();
+
+        const [name] = [...fake.files.keys()];
+        const all = allLinesIn(fake.files.get(String(name)));
+        expect(all).toHaveLength(3);
+        const closing = all.at(-1);
+        expect(closing).toMatchObject({ k: 'c', name, epoch: 3, lines: 2, kv: 1 });
+        expect(
+          keys.verifySignature(
+            'audit-anchor',
+            1,
+            ['audit-anchor-file', String(name), '3', '2'],
+            Buffer.from(String(closing?.sig), 'base64'),
+          ),
+        ).toBe(true);
+      });
+
+      it('what the log wrote reads back sound, with no alarm', async () => {
+        const fake = createFakeWriteOnceStore();
+        const first = await started(fake);
+        first.advance(5);
+        first.log.keep(anchorAt(CHAIN, 2n));
+        await first.log.flush();
+
+        const { log, lines } = logOver(fake);
+        await log.read();
+        expect(log.latest(CHAIN)?.seq).toBe(2n);
+        expect(lines('audit.integrity_failed')).toEqual([]);
+      });
+
+      it.each([
+        ['an empty file', (): Buffer => gzipSync('')],
+        ['a file of no lines', (): Buffer => gzipSync('\n\n')],
+        ['no closing line', (): Buffer => gzippedLines([lineOf(line)])],
+        ['one for another name', (): Buffer => gzippedLines([lineOf(line), closingOf(nameOf('snapshots', 61), 1)])],
+        ['one for another epoch', (): Buffer => gzippedLines([lineOf(line), closingOf(NAME, 1, keys, 2)])],
+        ['one counting other lines', (): Buffer => gzippedLines([lineOf(line), closingOf(NAME, 2)])],
+        ['one counting none', (): Buffer => gzippedLines([lineOf(line), closingOf(NAME, 0)])],
+        ['one signed by someone else', (): Buffer => gzippedLines([lineOf(line), closingOf(NAME, 1, otherKeys)])],
+        [
+          'one by a key this process has not',
+          (): Buffer => gzippedLines([lineOf(line), closingOf(NAME, 1, LATER_KEYS)]),
+        ],
+        [
+          'one whose name was edited after signing',
+          (): Buffer =>
+            gzippedLines([
+              lineOf(line),
+              JSON.stringify({ ...(JSON.parse(closingOf(nameOf('snapshots', 61), 1)) as object), name: NAME }),
+            ]),
+        ],
+        [
+          'one whose version is no count',
+          (): Buffer =>
+            gzippedLines([lineOf(line), JSON.stringify({ ...(JSON.parse(closingOf(NAME, 1)) as object), kv: 'one' })]),
+        ],
+        [
+          'one whose signature is not text',
+          (): Buffer =>
+            gzippedLines([lineOf(line), JSON.stringify({ ...(JSON.parse(closingOf(NAME, 1)) as object), sig: 7 })]),
+        ],
+      ])(
+        '%s is spoiled and is the alarm: the older snapshot and every delta since it are read',
+        async (_what, file) => {
+          const fake = createFakeWriteOnceStore();
+          older(fake);
+          fake.files.set(NAME, file());
+          const { log, lines } = logOver(fake);
+          await log.read();
+
+          expect(log.state()).toBe('read');
+          // Sound lines count wherever they are; 7 is here in the files that hold it.
+          expect(log.latest(CHAIN)?.seq).toBeGreaterThanOrEqual(5n);
+          expect(lines('audit.integrity_failed')).toEqual([
+            expect.objectContaining({ level: 'error', check: 'anchor_store', reason: 'unclosed', kind: 'snapshots' }),
+          ]);
+        },
+      );
+
+      it('a closing line anywhere but the end is a line that fails, and the file is spoiled', async () => {
+        const fake = createFakeWriteOnceStore();
+        older(fake);
+        fake.files.set(NAME, gzippedLines([closingOf(NAME, 1), lineOf(line)]));
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.latest(CHAIN)?.seq).toBe(7n);
+        expect(lines('audit.integrity_failed').map((each) => each.reason)).toEqual(['signature', 'unclosed']);
+      });
+
+      it('the same in a delta: the alarm, its sound lines still count, and the others are read', async () => {
+        const fake = createFakeWriteOnceStore();
+        older(fake);
+        fake.files.set(nameOf('deltas', 40), gzippedLines([lineOf(line)]));
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.latest(CHAIN)?.seq).toBe(7n);
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ reason: 'unclosed', kind: 'deltas' }),
+        ]);
+      });
+
+      it('a snapshot of no chains stands only when its closing line says so', async () => {
+        const fake = createFakeWriteOnceStore();
+        older(fake);
+        fake.files.set(NAME, fileOf(NAME));
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(lines('audit.integrity_failed')).toEqual([]);
+        expect(log.latest(CHAIN)).toBeUndefined();
+      });
+
+      it('a sole file with none is no base: the store reads as unreadable', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(NAME, gzipSync(''));
+        const { log } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('unreadable');
+      });
+
+      it('a spoiled snapshot added hourly does not stop snapshots: their time counts from the last sound one', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', -60), fileOf(nameOf('snapshots', -60), anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('snapshots', -1), gzipSync(''));
+        const { log } = logOver(fake, 1, keys, START);
+        await log.read();
+        log.keep(anchorAt(CHAIN, 4n));
+        await log.flush();
+
+        expect(files(fake, 'snapshots')).toHaveLength(3);
+        expect(files(fake, 'deltas')).toEqual([]);
+      });
+
+      it('another copy spoiling one once read does not bring the next snapshot forward', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, advance } = await started(fake);
+        advance(30);
+        fake.files.set(nameOf('snapshots', 20, 7), gzipSync(''));
+        await log.read();
+        log.keep(anchorAt(CHAIN, 2n));
+        await log.flush();
+        advance(30);
+        log.keep(anchorAt(CHAIN, 3n));
+        await log.flush();
+
+        // The hour from the snapshot it wrote, and no later for the one added at 20 minutes.
+        expect(files(fake, 'deltas')).toHaveLength(1);
+        expect(files(fake, 'snapshots')).toHaveLength(3);
+      });
+    });
+
+    describe('a name dated past the clock', () => {
+      const FAR = 365 * 24 * 60;
+
+      it.each(['snapshots', 'deltas'] as const)(
+        'in %s is passed over, reported, never read, and hides nothing later written',
+        async (kind) => {
+          const fake = createFakeWriteOnceStore();
+          fake.files.set(nameOf(kind, FAR, 9), fileOf(nameOf(kind, FAR, 9), anchorAt(CHAIN, 999n)));
+          fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
+          fake.files.set(nameOf('deltas', 1), fileOf(nameOf('deltas', 1), anchorAt(CHAIN, 4n)));
+          const { log, lines } = logOver(fake);
+          await log.read();
+
+          expect(log.latest(CHAIN)?.seq).toBe(4n);
+          expect(fake.calls.gets).toBe(2);
+          expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ files: 1 })]);
+          expect(lines('audit.integrity_failed')).toEqual([
+            expect.objectContaining({
+              level: 'error',
+              check: 'anchor_store',
+              reason: 'future',
+              kind,
+              fileAt: new Date(START.getTime() + FAR * MINUTE).toISOString(),
+            }),
+          ]);
+
+          fake.files.set(nameOf('deltas', 2, 8), fileOf(nameOf('deltas', 2, 8), anchorAt(CHAIN, 5n)));
+          await log.read();
+          expect(log.latest(CHAIN)?.seq).toBe(5n);
+        },
+      );
+
+      it('does not stop this process writing snapshots', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', FAR, 9), fileOf(nameOf('snapshots', FAR, 9), anchorAt(CHAIN, 999n)));
+        const { log, advance } = logOver(fake);
+        await log.read();
+        log.keep(anchorAt(CHAIN, 1n));
+        await log.flush();
+        advance(60);
+        log.keep(anchorAt(CHAIN, 2n));
+        await log.flush();
+
+        expect(files(fake, 'snapshots')).toHaveLength(3);
+      });
+
+      it('allows 5 minutes of clocks disagreeing, and no more', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('deltas', 5.001, 2), fileOf(nameOf('deltas', 5.001, 2), anchorAt(CHAIN, 4n)));
+        const { log, lines } = logOver(fake, 1, keys, START);
+        await log.read();
+
+        expect(log.latest(CHAIN)?.seq).toBe(3n);
+        expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'future' })]);
+      });
+
+      it('never counts toward the snapshots a read goes back past', async () => {
+        const fake = createFakeWriteOnceStore();
+        for (let hour = 1; hour <= 25; hour += 1) {
+          fake.files.set(nameOf('snapshots', hour * 60), gzipSync(''));
+        }
+        fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
+        const { log } = logOver(fake, 1, keys, START);
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(3n);
+        expect(fake.calls.gets).toBe(1);
+      });
+    });
+
     it('a delta that will not open is the alarm, and the others are read', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 0), fileOf(anchorAt(CHAIN, 3n)));
+      fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), anchorAt(CHAIN, 3n)));
       fake.files.set(nameOf('deltas', 5), Buffer.from('not gzip'));
       const { log, lines } = logOver(fake);
       await log.read();
@@ -666,8 +961,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     it('warns of a file it would never have named, and never reads it', async () => {
       const fake = createFakeWriteOnceStore();
       const planted = 'e1/deltas/0000000000000-not-an-id';
-      fake.files.set(planted, fileOf(anchorAt(CHAIN, 999n)));
-      fake.files.set(nameOf('deltas', 0), fileOf(anchorAt(CHAIN, 2n)));
+      fake.files.set(planted, fileOf(planted, anchorAt(CHAIN, 999n)));
+      fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), anchorAt(CHAIN, 2n)));
       fake.instead.list = async (start, most, after) => {
         const page = await fake.real.list(start, most, after);
         return start.includes('/deltas/') ? { ...page, foreign: 1 } : page;
@@ -682,10 +977,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('counts a foreign name only as far as a read goes: the stated limit', async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('snapshots', 60), fileOf(anchorAt(CHAIN, 2n)));
-      fake.files.set(nameOf('deltas', 65), fileOf(anchorAt(CHAIN, 3n)));
-      fake.files.set('e1/snapshots/0-sorts-first', fileOf(anchorAt(CHAIN, 998n)));
-      fake.files.set('e1/snapshots/z-sorts-after', fileOf(anchorAt(CHAIN, 999n)));
+      fake.files.set(nameOf('snapshots', 60), fileOf(nameOf('snapshots', 60), anchorAt(CHAIN, 2n)));
+      fake.files.set(nameOf('deltas', 65), fileOf(nameOf('deltas', 65), anchorAt(CHAIN, 3n)));
+      fake.files.set('e1/snapshots/0-sorts-first', fileOf('e1/snapshots/0-sorts-first', anchorAt(CHAIN, 998n)));
+      fake.files.set('e1/snapshots/z-sorts-after', fileOf('e1/snapshots/z-sorts-after', anchorAt(CHAIN, 999n)));
       const { log, lines } = logOver(fake);
       await log.read();
 
@@ -712,7 +1007,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       await log.read();
       expect(fake.calls.gets).toBe(0);
 
-      fake.files.set(nameOf('deltas', 10, 7), fileOf(anchorAt(CHAIN, 8n), anchorAt(OTHER_CHAIN, 1n)));
+      fake.files.set(
+        nameOf('deltas', 10, 7),
+        fileOf(nameOf('deltas', 10, 7), anchorAt(CHAIN, 8n), anchorAt(OTHER_CHAIN, 1n)),
+      );
       await log.read();
       expect(fake.calls.gets).toBe(1);
       expect(log.latest(CHAIN)?.seq).toBe(8n);
@@ -726,7 +1024,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     it('reads no delta older than the snapshot it wrote itself', async () => {
       const fake = createFakeWriteOnceStore();
       const { log } = await started(fake);
-      fake.files.set(nameOf('deltas', -60, 7), fileOf(anchorAt(CHAIN, 8n)));
+      fake.files.set(nameOf('deltas', -60, 7), fileOf(nameOf('deltas', -60, 7), anchorAt(CHAIN, 8n)));
       fake.calls.gets = 0;
       await log.read();
 
@@ -736,10 +1034,11 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it("reads another copy's newer snapshot, and no older one", async () => {
       const fake = createFakeWriteOnceStore();
-      const { log } = await started(fake);
+      const { log, advance } = await started(fake);
+      advance(60);
       fake.calls.gets = 0;
-      fake.files.set(nameOf('snapshots', 60, 7), fileOf(anchorAt(CHAIN, 8n)));
-      fake.files.set(nameOf('snapshots', -60, 8), fileOf(anchorAt(OTHER_CHAIN, 8n)));
+      fake.files.set(nameOf('snapshots', 60, 7), fileOf(nameOf('snapshots', 60, 7), anchorAt(CHAIN, 8n)));
+      fake.files.set(nameOf('snapshots', -60, 8), fileOf(nameOf('snapshots', -60, 8), anchorAt(OTHER_CHAIN, 8n)));
       await log.read();
 
       expect(log.latest(CHAIN)?.seq).toBe(8n);

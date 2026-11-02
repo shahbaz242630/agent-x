@@ -3,7 +3,7 @@
 // keys can't reach it, so a chain wound back shows across a restart too. Tx A
 // still reads this process's memory, with no trip.
 //
-// Files, gzipped lines, named so the newest lists first, under an epoch a
+// Files, gzipped lines, each ending in a closing line, named so the newest lists first, under an epoch a
 // sanctioned restore of the whole database moves on (AGENTX_ANCHOR_EPOCH):
 //   e<epoch>/deltas/<inverted-ms>-<id>     what moved, at the end of a run
 //   e<epoch>/snapshots/<inverted-ms>-<id>  every chain's anchor, hourly
@@ -12,18 +12,29 @@
 // another process wrote, so a copy that takes the lease back holds what the
 // one before it found. Nothing is written if nothing moved.
 //
-// Every line is signed with the `audit-anchor` key. A line that fails is skipped
-// and is the alarm, never a hold. A snapshot holding one can't stand for the whole,
-// or the chains on those lines would read as new: the read goes back to the last
-// with nothing wrong and every delta since, and if none is left (a key version
-// gone, say), the store reads as unreadable, so nothing is anchored afresh. In a
-// delta, the chain falls back on the anchor before it; a chain whose first anchor
-// that line was is anchored afresh, at most an hour's comparing lost, and the alarm
-// says so. Two lines at one place with different hashes are the alarm too: the older
-// is kept, and the chain's own check then says which it holds. Every chain in the
-// store counts as seen, so an organisation taken off the list and the record is
-// still missed. Whoever holds this store's add right runs as the API, with its
-// signing key: nothing here guards against them.
+// Every line is signed with the `audit-anchor` key, and every file ends with a
+// signed closing line naming the file, its epoch and how many lines it holds, so
+// an empty file or signed lines copied under a new name can't pass for one of ours.
+// A line that fails is skipped and is the alarm, never a hold; so is a file with no
+// closing line for its own name, though its sound lines still count, as each is
+// signed and the highest place wins. A snapshot with either wrong can't stand for
+// the whole, or the chains on those lines would read as new: the read goes back to
+// the last with nothing wrong and every delta since, and if none is left (a key
+// version gone, say), the store reads as unreadable, so nothing is anchored afresh.
+// Its moves that no delta holds, as a snapshot due takes what moved in place of a
+// delta, are lost with it: those chains read one run behind, and a wind-back inside
+// that gap passes, with the spoiled file's alarm raised. In a delta, the chain falls
+// back on the anchor before it; a chain whose first anchor that line was is anchored
+// afresh, at most an hour's comparing lost, and the alarm says so. Two lines at one
+// place with different hashes are the alarm too: the older is kept, and the chain's
+// own check then says which it holds. A name dated past the clock is passed over and
+// is the alarm, so it can't hide later files. Every chain in the store counts as
+// seen, so an organisation taken off the list and the record is still missed.
+//
+// So the API identity's token alone (add and read) can raise alarms and, with enough
+// spoiled files before a restart, make payments wait, but can't move an anchor back.
+// Whoever also holds the `audit-anchor` signing key can write anything a file may
+// hold: nothing here guards against them.
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { gunzip as gunzipCallback, gzip as gzipCallback } from 'node:zlib';
@@ -31,6 +42,7 @@ import { gunzip as gunzipCallback, gzip as gzipCallback } from 'node:zlib';
 import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import { OverwriteRefused, type WriteOnceStore } from '../storage/write-once.ts';
+import type { Message } from '../keys/message.ts';
 import { type Anchor, type AnchorStore, anchorMessage } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
 
@@ -52,9 +64,17 @@ const DELTAS_A_PAGE = 100;
 
 /**
  * How many spoiled snapshots a read goes back past, a day's at one an hour. A file spoiled by chance is one or two; a
- * key version gone spoils every one since, and the read must not walk years of them each run before saying so.
+ * key version gone spoils every one since, and the read must not walk years of them each run before saying so. A file
+ * claiming a good name and a time gone by counts, as nothing else tells it from a key gone: so this many added before a
+ * restart stop that restart's read, which fails closed, with the alarm for each and the store's alert.
  */
 const MOST_SPOILED_SNAPSHOTS = 24;
+
+/**
+ * How far past this process's clock a file's name may be dated. Copies' clocks agree far closer than this on Azure; a
+ * later name sorts first and counts as the newest, so one any later would hide what's written until its time comes.
+ */
+const MOST_AHEAD_MS = 5 * 60_000;
 
 /** The most a file may open to: every line of 100,000 chains (MOST_ORGANIZATIONS) is about 30 MB. */
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
@@ -142,15 +162,18 @@ function anchorFrom(line: Record<string, unknown>): Anchor | undefined {
   };
 }
 
-/** Whether the signature is the one for the anchor. A version this process doesn't hold is simply wrong. */
-function isSigned(keys: KeyProvider, anchor: Anchor): boolean {
+/** What a file's closing line signs: which file, in which epoch, of how many lines. */
+const closingMessage = (name: string, epoch: number, lines: number): Message => [
+  'audit-anchor-file',
+  name,
+  String(epoch),
+  String(lines),
+];
+
+/** Whether the signature is the one for the message. A version this process doesn't hold is simply wrong. */
+function isSigned(keys: KeyProvider, keyVersion: number, message: Message, signature: Buffer): boolean {
   try {
-    return keys.verifySignature(
-      'audit-anchor',
-      anchor.keyVersion,
-      anchorMessage(anchor.chain, anchor, anchor.at),
-      anchor.signature,
-    );
+    return keys.verifySignature('audit-anchor', keyVersion, message, signature);
   } catch (error) {
     if (error instanceof KeyError) return false;
     throw error;
@@ -166,20 +189,40 @@ function parsed(line: string): unknown {
   }
 }
 
-/** A file's anchors, and how many of its lines failed. Lines of a later piece's kinds are neither. */
-function readLines(keys: KeyProvider, text: string): { readonly anchors: Anchor[]; readonly bad: number } {
+const kindOf = (fields: unknown): unknown =>
+  typeof fields === 'object' && fields !== null && 'k' in fields ? fields.k : undefined;
+
+/** Whether a parsed line closes this file: its own name, its epoch, as many lines as came before it, signed. */
+function closes(keys: KeyProvider, fields: unknown, name: string, epoch: number, lines: number): boolean {
+  if (kindOf(fields) !== 'c') return false;
+  const said = fields as Record<string, unknown>;
+  if (said.name !== name || said.epoch !== epoch || said.lines !== lines) return false;
+  if (!isCount(said.kv) || typeof said.sig !== 'string') return false;
+  return isSigned(keys, said.kv, closingMessage(name, epoch, lines), Buffer.from(said.sig, 'base64'));
+}
+
+/** A file's anchors, how many of its lines failed, and whether it closes for its own name. Lines of a later piece's kinds are neither. */
+function readLines(keys: KeyProvider, text: string, name: string, epoch: number) {
+  const all = text.split('\n').flatMap((line) => (line === '' ? [] : [parsed(line)]));
+  const last = all.at(-1);
+  // Only the last line can close: one anywhere else is one more line that fails.
+  const body = kindOf(last) === 'c' ? all.slice(0, -1) : all;
   const anchors: Anchor[] = [];
   let bad = 0;
-  for (const line of text.split('\n')) {
-    if (line === '') continue;
-    const fields = parsed(line);
-    const kind = typeof fields === 'object' && fields !== null && 'k' in fields ? fields.k : undefined;
+  for (const fields of body) {
+    const kind = kindOf(fields);
     if (LATER_KINDS.has(kind)) continue;
     const anchor = kind === 'a' ? anchorFrom(fields as Record<string, unknown>) : undefined;
-    if (anchor !== undefined && isSigned(keys, anchor)) anchors.push(anchor);
-    else bad += 1;
+    if (
+      anchor !== undefined &&
+      isSigned(keys, anchor.keyVersion, anchorMessage(anchor.chain, anchor, anchor.at), anchor.signature)
+    ) {
+      anchors.push(anchor);
+    } else {
+      bad += 1;
+    }
   }
-  return { anchors, bad };
+  return { anchors, bad, closed: closes(keys, last, name, epoch, body.length) };
 }
 
 /** The anchors held durable, read and written through `store`, and in memory for Tx A. */
@@ -212,6 +255,8 @@ export function createAnchorLog({
   // The newest delta listed, by name, and the newest snapshot read or written, as counted down: older ones have nothing new.
   let deltasFrom: string | undefined;
   let snapshotFrom: string | undefined;
+  // When the newest sound snapshot was made: a spoiled one added each hour must not stop them being written.
+  let soundSnapshotAt: number | undefined;
   // Deltas this process wrote since it last listed: nothing to read in them.
   const written = new Set<string>();
   let readFailingSince: number | undefined;
@@ -236,8 +281,15 @@ export function createAnchorLog({
       const page = await store.list(start, most, after);
       foreign.count += page.foreign;
       for (const name of page.names) {
-        if (FILE.test(name.slice(start.length))) yield name;
-        else foreign.count += 1;
+        const rest = name.slice(start.length);
+        if (!FILE.test(rest)) {
+          foreign.count += 1;
+        } else if (LAST_MS - Number(rest.slice(0, 13)) > now().getTime() + MOST_AHEAD_MS) {
+          foreign.count += 1;
+          alarm('future', { kind, fileAt: whenNamed(rest.slice(0, 13)) });
+        } else {
+          yield name;
+        }
       }
       after = page.next;
     } while (after !== undefined);
@@ -245,8 +297,8 @@ export function createAnchorLog({
 
   const countdownOf = (kind: Kind, name: string): string => name.slice(folder(kind).length, folder(kind).length + 13);
 
-  /** A file's anchors and how many lines failed, or nothing where it won't open, each the alarm. A failed call to the store is thrown. */
-  const opened = async (kind: Kind, name: string): Promise<ReturnType<typeof readLines> | undefined> => {
+  /** A file's anchors, and whether it stands for what it should: every line sound and closed for its name. Anything wrong is the alarm. A failed call to the store is thrown. */
+  const opened = async (kind: Kind, name: string): Promise<{ anchors: readonly Anchor[]; sound: boolean }> => {
     const bytes = await store.get(name);
     const fileAt = whenNamed(countdownOf(kind, name));
     let text: string;
@@ -254,11 +306,12 @@ export function createAnchorLog({
       text = (await gunzip(bytes, { maxOutputLength: MOST_FILE_BYTES })).toString('utf8');
     } catch (error) {
       alarm('file', { kind, fileAt, err: error });
-      return undefined;
+      return { anchors: [], sound: false };
     }
-    const lines = readLines(keys, text);
-    if (lines.bad > 0) alarm('signature', { kind, fileAt, lines: lines.bad });
-    return lines;
+    const { anchors: lines, bad, closed } = readLines(keys, text, name, epoch);
+    if (bad > 0) alarm('signature', { kind, fileAt, lines: bad });
+    if (!closed) alarm('unclosed', { kind, fileAt });
+    return { anchors: lines, sound: bad === 0 && closed };
   };
 
   /**
@@ -275,12 +328,12 @@ export function createAnchorLog({
       if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
       newest ??= countdown;
       const file = await opened('snapshots', name);
-      lines.push(...(file?.anchors ?? []));
-      if (file?.bad === 0) return { lines, newest, base: countdown };
+      lines.push(...file.anchors);
+      if (file.sound) return { lines, newest, base: countdown, sound: countdown };
       spoiled += 1;
     }
     if (spoiled > 0 && snapshotFrom === undefined) throw new Error(tooManySpoiled(spoiled));
-    return { lines, newest, base: snapshotFrom };
+    return { lines, newest, base: snapshotFrom, sound: undefined };
   };
 
   /**
@@ -300,7 +353,7 @@ export function createAnchorLog({
       newest ??= name;
       if (written.delete(name)) continue;
       files += 1;
-      lines.push(...((await opened('deltas', name))?.anchors ?? []));
+      lines.push(...(await opened('deltas', name)).anchors);
     }
     return { lines, newest, files };
   };
@@ -342,6 +395,7 @@ export function createAnchorLog({
       for (const line of snapshots.lines) merge(line);
       for (const line of deltas.lines) merge(line);
       if (snapshots.newest !== undefined) snapshotFrom = snapshots.newest;
+      if (snapshots.sound !== undefined) soundSnapshotAt = LAST_MS - Number(snapshots.sound);
       if (deltas.newest !== undefined) deltasFrom = deltas.newest;
       if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
       if (state !== 'read') {
@@ -384,20 +438,33 @@ export function createAnchorLog({
     }
     unsent = undefined;
     if (file.kind === 'deltas') written.add(file.name);
-    else snapshotFrom = countdownOf('snapshots', file.name);
+    else {
+      snapshotFrom = countdownOf('snapshots', file.name);
+      soundSnapshotAt = LAST_MS - Number(snapshotFrom);
+    }
     logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines.length });
   };
 
   /** The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. */
   const madeFile = async (): Promise<Unsent> => {
     const at = now().getTime();
-    const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
-    const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
+    const kind: Kind =
+      soundSnapshotAt === undefined || at - soundSnapshotAt >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
     const lines = kind === 'snapshots' ? [...anchors.values()] : [...pending.values()];
-    const bytes = await gzip(`${lines.map(lineOf).join('\n')}\n`);
+    const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
+    const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, lines.length));
+    const closing = JSON.stringify({
+      k: 'c',
+      name,
+      epoch,
+      lines: lines.length,
+      kv: keyVersion,
+      sig: signature.toString('base64'),
+    });
+    const bytes = await gzip(`${[...lines.map(lineOf), closing].join('\n')}\n`);
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);
-    return { kind, name: `${folder(kind)}${countedDown(at)}-${randomUUID()}`, bytes, lines };
+    return { kind, name, bytes, lines };
   };
 
   const writeDue = async (): Promise<void> => {
