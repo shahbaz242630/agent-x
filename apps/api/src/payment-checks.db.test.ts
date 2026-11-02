@@ -21,6 +21,7 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import { markFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type ExecutionLookup, type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
+import { createProviderEvents } from '@agentx/core/modules/provider-events';
 import { TRANSACTIONS } from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -1147,6 +1148,49 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     expect(health.heldFor('nobody')).toBe('bank');
   };
 
+  it('a hung organisation’s message keeps no other’s regular check from the bank, in the same run', async () => {
+    const hung = await paymentsUnderWay(1);
+    const other = await paymentsUnderWay(1);
+    const instruction = (await transactionOf(hung.w, hung.requests[0] ?? '')).instructionId;
+    await database.as('admin').query(
+      `insert into provider_events.inbox (id, partner, dedupe_key, event_type, reference_kind, reference, org_id, received_at)
+         values ($1, 'fake', $2, 'payment.update', 'instruction', $3, $4, now())`,
+      [ids.next(), ids.next(), instruction, hung.w.org],
+    );
+    const { rail, asked, waiting } = railOf([hung.w, other.w], (org) => org === hung.w.org);
+    // A clock that really moves, so a budget spent is spent.
+    const moving = { now: () => new Date() };
+
+    const run = createPaymentChecks({
+      list: () => Promise.resolve([hung.w.org, other.w.org]),
+      database: app,
+      outbox: createOutbox({ ids, clock: moving }),
+      rail,
+      keys,
+      ids,
+      clock: moving,
+      logger: testLogger(capture),
+      health: breaker(),
+      databaseGate: handoffDatabaseGate(6),
+      events: createProviderEvents({ keys, ids, clock: moving, retentionDays: 30 }),
+      runBudgetMs: 2_000,
+    }).run();
+
+    // Its message's call hangs; the other's goes past it, in this run, and is answered.
+    await expect.poll(() => asked.filter((org) => org === hung.w.org).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    await expect.poll(() => asked, { timeout: 20_000 }).toContain(other.w.org);
+    await expect.poll(() => lines('payment_check.checked').length, { timeout: 20_000 }).toBeGreaterThan(0);
+    expect(waiting.length).toBeGreaterThan(0);
+
+    await expect
+      .poll(() => {
+        for (const answer of waiting.splice(0)) answer(true);
+        return lines('payment_check.bank_unavailable').length;
+      })
+      .toBe(1);
+    await run;
+  });
+
   it('one hung organisation first in the list keeps no other’s lookups from the bank, and the hold clears', async () => {
     const hung = await paymentsUnderWay(4);
     const other = await paymentsUnderWay(1);
@@ -1172,7 +1216,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     await run;
     expect(asked.filter((org) => org === hung.w.org).length).toBeLessThanOrEqual(4);
 
-    // A real acceptance fully reopens it.
+    // A real acceptance takes it a step on.
     await ask(other.acting, other.w, { amount: AED(5_000n) });
     await createHandoff({
       list: () => Promise.resolve([other.w.org]),
@@ -1186,7 +1230,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       clock,
       logger: testLogger(capture),
     }).run();
-    expect(lines('handoff.bank_back')).toHaveLength(1);
+    expect(lines('handoff.bank_step')).toHaveLength(1);
   });
 
   it('says nothing to the breaker for a lookup that didn’t answer', async () => {
@@ -1227,15 +1271,15 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     expect(health.heldFor('nobody')).toBe('bank');
   });
 
-  it('holds 8 at once in all and 2 in an organisation, by its own limits, the rest going as those answer', async () => {
+  it('holds 6 of its 8 for the regular turns, and 2 in an organisation, the rest going as those answer', async () => {
     const worlds = [];
     for (let n = 0; n < 5; n += 1) worlds.push((await paymentsUnderWay(3)).w);
     const { rail, asked, waiting } = railOf(worlds, () => true);
 
     const run = checksOver(worlds, rail, breaker()).run();
-    await expect.poll(() => asked.length, { timeout: 30_000 }).toBe(8);
+    await expect.poll(() => asked.length, { timeout: 30_000 }).toBe(6);
     await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(asked).toHaveLength(8);
+    expect(asked).toHaveLength(6);
     const byOrganisation = new Map<string, number>();
     for (const org of asked) byOrganisation.set(org, (byOrganisation.get(org) ?? 0) + 1);
     expect(Math.max(...byOrganisation.values())).toBe(2);
@@ -1253,7 +1297,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     await run;
   }, 120_000);
 
-  it('starts no new call past its budget; the next run goes on, its own place kept', async () => {
+  it('starts no new call past its part of the budget; its next run goes on, its own place kept', async () => {
     const { w } = await paymentsUnderWay(3);
     let spentOnce = false;
     const { rail, asked } = railOf([w]);
@@ -1271,11 +1315,127 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     });
 
     await job.run();
-    expect(asked).toHaveLength(1);
+    // The regular turns' part spent on its first; the lap of the rest takes its own turn.
+    expect(asked.length).toBeGreaterThanOrEqual(1);
+    const first = asked.length;
 
-    // The next run is another sweep, with a place of its own, so starts at its first.
     await job.run();
-    expect(asked).toHaveLength(4);
+    expect(asked.length).toBeGreaterThan(first);
+  });
+
+  describe('old payments, more than a run’s budget of them', () => {
+    const DAY = 24 * 60 * 60_000;
+
+    /** A world with `count` payments gone UNKNOWN, and `paid` others paid in the last week, all older than a day. */
+    async function oldPayments(count: number, paid = 0) {
+      const { w, acting } = await ready();
+      const unknown: string[] = [];
+      const settled: string[] = [];
+      // The fake's .02: made at the partner, its answer lost.
+      for (let n = 0; n < count; n += 1) unknown.push((await ask(acting, w, { amount: AED(5_002n) })).id);
+      const health = createRailHealth({ clock, logger: testLogger(capture), laneUnknowns: 1_000 });
+      await createHandoff({
+        list: () => Promise.resolve([w.org]),
+        database: app,
+        outbox: createOutbox({ ids, clock }),
+        rail: w.rail,
+        health,
+        databaseGate: handoffDatabaseGate(6),
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+      }).run();
+      for (let n = 0; n < paid; n += 1) settled.push((await ask(acting, w, { amount: AED(5_000n) })).id);
+      await handoffOf(w).run();
+      clock.advanceBy(2 * DAY);
+      return { w, unknown, settled };
+    }
+
+    /** The world's rail, each lookup costing a second of the clock and noted by its instruction. */
+    const costingASecond = (w: World) => {
+      const asked: string[] = [];
+      const rail: FakeRail = {
+        ...w.rail,
+        getExecution: (ref) => {
+          asked.push(ref.instructionId);
+          clock.advanceBy(1_000);
+          return w.rail.getExecution(ref);
+        },
+      };
+      return { rail, asked };
+    };
+
+    /** The instruction each request's payment went under. */
+    const instructionsOf = async (w: World, requests: readonly string[]) =>
+      Promise.all(requests.map(async (id) => (await transactionOf(w, id)).id)).then(() =>
+        Promise.all(
+          requests.map(async (id) =>
+            withTenant(app, w.org, async (tx) => {
+              const row = await tx
+                .selectFrom('instructions.instructions')
+                .select('id')
+                .where('spend_request_id', '=', id)
+                .executeTakeFirstOrThrow();
+              return row.id;
+            }),
+          ),
+        ),
+      );
+
+    it('reaches every UNKNOWN within as many runs as they need, not the next 30th', async () => {
+      const { w, unknown } = await oldPayments(6);
+      const { rail, asked } = costingASecond(w);
+      // A second a call, and the UNKNOWNs' part of the budget a second: one a run.
+      const job = checksOver([w], rail, breaker(), { limits: { total: 1, perOrganisation: 1 }, runBudgetMs: 3_000 });
+      const instructions = await instructionsOf(w, unknown);
+
+      for (let run = 0; run < 7; run += 1) await job.run();
+
+      for (const instruction of instructions) expect(asked).toContain(instruction);
+    });
+
+    it('asks the UNKNOWNs ahead of the paid watch, however many that holds', async () => {
+      const { w, unknown, settled } = await oldPayments(1, 6);
+      const { rail, asked } = costingASecond(w);
+      const job = checksOver([w], rail, breaker(), { limits: { total: 1, perOrganisation: 1 }, runBudgetMs: 3_000 });
+      const [unknownInstruction] = await instructionsOf(w, unknown);
+      const paid = await instructionsOf(w, settled);
+
+      await job.run();
+
+      expect(asked).toContain(unknownInstruction);
+      // The watch's part of the budget a little: not all of it this run.
+      expect(paid.filter((instruction) => asked.includes(instruction)).length).toBeLessThan(paid.length);
+    });
+
+    it('says a lap that outlasts its time, once; none that keeps to it', async () => {
+      const { w } = await oldPayments(4);
+      const { rail } = costingASecond(w);
+      const job = checksOver([w], rail, breaker(), { limits: { total: 1, perOrganisation: 1 }, runBudgetMs: 3_000 });
+
+      await job.run();
+      expect(lines('payment_check.lap_behind')).toEqual([]);
+
+      clock.advanceBy(31 * 60_000);
+      await job.run();
+      await job.run();
+
+      expect(lines('payment_check.lap_behind')).toEqual([expect.objectContaining({ sweep: 'unknown', level: 'warn' })]);
+    });
+
+    it('starts no new lap while one is going, and a new one once it has ended, at its 30th run', async () => {
+      const { w, unknown } = await oldPayments(1);
+      const { rail, asked } = costingASecond(w);
+      const job = checksOver([w], rail, breaker());
+      const [instruction] = await instructionsOf(w, unknown);
+
+      for (let run = 0; run < 30; run += 1) await job.run();
+      expect(asked.filter((id) => id === instruction)).toHaveLength(1);
+
+      await job.run();
+      expect(asked.filter((id) => id === instruction)).toHaveLength(2);
+    });
   });
 
   it('a stop never waits out a hung bank: it ends clean, a late answer moving nothing', async () => {

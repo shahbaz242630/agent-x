@@ -554,7 +554,9 @@ describe('a message the check can’t take yet waits for the next run', () => {
 
     await checksOf(w, down).run();
 
-    expect(asked).toBe(3);
+    // The third ends it; the regular turns beside the message may have one more under way.
+    expect(asked).toBeGreaterThanOrEqual(3);
+    expect(asked).toBeLessThanOrEqual(4);
     expect(lines('payment_check.bank_unavailable')).toEqual([expect.objectContaining({ stopped: true })]);
     expect((await inbox())[0]?.taken_at).toBeNull();
   });
@@ -573,7 +575,8 @@ describe('a message the check can’t take yet waits for the next run', () => {
 
     await checksOf(w, slow).run();
 
-    expect(asked).toBe(1);
+    // Past the whole budget at the first; the regular turns beside it may have begun theirs.
+    expect(asked).toBeLessThan(3);
     expect((await inbox())[0]?.taken_at).toBeNull();
   });
 

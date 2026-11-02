@@ -6,16 +6,21 @@
 // messages early, late, twice or missed change nothing. Nothing is ever sent
 // to the bank again (ADR-007 §10).
 //
-// Each run first takes the partner's messages waiting in the inbox (E1b), and
-// checks the payments each names, ahead of their turn; a message is taken once
-// the bank answered for each, tried at most 5 runs. Then it takes the
-// organisations' transactions still under way (SUBMISSION_PENDING past its
+// Each run takes the partner's messages waiting in the inbox (E1b), and checks
+// the payments each names, ahead of their turn; a message is taken once the bank
+// answered for each, tried at most 5 runs. Beside them, never behind, it takes
+// the organisations' transactions still under way (SUBMISSION_PENDING past its
 // answer's time, SUBMITTED, PROCESSING, UNKNOWN) in turns (fair-lanes.ts, 4D2e
-// Stage F: up to 8 calls at once, 2 an organisation, slots of its own beside the
-// hand-off's), each organisation's oldest first, a page at a
-// time: one under 15 minutes old every run, one under a day old every 5th
-// run, every one every 30th (the real partner's rate limits), with those paid
-// in the last 7 days; none twice in a run. The bank is asked outside any
+// Stage F: up to 8 calls at once, 2 of them the messages', 2 an organisation and
+// 1 more for a message, slots of its own beside the hand-off's), each organisation's
+// oldest first, a page at a time: one under 15 minutes old every run, one under
+// a day old every 5th run (the real partner's rate limits). Every 30th run, the
+// first after a start among them, two laps begin: every UNKNOWN of any age, then
+// the rest under way with those paid or failed in the last 7 days. A lap carries
+// on run after run, each with its own part of the budget, the UNKNOWNs' larger,
+// until every organisation has had its turn: an UNKNOWN is asked again within 30
+// runs and that lap's length, and one that outlasts its time is said. None is
+// asked twice in a run. The bank is asked outside any
 // database transaction; then one transaction a payment, in ADR-006 §6's lock order, as Tx B (`lockPayment`:
 // the transaction for change, 10; its holdings, 11; the move, the head, 12),
 // and every move settled by `settlePayment` (its holdings; on SUCCEEDED, the
@@ -148,6 +153,14 @@ const UNREACHED_IN_A_ROW = 3;
 /** How many calls to the bank at once, across every organisation and in each: slots of their own, beside the hand-off's. */
 const CHECK_LIMITS = { total: 8, perOrganisation: 2 } as const;
 
+/** How the run's budget is parted: the regular turns, then each lap. A message's pass has the whole of it, beside them. */
+const REGULAR_SHARE = 1 / 2;
+const UNKNOWN_LAP_SHARE = 1 / 3;
+const WATCH_LAP_SHARE = 1 / 6;
+
+/** How long the UNKNOWNs' lap may take before it is said: by then the next is due. */
+const LAP_DUE_MS = ALL_EVERY * PAYMENT_CHECKS_EVERY_MS;
+
 /** The API, as the check's actor in the signed events. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
@@ -164,8 +177,9 @@ interface Listed {
 /** What the bank said, as the check reads it. */
 type Word = ExecutionLookup | { readonly kind: 'unavailable' } | { readonly kind: 'unreadable' };
 
-/** Which payments a run checks: those under way made since `since` (all where none), and the paid ones or not. */
+/** Which payments a sweep checks: those in `statuses` made since `since` (all where none), and the paid ones or not. */
 interface Due {
+  readonly statuses: readonly TransactionStatus[];
   readonly since: Date | undefined;
   readonly watchPaid: boolean;
 }
@@ -180,6 +194,20 @@ interface Run {
   endedTurns: number;
   readonly inRow: Map<string, number>;
   readonly checks: Map<string, Promise<CheckOutcome>>;
+  readonly unreadable: Set<string>;
+}
+
+/** One of the sweeps that reach every payment of its kind, over as many runs as they take. */
+interface Lap {
+  readonly sweep: string;
+  readonly lanes: FairLanes;
+  readonly share: number;
+  /** How long it may take before it is said. */
+  readonly outlastsMs: number;
+  /** The organisations yet to have their turn: empty between laps. */
+  left: readonly string[];
+  startedAt: number;
+  said: boolean;
 }
 
 /** Where a check found the payment, and left it. */
@@ -254,9 +282,10 @@ export function createPaymentChecks({
   // As the hand-off's: its first beat is its start, then only a run that reads its organisations beats.
   let beat = clock.now().getTime();
   let runs = 0;
+  // A quarter of the calls the messages': enough to go on, never all of them.
+  const nudgeSlots = Math.max(1, Math.floor(limits.total / 4));
   // The run under way's, as the lanes' work needs them; runs never overlap.
-  let run: Run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map() };
-  let due: Due = { since: undefined, watchPaid: true };
+  let run: Run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
   let spent: () => boolean = () => false;
   let gaveUpWaiting = false;
   const beatNow = (): void => {
@@ -267,7 +296,7 @@ export function createPaymentChecks({
   const underWay = (
     orgId: string,
     after: string | undefined,
-    { since, watchPaid }: Due,
+    { statuses, since, watchPaid }: Due,
     log: Logger,
   ): Promise<Listed[]> =>
     withSignedStates(database, orgId, services(log), (tx) => {
@@ -289,7 +318,7 @@ export function createPaymentChecks({
           .where((where) =>
             where.or([
               where.and([
-                where('t.status', 'in', UNDER_WAY),
+                where('t.status', 'in', statuses),
                 // One still waiting for its own answer is its Tx B's (or the hand-off's sweep's) until the answer is due.
                 where.or([where('t.status', '!=', 'SUBMISSION_PENDING'), where('t.created_at', '<=', answerDue)]),
                 since === undefined ? where.lit(true) : where('t.created_at', '>=', since),
@@ -375,9 +404,10 @@ export function createPaymentChecks({
       const named = await databaseGate.run(orgId, () => namedBy(nudge, log));
       for (const payment of named) {
         if (spent()) return 'end_turn';
+        const fresh = !run.checks.has(payment.id);
         const checked = await checkOnce(orgId, payment, log);
         answered &&= checked === 'checked';
-        if (stepOf(orgId, checked) === 'end_turn') return 'end_turn';
+        if (fresh && stepOf(orgId, checked) === 'end_turn') return 'end_turn';
       }
       if (answered) await databaseGate.run(orgId, () => inbox.taken(database, nudge.id));
       else if (tries >= MOST_TRIES) log.warn('payment_check.nudge_given_up', { messageId: nudge.id });
@@ -398,7 +428,9 @@ export function createPaymentChecks({
       return;
     }
     const lanes = createFairLanes<Nudge>({
-      ...laneLimits,
+      total: nudgeSlots,
+      limitOf: () => 1,
+      thrown: laneThrown,
       // Past the most a run takes, so each lane's one read is its last.
       page: NUDGES_A_RUN + 1,
       idOf: ({ id }) => id,
@@ -540,11 +572,14 @@ export function createPaymentChecks({
   };
 
   /** A page of the organisation's due payments, or null where it couldn't be read (said; its turn ends). */
-  const laneRead = async (orgId: string, after: string | undefined): Promise<Listed[] | null> => {
+  const laneRead = async (orgId: string, after: string | undefined, due: Due): Promise<Listed[] | null> => {
+    // Said once a run, however many sweeps come to it.
+    if (run.unreadable.has(orgId)) return null;
     const log = logger.child({ orgId });
     try {
       return await databaseGate.run(orgId, () => underWay(orgId, after, due, log));
     } catch (error) {
+      run.unreadable.add(orgId);
       log.error('payment_check.list_failed', { err: error });
       return null;
     }
@@ -554,26 +589,72 @@ export function createPaymentChecks({
     logger.child({ orgId }).error('payment_check.failed', { err: error });
   };
 
-  const laneLimits = {
-    total: limits.total,
-    limitOf: () => limits.perOrganisation,
-    thrown: laneThrown,
+  /** One payment's turn; an organisation already gone unanswered this run is asked no more, whichever sweep found it so. */
+  const payment = async (orgId: string, listed: Listed): Promise<LaneStep> => {
+    if ((run.inRow.get(orgId) ?? 0) >= UNREACHED_IN_A_ROW) return 'end_turn';
+    // Asked already this run, by a message or another sweep: no new call, so nothing to count.
+    if (run.checks.has(listed.id)) return 'next';
+    return stepOf(orgId, await checkOnce(orgId, listed, logger.child({ orgId })));
   };
 
-  const lanesOfPayments = (): FairLanes =>
+  const lanesOf = (dueNow: () => Due): FairLanes =>
     createFairLanes<Listed>({
-      ...laneLimits,
+      total: Math.max(1, limits.total - nudgeSlots),
+      limitOf: () => limits.perOrganisation,
+      thrown: laneThrown,
       page,
       idOf: ({ id }) => id,
-      read: laneRead,
-      work: async (orgId, payment) => stepOf(orgId, await checkOnce(orgId, payment, logger.child({ orgId }))),
+      read: (orgId, after) => laneRead(orgId, after, dueNow()),
+      work: payment,
     });
 
-  // A place kept for each of the run's three sweeps: one cut short goes on where it left off at its next, so one that
-  // reaches the old payments is never cut before them, again and again, by the runs between.
-  const everyRunLanes = lanesOfPayments();
-  const daysLanes = lanesOfPayments();
-  const allLanes = lanesOfPayments();
+  const since = (ms: number) => new Date(clock.now().getTime() - ms);
+  // A place kept for each sweep, so one cut short goes on where it left off at its next.
+  const everyRunLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(FRESH_MS), watchPaid: false }));
+  const daysLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(DAY_MS), watchPaid: false }));
+
+  const lapOf = (sweep: string, due: Due, share: number, outlastsMs: number): Lap => ({
+    sweep,
+    lanes: lanesOf(() => due),
+    share,
+    outlastsMs,
+    left: [],
+    startedAt: 0,
+    said: false,
+  });
+  // The UNKNOWNs a lap of their own, ahead of the paid watch: at volume the watch may never end a lap, and these must.
+  const laps = [
+    lapOf('unknown', { statuses: ['UNKNOWN'], since: undefined, watchPaid: false }, UNKNOWN_LAP_SHARE, LAP_DUE_MS),
+    lapOf(
+      'watched',
+      { statuses: UNDER_WAY.filter((status) => status !== 'UNKNOWN'), since: undefined, watchPaid: true },
+      WATCH_LAP_SHARE,
+      PAID_WATCH_MS,
+    ),
+  ];
+
+  /** A part of the run's budget, from now: a sweep that spends its own leaves the next its turn. */
+  const partOfBudget = (share: number, signal: AbortSignal | undefined): (() => boolean) => {
+    const ends = clock.now().getTime() + runBudgetMs * share;
+    return () => signal?.aborted === true || clock.now().getTime() >= ends;
+  };
+
+  /** A lap's next part: its organisations not yet had their turn; one hung or unreadable has had it, and tries again next lap. */
+  const lapPart = async (lap: Lap, signal: AbortSignal | undefined): Promise<void> => {
+    if (lap.left.length === 0) return;
+    const outcomes = await lap.lanes.run(lap.left, partOfBudget(lap.share, signal));
+    lap.left = lap.left.filter((orgId) => outcomes.get(orgId) === 'cut');
+    if (lap.left.length === 0 || lap.said || clock.now().getTime() - lap.startedAt < lap.outlastsMs) return;
+    lap.said = true;
+    logger.warn('payment_check.lap_behind', { sweep: lap.sweep, organisations: lap.left.length });
+  };
+
+  /** The regular turns, then the laps under way, each with its part of the budget. */
+  const sweeps = async (n: number, orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
+    const regular = n % DAY_EVERY === 0 ? daysLanes : everyRunLanes;
+    await regular.run(orgs, partOfBudget(REGULAR_SHARE, signal));
+    for (const lap of laps) await lapPart(lap, signal);
+  };
 
   return {
     async run(signal) {
@@ -587,18 +668,18 @@ export function createPaymentChecks({
       beatNow();
       const n = runs;
       runs += 1;
-      const now = clock.now().getTime();
-      // The first run after a start checks every one, so none waits half an hour for a restart.
-      const all = n % ALL_EVERY === 0;
-      const day = n % DAY_EVERY === 0;
-      due = { since: all ? undefined : new Date(now - (day ? DAY_MS : FRESH_MS)), watchPaid: all };
-      run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map() };
-      const budgetEnds = now + runBudgetMs;
-      spent = () => signal?.aborted === true || clock.now().getTime() >= budgetEnds;
+      // The first run after a start is among these, so none waits half an hour for a restart. One still going keeps on.
+      for (const lap of n % ALL_EVERY === 0 ? laps.filter(({ left }) => left.length === 0) : []) {
+        lap.left = orgs;
+        lap.startedAt = clock.now().getTime();
+        lap.said = false;
+      }
+      run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
+      spent = partOfBudget(1, signal);
       gaveUpWaiting = false;
-      const lanes = all ? allLanes : day ? daysLanes : everyRunLanes;
+      // Side by side: a hung lookup under a message must never spend the regular turns' budget.
       const finished = await finishedWithinStop(
-        checkNudged().then(() => lanes.run(orgs, spent)),
+        Promise.all([checkNudged(), sweeps(n, orgs, signal)]),
         signal,
         stopWaitMs,
       );

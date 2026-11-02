@@ -491,6 +491,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing was changed. The message was kept, encrypted, for checking.',
     next: 'Check with the partner which payment it means: it may be one Agent X never handed off.',
   },
+  'payment_check.lap_behind': {
+    happened: 'Asking the bank again about older payments has taken longer than its allowed time.',
+    broke: 'Some were not asked again in time. Nothing is lost: they stay as they were, their money held if it was.',
+    next: 'It carries on where it was. If this repeats, the checks cannot keep up: a developer should look at the volume.',
+  },
   'payment_check.nudge_given_up': {
     happened: "The payments a partner's message named couldn't be checked after 5 tries, so the message was set aside.",
     broke: 'Nothing is lost: those payments are still checked by the regular run, on its usual timing.',
