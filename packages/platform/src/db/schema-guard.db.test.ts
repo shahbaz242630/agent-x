@@ -1889,6 +1889,213 @@ describe('which drift a release can also make (schema-check.ts holds it one run 
     }
   });
 
+  describe('a table the migrations did not build (a release before its image is in)', () => {
+    const MADE = 'create table audit.planted (id uuid primary key)';
+    const GONE = 'drop table if exists audit.planted';
+
+    afterEach(async () => {
+      await owner.query(GONE);
+    });
+
+    it('every problem of its own shape is release-shaped, and nothing is the alarm at once', async () => {
+      await owner.query(MADE);
+      await owner.query('grant select, update on audit.planted to agentx_app');
+      await owner.query(`create policy other on audit.planted using (true)`);
+      expect(await drift()).toEqual({
+        atOnce: [],
+        releaseShaped: [
+          'agentx_app may UPDATE on audit.planted',
+          'audit.planted does not have row-level security enabled',
+          'audit.planted does not have row-level security forced',
+          "audit.planted's policy is not tenant_isolation",
+          "audit.planted's policy reads differently",
+          'audit.planted has no org_id',
+          `audit.planted's unique index "planted_pkey" does not cover org_id`,
+        ].toSorted((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+      });
+    });
+
+    it('a trigger on it is release-shaped, the same as its other shape', async () => {
+      await owner.query(MADE);
+      await owner.query(
+        'create trigger planted before update on audit.planted for each row execute function state_rules.guard_made_once()',
+      );
+      const { atOnce, releaseShaped } = await drift();
+      expect(atOnce).toEqual([]);
+      expect(releaseShaped).toContain('audit.planted carries the trigger "planted"');
+    });
+
+    it('a table walled properly with no problem of its own says nothing, as before', async () => {
+      await owner.query(
+        `create table audit.planted (org_id uuid not null, id uuid not null, primary key (org_id, id))`,
+      );
+      await owner.query('alter table audit.planted enable row level security');
+      await owner.query('alter table audit.planted force row level security');
+      await owner.query(
+        `create policy tenant_isolation on audit.planted
+         using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)
+         with check (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)`,
+      );
+      expect(await drift()).toEqual({ atOnce: [], releaseShaped: [] });
+    });
+
+    it.each([
+      [
+        'a rule',
+        'create rule hide as on delete to audit.planted do instead nothing',
+        'audit.planted carries the rewrite rule "hide"',
+      ],
+      ['a right for PUBLIC', 'grant select on audit.planted to public', 'PUBLIC may SELECT on audit.planted'],
+    ])('%s on it is still the alarm at once: no release makes one', async (_what, tamper, problem) => {
+      await owner.query(MADE);
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+      await owner.query(tamper);
+      const { atOnce, releaseShaped } = await drift();
+      expect(atOnce).toEqual([problem]);
+      expect(releaseShaped).not.toContain(problem);
+    });
+
+    it.each([
+      [
+        'a view',
+        'create view audit.planted as select 1 as one',
+        'drop view audit.planted',
+        'audit.planted is no longer a plain table',
+      ],
+      [
+        'a partitioned table',
+        'create table audit.planted (id uuid) partition by hash (id)',
+        'drop table audit.planted',
+        'audit.planted is partitioned',
+      ],
+    ])('%s of a new name is not such a table: all of it is the alarm at once', async (_what, make, undo, problem) => {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+      await owner.query(make);
+      try {
+        const { atOnce, releaseShaped } = await drift();
+        expect(atOnce).toContain(problem);
+        expect(atOnce).toContain('audit.planted has no org_id');
+        expect(releaseShaped).toEqual([]);
+      } finally {
+        // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+        await owner.query(undo);
+      }
+    });
+
+    it('a child of a built table is not such a table: all of it is the alarm at once', async () => {
+      await owner.query('create table audit.planted () inherits (audit.heads)');
+      const { atOnce, releaseShaped } = await drift();
+      expect(atOnce).toContain('audit.planted is in an inheritance tree');
+      expect(atOnce).toContain('audit.heads is in an inheritance tree');
+      // The CHECKs it inherits are release-shaped as any CHECK is; nothing of its shape.
+      expect(releaseShaped.filter((problem) => !problem.includes('CHECK constraint'))).toEqual([]);
+    });
+
+    it('one owned by another role is not such a table: all of it is the alarm at once', async () => {
+      const admin = database.as('admin');
+      await admin.query('create role new_table_fixture nologin');
+      try {
+        await owner.query(MADE);
+        await admin.query('alter table audit.planted owner to new_table_fixture');
+        const { atOnce, releaseShaped } = await drift();
+        expect(atOnce).toContain('audit.planted is owned by another role');
+        expect(atOnce).toContain('audit.planted has no org_id');
+        expect(releaseShaped).toEqual([]);
+      } finally {
+        await admin.query('drop table audit.planted');
+        await admin.query('drop role new_table_fixture');
+      }
+    });
+
+    it("a global table's columns changed are the alarm at once, named once", async () => {
+      await owner.query('alter table platform_controls.audit_head add column extra integer');
+      try {
+        expect(await drift()).toEqual({
+          atOnce: ['platform_controls.audit_head no longer has exactly its columns'],
+          releaseShaped: [],
+        });
+      } finally {
+        await owner.query('alter table platform_controls.audit_head drop column extra');
+      }
+    });
+
+    it("a known table's drift beside it is still the alarm at once, and the new table's stays apart", async () => {
+      await owner.query(MADE);
+      await owner.query('alter table spend_requests.requests no force row level security');
+      try {
+        const { atOnce, releaseShaped } = await drift();
+        expect(atOnce).toEqual(['spend_requests.requests does not have row-level security forced']);
+        expect(releaseShaped).toContain('audit.planted has no org_id');
+      } finally {
+        await owner.query('alter table spend_requests.requests force row level security');
+      }
+    });
+
+    it.each([
+      [
+        'its walls off',
+        'alter table spend_requests.requests disable row level security',
+        'alter table spend_requests.requests enable row level security',
+        'spend_requests.requests does not have row-level security enabled',
+      ],
+      [
+        'its walls not forced',
+        'alter table spend_requests.requests no force row level security',
+        'alter table spend_requests.requests force row level security',
+        'spend_requests.requests does not have row-level security forced',
+      ],
+      [
+        'a wider right',
+        'grant truncate on spend_requests.requests to agentx_app',
+        'revoke truncate on spend_requests.requests from agentx_app',
+        'agentx_app may TRUNCATE on spend_requests.requests',
+      ],
+    ])('a known table with %s is the alarm at once, never release-shaped', async (_what, tamper, undo, problem) => {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+      await owner.query(tamper);
+      try {
+        const { atOnce, releaseShaped } = await drift();
+        expect(atOnce).toContain(problem);
+        expect(releaseShaped).toEqual([]);
+      } finally {
+        // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+        await owner.query(undo);
+      }
+    });
+
+    it("a known table's policy rewritten is the alarm at once; a new table's odd one doesn't count against the rest", async () => {
+      await owner.query(MADE);
+      await owner.query('create policy other on audit.planted using (true)');
+      // Alone it trips no comparison with the policies that stand.
+      expect((await drift()).atOnce).toEqual([]);
+      await owner.query('alter policy tenant_isolation on audit.events using (true)');
+      try {
+        expect((await drift()).atOnce).toEqual(
+          expect.arrayContaining([
+            "audit.events's policy reads differently",
+            'the tenant policies no longer all read the same way',
+          ]),
+        );
+      } finally {
+        await owner.query(
+          `alter policy tenant_isolation on audit.events
+           using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)`,
+        );
+      }
+    });
+
+    it('a known table renamed to pass as new shows as gone: release-shaped, its old walls still its own', async () => {
+      await owner.query('alter table identity.login_flows rename to login_flows_moved');
+      try {
+        const { releaseShaped } = await drift();
+        expect(releaseShaped).toContain('identity.login_flows is a table the migrations built, and is not there');
+        expect(releaseShaped).toContain('identity.login_flows_moved has no org_id');
+      } finally {
+        await owner.query('alter table identity.login_flows_moved rename to login_flows');
+      }
+    });
+  });
+
   it('liveSchemaProblems gives both lists as one, in order', async () => {
     await owner.query(PLANTED);
     await owner.query('grant insert on audit.events to agentx_backup');

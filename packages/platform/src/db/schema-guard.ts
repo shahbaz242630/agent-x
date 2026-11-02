@@ -28,6 +28,15 @@
 // a new migration needs no pin here and CI goes red until the file is refreshed.
 // Each is compared as Postgres prints it, in this process, with no cast read.
 //
+// **Tables** are named in built-tables.json, written the same way. A release's new
+// table is not in the file of the image before it, so to that image it has no
+// walls, or the wrong rights, the moment the migration ends: that is release-shaped
+// drift (schema-check.ts), for its own shape alone. It must be a plain table of the
+// owner's: anything else no migration of ours makes, and PUBLIC's rights and rewrite
+// rules aren't its shape. A table the file names is held at once, as ever. One gone
+// from the live database is release-shaped too, or a rename would pass a known
+// table off as new.
+//
 // **What it can read.** Everything here is readable by an ordinary role —
 // checked on 16 and 18 before it was written (pg_class, pg_namespace,
 // pg_attribute, pg_policy, pg_trigger, pg_rewrite, pg_cast, pg_db_role_setting,
@@ -41,6 +50,7 @@
 import { type Kysely, sql } from 'kysely';
 
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
+import BUILT_TABLES from './built-tables.json' with { type: 'json' };
 import { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
 import { OWN_COLUMNS, type SignedStateTable } from './signed-rows.ts';
 import { TENANT_POLICY_EXPRESSION } from './tenant.ts';
@@ -397,7 +407,8 @@ export interface SchemaDrift {
   readonly atOnce: readonly SchemaProblem[];
   /**
    * What a release's migration also makes to the image before it: a CHECK not
-   * as built, reworded or gone, or a function this image doesn't know.
+   * as built, reworded or gone, a function this image doesn't know, or a table
+   * it doesn't, with what that table's shape breaks.
    */
   readonly releaseShaped: readonly SchemaProblem[];
 }
@@ -595,6 +606,11 @@ async function relations<Schema>(db: Kysely<Schema>): Promise<RelationRow[]> {
     order by 1
   `.execute(db);
   return [...rows];
+}
+
+/** Every relation's name, for built-tables.json. */
+export async function relationNames<Schema>(db: Kysely<Schema>): Promise<string[]> {
+  return (await relations(db)).map(({ name }) => name);
 }
 
 async function schemas<Schema>(db: Kysely<Schema>): Promise<SchemaRow[]> {
@@ -1671,29 +1687,56 @@ export async function liveSchemaDrift<Schema>(
     }),
   );
 
+  // A table a release may just have made. Only a plain table of the owner's: the rest stays the alarm at once.
+  const built = new Set(BUILT_TABLES);
+  const newTables = allRelations.filter(
+    (one) => !built.has(one.name) && one.kind === 'r' && !one.inherits && one.owner === ownerRole,
+  );
+  const isNew = new Set(newTables.map(({ name }) => name));
+  /** What a table's own shape breaks: the same rules, for those that stand and those new. */
+  const shapeProblems = (
+    tables: readonly RelationRow[],
+    ofThese: (table: string) => boolean,
+    listed: SchemaPolicy['globalTables'],
+  ): SchemaProblem[] => [
+    ...tables.flatMap((relation) => relationProblems(relation, ownerRole, globalTables.has(relation.name))),
+    ...policyProblems(
+      tables,
+      allPolicies.filter((one) => ofThese(one.table)),
+      globalTables,
+      sweptAfter,
+    ),
+    ...allTriggers.filter((one) => ofThese(one.table)).flatMap((trigger) => triggerProblems(trigger, fixedCalls)),
+    ...allIndexes
+      .filter((one) => ofThese(one.table))
+      .flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
+    ...heldRightsProblems(tables, narrow, allGrants, policy, appRole),
+    ...columnProblems(allColumns, listed, tables, globalTables),
+  ];
+
   const problems: SchemaProblem[] = [
     ...schemaOwnerProblems(allSchemas, ownerRole),
-    ...allRelations.flatMap((relation) => relationProblems(relation, ownerRole, globalTables.has(relation.name))),
+    ...shapeProblems(
+      allRelations.filter((one) => !isNew.has(one.name)),
+      (table) => !isNew.has(table),
+      policy.globalTables,
+    ),
     ...[...globalTables]
       .filter((listed) => !known.has(listed))
       .map((listed) => `${listed} is listed as a global table but is not there`),
-    ...policyProblems(allRelations, allPolicies, globalTables, sweptAfter),
     ...allFunctions.flatMap((fn) => functionProblems(fn, ownerRole)),
     // A rewrite rule can turn any statement into a different one, silently.
     ...allRules.map((rule) => `${rule.table} carries the rewrite rule ${quoted(rule.name)}`),
-    ...allTriggers.flatMap((trigger) => triggerProblems(trigger, fixedCalls)),
     // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
     // The same for each table whose rows are made once.
     ...missingGuardProblems(statusGuardedTables, STATUS_GUARD, allRelations, allTriggers),
     ...missingGuardProblems(madeOnceTables, MADE_ONCE, allRelations, allTriggers),
     ...missingGuardProblems(Object.keys(fixedAtCreation), FIXED, allRelations, allTriggers),
     ...TABLE_GUARDS.flatMap((guard) => missingGuardProblems([guard.table], guard.name, allRelations, allTriggers)),
-    ...allIndexes.flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
     ...missingPartialProblems(policy.partialUniqueIndexes, allIndexes),
     // Rights: an allow-list, so a privilege nobody thought about is a problem
     // rather than an omission.
     ...listing,
-    ...heldRightsProblems(allRelations, narrow, allGrants, policy, appRole),
     ...[...narrow].flatMap(([name, mayChange]) =>
       narrowRightsProblems(name, mayChange, allGrants, writableIn.get(name) ?? [], sweptAfter(name), appRole),
     ),
@@ -1701,7 +1744,6 @@ export async function liveSchemaDrift<Schema>(
     // Nothing in our schemas is PUBLIC's, whatever the privilege: a right every
     // role holds reaches the app as well, and reaches every role made later.
     ...forPublic.map((grant) => `PUBLIC may ${grant.privilege} on ${grant.table}`),
-    ...columnProblems(allColumns, policy.globalTables, allRelations, globalTables),
     ...policy.requiredForeignKeys.flatMap((required) => requiredKeyProblems(required, keys)),
     ...allChecks.filter(({ validated }) => !validated).map((one) => `${checkNamed(one)} is not validated`),
     ...backupHeld.flatMap(backupProblems),
@@ -1713,7 +1755,14 @@ export async function liveSchemaDrift<Schema>(
 
   return {
     atOnce: inOrder(problems),
-    releaseShaped: inOrder([...builtCheckProblems(allChecks, BUILT_CHECKS), ...unknownFunctionProblems(allFunctions)]),
+    releaseShaped: inOrder([
+      ...builtCheckProblems(allChecks, BUILT_CHECKS),
+      ...unknownFunctionProblems(allFunctions),
+      ...shapeProblems(newTables, (table) => isNew.has(table), {}),
+      ...BUILT_TABLES.filter((name) => !known.has(name)).map(
+        (name) => `${name} is a table the migrations built, and is not there`,
+      ),
+    ]),
   };
 }
 
