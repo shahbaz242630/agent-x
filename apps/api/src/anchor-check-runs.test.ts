@@ -591,7 +591,9 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
     clock.advanceBy(STALE_MS);
     failing = true;
     await check.run();
-    expect(alarms().filter((line) => line.reason === 'unchecked')).toHaveLength(2);
+    expect(alarms().filter((line) => line.reason === 'unchecked')).toEqual([
+      expect.objectContaining({ organisations: 2 }),
+    ]);
   });
 
   it('no turn completing with organisations past the bound is the alarm, by count, naming the first few; no hold', async () => {
@@ -632,7 +634,7 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
       reason: 'unreached',
       organisations: notReached,
     });
-    expect(alarms[0]?.firstFew as string[]).toHaveLength(20);
+    expect(alarms[0]?.firstFew as string[]).toHaveLength(5);
     expect(holds.filter(([, failure]) => failure !== undefined)).toEqual([]);
     for (const orgId of [...running.keys()]) release(orgId);
   });
@@ -1150,6 +1152,41 @@ describe('second round (4D2e E6 review): any number of organisations may slow it
     started.length = 0;
     await check.run();
     expect(started).toEqual([org(1), org(3), org(2), org(4)]);
+  });
+
+  it('a database down is one line a run however many chains: the count and a few, and past the limit one alarm line', async () => {
+    const all = orgs(12);
+    const { organizations, holds } = directory(all);
+    let down = false;
+    const verify: OrganisationChains['verify'] = (orgId, anchor) =>
+      down ? Promise.reject(new Error('connect ECONNREFUSED')) : organizations.verify(orgId, anchor);
+    const { check, capture, clock } = checking({ ...organizations, verify }, { lanes: 2 });
+    await check.run();
+    down = true;
+    await check.run();
+    expect(lines(capture, 'audit.anchor_check_failed')).toEqual([
+      expect.objectContaining({ level: 'warn', chain: 'organisation', chains: 12, firstFew: all.slice(0, 5) }),
+    ]);
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
+
+    clock.advanceBy(STALE_MS);
+    await check.run();
+    expect(lines(capture, 'audit.anchor_check_failed')).toHaveLength(2);
+    // What the SEV-1 alert counts: this event, once, with how many it covers.
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([
+      expect.objectContaining({ chain: 'organisation', check: 'anchor', reason: 'unchecked', organisations: 12 }),
+    ]);
+    expect(holds.filter(([, failure]) => failure !== undefined)).toEqual([]);
+  });
+
+  it('the hand-off’s own check of one organisation still says so on its own line, as no run sums it up', async () => {
+    const { organizations } = directory([org(1)]);
+    const verify: OrganisationChains['verify'] = () => Promise.reject(new Error('connect ECONNREFUSED'));
+    const { check, capture } = checking({ ...organizations, verify }, { lanes: 1 });
+    await check.anchorOrganisation(org(1));
+    expect(lines(capture, 'audit.anchor_check_failed')).toEqual([
+      expect.objectContaining({ chain: 'organisation', orgId: org(1) }),
+    ]);
   });
 
   it('#8 a list that can’t be read leaves the last in use, with a warning: everyone is still checked', async () => {

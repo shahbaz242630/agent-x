@@ -186,8 +186,8 @@ const RUNS_FOR_A_TURN = 7;
 /** How long an organisation may wait for its turn, at this interval between runs: the answer for `reachWithinMs`. */
 export const reachWithin = (intervalMs: number): number => RUNS_FOR_A_TURN * (intervalMs + RUN_WITHIN_MS);
 
-/** How many IDs a line of late organisations names. The count is the whole of it; any more would be a very long line. */
-const LATE_NAMED = 20;
+/** How many IDs a line about many organisations names. The count is the whole of it; these are where to start looking. */
+const NAMED_ON_A_LINE = 5;
 
 /** How many times running a chain's check must fail, with rounds spreading, before it is that chain's own: one could be anyone's bad moment. */
 const MISSES_TO_SAY = 2;
@@ -282,6 +282,11 @@ export function createAnchorCheck({
   // Checks completed this run, and how many times running each chain's has not.
   let completed = 0;
   const misses = new Map<string, number>();
+  // Organisations whose check couldn't run this run, and those of them gone too long: a line a run, not a line each, as
+  // a database down is every chain at once. The first failure stands for the rest.
+  let missedThisRun: string[] = [];
+  let staleThisRun: string[] = [];
+  let firstMiss: unknown;
   /** Whether a chain has gone unchecked too long. With rounds spreading its turn may rightly be long ago, so a miss alone says nothing. */
   const isStale = (key: string): boolean =>
     clock.now().getTime() - since(key) >= staleAfterMs &&
@@ -365,7 +370,49 @@ export function createAnchorCheck({
     }
   };
 
-  const checkOne = async ({ chain, verify }: CheckedChain, signal: AbortSignal | undefined): Promise<Outcome> => {
+  /** A check that couldn't run, said at once on its own line where `alone`, or else in the run's one line. */
+  const missedCheck = (chain: Chain, log: Logger, error: unknown, alone: boolean): Outcome => {
+    const key = keyOf(chain);
+    misses.set(key, (misses.get(key) ?? 0) + 1);
+    const stale = isStale(key);
+    if (alone || chain.kind === 'platform') {
+      log.warn('audit.anchor_check_failed', { chain: chain.kind, err: error });
+      return stale ? alarmed(chain, log, 'unchecked') : 'unchecked';
+    }
+    missedThisRun.push(key);
+    firstMiss ??= error;
+    if (!stale) return 'unchecked';
+    staleThisRun.push(key);
+    failures.set(key, 'unchecked');
+    return 'failed';
+  };
+
+  /** The run's one line for the checks that couldn't run, and its one alarm for those gone too long. */
+  const sayMissed = (): void => {
+    if (missedThisRun.length > 0) {
+      logger.warn('audit.anchor_check_failed', {
+        chain: 'organisation',
+        chains: missedThisRun.length,
+        firstFew: missedThisRun.slice(0, NAMED_ON_A_LINE),
+        err: firstMiss,
+      });
+    }
+    if (staleThisRun.length > 0) {
+      logger.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'anchor',
+        reason: 'unchecked',
+        organisations: staleThisRun.length,
+        firstFew: staleThisRun.slice(0, NAMED_ON_A_LINE),
+      });
+    }
+  };
+
+  const checkOne = async (
+    { chain, verify }: CheckedChain,
+    signal: AbortSignal | undefined,
+    alone = false,
+  ): Promise<Outcome> => {
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
     const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
     const key = keyOf(chain);
@@ -394,9 +441,7 @@ export function createAnchorCheck({
         if (error instanceof Stopped) return 'unchecked';
         // A store that breaks its contract may be a hostile database too (a planted operator, a view for a table).
         if (error instanceof ChainStoreError || refusedByDatabase(error)) return alarm('store');
-        log.warn('audit.anchor_check_failed', { chain: chain.kind, err: error });
-        misses.set(key, (misses.get(key) ?? 0) + 1);
-        return isStale(key) ? alarm('unchecked') : 'unchecked';
+        return missedCheck(chain, log, error, alone);
       }
       return compared(chain, log, report, last);
     } catch (error) {
@@ -616,7 +661,7 @@ export function createAnchorCheck({
     const at = clock.now().getTime();
     const late = (inUse ?? [...seen]).filter((orgId) => at - lastKnown(orgId) >= reachWithinMs);
     if (late.length === 0) return;
-    const count = { organisations: late.length, firstFew: late.slice(0, LATE_NAMED) };
+    const count = { organisations: late.length, firstFew: late.slice(0, NAMED_ON_A_LINE) };
     if (completed > 0) logger.error('audit.anchor_check_behind', { ...count, left: turns.left(), lanes });
     else
       logger.error('audit.integrity_failed', { chain: 'organisation', check: 'anchor', reason: 'unreached', ...count });
@@ -711,6 +756,7 @@ export function createAnchorCheck({
       const outcome = await checkOne(
         { chain: { kind: 'organisation', orgId: id }, verify: (anchor) => organizations.verify(id, anchor) },
         signal,
+        true,
       );
       if (outcome === 'failed') await settle(organizations, id, signal);
     },
@@ -738,12 +784,16 @@ export function createAnchorCheck({
       if (signal?.aborted === true) end();
       signal?.addEventListener('abort', end, { once: true });
       completed = 0;
+      missedThisRun = [];
+      staleThisRun = [];
+      firstMiss = undefined;
       if (durable !== undefined) await readStore(durable, cap);
       const endWrites = durable === undefined ? undefined : writeAlong(durable, signal);
       const outcomes = await checkAll(cap, signal);
       clearTimeout(timer);
       signal?.removeEventListener('abort', end);
       endWrites?.();
+      sayMissed();
       if (signal?.aborted !== true) sayLeft(cap);
       if (durable !== undefined) {
         // A run stopped ends at once: `flush` never throws, and `finish`, where the API is stopping, joins it.

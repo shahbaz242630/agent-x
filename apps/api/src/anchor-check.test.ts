@@ -237,13 +237,13 @@ describe('the anchor check (ADR-012 §2, SEC-DB-11)', () => {
   it("counts each chain's stale period on its own: one organisation's checks don't vouch for another's", async () => {
     const fine = chainGiving([ok(2n)], { kind: 'organisation', orgId: ORG });
     const failing = chainGiving([unreachable()], { kind: 'organisation', orgId: OTHER_ORG });
-    const { check, events, clock } = checking([fine.checked, failing.checked]);
+    const { check, capture, clock } = checking([fine.checked, failing.checked]);
     await check.run();
     clock.advanceBy(STALE_MS);
     await check.run();
 
-    expect(events().filter((line) => line.event === 'audit.integrity_failed')).toEqual([
-      { ...alarm('unchecked'), chain: 'organisation', orgId: OTHER_ORG },
+    expect(capture.lines().filter((line) => line.event === 'audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'unchecked', organisations: 1, firstFew: [OTHER_ORG] }),
     ]);
   });
 
@@ -768,14 +768,13 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
       ...organizations,
       verify: () => Promise.reject(unreachable()),
     };
-    const { check, events, clock } = checking([], undefined, failing);
+    const { check, capture, events, clock } = checking([], undefined, failing);
     await check.run();
     clock.advanceBy(STALE_MS);
     await check.run();
 
-    expect(events()).toEqual([
-      { level: 'warn', event: 'audit.anchor_check_failed', chain: 'organisation', orgId: ORG },
-    ]);
+    expect(events()).toEqual([{ level: 'warn', event: 'audit.anchor_check_failed', chain: 'organisation' }]);
+    expect(capture.lines().find((line) => line.event === 'audit.anchor_check_failed')?.firstFew).toEqual([ORG]);
   });
 
   it('never reads the list twice at once: a read still hung is a warning, and no second read starts', async () => {
@@ -986,7 +985,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
       [ORG]: refused('42501'),
       [OTHER_ORG]: unreachable(),
     });
-    const { check, clock, events } = checking([], undefined, organizations);
+    const { check, clock, capture } = checking([], undefined, organizations);
     await check.run();
     clock.advanceBy(STALE_MS);
     await check.run();
@@ -997,8 +996,8 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
       `hold ${ORG} store`,
       `hold ${OTHER_ORG} -`,
     ]);
-    expect(events().filter((line) => line.orgId === OTHER_ORG && line.event === 'audit.integrity_failed')).toEqual([
-      expect.objectContaining({ reason: 'unchecked' }),
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([
+      expect.objectContaining({ organisations: 1, firstFew: [OTHER_ORG] }),
     ]);
   });
 

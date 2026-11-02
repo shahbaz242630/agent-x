@@ -189,7 +189,7 @@ export const PLAIN_WORDS = {
   },
   'audit.anchor_check_failed': {
     happened: 'The regular tamper check of the audit history could not finish, usually as the database was slow.',
-    broke: 'One audit history went unchecked this time, or all of them if the list could not be read.',
+    broke: 'Some audit histories went unchecked this time; the line says how many. Those on the last list are tried.',
     next: 'It is tried again at the next check. Three misses in a row raise the integrity alarm.',
   },
   'audit.anchor_check_unfinished': {
