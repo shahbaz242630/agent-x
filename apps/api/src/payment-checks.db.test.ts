@@ -1326,11 +1326,14 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
   describe('old payments, more than a run’s budget of them', () => {
     const DAY = 24 * 60 * 60_000;
 
-    /** A world with `count` payments gone UNKNOWN, and `paid` others paid in the last week, all older than a day. */
+    /** A world with `paid` payments still under way, then `count` gone UNKNOWN, all older than a day. */
     async function oldPayments(count: number, paid = 0) {
       const { w, acting } = await ready();
       const unknown: string[] = [];
       const settled: string[] = [];
+      // The others first, so an UNKNOWN comes after them in any sweep that takes them together.
+      for (let n = 0; n < paid; n += 1) settled.push((await ask(acting, w, { amount: AED(5_000n) })).id);
+      await handoffOf(w).run();
       // The fake's .02: made at the partner, its answer lost.
       for (let n = 0; n < count; n += 1) unknown.push((await ask(acting, w, { amount: AED(5_002n) })).id);
       const health = createRailHealth({ clock, logger: testLogger(capture), laneUnknowns: 1_000 });
@@ -1346,8 +1349,6 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
         clock,
         logger: testLogger(capture),
       }).run();
-      for (let n = 0; n < paid; n += 1) settled.push((await ask(acting, w, { amount: AED(5_000n) })).id);
-      await handoffOf(w).run();
       clock.advanceBy(2 * DAY);
       return { w, unknown, settled };
     }
@@ -1395,7 +1396,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       for (const instruction of instructions) expect(asked).toContain(instruction);
     });
 
-    it('asks the UNKNOWNs ahead of the paid watch, however many that holds', async () => {
+    it('asks the UNKNOWNs ahead of the rest, older though the rest are, however many they are', async () => {
       const { w, unknown, settled } = await oldPayments(1, 6);
       const { rail, asked } = costingASecond(w);
       const job = checksOver([w], rail, breaker(), { limits: { total: 1, perOrganisation: 1 }, runBudgetMs: 3_000 });
@@ -1405,7 +1406,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       await job.run();
 
       expect(asked).toContain(unknownInstruction);
-      // The watch's part of the budget a little: not all of it this run.
+      // The rest's part of the budget a little: not all of them this run.
       expect(paid.filter((instruction) => asked.includes(instruction)).length).toBeLessThan(paid.length);
     });
 
@@ -1422,6 +1423,36 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       await job.run();
 
       expect(lines('payment_check.lap_behind')).toEqual([expect.objectContaining({ sweep: 'unknown', level: 'warn' })]);
+    });
+
+    it('keeps a lap going past its 30th run, unrestarted: said once however long', async () => {
+      const { w } = await oldPayments(1);
+      // No budget: it goes nowhere, run after run.
+      const job = checksOver([w], w.rail, breaker(), { runBudgetMs: 0 });
+
+      await job.run();
+      clock.advanceBy(31 * 60_000);
+      for (let run = 1; run < 30; run += 1) await job.run();
+      expect(lines('payment_check.lap_behind').filter(({ sweep }) => sweep === 'unknown')).toHaveLength(1);
+
+      // Its 31st run, when another would begin, and one more: a restart would have it said again.
+      await job.run();
+      clock.advanceBy(31 * 60_000);
+      await job.run();
+      expect(lines('payment_check.lap_behind').filter(({ sweep }) => sweep === 'unknown')).toHaveLength(1);
+    });
+
+    it('holds the regular turns to their part of the budget, so the laps get theirs', async () => {
+      const { w, acting } = await ready();
+      for (let n = 0; n < 4; n += 1) await ask(acting, w, { amount: AED(5_000n) });
+      await handoffOf(w).run();
+      const { rail, asked } = costingASecond(w);
+      const job = checksOver([w], rail, breaker(), { limits: { total: 1, perOrganisation: 1 }, runBudgetMs: 2_000 });
+
+      await job.run();
+
+      // The regular turns' second, spent on one; the lap of the rest takes one more in its own.
+      expect(asked).toHaveLength(2);
     });
 
     it('starts no new lap while one is going, and a new one once it has ended, at its 30th run', async () => {

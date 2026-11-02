@@ -561,6 +561,55 @@ describe('a message the check can’t take yet waits for the next run', () => {
     expect((await inbox())[0]?.taken_at).toBeNull();
   });
 
+  /** The check with messages alone to take: no organisation listed, so no regular turn runs beside them. */
+  const messagesOnly = (rail: FakeRail) =>
+    createPaymentChecks({
+      list: () => Promise.resolve([]),
+      database: app,
+      outbox: createOutbox({ ids, clock }),
+      rail,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
+      databaseGate: handoffDatabaseGate(6),
+      events: events(),
+    });
+
+  it('ends a message’s own checks at exactly the third unanswered', async () => {
+    const w = await messageOverPayments(4);
+    let asked = 0;
+
+    await messagesOnly({
+      ...w.rail,
+      getExecution: () => {
+        asked += 1;
+        return Promise.reject(new RailUnavailable());
+      },
+    }).run();
+
+    expect(asked).toBe(3);
+    expect((await inbox())[0]?.taken_at).toBeNull();
+  });
+
+  it('stops a message’s own checks at the run’s budget', async () => {
+    const w = await messageOverPayments(3);
+    let asked = 0;
+
+    await messagesOnly({
+      ...w.rail,
+      getExecution: (ref) => {
+        asked += 1;
+        clock.advanceBy(60_000);
+        return w.rail.getExecution(ref);
+      },
+    }).run();
+
+    expect(asked).toBe(1);
+    expect((await inbox())[0]?.taken_at).toBeNull();
+  });
+
   it('stops a message’s checks past the run’s budget, and leaves it for the next run', async () => {
     const w = await messageOverPayments(3);
     let asked = 0;
@@ -578,6 +627,28 @@ describe('a message the check can’t take yet waits for the next run', () => {
     // Past the whole budget at the first; the regular turns beside it may have begun theirs.
     expect(asked).toBeLessThan(3);
     expect((await inbox())[0]?.taken_at).toBeNull();
+  });
+
+  it('counts one unanswered call once, however many messages name its payment', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await handoffOf(w).run();
+    const { instructionId } = await transactionOf(w, request.id);
+    for (let n = 0; n < 3; n += 1) {
+      await database.as('admin').query(
+        `insert into provider_events.inbox (id, partner, dedupe_key, event_type, reference_kind, reference, org_id, received_at)
+           values ($1, 'fake', $2, 'payment.update', 'instruction', $3, $4, now())`,
+        [ids.next(), ids.next(), instructionId, w.org],
+      );
+    }
+    const down: FakeRail = { ...w.rail, getExecution: () => Promise.reject(new RailUnavailable()) };
+    clock.advanceBy(STEP);
+
+    await checksOf(w, down).run();
+
+    expect(lines('payment_check.bank_unavailable')).toEqual([
+      expect.objectContaining({ unreached: 1, stopped: false }),
+    ]);
   });
 
   it('checks a payment once for two messages naming it, and takes both', async () => {

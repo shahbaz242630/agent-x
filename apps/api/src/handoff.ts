@@ -333,7 +333,7 @@ export function createHandoff({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
-  /** The bank breaker (rail-health.ts), shared with what reopens it: main.ts gives the bank check its `watchedRail`. */
+  /** The bank breaker (rail-health.ts), shared with what reopens it: job-list.ts gives the bank check the same one. */
   readonly health: RailHealth;
   /** How many of an organisation's requests are read at once (HANDOFF_PAGE unless a test names fewer). */
   readonly page?: number;
