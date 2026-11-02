@@ -14,7 +14,7 @@ import { createOutboundFetch } from '@agentx/platform/outbound';
 import { azureBlobOrigins, azureWriteOnceStore, folderWriteOnceStore } from '@agentx/platform/storage';
 
 export function anchorLogOf(
-  { environment, anchorStore: { directory, container }, audit: { anchorEpoch: epoch, mostOrganisations } }: Config,
+  { environment, anchorStore: { directory, container }, audit: { anchorEpoch: epoch } }: Config,
   {
     clock,
     ...services
@@ -25,7 +25,7 @@ export function anchorLogOf(
     readonly alertAfterMs: number;
   },
 ): AnchorLog | undefined {
-  const shared = { ...services, epoch, mostChains: mostOrganisations, now: () => clock.now() };
+  const shared = { ...services, epoch, now: () => clock.now() };
   if (container !== null) {
     const fetch = createOutboundFetch(azureBlobOrigins(container));
     return createAnchorLog({ ...shared, store: azureWriteOnceStore({ settings: container, fetch }) });

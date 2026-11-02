@@ -28,6 +28,7 @@ const LATER_KEYS = createKeyProvider(
 const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
 const CHAIN: Chain = { kind: 'organisation', orgId: ORG };
+const OTHER: Chain = { kind: 'platform' };
 const OTHER_CHAIN: Chain = { kind: 'organisation', orgId: OTHER_ORG };
 const PLATFORM: Chain = { kind: 'platform' };
 const START = new Date('2026-11-02T09:00:00.000Z');
@@ -1004,24 +1005,121 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'file', kind: 'deltas' })]);
     });
 
-    it('a file of more chains than the default opens where the setting says it may, so it can not read as unreadable', async () => {
-      const fake = createFakeWriteOnceStore();
-      fake.files.set(nameOf('deltas', 0), gzipSync(Buffer.alloc(65 * 1024 * 1024, 10)));
-      const capture = new LogCapture();
-      const log = createAnchorLog({
-        store: fake.store,
-        keys,
-        logger: testLogger(capture),
-        now: () => LATER,
-        epoch: 1,
-        alertAfterMs: 1000,
-        mostChains: 200_000,
+    describe('a file past what this process can hold', () => {
+      const limited = (fake: FakeWriteOnceStore, mostFileBytes: number) => {
+        const capture = new LogCapture();
+        const log = createAnchorLog({
+          store: fake.store,
+          keys,
+          logger: testLogger(capture),
+          now: () => LATER,
+          epoch: 1,
+          alertAfterMs: 1000,
+          mostFileBytes,
+        });
+        return { log, capture };
+      };
+
+      it('signed and sound is capacity, with the true reason: never `file`, and payments wait', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('snapshots', 0);
+        fake.files.set(name, fileOf(name, anchorAt(CHAIN, 3n), anchorAt(OTHER, 4n)));
+        const { log, capture } = limited(fake, 200);
+        await log.read();
+        expect(log.state()).toBe('unreadable');
+        expect(log.latest(CHAIN)).toBeUndefined();
+        expect(capture.lines().filter((line) => line.event === 'audit.integrity_failed')).toEqual([]);
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([
+          expect.objectContaining({ level: 'error', kind: 'snapshots', mostBytes: 200 }),
+        ]);
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_unreadable')).toEqual([]);
       });
+
+      it('does not walk back to an older snapshot, which would read older anchors', async () => {
+        const fake = createFakeWriteOnceStore();
+        const [older, newer] = [nameOf('snapshots', 0), nameOf('snapshots', 60)];
+        fake.files.set(older, fileOf(older, anchorAt(CHAIN, 3n)));
+        fake.files.set(newer, fileOf(newer, anchorAt(CHAIN, 9n), anchorAt(OTHER, 4n), anchorAt(CHAIN, 10n)));
+        const { log } = limited(fake, fileOf(older, anchorAt(CHAIN, 3n)).length * 2);
+        await log.read();
+        expect(log.state()).toBe('unreadable');
+        expect(log.latest(CHAIN)).toBeUndefined();
+      });
+
+      it('a forged line past it is `file`, and the read stops there', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('deltas', 0);
+        fake.files.set(
+          name,
+          gzippedLines([lineOf(anchorAt(CHAIN, 3n)), lineOf(anchorAt(OTHER, 4n)).replace('"a"', '"z"')]),
+        );
+        const { log, capture } = limited(fake, 200);
+        await log.read();
+        expect(capture.lines().filter((line) => line.reason === 'file')).toHaveLength(1);
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([]);
+        expect(log.latest(CHAIN)).toBeUndefined();
+      });
+
+      it('with no closing line past it is `file`', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('deltas', 0);
+        fake.files.set(name, gzippedLines([lineOf(anchorAt(CHAIN, 3n)), lineOf(anchorAt(OTHER, 4n))]));
+        const { capture, log } = limited(fake, 200);
+        await log.read();
+        expect(capture.lines().filter((line) => line.reason === 'file').length).toBeGreaterThan(0);
+      });
+
+      it('far past it is `file` however it is signed: a file anyone can add must not be read for ever', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('snapshots', 0);
+        fake.files.set(name, fileOf(name, anchorAt(CHAIN, 3n), anchorAt(OTHER, 4n)));
+        const { log, capture } = limited(fake, 50);
+        await log.read();
+        expect(capture.lines().filter((line) => line.reason === 'file')).toHaveLength(1);
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([]);
+        expect(log.state()).toBe('unreadable');
+      });
+
+      it('a run of empty lines past it is `file` at once: no honest file has them, and they would cost no key to make', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('deltas', 0);
+        fake.files.set(name, gzipSync(Buffer.alloc(1024 * 1024, 10)));
+        const { capture, log } = limited(fake, 50);
+        await log.read();
+        expect(capture.lines().filter((line) => line.reason === 'file')).toHaveLength(1);
+      });
+
+      it('a process already reading goes on from what it holds, with the true reason', async () => {
+        const fake = createFakeWriteOnceStore();
+        const small = nameOf('snapshots', 0);
+        fake.files.set(small, fileOf(small, anchorAt(CHAIN, 3n)));
+        const size = fileOf(small, anchorAt(CHAIN, 3n)).length * 4;
+        const { log, capture } = limited(fake, size);
+        await log.read();
+        expect(log.state()).toBe('read');
+        const big = nameOf('snapshots', 60);
+        const many = Array.from({ length: 20 }, (_, index) => anchorAt(CHAIN, BigInt(index + 10)));
+        fake.files.set(big, fileOf(big, ...many));
+        await log.read();
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(3n);
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toHaveLength(1);
+      });
+    });
+
+    it('reads a file far larger than one chunk of its opening, lines across the chunks, every one checked', async () => {
+      const fake = createFakeWriteOnceStore();
+      const name = nameOf('snapshots', 0);
+      const many = Array.from({ length: 1000 }, (_, index) =>
+        anchorAt({ kind: 'organisation', orgId: `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}` }, 1n),
+      );
+      fake.files.set(name, fileOf(name, ...many));
+      const { log, lines } = logOver(fake);
       await log.read();
-      expect(capture.lines().filter((line) => line.reason === 'file')).toEqual([]);
-      expect(capture.lines().filter((line) => line.reason === 'unclosed')).toHaveLength(1);
-      // As the one below: 65 MB to shrink.
-    }, 30_000);
+      expect(lines('audit.integrity_failed')).toEqual([]);
+      expect(log.state()).toBe('read');
+      expect(log.organisations()).toHaveLength(1000);
+    });
 
     it('the same place signed later replaces the older in memory, an older one not, and neither is a fork', async () => {
       const fake = createFakeWriteOnceStore();

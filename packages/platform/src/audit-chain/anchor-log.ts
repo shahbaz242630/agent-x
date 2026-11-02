@@ -37,8 +37,10 @@
 // Whoever also holds the `audit-anchor` signing key can write anything a file may
 // hold: nothing here guards against them.
 import { randomUUID } from 'node:crypto';
-import { promisify } from 'node:util';
-import { gunzip as gunzipCallback, gzip as gzipCallback } from 'node:zlib';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { getHeapStatistics } from 'node:v8';
+import { createGunzip, createGzip } from 'node:zlib';
 
 import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
@@ -46,9 +48,6 @@ import { OverwriteRefused, type WriteOnceStore } from '../storage/write-once.ts'
 import type { Message } from '../keys/message.ts';
 import { type Anchor, type AnchorStore, anchorMessage } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
-
-const gzip = promisify(gzipCallback);
-const gunzip = promisify(gunzipCallback);
 
 /** How often every chain's anchor is written whole, where something moved. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -77,11 +76,18 @@ const MOST_SPOILED_SNAPSHOTS = 24;
  */
 const MOST_AHEAD_MS = 5 * 60_000;
 
-/** The most a file may open to: every line of 100,000 chains (MOST_ORGANIZATIONS) is about 30 MB. */
-const MOST_FILE_BYTES = 64 * 1024 * 1024;
+/**
+ * What of a file this process can take into memory, a fifth of its heap: an anchor held is about 2.6 times its line (885
+ * bytes to 340), so that much file is about half the heap in anchors. Past it a file is read on only to tell a sound one,
+ * capacity, from a broken one; it isn't kept. By what the process has, not by a setting the store can outgrow.
+ */
+const heapsFileBytes = (): number => Math.floor(getHeapStatistics().heap_size_limit / 5);
 
-/** A line's most, for files of more chains than that: a store file too big to open would read as a store unreadable. */
-const MOST_LINE_BYTES = 672;
+/** How far past that a file is read: a million lines of ones signed before, in a file anyone can add, cost little to pack. */
+const MOST_READ_PAST = 8;
+
+/** A line past this is no line of ours; they are about 340 bytes. */
+const MOST_LINE_BYTES = 4096;
 
 const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const SEQ = /^(?:0|[1-9]\d{0,18})$/;
@@ -92,6 +98,21 @@ const ORGANISATION = 'organisation:';
 const LATER_KINDS: ReadonlySet<unknown> = new Set(['p', 'r']);
 
 type Kind = 'deltas' | 'snapshots';
+
+/** A file that can't be one of ours, found while reading it. */
+class BrokenFile extends Error {}
+
+/** A file signed and sound, past what this process can hold. */
+class BeyondMemory extends Error {
+  readonly kind: Kind;
+  readonly fileAt: string;
+
+  constructor(kind: Kind, fileAt: string) {
+    super('a sound file too large for this process');
+    this.kind = kind;
+    this.fileAt = fileAt;
+  }
+}
 
 export interface AnchorLog extends AnchorStore {
   /** The epoch anchors kept here must be signed for. */
@@ -209,28 +230,78 @@ function closes(keys: KeyProvider, fields: unknown, name: string, epoch: number,
   return isSigned(keys, said.kv, closingMessage(name, epoch, lines), Buffer.from(said.sig, 'base64'));
 }
 
-/** A file's anchors, how many of its lines failed, and whether it closes for its own name. Lines of a later piece's kinds are neither. */
-function readLines(keys: KeyProvider, text: string, name: string, epoch: number) {
-  const all = text.split('\n').flatMap((line) => (line === '' ? [] : [parsed(line)]));
-  const last = all.at(-1);
-  // Only the last line can close: one anywhere else is one more line that fails.
-  const body = kindOf(last) === 'c' ? all.slice(0, -1) : all;
+/**
+ * A file's lines as it opens, never the whole as one string: V8 can't hold one much past 1.5 million chains' worth. Each
+ * line is signed on its own and the closing line signs how many came before, so nothing needs the file whole to be checked.
+ */
+async function* linesIn(bytes: Buffer, opened: { bytes: number }): AsyncGenerator<string> {
+  const opening = createGunzip();
+  opening.end(bytes);
+  let rest: Buffer = Buffer.alloc(0);
+  for await (const chunk of opening as AsyncIterable<Buffer>) {
+    opened.bytes += chunk.length;
+    const joined = rest.length > 0 ? Buffer.concat([rest, chunk]) : chunk;
+    let from = 0;
+    for (let end = joined.indexOf(10, from); end >= 0; end = joined.indexOf(10, from)) {
+      yield joined.toString('utf8', from, end);
+      from = end + 1;
+    }
+    rest = joined.subarray(from);
+    if (rest.length > MOST_LINE_BYTES) throw new BrokenFile('a line longer than any of ours');
+  }
+  if (rest.length > 0) yield rest.toString('utf8');
+}
+
+/**
+ * A file's anchors, how many of its lines failed, whether it closes for its own name, and whether it went past `mostBytes`,
+ * when it holds none: then its first wrong line, or an empty one, or going on too far, is thrown. Lines of a later piece's
+ * kinds are neither sound nor failed.
+ */
+async function readFile(keys: KeyProvider, bytes: Buffer, name: string, epoch: number, mostBytes: number) {
+  const opened = { bytes: 0 };
   const anchors: Anchor[] = [];
   let bad = 0;
-  for (const fields of body) {
+  let body = 0;
+  const judged = (fields: unknown): void => {
+    body += 1;
     const kind = kindOf(fields);
-    if (LATER_KINDS.has(kind)) continue;
+    if (LATER_KINDS.has(kind)) return;
     const anchor = kind === 'a' ? anchorFrom(fields as Record<string, unknown>) : undefined;
     if (
-      anchor !== undefined &&
-      isSigned(keys, anchor.keyVersion, anchorMessage(anchor.chain, anchor, anchor.at, epoch), anchor.signature)
+      anchor === undefined ||
+      !isSigned(keys, anchor.keyVersion, anchorMessage(anchor.chain, anchor, anchor.at, epoch), anchor.signature)
     ) {
-      anchors.push(anchor);
-    } else {
       bad += 1;
+    } else if (opened.bytes <= mostBytes) {
+      anchors.push(anchor);
+    }
+  };
+  let last: unknown;
+  let any = false;
+  for await (const line of linesIn(bytes, opened)) {
+    if (opened.bytes > mostBytes && (bad > 0 || line === '' || opened.bytes > mostBytes * MOST_READ_PAST)) {
+      throw new BrokenFile('past what can be held, and not a sound file');
+    }
+    if (line !== '') {
+      if (any) judged(last);
+      last = parsed(line);
+      any = true;
     }
   }
-  return { anchors, bad, closed: closes(keys, last, name, epoch, body.length) };
+  // Only the last line can close: one anywhere else is one more line that fails.
+  const closing = kindOf(last) === 'c';
+  if (any && !closing) judged(last);
+  const past = opened.bytes > mostBytes;
+  return { anchors: past ? [] : anchors, bad, past, closed: closing && closes(keys, last, name, epoch, body) };
+}
+
+/** Gzipped lines, made a line at a time: the whole as one string has the same limit as on the way in. */
+async function gzippedLines(lines: Iterable<string>): Promise<Buffer> {
+  const made: Buffer[] = [];
+  await pipeline(Readable.from(lines), createGzip(), async (gzipped: AsyncIterable<Buffer>) => {
+    for await (const chunk of gzipped) made.push(chunk);
+  });
+  return Buffer.concat(made);
 }
 
 /** The anchors held durable, read and written through `store`, and in memory for Tx A. */
@@ -241,7 +312,7 @@ export function createAnchorLog({
   now,
   epoch,
   alertAfterMs,
-  mostChains = 0,
+  mostFileBytes = heapsFileBytes(),
 }: {
   readonly store: WriteOnceStore;
   readonly keys: KeyProvider;
@@ -251,10 +322,9 @@ export function createAnchorLog({
   readonly epoch: number;
   /** How long reads once the store is read, or writes, may fail before that is the alert, not just a warning. */
   readonly alertAfterMs: number;
-  /** AGENTX_AUDIT_MOST_ORGANISATIONS: how many chains a file may hold, past what every process can open anyway. */
-  readonly mostChains?: number;
+  /** What of a file this process can take into memory (a fifth of its heap) unless a test says. */
+  readonly mostFileBytes?: number;
 }): AnchorLog {
-  const mostFileBytes = Math.max(MOST_FILE_BYTES, mostChains * MOST_LINE_BYTES);
   const folder = (kind: Kind): string => `e${String(epoch)}/${kind}/`;
   const anchors = new Map<string, Anchor>();
   // What has moved since it was last written: one line a chain at most, however long the store stays away.
@@ -313,14 +383,19 @@ export function createAnchorLog({
   const opened = async (kind: Kind, name: string): Promise<{ anchors: readonly Anchor[]; sound: boolean }> => {
     const bytes = await store.get(name);
     const fileAt = whenNamed(countdownOf(kind, name));
-    let text: string;
+    let file: Awaited<ReturnType<typeof readFile>>;
     try {
-      text = (await gunzip(bytes, { maxOutputLength: mostFileBytes })).toString('utf8');
+      file = await readFile(keys, bytes, name, epoch, mostFileBytes);
     } catch (error) {
       alarm('file', { kind, fileAt, err: error });
       return { anchors: [], sound: false };
     }
-    const { anchors: lines, bad, closed } = readLines(keys, text, name, epoch);
+    const { anchors: lines, bad, closed, past } = file;
+    if (past) {
+      if (bad === 0 && closed) throw new BeyondMemory(kind, fileAt);
+      alarm('file', { kind, fileAt });
+      return { anchors: [], sound: false };
+    }
     if (bad > 0) alarm('signature', { kind, fileAt, lines: bad });
     if (!closed) alarm('unclosed', { kind, fileAt });
     return { anchors: lines, sound: bad === 0 && closed };
@@ -338,7 +413,7 @@ export function createAnchorLog({
       if (snapshotFrom !== undefined && countdown >= snapshotFrom) break;
       if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
       const file = await opened('snapshots', name);
-      lines.push(...file.anchors);
+      for (const line of file.anchors) lines.push(line);
       if (file.sound) return { lines, base: countdown, sound: countdown };
       spoiled += 1;
     }
@@ -366,7 +441,7 @@ export function createAnchorLog({
       }
       files += 1;
       const file = await opened('deltas', name);
-      lines.push(...file.anchors);
+      for (const line of file.anchors) lines.push(line);
       if (file.sound) newest ??= name;
     }
     return { lines, newest, files };
@@ -426,7 +501,17 @@ export function createAnchorLog({
       readFailingSince = undefined;
       state = 'read';
     } catch (error) {
-      readFailed(error);
+      if (!(error instanceof BeyondMemory)) {
+        readFailed(error);
+        return;
+      }
+      // Fails closed all the same: anchors it can't hold can't be compared, so payments wait, for the true reason.
+      logger.error('audit.anchor_store_beyond_memory', {
+        kind: error.kind,
+        fileAt: error.fileAt,
+        mostBytes: mostFileBytes,
+      });
+      if (state !== 'read') state = 'unreadable';
     }
   };
 
@@ -477,7 +562,12 @@ export function createAnchorLog({
       kv: keyVersion,
       sig: signature.toString('base64'),
     });
-    const bytes = await gzip(`${[...lines.map(lineOf), closing].join('\n')}\n`);
+    const bytes = await gzippedLines(
+      (function* lined() {
+        for (const line of lines) yield `${lineOf(line)}\n`;
+        yield `${closing}\n`;
+      })(),
+    );
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);
     return { kind, name, bytes, lines };
