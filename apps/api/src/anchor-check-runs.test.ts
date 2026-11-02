@@ -19,7 +19,7 @@ import {
   reachWithin,
   RUN_WITHIN_MS,
 } from './anchor-check.ts';
-import { SLOW_AFTER_MS } from './anchor-turns.ts';
+import { lanesWithin, SLOW_AFTER_MS } from './anchor-turns.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -530,6 +530,13 @@ describe('a run ends in its time, with its line, and the next goes on from there
 });
 
 describe('how long a turn may take (the bound) and what is said past it', () => {
+  it('keeps its lanes to half the pool, and at least one', () => {
+    expect(lanesWithin(4, 10)).toBe(4);
+    expect(lanesWithin(64, 10)).toBe(5);
+    expect(lanesWithin(4, 7)).toBe(3);
+    expect(lanesWithin(4, 1)).toBe(1);
+  });
+
   it('states the bound: seven runs’ time, 63 minutes at the default interval, and a run of four minutes', () => {
     expect(RUN_WITHIN_MS).toBe(240_000);
     expect(reachWithin(300_000)).toBe(63 * 60_000);

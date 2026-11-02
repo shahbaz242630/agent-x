@@ -134,6 +134,8 @@ vi.mock('./start-record.ts', () => ({
 const anchorChecks = vi.hoisted(() => ({
   intervals: [] as number[],
   staleAfter: [] as number[],
+  reachWithin: [] as (number | undefined)[],
+  lanes: [] as (number | undefined)[],
   deadlines: [] as number[],
   chains: [] as unknown[],
   durable: [] as unknown[],
@@ -245,15 +247,20 @@ vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
 });
 
 vi.mock('./anchor-check.ts', () => ({
+  reachWithin: (intervalMs: number) => 7 * intervalMs,
   createAnchorCheck: (options: {
     chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
     staleAfterMs: number;
+    reachWithinMs?: number;
+    lanes?: number;
     deadlineMs: number;
     durable?: unknown;
   }) => {
     anchorChecks.chains.push(...options.chains.map((one) => one.chain));
     anchorChecks.verifies.push(...options.chains.map((one) => one.verify));
     anchorChecks.staleAfter.push(options.staleAfterMs);
+    anchorChecks.reachWithin.push(options.reachWithinMs);
+    anchorChecks.lanes.push(options.lanes);
     anchorChecks.deadlines.push(options.deadlineMs);
     anchorChecks.durable.push(options.durable);
     return {
@@ -393,6 +400,8 @@ beforeEach(() => {
   startRecord.result = () => Promise.resolve(7n);
   anchorChecks.intervals.length = 0;
   anchorChecks.staleAfter.length = 0;
+  anchorChecks.reachWithin.length = 0;
+  anchorChecks.lanes.length = 0;
   anchorChecks.deadlines.length = 0;
   anchorChecks.chains.length = 0;
   anchorChecks.verifies.length = 0;
@@ -610,6 +619,17 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     // Three intervals without a completed check are the alarm.
     expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
     expect(anchorChecks.deadlines).toEqual([120_000, 120_000]);
+    // How long a turn may wait goes with the interval.
+    expect(anchorChecks.reachWithin).toEqual([2_100_000, 4_200_000]);
+  });
+
+  it('gives the anchor check the lanes the setting names, never more than half the pool (4D2e E6)', async () => {
+    await start();
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_LANES: '5' });
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_LANES: '64' });
+    await start({ ...ENV, AGENTX_DB_POOL_MAX: '6' });
+
+    expect(anchorChecks.lanes).toEqual([4, 5, 5, 3]);
   });
 
   it("keeps the chains' anchors where the config names, in memory alone otherwise, and writes what moved as the schedule stops (PL-58)", async () => {

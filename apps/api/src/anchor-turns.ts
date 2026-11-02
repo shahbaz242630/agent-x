@@ -13,6 +13,10 @@
 /** A check this long marks its chain slow: most take milliseconds, and this is a quarter of a chain's whole deadline. */
 export const SLOW_AFTER_MS = 30_000;
 
+/** The lanes asked for, in half the pool at most: the requests and the other jobs have the rest. A small pool's check goes slower, no less. */
+export const lanesWithin = (asked: number, poolMax: number): number =>
+  Math.min(asked, Math.max(1, Math.floor(poolMax / 2)));
+
 export interface Turns {
   /**
    * The start of a run. `listed` is all of them, `fresh` those never seen before, `unlisted` those seen and not listed.
