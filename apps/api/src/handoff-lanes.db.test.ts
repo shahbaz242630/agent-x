@@ -280,6 +280,22 @@ describe('turns: fair, kept between runs (fair-lanes.ts)', () => {
     expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 1 })]);
   });
 
+  it('counts nothing left standing for an organisation with no rows: a trip saved', async () => {
+    const { w } = await ready();
+    let opened = 0;
+    const job = handoffOver([w], railOver([w]).rail, {
+      database: databaseWatched(() => {
+        opened += 1;
+      }),
+    });
+    // Its sweep done on the first; on the second, the pause (1) and the page (2), and no count.
+    await job.run();
+    opened = 0;
+    await job.run();
+
+    expect(opened).toBe(2);
+  });
+
   it('a frozen organisation stops its turn and raises no stale alert', async () => {
     const { w, requests } = await worldWith(3);
     const mandateId = await shared.mandateIdOf(w);

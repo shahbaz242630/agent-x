@@ -317,9 +317,13 @@ export function createHandoff({
   // Each organisation's waiting requests and why (gate H5, H8): `said` as of its last full pass, `now` in the pass under
   // way, which may take several runs; replaced only after a full pass, so a lane cut short forgets nothing, and a lane
   // that ended its turn on its first request never reads as if the rest had stopped waiting.
-  const waiting = new Map<string, { said: Map<string, string>; now: Map<string, string> }>();
+  const waiting = new Map<string, { said: Map<string, string>; now: Map<string, string>; sawRows: boolean }>();
   const waitingOf = (orgId: string) => {
-    const lane = waiting.get(orgId) ?? { said: new Map<string, string>(), now: new Map<string, string>() };
+    const lane = waiting.get(orgId) ?? {
+      said: new Map<string, string>(),
+      now: new Map<string, string>(),
+      sawRows: false,
+    };
     waiting.set(orgId, lane);
     return lane;
   };
@@ -712,7 +716,9 @@ export function createHandoff({
   const laneRead = async (orgId: string, after: string | undefined): Promise<string[] | null> => {
     const log = logger.child({ orgId });
     try {
-      return await approvedOf(orgId, after, log);
+      const approved = await approvedOf(orgId, after, log);
+      if (approved.length > 0) waitingOf(orgId).sawRows = true;
+      return approved;
     } catch (error) {
       log.error('handoff.failed', { err: error });
       return null;
@@ -751,7 +757,9 @@ export function createHandoff({
     for (const [orgId, outcome] of outcomes) {
       if (outcome !== 'whole') continue;
       const lane = waitingOf(orgId);
-      if (!stopped()) await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));
+      // A pass that read no rows has nothing to count: a trip saved for each idle organisation.
+      if (lane.sawRows && !stopped()) await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));
+      lane.sawRows = false;
       lane.said = lane.now;
       lane.now = new Map();
     }
