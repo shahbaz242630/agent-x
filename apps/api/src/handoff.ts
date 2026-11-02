@@ -394,7 +394,11 @@ export function createHandoff({
   const staleSaid = new Map<string, number>();
   const staleRead = new Map<string, number>();
   const cutAtTheGate = new Set<string>();
-  const waitingAsAWhole = new Set<string>();
+  // When each was last seen waiting as a whole. Kept between runs, so a run the budget cuts before reaching it says
+  // nothing either; for one age only, as under lasting overload a run may never reach it to see it moved.
+  const waitingAsAWhole = new Map<string, number>();
+  const seenWaitingLately = (orgId: string): boolean =>
+    clock.now().getTime() - (waitingAsAWhole.get(orgId) ?? Number.NEGATIVE_INFINITY) < QUEUE_STALE_MS;
   // What each organisation was told of its payments waiting for the bank: its lane's hold, and the platform's outage.
   // One signed event an outage and one a lane's hold, not one a run; an acceptance of its own clears it.
   const toldHeld = new Map<string, { readonly lane?: true; readonly bank?: number }>();
@@ -769,6 +773,10 @@ export function createHandoff({
       return 'next';
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
+    // Before the bank's answer, which a later Tx A seeing a freeze can overtake.
+    const whole = done.outcome === 'waiting' && isOrganisationWide(done.why);
+    if (whole) waitingAsAWhole.set(orgId, clock.now().getTime());
+    else if (done.outcome !== 'stopped' && done.outcome !== 'held') waitingAsAWhole.delete(orgId);
     if (done.outcome === 'handed_off') await sent(orgId, id, done, log);
     if (done.outcome === 'stopped') {
       // At the default limits a backlogged lane usually ends here, not cut by the lanes themselves: still counted (review).
@@ -780,10 +788,6 @@ export function createHandoff({
       await tellHeld(orgId, done.hold, done.outage, log);
       return 'end_turn';
     }
-    const whole = done.outcome === 'waiting' && isOrganisationWide(done.why);
-    // Kept between runs: a later run the budget cuts before reaching it says nothing either, until one is seen moving.
-    if (whole) waitingAsAWhole.add(orgId);
-    else waitingAsAWhole.delete(orgId);
     if (done.outcome === 'waiting') noteWaiting(orgId, id, done.why, log);
     return whole ? 'end_turn' : 'next';
   };
@@ -880,8 +884,7 @@ export function createHandoff({
       const lane = waitingOf(orgId);
       const cut = outcome === 'cut' || cutAtTheGate.has(orgId);
       // A frozen or held organisation's rows wait for that, whichever of them the run reached (review).
-      const counted =
-        outcome === 'whole' || (cut && !waitingAsAWhole.has(orgId) && health.heldFor(orgId) === undefined);
+      const counted = outcome === 'whole' || (cut && !seenWaitingLately(orgId) && health.heldFor(orgId) === undefined);
       // A pass that read no rows has nothing to count: a trip saved for each idle organisation.
       if (counted && lane.sawRows && signal?.aborted !== true) {
         await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));

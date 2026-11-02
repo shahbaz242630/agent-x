@@ -902,9 +902,9 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
             if (cutting) clock.advanceBy(1_000);
           }),
         });
+        clock.advanceBy(QUEUE_STALE_MS + 60_000);
         await job.run();
         cutting = true;
-        clock.advanceBy(QUEUE_STALE_MS + 60_000);
         const stopCutting = () => {
           cutting = false;
         };
@@ -918,6 +918,15 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
 
         expect(sent).toEqual([]);
         expect(lines('handoff.queue_stale')).toEqual([]);
+      });
+
+      it('is counted again when no run has reached it for the queue’s age: overload stays no silence', async () => {
+        const { job } = await pausedThenCut();
+        clock.advanceBy(QUEUE_STALE_MS);
+
+        await job.run();
+
+        expect(lines('handoff.queue_stale')).not.toEqual([]);
       });
 
       it('is counted again once a run has seen it moving', async () => {
