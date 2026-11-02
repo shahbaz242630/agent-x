@@ -38,6 +38,15 @@
 // walls stripped to wait out one run: then a new table's shape is the alarm at once.
 // A release renaming a table keeps its walls, so raises nothing that way.
 //
+// **A trigger on a table already built** can't be judged by its shape as a new
+// table is: any trigger on a known table is the alarm at once, and that must stay,
+// as a planted one is the attack. So the image before a migration has to know the
+// trigger exactly, or it raises a false tamper alarm when the migration ends. That
+// knowledge can't come with the migration, as the image running then is older: it
+// lands first, in COMING_TRIGGERS, and reaches a release, and only then the
+// migration may run. Each entry is compared whole as Postgres prints it, and its
+// function by hash: release-shaped when exact, and anything else the alarm at once.
+//
 // **What it can read.** Everything here is readable by an ordinary role —
 // checked on 16 and 18 before it was written (pg_class, pg_namespace,
 // pg_attribute, pg_policy, pg_trigger, pg_rewrite, pg_cast, pg_db_role_setting,
@@ -218,6 +227,58 @@ const TABLE_GUARDS: readonly TableGuard[] = [
 const ORDER_KEY_FUNCTION = 'spend_requests.order_key_of';
 const ORDER_FOLD_BODY = 'bb6d9bf53645d25b221df7960884a98a1f8054002f2d2d480ea64246a726eabe';
 
+/**
+ * A trigger a migration adds to a table already built, as `pg_get_triggerdef` prints it: that one text holds its name,
+ * table, events, deferral, condition, function and arguments. Its function is held to the SHA-256 of its body.
+ */
+export interface WrittenTrigger {
+  readonly table: string;
+  readonly name: string;
+  readonly definition: string;
+  readonly function: string;
+  readonly body: string;
+}
+
+const MARK_FUNCTION = 'directory.mark_org_work';
+const MARK_BODY = '6cae37308679fd17975fca6e78aa25f031395080196fb037e0d947ae2b868229';
+
+/** Which organisation has which job waiting (0070, 4D2e D6): deferred, so each fires inside COMMIT. */
+const markTrigger = (table: string, name: string, condition: string, job: string, wait: string): WrittenTrigger => ({
+  table,
+  name,
+  definition: `CREATE CONSTRAINT TRIGGER ${name} AFTER INSERT OR UPDATE ON ${table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (${condition}) EXECUTE FUNCTION ${MARK_FUNCTION}('${job}', '${wait}')`,
+  function: MARK_FUNCTION,
+  body: MARK_BODY,
+});
+
+/**
+ * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
+ * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
+ */
+const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  markTrigger(
+    'spend_requests.requests',
+    'marks_hand_off',
+    "(new.status = ANY (ARRAY['APPROVED'::text, 'INSTRUCTION_READY'::text]))",
+    'hand_off',
+    '0 seconds',
+  ),
+  markTrigger(
+    'transactions.transactions',
+    'marks_hand_off_sweep',
+    "(new.status = 'SUBMISSION_PENDING'::text)",
+    'hand_off_sweep',
+    '10 minutes',
+  ),
+  markTrigger(
+    'transactions.transactions',
+    'marks_payment_check',
+    "(new.status = ANY (ARRAY['SUBMISSION_PENDING'::text, 'SUBMITTED'::text, 'PROCESSING'::text, 'UNKNOWN'::text]))",
+    'payment_check',
+    '0 seconds',
+  ),
+];
+
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
   [STATUS_GUARD_FUNCTION, STATUS_GUARD_BODY],
@@ -392,6 +453,8 @@ export interface SchemaGuardOptions {
    * default.
    */
   readonly fixedAtCreation?: Readonly<Record<string, readonly string[]>>;
+  /** The triggers a coming migration adds to a table already built. Defaults to the product's own. */
+  readonly comingTriggers?: readonly WrittenTrigger[];
 }
 
 /**
@@ -408,8 +471,8 @@ export interface SchemaDrift {
   readonly atOnce: readonly SchemaProblem[];
   /**
    * What a release's migration also makes to the image before it: a CHECK not
-   * as built, reworded or gone, a function this image doesn't know, or a table
-   * it doesn't, with what that table's shape breaks.
+   * as built, reworded or gone, a function this image doesn't know, a table it
+   * doesn't, with what that table's shape breaks, or a trigger it knows is coming.
    */
   readonly releaseShaped: readonly SchemaProblem[];
 }
@@ -1231,20 +1294,23 @@ function tenantPolicyProblems(table: string, found: readonly PolicyRow[]): Schem
  * Functions: the guards and the order key above are the only ones our schemas hold, and each must still be the function its migration wrote,
  * running with its caller's rights and looking names up where it pinned them.
  */
-function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
+function functionProblems(fn: FunctionRow, ownerRole: string, bodies: ReadonlyMap<string, string>): SchemaProblem[] {
   const problems: SchemaProblem[] = [];
   if (fn.definer) problems.push(`${fn.name} runs with its owner's rights`);
   if (fn.owner !== ownerRole) problems.push(`${fn.name} is owned by another role`);
   if (fn.config !== PINNED_FUNCTION_CONFIG) problems.push(`${fn.name} does not pin its search_path`);
-  const body = GUARD_BODIES.get(fn.name);
+  const body = bodies.get(fn.name);
   if (body !== undefined && fn.body !== body) problems.push(`${fn.name} is not the function the migration wrote`);
   return problems;
 }
 
-/** Each function in our schemas that isn't one of the guards above. */
-function unknownFunctionProblems(allFunctions: readonly FunctionRow[]): SchemaProblem[] {
+/** Each function in our schemas that isn't one of those this image knows. */
+function unknownFunctionProblems(
+  allFunctions: readonly FunctionRow[],
+  bodies: ReadonlyMap<string, string>,
+): SchemaProblem[] {
   return allFunctions
-    .filter((fn) => !GUARD_BODIES.has(fn.name))
+    .filter((fn) => !bodies.has(fn.name))
     .map((fn) => `${fn.name} is a function our schemas should not hold`);
 }
 
@@ -1626,6 +1692,7 @@ export async function liveSchemaDrift<Schema>(
     statusGuardedTables = [],
     madeOnceTables = [],
     fixedAtCreation = {},
+    comingTriggers = COMING_TRIGGERS,
   }: SchemaGuardOptions,
 ): Promise<SchemaDrift> {
   // One after another on one connection: this check must not be what fills a full server (run day 5, S168 review).
@@ -1695,6 +1762,11 @@ export async function liveSchemaDrift<Schema>(
   );
   const isNew = new Set(newTables.map(({ name }) => name));
   const gone = BUILT_TABLES.filter((name) => !known.has(name));
+  // A coming trigger only when exact and firing as written; any other falls to the rules below, the alarm at once.
+  const comingDefinitions = new Set(comingTriggers.map(({ definition }) => definition));
+  const isComing = ({ definition, enabled }: TriggerRow): boolean =>
+    comingDefinitions.has(definition) && enabled === 'O';
+  const bodies = new Map([...GUARD_BODIES, ...comingTriggers.map((one) => [one.function, one.body] as const)]);
   /** What a table's own shape breaks: the same rules, for those that stand and those new. */
   const shapeProblems = (
     tables: readonly RelationRow[],
@@ -1708,7 +1780,9 @@ export async function liveSchemaDrift<Schema>(
       globalTables,
       sweptAfter,
     ),
-    ...allTriggers.filter((one) => ofThese(one.table)).flatMap((trigger) => triggerProblems(trigger, fixedCalls)),
+    ...allTriggers
+      .filter((one) => ofThese(one.table) && !isComing(one))
+      .flatMap((trigger) => triggerProblems(trigger, fixedCalls)),
     ...allIndexes
       .filter((one) => ofThese(one.table))
       .flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
@@ -1730,7 +1804,7 @@ export async function liveSchemaDrift<Schema>(
     ...[...globalTables]
       .filter((listed) => !known.has(listed))
       .map((listed) => `${listed} is listed as a global table but is not there`),
-    ...allFunctions.flatMap((fn) => functionProblems(fn, ownerRole)),
+    ...allFunctions.flatMap((fn) => functionProblems(fn, ownerRole, bodies)),
     // A rewrite rule can turn any statement into a different one, silently.
     ...allRules.map((rule) => `${rule.table} carries the rewrite rule ${quoted(rule.name)}`),
     // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
@@ -1763,7 +1837,8 @@ export async function liveSchemaDrift<Schema>(
     atOnce: inOrder(problems),
     releaseShaped: inOrder([
       ...builtCheckProblems(allChecks, BUILT_CHECKS),
-      ...unknownFunctionProblems(allFunctions),
+      ...unknownFunctionProblems(allFunctions, bodies),
+      ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),
       ...gone.map((name) => `${name} is a table the migrations built, and is not there`),
     ]),
