@@ -194,24 +194,27 @@ export function createAnchorCheck({
   /** Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read. */
   const storeUnread = (): boolean => durable !== undefined && durable.state() !== 'read';
 
+  /** A chain's integrity alarm on its own line, its reason kept for its hold. */
+  const alarmed = (chain: Chain, log: Logger, reason: string, seq?: bigint): Outcome => {
+    if (chain.kind === 'organisation') failures.set(keyOf(chain), reason);
+    const held = anchors.latest(chain);
+    log.error('audit.integrity_failed', {
+      chain: chain.kind,
+      check: 'anchor',
+      reason,
+      ...(seq === undefined ? {} : { seq }),
+      ...(held === undefined ? {} : { anchorSeq: held.seq }),
+    });
+    return 'failed';
+  };
+
   const checkOne = async ({ chain, verify }: CheckedChain, signal: AbortSignal | undefined): Promise<Outcome> => {
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
     const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
     const key = keyOf(chain);
     try {
       const last = anchors.latest(chain);
-      const alarm = (reason: string, seq?: bigint): Outcome => {
-        if (chain.kind === 'organisation') failures.set(key, reason);
-        const held = anchors.latest(chain);
-        log.error('audit.integrity_failed', {
-          chain: chain.kind,
-          check: 'anchor',
-          reason,
-          ...(seq === undefined ? {} : { seq }),
-          ...(held === undefined ? {} : { anchorSeq: held.seq }),
-        });
-        return 'failed';
-      };
+      const alarm = (reason: string, seq?: bigint): Outcome => alarmed(chain, log, reason, seq);
       let report: ChainReport;
       try {
         if (inFlight.has(key)) throw new Error('the last check of this chain has not finished');

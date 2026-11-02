@@ -727,7 +727,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       const chains = chainsHolding({ [ORG]: ok(10n) });
       const first = process(fake, chains.organizations);
       await first.check.run();
-      const oldest = fake.files.values().next().value as Buffer;
+      const oldest = [...fake.files.values()].at(0) ?? Buffer.alloc(0);
       chains.held[ORG] = ok(100n);
       await first.check.run();
       expect(first.log.latest(CHAIN)?.seq).toBe(100n);
