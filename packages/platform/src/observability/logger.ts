@@ -99,6 +99,12 @@ const workContexts = new AsyncLocalStorage<WorkContext>();
 /** Runs `work`, and all it goes on to do, with its lines saying `context`. */
 export const withLogContext = <T>(context: WorkContext, work: () => T): T => workContexts.run(context, work);
 
+/**
+ * Runs `listener` as no one's work. For what outlives the work that made it: a socket's events run in the context it
+ * was opened in, so a connection a request opened would report its loss, hours on, as that request's.
+ */
+export const asNoWork = <T>(listener: () => T): T => workContexts.exit(listener);
+
 /** What the work under way adds to a line. A correlation ID a child was given stands: a job names one for each organisation. */
 function contextOfLine(correlationBound: boolean): WorkContext | undefined {
   const context = workContexts.getStore();

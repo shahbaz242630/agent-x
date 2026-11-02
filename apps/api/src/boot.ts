@@ -55,6 +55,7 @@ import {
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import {
+  asNoWork,
   createLogger,
   createStartupLogger,
   guardOutputs,
@@ -248,7 +249,10 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
 
   const logger = createLogger({ service: SERVICE, config, destination });
   host.on('uncaughtException', (error, origin) => {
-    logger.error('api.crashed', { err: error, origin });
+    // The process's own line: a throw from an old connection's socket would otherwise name whoever opened it (logger.ts).
+    asNoWork(() => {
+      logger.error('api.crashed', { err: error, origin });
+    });
     logger.flush();
     host.exit(1);
   });

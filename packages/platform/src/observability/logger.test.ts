@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { LogLevel } from '../config/index.ts';
 import {
+  asNoWork,
   createLogger,
   createStartupLogger,
   eventOf,
@@ -99,6 +100,81 @@ describe('4D2e Stage F the work a line belongs to', () => {
     expect(lines()[0]).not.toHaveProperty('runId');
     expect(lines()[1]).toMatchObject({ runId: 'r-1' });
     expect(lines()[1]).not.toHaveProperty('correlationId');
+  });
+
+  it('leaves nothing behind when the work throws, and says the work on the line about it', async () => {
+    const { logger, lines } = setup();
+    expect(() =>
+      withLogContext({ correlationId: 'c-1' }, () => {
+        throw new Error('at once');
+      }),
+    ).toThrow('at once');
+    logger.info('a.after_throw');
+    await expect(
+      withLogContext({ runId: 'r-1' }, async () => {
+        await Promise.resolve();
+        const error = Object.assign(new Error('later'), { correlationId: 'on-the-error', runId: 'on-the-error' });
+        logger.error(PROBLEM, { err: error });
+        throw error;
+      }),
+    ).rejects.toThrow('later');
+    logger.info('a.after_rejection');
+    const [afterThrow, failed, afterRejection] = lines();
+    expect(afterThrow).not.toHaveProperty('correlationId');
+    expect(afterRejection).not.toHaveProperty('runId');
+    // The work's own ID on the line: an error's fields stay inside `err`.
+    expect(failed).toMatchObject({ runId: 'r-1' });
+    expect(failed).not.toHaveProperty('correlationId');
+  });
+
+  it('keeps the work on a line cut for length, which is still one JSON line', () => {
+    const { logger, lines } = setup();
+    const huge = Object.fromEntries(Array.from({ length: 40 }, (_, at) => [`f${String(at)}`, 'x'.repeat(2000)]));
+    withLogContext({ correlationId: 'c-1', runId: 'r-1' }, () => {
+      logger.info('a.huge', huge);
+    });
+    expect(lines()[0]).toMatchObject({ event: 'a.huge', lineCut: true, correlationId: 'c-1', runId: 'r-1' });
+  });
+
+  it('writes only the standard fields on a line outside any work', () => {
+    const { logger, lines } = setup();
+    logger.info('a.none');
+    expect(Object.keys(lines()[0] ?? {}).toSorted()).toEqual(['env', 'event', 'level', 'release', 'service', 'time']);
+  });
+
+  it('says no work from a listener that outlasts it, and the work carries on after', async () => {
+    const { logger, lines } = setup();
+    await withLogContext({ correlationId: 'c-1', runId: 'r-1' }, async () => {
+      asNoWork(() => {
+        logger.child({ module: 'm' }).info('a.listener');
+      });
+      await Promise.resolve();
+      logger.info('a.work');
+    });
+    expect(lines()[0]).not.toHaveProperty('correlationId');
+    expect(lines()[0]).not.toHaveProperty('runId');
+    expect(lines()[1]).toMatchObject({ correlationId: 'c-1', runId: 'r-1' });
+  });
+
+  it("carries only a request's or run's ID: an organisation or person stays on the logger given it", async () => {
+    const { logger, lines } = setup();
+    await withLogContext({ runId: 'r-1' }, async () => {
+      for (const org of ['a', 'b']) {
+        const own = logger.child({ orgId: org, actor: `actor-${org}`, correlationId: `c-${org}` });
+        own.info('a.organisation');
+        await Promise.resolve();
+        logger.info('a.bare');
+        own.info('a.organisation');
+      }
+    });
+    const [a1, bareA, a2, b1, bareB, b2] = lines();
+    const ofA = { orgId: 'a', actor: 'actor-a', correlationId: 'c-a', runId: 'r-1' };
+    const ofB = { orgId: 'b', actor: 'actor-b', correlationId: 'c-b', runId: 'r-1' };
+    expect([a1, a2, b1, b2]).toMatchObject([ofA, ofA, ofB, ofB]);
+    for (const line of [bareA, bareB]) {
+      expect(line).toMatchObject({ runId: 'r-1' });
+      for (const name of ['orgId', 'actor', 'correlationId']) expect(line).not.toHaveProperty(name);
+    }
   });
 
   it('gives no work to the held-back counts: they belong to no request', () => {

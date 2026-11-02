@@ -6,7 +6,7 @@ import path from 'node:path';
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
 import { PURPOSES } from '@agentx/platform/keys';
-import type { Output } from '@agentx/platform/observability';
+import { type Output, withLogContext } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, writeTestKeys } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1311,5 +1311,16 @@ describe('the API logs a crash before it exits', () => {
         err: expect.objectContaining({ type: 'TypeError', message: 'bad state for [email]' }) as unknown,
       }),
     );
+  });
+
+  it("4D2e Stage F claims no request or run: a throw from an old connection's socket would name whoever opened it", async () => {
+    const { host, capture } = await start();
+    withLogContext({ correlationId: 'opened-the-socket', runId: 'opened-the-socket' }, () => {
+      host.emit('uncaughtException', new TypeError('bad state'), 'uncaughtException');
+    });
+    const crashed = capture.lines().at(-1);
+    expect(crashed).toMatchObject({ event: 'api.crashed' });
+    expect(crashed).not.toHaveProperty('correlationId');
+    expect(crashed).not.toHaveProperty('runId');
   });
 });
