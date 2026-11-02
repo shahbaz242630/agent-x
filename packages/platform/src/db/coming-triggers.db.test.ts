@@ -10,7 +10,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
-import { liveSchemaDrift, liveSchemaProblems, type WrittenTrigger } from './schema-guard.ts';
+import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
+import BUILT_TABLES from './built-tables.json' with { type: 'json' };
+import { liveSchemaDrift, liveSchemaProblems, MARK_TRIGGERS, type WrittenTrigger } from './schema-guard.ts';
+import { SCHEMA_POLICY } from './schema-policy.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -207,43 +210,160 @@ describe('a trigger a coming migration adds to a table already built', () => {
   });
 });
 
-describe("the product's own list", () => {
-  /** What the release's migration will run, on the tables it names, as far as the guard can see it. */
-  const MIGRATION = [
-    `create function directory.mark_org_work() returns trigger language plpgsql
-SET search_path = pg_catalog AS $$ BEGIN
-  INSERT INTO directory.org_work (org_id, job, due_at)
-  VALUES (NEW.org_id, TG_ARGV[0], pg_catalog.now() + TG_ARGV[1]::interval)
-  ON CONFLICT (org_id, job) DO UPDATE SET marks = org_work.marks + 1,
-    due_at = LEAST(org_work.due_at, EXCLUDED.due_at);
-  RETURN NULL;
-END $$`,
-    `create constraint trigger marks_hand_off after insert or update on spend_requests.requests
-       deferrable initially deferred for each row when (new.status in ('APPROVED', 'INSTRUCTION_READY'))
-       execute function directory.mark_org_work('hand_off', '0 seconds')`,
-    `create constraint trigger marks_hand_off_sweep after insert or update on transactions.transactions
-       deferrable initially deferred for each row when (new.status = 'SUBMISSION_PENDING')
-       execute function directory.mark_org_work('hand_off_sweep', '10 minutes')`,
-    `create constraint trigger marks_payment_check after insert or update on transactions.transactions
-       deferrable initially deferred for each row
-       when (new.status in ('SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'))
-       execute function directory.mark_org_work('payment_check', '0 seconds')`,
+describe('0072, read as the image before it would read it', () => {
+  const OURS = 'directory.org_work';
+  const { [OURS]: _ours, ...tablesBefore } = SCHEMA_POLICY.globalTables;
+  const knowingNothing = {
+    triggers: [],
+    tables: BUILT_TABLES.filter((name) => name !== OURS),
+    checks: BUILT_CHECKS.filter((one) => one.table !== OURS),
+  };
+  const imageBefore = { ...ROLES, policy: { ...SCHEMA_POLICY, globalTables: tablesBefore }, built: knowingNothing };
+  const SHAPE = [
+    `directory.org_work does not have row-level security enabled`,
+    `directory.org_work does not have row-level security forced`,
+    `directory.org_work does not have exactly one row-security policy`,
   ];
 
-  afterEach(async () => {
-    await owner.query('drop function if exists directory.mark_org_work() cascade');
-  });
-
-  it('knows the marks exactly, by default: the image that must reach a release before 0072 runs', async () => {
-    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
-    for (const statement of MIGRATION) await owner.query(statement);
-    expect(await liveSchemaDrift(app, ROLES)).toEqual({
-      atOnce: [],
-      releaseShaped: [
+  it('knowing the marks: nothing at all is the alarm at once, and all of it warns first', async () => {
+    const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: MARK_TRIGGERS });
+    expect(atOnce).toEqual([]);
+    expect(releaseShaped).toEqual(
+      expect.arrayContaining([
         'spend_requests.requests carries "marks_hand_off", a coming trigger',
         'transactions.transactions carries "marks_hand_off_sweep", a coming trigger',
         'transactions.transactions carries "marks_payment_check", a coming trigger',
-      ],
-    });
+        ...SHAPE,
+        `directory.org_work's CHECK constraint "org_work_job_check" is not one the migrations built`,
+      ]),
+    );
+  });
+
+  it('not knowing them: the false alarm this all exists to prevent, on those three alone', async () => {
+    const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: [] });
+    expect(atOnce).toEqual([
+      'spend_requests.requests carries the trigger "marks_hand_off"',
+      'transactions.transactions carries the trigger "marks_hand_off_sweep"',
+      'transactions.transactions carries the trigger "marks_payment_check"',
+    ]);
+    expect(releaseShaped).toContain('directory.mark_org_work is a function our schemas should not hold');
+  });
+});
+
+describe('0072 once its image is in: each part held at once', () => {
+  const clean = () => liveSchemaDrift(app, ROLES);
+  const WHEN = "when (new.status = 'APPROVED')";
+  const CALL = "execute function directory.mark_org_work('hand_off', '0 seconds')";
+  const LATER = 'deferrable initially deferred for each row';
+  const ON = 'after insert or update on spend_requests.requests';
+  const PUT_BACK = `drop trigger if exists marks_hand_off on spend_requests.requests;
+    create constraint trigger marks_hand_off ${ON} ${LATER}
+    when (new.status in ('APPROVED', 'INSTRUCTION_READY')) ${CALL}`;
+
+  it('reads clean, with its function and triggers as written', async () => {
+    expect(await clean()).toEqual({ atOnce: [], releaseShaped: [] });
+  });
+
+  it.each([
+    [
+      'its trigger dropped',
+      'drop trigger marks_hand_off on spend_requests.requests',
+      PUT_BACK,
+      'spend_requests.requests carries no marks_hand_off',
+    ],
+    [
+      'its trigger rewritten with a narrower condition',
+      `drop trigger marks_hand_off on spend_requests.requests;
+       create constraint trigger marks_hand_off ${ON} ${LATER} ${WHEN} ${CALL}`,
+      PUT_BACK,
+      "spend_requests.requests's marks_hand_off is not the trigger its migration wrote",
+    ],
+    [
+      'its trigger pointed at another job',
+      `drop trigger marks_hand_off on spend_requests.requests;
+       create constraint trigger marks_hand_off ${ON} ${LATER} when (new.status in ('APPROVED', 'INSTRUCTION_READY'))
+       execute function directory.mark_org_work('payment_check', '0 seconds')`,
+      PUT_BACK,
+      "spend_requests.requests's marks_hand_off is not the trigger its migration wrote",
+    ],
+    [
+      'its trigger no longer deferred',
+      `drop trigger marks_hand_off on spend_requests.requests;
+       create constraint trigger marks_hand_off ${ON} deferrable initially immediate for each row
+       when (new.status in ('APPROVED', 'INSTRUCTION_READY')) ${CALL}`,
+      PUT_BACK,
+      "spend_requests.requests's marks_hand_off is not the trigger its migration wrote",
+    ],
+    [
+      'its trigger switched off',
+      'alter table spend_requests.requests disable trigger marks_hand_off',
+      'alter table spend_requests.requests enable trigger marks_hand_off',
+      "spend_requests.requests's marks_hand_off is switched off",
+    ],
+    [
+      'a trigger of its name on another table',
+      `create constraint trigger marks_hand_off after insert or update on transactions.transactions ${LATER} ${CALL}`,
+      'drop trigger marks_hand_off on transactions.transactions',
+      'transactions.transactions carries the trigger "marks_hand_off"',
+    ],
+    [
+      'a stranger calling its function',
+      `create constraint trigger planted ${ON} ${LATER} ${CALL}`,
+      'drop trigger planted on spend_requests.requests',
+      'spend_requests.requests carries the trigger "planted"',
+    ],
+    [
+      'the whole table granted for update',
+      'grant update on directory.org_work to agentx_app',
+      'revoke update on directory.org_work from agentx_app; grant update (due_at, marks) on directory.org_work to agentx_app',
+      'agentx_app may UPDATE on directory.org_work',
+    ],
+    [
+      'a column granted past its list',
+      'grant update (job) on directory.org_work to agentx_app',
+      'revoke update (job) on directory.org_work from agentx_app',
+      `agentx_app may UPDATE directory.org_work's column "job"`,
+    ],
+    [
+      'its rights widened to emptying it',
+      'grant truncate on directory.org_work to agentx_app',
+      'revoke truncate on directory.org_work from agentx_app',
+      'agentx_app may TRUNCATE on directory.org_work',
+    ],
+    [
+      'a column added',
+      'alter table directory.org_work add column note text',
+      'alter table directory.org_work drop column note',
+      'directory.org_work no longer has exactly its columns',
+    ],
+  ])('%s is the alarm at once', async (_what, tamper, undo, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(tamper);
+    try {
+      const { atOnce, releaseShaped } = await clean();
+      expect(atOnce).toContain(problem);
+      expect(releaseShaped).toEqual([]);
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(undo);
+    }
+  });
+
+  it('its function rewritten is the alarm at once, and put back reads clean', async () => {
+    const [{ source = '' } = {}] = await owner.query<{ source: string }>(
+      `select p.prosrc as source from pg_catalog.pg_proc p where p.proname = 'mark_org_work'`,
+    );
+    const replacing = (body: string) => `create or replace function directory.mark_org_work() returns trigger
+      language plpgsql set search_path = pg_catalog as $mark$${body}$mark$`;
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text and the body the migration wrote.
+    await owner.query(replacing(' BEGIN RETURN NULL; END '));
+    try {
+      const { atOnce } = await clean();
+      expect(atOnce).toEqual(['directory.mark_org_work is not the function the migration wrote']);
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(replacing(source));
+    }
+    expect(await clean()).toEqual({ atOnce: [], releaseShaped: [] });
   });
 });
