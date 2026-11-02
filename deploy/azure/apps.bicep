@@ -58,7 +58,7 @@ import {
   shortName
   uniqueSuffix
 } from 'names.bicep'
-import { evidenceAccountName, evidenceContainerName } from 'modules/evidence.bicep'
+import { anchorContainerName, evidenceAccountName, evidenceContainerName } from 'modules/evidence.bicep'
 import { activityDownloadsAccountName, activityDownloadsContainerName } from 'modules/activity-downloads.bicep'
 
 targetScope = 'resourceGroup'
@@ -484,7 +484,7 @@ var operatorRequest = {
   value: '[]'
 }
 
-// Where the operator writes an audit export (ADR-005 §6, E10c): the store's one
+// Where the operator writes an audit export (ADR-005 §6, E10c): the store's exports
 // container, named as modules/evidence.bicep names it for the foundation, and
 // the operator identity's client ID, which it asks Azure for a token as. Added
 // in the job's own body, as `emailSettings` is in an app's: the client ID is
@@ -520,6 +520,19 @@ var activityDownloadsSettings = [
   }
   {
     name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
+    value: apiIdentity.properties.clientId
+  }
+]
+
+// Where the API keeps the audit chains' anchors (4D2e E, PL-58): the write-once
+// store's second container, as its own identity. Added as `activityDownloadsSettings` is.
+var anchorStoreSettings = [
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_URL'
+    value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
+  }
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
     value: apiIdentity.properties.clientId
   }
 ]
@@ -832,6 +845,8 @@ var apps = [
     signsIn: true
     // Keeps the activity log's background downloads (`activityDownloadsSettings`).
     keepsDownloads: true
+    // Keeps the audit chains' anchors (`anchorStoreSettings`).
+    keepsAnchors: true
     // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
     // second replica would give every client two allowances. The worker, which
     // holds no such count, is the part that scales in Phase 4.
@@ -961,6 +976,7 @@ var apps = [
     sendsEmail: false
     signsIn: false
     keepsDownloads: false
+    keepsAnchors: false
     // Its projections and its cache are one replica's; a second would also take
     // ten more of the server's connections.
     maxReplicas: 1
@@ -1020,6 +1036,7 @@ var apps = [
     sendsEmail: false
     signsIn: false
     keepsDownloads: false
+    keepsAnchors: false
     settings: [
       // The host the browser uses, which Zitadel reads before the Host header
       // (ADR-003 Amendment S10), so the pages need no Host override here.
@@ -1224,7 +1241,8 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
                 value: zitadelInternalUrl
               }),
               app.sendsEmail ? emailSettings : app.signsIn ? zitadelOrigins : [],
-              app.keepsDownloads ? activityDownloadsSettings : []
+              app.keepsDownloads ? activityDownloadsSettings : [],
+              app.keepsAnchors ? anchorStoreSettings : []
             )
             volumeMounts: empty(app.files)
               ? []
