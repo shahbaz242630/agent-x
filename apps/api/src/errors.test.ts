@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 
-import { errorBody, IntegrityFailure, responseFor } from './errors.ts';
+import { errorBody, IntegrityFailure, responseFor, troubleOf } from './errors.ts';
 
 const withStatus = (statusCode: unknown): Error => Object.assign(new Error('internal detail'), { statusCode });
 
@@ -30,12 +30,24 @@ describe('SEC-DATA-04 an error response carries a reason code, never the error',
     expect(responseFor(withStatus(status))).toEqual({ status: 400, code: 'BAD_REQUEST' });
   });
 
-  it.each(['57014', '40P01'])('answers %s on a stop busy, and on anything else as it was', (code) => {
+  it.each(['57014', '40P01'])('answers %s on a stop or a decision busy, and on anything else as it was', (code) => {
     const failed = Object.assign(new Error('x'), { code });
-    expect(responseFor(failed, 'agents.suspend')).toEqual({ status: 503, code: 'ORGANISATION_BUSY' });
-    expect(responseFor(failed, 'spend-requests.decide')).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
+    const busy = { status: 503, code: 'ORGANISATION_BUSY' };
+    expect(responseFor(failed, 'agents.suspend')).toEqual(busy);
+    expect(responseFor(failed, 'spend-requests.create')).toEqual(busy);
+    expect(troubleOf(failed, 'agents.suspend')).toBe('stop');
+    expect(troubleOf(failed, 'spend-requests.create')).toBe('decision');
+    expect(responseFor(failed, 'agents.register')).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
+    expect(troubleOf(failed, 'agents.register')).toBeUndefined();
     expect(responseFor(failed)).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
     expect(responseFor(new Error('other'), 'agents.suspend')).toEqual({ status: 500, code: 'INTERNAL_ERROR' });
+    expect(troubleOf(new Error('other'), 'agents.suspend')).toBeUndefined();
+  });
+
+  it('names a lock wait run out on a stop as trouble, and on a decision leaves it its usual line', () => {
+    const waited = Object.assign(new Error('x'), { code: '55P03' });
+    expect(troubleOf(waited, 'suppliers.reactivate')).toBe('stop');
+    expect(troubleOf(waited, 'spend-requests.create')).toBeUndefined();
   });
 
   it('sends a record a shared helper can’t believe as 503 INTEGRITY_FAILED, never a plain 500', () => {

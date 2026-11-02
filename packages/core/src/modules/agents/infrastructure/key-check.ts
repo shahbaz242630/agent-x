@@ -41,7 +41,15 @@
 // The check's transaction ends before the request's own work: a request that
 // decides on the agent (Phase 3's Tx A) reads it again (SEC-AG-12), and one
 // that runs in the same transaction uses agentKeyAt with its own.
-import { AGENT_BRAKE, asAgentTraffic, brakeSharedLookedUp, lockWaitBoundedAlone } from '@agentx/platform/db';
+import {
+  AGENT_BRAKE,
+  asAgentTraffic,
+  brakeSharedLookedUp,
+  isRetryable,
+  isStatementLimit,
+  lockWaitBoundedAlone,
+  OrganisationBusy,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
@@ -192,12 +200,21 @@ export function createAgentKeyCheck({
       if (orgId === undefined) return answer(refused('unlisted'), presented.keyId);
       // Counted against the organisation's share: it locks the agent's and key's rows, and waiting behind a change
       // of them, every copy would hold a connection, the agents of one organisation filling the pool (PL-63).
-      const checked = await asAgentTraffic(() =>
-        withSignedStates(database, orgId, { keys, ids, logger: log, correlationId }, (tx, states) =>
-          agentKeyAt(tx, states, { keys, now: clock.now() }, orgId, presented),
-        ),
-      );
-      return answer(checked, presented.keyId);
+      const started = performance.now();
+      try {
+        const checked = await asAgentTraffic(() =>
+          withSignedStates(database, orgId, { keys, ids, logger: log, correlationId }, (tx, states) =>
+            agentKeyAt(tx, states, { keys, now: clock.now() }, orgId, presented),
+          ),
+        );
+        return answer(checked, presented.keyId);
+      } catch (error) {
+        if (!isStatementLimit(error) && !isRetryable(error)) throw error;
+        // Answered busy, never a 500 (partner, 4D2e C3): the agent sends it again, and nothing of it was kept.
+        const waitedMs = Math.round(performance.now() - started);
+        log.child({ orgId }).warn('agent_key.check_in_trouble', { keyId: presented.keyId, waitedMs });
+        throw new OrganisationBusy(waitedMs);
+      }
     },
   };
 }

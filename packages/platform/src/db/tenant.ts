@@ -276,12 +276,22 @@ export const SOURCE_BRAKE = 'source-brake';
  * The longest a brake waits for each lock. Past a statement's limit, as that is how long one inside can really take:
  * a decision queued behind another for a stuck supplier's row waits its 5 s for the row's queue, then 5 s more on its
  * holder, each wait timed alone (measured, S168: at 8 s a freeze behind them failed every time). New ones line up
- * behind the brake from its first moment, so what it waits for is only those already inside.
+ * behind the brake from its first moment, so what it waits for is only those already inside. It doesn't cover the
+ * longest one inside: a decision can also wait on its month's and the chain head's locks while it holds the shared side,
+ * each up to its own bound. Then the stop answers busy, honestly, with nothing changed, and pressing it again usually lands.
  */
 const BRAKE_WAIT_SECONDS = STATEMENT_SECONDS + 2;
 const BRAKE_WAIT = `${String(BRAKE_WAIT_SECONDS)}s`;
 /** A brake's own limit on a statement, past its wait, so that the wait runs out as a lock's. */
 const BRAKE_STATEMENT = `${String(BRAKE_WAIT_SECONDS + 3)}s`;
+/** A stop's bound on its waits, in a statement of their own. */
+const STOP_WAITS = sql`select pg_catalog.set_config('lock_timeout', ${BRAKE_WAIT}, true),
+  pg_catalog.set_config('statement_timeout', ${BRAKE_STATEMENT}, true)`;
+/**
+ * A routine change's bound on its waits (a policy, a draft, a consent choice): under a decision's 5 s, so that decisions
+ * queued behind it outlast it and go on, and one change can't turn away a whole organisation's or agent's traffic.
+ */
+const ROUTINE_WAITS = sql`select pg_catalog.set_config('lock_timeout', '3s', true)`;
 
 /**
  * The shared side of a brake, a statement of its own ahead of what it guards, so that the read behind it takes its
@@ -301,17 +311,30 @@ export const brakeShared = (scope: string, ...ids: readonly string[]): RawBuilde
 export async function holdBrakeNamed<Schema>(
   tx: Transaction<Schema>,
   name: RawBuilder<unknown> | string,
+  waits: RawBuilder<unknown> = STOP_WAITS,
 ): Promise<void> {
   await sendTogether(tx, [
-    sql`select pg_catalog.set_config('lock_timeout', ${BRAKE_WAIT}, true),
-      pg_catalog.set_config('statement_timeout', ${BRAKE_STATEMENT}, true)`,
+    waits,
     sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`,
   ]);
 }
 
+/** holdBrakeNamed for a routine change: its waits, and its brake's, are ROUTINE_WAITS'. */
+export const holdRoutineBrakeNamed = <Schema>(
+  tx: Transaction<Schema>,
+  name: RawBuilder<unknown> | string,
+): Promise<void> => holdBrakeNamed(tx, name, ROUTINE_WAITS);
+
 /** holdBrakeNamed for a brake named by its scope and IDs. */
 export const holdBrake = <Schema>(tx: Transaction<Schema>, scope: string, ...ids: readonly string[]): Promise<void> =>
   holdBrakeNamed(tx, lockName(scope, ...ids));
+
+/** holdRoutineBrakeNamed for a brake named by its scope and IDs. */
+export const holdRoutineBrake = <Schema>(
+  tx: Transaction<Schema>,
+  scope: string,
+  ...ids: readonly string[]
+): Promise<void> => holdRoutineBrakeNamed(tx, lockName(scope, ...ids));
 
 /**
  * A statement of its own that bounds the rest of the transaction's waits as a claim's does, for one with no claim:

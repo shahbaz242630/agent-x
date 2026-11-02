@@ -61,7 +61,14 @@ import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core
 import { type FinancialRailAdapter, limitsInAccountCurrency, type SourceLookup } from '@agentx/core/modules/providers';
 import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, holdBrake, type IdempotentRequest, isUnwritten, SOURCE_BRAKE } from '@agentx/platform/db';
+import {
+  type Database,
+  holdBrake,
+  holdRoutineBrake,
+  type IdempotentRequest,
+  isUnwritten,
+  SOURCE_BRAKE,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -338,7 +345,7 @@ export function createFundingSourceChanges({
     },
 
     async chooseConsentExpiry(member, idempotent, sourceId, consentExpiry, correlationId) {
-      const hold = (tx: FundingSourceTx) => holdBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
+      const hold = (tx: FundingSourceTx) => holdRoutineBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
       const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         await work.memberIn(tx, states, member, CONSENT_EXPIRY_ROLES);
         const key = { orgId: member.orgId, id: sourceId };

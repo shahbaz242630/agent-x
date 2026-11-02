@@ -105,13 +105,17 @@ export class IntegrityFailure extends Error {}
 /** How long a client is told to wait before sending a busy request again: as long as the store waited, time for most writes holding the key to end. */
 export const BUSY_RETRY_SECONDS = 5;
 
+/** The agent's decision: answered busy under trouble too, as it can safely resend under its key (partner, 4D2e C3). */
+const DECISION_OPERATION = 'spend-requests.create';
+
 /**
- * Every stop an admin presses, ask and confirm: under trouble, a statement past its limit or a deadlock rolled it back
- * and is answered busy like a lock's wait, never a plain 500, on any statement of it, its answer's read after it
- * included (partner, 4D2e C3). Those committed are replayed by the same key. Written out; contract.test.ts holds each to
- * an operation of the API. A decision's stays as it is (S166).
+ * Every stop an admin presses, ask and confirm, and an agent's decision: under trouble, a statement past its limit or a
+ * deadlock rolled it back and is answered busy like a lock's wait, never a plain 500, on any statement of it, its
+ * answer's read after it included (partner, 4D2e C3). One committed is replayed by the same key. Written out;
+ * contract.test.ts holds each to an operation of the API. A key check answers its own (key-check.ts).
  */
-export const STOP_OPERATIONS: ReadonlySet<string> = new Set([
+export const BUSY_UNDER_TROUBLE: ReadonlySet<string> = new Set([
+  DECISION_OPERATION,
   'organization.freeze',
   'organization.unfreeze',
   'organization.unfreeze.confirm',
@@ -139,8 +143,18 @@ export const STOP_OPERATIONS: ReadonlySet<string> = new Set([
   'suppliers.reactivate.confirm',
 ]);
 
-const isStopTrouble = (error: unknown, operation: string | undefined): boolean =>
-  operation !== undefined && STOP_OPERATIONS.has(operation) && (isStatementLimit(error) || isRetryable(error));
+/**
+ * What a failure on a route answered busy under trouble is, for its line (server.ts): a stop's, which an admin relies
+ * on and which may have committed before its answer's read, or a decision's, one organisation's own trouble. A stop
+ * whose write takes a brake has raised its alarm and answered already: this is for what's left. A decision's own lock
+ * wait keeps its usual line.
+ */
+export function troubleOf(error: unknown, operation: string | undefined): 'stop' | 'decision' | undefined {
+  if (operation === undefined || !BUSY_UNDER_TROUBLE.has(operation)) return undefined;
+  const failed = isStatementLimit(error) || isRetryable(error);
+  if (operation === DECISION_OPERATION) return failed ? 'decision' : undefined;
+  return failed || isLockWaitRunOut(error) ? 'stop' : undefined;
+}
 
 /**
  * What to send for an error, from its own status; an integrity failure is 503
@@ -151,7 +165,7 @@ const isStopTrouble = (error: unknown, operation: string | undefined): boolean =
  */
 export function responseFor(error: unknown, operation?: string): ErrorResponse {
   if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };
-  if (isStopTrouble(error, operation)) return { status: 503, code: 'ORGANISATION_BUSY' };
+  if (troubleOf(error, operation) !== undefined) return { status: 503, code: 'ORGANISATION_BUSY' };
   if (error instanceof OrganisationBusy || isLockWaitRunOut(error)) return { status: 503, code: 'ORGANISATION_BUSY' };
   // Every connection in use, past the pool's own wait: the platform's, for whichever organisation or job was next.
   if (error instanceof PoolWaitRanOut) return { status: 503, code: 'PLATFORM_BUSY' };

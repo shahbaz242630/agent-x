@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
-import { STOP_OPERATIONS } from './errors.ts';
+import { BUSY_UNDER_TROUBLE } from './errors.ts';
 import './route-server.helper.test.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ContractBroken, NOT_FOUND_CHECKS, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
@@ -103,7 +103,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     const operations = new Set(
       Object.values(document.paths).flatMap((item) => Object.values(item).map(({ operationId }) => operationId)),
     );
-    expect([...STOP_OPERATIONS].filter((operation) => !operations.has(operation))).toEqual([]);
+    expect([...BUSY_UNDER_TROUBLE].filter((operation) => !operations.has(operation))).toEqual([]);
   });
 
   it("documents every route the server serves, and the HEAD Fastify adds to each GET, whatever the route's shape", async () => {

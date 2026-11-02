@@ -41,8 +41,8 @@
 //   one with no version in force yet, MANDATE_NOT_ACCEPTED (its draft's own
 //   choice applies once accepted).
 //
-// A confirm takes its agent's brake first (1b, tenant.ts), so the agent's decisions
-// can't starve it (PL-63 item 3, 4D2e C3); past its wait, busy, nothing changed, with
+// A confirm takes its agent's brake first (1b, tenant.ts; an over-limit choice's a
+// routine change's shorter wait), so the agent's decisions can't starve it (PL-63 item 3, 4D2e C3); past its wait, busy, nothing changed, with
 // an alarm. An ask reads the mandate as they do, so nothing holds it up.
 //
 // Lock order (ADR-006 §6): the idempotency key, the agent's brake (a confirm's), the session's challenges (0b,
@@ -63,6 +63,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import {
   agentBrakeOfMandate,
+  routineBrakeOfMandate,
   MandateRefused,
   type MandateTables,
   type MandateTx,
@@ -335,7 +336,7 @@ export function createMandateMoves({
     },
 
     async chooseOverLimitConfirm(member, idempotent, mandateId, overLimit, stepUpChallengeId, correlationId) {
-      const hold = (tx: MandateTx) => agentBrakeOfMandate(tx, member.orgId, mandateId);
+      const hold = (tx: MandateTx) => routineBrakeOfMandate(tx, member.orgId, mandateId);
       const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, MOVING_ROLES);

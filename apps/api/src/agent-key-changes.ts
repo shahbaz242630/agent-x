@@ -280,6 +280,7 @@ export function createAgentKeyChanges({
 
     async rotateConfirm(member, idempotent, named, oldKey, stepUpChallengeId, correlationId) {
       let key: string | null = null;
+      let answered: AgentWithKeys | undefined;
       const done = await work.brakeWrite(
         member,
         idempotent,
@@ -335,13 +336,16 @@ export function createAgentKeyChanges({
               details: ended,
             });
           }
+          // Read in the transaction that issues it, on rows it holds: nothing after its commit can lose the key shown
+          // this once. A read that fails here rolls it all back, for the same request to do it again.
+          answered = await work.withKeys(tx, states, member.orgId, old.agent.id);
           key = issued.text;
           return { status: 201, resourceId: old.agent.id };
         },
       );
       if (isUnwritten(done)) return done;
       // The key is set only by a write done now: a retry answers it as null, as it was shown once.
-      const agent = await reread(member, correlationId, done.result.resourceId);
+      const agent = answered ?? (await reread(member, correlationId, done.result.resourceId));
       if ('outcome' in agent) return agent;
       return { outcome: 'rotated', agent, key, oldKey };
     },

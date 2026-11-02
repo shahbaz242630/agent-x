@@ -62,13 +62,17 @@ import {
   keys,
   mandateWorld,
   type MandateWorldTables,
+  refused,
   type World,
 } from './mandate-world.helper.test.ts';
+import { createAgentMandates } from './agent-mandate.ts';
 import { createPolicyChanges, POLICY_OPERATIONS } from './policy-changes.ts';
 import { closeServers, COOKIE, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import { createSpendRequestDecisions, DECIDE_OPERATION } from './spend-request-decisions.ts';
-import { createSupplierChanges } from './supplier-changes.ts';
+import { createSpendRequestReads } from './spend-request-reads.ts';
+import { createSupplierChanges, SUSPEND_OPERATION as SUPPLIER_SUSPEND } from './supplier-changes.ts';
+import { createSupplierRegistry } from './supplier-registry.ts';
 
 const UNQUEUED = createDecisionEntry({
   turns: createAgentTurns({ perAgent: Number.MAX_SAFE_INTEGER }),
@@ -137,11 +141,11 @@ type Ready = Awaited<ReturnType<typeof ready>>;
 
 let asked = 0;
 /** A real decision, an order of its own, to the first supplier. */
-const decision = ({ w, acting }: Pick<Ready, 'w' | 'acting'>) => {
+const decision = ({ w, acting }: Pick<Ready, 'w' | 'acting'>, supplierId = w.suppliers[0] ?? '') => {
   asked += 1;
   const request = {
     amount: AED(100_000n),
-    supplierId: w.suppliers[0] ?? '',
+    supplierId,
     fundingSourceId: w.source,
     orderReference: `INV-${String(asked)}`,
     purpose: 'Printer paper',
@@ -265,6 +269,34 @@ const moved = (ready_: Ready, chosen: Parameters<ReturnType<typeof moves>['ask']
     keyed(w.admin, MOVE_OPERATIONS[chosen.move].confirm),
     mandateId,
     chosen,
+    challengeId,
+    CORRELATION,
+  );
+};
+
+/** The mandate's own policy, set by the admin as they would: asked, stepped up and confirmed. */
+const mandatePolicySet = async ({ w, mandateId }: Ready, monthlyCap: bigint) => {
+  const target = { scope: 'mandate' as const, mandateId };
+  const sent = {
+    rules: {
+      currency: 'AED',
+      perOrderCap: null,
+      monthlyCap: AED(monthlyCap),
+      approvalThreshold: null,
+      supplierIds: null,
+    },
+    capChoice: null,
+    approvalWait: null,
+  };
+  const challengeId = await steppedUp(w, () =>
+    policies().ask(w.admin, keyed(w.admin, POLICY_OPERATIONS.mandate.ask), target, sent, undefined, CORRELATION),
+  );
+  return policies().confirm(
+    w.admin,
+    keyed(w.admin, POLICY_OPERATIONS.mandate.confirm),
+    target,
+    sent,
+    undefined,
     challengeId,
     CORRELATION,
   );
@@ -445,6 +477,14 @@ const CHANGES: readonly (readonly [string, (ready_: Ready) => Promise<() => Prom
     },
   ],
   [
+    'a mandate’s own policy changed',
+    async (r) => {
+      // Its row now there for a decision to hold.
+      expect(await mandatePolicySet(r, 1_000n)).toMatchObject({ outcome: 'changed' });
+      return () => mandatePolicySet(r, 2_000n);
+    },
+  ],
+  [
     'the organisation’s policy changed',
     ({ w }) => {
       const target = { scope: 'organization' as const };
@@ -512,6 +552,8 @@ async function admin(w: World) {
   const member: MembershipCheck = { outcome: 'active', id: w.admin.membershipId, role: 'admin' };
   const api = await routeServer({
     live,
+    logger: testLogger(capture),
+    agentChanges: agentChanges(),
     agentKeyChanges: keyChanges(),
     mandateMoves: moves(),
     supplierChanges: createSupplierChanges(services()),
@@ -739,6 +781,408 @@ describe('the lock order: nothing takes a brake while holding a row', () => {
         outcome: 'decided',
         request: { decision: 'DENY', reasons: ['SOURCE_NOT_USABLE'] },
       });
+    },
+    LONG,
+  );
+});
+
+/**
+ * Runs `change`, which must lock the agent's row and then the chain head, so that another takes that row and keeps it the
+ * moment it commits: whatever `change` reads of the row after its commit waits. What it answered, and the other, holding.
+ */
+async function withTheRowTakenAtCommit<T>(w: World, change: () => Promise<T>) {
+  const monitor = database.as('admin');
+  const head = await database.connect('admin');
+  await head.query('begin');
+  await head.query('select 1 from audit.heads where org_id = $1 for update', [w.org]);
+  const changing = change();
+  await waitUntilQueued(monitor, 1);
+  const next = await database.connect('admin');
+  await next.query('begin');
+  const taken = next.query('select 1 from agents.agents where id = $1 for update', [w.agent]);
+  await waitUntilQueued(monitor, 2);
+  await letGo(head);
+  const { answer, ms } = await timed(() => changing);
+  await taken;
+  return { answer, ms, next };
+}
+
+/** Runs `action` with a row of `table`, in its `moment`, failing as Postgres would with `code`. */
+/* eslint-disable agentx/no-string-built-sql -- a test's own trigger, every part of it fixed in this file. */
+async function withFailing<T>(table: string, moment: string, code: string, action: () => Promise<T>): Promise<T> {
+  const owner = database.as('owner');
+  await owner.query(
+    `create function ${table}_forced() returns trigger language plpgsql as $$ begin raise exception 'forced' using errcode = '${code}'; end $$`,
+  );
+  await owner.query(
+    `create trigger forced before ${moment} on ${table} for each row execute function ${table}_forced()`,
+  );
+  try {
+    return await action();
+  } finally {
+    await owner.query(`drop trigger forced on ${table}`);
+    await owner.query(`drop function ${table}_forced()`);
+  }
+}
+/* eslint-enable agentx/no-string-built-sql */
+
+const linesOf = (event: string) => capture.lines().filter((line) => line.event === event);
+
+describe('no stop fails unseen', () => {
+  it('a kill switch losing a deadlock raises the alarm, and is answered busy', async () => {
+    const r = await ready();
+    const post = await admin(r.w);
+
+    const answer = await withFailing('agents.agents', 'update', '40P01', () =>
+      post(`/v1/agents/${r.w.agent}/suspend`, 'suspend-1', { pendingRequests: 'pause' }),
+    );
+
+    expect(answer.statusCode).toBe(503);
+    expect(answer.json()).toMatchObject({ error: { code: 'ORGANISATION_BUSY' } });
+    expect(linesOf('brake.not_applied')).toHaveLength(1);
+    expect((await post(`/v1/agents/${r.w.agent}/suspend`, 'suspend-1', { pendingRequests: 'pause' })).statusCode).toBe(
+      200,
+    );
+  });
+
+  it(
+    'a stop whose read after its commit fails says so in its own line, and its key then answers what it did',
+    async () => {
+      const r = await ready();
+      const post = await admin(r.w);
+      const suspend = () => post(`/v1/agents/${r.w.agent}/suspend`, 'suspend-1', { pendingRequests: 'pause' });
+
+      const { answer, next } = await withTheRowTakenAtCommit(r.w, suspend);
+
+      expect(answer.statusCode).toBe(503);
+      expect(answer.headers['retry-after']).toBe('5');
+      expect(linesOf('api.stop_in_trouble')).toMatchObject([{ level: 'error' }]);
+      // It committed: this isn't the line that says nothing was stopped.
+      expect(linesOf('brake.not_applied')).toEqual([]);
+      await letGo(next);
+      const replayed = await suspend();
+      expect(replayed.statusCode).toBe(200);
+      expect(replayed.json()).toMatchObject({ agent: { status: 'SUSPENDED' } });
+    },
+    LONG,
+  );
+
+  it(
+    'a supplier’s reactivation behind its row held says so, and is answered busy',
+    async () => {
+      const r = await ready();
+      const post = await admin(r.w);
+      const supplier = r.w.suppliers[0] ?? '';
+      expect(
+        (await post(`/v1/suppliers/${supplier}/suspend`, 'suspend-1', { pendingRequests: 'pause' })).statusCode,
+      ).toBe(200);
+      const stuck = await database.connect('admin');
+      await stuck.query('begin');
+      await stuck.query('select 1 from suppliers.suppliers where id = $1 for update', [supplier]);
+
+      const answer = await post(`/v1/suppliers/${supplier}/reactivate`, 'reactivate-1', { pendingRequests: 'pause' });
+      await letGo(stuck);
+
+      expect(answer.statusCode).toBe(503);
+      expect(linesOf('api.stop_in_trouble')).toHaveLength(1);
+    },
+    LONG,
+  );
+});
+
+describe('a new key is never lost behind a busy answer', () => {
+  it(
+    'a rotation gives its key, its agent’s row taken the moment it commits',
+    async () => {
+      const { w, acting } = await ready();
+      const named = { agentId: w.agent, keyId: acting.keyId };
+      const challengeId = await steppedUp(w, () =>
+        keyChanges().rotate(w.admin, keyed(w.admin, ROTATE_OPERATION), named, 'end_now', CORRELATION),
+      );
+
+      const { answer, ms, next } = await withTheRowTakenAtCommit(w, () =>
+        keyChanges().rotateConfirm(
+          w.admin,
+          keyed(w.admin, ROTATE_CONFIRM_OPERATION),
+          named,
+          'end_now',
+          challengeId,
+          CORRELATION,
+        ),
+      );
+      await letGo(next);
+
+      expect(answer).toMatchObject({ outcome: 'rotated', key: expect.stringMatching(/^axk_/u) as string });
+      expect(ms).toBeLessThan(3_000);
+    },
+    LONG,
+  );
+
+  it(
+    'a handover gives its key the same way',
+    async () => {
+      const { w } = await ready();
+      const owner = await shared.member(w.org, 'admin');
+      const challengeId = await steppedUp(w, () =>
+        agentChanges().handOver(w.admin, keyed(w.admin, HAND_OVER_OPERATION), w.agent, owner.membershipId, CORRELATION),
+      );
+
+      const { answer, ms, next } = await withTheRowTakenAtCommit(w, () =>
+        agentChanges().handOverConfirm(
+          w.admin,
+          keyed(w.admin, HAND_OVER_CONFIRM_OPERATION),
+          w.agent,
+          owner.membershipId,
+          challengeId,
+          CORRELATION,
+        ),
+      );
+      await letGo(next);
+
+      expect(answer).toMatchObject({ outcome: 'handedOver', key: expect.stringMatching(/^axk_/u) as string });
+      expect(ms).toBeLessThan(3_000);
+    },
+    LONG,
+  );
+});
+
+describe('a routine change holds no traffic up for long', () => {
+  it(
+    'a policy confirm behind a stuck supplier gives up in 3 s, and decisions queued behind it then go on',
+    async () => {
+      const r = await ready();
+      const { w } = r;
+      const target = { scope: 'organization' as const };
+      const sent = { rules: POLICY_RULES, capChoice: 'amount' as const, approvalWait: 72 as const };
+      const challengeId = await steppedUp(w, () =>
+        policies().ask(
+          w.admin,
+          keyed(w.admin, POLICY_OPERATIONS.organization.ask),
+          target,
+          sent,
+          undefined,
+          CORRELATION,
+        ),
+      );
+      const stuck = await database.connect('admin');
+      await stuck.query('begin');
+      await stuck.query('select 1 from suppliers.suppliers where id = $1 for update', [w.suppliers[0]]);
+      const inside = settled(decision(r));
+      await waitUntilQueued(database.as('admin'), 1);
+
+      const confirming = timed(() =>
+        policies().confirm(
+          w.admin,
+          keyed(w.admin, POLICY_OPERATIONS.organization.confirm),
+          target,
+          sent,
+          undefined,
+          challengeId,
+          CORRELATION,
+        ),
+      );
+      await waitUntilQueued(database.as('admin'), 2);
+      // A decision to a calm supplier, behind the waiting change.
+      const calm = settled(decision(r, w.suppliers[1]));
+      await waitUntilQueued(database.as('admin'), 3);
+
+      const { answer, ms } = await confirming;
+      expect(answer).toEqual(refused(503, 'ORGANISATION_BUSY'));
+      expect(ms).toBeGreaterThan(2_500);
+      expect(ms).toBeLessThan(4_500);
+      expect(await calm).toMatchObject({ outcome: 'decided', request: { decision: 'ALLOW' } });
+      expect(await decision(r, w.suppliers[1])).toMatchObject({ outcome: 'decided' });
+
+      await letGo(stuck);
+      await inside;
+    },
+    LONG,
+  );
+});
+
+describe('every routine change gives up on its brake in 3 s', () => {
+  const ROUTINE: readonly (readonly [string, (r: Ready) => string])[] = [
+    ['the organisation’s policy changed', ({ w }) => lockName(ORGANISATION_BRAKE, w.org)],
+    ['a mandate’s over-limit choice', ({ w }) => lockName(AGENT_BRAKE, w.org, w.agent)],
+    ['a mandate redrafted', ({ w }) => lockName(AGENT_BRAKE, w.org, w.agent)],
+    ['a mandate’s draft accepted', ({ w }) => lockName(AGENT_BRAKE, w.org, w.agent)],
+    ['its source’s consent-expiry choice', ({ w }) => lockName(SOURCE_BRAKE, w.org, w.source)],
+  ];
+
+  it.each(ROUTINE)(
+    '%s',
+    async (name, brake) => {
+      const r = await ready();
+      const prepared = CHANGES.find(([change]) => change === name)?.[1];
+      if (prepared === undefined) throw new Error(`no such change: ${name}`);
+      const change = await prepared(r);
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      await holder.query(BRAKE_SHARED, [brake(r)]);
+
+      const { answer, ms } = await timed(change);
+      await letGo(holder);
+
+      expect(answer).toEqual(refused(503, 'ORGANISATION_BUSY'));
+      expect(ms).toBeLessThan(4_500);
+      expect(ms).toBeGreaterThan(2_500);
+    },
+    LONG,
+  );
+});
+
+describe('a decision under trouble, through its route', () => {
+  async function agentApi({ acting, w }: Ready) {
+    const check = createAgentKeyCheck({ database: app, keys, ids, clock, logger: testLogger() });
+    const api = await routeServer({
+      logger: testLogger(capture),
+      checkAgentKey: check.check.bind(check),
+      spendRequestDecisions: createSpendRequestDecisions({ ...services(), entry: UNQUEUED }),
+    });
+    return (orderReference: string, key: string) =>
+      api.inject({
+        method: 'POST',
+        url: '/v1/spend-requests',
+        headers: { authorization: `Bearer ${acting.text}`, 'idempotency-key': key },
+        payload: {
+          amountMinor: 100_000,
+          currency: 'AED',
+          supplierId: w.suppliers[0],
+          fundingSourceId: w.source,
+          orderReference,
+          purpose: 'Printer paper',
+        },
+      });
+  }
+
+  it.each([
+    ['a statement past its limit', '57014'],
+    ['a deadlock its retries lost', '40P01'],
+  ])(
+    'answers %s busy with Retry-After, seen at warn level, and its key sends it again',
+    async (_, code) => {
+      const r = await ready();
+      const post = await agentApi(r);
+
+      const answer = await withFailing('spend_requests.requests', 'insert', code, () => post('INV_T', 'trouble-1'));
+
+      expect(answer.statusCode).toBe(503);
+      expect(answer.headers['retry-after']).toBe('5');
+      expect(answer.json()).toMatchObject({ error: { code: 'ORGANISATION_BUSY' } });
+      expect(linesOf('api.decision_in_trouble')).toMatchObject([{ level: 'warn' }]);
+      expect(linesOf('http.request_failed')).toEqual([]);
+      expect((await post('INV_T', 'trouble-1')).statusCode).toBe(201);
+    },
+    LONG,
+  );
+
+  it(
+    'its read after commit answered busy: the same key replays the same answer',
+    async () => {
+      const r = await ready();
+      const post = await agentApi(r);
+      const first = await post('INV_R', 'replayed-1');
+      expect(first.statusCode).toBe(201);
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      await holder.query('select 1 from spend_requests.requests where id = $1 for update', [
+        first.json<{ id: string }>().id,
+      ]);
+
+      const busy = await post('INV_R', 'replayed-1');
+      await letGo(holder);
+
+      expect(busy.statusCode).toBe(503);
+      expect(linesOf('api.decision_in_trouble')).toHaveLength(1);
+      const again = await post('INV_R', 'replayed-1');
+      expect(again.statusCode).toBe(201);
+      expect(again.json()).toEqual(first.json());
+    },
+    LONG,
+  );
+});
+
+/** Each agent read that takes a source's or a supplier's row FOR SHARE, and no brake. */
+const agentReads = ({ w, acting }: Pick<Ready, 'w' | 'acting'>, requestId: string) => {
+  const mandates = createAgentMandates({ database: app, keys, ids, clock, logger: testLogger() });
+  const registry_ = createSupplierRegistry(services());
+  const reads = createSpendRequestReads({ database: app, keys, ids, logger: testLogger() });
+  return [
+    () => mandates.sources(w.org, acting.agentId, null, CORRELATION),
+    () => registry_.usableByAgent(w.org, { after: null, limit: 50 }, CORRELATION),
+    () => reads.ofAgent(w.org, acting.agentId, requestId, CORRELATION),
+  ];
+};
+
+/** The default limit on an organisation: 300 requests a minute, one every 200 ms. */
+const ORGANISATION_REAL_RATE_MS = 200;
+
+describe('agent reads, which take no brake, against the stops they could hold up', () => {
+  const STOPS: readonly (readonly [string, (r: Ready) => Promise<unknown>])[] = [
+    [
+      'a source',
+      ({ w }: Ready) =>
+        sourceChanges().suspend(w.admin, keyed(w.admin, SOURCE_SUSPEND), w.source, 'pause', CORRELATION),
+    ],
+    [
+      'a supplier',
+      ({ w }: Ready) =>
+        createSupplierChanges(services()).suspend(
+          w.admin,
+          keyed(w.admin, SUPPLIER_SUSPEND),
+          w.suppliers[0] ?? '',
+          'pause',
+          CORRELATION,
+        ),
+    ],
+  ];
+
+  const preparedReads = async () => {
+    const r = await ready();
+    const made = await decision(r);
+    if (made.outcome !== 'decided') throw new Error(`not decided: ${JSON.stringify(made)}`);
+    return { r, reads: agentReads(r, made.request.id) };
+  };
+
+  it.each(STOPS)(
+    '%s stops at once behind them at the rate its organisation can reach',
+    async (_, stop) => {
+      const { r, reads } = await preparedReads();
+      let turn = 0;
+      const stopReads = stream(() => {
+        turn += 1;
+        return reads[turn % reads.length]?.() ?? Promise.resolve();
+      }, ORGANISATION_REAL_RATE_MS);
+      await sleep(600);
+
+      const { answer, ms } = await timed(() => stop(r));
+      await stopReads();
+
+      expect(answer).toMatchObject({ outcome: 'changed' });
+      expect(ms).toBeLessThan(2_000);
+    },
+    LONG,
+  );
+
+  it.each(STOPS)(
+    '%s still stops behind them flat out, one at a time on twelve connections',
+    async (name, stop) => {
+      const { r, reads } = await preparedReads();
+      const flat = { on: true };
+      // Each loop one read at a time, leaving the pool room for the stop: flat out on the rows, not on the pool.
+      const loops = Array.from({ length: 12 }, async (_, n) => {
+        while (flat.on) {
+          await settled(reads[name === 'a source' ? 0 : 1 + (n % 2)]?.() ?? Promise.resolve());
+        }
+      });
+      await sleep(600);
+
+      const answer = await stop(r);
+      flat.on = false;
+      await Promise.all(loops);
+
+      // Not a time: on a laptop these overlap too little to be sure of one. See the rate above for what is promised.
+      expect(answer).toMatchObject({ outcome: 'changed' });
     },
     LONG,
   );

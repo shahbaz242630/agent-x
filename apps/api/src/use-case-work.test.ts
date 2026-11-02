@@ -29,6 +29,7 @@ describe('braked: a brake that couldn’t take hold', () => {
   it.each([
     ['a lock wait run out', '55P03'],
     ['a statement past its limit', '57014'],
+    ['a deadlock lost', '40P01'],
   ])('answers %s busy, and raises the alarm', async (_, code) => {
     const capture = new LogCapture();
 
@@ -45,7 +46,7 @@ describe('braked: a brake that couldn’t take hold', () => {
   it('throws anything else as it was, with no alarm', async () => {
     const capture = new LogCapture();
 
-    await expect(braked(testLogger(capture), ORG, 'corr-1', failing('40P01'))).rejects.toThrow('failed');
+    await expect(braked(testLogger(capture), ORG, 'corr-1', failing('23505'))).rejects.toThrow('failed');
     expect(capture.lines()).toEqual([]);
   });
 

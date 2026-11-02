@@ -244,8 +244,24 @@ export const PLAIN_WORDS = {
     broke: 'It was told busy, send again; nothing of it began, and sending again cannot do it twice.',
     next: 'Look at how busy the database is and what holds connections. If it keeps coming, it needs more room.',
   },
+  'agent_key.check_in_trouble': {
+    happened: 'An agent key check hit a database limit or lost a deadlock.',
+    broke: 'That one request was told busy, send again. Other organisations carried on.',
+    next: "Nothing to do if rare. If often, look at what is holding that organisation's rows.",
+  },
+  'api.decision_in_trouble': {
+    happened: "An agent's spend decision hit a database limit or lost a deadlock.",
+    broke: 'The agent was told busy and can send it again under the same key, so it cannot happen twice.',
+    next: "Nothing to do if rare. If often, look at what is holding that organisation's rows.",
+  },
+  'api.stop_in_trouble': {
+    happened: "An admin's stop or change hit a database limit, a lock wait or a deadlock.",
+    broke:
+      'The admin was told busy. It may or may not have taken effect, as the failure may have come after it was saved.',
+    next: 'Send the same request again, which shows what it did. If this repeats, find what is holding the rows.',
+  },
   'brake.not_applied': {
-    happened: 'An admin pressed a stop or changed an authority, and it could not get its lock in time.',
+    happened: 'An admin pressed a stop or changed an authority, and it could not get its lock or lost a deadlock.',
     broke: 'Nothing was stopped, so agents can still act. The admin was told busy.',
     next: 'Press it again. If it keeps failing, find the stuck database work and end it.',
   },

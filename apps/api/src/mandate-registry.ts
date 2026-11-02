@@ -53,7 +53,7 @@ import {
   type MandateView,
   sourceIn,
   viewIn,
-  agentBrakeOfMandate,
+  routineBrakeOfMandate,
 } from './mandate-reads.ts';
 import { overLimitDetails } from './over-limit-choice.ts';
 import type { Refused } from './refused.ts';
@@ -209,7 +209,7 @@ export function createMandateRegistry({
     },
 
     async redraft(member, idempotent, mandateId, { terms, overLimit }, correlationId) {
-      const hold = (tx: MandateTx) => agentBrakeOfMandate(tx, member.orgId, mandateId);
+      const hold = (tx: MandateTx) => routineBrakeOfMandate(tx, member.orgId, mandateId);
       const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         const now = clock.now();
         const admin = await drafting(tx, states, member, now);
