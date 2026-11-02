@@ -290,15 +290,124 @@ describe('the platform', () => {
     expect(health.heldFor('w')).toBeUndefined();
   });
 
-  it('half-open, one acceptance fully reopens it, said, the fourth place no more limited', () => {
+  /** One step of reopening, every call it lets through accepted. */
+  const stepAccepted = (calls: number) => {
+    const places = Array.from({ length: calls }, (_, at) => entered(`step-${String(calls)}-${String(at)}`));
+    for (const place of places) place.settle('accepted');
+  };
+
+  it('reopens in steps of 3, 6, 12, 24, each only when its calls have all ended, one accepted, none unknown', () => {
     tripped();
     looked();
 
-    accepted('x');
+    const first = [entered('p'), entered('q'), entered('r')];
+    expect(health.heldFor('w')).toBe('bank');
+    first[0]?.settle('accepted');
+    first[1]?.settle('accepted');
+    // A call of its step still out: the step isn't over, its places aren't refilled.
+    expect(health.heldFor('w')).toBe('bank');
+    first[2]?.settle('accepted');
+    expect(lines('handoff.bank_step').map(({ calls }) => calls)).toEqual([6]);
 
-    expect(lines('handoff.bank_back')).toHaveLength(1);
-    for (const org of ['p', 'q', 'r', 's', 't']) entered(org);
+    stepAccepted(6);
+    expect(lines('handoff.bank_step').map(({ calls }) => calls)).toEqual([6, 12]);
     expect(health.heldFor('w')).toBeUndefined();
+    stepAccepted(12);
+    expect(lines('handoff.bank_step').map(({ calls }) => calls)).toEqual([6, 12, 24]);
+    expect(lines('handoff.bank_back')).toEqual([]);
+    stepAccepted(24);
+    expect(lines('handoff.bank_back')).toHaveLength(1);
+    // Open: no step limits it.
+    const many = Array.from({ length: 40 }, (_, at) => entered(`open-${String(at)}`));
+    expect(many).toHaveLength(40);
+    expect(health.heldFor('w')).toBeUndefined();
+  });
+
+  it('holds each step to its own number of calls', () => {
+    tripped();
+    looked();
+    stepAccepted(3);
+
+    const six = Array.from({ length: 6 }, (_, at) => entered(`six-${String(at)}`));
+
+    expect(health.heldFor('w')).toBe('bank');
+    expect('hold' in health.enter('w')).toBe(true);
+    expect(six).toHaveLength(6);
+  });
+
+  it('climbs a step on few calls where few are waiting: one accepted, nothing out', () => {
+    tripped();
+    looked();
+
+    accepted('only');
+
+    expect(lines('handoff.bank_step').map(({ calls }) => calls)).toEqual([6]);
+  });
+
+  it('goes back to held at any unknown in a later step, the same outage', () => {
+    tripped();
+    looked();
+    stepAccepted(3);
+
+    entered('x').settle('unknown');
+
+    expect(health.heldFor('w')).toBe('bank');
+    expect(lines('handoff.bank_held')).toHaveLength(1);
+    expect(lines('handoff.bank_held_again')).toHaveLength(1);
+  });
+
+  it('a stale acceptance from before the trip clears its lane, and moves the platform nowhere', () => {
+    const stale = entered('s');
+    tripped();
+    looked();
+    const third = [entered('p'), entered('q'), entered('r')];
+
+    stale.settle('accepted');
+
+    expect(health.heldFor('w')).toBe('bank');
+    expect(lines('handoff.bank_step')).toEqual([]);
+    expect(lines('handoff.bank_back')).toEqual([]);
+    expect(third).toHaveLength(3);
+  });
+
+  it('clears a lane at an acceptance begun before its hold', () => {
+    const under = [entered('s'), entered('s'), entered('s'), entered('s')];
+    for (const place of under.slice(0, 3)) place.settle('unknown');
+    expect(health.heldFor('s')).toBe('lane');
+
+    under[3]?.settle('accepted');
+
+    expect(health.heldFor('s')).toBeUndefined();
+    expect(health.oneAtATime('s')).toBe(false);
+  });
+
+  it('keeps a lookup answered during the wait, and goes half-open when the wait ends, with no lookup then', () => {
+    tripped();
+    looked();
+    entered('x').settle('unknown');
+    expect(health.heldFor('w')).toBe('bank');
+
+    // Answered within its minute's wait.
+    looked();
+    expect(health.heldFor('w')).toBe('bank');
+    clock.advanceBy(MINUTE - 1);
+    expect(health.heldFor('w')).toBe('bank');
+
+    clock.advanceBy(1);
+    expect(health.heldFor('w')).toBeUndefined();
+    expect(lines('handoff.bank_half_open')).toHaveLength(2);
+  });
+
+  it('keeps no lookup heard before a trip for the wait after it', () => {
+    tripped();
+    looked();
+    entered('x').settle('unknown');
+    looked();
+    clock.advanceBy(MINUTE);
+    entered('y').settle('unknown');
+    clock.advanceBy(60 * MINUTE);
+
+    expect(health.heldFor('w')).toBe('bank');
   });
 
   it('half-open, a refusal doesn’t reopen it', () => {
@@ -364,18 +473,62 @@ describe('the platform', () => {
     ]);
   });
 
-  it('an acceptance resets the wait; the next outage is a new one, a new error', () => {
+  /** Reopened all the way, a fresh organisation's calls accepted in each step. */
+  const reopened = () => {
+    for (const calls of [3, 6, 12, 24]) {
+      const places = Array.from({ length: calls }, (_, at) => entered(`back-${String(calls)}-${String(at)}`));
+      for (const place of places) place.settle('accepted');
+    }
+    expect(lines('handoff.bank_back').length).toBeGreaterThan(0);
+  };
+
+  const FRESH = ['p', 'q', 'r', 's', 't'];
+  const tripAmong = () => {
+    for (const org of FRESH) unknowns(org, 1);
+  };
+
+  it('a flapping bank stays one outage: a trip within 15 minutes of opening, no new error, its wait going on growing', () => {
     tripped();
     looked();
     entered('x').settle('unknown');
     clock.advanceBy(MINUTE);
     looked();
-    accepted('x');
-    expect(health.heldFor('z')).toBeUndefined();
+    reopened();
 
-    // Fresh organisations' lanes clean: the next outage's trip.
-    for (const org of ['p', 'q', 'r', 's', 't']) unknowns(org, 1);
+    clock.advanceBy(15 * MINUTE - 1);
+    tripAmong();
+
+    expect(health.heldFor('z')).toBe('bank');
+    expect(lines('handoff.bank_held')).toHaveLength(1);
+    expect(lines('handoff.bank_held_again').map(({ waitMinutes }) => waitMinutes)).toEqual([1, 2]);
+  });
+
+  it('keeps the hold’s lasting going through a flap: the same outage’s hold, said from its first trip', () => {
+    tripped();
+    looked();
+    reopened();
+    clock.advanceBy(14 * MINUTE);
+    tripAmong();
+    clock.advanceBy(MINUTE);
+
+    health.enter('z');
+
+    expect(lines('handoff.hold_lasting')).toEqual([expect.objectContaining({ minutes: 15 })]);
+  });
+
+  it('a new outage only after 15 healthy minutes: a new error, its wait started afresh', () => {
+    tripped();
+    looked();
+    entered('x').settle('unknown');
+    clock.advanceBy(MINUTE);
+    looked();
+    reopened();
+
+    clock.advanceBy(15 * MINUTE);
+    tripAmong();
+
     expect(lines('handoff.bank_held')).toHaveLength(2);
+    // Open again at once on a lookup, its first wait none; its next trip waits a minute.
     looked();
     entered('u').settle('unknown');
     expect(lines('handoff.bank_held_again').at(-1)).toMatchObject({ waitMinutes: 1 });
@@ -390,7 +543,10 @@ describe('the platform', () => {
     looked();
     const three = [entered('p'), entered('q'), entered('r')];
 
+    // Neither a place given back, nor a step's acceptance.
     earlier.settle('refused');
+    expect(health.heldFor('w')).toBe('bank');
+    earlier.settle('accepted');
 
     expect(three).toHaveLength(3);
     expect(health.heldFor('w')).toBe('bank');
@@ -422,16 +578,138 @@ describe('the platform', () => {
       for (const place of places) place.settle('unknown');
     }
 
-    // Waits of 1, 2, 4, 8, 16, 30 fill the hour: at most 7 half-opens, 3 a time: not the 1,200-2,200 at 24 a time.
-    expect(sent).toBeLessThanOrEqual(21);
+    // Waits of 1, 2, 4, 8, 16 and 30 fill the hour: 6 half-opens, 3 calls each, 18: not the 1,200-2,200 at 24 a time.
+    expect(sent).toBeLessThanOrEqual(18);
     expect(sent).toBeGreaterThan(0);
     // One outage: one error for the trip, the rest the hold's lasting, once each 15 minutes.
     expect(lines('handoff.bank_held')).toHaveLength(1);
   });
+
+  describe('a partly working bank, an hour of it', () => {
+    interface Call {
+      readonly at: number;
+      readonly org: string;
+      readonly place: Exclude<RailEntry, { hold: unknown }>;
+      readonly word: 'accepted' | 'unknown';
+    }
+
+    /** The calls due by now ended, each told to the breaker: how many were lost. */
+    function ended(out: Call[], perOrg: Map<string, number>, second: number): number {
+      const due = out.filter(({ at }) => at <= second);
+      for (const call of due) {
+        out.splice(out.indexOf(call), 1);
+        perOrg.set(call.org, (perOrg.get(call.org) ?? 1) - 1);
+        call.place.settle(call.word);
+      }
+      return due.filter(({ word }) => word === 'unknown').length;
+    }
+
+    /** 30 organisations, up to 24 calls at once and 4 each; an acceptance in a second, a lost call in 30; lookups each minute. */
+    function anHourAt(acceptance: number) {
+      let seed = 7;
+      const random = () => {
+        seed = (seed * 1664525 + 1013904223) % 2 ** 32;
+        return seed / 2 ** 32;
+      };
+      const out: Call[] = [];
+      const perOrg = new Map<string, number>();
+      let cursor = 0;
+      let lost = 0;
+      const start = (org: string, second: number) => {
+        if ((perOrg.get(org) ?? 0) >= (health.oneAtATime(org) ? 1 : 4)) return;
+        const entry = health.enter(org);
+        if ('hold' in entry) return;
+        const works = random() < acceptance;
+        perOrg.set(org, (perOrg.get(org) ?? 0) + 1);
+        out.push({ at: second + (works ? 1 : 30), org, place: entry, word: works ? 'accepted' : 'unknown' });
+      };
+      for (let second = 0; second < 3_600; second += 1) {
+        clock.advanceBy(1_000);
+        lost += ended(out, perOrg, second);
+        if (second % 60 === 0) for (let org = 0; org < 30; org += 1) looked(`o${String(org)}`);
+        for (let turn = 0; turn < 30 && out.length < 24; turn += 1) {
+          start(`o${String(cursor % 30)}`, second);
+          cursor += 1;
+        }
+      }
+      return { lost, errors: lines('handoff.bank_held').length };
+    }
+
+    it.each([
+      // Simulated (scratchpad sim.mjs): a tenth, a quarter and a half accepted, against 73, 308 and 653 lost before.
+      [0.1, 60],
+      [0.25, 60],
+      [0.5, 100],
+    ])('at %s accepted, loses few and raises one error', (acceptance, most) => {
+      const { lost, errors } = anHourAt(acceptance);
+
+      expect(lost).toBeLessThanOrEqual(most);
+      expect(errors).toBeLessThanOrEqual(1);
+    });
+
+    it('a fair bank comes back to 24 in minutes, once it answers', () => {
+      tripped();
+      looked();
+      // Each hand-off run, 10 s apart, its step's calls all accepted.
+      for (const calls of [3, 6, 12, 24]) {
+        clock.advanceBy(10_000);
+        const places = Array.from({ length: calls }, (_, at) => entered(`fair-${String(calls)}-${String(at)}`));
+        for (const place of places) place.settle('accepted');
+      }
+
+      expect(lines('handoff.bank_back')).toHaveLength(1);
+    });
+  });
+});
+
+describe('a bank that refuses everything', () => {
+  /** `times` refusals from each organisation in turn. */
+  const refusals = (orgs: readonly string[], times: number) => {
+    for (let time = 0; time < times; time += 1) for (const org of orgs) entered(org).settle('refused');
+  };
+
+  it('says nothing of many refusals from two organisations: theirs, and real', () => {
+    refusals(['a', 'b'], 20);
+
+    expect(lines('handoff.bank_refusing')).toEqual([]);
+  });
+
+  it('says nothing of few across many', () => {
+    refusals(['a', 'b', 'c'], 3);
+
+    expect(lines('handoff.bank_refusing')).toEqual([]);
+  });
+
+  it('warns once of a run across three organisations with no acceptance; an error once it lasts; no hold on anyone', () => {
+    refusals(['a', 'b', 'c'], 4);
+    refusals(['a', 'b', 'c'], 4);
+    expect(lines('handoff.bank_refusing')).toEqual([expect.objectContaining({ level: 'warn', organisations: 3 })]);
+
+    clock.advanceBy(15 * MINUTE - 1);
+    refusals(['a'], 1);
+    expect(lines('handoff.bank_refusing')).toHaveLength(1);
+
+    clock.advanceBy(1);
+    refusals(['a'], 1);
+    refusals(['a'], 1);
+    expect(lines('handoff.bank_refusing').map(({ level }) => level)).toEqual(['warn', 'error']);
+    expect(health.heldFor('a')).toBeUndefined();
+  });
+
+  it('starts the count again at any acceptance', () => {
+    refusals(['a', 'b', 'c'], 3);
+    accepted('d');
+    refusals(['a', 'b', 'c'], 3);
+
+    expect(lines('handoff.bank_refusing')).toEqual([]);
+
+    refusals(['a', 'b', 'c'], 1);
+    expect(lines('handoff.bank_refusing')).toHaveLength(1);
+  });
 });
 
 describe('only a long hold is an error', () => {
-  it('says nothing of a blip: tripped, half-open, reopened inside 15 minutes', () => {
+  it('says no lasting hold of a blip: tripped, half-open, climbing inside 15 minutes', () => {
     tripped();
     health.enter('z');
     clock.advanceBy(15 * MINUTE - 1);

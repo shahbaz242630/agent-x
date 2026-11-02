@@ -15,11 +15,12 @@
 // - The platform: 5 unknowns from at least 3 organisations in 60 s holds every
 //   new Tx A. That is the bank's outage, not an organisation's block (decision
 //   1). A lookup begun since the trip that answers, `not_found` included, makes
-//   it half-open: at most 3 calls at once across the platform, until an
-//   acceptance fully reopens it. Any unknown while half-open trips it again,
-//   and a lookup can't reopen it for 1 minute, then 2, 4, up to 30; an acceptance
-//   resets that wait. So a bank whose lookups answer and whose payments hang costs a
-//   bounded few UNKNOWNs an hour.
+//   it half-open, reopening in steps: 3 calls, then 6, 12, 24, then open. A step
+//   ends when its calls have all ended, at least one accepted and none unknown,
+//   so a bank that accepts only some never climbs. Any unknown goes back to held,
+//   and a lookup can't reopen it for 1 minute, then 2, 4, up to 30; one answered
+//   during that wait is kept for its end. It stays one outage, with one error line
+//   and its wait still growing, until it has been open for 15 minutes.
 //
 // In this process's memory: a restart forgets it, and the next unknowns count
 // again. Nothing here decides a payment: a held one waits, APPROVED, its money
@@ -40,8 +41,15 @@ const PLATFORM_UNKNOWNS = 5;
 const PLATFORM_ORGANISATIONS = 3;
 const PLATFORM_WINDOW_MS = 60_000;
 
-/** The calls at once across the platform while half-open. */
-const HALF_OPEN_CALLS = 3;
+/** The calls each step of reopening may start across the platform: a refused or unsent one gives its place back. */
+const REOPEN_STEPS = [3, 6, 12, 24] as const;
+
+/** How long it must stay open before a further trip is a new outage, with its wait started afresh. */
+const HEALTHY_MS = 15 * 60_000;
+
+/** Refusals in a row, with no acceptance, from at least REFUSING_ORGANISATIONS, before they are said: one's own are real. */
+const REFUSALS_SAID = 10;
+const REFUSING_ORGANISATIONS = 3;
 
 /** How long a lookup can't reopen a hold after a trip from half-open, doubling each time, up to the most. */
 const REOPEN_WAIT_MS = 60_000;
@@ -114,9 +122,24 @@ export function createRailHealth({
   let outage = 0;
   let reopensAt = 0;
   let nextWaitMs = REOPEN_WAIT_MS;
-  let halfOpenCalls = 0;
-  // Each half-open's own: a call let through in an earlier one gives nothing back to this one's count.
-  let halfOpenRound = 0;
+  // The reopening under way: which one (a call begun in an earlier one moves nothing), its step and what that step has
+  // let through, has under way, and has had accepted.
+  let reopening = 0;
+  let step = 0;
+  let letThrough = 0;
+  let underWay = 0;
+  let stepAccepted = false;
+  // A lookup begun since the trip has answered: kept through the wait, for when it ends.
+  let lookupHeard = false;
+  // Until when a further trip is still the same outage.
+  let healthyAt = Number.NEGATIVE_INFINITY;
+  // The refusals since the last acceptance, whoever they were from, and when they were first said.
+  let refusals = {
+    count: 0,
+    organisations: new Set<string>(),
+    saidAt: undefined as number | undefined,
+    lasting: false,
+  };
   const bankHold: Lasting = { heldSince: 0, lastingSaid: 0 };
 
   const now = (): number => clock.now().getTime();
@@ -124,8 +147,26 @@ export function createRailHealth({
   const laneHoldsNow = (lane: LaneState | undefined): lane is LaneState =>
     lane !== undefined && lane.inRow >= laneUnknowns && (lane.heldUntil > now() || !lane.lookedSince || lane.probing);
 
-  const bankHoldsNow = (): boolean =>
-    platform === 'held' || (platform === 'half_open' && halfOpenCalls >= HALF_OPEN_CALLS);
+  const beginStep = (next: number): void => {
+    step = next;
+    letThrough = 0;
+    underWay = 0;
+    stepAccepted = false;
+  };
+
+  /** Held with a lookup heard since its trip, and its wait over: the first step of reopening. */
+  const reopenIfDue = (): void => {
+    if (platform !== 'held' || !lookupHeard || now() < reopensAt) return;
+    platform = 'half_open';
+    reopening += 1;
+    beginStep(0);
+    logger.info('handoff.bank_half_open', { calls: REOPEN_STEPS[0] });
+  };
+
+  const bankHoldsNow = (): boolean => {
+    reopenIfDue();
+    return platform === 'held' || (platform === 'half_open' && letThrough >= (REOPEN_STEPS[step] ?? 0));
+  };
 
   /** Whether this hold, reached by a payment that really waits on it, has lasted past a blip and is due to be said. */
   const lastingDue = (hold: Lasting): boolean => {
@@ -135,10 +176,15 @@ export function createRailHealth({
     return true;
   };
 
-  /** A trip from half-open: the same outage, its wait growing. */
-  const tripAgain = (at: number): void => {
+  const held = (): void => {
     platform = 'held';
     trippedAtUnknown = unknowns;
+    lookupHeard = false;
+  };
+
+  /** A trip within an outage (from half-open, or too soon after it opened): no new error, its wait growing. */
+  const tripAgain = (at: number): void => {
+    held();
     reopensAt = at + nextWaitMs;
     logger.info('handoff.bank_held_again', { waitMinutes: nextWaitMs / 60_000 });
     nextWaitMs = Math.min(nextWaitMs * 2, REOPEN_WAIT_MOST_MS);
@@ -154,12 +200,16 @@ export function createRailHealth({
     recent = [...recent.filter((unknown) => at - unknown.at < PLATFORM_WINDOW_MS), { at, orgId }];
     const organisations = new Set(recent.map((unknown) => unknown.orgId)).size;
     if (recent.length < PLATFORM_UNKNOWNS || organisations < PLATFORM_ORGANISATIONS) return;
-    platform = 'held';
+    if (at < healthyAt) {
+      tripAgain(at);
+      return;
+    }
+    held();
     outage += 1;
-    trippedAtUnknown = unknowns;
     bankHold.heldSince = at;
     bankHold.lastingSaid = at;
     reopensAt = at;
+    nextWaitMs = REOPEN_WAIT_MS;
     logger.error('handoff.bank_held', { unknowns: recent.length, organisations });
   };
 
@@ -198,14 +248,47 @@ export function createRailHealth({
     countForBank(orgId, at);
   };
 
-  /** An acceptance: its lane clear, and, half-open, the platform too. */
-  const acceptedIn = (orgId: string): void => {
-    lanes.delete(orgId);
-    if (platform !== 'half_open') return;
+  /** A step's calls all ended, one accepted, none unknown: the next step, or open after the last. */
+  const stepDone = (): void => {
+    const next = step + 1;
+    const calls = REOPEN_STEPS[next];
+    if (calls !== undefined) {
+      beginStep(next);
+      logger.info('handoff.bank_step', { calls });
+      return;
+    }
     platform = 'open';
     recent = [];
-    nextWaitMs = REOPEN_WAIT_MS;
+    healthyAt = now() + HEALTHY_MS;
     logger.info('handoff.bank_back', {});
+  };
+
+  /** A call of the reopening under way ended, unknown aside (that goes back to held). */
+  const countForStep = (how: Exclude<Settled, 'unknown'>): void => {
+    underWay -= 1;
+    if (how !== 'accepted') letThrough -= 1;
+    else stepAccepted = true;
+    if (underWay === 0 && stepAccepted) stepDone();
+  };
+
+  /**
+   * A refusal is neutral for payments, and one organisation's are real: a run of
+   * them across several, with no acceptance, may be our own credentials or a
+   * limit, so is said, a warning, then an error if it lasts. No payment stops on it.
+   */
+  const countRefusal = (orgId: string): void => {
+    refusals.count += 1;
+    refusals.organisations.add(orgId);
+    if (refusals.count < REFUSALS_SAID || refusals.organisations.size < REFUSING_ORGANISATIONS) return;
+    const at = now();
+    const said = { refusals: refusals.count, organisations: refusals.organisations.size };
+    if (refusals.saidAt === undefined) {
+      refusals.saidAt = at;
+      logger.warn('handoff.bank_refusing', said);
+    } else if (!refusals.lasting && at - refusals.saidAt >= HOLD_LASTING_MS) {
+      refusals.lasting = true;
+      logger.error('handoff.bank_refusing', said);
+    }
   };
 
   /** A place for one payment: its lane's and, half-open, the platform's. Assumes nothing holds it. */
@@ -213,14 +296,23 @@ export function createRailHealth({
     const lane = lanes.get(orgId);
     const probe = lane !== undefined && lane.inRow >= laneUnknowns;
     if (probe) lane.probing = true;
-    const round = platform === 'half_open' ? halfOpenRound : undefined;
-    if (round !== undefined) halfOpenCalls += 1;
+    const round = platform === 'half_open' ? reopening : undefined;
+    if (round !== undefined) {
+      letThrough += 1;
+      underWay += 1;
+    }
     return {
       settle: (how) => {
         if (probe) lane.probing = false;
-        if (round === halfOpenRound) halfOpenCalls -= 1;
-        if (how === 'accepted') acceptedIn(orgId);
+        // Any acceptance clears its lane, one begun before a trip included.
+        if (how === 'accepted') {
+          lanes.delete(orgId);
+          refusals = { count: 0, organisations: new Set(), saidAt: undefined, lasting: false };
+        }
+        if (how === 'refused') countRefusal(orgId);
         if (how === 'unknown') unknownIn(orgId);
+        // Only a call of the reopening under way moves it: a stale one proves nothing of the way now.
+        else if (round === reopening && platform === 'half_open') countForStep(how);
       },
     };
   };
@@ -256,11 +348,9 @@ export function createRailHealth({
       return () => {
         const lane = lanes.get(orgId);
         if (lane !== undefined && begunAt >= lane.lastUnknown) lane.lookedSince = true;
-        if (platform !== 'held' || begunAt < trippedAtUnknown || now() < reopensAt) return;
-        platform = 'half_open';
-        halfOpenRound += 1;
-        halfOpenCalls = 0;
-        logger.info('handoff.bank_half_open', { calls: HALF_OPEN_CALLS });
+        if (platform !== 'held' || begunAt < trippedAtUnknown) return;
+        lookupHeard = true;
+        reopenIfDue();
       };
     },
   };

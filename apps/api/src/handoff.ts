@@ -311,9 +311,9 @@ export function createHandoff({
   const waitingIn = new Map<string, string[]>();
   // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
   const staleSaid = new Map<string, number>();
-  // The organisations told their payments wait for the bank, by the hold and platform outage then: one signed event an
-  // outage, not one a run. A trip again from half-open is the same outage; an acceptance of its own clears it.
-  const toldHeld = new Map<string, { readonly hold: RailHold; readonly outage: number }>();
+  // What each organisation was told of its payments waiting for the bank: its lane's hold, and the platform's outage.
+  // One signed event an outage and one a lane's hold, not one a run; an acceptance of its own clears it.
+  const toldHeld = new Map<string, { readonly lane?: true; readonly bank?: number }>();
   const beatNow = (): void => {
     beat = clock.now().getTime();
   };
@@ -616,15 +616,17 @@ export function createHandoff({
   /**
    * The organisation told, in its audit log, that its payments wait for the
    * bank (partner S119, S140: background actions kept where it can read them):
-   * once an outage. One that can't be written is said and tried again next run;
-   * the payments stay held either way.
+   * once an outage, and once a hold of its own lane. A lane's note speaks for
+   * the platform's hold that follows it. One that can't be written is said and
+   * tried again next run; the payments stay held either way.
    */
   const tellHeld = async (orgId: string, hold: RailHold, outage: number, log: Logger): Promise<void> => {
-    const told = toldHeld.get(orgId);
+    const told = toldHeld.get(orgId) ?? {};
+    const already =
+      hold === 'lane' ? told.lane === true : told.bank === outage || (told.lane === true && told.bank === undefined);
     // Noted before it is written: several of its requests may reach the hold at once.
-    toldHeld.set(orgId, { hold, outage });
-    // A lane's own note speaks for the platform's hold that follows it, as for the rest of this outage.
-    if (told !== undefined && (told.outage === outage || told.hold === 'lane')) return;
+    toldHeld.set(orgId, hold === 'lane' ? { ...told, lane: true } : { ...told, bank: outage });
+    if (already) return;
     try {
       await withSignedStates(database, orgId, services(log), (tx) =>
         createAuditTrail({ keys, ids }).record(tx, orgId, {
@@ -635,7 +637,7 @@ export function createHandoff({
         }),
       );
     } catch (error) {
-      toldHeld.delete(orgId);
+      toldHeld.set(orgId, told);
       log.error('handoff.held_unrecorded', { err: error });
     }
   };
@@ -675,7 +677,7 @@ export function createHandoff({
   ): Promise<void> => {
     const answer = await answerOf(intent, id, log);
     // Before Tx B, the moment it is known, so no new Tx A can start between an outage's answers.
-    const word = breakerWord(answer, intent);
+    const word = breakerWordOf(answer, intent);
     settle(word);
     if (word === 'accepted') toldHeld.delete(orgId);
     try {
@@ -891,6 +893,10 @@ type Answer =
  * breaker. Only a clear acceptance of this very payment is an acceptance: an
  * answer about another payment, or a rejection with no proof, leaves its outcome
  * unknown as surely as a timeout does. A rejection with its proof is a refusal.
+ *
+ * For the Phase 5 adapter: a refusal here means the bank weighed this payment and
+ * turned it down. Our own 401, 403 and 429 must never arrive as `refused`: throw
+ * RailUnavailable, so they count as unknown and hold the way, not as neutral.
  */
 function breakerWord(answer: Answer, intent: ApprovedPaymentIntent): 'accepted' | 'refused' | 'unknown' {
   if (answer.kind !== 'accepted') return answer.kind;
@@ -899,6 +905,15 @@ function breakerWord(answer: Answer, intent: ApprovedPaymentIntent): 'accepted' 
   const state = paymentStateOf(answer.execution);
   if (state === 'UNKNOWN') return 'unknown';
   return state === 'FAILED' ? 'refused' : 'accepted';
+}
+
+/** The word on an answer, one too malformed to read counting as unknown, so the breaker's place is always given back. */
+function breakerWordOf(answer: Answer, intent: ApprovedPaymentIntent): 'accepted' | 'refused' | 'unknown' {
+  try {
+    return breakerWord(answer, intent);
+  } catch {
+    return 'unknown';
+  }
 }
 
 /** A request's move by its machine, signed, from its state read for change in this transaction. */

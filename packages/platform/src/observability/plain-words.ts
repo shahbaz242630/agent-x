@@ -455,15 +455,19 @@ export const PLAIN_WORDS = {
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
   'handoff.bank_held': {
-    happened:
-      'The bank gave no clear answer to new payments from several organisations, so new payments are held back.',
+    happened: 'The bank gave no clear answer to payments from several organisations, so new ones are held back.',
     broke: 'Approved payments wait, their money still held. Nothing already sent is sent again.',
-    next: 'When a status check answers, a few go to test the way; one accepted reopens it. If it lasts, ask the bank why.',
+    next: 'When a status check answers, a few go to test the way, more as they are accepted. If it lasts, ask the bank.',
   },
   'handoff.hold_lasting': {
     happened: 'New payments have been held back for over 15 minutes because the bank is not answering them clearly.',
-    broke: 'Approved payments wait, their money still held; at most a few go at a time to test the way.',
-    next: 'Ask the bank what is wrong. It reopens by itself once the bank accepts one. Said again each 15 minutes.',
+    broke: 'Approved payments wait, their money still held; a few at a time go to test the way.',
+    next: 'Ask the bank what is wrong. It reopens by itself, in steps, as the bank accepts. Said again each 15 minutes.',
+  },
+  'handoff.bank_refusing': {
+    happened: 'The bank has refused many payments from several organisations, and has accepted none since.',
+    broke: 'Those payments failed, their money given back. Nothing else is stopped.',
+    next: 'Check our access to the bank and its limits: this may be ours, not theirs. Then ask the bank.',
   },
   'handoff.lane_held': {
     happened:

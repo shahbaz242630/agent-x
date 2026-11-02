@@ -47,7 +47,7 @@ const shared = spendWorld({
   decisions: () => decisions,
 });
 const { ask, statusOf } = shared;
-const { ready } = handoffWorld({
+const { ready, paymentOf } = handoffWorld({
   app: () => app,
   clock: () => clock,
   ids,
@@ -305,7 +305,7 @@ describe('the bank held: 5 unknowns from at least 3 organisations in 60 s', () =
     return { worlds: worlds.map(({ w }) => w), requests: worlds.flatMap(({ requests }) => requests) };
   };
 
-  it('a payment is never the probe', async () => {
+  it('sends nothing while held, however long, until a lookup answers', async () => {
     const { worlds } = await threeWorlds(3);
     let bankAway = true;
     const { rail, sent } = railOver(worlds, (real) => (intent) => (bankAway ? noAnswer(intent) : real(intent)));
@@ -330,7 +330,7 @@ describe('the bank held: 5 unknowns from at least 3 organisations in 60 s', () =
     for (const w of worlds) expect((await lookedFor(w, rail)).kind).toBe('not_found');
     expect(lines('handoff.bank_half_open')).toHaveLength(1);
     await job.run();
-    expect(lines('handoff.bank_back')).toHaveLength(1);
+    expect(lines('handoff.bank_step').length).toBeGreaterThan(0);
     expect(sent).toHaveLength(worlds.length * 3);
   });
 
@@ -400,15 +400,59 @@ describe('the bank held: 5 unknowns from at least 3 organisations in 60 s', () =
     await job.run();
     expect(await heldNotesOf(w)).toHaveLength(1);
 
-    // Another's acceptance reopens it, half-open; a fresh trip is a new outage.
+    // Others' acceptances reopen it, all the way; 15 healthy minutes on, a fresh trip is a new outage.
     health.lookupBegun('p')();
-    const place = health.enter('p');
-    if ('settle' in place) place.settle('accepted');
+    for (const calls of [3, 6, 12, 24]) {
+      const places = Array.from({ length: calls }, (_, at) => health.enter(`others-${String(calls)}-${String(at)}`));
+      for (const place of places) if ('settle' in place) place.settle('accepted');
+    }
+    clock.advanceBy(15 * 60_000);
     unknownsFrom(['q', 'r', 's', 't', 'u']);
     await job.run();
 
     expect(await heldNotesOf(w)).toHaveLength(2);
     expect(await statusOf(w, requests[0] ?? '')).toBe('APPROVED');
+  });
+
+  it('tells it of a lane hold of its own, though told of the bank in this same outage', async () => {
+    const { w } = await worldWith(1);
+    const job = handoffOver([w], railOver([w]).rail);
+    unknownsFrom(['x', 'x', 'y', 'y', 'z']);
+    await job.run();
+    expect(await heldNotesOf(w)).toHaveLength(1);
+
+    // Half-open, its own three unanswered: a hold of its lane, though the outage is the same.
+    health.lookupBegun('anyone')();
+    const own = [health.enter(w.org), health.enter(w.org), health.enter(w.org)];
+    for (const place of own) if ('settle' in place) place.settle('unknown');
+    clock.advanceBy(60 * 60_000);
+    health.lookupBegun('anyone')();
+    await job.run();
+
+    const notes = await heldNotesOf(w);
+    expect(notes).toHaveLength(2);
+    expect(notes.map(({ details }) => JSON.parse(details) as unknown)).toEqual([
+      expect.objectContaining({ hold: 'bank' }),
+      expect.objectContaining({ hold: 'lane' }),
+    ]);
+  });
+
+  it('counts an answer too malformed to read as unknown, its place given back, nothing sent again', async () => {
+    const { w, requests } = await worldWith(1);
+    unknownsFrom(['x', 'x', 'y', 'y', 'z']);
+    health.lookupBegun('anyone')();
+    const { rail, sent } = railOver(
+      [w],
+      () => () => Promise.resolve({ kind: 'accepted', execution: null } as unknown as Awaited<ReturnType<Submit>>),
+    );
+
+    await handoffOver([w], rail).run();
+
+    expect(sent).toHaveLength(1);
+    // Unknown in half-open: back to held, no place left stuck.
+    expect(lines('handoff.bank_held_again')).toHaveLength(1);
+    expect(lines('handoff.answer_unrecorded')).toHaveLength(1);
+    expect(await paymentOf(w, requests[0] ?? '')).toMatchObject({ transaction: { status: 'SUBMISSION_PENDING' } });
   });
 
   it('says the note it couldn’t write, the payment held all the same, and writes it next run', async () => {
