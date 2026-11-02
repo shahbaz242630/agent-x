@@ -19,7 +19,7 @@ import {
   reachWithin,
   RUN_WITHIN_MS,
 } from './anchor-check.ts';
-import { lanesWithin, shuffledAfresh, SLOW_AFTER_MS } from './anchor-turns.ts';
+import { createTurns, lanesWithin, shuffledAfresh, SLOW_AFTER_MS, startAnywhere } from './anchor-turns.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -90,6 +90,7 @@ function checking(
     reachWithinMs: REACH_MS,
     deadlineMs: DEADLINE_MS,
     shuffled: (orgIds) => orgIds,
+    pastCapStart: () => 0,
     ...more,
   });
   return { check, capture, clock };
@@ -1342,6 +1343,99 @@ describe('third round (4D2e E6 review)', () => {
     expect(new Set(started)).toEqual(new Set(all));
     expect(lines(capture, 'audit.anchor_check_over_size').at(0)).toMatchObject({ level: 'error', beyond: 5, most: 1 });
     expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
+  });
+
+  it('#5 past the cap a restart starts anywhere, so restarts more often than a round leave no tail unchecked', async () => {
+    const all = orgs(6);
+    const turnsSeen = new Set<string>();
+    for (let life = 0; life < 300 && turnsSeen.size < all.length; life += 1) {
+      const stopping = new AbortController();
+      let turnsThisLife = 0;
+      const { organizations } = directory(all);
+      const verify: OrganisationChains['verify'] = (orgId, anchor) => {
+        turnsSeen.add(orgId);
+        turnsThisLife += 1;
+        if (turnsThisLife === 2) stopping.abort();
+        return organizations.verify(orgId, anchor);
+      };
+      const { check } = checking(
+        { ...organizations, verify },
+        { lanes: 1, mostOrganisations: 1, pastCapStart: startAnywhere },
+      );
+      await check.run(stopping.signal);
+    }
+    expect(turnsSeen).toEqual(new Set(all));
+  });
+
+  it('#5 the start of a round past the cap goes where it is told, once in a process, and then the cursor goes on', async () => {
+    const all = orgs(5);
+    const asked: number[] = [];
+    const { organizations, started } = directory(all);
+    const { check } = checking(organizations, {
+      lanes: 1,
+      mostOrganisations: 1,
+      pastCapStart: (count) => {
+        asked.push(count);
+        return 2;
+      },
+    });
+    await check.run();
+    expect(started.filter((orgId) => orgId !== org(1))).toEqual([org(4), org(5), org(2), org(3)]);
+    started.length = 0;
+    await check.run();
+    expect(started.filter((orgId) => orgId !== org(1))).toEqual([org(4), org(5), org(2), org(3)]);
+    expect(asked).toEqual([4]);
+  });
+
+  it('#5 a run that reaches none past the cap does not put back how long they have waited', () => {
+    const turns = createTurns(
+      1,
+      (orgIds) => orgIds,
+      () => 0,
+    );
+    const past = [org(2), org(3)];
+    turns.begin([], [], [], past);
+    expect(turns.pastCapStarts()).toBe(true);
+    turns.begin([], [], [], past);
+    expect(turns.pastCapStarts()).toBe(false);
+    expect(turns.next()).toBe(org(2));
+    turns.begin([], [], [], past);
+    expect(turns.pastCapStarts()).toBe(false);
+    expect(turns.next()).toBe(org(3));
+    turns.begin([], [], [], past);
+    expect(turns.pastCapStarts()).toBe(true);
+  });
+
+  it('a mass removal from the list names the first 20, and one line counts the rest: still the tamper alarm', async () => {
+    const all = orgs(30);
+    const { organizations, list, holds } = directory(all);
+    const { check, capture } = checking(organizations, { lanes: 4 });
+    await check.run();
+    list.now = all.slice(25);
+    await check.run();
+    const said = lines(capture, 'audit.integrity_failed').filter((line) => line.reason === 'unlisted');
+    const named = said.filter((line) => line.organisations === undefined);
+    expect(named).toHaveLength(20);
+    expect(said.filter((line) => line.organisations !== undefined)).toEqual([
+      expect.objectContaining({ level: 'error', chain: 'organisation', check: 'anchor', organisations: 5 }),
+    ]);
+    expect(lines(capture, 'audit.anchor_check_behind')).toEqual([]);
+    // Every one held all the same, and the next run says it all again.
+    expect(holds.filter(([, reason]) => reason === 'unlisted')).toHaveLength(25);
+    await check.run();
+    expect(lines(capture, 'audit.integrity_failed').filter((line) => line.reason === 'unlisted')).toHaveLength(42);
+  });
+
+  it('20 removed or fewer are all named, with no line of the rest', async () => {
+    const all = orgs(21);
+    const { organizations, list } = directory(all);
+    const { check, capture } = checking(organizations, { lanes: 2 });
+    await check.run();
+    list.now = all.slice(20);
+    await check.run();
+    const said = lines(capture, 'audit.integrity_failed').filter((line) => line.reason === 'unlisted');
+    expect(said).toHaveLength(20);
+    expect(said.every((line) => line.organisations === undefined)).toBe(true);
   });
 
   it('#5 a wind-back on the last chain past the cap is found, with its hold', async () => {

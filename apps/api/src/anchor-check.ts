@@ -40,7 +40,9 @@
 // Any number of organisations may be listed. AGENTX_AUDIT_MOST_ORGANISATIONS only says how
 // many this check keeps its own notes on. Those past it take their turns from a cursor
 // through the list, and `audit.anchor_check_over_size`, SEV-2, says so; their anchors are
-// still held, as Tx A and their own comparison need them.
+// still held, as Tx A and their own comparison need them, the store being a log with no way
+// to read one chain's. So the true limit is memory: more anchors than the heap holds take
+// more hardware, and a store file past it says so (`audit.anchor_store_beyond_memory`).
 //
 // What that means for tamper: a chain wound back is seen at its turn, so a round's
 // length, not a run's, once rounds spread. Tx A compares a payment with the last
@@ -90,7 +92,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { createTurns, shuffledAfresh } from './anchor-turns.ts';
+import { createTurns, shuffledAfresh, startAnywhere } from './anchor-turns.ts';
 import { PastDeadline, scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
@@ -150,6 +152,8 @@ export interface AnchorCheckOptions {
   readonly mostOrganisations?: number;
   /** A round's order where there is no store to go by: a fresh shuffle unless given. */
   readonly shuffled?: (orgIds: readonly string[]) => readonly string[];
+  /** Where a process starts among those past the cap: a random place unless given. */
+  readonly pastCapStart?: (count: number) => number;
   /**
    * How long one chain's check may take. Postgres's own limits can be got round
    * by someone who owns the database, and a connection can die without a word,
@@ -195,6 +199,9 @@ export const reachWithin = (intervalMs: number): number => RUNS_FOR_A_TURN * (in
 
 /** How many IDs a line about many organisations names. The count is the whole of it; these are where to start looking. */
 const NAMED_ON_A_LINE = 5;
+
+/** How many organisations gone from the list a run names on a line each, with their holds' reason; the rest are a count. */
+const UNLISTED_NAMED = 20;
 
 /** How many times running a chain's check must fail, with rounds spreading, before it is that chain's own: one could be anyone's bad moment. */
 const MISSES_TO_SAY = 2;
@@ -251,6 +258,7 @@ export function createAnchorCheck({
   reachWithinMs = staleAfterMs,
   mostOrganisations = MOST_ORGANIZATIONS,
   shuffled = shuffledAfresh,
+  pastCapStart = startAnywhere,
   deadlineMs,
   durable,
   anchors = durable ?? createMemoryAnchorStore(),
@@ -302,6 +310,8 @@ export function createAnchorCheck({
   // a database down is every chain at once. The first failure stands for the rest.
   let missedThisRun: string[] = [];
   let staleThisRun: string[] = [];
+  // Organisations gone from the list this run: the first named, line by line, and the rest counted.
+  let unlistedThisRun = 0;
   let firstMiss: unknown;
   /** Whether a chain has gone unchecked too long. With rounds spreading its turn may rightly be long ago, so a miss alone says nothing. */
   const isStale = (key: string): boolean =>
@@ -318,7 +328,7 @@ export function createAnchorCheck({
       .map((orgId) => ({ orgId, at: anchors.latest({ kind: 'organisation', orgId })?.at.getTime() ?? 0 }))
       .sort((one, other) => one.at - other.at)
       .map(({ orgId }) => orgId);
-  const turns = createTurns(lanes, durable === undefined ? shuffled : oldestFirst);
+  const turns = createTurns(lanes, durable === undefined ? shuffled : oldestFirst, pastCapStart);
 
   /** Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read. */
   const storeUnread = (): boolean => durable !== undefined && durable.state() !== 'read';
@@ -423,8 +433,16 @@ export function createAnchorCheck({
     return 'failed';
   };
 
-  /** The run's one line for the checks that couldn't run, and its one alarm for those gone too long. */
+  /** The run's one line for the checks that couldn't run, its one alarm for those gone too long, and one for those gone from the list past the named. */
   const sayMissed = (): void => {
+    if (unlistedThisRun > UNLISTED_NAMED) {
+      logger.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'anchor',
+        reason: 'unlisted',
+        organisations: unlistedThisRun - UNLISTED_NAMED,
+      });
+    }
     if (missedThisRun.length > 0) {
       logger.warn('audit.anchor_check_failed', {
         chain: 'organisation',
@@ -542,6 +560,8 @@ export function createAnchorCheck({
   const unlisted = (orgId: string): Outcome => {
     const last = anchors.latest({ kind: 'organisation', orgId });
     failures.set(orgId, 'unlisted');
+    unlistedThisRun += 1;
+    if (unlistedThisRun > UNLISTED_NAMED) return 'failed';
     logger.child({ orgId }).error('audit.integrity_failed', {
       chain: 'organisation',
       check: 'anchor',
@@ -857,6 +877,7 @@ export function createAnchorCheck({
       completed = 0;
       missedThisRun = [];
       staleThisRun = [];
+      unlistedThisRun = 0;
       firstMiss = undefined;
       if (durable !== undefined) await readStore(durable, cap);
       const endWrites = durable === undefined ? undefined : writeAlong(durable, signal);

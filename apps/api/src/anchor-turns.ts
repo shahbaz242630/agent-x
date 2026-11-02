@@ -9,7 +9,7 @@
 //   comparison is owed; one cut off by the run's end. At most half the lanes;
 // - chains past AGENTX_AUDIT_MOST_ORGANISATIONS, kept here as no more than a cursor through
 //   the list: the same share as the slow ones, turn about with them. Past a restart it
-//   starts over.
+//   starts at a random place, so restarts more often than their round leave no tail unchecked.
 // Repeats and the shares together leave a lane for quick ones, and a lone lane takes turn
 // about, so however many of them there are, fresh chains advance.
 //
@@ -35,6 +35,9 @@ export function shuffledAfresh(orgIds: readonly string[]): string[] {
   }
   return shuffled;
 }
+
+/** Where in those past the cap a process starts: anywhere (`count` above zero). */
+export const startAnywhere = (count: number): number => randomInt(count);
 
 export interface Turns {
   /**
@@ -67,15 +70,22 @@ export interface Turns {
 
 type Kind = 'repeat' | 'slow' | 'pastCap' | 'quick';
 
-export function createTurns(lanes: number, roundOrder: (orgIds: readonly string[]) => readonly string[]): Turns {
+export function createTurns(
+  lanes: number,
+  roundOrder: (orgIds: readonly string[]) => readonly string[],
+  pastCapStart: (count: number) => number = startAnywhere,
+): Turns {
   const places: Record<'repeat' | 'slow' | 'quick', Set<string>> = {
     repeat: new Set(),
     slow: new Set(),
     quick: new Set(),
   };
   let pastCap: readonly string[] = [];
-  let cursor = 0;
+  let cursor: number | undefined;
   let pastCapThisRun = 0;
+  // How many of them have had their turn since this round of them began, and whether one begins this run.
+  let walked = 0;
+  let roundBegins = false;
   let lastShared: Kind = 'pastCap';
   // Fresh each run. A set's iterator goes on past deletions, without walking what was deleted again.
   let walking: Record<'repeat' | 'slow' | 'quick', Iterator<string, undefined>> = {
@@ -104,9 +114,11 @@ export function createTurns(lanes: number, roundOrder: (orgIds: readonly string[
 
   const takePastCap = (): string | undefined => {
     while (pastCapThisRun > 0) {
-      const orgId = pastCap[cursor] as string;
-      cursor = (cursor + 1) % pastCap.length;
+      const at = cursor ?? 0;
+      const orgId = pastCap[at] as string;
+      cursor = (at + 1) % pastCap.length;
       pastCapThisRun -= 1;
+      walked += 1;
       if (!places.repeat.has(orgId)) return taken('pastCap', orgId);
     }
     return undefined;
@@ -123,7 +135,10 @@ export function createTurns(lanes: number, roundOrder: (orgIds: readonly string[
   return {
     begin(listed, fresh, unlisted, pastCapNow = []) {
       pastCap = pastCapNow;
-      if (cursor >= pastCap.length) cursor = 0;
+      // Only a first start or a round done begins one: a run that reached none of them must not put back how long they waited.
+      roundBegins = pastCap.length > 0 && (cursor === undefined || walked >= pastCap.length);
+      if (pastCap.length > 0) cursor = cursor === undefined ? pastCapStart(pastCap.length) : cursor % pastCap.length;
+      if (roundBegins) walked = 0;
       pastCapThisRun = pastCap.length;
       for (const orgId of [...unlisted, ...again]) {
         places.repeat.add(orgId);
@@ -171,6 +186,6 @@ export function createTurns(lanes: number, roundOrder: (orgIds: readonly string[
       busy.delete(orgId);
     },
     left: () => places.repeat.size + places.quick.size + places.slow.size + pastCapThisRun,
-    pastCapStarts: () => cursor === 0,
+    pastCapStarts: () => roundBegins,
   };
 }
