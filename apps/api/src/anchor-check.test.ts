@@ -28,7 +28,12 @@ const AT = new Date('2026-09-19T09:00:00.000Z');
 const STALE_MS = 900_000;
 const DEADLINE_MS = 120_000;
 
-const ok = (seq: bigint, fill = Number(seq)): ChainReport => ({ ok: true, seq, hash: Buffer.alloc(32, fill) });
+const ok = (seq: bigint, fill = Number(seq)): ChainReport => ({
+  ok: true,
+  seq,
+  hash: Buffer.alloc(32, fill),
+  macKeyVersion: 1,
+});
 const unreachable = (): Error => new Error('connect ECONNREFUSED');
 const refused = (code: string): Error => Object.assign(new Error('the database refused the check'), { code });
 

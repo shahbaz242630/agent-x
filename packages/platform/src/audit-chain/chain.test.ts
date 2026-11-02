@@ -239,11 +239,16 @@ describe('SEC-EVD-02 the chain check', () => {
   const { events, head } = sealedChain(keys, 4);
 
   it('passes an untouched chain, up to its head', () => {
-    expect(verify(keys, head, events)).toEqual({ ok: true, seq: 4n, hash: head.hash });
+    expect(verify(keys, head, events)).toEqual({ ok: true, seq: 4n, hash: head.hash, macKeyVersion: 1 });
   });
 
   it('passes an empty chain', () => {
-    expect(verify(keys, genesisHead(keys, CHAIN), [])).toEqual({ ok: true, seq: 0n, hash: GENESIS_HASH });
+    expect(verify(keys, genesisHead(keys, CHAIN), [])).toEqual({
+      ok: true,
+      seq: 0n,
+      hash: GENESIS_HASH,
+      macKeyVersion: 0,
+    });
   });
 
   it("finds an event sealed with an older key version than one before it: a rotated-out key can't add events", () => {
@@ -291,6 +296,7 @@ describe('SEC-EVD-02 the chain check', () => {
     expect(verify(rotated, after.head, [...before.events, { ...next, ...after.link }])).toEqual({
       ok: true,
       seq: 3n,
+      macKeyVersion: 2,
       hash: after.head.hash,
     });
   });
@@ -361,7 +367,12 @@ describe('SEC-EVD-02 the chain check', () => {
   it('finds a head wound back to an earlier valid head only past its events: the anchor check catches the rest', () => {
     const earlier = sealedChain(keys, 2);
 
-    expect(verify(keys, earlier.head, events.slice(0, 2))).toEqual({ ok: true, seq: 2n, hash: earlier.head.hash });
+    expect(verify(keys, earlier.head, events.slice(0, 2))).toEqual({
+      ok: true,
+      seq: 2n,
+      hash: earlier.head.hash,
+      macKeyVersion: 1,
+    });
     expect(verify(keys, earlier.head, events)).toEqual({ ok: false, problem: { reason: 'head', seq: 2n } });
   });
 
@@ -425,8 +436,8 @@ describe('SEC-DB-11 the chain against its last anchor (ADR-012 §2)', () => {
   };
 
   it('passes a chain that still holds its anchor, at its head or grown past it', () => {
-    expect(against(head, events, anchorAt(4))).toEqual({ ok: true, seq: 4n, hash: head.hash });
-    expect(against(head, events, anchorAt(2))).toEqual({ ok: true, seq: 4n, hash: head.hash });
+    expect(against(head, events, anchorAt(4))).toEqual({ ok: true, seq: 4n, hash: head.hash, macKeyVersion: 1 });
+    expect(against(head, events, anchorAt(2))).toEqual({ ok: true, seq: 4n, hash: head.hash, macKeyVersion: 1 });
   });
 
   it('finds a chain wound back to an earlier sealed head, its tail deleted: the chain alone looks whole', () => {

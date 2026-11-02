@@ -2168,7 +2168,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     if (head === undefined) throw new Error('no head');
     const anchors = createMemoryAnchorStore();
     const chain = { kind: 'organisation', orgId: w.org } as const;
-    anchors.keep(signAnchor(keys, chain, { seq: BigInt(head.seq), hash: head.hash }, clock.now()));
+    anchors.keep(signAnchor(keys, chain, { seq: BigInt(head.seq), hash: head.hash, macKeyVersion: 1 }, clock.now()));
     return anchors;
   }
 
@@ -2338,7 +2338,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     const request = await ask(acting, w, { amount: ALLOWED() });
     const anchors = createMemoryAnchorStore();
     const chain = { kind: 'organisation', orgId: w.org } as const;
-    anchors.keep(signAnchor(keys, chain, { seq: 0n, hash: Buffer.alloc(32) }, clock.now()));
+    anchors.keep(signAnchor(keys, chain, { seq: 0n, hash: Buffer.alloc(32), macKeyVersion: 0 }, clock.now()));
 
     expect(await handedOnce(w, request.id, anchors)).toMatchObject({ submitted: 1, status: 'HANDED_OFF' });
     expect(anchorAlarms()).toEqual([]);

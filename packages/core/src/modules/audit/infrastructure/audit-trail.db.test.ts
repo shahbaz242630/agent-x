@@ -13,6 +13,7 @@ import {
   within,
 } from '@agentx/testing';
 import {
+  CHAIN_START,
   ChainBroken,
   type ChainReport,
   linkHash,
@@ -883,6 +884,286 @@ describe('checking a chain alone, for the anchor check (B1d-2)', () => {
     await expect(withTenant(app, newOrg(), () => trail.verifyAlone(app, org, undefined))).rejects.toThrow(
       TenantContextError,
     );
+  });
+});
+
+describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
+  /** Where a whole check has reached, as the anchor would have signed it. */
+  const checked = async (orgId: string) => {
+    const report = await verify(orgId);
+    if (!report.ok) throw new Error('the chain should check out');
+    const { seq, hash, macKeyVersion } = report;
+    return { seq, hash, macKeyVersion };
+  };
+
+  /** Counts the trips a transaction of the app's makes, each a query. */
+  const counted = () => {
+    const trips: string[] = [];
+    const counting = app.withPlugin({
+      transformQuery: ({ node }) => {
+        trips.push(node.kind);
+        return node;
+      },
+      transformResult: ({ result }) => Promise.resolve(result),
+    });
+    return { trips, counting };
+  };
+
+  it('reads a chain that has not moved in one trip, and one that has in two', async () => {
+    await record(org, event(1), event(2));
+    const from = await checked(org);
+
+    const still = counted();
+    expect(await trail.checkFromAnchor(still.counting, org, from)).toMatchObject({ ok: true, seq: 2n, to: 2n });
+    expect(still.trips).toHaveLength(1);
+
+    await record(org, event(3));
+    const moved = counted();
+    expect(await trail.checkFromAnchor(moved.counting, org, from)).toMatchObject({
+      ok: true,
+      seq: 3n,
+      to: 3n,
+      macKeyVersion: 1,
+    });
+    expect(moved.trips).toHaveLength(2);
+  });
+
+  it('stops at its limit, and goes on from there', async () => {
+    await record(org, event(1), event(2), event(3), event(4));
+
+    const first = await trail.checkFromAnchor(app, org, CHAIN_START, 3);
+    expect(first).toMatchObject({ ok: true, seq: 3n, to: 4n });
+    if (!first.ok) throw new Error('the step should pass');
+    expect(await trail.checkFromAnchor(app, org, first, 3)).toMatchObject({ ok: true, seq: 4n, to: 4n });
+  });
+
+  it('reads an organisation with no chain as empty, and sees nothing of another under its wall', async () => {
+    const other = newOrg();
+    await record(other, event(1), event(2));
+
+    expect(await trail.checkFromAnchor(app, org, CHAIN_START)).toMatchObject({ ok: true, seq: 0n, to: 0n });
+    expect(await trail.countStep(app, org, 0n, 2n)).toEqual({ reason: 'gap', seq: 1n });
+    expect(await trail.passStep(app, org, CHAIN_START, await checked(other), 5)).toEqual({
+      ok: false,
+      problem: { reason: 'gap', seq: 1n },
+    });
+    // The other's anchor, read under this organisation's wall, is a chain that no longer holds it.
+    expect(await trail.checkFromAnchor(app, org, await checked(other))).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 2n },
+    });
+  });
+
+  it('refuses to run inside another withTenant, and an ID that is not one', async () => {
+    await expect(withTenant(app, newOrg(), () => trail.checkFromAnchor(app, org, CHAIN_START))).rejects.toThrow(
+      TenantContextError,
+    );
+    await expect(trail.checkFromAnchor(app, 'not-an-id', CHAIN_START)).rejects.toThrow(AuditEventRefused);
+  });
+
+  it('checks the chain as its edges stood, and takes no later event for tampering', async () => {
+    await record(org, event(1), event(2), event(3));
+    const from = await checked(org);
+    await record(org, event(4));
+    // Another transaction adds an event the moment the check has read the edges, before it reads any event.
+    const addEvent = AsyncResource.bind(() => record(org, event(5)));
+    const edgeReads = new WeakSet<object>();
+    let added = false;
+    const racing = app.withPlugin({
+      transformQuery: ({ node, queryId }) => {
+        if (node.kind === 'RawNode' && node.sqlFragments.join('').includes('head_event_hash')) edgeReads.add(queryId);
+        return node;
+      },
+      transformResult: async ({ result, queryId }) => {
+        if (edgeReads.has(queryId) && !added) {
+          added = true;
+          await addEvent();
+        }
+        return result;
+      },
+    });
+
+    expect(await trail.checkFromAnchor(racing, org, from)).toMatchObject({ ok: true, seq: 4n, to: 4n });
+    expect(added).toBe(true);
+    expect(await trail.checkFromAnchor(app, org, from)).toMatchObject({ ok: true, seq: 5n, to: 5n });
+  });
+
+  describe('FX-TAMPER: the attacker, holding none of the keys', () => {
+    /** Three events anchored at the second, and the chain moved one on. */
+    const anchoredAtTwo = async () => {
+      await record(org, event(1), event(2));
+      const from = await checked(org);
+      await record(org, event(3));
+      return from;
+    };
+
+    /** The head put back to the state a chain's whole check once read at `seq`, its own MAC and all. */
+    const windBackTo = async (saved: { seq: bigint; hash: Buffer; mac: Buffer; mac_key_version: number }) => {
+      await attacker.query(
+        'update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1',
+        [org, saved.seq, saved.hash, saved.mac, saved.mac_key_version],
+      );
+    };
+
+    const headRow = async () => {
+      const [row] = await attacker.query<{ seq: bigint; hash: Buffer; mac: Buffer; mac_key_version: number }>(
+        'select seq, hash, mac, mac_key_version from audit.heads where org_id = $1',
+        [org],
+      );
+      if (row === undefined) throw new Error('no head');
+      return row;
+    };
+
+    it('finds a chain wound back, its tail removed with its head', async () => {
+      await record(org, event(1), event(2));
+      const earlier = await headRow();
+      await record(org, event(3), event(4));
+      const from = await checked(org);
+      await attacker.query('delete from audit.events where org_id = $1 and seq > 2', [org]);
+      await windBackTo(earlier);
+
+      expect(await trail.checkFromAnchor(app, org, from)).toEqual({
+        ok: false,
+        problem: { reason: 'anchor', seq: 4n },
+      });
+    });
+
+    it('finds the tail removed with the head left', async () => {
+      const from = await anchoredAtTwo();
+      await attacker.query('delete from audit.events where org_id = $1 and seq = 3', [org]);
+
+      expect(await trail.checkFromAnchor(app, org, from)).toEqual({
+        ok: false,
+        problem: { reason: 'head', seq: 3n },
+      });
+    });
+
+    it('finds an event left past a wound-back head, reading no event', async () => {
+      await record(org, event(1), event(2));
+      const earlier = await headRow();
+      const from = await checked(org);
+      await record(org, event(3));
+      await windBackTo(earlier);
+
+      expect(await trail.checkFromAnchor(app, org, from)).toEqual({
+        ok: false,
+        problem: { reason: 'head', seq: 2n },
+      });
+    });
+
+    it('finds the first event removed, wherever the anchor stands', async () => {
+      const from = await anchoredAtTwo();
+      await attacker.query('delete from audit.events where org_id = $1 and seq = 1', [org]);
+
+      expect(await trail.checkFromAnchor(app, org, from)).toEqual({ ok: false, problem: { reason: 'gap', seq: 1n } });
+      expect(await trail.countStep(app, org, 0n, 2n)).toEqual({ reason: 'gap', seq: 1n });
+    });
+
+    it('finds the anchored event edited, and an event after it edited', async () => {
+      const from = await anchoredAtTwo();
+      await attacker.query(`update audit.events set action = 'probe.edited' where org_id = $1 and seq = 3`, [org]);
+      expect(await trail.checkFromAnchor(app, org, from)).toEqual({ ok: false, problem: { reason: 'hash', seq: 3n } });
+
+      await attacker.query(`update audit.events set action = 'probe.edited' where org_id = $1 and seq = 2`, [org]);
+      expect(await trail.checkFromAnchor(app, org, from)).toEqual({
+        ok: false,
+        problem: { reason: 'anchor', seq: 2n },
+      });
+    });
+
+    it('finds an old event edited only on a pass, and deleted only on a count or a pass', async () => {
+      const from = await anchoredAtTwo();
+      const target = await checked(org);
+      await attacker.query(`update audit.events set action = 'probe.edited' where org_id = $1 and seq = 1`, [org]);
+
+      expect(await trail.checkFromAnchor(app, org, from)).toMatchObject({ ok: true, seq: 3n });
+      expect(await trail.passStep(app, org, CHAIN_START, target, 10)).toEqual({
+        ok: false,
+        problem: { reason: 'hash', seq: 1n },
+      });
+    });
+
+    it('finds a middle event deleted by count, and by a pass, though the edges hold', async () => {
+      await record(org, event(1), event(2), event(3), event(4));
+      const whole = await checked(org);
+      await attacker.query('delete from audit.events where org_id = $1 and seq = 2', [org]);
+
+      expect(await trail.checkFromAnchor(app, org, whole)).toMatchObject({ ok: true, seq: 4n });
+      expect(await trail.countStep(app, org, 0n, 4n)).toEqual({ reason: 'gap', seq: 1n });
+      expect(await trail.countStep(app, org, 2n, 4n)).toBeUndefined();
+      expect(await trail.passStep(app, org, CHAIN_START, whole, 10)).toEqual({
+        ok: false,
+        problem: { reason: 'gap', seq: 2n },
+      });
+    });
+
+    it("believes no anchored event with another at its number, the table's key gone", async () => {
+      const from = await anchoredAtTwo();
+      await attacker.query('alter table audit.events drop constraint events_pkey cascade');
+      const copy = await attacker.query<{ id: string }>(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+                                   subject_version, details, prev_hash, hash, mac, mac_key_version)
+         select org_id, seq, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+                subject_version, details, prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1 and seq = 2 returning id`,
+        [org],
+      );
+      try {
+        expect(await trail.checkFromAnchor(app, org, from)).toEqual({
+          ok: false,
+          problem: { reason: 'anchor', seq: 2n },
+        });
+      } finally {
+        await attacker.query('delete from audit.events where id = $1', [copy[0]?.id]);
+        await attacker.query('alter table audit.events add primary key (org_id, seq)');
+      }
+    });
+
+    it('reads a head removed, its events left, as no usable head', async () => {
+      const from = await anchoredAtTwo();
+      await attacker.query('delete from audit.heads where org_id = $1', [org]);
+
+      expect(await trail.checkFromAnchor(app, org, from)).toEqual({ ok: false, problem: { reason: 'head', seq: 0n } });
+    });
+  });
+
+  describe('a full pass', () => {
+    it('walks from the start to where it set out for, a page a step, no further', async () => {
+      await record(org, event(1), event(2), event(3));
+      const target = await checked(org);
+      await record(org, event(4));
+
+      const first = await trail.passStep(app, org, CHAIN_START, target, 2);
+      expect(first).toMatchObject({ ok: true, seq: 2n, to: 3n });
+      if (!first.ok) throw new Error('the step should pass');
+      expect(await trail.passStep(app, org, first, target, 2)).toMatchObject({
+        ok: true,
+        seq: 3n,
+        to: 3n,
+        hash: target.hash,
+      });
+    });
+
+    it('passes a chain across a key rotation, and an anchor taken before it', async () => {
+      const rotated = keysWith(ROTATED_MAC);
+      const after = createAuditTrail({ keys: rotated, ids });
+      await record(org, event(1));
+      const before = await checked(org);
+      await withTenant(app, org, (tx) => after.record(tx, org, event(2)));
+
+      expect(await after.checkFromAnchor(app, org, before)).toMatchObject({ ok: true, seq: 2n, macKeyVersion: 2 });
+      // Anchored after the rotation, the first event's older version is one a later event can't fall back to.
+      const report = await after.checkFromAnchor(app, org, CHAIN_START);
+      expect(report).toMatchObject({ ok: true, seq: 2n, macKeyVersion: 2 });
+    });
+  });
+
+  it('counts a stretch of events of this chain alone', async () => {
+    await record(org, event(1), event(2), event(3));
+
+    expect(await trail.countStep(app, org, 0n, 3n)).toBeUndefined();
+    expect(await trail.countStep(app, org, 1n, 2n)).toBeUndefined();
+    expect(await trail.countStep(app, org, 2n, 5n)).toEqual({ reason: 'gap', seq: 3n });
   });
 });
 

@@ -13,6 +13,8 @@ import {
   ChainStoreError,
   type ChainWriter,
   clockOf,
+  countIn,
+  edgesIn,
   headFields,
   type LockedHead,
   sealedFields,
@@ -113,6 +115,78 @@ async function chainOf(count: number): Promise<MemoryChain> {
   return memory;
 }
 
+describe('the edges and a count, as a store reads them (4D2e E2)', () => {
+  const HASH = Buffer.alloc(32, 1);
+  const ROW = {
+    heads: 1n,
+    head_seq: 3n,
+    head_hash: HASH,
+    head_mac: Buffer.alloc(32, 2),
+    head_mac_key_version: 1,
+    lowest: 1n,
+    highest: 3n,
+    head_event_hash: HASH,
+    seq: 2n,
+    id: id(2),
+    recorded_at: NOW,
+    whole_ms: true,
+    prev_hash: Buffer.alloc(32, 3),
+    hash: Buffer.alloc(32, 4),
+    mac: Buffer.alloc(32, 5),
+    mac_key_version: 1,
+  };
+  const HEAD = { seq: 3n, hash: HASH, mac: ROW.head_mac, macKeyVersion: 1 };
+
+  it('reads the head, the numbers, the hash at the head and the anchored event whole', () => {
+    expect(edgesIn(ROW, CONTENT)).toEqual({
+      head: HEAD,
+      lowest: 1n,
+      highest: 3n,
+      headEventHash: HASH,
+      anchored: {
+        seq: 2n,
+        id: id(2),
+        recordedAt: NOW,
+        prevHash: ROW.prev_hash,
+        hash: ROW.hash,
+        mac: ROW.mac,
+        macKeyVersion: 1,
+        content: CONTENT,
+      },
+    });
+  });
+
+  it('reads no event stored, and no head, as such', () => {
+    expect(edgesIn({ ...ROW, heads: 0n, lowest: null, highest: null, head_event_hash: null }, undefined)).toEqual({
+      head: 'none',
+      lowest: null,
+      highest: null,
+      headEventHash: undefined,
+      anchored: undefined,
+    });
+  });
+
+  it('knows no anchored event from a row with none, or content that could not be read', () => {
+    expect(edgesIn({ ...ROW, seq: null }, CONTENT).anchored).toBeUndefined();
+    expect(edgesIn(ROW, undefined).anchored).toBeUndefined();
+  });
+
+  it.each([
+    ['two heads', { heads: 2n }],
+    ['a head with a column of the wrong type', { head_seq: '3' }],
+    ['a lowest number of the wrong type', { lowest: '1' }],
+    ['a highest number of the wrong type', { highest: 3 }],
+  ])('reads %s as a head that cannot be read', (_what, change) => {
+    expect(edgesIn({ ...ROW, ...change }, CONTENT).head).toBe('unreadable');
+  });
+
+  it('reads a count, and refuses anything else as the store failing', () => {
+    expect(countIn({ stored: 4n })).toBe(4n);
+    expect(() => countIn({ stored: '4' })).toThrow(ChainStoreError);
+    expect(() => countIn(undefined)).toThrow(ChainStoreError);
+  });
+});
+
 describe('appending events together (4D2d P13)', () => {
   const two = [
     { nextId: () => id(2), content: CONTENT },
@@ -128,7 +202,12 @@ describe('appending events together (4D2d P13)', () => {
     expect([second?.seq, third?.seq]).toEqual([2n, 3n]);
     expect(third?.prevHash).toEqual(second?.hash);
     expect([second?.recordedAt, third?.recordedAt]).toEqual([NOW, NOW]);
-    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({ ok: true, seq: 3n, hash: third?.hash });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+      ok: true,
+      seq: 3n,
+      hash: third?.hash,
+      macKeyVersion: 1,
+    });
   });
 
   it('starts a chain with no head, as one event does', async () => {
@@ -201,7 +280,12 @@ describe('appending an event', () => {
     expect([first.seq, second.seq]).toEqual([1n, 2n]);
     expect(second.prevHash).toEqual(first.hash);
     expect(first.recordedAt).toBe(NOW);
-    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({ ok: true, seq: 2n, hash: second.hash });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+      ok: true,
+      seq: 2n,
+      hash: second.hash,
+      macKeyVersion: 1,
+    });
   });
 
   it('takes the time the head was locked with, then writes: two trips an event (4D2d P2)', async () => {
@@ -314,6 +398,7 @@ describe('checking a chain', () => {
       ok: true,
       seq: 0n,
       hash: GENESIS_HASH,
+      macKeyVersion: 0,
     });
   });
 
@@ -410,7 +495,7 @@ describe('checking a chain', () => {
     };
 
     await expect(verifyChain(keys, CHAIN, broken, undefined)).rejects.toThrow(
-      new ChainStoreError('it gave an event past the head it was asked to read up to'),
+      new ChainStoreError('it gave an event past the place it was asked to read up to'),
     );
   });
 

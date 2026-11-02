@@ -101,7 +101,8 @@ describe('config: a correct config loads', () => {
       sessions: { idleSeconds: 1800, absoluteSeconds: 43_200 },
       securityEvents: { retentionDays: 90 },
       payees: { coolingOffHours: 24 },
-      audit: { anchorSeconds: 300 },
+      audit: { anchorSeconds: 300, anchorEpoch: 1 },
+      anchorStore: { directory: null, container: null },
       activityDownloads: { directory: null, container: null },
       keys: { directory: KEYS_DIR, current: {} },
     });
@@ -187,7 +188,8 @@ describe('config: a correct config loads', () => {
       securityEvents: { retentionDays: 180 },
       partner: { mode: 'fake' },
       payees: { coolingOffHours: 48 },
-      audit: { anchorSeconds: 600 },
+      audit: { anchorSeconds: 600, anchorEpoch: 1 },
+      anchorStore: { directory: null, container: null },
       activityDownloads: { directory: null, container: null },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
     });
@@ -250,6 +252,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
     'AGENTX_PAYEE_COOLING_OFF_HOURS',
     'AGENTX_AUDIT_ANCHOR_SECONDS',
+    'AGENTX_ANCHOR_EPOCH',
     'AGENTX_KEYS_DIR',
     'AGENTX_KEYS_CURRENT',
     'AGENTX_DB_HOST',
@@ -1592,5 +1595,88 @@ describe('L5c where the activity log’s background downloads are kept', () => {
 
     expect(settings).toContain(CONTAINER);
     expect(settings).not.toContain(HEADER);
+  });
+});
+
+describe('4D2e E3 where the chains’ anchors are kept', () => {
+  const CONTAINER = 'https://stagentxevstg01.blob.core.windows.net/audit-anchors';
+  const CLIENT_ID = '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b';
+  /** Plain words, so secret scanners ignore it. */
+  const HEADER = 'identity header for these tests';
+  const WITH_CONTAINER: Env = {
+    ...MINIMAL,
+    AGENTX_AUDIT_ANCHORS_URL: CONTAINER,
+    AGENTX_AUDIT_ANCHORS_CLIENT_ID: CLIENT_ID,
+    IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+    IDENTITY_HEADER: HEADER,
+  };
+
+  it('reads the container, its identity and the endpoint Azure gives the app', () => {
+    expect(loadConfig(WITH_CONTAINER).anchorStore).toEqual({
+      directory: null,
+      container: {
+        url: CONTAINER,
+        clientId: CLIENT_ID,
+        identityEndpoint: 'http://localhost:42356/msi/token',
+        identityHeader: HEADER,
+      },
+    });
+    expect(Object.isFrozen(loadConfig(WITH_CONTAINER).anchorStore)).toBe(true);
+  });
+
+  it('reads the local folder in development and test', () => {
+    const env = { ...LOCAL, AGENTX_ENV: 'test', AGENTX_AUDIT_ANCHORS_DIR: '/tmp/anchors' };
+
+    expect(loadConfig(env).anchorStore).toEqual({ directory: '/tmp/anchors', container: null });
+  });
+
+  it.each([
+    [
+      'the folder, deployed',
+      {
+        AGENTX_AUDIT_ANCHORS_URL: undefined,
+        AGENTX_AUDIT_ANCHORS_CLIENT_ID: undefined,
+        AGENTX_AUDIT_ANCHORS_DIR: '/tmp/a',
+      },
+      "AGENTX_AUDIT_ANCHORS_DIR: is allowed only in development and test; production keeps the chains' anchors in their write-once container",
+    ],
+    [
+      'the container without its identity',
+      { AGENTX_AUDIT_ANCHORS_CLIENT_ID: undefined },
+      'AGENTX_AUDIT_ANCHORS_URL and AGENTX_AUDIT_ANCHORS_CLIENT_ID: set both, or neither',
+    ],
+    [
+      'a host other than Azure blob storage, deployed',
+      { AGENTX_AUDIT_ANCHORS_URL: 'https://anchors.example.com/audit-anchors' },
+      "AGENTX_AUDIT_ANCHORS_URL: production writes to Azure's blob service, <account>.blob.core.windows.net",
+    ],
+    [
+      'no header from Azure',
+      { IDENTITY_HEADER: undefined },
+      'IDENTITY_HEADER: is required with the container (Azure sets it where the app has a managed identity)',
+    ],
+  ])('refuses %s', (_what, change, problem) => {
+    expect(problemsWith({ ...WITH_CONTAINER, ...change })).toEqual([problem]);
+  });
+
+  it('reads the epoch, from 1, a whole number', () => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_ANCHOR_EPOCH: '3' }).audit.anchorEpoch).toBe(3);
+    expect(problemsWith({ ...MINIMAL, AGENTX_ANCHOR_EPOCH: '0' })).toEqual([
+      expect.stringMatching(/^AGENTX_ANCHOR_EPOCH: /),
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_ANCHOR_EPOCH: 'one' })).toEqual([
+      expect.stringMatching(/^AGENTX_ANCHOR_EPOCH: /),
+    ]);
+  });
+
+  it('keeps the store and the epoch in the fingerprint, never Azure’s header', () => {
+    const settings = fingerprintedSettings(loadConfig({ ...WITH_CONTAINER, AGENTX_ANCHOR_EPOCH: '2' }));
+
+    expect(settings.audit).toEqual({ anchorSeconds: 300, anchorEpoch: 2 });
+    expect(settings.anchorStore).toEqual({
+      directory: null,
+      container: { url: CONTAINER, clientId: CLIENT_ID, identityEndpoint: 'http://localhost:42356/msi/token' },
+    });
+    expect(JSON.stringify(settings)).not.toContain(HEADER);
   });
 });

@@ -55,18 +55,27 @@ import {
   appendEvents,
   type Chain,
   type ChainBatchWriter,
+  type ChainEdgeReader,
   type ChainHead,
+  type ChainProblem,
   type ChainReader,
   type ChainReport,
+  type ChainStep,
+  type CheckedPoint,
   clockOf,
+  countIn,
+  countStep,
+  edgesIn,
   entryIsSealed,
   headFields,
   headIsSealed,
+  passStep,
   sealedFields,
   type StateSeal,
   stateSealIn,
   type StoredEntry,
   verifyChain,
+  verifyFromAnchor,
 } from '@agentx/platform/audit-chain';
 import {
   type AnswersOf,
@@ -268,6 +277,23 @@ export interface AuditTrail {
    * someone who owns the database can get round this one.
    */
   verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  /**
+   * The chain checked from its last anchor (verifyFromAnchor, 4D2e E): at most
+   * `most` events past it, in withTenant's transaction for the organisation,
+   * limited as verifyAlone's. For a chain that moved; it reads the wall's own
+   * organisation alone, so a chain it can't see reads as empty, never another's.
+   */
+  checkFromAnchor(db: Kysely<AuditTables>, orgId: string, from: CheckedPoint, most?: number): Promise<ChainStep>;
+  /** One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  passStep(
+    db: Kysely<AuditTables>,
+    orgId: string,
+    cursor: CheckedPoint,
+    target: CheckedPoint,
+    most: number,
+  ): Promise<ChainStep>;
+  /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  countStep(db: Kysely<AuditTables>, orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
   /**
    * Whether the organisation's chain still holds its last anchor, in one read:
    * its head not behind it, and the event anchored there the one anchored (not
@@ -871,8 +897,35 @@ interface Along {
 }
 
 /** Checking's reads of the audit tables, for one organisation. */
-function readerFor(tx: AuditTransaction, orgId: string): ChainReader {
+function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdgeReader {
   return {
+    async edges(anchored) {
+      // One statement, so all of it comes from one moment. Each on the events' key, whatever the chain's length.
+      const { rows } = await sql<Record<string, unknown>>`
+        select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${orgId}) as heads,
+               h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
+               (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${orgId}) as lowest,
+               (select pg_catalog.max(p.seq) from audit.events p where p.org_id = ${orgId}) as highest,
+               (select p.hash from audit.events p where p.org_id = ${orgId} and p.seq = h.seq limit 1) as head_event_hash,
+               ${EVENT_COLUMNS}
+        from (values (1)) as one (x)
+        left join (select * from audit.heads a where a.org_id = ${orgId} limit 1) as h on true
+        left join audit.events e on e.org_id = ${orgId} and e.seq = ${anchored}
+      `.execute(tx);
+      // One row always (`values` and left joins), but two where two events share a number, the table's key
+      // gone: neither is the one anchored.
+      const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
+      return edgesIn(row, contentOf(row));
+    },
+
+    async countBetween(after, upTo) {
+      const { rows } = await sql<Record<string, unknown>>`
+        select pg_catalog.count(*) as stored from audit.events e
+        where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
+      `.execute(tx);
+      return countIn(rows[0]);
+    },
+
     async state() {
       const { rows } = await sql<Record<string, unknown>>`
         select (select pg_catalog.count(*) from audit.events e where e.org_id = ${orgId}) as stored,
@@ -1218,6 +1271,51 @@ export function createAuditTrail({
 
     verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
       return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), { limited: true });
+    },
+
+    async checkFromAnchor(
+      db: Kysely<AuditTables>,
+      orgId: string,
+      from: CheckedPoint,
+      most?: number,
+    ): Promise<ChainStep> {
+      const chain = chainOf(orgId);
+      return withTenant(
+        db,
+        chain.orgId,
+        (tx) => verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId), from, most),
+        {
+          limited: true,
+        },
+      );
+    },
+
+    async passStep(
+      db: Kysely<AuditTables>,
+      orgId: string,
+      cursor: CheckedPoint,
+      target: CheckedPoint,
+      most: number,
+    ): Promise<ChainStep> {
+      const chain = chainOf(orgId);
+      return withTenant(
+        db,
+        chain.orgId,
+        (tx) => passStep(keys, chain, readerFor(tx, chain.orgId), cursor, target, most),
+        {
+          limited: true,
+        },
+      );
+    },
+
+    async countStep(
+      db: Kysely<AuditTables>,
+      orgId: string,
+      after: bigint,
+      upTo: bigint,
+    ): Promise<ChainProblem | undefined> {
+      const chain = chainOf(orgId);
+      return withTenant(db, chain.orgId, (tx) => countStep(readerFor(tx, chain.orgId), after, upTo), { limited: true });
     },
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {

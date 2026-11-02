@@ -142,8 +142,18 @@ export interface Config {
   readonly partner: Partner;
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
-  /** ADR-012 §2: how often each audit chain is checked against its last anchor, and anchored again. */
-  readonly audit: { readonly anchorSeconds: number };
+  /**
+   * ADR-012 §2: how often each audit chain is checked against its last anchor,
+   * and anchored again; the epoch its anchors are kept under, which moves on only
+   * for a sanctioned restore of the whole database (4D2e E).
+   */
+  readonly audit: { readonly anchorSeconds: number; readonly anchorEpoch: number };
+  /**
+   * Where the anchors are kept apart from the database (4D2e E, PL-58): a local
+   * folder, development and test alone, or the write-once container in the UAE;
+   * null for each not set. Nothing reads it yet: anchors stay in memory until E5.
+   */
+  readonly anchorStore: { readonly directory: string | null; readonly container: BlobContainer | null };
   /**
    * Where the activity log's background downloads are kept (Phase 3 L5c): a
    * local folder, development and test alone, or the container in the UAE;
@@ -386,6 +396,10 @@ function readSettings(env: Env, location: LocationChecks) {
     gateRef: setting(env, 'AGENTX_LIVE_MONEY_GATE_REF'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
+    anchorEpoch: setting(env, 'AGENTX_ANCHOR_EPOCH'),
+    anchorsDirectory: setting(env, 'AGENTX_AUDIT_ANCHORS_DIR'),
+    anchorsContainer: setting(env, 'AGENTX_AUDIT_ANCHORS_URL'),
+    anchorsClientId: setting(env, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'),
     downloadsDirectory: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_DIR'),
     downloadsContainer: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_URL'),
     downloadsClientId: setting(env, 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'),
@@ -414,8 +428,40 @@ const ACTIVITY_DOWNLOADS: BlobContainerSettings = {
   holder: 'the app',
 };
 
+/** The settings the chains' anchors are kept by (4D2e E, PL-58). */
+const AUDIT_ANCHORS: BlobContainerSettings = {
+  directory: 'AGENTX_AUDIT_ANCHORS_DIR',
+  url: 'AGENTX_AUDIT_ANCHORS_URL',
+  clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+  deployedDoes: "keeps the chains' anchors in their write-once container",
+  holder: 'the app',
+};
+
 /** The settings, each checked on its own (readSettings). */
 type Settings = ReturnType<typeof readSettings>;
+
+/** The rules of the app's stores on the blob service, where their settings are valid. */
+function blobStoreProblems(env: Env, checks: Settings): string[] {
+  const { environment, downloadsDirectory, downloadsContainer, downloadsClientId } = checks;
+  const { anchorsDirectory, anchorsContainer, anchorsClientId } = checks;
+  if (!environment.ok) return [];
+  return [
+    ...(downloadsDirectory.ok && downloadsContainer.ok && downloadsClientId.ok
+      ? blobContainerProblems(env, environment.value, ACTIVITY_DOWNLOADS, {
+          directory: downloadsDirectory.value,
+          container: downloadsContainer.value,
+          clientId: downloadsClientId.value,
+        })
+      : []),
+    ...(anchorsDirectory.ok && anchorsContainer.ok && anchorsClientId.ok
+      ? blobContainerProblems(env, environment.value, AUDIT_ANCHORS, {
+          directory: anchorsDirectory.value,
+          container: anchorsContainer.value,
+          clientId: anchorsClientId.value,
+        })
+      : []),
+  ];
+}
 
 /** Rules between the environment and the HTTP, logging and outbound settings, where those are valid. */
 function httpRuleProblems(checks: Settings): string[] {
@@ -545,13 +591,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     ...decisionGateProblems(checks),
     ...serviceRuleProblems(checks),
     ...partnerRuleProblems(checks, built),
-    ...(environment.ok && checks.downloadsDirectory.ok && checks.downloadsContainer.ok && checks.downloadsClientId.ok
-      ? blobContainerProblems(env, environment.value, ACTIVITY_DOWNLOADS, {
-          directory: checks.downloadsDirectory.value,
-          container: checks.downloadsContainer.value,
-          clientId: checks.downloadsClientId.value,
-        })
-      : []),
+    ...blobStoreProblems(env, checks),
     ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
@@ -609,7 +649,11 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     securityEvents: Object.freeze({ retentionDays: checks.securityEventRetention.value }),
     partner: partnerFrom(checks.partnerMode.value, checks.gateRef.value),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
-    audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value }),
+    audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value, anchorEpoch: checks.anchorEpoch.value }),
+    anchorStore: Object.freeze({
+      directory: checks.anchorsDirectory.value ?? null,
+      container: blobContainerOf(env, checks.anchorsContainer.value, checks.anchorsClientId.value),
+    }),
     activityDownloads: Object.freeze({
       directory: checks.downloadsDirectory.value ?? null,
       container: blobContainerOf(env, checks.downloadsContainer.value, checks.downloadsClientId.value),
