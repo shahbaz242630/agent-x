@@ -42,6 +42,10 @@ param agentCancelCapAlertName string
 param dailyWordsAlertName string
 param handoffQueueAlertName string
 param platformFullAlertName string
+param anchorStoppedAlertName string
+param jobsStoppedAlertName string
+@description('Whether something always runs here, so the rules that fire on lines missing can be on.')
+param alwaysOn bool
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -568,6 +572,88 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
           threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The jobs having stopped altogether, seen from outside (4D2e D, PL-33): a process dead, frozen or never started
+// logs nothing, so nothing inside it can say so. These fire on lines missing, so they need something always on:
+// staging sleeps, and would fire every night. `alwaysOn` switches them on (policy.ts: production always; staging
+// only for a keep-running window). A count of nothing is one row, 0: `count()` with no `by` always answers.
+// The window is well past the lines' 4 to 9 minutes of lateness (S33).
+resource anchorStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: anchorStoppedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Audit: the anchor check has stopped'
+    description: 'SEV-1. No audit chain check has finished for 20 minutes (no audit.anchor_check_done): the jobs have stopped, so tampering would go unseen. Runbook: Incident-Response-Playbook.md section H.'
+    severity: 1
+    enabled: alwaysOn
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT10M'
+    windowSize: 'PT20M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_check_done" | summarize Done = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Done'
+          operator: 'LessThan'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless, as every SEV-1: each 10 minutes it stays stopped notifies again.
+    autoMitigate: false
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+resource jobsStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: jobsStoppedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Jobs: no pulse'
+    description: 'SEV-2. No process running the background jobs has said it is alive for 15 minutes (no jobs.pulse): it is down, or none holds the lease. Runbook: Incident-Response-Playbook.md section O.'
+    severity: 2
+    enabled: alwaysOn
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "jobs.pulse" | summarize Pulses = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Pulses'
+          operator: 'LessThan'
+          threshold: 1
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1

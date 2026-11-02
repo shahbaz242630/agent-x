@@ -104,6 +104,9 @@ param postgresGeoRedundantBackup bool
 @description('Whether the Container Apps environment spreads over availability zones. It can only be set when the environment is created (Microsoft), so each environment states it.')
 param appsZoneRedundant bool
 
+@description('Whether the jobs always run here, so the alerts on their lines missing are on (4D2e D, policy.ts).')
+param alwaysOn bool
+
 @description('The apps\' error alert fires above this many error events in 15 minutes (logging standard §5).')
 @minValue(0)
 param appErrorAlertThreshold int
@@ -276,6 +279,9 @@ module appsEnvironment 'modules/environment.bicep' = {
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
     platformFullAlertName: 'alert-agentx-${short}-platform-full'
+    anchorStoppedAlertName: 'alert-agentx-${short}-anchor-stopped'
+    jobsStoppedAlertName: 'alert-agentx-${short}-jobs-stopped'
+    alwaysOn: alwaysOn
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [

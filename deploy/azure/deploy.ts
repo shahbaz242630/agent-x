@@ -163,6 +163,7 @@ const ADMIN_PASSWORD = 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD';
 const ALERT_EMAIL = 'AGENTX_AZURE_ALERT_EMAIL';
 /** staging.bicepparam's databaseSize: always set by the foundation, so a value left in the shell is never what's sent. */
 const DATABASE_SIZE = 'AGENTX_AZURE_DATABASE_SIZE';
+const ALWAYS_ON = 'AGENTX_AZURE_ALWAYS_ON';
 /** staging.bicepparam's databaseDiskGb: as the server has it, since autogrow changes it and Azure refuses a smaller one. */
 const DATABASE_DISK = 'AGENTX_AZURE_DATABASE_DISK_GB';
 /** A new server's disk (postgres.bicep's least). */
@@ -192,7 +193,7 @@ export type SecretPlan =
   | { readonly kind: 'keys' };
 
 export type Request =
-  | { readonly command: 'foundation'; readonly loadSize: boolean }
+  | { readonly command: 'foundation'; readonly loadSize: boolean; readonly alwaysOn: boolean }
   | { readonly command: 'secrets'; readonly plan: SecretPlan }
   | {
       readonly command: 'apps';
@@ -212,7 +213,7 @@ export class UsageError extends Error {
 }
 
 export const USAGE = `Usage, from your own terminal window:
-  node deploy/azure/deploy.ts foundation [--load-size]
+  node deploy/azure/deploy.ts foundation [--load-size] [--always-on]
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
   node deploy/azure/deploy.ts secrets --keys
@@ -248,9 +249,13 @@ function parseApps(options: readonly string[]): Request {
 export function parseArguments(argv: readonly string[]): Request {
   const [command, ...rest] = argv;
   if (command === 'foundation') {
-    if (rest.length === 0) return { command, loadSize: false };
-    if (rest.length === 1 && rest[0] === '--load-size') return { command, loadSize: true };
-    throw new UsageError(`foundation takes only --load-size (the load run's database size), not ${rest.join(' ')}`);
+    const known = ['--load-size', '--always-on'];
+    if (rest.every((option) => known.includes(option)) && new Set(rest).size === rest.length) {
+      return { command, loadSize: rest.includes('--load-size'), alwaysOn: rest.includes('--always-on') };
+    }
+    throw new UsageError(
+      `foundation takes only --load-size (the load run's database size) and --always-on (the alerts on the jobs stopping, for apps --keep-running), each once, not ${rest.join(' ')}`,
+    );
   }
   if (command === 'alerts' || command === 'dns' || command === 'certificates') {
     if (rest.length > 0) throw new UsageError(`${command} takes no options, not ${rest.join(' ')}`);
@@ -921,7 +926,7 @@ function leaveRecord(steps: Steps, subscription: string, deployment: Recorded, c
   return true;
 }
 
-async function deployFoundation(steps: Steps, loadSize: boolean): Promise<number> {
+async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boolean): Promise<number> {
   const commit = sentFrom(steps, 'foundation');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
@@ -940,12 +945,18 @@ async function deployFoundation(steps: Steps, loadSize: boolean): Promise<number
     [ALERT_EMAIL]: email,
     [ADMIN_PASSWORD]: admin,
     [DATABASE_SIZE]: loadSize ? 'load' : 'normal',
+    [ALWAYS_ON]: alwaysOn ? 'true' : 'false',
     [DATABASE_DISK]: String(diskNow(steps, subscription)),
   };
   steps.terminal.say(
     loadSize
       ? "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes, and the run's measurements (Query Store) switch on. Run foundation again without --load-size the same day to size it back and switch them off."
       : 'The database stays at (or goes back to) its normal size, B1ms; a change of size restarts it for a few minutes.',
+  );
+  steps.terminal.say(
+    alwaysOn
+      ? 'The alerts on the jobs stopping go on. Staging sleeps, so they fire unless apps runs with --keep-running: run foundation again without --always-on before it stops.'
+      : 'The alerts on the jobs stopping stay off: staging sleeps.',
   );
   checkPolicy(steps, values);
   const outputs = sendWithWhatIf(steps, subscription, 'foundation', values);
@@ -1647,7 +1658,7 @@ async function deployApps(
 export async function deploy(request: Request, steps: Steps): Promise<number> {
   switch (request.command) {
     case 'foundation':
-      return deployFoundation(steps, request.loadSize);
+      return deployFoundation(steps, request.loadSize, request.alwaysOn);
     case 'secrets':
       return deploySecrets(steps, request.plan);
     case 'apps':
