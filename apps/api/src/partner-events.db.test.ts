@@ -36,6 +36,7 @@ import {
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createHandoff } from './handoff.ts';
+import { createRailHealth } from './rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { keys, type World } from './mandate-world.helper.test.ts';
@@ -90,6 +91,7 @@ const handoffOf = (w: World) =>
     ids,
     clock,
     logger: testLogger(capture),
+    health: createRailHealth({ clock, logger: testLogger(capture) }),
   });
 
 /** The bank check over the world alone, taking the inbox's messages first, asking `rail`. */

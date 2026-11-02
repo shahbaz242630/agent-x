@@ -5,7 +5,7 @@
 // its signed audit log.
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
-import { type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
+import { type FakeRail, type PaymentExecution, RailUnavailable } from '@agentx/core/modules/providers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -162,8 +162,20 @@ beforeEach(() => {
   });
 });
 
+/** Unknowns counted for these organisations, as a bank gone quiet leaves them. */
+const unknownsFrom = (orgs: readonly string[]) => {
+  for (const org of orgs) {
+    const entry = health.enter(org);
+    if ('settle' in entry) entry.settle('unknown');
+  }
+};
+
+/** Answers a status lookup for the organisation, as the bank check would. */
+const lookedFor = (w: World, rail: FakeRail) =>
+  watchedRail(rail, health).getExecution({ organizationId: w.org, instructionId: ids.next() });
+
 describe('a lane held: 3 unknowns in a row from one organisation', () => {
-  it('sends no more, then after 5 minutes one, held again by its unknown; an answer clears it', async () => {
+  it('sends no more; a hung organisation sends nothing past its hold; a lookup lets one; an acceptance clears it', async () => {
     const { w, requests } = await worldWith(5);
     let bankAway = true;
     const { rail, sent } = railOver([w], (real) => (intent) => (bankAway ? noAnswer(intent) : real(intent)));
@@ -174,19 +186,22 @@ describe('a lane held: 3 unknowns in a row from one organisation', () => {
     expect(await statusOf(w, requests[3] ?? '')).toBe('APPROVED');
     expect(lines('handoff.lane_held')).toHaveLength(1);
 
-    // Still held: nothing sent, however many runs.
+    // Still held: nothing sent, however many runs. Past its hold, no lookup having answered: still nothing.
+    await job.run();
+    clock.advanceBy(60 * 60_000);
     await job.run();
     expect(sent).toHaveLength(3);
 
-    // Past its hold: one, unanswered, holds it again.
-    clock.advanceBy(5 * 60_000);
+    // A lookup answers: one goes, unanswered, and holds it again, for longer.
+    await lookedFor(w, rail);
     await job.run();
     expect(sent).toHaveLength(4);
-    expect(lines('handoff.lane_held')).toHaveLength(2);
+    expect(lines('handoff.lane_held').map(({ holdMinutes }) => holdMinutes)).toEqual([5, 10]);
 
     // Past it again, the bank back: the last goes, and it is clear.
     bankAway = false;
-    clock.advanceBy(5 * 60_000);
+    clock.advanceBy(10 * 60_000);
+    await lookedFor(w, rail);
     await job.run();
     expect(sent).toHaveLength(5);
     expect(await statusOf(w, requests[4] ?? '')).toBe('HANDED_OFF');
@@ -214,12 +229,72 @@ describe('a lane held: 3 unknowns in a row from one organisation', () => {
     const job = handoffOver([w], rail);
 
     await job.run();
-    // Past the queue's age and the lane's hold: one more sent, unanswered, held again.
     clock.advanceBy(QUEUE_STALE_MS + 60_000);
     await job.run();
 
     expect(lines('handoff.queue_stale')).toEqual([]);
     expect(lines('handoff.queue_unread')).toEqual([]);
+  });
+
+  it('says a hold outlasting the queue’s age, an error, once a payment really waits on it; a blip nothing', async () => {
+    const { w } = await worldWith(4);
+    const { rail } = railOver([w], () => noAnswer);
+    const job = handoffOver([w], rail);
+
+    await job.run();
+    clock.advanceBy(QUEUE_STALE_MS - 1);
+    await job.run();
+    expect(lines('handoff.hold_lasting')).toEqual([]);
+
+    clock.advanceBy(1);
+    await job.run();
+    expect(lines('handoff.hold_lasting')).toEqual([expect.objectContaining({ level: 'error', hold: 'lane' })]);
+  });
+});
+
+describe('an answer that is no acceptance (H3)', () => {
+  const fourAnsweredAs = async (change: (execution: PaymentExecution) => PaymentExecution) => {
+    const { w } = await worldWith(4);
+    const { rail, sent } = railOver([w], (real) => async (intent) => {
+      const answer = await real(intent);
+      return answer.kind === 'accepted' ? { ...answer, execution: change(answer.execution) } : answer;
+    });
+    await handoffOver([w], rail).run();
+    return { w, sent };
+  };
+
+  it.each([
+    ['about another payment', (execution: PaymentExecution) => ({ ...execution, instructionId: 'another' })],
+    ['for another amount', (execution: PaymentExecution) => ({ ...execution, amountMinor: 1n })],
+    ['in another currency', (execution: PaymentExecution) => ({ ...execution, currency: 'USD' })],
+    ['of another organisation', (execution: PaymentExecution) => ({ ...execution, organizationId: 'another' })],
+    [
+      'Rejected with no proof the money stayed',
+      (execution: PaymentExecution) => ({ ...execution, providerStatus: 'Rejected' as const, noDebitProven: false }),
+    ],
+  ])('counts an accepted answer %s as an unknown: 3 hold the lane', async (_name, change) => {
+    const { w, sent } = await fourAnsweredAs(change);
+
+    expect(sent).toHaveLength(3);
+    expect(health.heldFor(w.org)).toBe('lane');
+  });
+
+  it('counts a rejection with its proof, and a refusal, as neither: no unknown, nothing cleared', async () => {
+    const proven = await fourAnsweredAs((execution) => ({
+      ...execution,
+      providerStatus: 'Rejected' as const,
+      noDebitProven: true,
+    }));
+    expect(proven.sent).toHaveLength(4);
+    expect(lines('handoff.lane_held')).toEqual([]);
+
+    // Two unknowns, then a refusal (.01), then one more: three in a row, the refusal not breaking it.
+    const { w, acting } = await ready();
+    for (const fils of [2n, 2n, 1n, 2n, 0n]) await ask(acting, w, { amount: AED(5_000n + fils) });
+    const { rail, sent } = railOver([w]);
+    await handoffOver([w], rail).run();
+    expect(sent).toHaveLength(4);
+    expect(health.heldFor(w.org)).toBe('lane');
   });
 });
 
@@ -237,7 +312,7 @@ describe('the bank held: 5 unknowns from at least 3 organisations in 60 s', () =
     const job = handoffOver(worlds, rail);
 
     await job.run();
-    expect(lines('handoff.bank_held')).toHaveLength(1);
+    expect(lines('handoff.bank_held')).toEqual([expect.objectContaining({ level: 'error' })]);
     const sentByTheHold = sent.length;
     const unsent = worlds.length * 3 - sentByTheHold;
     expect(unsent).toBeGreaterThan(0);
@@ -251,15 +326,33 @@ describe('the bank held: 5 unknowns from at least 3 organisations in 60 s', () =
     expect(sent).toHaveLength(sentByTheHold);
     expect(health.heldFor(worlds[0]?.org ?? '')).toBe('bank');
 
-    // A lookup answers, "not found" at that: open, said, and what waited goes.
-    const lookup = await watchedRail(rail, health).getExecution({
-      organizationId: worlds[0]?.org ?? '',
-      instructionId: ids.next(),
-    });
-    expect(lookup.kind).toBe('not_found');
-    expect(lines('handoff.bank_back')).toHaveLength(1);
+    // A lookup answers, "not found" at that, for each: half-open, a real acceptance reopens it, and what waited goes.
+    for (const w of worlds) expect((await lookedFor(w, rail)).kind).toBe('not_found');
+    expect(lines('handoff.bank_half_open')).toHaveLength(1);
     await job.run();
+    expect(lines('handoff.bank_back')).toHaveLength(1);
     expect(sent).toHaveLength(worlds.length * 3);
+  });
+
+  it('half-open, one unknown trips it again: nothing more sent, no new error, no second note', async () => {
+    const { worlds } = await threeWorlds(4);
+    const { rail, sent } = railOver(worlds, () => noAnswer);
+    const job = handoffOver(worlds, rail);
+
+    await job.run();
+    const sentByTheHold = sent.length;
+    for (const w of worlds) await lookedFor(w, rail);
+    clock.advanceBy(60 * 60_000);
+    for (const w of worlds) await lookedFor(w, rail);
+    await job.run();
+
+    // The third organisation's lane still clear of its own row: one goes, unanswered, tripping it again.
+    expect(sent).toHaveLength(sentByTheHold + 1);
+    expect(lines('handoff.bank_held')).toHaveLength(1);
+    expect(lines('handoff.bank_held_again')).toHaveLength(1);
+    await job.run();
+    expect(sent).toHaveLength(sentByTheHold + 1);
+    for (const w of worlds) expect(await heldNotesOf(w)).toHaveLength(1);
   });
 
   it('tells each organisation with payments waiting once, signed, in its audit log, however many runs', async () => {
@@ -278,9 +371,9 @@ describe('the bank held: 5 unknowns from at least 3 organisations in 60 s', () =
     }
   });
 
-  it('tells it again in a later outage, once one of its payments was answered between', async () => {
+  it('tells it again in a later hold, once one of its own payments was accepted between', async () => {
     const { w } = await worldWith(8);
-    // Three unanswered, one answered, three unanswered: two outages, one still waiting to be held.
+    // Three unanswered, one accepted, three unanswered: two outages, one still waiting to be held.
     let sentSoFar = 0;
     const { rail } = railOver([w], (real) => (intent) => {
       sentSoFar += 1;
@@ -293,15 +386,34 @@ describe('the bank held: 5 unknowns from at least 3 organisations in 60 s', () =
     expect(await heldNotesOf(w)).toHaveLength(1);
 
     clock.advanceBy(5 * 60_000);
+    await lookedFor(w, rail);
     await job.run();
     await job.run();
     expect(sentSoFar).toBe(7);
     expect(await heldNotesOf(w)).toHaveLength(2);
   });
 
+  it('tells it again for a new platform outage, though none of its own was accepted between', async () => {
+    const { w, requests } = await worldWith(3);
+    const job = handoffOver([w], railOver([w]).rail);
+    unknownsFrom(['x', 'x', 'y', 'y', 'z']);
+    await job.run();
+    expect(await heldNotesOf(w)).toHaveLength(1);
+
+    // Another's acceptance reopens it, half-open; a fresh trip is a new outage.
+    health.lookupBegun('p')();
+    const place = health.enter('p');
+    if ('settle' in place) place.settle('accepted');
+    unknownsFrom(['q', 'r', 's', 't', 'u']);
+    await job.run();
+
+    expect(await heldNotesOf(w)).toHaveLength(2);
+    expect(await statusOf(w, requests[0] ?? '')).toBe('APPROVED');
+  });
+
   it('says the note it couldn’t write, the payment held all the same, and writes it next run', async () => {
     const { w, requests } = await worldWith(1);
-    for (const org of ['x', 'x', 'y', 'y', 'z']) health.unknown(org);
+    unknownsFrom(['x', 'x', 'y', 'y', 'z']);
     expect(health.heldFor(w.org)).toBe('bank');
     // A run's transactions: the pause (1), the page (2), the note (3), which fails the first time alone.
     let opened = 0;

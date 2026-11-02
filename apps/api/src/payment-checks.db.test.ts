@@ -37,6 +37,7 @@ import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createHandoff, HEARTBEAT_STALE_MS } from './handoff.ts';
+import { createRailHealth } from './rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { heartbeatChecks } from './health.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
@@ -90,6 +91,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
     ids,
     clock,
     logger: testLogger(capture),
+    health: createRailHealth({ clock, logger: testLogger(capture) }),
   });
 
 /** The bank check over the world alone, asking `rail` (the world's own fake unless given). */

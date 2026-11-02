@@ -149,6 +149,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resol
     ids,
     clock,
     logger: testLogger(capture),
+    health: createRailHealth({ clock, logger: testLogger(capture) }),
   });
 
 /** The platform's hand-off pause moved in the caller's transaction, as the operator's command moves it (B1). */
@@ -312,6 +313,7 @@ describe('an approved request handed to the partner once (B4)', () => {
       ids,
       clock,
       logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
       page: 1,
     }).run();
 
@@ -393,6 +395,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
       ids,
       clock,
       logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
     });
 
     await job.run();
@@ -709,6 +712,7 @@ describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, S
       ids,
       clock,
       logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
       unknownAfterMs: 60_000,
     });
 
@@ -832,6 +836,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
       ids,
       clock,
       logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
       ...limits,
     });
 
@@ -1098,6 +1103,7 @@ describe('approved requests left standing, said for the queue-age alert (gate H8
       ids,
       clock,
       logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
     });
 
     await job.run();

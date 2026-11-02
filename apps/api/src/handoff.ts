@@ -127,7 +127,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { alertAdmins } from './payment-alerts.ts';
-import { createRailHealth, type RailHealth, type RailHold } from './rail-health.ts';
+import type { RailEntry, RailHealth, RailHold } from './rail-health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
 
 /** The statuses a late refusal goes back on: the bank's word read as under way, or paid (decision 37b). */
@@ -260,7 +260,7 @@ export function createHandoff({
   ids,
   clock,
   logger,
-  health = createRailHealth({ clock, logger }),
+  health,
   page = HANDOFF_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
   unknownAfterMs = UNKNOWN_AFTER_MS,
@@ -276,12 +276,8 @@ export function createHandoff({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
-  /**
-   * The bank breaker (rail-health.ts), shared with what reopens it: main.ts
-   * gives the bank check its `watchedRail`. A test may leave it out: its own,
-   * which only its own answers reach.
-   */
-  readonly health?: RailHealth;
+  /** The bank breaker (rail-health.ts), shared with what reopens it: main.ts gives the bank check its `watchedRail`. */
+  readonly health: RailHealth;
   /** How many of an organisation's requests are read at once (HANDOFF_PAGE unless a test names fewer). */
   readonly page?: number;
   /** How long the partner is given (PARTNER_CALL_TIMEOUT_MS unless a test names less). */
@@ -315,8 +311,9 @@ export function createHandoff({
   const waitingIn = new Map<string, string[]>();
   // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
   const staleSaid = new Map<string, number>();
-  // The organisations already told their payments wait for the bank: one signed event an outage, not one a run.
-  const toldHeld = new Set<string>();
+  // The organisations told their payments wait for the bank, by the hold and platform outage then: one signed event an
+  // outage, not one a run. A trip again from half-open is the same outage; an acceptance of its own clears it.
+  const toldHeld = new Map<string, { readonly hold: RailHold; readonly outage: number }>();
   const beatNow = (): void => {
     beat = clock.now().getTime();
   };
@@ -604,20 +601,12 @@ export function createHandoff({
     requestId: string,
   ): Promise<TransactionStatus> => (await lockPayment(tx, states, key, requestId)).transaction.status;
 
-  /**
-   * The partner's answer to the intent, within its time; any it can't give is
-   * `unknown` (never resent). Noted for the bank breaker the moment it is known,
-   * before Tx B, so no new Tx A can start between the outage's answers.
-   */
+  /** The partner's answer to the intent, within its time; any it can't give is `unknown` (never resent). */
   const answerOf = async (intent: ApprovedPaymentIntent, id: string, log: Logger): Promise<Answer> => {
-    const { organizationId: orgId } = intent;
     try {
       const submitted = await withinTime(rail.submitApprovedIntent(intent), callTimeoutMs);
-      health.answered(orgId);
-      toldHeld.delete(orgId);
       return submitted.kind === 'accepted' ? submitted : { kind: 'refused', code: submitted.code };
     } catch (error) {
-      health.unknown(orgId);
       if (error instanceof PartnerTimedOut) log.warn('handoff.partner_timeout', { requestId: id });
       else if (!(error instanceof RailUnavailable)) log.error('handoff.partner_failed', { requestId: id, err: error });
       return { kind: 'unknown' };
@@ -627,11 +616,15 @@ export function createHandoff({
   /**
    * The organisation told, in its audit log, that its payments wait for the
    * bank (partner S119, S140: background actions kept where it can read them):
-   * once, until one of its payments is answered again. One that can't be
-   * written is said and tried again next run; the payments stay held either way.
+   * once an outage. One that can't be written is said and tried again next run;
+   * the payments stay held either way.
    */
-  const tellHeld = async (orgId: string, hold: RailHold, log: Logger): Promise<void> => {
-    if (toldHeld.has(orgId)) return;
+  const tellHeld = async (orgId: string, hold: RailHold, outage: number, log: Logger): Promise<void> => {
+    const told = toldHeld.get(orgId);
+    // Noted before it is written: several of its requests may reach the hold at once.
+    toldHeld.set(orgId, { hold, outage });
+    // A lane's own note speaks for the platform's hold that follows it, as for the rest of this outage.
+    if (told !== undefined && (told.outage === outage || told.hold === 'lane')) return;
     try {
       await withSignedStates(database, orgId, services(log), (tx) =>
         createAuditTrail({ keys, ids }).record(tx, orgId, {
@@ -641,8 +634,8 @@ export function createHandoff({
           details: { hold },
         }),
       );
-      toldHeld.add(orgId);
     } catch (error) {
+      toldHeld.delete(orgId);
       log.error('handoff.held_unrecorded', { err: error });
     }
   };
@@ -650,23 +643,25 @@ export function createHandoff({
   /** One request handed off if it may go, its outcome logged; false where the bank's hold ended the organisation's turn. */
   const handOff = async (orgId: string, id: string, log: Logger): Promise<boolean> => {
     beatNow();
-    let done: TxA;
-    const hold = health.heldFor(orgId);
-    if (hold !== undefined) {
-      noteWaiting(orgId, id, `hold_${hold}`, log);
-      await tellHeld(orgId, hold, log);
+    const entry = health.enter(orgId);
+    if ('hold' in entry) {
+      noteWaiting(orgId, id, `hold_${entry.hold}`, log);
+      await tellHeld(orgId, entry.hold, entry.outage, log);
       return false;
     }
+    let done: TxA;
     try {
       done = await withSignedStates(database, orgId, services(log), (tx, states) => txA(tx, states, orgId, id, log));
     } catch (error) {
       // Tx A's outcome unclear (a commit lost with the connection) or a bug: the partner is never called.
+      entry.settle('not_sent');
       log.error('handoff.failed', { requestId: id, err: error });
       return true;
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
     if (done.outcome === 'waiting') noteWaiting(orgId, id, done.why, log);
-    if (done.outcome === 'handed_off') await sent(orgId, id, done, log);
+    if (done.outcome === 'handed_off') await sent(orgId, id, done, entry, log);
+    else entry.settle('not_sent');
     return true;
   };
 
@@ -675,9 +670,14 @@ export function createHandoff({
     orgId: string,
     id: string,
     { intent, transactionId }: Extract<TxA, { outcome: 'handed_off' }>,
+    { settle }: Extract<RailEntry, { settle: unknown }>,
     log: Logger,
   ): Promise<void> => {
     const answer = await answerOf(intent, id, log);
+    // Before Tx B, the moment it is known, so no new Tx A can start between an outage's answers.
+    const word = breakerWord(answer, intent);
+    settle(word);
+    if (word === 'accepted') toldHeld.delete(orgId);
     try {
       const recorded = await txB(orgId, id, transactionId, answer, log);
       log.info('handoff.handed_off', {
@@ -885,6 +885,21 @@ type Answer =
   | { readonly kind: 'accepted'; readonly execution: PaymentExecution }
   | { readonly kind: 'refused'; readonly code: string }
   | { readonly kind: 'unknown' };
+
+/**
+ * What the partner's answer says of the way a payment takes, for the bank
+ * breaker. Only a clear acceptance of this very payment is an acceptance: an
+ * answer about another payment, or a rejection with no proof, leaves its outcome
+ * unknown as surely as a timeout does. A rejection with its proof is a refusal.
+ */
+function breakerWord(answer: Answer, intent: ApprovedPaymentIntent): 'accepted' | 'refused' | 'unknown' {
+  if (answer.kind !== 'accepted') return answer.kind;
+  const instruction = { id: intent.instructionId, amountMinor: intent.amountMinor, currency: intent.currency };
+  if (!answerAbout(answer.execution, intent.organizationId, { instruction })) return 'unknown';
+  const state = paymentStateOf(answer.execution);
+  if (state === 'UNKNOWN') return 'unknown';
+  return state === 'FAILED' ? 'refused' : 'accepted';
+}
 
 /** A request's move by its machine, signed, from its state read for change in this transaction. */
 async function moveRequest(

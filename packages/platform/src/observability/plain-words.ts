@@ -455,15 +455,21 @@ export const PLAIN_WORDS = {
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
   'handoff.bank_held': {
-    happened: 'The bank gave no clear answer to new payments from several organisations, so none are being sent to it.',
+    happened:
+      'The bank gave no clear answer to new payments from several organisations, so new payments are held back.',
     broke: 'Approved payments wait, their money still held. Nothing already sent is sent again.',
-    next: 'Sending starts again by itself once the bank answers a status check. If it lasts, ask the bank what is wrong.',
+    next: 'When a status check answers, a few go to test the way; one accepted reopens it. If it lasts, ask the bank why.',
+  },
+  'handoff.hold_lasting': {
+    happened: 'New payments have been held back for over 15 minutes because the bank is not answering them clearly.',
+    broke: 'Approved payments wait, their money still held; at most a few go at a time to test the way.',
+    next: 'Ask the bank what is wrong. It reopens by itself once the bank accepts one. Said again each 15 minutes.',
   },
   'handoff.lane_held': {
     happened:
-      "The bank gave no clear answer to three of one organisation's payments in a row, so its are held 5 minutes.",
+      "The bank gave no clear answer to three of one organisation's payments in a row, so its are held for a time.",
     broke: 'Its approved payments wait, their money still held. Other organisations carry on.',
-    next: 'After 5 minutes they go one at a time until the bank answers one. If it repeats, ask the bank why.',
+    next: 'One goes to test the way after the hold, once a status check answers. If it repeats, ask the bank why.',
   },
   'handoff.held_unrecorded': {
     happened: "An organisation's payments were held for the bank, but that could not be written in its audit log.",
