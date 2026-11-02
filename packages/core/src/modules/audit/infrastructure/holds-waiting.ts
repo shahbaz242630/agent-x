@@ -80,13 +80,24 @@ export async function holdNoLongerWaiting(
 /** Far past what the app writes (a row for each record found tampered with and not yet recorded), and quick to read. */
 export const HOLDS_READ_AT_ONCE = 1000;
 
-/** The holds waiting, on one trip, at most HOLDS_READ_AT_ONCE: an empty table is the usual answer. */
-export function holdsWaiting(db: Kysely<AuditTables>): Promise<readonly HoldWaiting[]> {
+/**
+ * The most findings of a process's own it keeps in memory once their rows carry them: 5 MB, at about 1 KB each. Far past
+ * what honest work finds, as each is a hold not yet recorded, or a second record found under a hold.
+ */
+export const MOST_KEPT_OWN = 5000;
+
+/**
+ * The holds waiting, on one trip, at most HOLDS_READ_AT_ONCE, in the key's order, from after `afterOrg` when given: an
+ * empty table is the usual answer.
+ */
+export function holdsWaiting(db: Kysely<AuditTables>, afterOrg?: string): Promise<readonly HoldWaiting[]> {
+  const all = db.selectFrom('directory.holds_waiting').select(['org_id', 'subject_type', 'object_id', 'reason']);
   return readAloneOnOneTrip(
     db,
-    db
-      .selectFrom('directory.holds_waiting')
-      .select(['org_id', 'subject_type', 'object_id', 'reason'])
+    (afterOrg === undefined ? all : all.where('org_id', '>', afterOrg))
+      .orderBy('org_id')
+      .orderBy('subject_type')
+      .orderBy('object_id')
       .limit(HOLDS_READ_AT_ONCE),
   );
 }

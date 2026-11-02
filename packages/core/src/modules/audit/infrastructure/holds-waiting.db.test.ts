@@ -82,6 +82,12 @@ async function aProcess(maxConnections = 4) {
       signed.withSignedStates(pool, orgId, services(), (tx, states) => states.integrityHold(tx, orgId, lock)),
     work: <T>(work: (tx: Transaction<AuditTables>, states: SignedStates) => Promise<T>) =>
       signed.withSignedStates(pool, org, services(), work),
+    /** A finding of this process's own, on a record of that organisation. */
+    findOn: (orgId: string, id: string) =>
+      signed.withSignedStates(pool, orgId, services(), (_, states) => {
+        states.mismatch('membership', { orgId, id });
+        return Promise.resolve();
+      }),
   };
 }
 
@@ -111,6 +117,9 @@ async function holdEvents(orgId = org): Promise<{ action: string; details: Recor
 }
 const actions = async (orgId = org) => (await holdEvents(orgId)).map(({ action }) => action);
 const ONE_SET = ['integrity_hold.created', 'integrity_hold.set'];
+
+const rowsNamedElsewhere = () =>
+  attacker.query<{ object_id: string }>('select object_id from directory.holds_waiting where org_id = $1', [org]);
 
 const waitingRows = (orgId = org) =>
   attacker.query<{ reason: string }>('select reason from directory.holds_waiting where org_id = $1', [orgId]);
@@ -684,6 +693,87 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
     expect(await actions()).toEqual(ONE_SET);
   });
 
+  it('forged rows an operator deletes under a hold on another record stay deleted: the alarm once, in each process', async () => {
+    const [one, two] = [await aProcess(), await aProcess()];
+    await one.hold('head');
+    await plant('seal', org, 'membership', newId());
+    await plant('seal', org, 'membership', newId());
+    await one.poll();
+    await two.poll();
+    expect(await rowsNamedElsewhere()).toHaveLength(2);
+
+    await attacker.query('delete from directory.holds_waiting where org_id = $1', [org]);
+
+    // Past their rest in both processes, and a good way on.
+    for (let poll = 0; poll < 16; poll += 1) {
+      await one.poll();
+      await two.poll();
+      expect(await rowsNamedElsewhere()).toEqual([]);
+    }
+    expect(rowGone()).toHaveLength(4);
+    expect(await actions()).toEqual(ONE_SET);
+  });
+
+  it("a finding of this process's own, its row deleted under a hold on another record, has it written back", async () => {
+    const finder = await aProcess();
+    await finder.hold('head');
+    await finder.work((_, states) => {
+      states.mismatch('membership', { orgId: org, id: newId() });
+      return Promise.resolve();
+    });
+    await attacker.query('delete from directory.holds_waiting where org_id = $1', [org]);
+
+    for (let poll = 0; poll < 13; poll += 1) await finder.poll();
+
+    expect(await rowsNamedElsewhere()).toHaveLength(1);
+    expect(rowGone()).toEqual([]);
+    expect(await actions()).toEqual(ONE_SET);
+  });
+
+  /** A poll of `by`, its one connection held back behind `between`, which runs after the read and before the try. */
+  async function pollWithThisBetween(by: Awaited<ReturnType<typeof aProcess>>, between: () => Promise<unknown>) {
+    const locker = await database.connect('admin');
+    await locker.query('begin');
+    await locker.query('lock table directory.holds_waiting in access exclusive mode');
+    const polling = by.poll();
+    await waitUntilQueued(attacker, 1);
+    const gate = by.platform.withTenant(by.pool, org, between);
+    await locker.query('rollback');
+    await locker.end();
+    await gate;
+    await polling;
+  }
+
+  it('a row gone before its try, the hold naming another record: the alarm, the entry forgotten, the row left deleted', async () => {
+    const other = await aProcess();
+    await other.hold('head');
+    const frozen = await aProcess(1);
+    await plant('seal', org, 'membership', newId());
+
+    await pollWithThisBetween(frozen, () =>
+      attacker.query('delete from directory.holds_waiting where org_id = $1', [org]),
+    );
+
+    expect(rowGone()).toEqual([expect.objectContaining({ level: 'error', orgId: org, check: 'hold' })]);
+    expect(await rowsNamedElsewhere()).toEqual([]);
+    await frozen.poll();
+    expect(rowGone()).toHaveLength(1);
+  });
+
+  it('a row gone before its try because the hold now names it: the usual way, nothing said', async () => {
+    const other = await aProcess();
+    const frozen = await aProcess(1);
+    await plant('chain');
+
+    await pollWithThisBetween(frozen, () => other.hold('head'));
+
+    expect(await actions()).toEqual(ONE_SET);
+    expect(rowGone()).toEqual([]);
+    expect(fromRow()).toEqual([]);
+    await frozen.poll();
+    expect(rowGone()).toEqual([]);
+  });
+
   it("a process holding a record that another recorded lets it go, though another record's row stands", async () => {
     const stale = await aProcess();
     await leftWaiting(stale);
@@ -703,7 +793,7 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
     expect(sets.map(({ details }) => details.objectId)).toEqual([org, next]);
   });
 
-  it('frozen between the read and its try: a row gone by then is not held over, with no alarm', async () => {
+  it('frozen between the read and its try: a row gone by then, its hold not naming it, is not held over, and is the alarm', async () => {
     await plant('seal');
     const frozen = await aProcess(1);
     const locker = await database.connect('admin');
@@ -722,7 +812,7 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
 
     expect(await actions()).toEqual(['integrity_hold.created']);
     expect(fromRow()).toEqual([]);
-    expect(rowGone()).toEqual([]);
+    expect(rowGone()).toEqual([expect.objectContaining({ level: 'error', orgId: org, check: 'hold' })]);
     expect(await frozen.read('none')).toMatchObject({ outcome: 'clear' });
   });
 
@@ -899,8 +989,8 @@ describe(`holds waiting: the database in trouble (4D2e D5, Postgres ${server.ver
       const real = await actual<typeof Waiting>();
       return {
         ...real,
-        holdsWaiting: async (db: Parameters<typeof real.holdsWaiting>[0]) => {
-          const rows = await real.holdsWaiting(db);
+        holdsWaiting: async (...read: Parameters<typeof real.holdsWaiting>) => {
+          const rows = await real.holdsWaiting(...read);
           readDone();
           await gate;
           return rows;
@@ -1073,7 +1163,7 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     expect(fromRow()).toHaveLength(2);
   });
 
-  it('a row resting, deleted: not judged gone until its rest is over, and then the row is written again', async () => {
+  it('a row resting, deleted: not judged gone until its rest is over, and then the alarm, with the row left deleted', async () => {
     const other = await aProcess();
     await other.hold('head');
     await plant('seal', org, 'membership', newId());
@@ -1082,10 +1172,15 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
 
     for (let poll = 0; poll < 12; poll += 1) expect(await tripsOf(other)).toBe(1);
     expect(await waitingRows()).toEqual([]);
+    expect(rowGone()).toEqual([]);
 
     await other.poll();
-    expect(await waitingRows()).toEqual([{ reason: 'seal' }]);
+    expect(await waitingRows()).toEqual([]);
+    expect(rowGone()).toEqual([expect.objectContaining({ level: 'error', orgId: org, check: 'hold' })]);
     expect(await actions()).toEqual(ONE_SET);
+    // Forgotten: nothing more to try, or to say.
+    expect(await tripsOf(other)).toBe(1);
+    expect(rowGone()).toHaveLength(1);
   });
 
   it('at the limit of what it reads: says so, and judges no row gone', async () => {
@@ -1207,14 +1302,157 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     await other.poll();
     expect(lines('audit.holds_waiting_past_memory')).toHaveLength(1);
 
+    const another = await aProcess();
+    await another.poll();
     await attacker.query('delete from directory.holds_waiting');
-    // The entries go four a poll: enough polls that nothing is left over the bound.
+    // With no rows read, none is left out: back under it, though the entries here only go four a poll.
     await other.poll();
-    expect(lines('audit.holds_waiting_past_memory')).toHaveLength(1);
+    expect(lines('audit.holds_waiting_past_memory')).toHaveLength(2);
+    // An operator's delete stands, in every process that held them, whatever hold they meet.
+    for (let poll = 0; poll < 3; poll += 1) {
+      await other.poll();
+      await another.poll();
+      expect(await waitingRows(crowded)).toEqual([]);
+    }
     await plantInBulk(600, crowded);
     await other.poll();
 
-    expect(lines('audit.holds_waiting_past_memory')).toHaveLength(2);
+    expect(lines('audit.holds_waiting_past_memory')).toHaveLength(3);
+  });
+
+  describe('what a process found itself, at its bound', () => {
+    /** A process whose bound on its own findings is one, as 5,000 real transactions would make it: the bound is its module's. */
+    async function aProcessBoundAtOne() {
+      vi.doMock('./holds-waiting.ts', async (actual) => ({ ...(await actual<typeof Waiting>()), MOST_KEPT_OWN: 1 }));
+      const bound = await aProcess();
+      vi.doUnmock('./holds-waiting.ts');
+      return bound;
+    }
+    const found = (by: Awaited<ReturnType<typeof aProcess>>, id: string, orgId = org) => by.findOn(orgId, id);
+    const past = () => lines('audit.holds_waiting_past_memory');
+
+    it('the next is in the table and not here, Tx A refuses, and a poll brings it in, said once', async () => {
+      const bound = await aProcessBoundAtOne();
+      await bound.hold('head');
+      const [first, second] = [newId(), newId()];
+      // The chain's entry went with its hold, so the first is the one here, at the bound.
+      await found(bound, first);
+      expect(past()).toEqual([]);
+      // Past it: this one's row alone carries it.
+      await found(bound, second);
+      expect(past()).toEqual([expect.objectContaining({ level: 'error', orgId: org, ownLeft: 1, kept: 1 })]);
+      expect((await rowsNamedElsewhere()).map(({ object_id: id }) => id).toSorted()).toEqual(
+        [first, second].toSorted(),
+      );
+
+      await bound.poll();
+
+      // Back in, from its row: only what wasn't here is new to the poll.
+      expect(fromRow()).toEqual([expect.objectContaining({ objectId: second })]);
+    });
+
+    it('past the bound, Tx A still refuses on the row alone, with no hold recorded yet', async () => {
+      const bound = await aProcessBoundAtOne();
+      await withHeadLocked(async () => {
+        await found(bound, newId());
+        await found(bound, newId());
+      });
+      expect(past()).toHaveLength(1);
+      expect(await rowsNamedElsewhere()).toHaveLength(2);
+      expect(await actions()).toEqual(['integrity_hold.created']);
+
+      expect(await (await aProcess()).read('head')).toMatchObject({ outcome: 'tampered', sign: 'holding' });
+    });
+
+    it('an organisation with nothing else here keeps its one, so it reads as waiting', async () => {
+      const bound = await aProcessBoundAtOne();
+      await withHeadLocked(() => found(bound, newId()));
+      const neighbour = await newOrganisation();
+      const elsewhere = org;
+      org = neighbour;
+      await withHeadLocked(() => found(bound, newId(), neighbour));
+
+      await withHeadLocked(async () => {
+        expect(await bound.read('none', neighbour)).toEqual({ outcome: 'tampered', sign: 'holding' });
+        expect(await bound.read('none', elsewhere)).toEqual({ outcome: 'tampered', sign: 'holding' });
+      });
+      expect(past()).toEqual([]);
+    });
+
+    it('with no row to carry it, a finding is kept here whatever the bound', async () => {
+      const bound = await aProcessBoundAtOne();
+      await withTableRefusing('insert', () =>
+        withHeadLocked(async () => {
+          await found(bound, newId());
+          await found(bound, newId());
+        }),
+      );
+      expect(past()).toEqual([]);
+      expect(lines('audit.hold_not_kept')).toHaveLength(2);
+      expect(await rowsNamedElsewhere()).toEqual([]);
+
+      // Each written in its turn, as each is tried: the first the hold, the second its row.
+      await bound.hold(undefined);
+      await bound.hold(undefined);
+      expect(await actions()).toEqual(ONE_SET);
+      expect(await rowsNamedElsewhere()).toHaveLength(1);
+    });
+
+    it('said again once back under the bound and past it again', async () => {
+      const bound = await aProcessBoundAtOne();
+      await bound.hold('head');
+      await found(bound, newId());
+      await found(bound, newId());
+      expect(past()).toHaveLength(1);
+      await clearTheHold(bound);
+      await bound.read('none');
+      expect(await actions()).toEqual([...ONE_SET, 'integrity_hold.cleared', 'integrity_hold.set']);
+      await bound.poll();
+      await found(bound, newId());
+      await found(bound, newId());
+
+      expect(past()).toHaveLength(2);
+    });
+  });
+
+  it('a crowded organisation hides no other: the next poll reads after it, nothing judged gone till a whole read', async () => {
+    const finder = await aProcess();
+    await leftWaiting(finder);
+    await attacker.query('delete from directory.holds_waiting where org_id = $1', [org]);
+    const crowded = await newOrganisation();
+    const hidden = await newOrganisation();
+    // Past the limit by enough that the holds this test's polls set don't bring it back under.
+    await plantInBulk(1010, crowded);
+    await plant('seal', hidden);
+    const spoke = () => lines('audit.holds_waiting_past_limit');
+
+    await finder.poll();
+    expect(await actions(hidden)).toEqual(['integrity_hold.created']);
+    expect(spoke().at(-1)).toMatchObject({ rows: 1000, atReadLimit: true });
+
+    await finder.poll();
+    expect(await actions(hidden)).toEqual(ONE_SET);
+    // A short page after a long one: the table is still long, and it says so.
+    expect(spoke()).toHaveLength(2);
+    expect(spoke().at(-1)).toMatchObject({ rows: 1, atReadLimit: false });
+
+    await finder.poll();
+    expect(rowGone()).toEqual([]);
+    expect(await actions()).toEqual(['integrity_hold.created']);
+
+    // The table shrunk: the page after the crowded one judges nothing, as it didn't start from the beginning.
+    await attacker.query('delete from directory.holds_waiting where org_id = $1', [crowded]);
+    await finder.poll();
+    expect(rowGone()).toEqual([]);
+    const spokenWhileLong = spoke().length;
+    expect(spokenWhileLong).toBe(4);
+
+    // From the beginning, under the limit: judging resumes, and the line goes quiet.
+    await finder.poll();
+    expect(spoke()).toHaveLength(spokenWhileLong);
+    // The crowded one's rows, deleted too, say so as each is reached.
+    expect(rowGone().filter(({ orgId }) => orgId === org)).toHaveLength(1);
+    expect(await actions()).toEqual(ONE_SET);
   });
 
   it('a table past the limit is read to the limit alone', async () => {

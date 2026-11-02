@@ -703,6 +703,8 @@ export interface HoldingSignedStates extends SignedStates {
    * no other lock.
    */
   hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already' | 'named_elsewhere'>;
+  /** Whether the hold is a verified HELD naming this finding's record, as `hold` would answer `already`. Takes no lock. */
+  holdNames(tx: AuditTransaction, finding: TamperFinding): Promise<boolean>;
 }
 
 type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
@@ -1426,6 +1428,13 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'tampered', sign });
   };
 
+  /** Whether the HELD state this event recorded names the finding's record. */
+  const heldStateNames = async (tx: AuditTransaction, eventId: string, finding: TamperFinding): Promise<boolean> => {
+    const event = await trail.recordedEvent(tx, finding.orgId, { eventId });
+    const details = event.kind === 'recorded' ? event.event.details : undefined;
+    return details?.foundOn === finding.subjectType && details.objectId === finding.objectId;
+  };
+
   /** The hold as the log holds it. Read clear, what rested behind a hold is told, though its answer isn't used. */
   const holdAsSigned = async (tx: AuditTransaction, orgId: string): Promise<HoldCheck> => {
     const { check } = await readHold(tx, orgId);
@@ -1861,6 +1870,11 @@ export function createSignedStates({
       return Object.freeze({ outcome: 'cleared', version: recorded.version, eventId: recorded.eventId });
     },
 
+    async holdNames(tx: AuditTransaction, finding: TamperFinding): Promise<boolean> {
+      const { check } = await readHold(tx, finding.orgId);
+      return check.outcome === 'held' && (await heldStateNames(tx, check.eventId, finding));
+    },
+
     async hold(
       tx: AuditTransaction,
       finding: TamperFinding,
@@ -1870,11 +1884,7 @@ export function createSignedStates({
       await lockChainHead(tx, orgId);
       const { check, version } = await readHold(tx, orgId);
       if (check.outcome === 'held') {
-        const event = await trail.recordedEvent(tx, orgId, { eventId: check.eventId });
-        const details = event.kind === 'recorded' ? event.event.details : undefined;
-        return details?.foundOn === finding.subjectType && details.objectId === finding.objectId
-          ? 'already'
-          : 'named_elsewhere';
+        return (await heldStateNames(tx, check.eventId, finding)) ? 'already' : 'named_elsewhere';
       }
       await recordHold(tx, orgId, version + 1, 'HELD', {
         actor: HOLDER,
