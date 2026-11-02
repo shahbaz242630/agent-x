@@ -326,9 +326,17 @@ interface PollTry {
   readonly gone: boolean;
 }
 
+/** An entry this poll reached: a poll nearer its turn if it rests, or the try it owes (none for a failed one whose row stands). */
+function turnOf(entries: Map<string, Found>, name: string, found: Found, stands: boolean): PollTry | undefined {
+  const waits = found.pollsToWait ?? 0;
+  if (waits > 0) entries.set(name, { ...found, pollsToWait: waits - 1 });
+  else if (!stands || found.pollsToWait === 0) return { found, gone: !stands };
+  return undefined;
+}
+
 /**
- * The tries this poll owes, by organisation, each resting entry a poll nearer its turn. `known`: what was here before
- * the read: one kept while it was on its way is new to it, not gone. `judgeGone`: whether the read saw every row.
+ * The tries this poll owes, by organisation. `known`: what was here before the read: one kept while it was on its way
+ * is new to it, not gone. `judgeGone`: whether the read saw every row.
  */
 function triesDue(
   known: ReadonlySet<string>,
@@ -339,14 +347,12 @@ function triesDue(
   for (const [held, entries] of unrecorded) {
     // Left to the try under way, rather than queue on the head beside it.
     if (recording.has(held)) continue;
-    const tries: PollTry[] = [];
-    for (const [name, found] of entries) {
-      const stands = standing.has(`${held}|${name}`);
-      if (!stands && !(judgeGone && known.has(`${held}|${name}`))) continue;
-      const waits = found.pollsToWait ?? 0;
-      if (waits > 0) entries.set(name, { ...found, pollsToWait: waits - 1 });
-      else if (!stands || found.pollsToWait === 0) tries.push({ found, gone: !stands });
-    }
+    const reached = [...entries].filter(
+      ([name]) => standing.has(`${held}|${name}`) || (judgeGone && known.has(`${held}|${name}`)),
+    );
+    const tries = reached.flatMap(
+      ([name, found]) => turnOf(entries, name, found, standing.has(`${held}|${name}`)) ?? [],
+    );
     if (tries.length > 0) due.set(held, tries);
   }
   return due;

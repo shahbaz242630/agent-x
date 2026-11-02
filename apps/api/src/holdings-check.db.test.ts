@@ -472,16 +472,14 @@ describe('the holdings check (E1)', () => {
   it('a real mismatch stops the clearing of a hold recorded from a row, until the claim is put back (D5)', async () => {
     const { w, acting } = await ready();
     const { allowed } = await requests(acting, w);
-    const setReleased = (at: 'now()' | 'null') =>
+    const setReleased = (released: boolean) =>
       pastTheApp(w, (owner) =>
         owner.query(
-          at === 'null'
-            ? 'update spend_requests.order_claims set released_at = null where request_id = $1'
-            : 'update spend_requests.order_claims set released_at = now() where request_id = $1',
-          [allowed],
+          'update spend_requests.order_claims set released_at = case when $2::boolean then now() end where request_id = $1',
+          [allowed, released],
         ),
       );
-    await setReleased('now()');
+    await setReleased(true);
     await database
       .as('app')
       .query(
@@ -546,7 +544,7 @@ describe('the holdings check (E1)', () => {
     expect(await confirm()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
 
-    await setReleased('null');
+    await setReleased(false);
     expect(await confirm()).toMatchObject({ outcome: 'cleared' });
   });
 
