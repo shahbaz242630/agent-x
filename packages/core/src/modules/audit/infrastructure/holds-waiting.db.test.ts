@@ -482,6 +482,28 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
     expect(await actions()).toEqual(ONE_SET);
   });
 
+  it('only a row naming both the type and the ID of what the hold names goes with it', async () => {
+    const [named, another] = [newId(), newId()];
+    await plant('seal', org, 'membership', named);
+    await (await aProcess()).poll();
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ foundOn: 'membership', objectId: named });
+
+    await plant('seal', org, 'membership', another);
+    await plant('seal', org, 'agent', named);
+    await plant('seal', org, 'membership', named);
+    await (await aProcess()).poll();
+
+    const rows = await attacker.query<{ subject_type: string; object_id: string }>(
+      'select subject_type, object_id from directory.holds_waiting where org_id = $1 order by subject_type',
+      [org],
+    );
+    expect(rows).toEqual([
+      { subject_type: 'agent', object_id: named },
+      { subject_type: 'membership', object_id: another },
+    ]);
+    expect(await actions()).toEqual(ONE_SET);
+  });
+
   it('a row deleted before its hold is recorded: the process that found it records it, with the alarm', async () => {
     const finder = await aProcess();
     await leftWaiting(finder);

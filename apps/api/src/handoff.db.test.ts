@@ -500,8 +500,8 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     await database
       .as('app')
       .query(
-        "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, 'agent', $1, 'seal')",
-        [w.org],
+        "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, 'agent', $2, 'seal')",
+        [w.org, w.org],
       );
 
     await handoffOf(w).run();
