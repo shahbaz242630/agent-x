@@ -665,6 +665,8 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
   });
 
   it('FX-RACE holdOrganisation and a request finding tampering at once: one HELD event, and neither waits on the other for ever', async () => {
+    // Listed, as the app's organisations are: whichever comes second names another record, so writes its row (D5).
+    await attacker.query('insert into directory.orgs (org_id) values ($1)', [org]);
     const id = await newAgent();
     await flip(id);
     let finding: Promise<unknown> | undefined;

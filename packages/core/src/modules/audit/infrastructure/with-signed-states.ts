@@ -64,6 +64,7 @@ import {
   holdsWaiting,
   type HoldWaiting,
   keepHoldWaiting,
+  keepHoldWaitingHere,
   namedAsTheAppWrites,
   type NamedRecord,
 } from './holds-waiting.ts';
@@ -101,13 +102,31 @@ interface Found {
 /** How often every process looks for holds another left waiting. */
 export const HOLDS_WAITING_EVERY_MS = 5_000;
 
-/** Holds this process found or polled but couldn't record yet, by organisation (lower case), with their findings. */
-const unrecorded = new Map<string, Found>();
+/** Holds this process found or polled but couldn't record yet, by organisation (lower case), then by record, with their findings. */
+const unrecorded = new Map<string, Map<string, Found>>();
 /**
  * How many holds this process is recording now, by organisation: a waiting
  * one is tried only while none is, so by one request at a time.
  */
 const recording = new Map<string, number>();
+
+/** What tells one record's entry from another's, as its row is named. */
+const entryName = ({ row, finding }: Found): string => `${(row ?? finding).subjectType}|${(row ?? finding).objectId}`;
+
+function keepEntry(held: string, found: Found): void {
+  const entries = unrecorded.get(held) ?? new Map<string, Found>();
+  unrecorded.set(held, entries);
+  entries.set(entryName(found), found);
+}
+
+function forgetEntry(held: string, found: Found): void {
+  const entries = unrecorded.get(held);
+  entries?.delete(entryName(found));
+  if (entries?.size === 0) unrecorded.delete(held);
+}
+
+/** The one a read answers with, and the next try takes. */
+const firstWaiting = (held: string): Found | undefined => unrecorded.get(held)?.values().next().value;
 
 /** The first finding for each organisation, with how many there were. */
 function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
@@ -124,15 +143,15 @@ function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
  * a row that can't be written leaves it in this process alone, and says so.
  */
 async function keepWaiting(db: Kysely<AuditTables>, held: string, found: Found, log: Logger): Promise<void> {
-  unrecorded.set(held, { ...found, inTable: false });
+  keepEntry(held, { ...found, inTable: false });
   // A row the app couldn't have written is never written again: it stands or it doesn't, and this entry says which.
   if (found.row !== undefined) {
-    unrecorded.set(held, found);
+    keepEntry(held, found);
     return;
   }
   try {
     await keepHoldWaiting(db, found.finding, found.finding.sign);
-    unrecorded.set(held, { ...found, inTable: true });
+    keepEntry(held, { ...found, inTable: true });
   } catch (error) {
     log.error('audit.hold_not_kept', { reason: found.finding.sign, err: error });
   }
@@ -175,14 +194,15 @@ async function setHold(
         const itsRow = found.row ?? finding;
         if (rowMustStand && !(await holdStillWaiting(tx, itsRow))) return 'already';
         const recorded = await holder.hold(tx, finding, count);
-        // Named elsewhere: clearing won't check this record, so its row stays to be the next hold.
         if (recorded !== 'named_elsewhere') await holdNoLongerWaiting(tx, itsRow);
+        // Clearing won't check this record: its row stays, or comes now if it may have none, to be the next hold.
+        else if (found.row === undefined && !rowMustStand) await keepHoldWaitingHere(tx, finding, finding.sign);
         return recorded;
       },
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
       { limited: true, unshared: true },
     );
-    unrecorded.delete(held);
+    forgetEntry(held, found);
     if (outcome === 'set') {
       log.warn('audit.integrity_hold_set', {
         reason: finding.sign,
@@ -258,7 +278,7 @@ async function goneFromTable(
  */
 export async function pollHoldsWaiting(db: Kysely<AuditTables>, services: SignedStatesServices): Promise<void> {
   // Read first: one kept while the read was on its way is new to it, not gone.
-  const known = new Map(unrecorded);
+  const known = [...unrecorded].flatMap(([held, entries]) => [...entries.values()].map((found) => ({ held, found })));
   let rows: readonly HoldWaiting[];
   try {
     rows = await holdsWaiting(db);
@@ -267,18 +287,20 @@ export async function pollHoldsWaiting(db: Kysely<AuditTables>, services: Signed
     services.logger.warn('audit.holds_waiting_unread', { err: error });
     return;
   }
-  const inTable = new Set(rows.map(({ org_id: orgId }) => orgId));
-  const fresh: [string, Found][] = [];
+  const inTable = new Set<string>();
+  const fresh: Found[] = [];
   for (const row of rows) {
     const inRow: Found = { ...foundInRow(row), inTable: true };
-    const here = unrecorded.get(row.org_id);
-    unrecorded.set(row.org_id, here === undefined ? inRow : { ...here, inTable: true });
-    // Each row of an organisation not known here: a hold named elsewhere must not keep the next row from its try.
-    if (!known.has(row.org_id) && !recording.has(row.org_id)) fresh.push([row.org_id, inRow]);
+    const name = entryName(inRow);
+    inTable.add(`${row.org_id}|${name}`);
+    const here = unrecorded.get(row.org_id)?.get(name);
+    keepEntry(row.org_id, here === undefined ? inRow : { ...here, inTable: true });
+    if (here === undefined && !recording.has(row.org_id)) fresh.push(inRow);
   }
-  for (const [held, found] of fresh) await setHold(db, held, found, services, true);
-  for (const [held, found] of known) {
-    if (!inTable.has(held) && !recording.has(held)) await goneFromTable(db, held, found, services);
+  for (const found of fresh) await setHold(db, found.finding.orgId, found, services, true);
+  for (const { held, found } of known) {
+    if (!inTable.has(`${held}|${entryName(found)}`) && !recording.has(held))
+      await goneFromTable(db, held, found, services);
   }
 }
 
@@ -297,7 +319,7 @@ export async function holdOrganisation(
   failure: string | undefined,
 ): Promise<void> {
   const held = orgId.toLowerCase();
-  const waiting = unrecorded.get(held);
+  const waiting = firstWaiting(held);
   if (failure !== undefined) {
     const finding: TamperFinding = {
       orgId: held,
@@ -333,7 +355,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     trail,
     logger,
     onTamper: (finding) => found.push(finding),
-    unrecorded: (id) => unrecorded.get(id.toLowerCase())?.finding,
+    unrecorded: (id) => firstWaiting(id.toLowerCase())?.finding,
   });
   // Whether the work's transaction began: one refused outright (nested, a bad ID) found nothing, and tries nothing.
   const opened = { began: false };
@@ -361,7 +383,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   } finally {
     const due = byOrganisation(found);
     const own = orgId.toLowerCase();
-    const waiting = unrecorded.get(own);
+    const waiting = firstWaiting(own);
     if (opened.began && waiting !== undefined && !due.has(own) && !recording.has(own)) due.set(own, waiting);
     for (const [held, one] of due) await setHold(db, held, one, services);
   }

@@ -512,6 +512,140 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
     expect(await rows()).toEqual([]);
   });
 
+  it('a finding meeting a hold on another record writes its row with that transaction, and is the next hold', async () => {
+    const other = await aProcess();
+    await other.hold('head');
+    const found = newId();
+
+    await other.work((_, states) => {
+      states.mismatch('membership', { orgId: org, id: found });
+      return Promise.resolve();
+    });
+
+    const rows = () =>
+      attacker.query<{ subject_type: string; object_id: string; reason: string }>(
+        'select subject_type, object_id, reason from directory.holds_waiting where org_id = $1',
+        [org],
+      );
+    expect(await rows()).toEqual([{ subject_type: 'membership', object_id: found, reason: 'holding' }]);
+    expect(notRecorded()).toEqual([]);
+    expect(await actions()).toEqual(ONE_SET);
+    // Found again: the row there stands.
+    await other.work((_, states) => {
+      states.mismatch('membership', { orgId: org, id: found });
+      return Promise.resolve();
+    });
+    expect(await rows()).toHaveLength(1);
+    expect(notRecorded()).toEqual([]);
+
+    await clearTheHold(other);
+    await (await aProcess()).poll();
+
+    expect(await actions()).toEqual([...ONE_SET, 'integrity_hold.cleared', 'integrity_hold.set']);
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ foundOn: 'membership', objectId: found });
+    expect(await rows()).toEqual([]);
+  });
+
+  it("such a row that can't be written fails its transaction: the finding waits here, and is written by the next try", async () => {
+    const other = await aProcess();
+    await other.hold('head');
+    const found = newId();
+
+    await withTableRefusing('insert', () =>
+      other.work((_, states) => {
+        states.mismatch('membership', { orgId: org, id: found });
+        return Promise.resolve();
+      }),
+    );
+    expect(notRecorded()).toHaveLength(1);
+    expect(lines('audit.hold_not_kept')).toHaveLength(1);
+    expect(await waitingRows()).toEqual([]);
+
+    await other.hold(undefined);
+
+    expect(await waitingRows()).toEqual([{ reason: 'holding' }]);
+    expect(await actions()).toEqual(ONE_SET);
+  });
+
+  it('a finding this process alone holds, meeting a hold on another record, is not lost: its row is written', async () => {
+    const finder = await aProcess();
+    await withTableRefusing('insert', () => leftWaiting(finder));
+    expect(await waitingRows()).toEqual([]);
+    // The hold another process sets names a record of its own.
+    const another = newId();
+    await plant('seal', org, 'membership', another);
+    await (await aProcess()).poll();
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ objectId: another });
+
+    await finder.hold(undefined);
+
+    expect(await waitingRows()).toEqual([{ reason: 'chain' }]);
+    expect(await actions()).toEqual(ONE_SET);
+  });
+
+  it('a hold recorded for one record leaves what waits here for another', async () => {
+    const finder = await aProcess();
+    await leftWaiting(finder);
+
+    const found = newId();
+    await withHeadLocked(() =>
+      finder.work((_, states) => {
+        states.mismatch('membership', { orgId: org, id: found });
+        return Promise.resolve();
+      }),
+    );
+    await finder.hold('head');
+
+    // The first was recorded; the second still waits, here and in its row.
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ foundOn: 'audit_chain' });
+    expect(await waitingRows()).toEqual([{ reason: 'holding' }]);
+    await finder.poll();
+    expect(await waitingRows()).toEqual([{ reason: 'holding' }]);
+    await clearTheHold(finder);
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ foundOn: 'membership', objectId: found });
+  });
+
+  it("a row gone by the time it is tried takes away that record's entry alone", async () => {
+    const finder = await aProcess(1);
+    await leftWaiting(finder);
+    const gone = newId();
+    await plant('seal', org, 'membership', gone);
+    const locker = await database.connect('admin');
+    await locker.query('begin');
+    await locker.query('lock table directory.holds_waiting in access exclusive mode');
+    const polling = finder.poll();
+    await waitUntilQueued(attacker, 1);
+    const gate = finder.platform.withTenant(finder.pool, org, () =>
+      attacker.query('delete from directory.holds_waiting where object_id = $1', [gone]),
+    );
+    await locker.query('rollback');
+    await locker.end();
+    await gate;
+    await polling;
+
+    expect(await actions()).toEqual(['integrity_hold.created']);
+    expect(await finder.read('none')).toEqual({ outcome: 'tampered', sign: 'chain' });
+  });
+
+  it("a process holding a record that another recorded lets it go, though another record's row stands", async () => {
+    const stale = await aProcess();
+    await leftWaiting(stale);
+    const other = await aProcess();
+    await other.hold('head');
+    expect(await waitingRows()).toEqual([]);
+    const next = newId();
+    await plant('seal', org, 'membership', next);
+
+    await stale.poll();
+    await clearTheHold(other);
+    // Its next request has nothing of the first to set again: Tx A reads the row standing, and that is what is recorded.
+    expect(await stale.read('head')).toEqual({ outcome: 'tampered', sign: 'seal' });
+    await stale.poll();
+
+    const sets = (await holdEvents()).filter(({ action }) => action === 'integrity_hold.set');
+    expect(sets.map(({ details }) => details.objectId)).toEqual([org, next]);
+  });
+
   it('frozen between the read and its try: a row gone by then is not held over, with no alarm', async () => {
     await plant('seal');
     const frozen = await aProcess(1);

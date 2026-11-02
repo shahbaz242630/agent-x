@@ -34,19 +34,29 @@ const named = (tx: Transaction<AuditTables>, { orgId, subjectType, objectId }: N
     .where('subject_type', '=', subjectType)
     .where('object_id', '=', objectId);
 
-/** Keeps a hold that couldn't be recorded. One there for this record stands. Its own transaction, so a hung statement ends. */
-export async function keepHoldWaiting(
-  db: Kysely<AuditTables>,
-  { orgId, subjectType, objectId }: NamedRecord,
+/** One there for this record stands. */
+const inserted = (tx: Transaction<AuditTables>, { orgId, subjectType, objectId }: NamedRecord, reason: string) =>
+  tx
+    .insertInto('directory.holds_waiting')
+    .values({ org_id: orgId, subject_type: subjectType, object_id: objectId, reason })
+    .onConflict((conflict) => conflict.doNothing())
+    .execute();
+
+/** Keeps a hold that couldn't be recorded. Its own transaction, so a hung statement ends. */
+export async function keepHoldWaiting(db: Kysely<AuditTables>, record: NamedRecord, reason: string): Promise<void> {
+  await limitedTransaction(db, (tx) => inserted(tx, record, reason));
+}
+
+/**
+ * Keeps a hold on one record, in the transaction that found the hold names another, so the two can't part. Holding the
+ * head's lock: the key's share lock on the directory's row waits on nothing, as the app never changes or deletes one.
+ */
+export async function keepHoldWaitingHere(
+  tx: Transaction<AuditTables>,
+  record: NamedRecord,
   reason: string,
 ): Promise<void> {
-  await limitedTransaction(db, (tx) =>
-    tx
-      .insertInto('directory.holds_waiting')
-      .values({ org_id: orgId, subject_type: subjectType, object_id: objectId, reason })
-      .onConflict((conflict) => conflict.doNothing())
-      .execute(),
-  );
+  await inserted(tx, record, reason);
 }
 
 /** Whether the record's row is there now. */
