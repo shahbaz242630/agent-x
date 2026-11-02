@@ -96,6 +96,7 @@ describe('config: a correct config loads', () => {
       role: 'all',
       release: RELEASE,
       log: { level: 'info', eventCapPerMinute: 600 },
+      logSuccessSampleOneIn: 1,
       http: {
         host: '127.0.0.1',
         port: 8080,
@@ -133,6 +134,7 @@ describe('config: a correct config loads', () => {
       AGENTX_RELEASE: RELEASE,
       AGENTX_LOG_LEVEL: 'warn',
       AGENTX_LOG_EVENT_CAP_PER_MINUTE: '1200',
+      AGENTX_LOG_SUCCESS_SAMPLE_ONE_IN: '20',
       AGENTX_HTTP_HOST: '0.0.0.0',
       AGENTX_HTTP_PORT: '3000',
       AGENTX_PUBLIC_ORIGIN: 'https://staging.agentx.example',
@@ -166,6 +168,7 @@ describe('config: a correct config loads', () => {
       role: 'all',
       release: RELEASE,
       log: { level: 'warn', eventCapPerMinute: 1200 },
+      logSuccessSampleOneIn: 20,
       http: {
         host: '0.0.0.0',
         port: 3000,
@@ -258,6 +261,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_RELEASE',
     'AGENTX_LOG_LEVEL',
     'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
+    'AGENTX_LOG_SUCCESS_SAMPLE_ONE_IN',
     'AGENTX_HTTP_HOST',
     'AGENTX_HTTP_PORT',
     'AGENTX_PUBLIC_ORIGIN',
@@ -642,6 +646,10 @@ describe('SEC-AV-03 logging settings', () => {
 
   it.each(['1000001', '1e6', 'lots'])('refuses the event cap %j', (cap) => {
     expect(problemsWith({ ...MINIMAL, AGENTX_LOG_EVENT_CAP_PER_MINUTE: cap })).toHaveLength(1);
+  });
+
+  it.each(['0', '10001', '1.5', 'half'])('Stage F refuses a sample of 1 in %j', (oneIn) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_LOG_SUCCESS_SAMPLE_ONE_IN: oneIn })).toHaveLength(1);
   });
 });
 

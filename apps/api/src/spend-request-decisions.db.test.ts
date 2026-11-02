@@ -66,13 +66,14 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { createAgentTurns, TURNS_AN_AGENT, TurnWaitExceeded } from './agent-turns.ts';
 import { responseFor } from './errors.ts';
 import { createDecisionEntry, type DecisionEntry, TURNS_A_SUPPLIER } from './decision-entry.ts';
 import { createOrganizationChanges, FREEZE_OPERATION } from './organization-changes.ts';
 import { createDecisionGate, type DecisionGate, NO_GATE_LIMITS } from './decision-gate.ts';
+import type { LogSample } from './log-sample.ts';
 import { createMandateMoves } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
@@ -1631,7 +1632,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
   });
 
   /** The decisions, through `entry`, as a use case of their own. */
-  const decisionsThrough = (entry: DecisionEntry) => {
+  const decisionsThrough = (entry: DecisionEntry, logSample?: LogSample) => {
     decisions = createSpendRequestDecisions({
       database: app,
       outbox: createOutbox({ ids, clock }),
@@ -1640,6 +1641,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       clock,
       logger: testLogger(capture),
       entry,
+      ...(logSample === undefined ? {} : { logSample }),
     });
   };
 
@@ -1735,6 +1737,26 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       () => [acting, theirKey, acting].map((who) => ask(who, asking(w, { amount: AED(100_000n) }))),
     );
     expect(answers.map((answer) => decidedOf(answer).decision).sort()).toEqual(['ALLOW', 'DENY', 'DENY']);
+  });
+
+  it('Stage F writes every decision with its reasons and its time, a fast one out of the sample without its timers', async () => {
+    const { w, acting } = await ready();
+    // No decision here is under 150 ms for certain, so a clock that says so: one tick a read.
+    let reading = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => (reading += 1));
+    try {
+      decisionsThrough(createDecisionEntry(), { oneIn: 20, keeps: () => false });
+      decidedOf(await ask(acting, asking(w)));
+    } finally {
+      clock.mockRestore();
+    }
+    const [line] = capture.lines().filter(({ event }) => event === 'spend_request.decided');
+    expect(line).toMatchObject({ agentId: acting.agentId, decision: expect.any(String) as string });
+    expect(line?.durationMs).toEqual(expect.any(Number));
+    expect(line).toHaveProperty('reasons');
+    for (const timer of ['turnWaitMs', 'gateWaitMs', 'trips', 'poolWaitMs', 'headLockMs', 'sampleOf']) {
+      expect(line).not.toHaveProperty(timer);
+    }
   });
 
   it('logs how long a decided request waited in each line, and still no supplier, order or amount on its line', async () => {

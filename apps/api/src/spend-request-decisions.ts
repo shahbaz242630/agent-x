@@ -116,6 +116,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { TurnWaitExceeded } from './agent-turns.ts';
 import { createDecisionEntry, type DecisionEntry, type EntryWaits, SupplierTurnExceeded } from './decision-entry.ts';
 import { DecisionGateRefused } from './decision-gate.ts';
+import { EVERY_LINE, type LogSample, timersKept } from './log-sample.ts';
 import {
   choicesHistory,
   consentOf,
@@ -578,6 +579,7 @@ export function createSpendRequestDecisions({
   clock,
   logger,
   entry = createDecisionEntry(),
+  logSample = EVERY_LINE,
 }: {
   readonly database: Database<DecisionTables>;
   /** Where a request waiting for approval is told, in its decision's own transaction (Phase 3 B2). */
@@ -588,6 +590,8 @@ export function createSpendRequestDecisions({
   readonly logger: Logger;
   /** Which decisions may hold a connection now, in this process (decision-entry.ts); the race suites' own, unqueued. */
   readonly entry?: DecisionEntry;
+  /** Which decisions' lines say where their time went (log-sample.ts); the line itself is always written. All when not given. */
+  readonly logSample?: LogSample;
 }): SpendRequestDecisions {
   // The mandates' refusal: the decision reads mandates, versions and policies through their reads.
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
@@ -773,15 +777,18 @@ export function createSpendRequestDecisions({
       // failed read after it can't lose it (E2a review): the denial-surge alert counts these lines per agent
       // (E2). The audit chain is the record; this is the signal.
       if (done.outcome === 'done' && made !== undefined) {
+        const durationMs = Math.round(performance.now() - started);
         log.info('spend_request.decided', {
           agentId: agent.agentId,
           decision: made.decision,
           reasons: made.reasons.join(' '),
-          durationMs: Math.round(performance.now() - started),
-          turnWaitMs: Math.round(waits?.turnWaitMs ?? 0),
-          supplierTurnWaitMs: Math.round(waits?.supplierTurnWaitMs ?? 0),
-          gateWaitMs: Math.round(waits?.gateWaitMs ?? 0),
-          ...statementTimesForLog(times),
+          durationMs,
+          ...timersKept(logSample, correlationId, durationMs, () => ({
+            turnWaitMs: Math.round(waits?.turnWaitMs ?? 0),
+            supplierTurnWaitMs: Math.round(waits?.supplierTurnWaitMs ?? 0),
+            gateWaitMs: Math.round(waits?.gateWaitMs ?? 0),
+            ...statementTimesForLog(times),
+          })),
         });
       }
       // A fresh decision answers as its own transaction sealed it (4D2d P4 and P8, partner decision 2);

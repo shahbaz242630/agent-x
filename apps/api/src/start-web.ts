@@ -63,6 +63,7 @@ import { loadPlaces } from './client-clues.ts';
 import { loadConsoleFiles } from './console-files.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
 import { createMyOrganizations } from './my-organizations.ts';
+import { createLogSample } from './log-sample.ts';
 import { buildServer } from './server.ts';
 import { createOrganizationChanges } from './organization-changes.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
@@ -126,10 +127,13 @@ export async function startWeb(
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
   // An agent's key, checked before its request goes on (C2-1).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
+  // One a process, so a request's line and its decision's timers are in or out together.
+  const logSample = createLogSample(config.logSuccessSampleOneIn);
   // A failure to build the server is a bug, so it goes to the crash handler (boot.ts).
   const server = await buildServer({
     config,
     logger,
+    logSample,
     ids: uuidV7Ids,
     healthChecks,
     signIn:
@@ -288,6 +292,7 @@ export async function startWeb(
       ids: uuidV7Ids,
       clock: systemClock,
       logger,
+      logSample,
       entry: createDecisionEntry({
         gate: createDecisionGate(gateLimitsOf(config.db.poolMax, config.decisionGate)),
       }),

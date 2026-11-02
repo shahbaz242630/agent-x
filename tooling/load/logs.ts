@@ -88,6 +88,8 @@ interface Line {
   readonly decisionRowsMs?: number;
   readonly supplierLockMs?: number;
   readonly headLockMs?: number;
+  /** Kept by the log's sample (apps/api/src/log-sample.ts): stands for this many. */
+  readonly sampleOf?: number;
 }
 
 /** The nearest-rank percentile of values sorted ascending: 0 when there are none. */
@@ -177,17 +179,37 @@ const BUSY_REFUSALS: ReadonlySet<string | undefined> = new Set([
   'db.organisation_busy',
 ]);
 
-const partsOf = (lines: readonly Line[], busyRefusals: number): DecisionParts => ({
-  connectionWaitP95: percentilesOf(lines.map(({ poolWaitMs = 0 }) => poolWaitMs)).p95,
-  turnWaitP95: percentilesOf(lines.map(({ turnWaitMs = 0 }) => turnWaitMs)).p95,
-  supplierTurnWaitP95: percentilesOf(lines.map(({ supplierTurnWaitMs = 0 }) => supplierTurnWaitMs)).p95,
-  gateWaitP95: percentilesOf(lines.map(({ gateWaitMs = 0 }) => gateWaitMs)).p95,
-  tripsP50: percentilesOf(lines.map(({ trips = 0 }) => trips)).p50,
-  decisionRowsP95: percentilesOf(lines.map(({ decisionRowsMs = 0 }) => decisionRowsMs)).p95,
-  supplierLockP95: percentilesOf(lines.map(({ supplierLockMs = 0 }) => supplierLockMs)).p95,
-  headLockP95: percentilesOf(lines.map(({ headLockMs = 0 }) => headLockMs)).p95,
-  busyRefusals,
-});
+const TIMERS = [
+  'poolWaitMs',
+  'turnWaitMs',
+  'supplierTurnWaitMs',
+  'gateWaitMs',
+  'trips',
+  'decisionRowsMs',
+  'supplierLockMs',
+  'headLockMs',
+] as const;
+
+/** The decisions whose lines say where their time went, each as many times as it stands for. */
+const withTimers = (lines: readonly Line[]): Line[] =>
+  lines.flatMap((line) =>
+    TIMERS.some((name) => line[name] !== undefined) ? Array.from({ length: line.sampleOf ?? 1 }, () => line) : [],
+  );
+
+const partsOf = (decided: readonly Line[], busyRefusals: number): DecisionParts => {
+  const lines = withTimers(decided);
+  return {
+    connectionWaitP95: percentilesOf(lines.map(({ poolWaitMs = 0 }) => poolWaitMs)).p95,
+    turnWaitP95: percentilesOf(lines.map(({ turnWaitMs = 0 }) => turnWaitMs)).p95,
+    supplierTurnWaitP95: percentilesOf(lines.map(({ supplierTurnWaitMs = 0 }) => supplierTurnWaitMs)).p95,
+    gateWaitP95: percentilesOf(lines.map(({ gateWaitMs = 0 }) => gateWaitMs)).p95,
+    tripsP50: percentilesOf(lines.map(({ trips = 0 }) => trips)).p50,
+    decisionRowsP95: percentilesOf(lines.map(({ decisionRowsMs = 0 }) => decisionRowsMs)).p95,
+    supplierLockP95: percentilesOf(lines.map(({ supplierLockMs = 0 }) => supplierLockMs)).p95,
+    headLockP95: percentilesOf(lines.map(({ headLockMs = 0 }) => headLockMs)).p95,
+    busyRefusals,
+  };
+};
 
 /** Below this share allowed, the steady traffic isn't the mix it means to be (S164: the split check made it 0.4%). */
 const LEAST_ALLOWED_SHARE = 0.3;

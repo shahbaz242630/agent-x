@@ -12,7 +12,8 @@ import { CORRELATION_HEADER } from './correlation.ts';
 import { BUSY_RETRY_SECONDS, errorBody } from './errors.ts';
 import { FRAMEWORK_EVENT } from './framework-logger.ts';
 import { CHECK_FAILED, type HealthCheck } from './health.ts';
-import { REQUEST_COMPLETED, REQUEST_FAILED, REQUEST_RATE_LIMITED } from './request-log.ts';
+import type { LogSample } from './log-sample.ts';
+import { REQUEST_COMPLETED, REQUEST_FAILED, REQUEST_MINUTE, REQUEST_RATE_LIMITED } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
 import { buildServer } from './server.ts';
@@ -57,6 +58,9 @@ interface SetupOptions {
   readonly healthChecks?: readonly HealthCheck[];
   /** Wraps the logger the server gets, to make part of it fail. */
   readonly wrapLogger?: (logger: Logger) => Logger;
+  readonly logSample?: LogSample;
+  /** What `/test/says` writes through the logger, as a route's work does. */
+  readonly says?: readonly `${string}.${string}`[];
 }
 
 /** A server with a few routes that exist only in these tests, to reach the paths real routes will take. */
@@ -77,6 +81,7 @@ async function setup(options: SetupOptions = {}) {
     ids: new SequentialIds(),
     healthChecks: options.healthChecks ?? [],
     securityEvents: { note: (event) => noted.push(event) },
+    logSample: options.logSample,
   });
   const reached: string[] = [];
   app.post('/test/write', OPEN, () => {
@@ -86,6 +91,10 @@ async function setup(options: SetupOptions = {}) {
   app.post('/test/body', { ...OPEN, schema: { response: { 200: z.object({ received: z.string() }) } } }, (request) => {
     reached.push('body');
     return { received: typeof request.body };
+  });
+  app.get('/test/says', OPEN, () => {
+    for (const event of options.says ?? []) logger.info(event);
+    return { ok: true };
   });
   app.get('/test/fail', OPEN, () => {
     throw new Error(`database said: password rejected for ${SAMPLES.email}`);
@@ -615,6 +624,25 @@ describe('ADR-011 §7 one line per request: route pattern, status and duration o
       ].sort(),
     );
     expect(line?.durationMs).toEqual(expect.any(Number));
+  });
+
+  it('Stage F: a security or money line is never sampled, nor a failure; the minute counts them all', async () => {
+    const said = ['handoff.sent', 'payment.moved', 'audit.written', 'security.noted', 'access_log.sealed'] as const;
+    const { app, lines } = await setup({ logSample: { oneIn: 20, keeps: () => false }, says: said });
+    await app.inject('/test/says');
+    await app.inject('/nothing-here');
+    await app.inject('/test/fail');
+    const events = lines().map((line) => line.event);
+    expect(events).toEqual(expect.arrayContaining([...said]));
+    // The money route's own 200 is the one line that may go; the refusal and the failure stay, not marked sampled.
+    const requests = events.filter((event) => event === REQUEST_COMPLETED);
+    expect(requests).toHaveLength(2);
+    expect(lines().filter((line) => line.event === REQUEST_COMPLETED && 'sampleOf' in line)).toEqual([]);
+
+    await app.close();
+    expect(lines().filter((line) => line.event === REQUEST_MINUTE)).toEqual([
+      expect.objectContaining({ requests: 3, s2xx: 1, s4xx: 1, s5xx: 1, aborted: 0, rateLimited: 0 }),
+    ]);
   });
 
   it("writes no other line for an ordinary request (Fastify's own request lines are replaced)", async () => {

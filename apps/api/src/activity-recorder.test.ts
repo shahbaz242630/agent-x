@@ -204,6 +204,18 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
     );
   });
 
+  it('Stage F decision 2 keeps a sampled read’s key on its row, its request line gone', async () => {
+    const { app, rows, capture } = await recording({ logSample: { oneIn: 20, keeps: () => false } });
+    const read = await app.inject({ method: 'GET', url: '/v1/agent', headers: { authorization: `Bearer ${KEY}` } });
+    expect(read.statusCode).toBe(200);
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({ actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId }, status: 200 }),
+      ]);
+    });
+    expect(capture.lines().filter(({ event }) => event === 'http.request_completed')).toEqual([]);
+  });
+
   it('writes an agent’s spend request refused while its organisation is frozen: the refusal kept, nothing made (SEC-AV-08)', async () => {
     const writing = `axk_${'d'.repeat(32)}_${'e'.repeat(43)}`;
     let asked = 0;
