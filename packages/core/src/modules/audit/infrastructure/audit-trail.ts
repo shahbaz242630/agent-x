@@ -897,6 +897,12 @@ interface Along {
 }
 
 /** Checking's reads of the audit tables, for one organisation. */
+/**
+ * How long a check's statement may go unanswered on its connection. Three times the database's own limit: no answer by
+ * then is a connection dead without a word, and the anchor check's lanes must get it back.
+ */
+const VERIFY_ANSWER_WITHIN_MS = 30_000;
+
 function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdgeReader {
   return {
     async edges(anchored) {
@@ -1270,7 +1276,10 @@ export function createAuditTrail({
     },
 
     verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
-      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), { limited: true });
+      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), {
+        limited: true,
+        answeredWithinMs: VERIFY_ANSWER_WITHIN_MS,
+      });
     },
 
     async checkFromAnchor(

@@ -1004,6 +1004,36 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'file', kind: 'deltas' })]);
     });
 
+    it('a file of more chains than the default opens where the setting says it may, so it can not read as unreadable', async () => {
+      const fake = createFakeWriteOnceStore();
+      fake.files.set(nameOf('deltas', 0), gzipSync(Buffer.alloc(65 * 1024 * 1024, 10)));
+      const capture = new LogCapture();
+      const log = createAnchorLog({
+        store: fake.store,
+        keys,
+        logger: testLogger(capture),
+        now: () => LATER,
+        epoch: 1,
+        alertAfterMs: 1000,
+        mostChains: 200_000,
+      });
+      await log.read();
+      expect(capture.lines().filter((line) => line.reason === 'file')).toEqual([]);
+      expect(capture.lines().filter((line) => line.reason === 'unclosed')).toHaveLength(1);
+      // As the one below: 65 MB to shrink.
+    }, 30_000);
+
+    it('the same place signed later replaces the older in memory, an older one not, and neither is a fork', async () => {
+      const fake = createFakeWriteOnceStore();
+      const newer = new Date(START.getTime() + 60_000);
+      fake.files.set(nameOf('deltas', 2), fileOf(nameOf('deltas', 2), anchorAt(CHAIN, 3n, newer)));
+      fake.files.set(nameOf('deltas', 1), fileOf(nameOf('deltas', 1), anchorAt(CHAIN, 3n, START)));
+      const { log, lines } = logOver(fake);
+      await log.read();
+      expect(log.latest(CHAIN)?.at).toEqual(newer);
+      expect(lines('audit.integrity_failed')).toEqual([]);
+    });
+
     it('a file that opens to more than a store could hold is one that will not open', async () => {
       const fake = createFakeWriteOnceStore();
       fake.files.set(nameOf('deltas', 0), gzipSync(Buffer.alloc(65 * 1024 * 1024)));

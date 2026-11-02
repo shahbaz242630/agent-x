@@ -80,6 +80,9 @@ const MOST_AHEAD_MS = 5 * 60_000;
 /** The most a file may open to: every line of 100,000 chains (MOST_ORGANIZATIONS) is about 30 MB. */
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
 
+/** A line's most, for files of more chains than that: a store file too big to open would read as a store unreadable. */
+const MOST_LINE_BYTES = 672;
+
 const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const SEQ = /^(?:0|[1-9]\d{0,18})$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -238,6 +241,7 @@ export function createAnchorLog({
   now,
   epoch,
   alertAfterMs,
+  mostChains = 0,
 }: {
   readonly store: WriteOnceStore;
   readonly keys: KeyProvider;
@@ -247,7 +251,10 @@ export function createAnchorLog({
   readonly epoch: number;
   /** How long reads once the store is read, or writes, may fail before that is the alert, not just a warning. */
   readonly alertAfterMs: number;
+  /** AGENTX_AUDIT_MOST_ORGANISATIONS: how many chains a file may hold, past what every process can open anyway. */
+  readonly mostChains?: number;
 }): AnchorLog {
+  const mostFileBytes = Math.max(MOST_FILE_BYTES, mostChains * MOST_LINE_BYTES);
   const folder = (kind: Kind): string => `e${String(epoch)}/${kind}/`;
   const anchors = new Map<string, Anchor>();
   // What has moved since it was last written: one line a chain at most, however long the store stays away.
@@ -308,7 +315,7 @@ export function createAnchorLog({
     const fileAt = whenNamed(countdownOf(kind, name));
     let text: string;
     try {
-      text = (await gunzip(bytes, { maxOutputLength: MOST_FILE_BYTES })).toString('utf8');
+      text = (await gunzip(bytes, { maxOutputLength: mostFileBytes })).toString('utf8');
     } catch (error) {
       alarm('file', { kind, fileAt, err: error });
       return { anchors: [], sound: false };
@@ -372,7 +379,11 @@ export function createAnchorLog({
       anchors.set(line.chain, line);
       return;
     }
-    if (line.seq === held.seq && !line.hash.equals(held.hash)) {
+    if (line.seq !== held.seq) return;
+    if (line.hash.equals(held.hash)) {
+      // The same place signed again later: an idle chain checked since (anchor-check.ts).
+      if (line.at > held.at) anchors.set(line.chain, line);
+    } else {
       alarm('fork', { seq: line.seq }, line.chain);
       if (line.at < held.at) anchors.set(line.chain, line);
     }

@@ -98,6 +98,8 @@ interface Opening {
   readonly limited: boolean;
   /** Outside the organisation's share of the connections, though an agent's request: its integrity hold and its activity row must not queue. */
   readonly unshared: boolean;
+  /** The app's own limit on each statement's answer, for a connection dead without a word: closed, not given back. */
+  readonly answeredWithinMs: number | undefined;
   taken: boolean;
 }
 
@@ -119,7 +121,11 @@ export async function withTenant<Schema, Result>(
   db: Kysely<Schema>,
   orgId: string,
   work: (tx: Transaction<Schema>) => Promise<Result>,
-  { limited = false, unshared = false }: { readonly limited?: boolean; readonly unshared?: boolean } = {},
+  {
+    limited = false,
+    unshared = false,
+    answeredWithinMs,
+  }: { readonly limited?: boolean; readonly unshared?: boolean; readonly answeredWithinMs?: number } = {},
 ): Promise<Result> {
   // Checked before the transaction opens; the ID itself is never echoed.
   if (!UUID.test(orgId)) throw new TenantContextError('the organisation ID is not a UUID');
@@ -128,7 +134,7 @@ export async function withTenant<Schema, Result>(
   }
   const scope = { open: true };
   const tenant = orgId.toLowerCase();
-  const asked: Opening = { tenant, limited, unshared, taken: false };
+  const asked: Opening = { tenant, limited, unshared, answeredWithinMs, taken: false };
   try {
     return await insideTenant.run(scope, () =>
       openedWith(db, asked, async (tx) => {
@@ -158,7 +164,13 @@ export function limitedTransaction<Schema, Result>(
   db: Kysely<Schema>,
   work: (tx: Transaction<Schema>) => Promise<Result>,
 ): Promise<Result> {
-  const asked: Opening = { tenant: undefined, limited: true, unshared: true, taken: false };
+  const asked: Opening = {
+    tenant: undefined,
+    limited: true,
+    unshared: true,
+    answeredWithinMs: undefined,
+    taken: false,
+  };
   return openedWith(db, asked, async (tx) => {
     // Another driver: the limit in a round trip of its own.
     if (!asked.taken) await limitStatements(tx);
@@ -519,6 +531,8 @@ class CheckedConnection implements DatabaseConnection {
   #tenant: string | undefined;
   /** Gives back the organisation's share of the connections this one came from, if it did. */
   readonly #leaveShare: () => void;
+  /** The opening's limit on an answer, in its transaction. */
+  #answeredWithinMs: number | undefined;
 
   constructor(pool: pg.Pool, logger: Logger, attempts: number, client: pg.PoolClient, leaveShare: () => void) {
     this.#pool = pool;
@@ -581,6 +595,7 @@ class CheckedConnection implements DatabaseConnection {
 
   /** The start, with the connection's check and the opening's settings, in one round trip. */
   async begin(settings: TransactionSettings, asked: Opening | undefined): Promise<void> {
+    this.#answeredWithinMs = asked?.answeredWithinMs;
     const set = await this.#sound(async (client) => {
       const answers = await startSent(client, settings, asked);
       // A connection closed for its state ends the transaction just begun on it.
@@ -619,6 +634,8 @@ class CheckedConnection implements DatabaseConnection {
 
   async rollback(): Promise<void> {
     this.#tenant = undefined;
+    // Gone unanswered: it would wait as long again behind that statement. Closing it rolls back.
+    if (this.#broken) return;
     await timedTrip(() => this.#taken().query('rollback'));
   }
 
@@ -633,6 +650,18 @@ class CheckedConnection implements DatabaseConnection {
   }
 
   #written(query: CompiledQuery): Promise<pg.QueryResult> {
+    const within = this.#answeredWithinMs;
+    if (within !== undefined) {
+      // The types leave out pg's own `query_timeout`, on a statement or a connection alike.
+      const limited = { text: query.sql, values: [...query.parameters], query_timeout: within } as pg.QueryConfig;
+      return this.#taken()
+        .query(limited)
+        .catch((error: unknown) => {
+          // pg gives up on the answer and leaves the statement running: this connection can't be used again.
+          this.#broken = true;
+          throw error;
+        });
+    }
     // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
     return this.#taken().query(query.sql, [...query.parameters]);
   }
