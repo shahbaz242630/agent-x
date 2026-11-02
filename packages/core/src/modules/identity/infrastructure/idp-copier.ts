@@ -5,6 +5,11 @@
 // factor removed, a password reset, a login locked, someone given rights in
 // the login service itself) is on the record and told.
 //
+// One copy at a time, by the jobs' lease (4D2e D). Unlike the other jobs, which
+// judge again under their row locks, this one is not safe with a stale holder: a
+// process frozen while leading and running on as it wakes could copy twice, until
+// its lease's timer ends the run. Its records say so if it does; nothing is lost.
+//
 // For each event, once for each organisation the person belongs to, in one
 // transaction, withTenant's for that organisation:
 // - the organisation's own chain records `person.sign_in_changed` about the

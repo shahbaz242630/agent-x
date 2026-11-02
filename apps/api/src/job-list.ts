@@ -2,6 +2,7 @@
 // never holds up another: the `jobs` side's, and what every process runs for
 // itself (the counts it holds in memory, and how a trip feels from there).
 //
+// The `jobs` side's run only while this process holds the lease (background.ts).
 // Nothing here starts until start-jobs.ts starts it: the anchor check's order
 // (it must start before the hand-off's first run) is this list's.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
@@ -26,7 +27,7 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
-import { scheduleRuns } from './background.ts';
+import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
@@ -97,7 +98,7 @@ const HALF_HOUR_MS = 30 * 60_000;
 const LONG_MS = 2 * HOUR_MS;
 
 /** Makes the list's entries, each one's runs recorded by the watch. */
-function jobsWatchedBy(watch: JobWatch) {
+function jobsWatchedBy(watch: JobWatch, gate: (work: WatchedWork) => WatchedWork = (work) => work) {
   return function job(
     name: string,
     work: Work | undefined,
@@ -113,7 +114,8 @@ function jobsWatchedBy(watch: JobWatch) {
         const handle =
           work === undefined
             ? { stop: () => Promise.resolve() }
-            : schedule(watch.watching(name, work, stalledAfterMs), everyMs);
+            : // The gate outside the watch: a run waiting for the lease isn't a run stalled.
+              schedule(gate(watch.watching(name, work, stalledAfterMs)), everyMs);
         says?.(work !== undefined);
         return handle;
       },
@@ -144,9 +146,9 @@ export function eachProcessJobs({ logger, database }: Booted, { recorder, watch 
  * come back too, for /health; the zones' sealing, whose first pass comes before
  * a process at `all` answers.
  */
-export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts) {
+export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
   const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch } = parts;
-  const job = jobsWatchedBy(watch);
+  const job = jobsWatchedBy(watch, leadership.onlyWhileLeading.bind(leadership));
   const list = () => listedOrganizations(database);
   const organisationJob = { list, database, keys, ids: uuidV7Ids, logger };
   const clocked = { ...organisationJob, clock: systemClock };

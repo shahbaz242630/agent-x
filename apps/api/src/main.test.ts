@@ -284,6 +284,10 @@ vi.mock('@agentx/core/modules/platform-controls', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/core/modules/platform-controls')>();
   return {
     ...actual,
+    // The lease's own statements are job-lease.db.test.ts's; here it is free and this process alone.
+    takeJobLease: () => Promise.resolve(true),
+    releaseJobLease: () => Promise.resolve(),
+    jobsBeating: () => Promise.resolve(true),
     createPlatformChain: (...args: Parameters<typeof actual.createPlatformChain>) => ({
       ...actual.createPlatformChain(...args),
       verifyAlone: (database: unknown, anchor: { seq: bigint; hash: Buffer }) => {

@@ -28,6 +28,21 @@ export const PLAIN_WORDS = {
     broke: 'A page before signing in, such as the sign-in page, may not have worked; the server is fine.',
     next: 'If many come, a developer should read them. Anyone can send these, so they may be forged.',
   },
+  'jobs.lease_lost': {
+    happened: 'This copy of the API stopped being the one running the background jobs.',
+    broke: 'Its jobs were stopped part way; each picks up where it was once a copy leads again.',
+    next: 'Nothing, if another copy took over or it comes back within minutes. If not, check the database.',
+  },
+  'jobs.lease_renew_failed': {
+    happened: 'The database did not answer when this copy tried to keep the right to run the background jobs.',
+    broke: 'Nothing yet. If this goes on for a minute, this copy stops its jobs until it can reach the database.',
+    next: 'It tries again in 20 seconds. If this repeats, check the database.',
+  },
+  'jobs.lease_release_failed': {
+    happened: 'A copy of the API stopping could not give up the right to run the background jobs.',
+    broke: 'The next copy waits up to a minute more before its jobs begin.',
+    next: 'Nothing: it ends by itself. If this repeats, check the database.',
+  },
   'job.stalled': {
     happened: 'A background job has been running far longer than it ever should.',
     broke: 'While it hangs, that job does none of its work, such as payments, checks or sweeps; the rest go on.',
