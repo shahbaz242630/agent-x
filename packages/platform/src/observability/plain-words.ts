@@ -210,13 +210,13 @@ export const PLAIN_WORDS = {
   },
   'audit.holds_waiting_past_limit': {
     happened: 'The list of security holds waiting is longer than honest work would leave.',
-    broke: 'At its read limit a process reads only part of it. Payments still read the list themselves.',
-    next: 'Treat it as tampering: find who can write to the database, delete the forged rows, and clear any hold they set.',
+    broke: 'At its read limit a process reads only part. Payments read the list themselves.',
+    next: 'Treat it as tampering: find who can write to the database, delete the forged rows, then clear any hold once the row-gone alarms stop.',
   },
   'audit.holds_waiting_past_memory': {
     happened: 'A process left some of the list of security holds waiting out of its memory, at its limit.',
-    broke: 'Nothing passes: they stay on the list, which payments read. Their alarms come as room frees.',
-    next: 'Treat it as tampering: find who can write to the database, delete the forged rows, and clear any hold they set.',
+    broke: 'Nothing passes: they stay on the list, which payments read.',
+    next: 'Treat it as tampering: find who can write to the database, delete the forged rows, then clear any hold once the row-gone alarms stop.',
   },
   'audit.holds_waiting_unread': {
     happened: 'A process could not read the list of security holds waiting to be recorded.',

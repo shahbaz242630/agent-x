@@ -52,9 +52,10 @@
 // (`audit.holds_waiting_past_limit`). It keeps at
 // most MOST_KEPT_FROM_ROWS from rows alone, and past that one an organisation with none,
 // so it still reads as waiting; the rest stay in the table and come in as those here go
-// (`audit.holds_waiting_past_memory`, once). What this process found itself is kept to
+// (`audit.holds_waiting_past_memory`, at most once a poll while it lasts). What this process found itself is kept to
 // MOST_KEPT_OWN likewise, once its row carries it, with one an organisation: a poll brings
-// it in by the rows' rules, as one known from its row. With no row to carry it, it is always
+// it in by the rows' rules, as one known from its row, said at most once for each poll in
+// which one is left out. With no row to carry it, it is always
 // kept: bounded only by what is found during database trouble. So while one hold stands, rows past that bound raise no alarm of their own
 // until a place comes free, and each still becomes a hold in turn. It tries at most
 // MOST_TRIES_A_POLL holds, one an organisation in turn, starting after the last one
@@ -73,7 +74,10 @@
 // and an operator's delete of a forged row stands. If its finder has restarted too, that gives
 // it up, with the organisation on a hold anyway; the tampering sets its hold when next found.
 // A try that fails on a locked head still writes that row back, as caution while no hold
-// can be recorded. A hold's transaction is bounded by the head's lock (5 s) and each statement's
+// can be recorded. A clear made while a process still holds entries for deleted rows brings
+// back one hold, for a deleted record: safe, and it can be cleared, so the words say to wait
+// until `row_gone` stops; that path is what saves a real finding whose row was deleted.
+// A hold's transaction is bounded by the head's lock (5 s) and each statement's
 // time (10 s).
 //
 // A work whose recording meets a chain that refuses new events has met
@@ -161,9 +165,7 @@ const unrecorded = new Map<string, Map<string, Found>>();
 const recording = new Map<string, number>();
 /** The organisation a poll last tried: the next starts after it, so no organisation is always the last reached. */
 let lastTried = '';
-/** Whether the last poll left rows out of memory, so the line says so once for each time it starts. */
-let leftRowsOut = false;
-/** Whether a finding of this process's own was left to its row, so the line says so once for each time it starts. */
+/** Whether a finding of this process's own was left to its row since the last poll: a burst of them says so once. */
 let leftOwnOut = false;
 /** Where the next poll reads from: after the last organisation a read that hit its limit reached, or the beginning. */
 let readAfter: string | undefined;
@@ -475,8 +477,7 @@ function keptFromRows(rows: readonly HoldWaiting[], services: SignedStatesServic
       rowsLeft += 1;
     }
   }
-  if (rowsLeft > 0 && !leftRowsOut) services.logger.error('audit.holds_waiting_past_memory', { rowsLeft, kept });
-  leftRowsOut = rowsLeft > 0;
+  if (rowsLeft > 0) services.logger.error('audit.holds_waiting_past_memory', { rowsLeft, kept });
   return standing;
 }
 
@@ -502,7 +503,7 @@ export async function pollHoldsWaiting(db: Kysely<AuditTables>, services: Signed
   }
   const atReadLimit = rows.length >= HOLDS_READ_AT_ONCE;
   readAfter = atReadLimit ? rows.at(-1)?.org_id : undefined;
-  if (keptNow(false) <= MOST_KEPT_OWN) leftOwnOut = false;
+  leftOwnOut = false;
   const standing = keptFromRows(rows, services);
   // A short page after a long one is still a long table.
   if (rows.length >= MANY_ROWS || startedAfter !== undefined) {

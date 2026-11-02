@@ -1219,7 +1219,7 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     expect(await actions()).toEqual(ONE_SET);
   });
 
-  it('what rows add to memory stays at the bound, said once, and every row still comes in turn', async () => {
+  it('what rows add to memory stays at the bound, said each poll it lasts, and every row still comes in turn', async () => {
     await plantInBulk(505, org);
     const other = await aProcess();
     const past = () => lines('audit.holds_waiting_past_memory');
@@ -1230,10 +1230,16 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
 
     expect(kept()).toBe(500);
     expect(past()).toEqual([expect.objectContaining({ level: 'error', rowsLeft: 5, kept: 500 })]);
-    for (let poll = 0; poll < 200 && named().size < 500; poll += 1) await other.poll();
+    let polls = 1;
+    for (let poll = 0; poll < 200 && named().size < 500; poll += 1) {
+      await other.poll();
+      polls += 1;
+    }
     expect(named().size).toBe(500);
     expect(kept()).toBeLessThanOrEqual(500);
-    expect(past()).toHaveLength(1);
+    expect(past().length).toBeGreaterThan(1);
+    expect(past().length).toBeLessThanOrEqual(polls);
+
     // No silent gap: rows left with no alarm of their own while the hold stands, and each poll says the table is long.
     const spoke = lines('audit.holds_waiting_past_limit').length;
     await other.poll();
@@ -1295,7 +1301,7 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     expect(await waitingRows()).toEqual([{ reason: 'holding' }]);
   });
 
-  it('past the bound and back under it, then past it again: said again', async () => {
+  it('rows left out are said for each poll that leaves them out, and not once none is', async () => {
     const crowded = await newOrganisation();
     await plantInBulk(600, crowded);
     const other = await aProcess();
@@ -1318,6 +1324,8 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     await other.poll();
 
     expect(lines('audit.holds_waiting_past_memory')).toHaveLength(3);
+    await other.poll();
+    expect(lines('audit.holds_waiting_past_memory')).toHaveLength(4);
   });
 
   describe('what a process found itself, at its bound', () => {
@@ -1331,7 +1339,7 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     const found = (by: Awaited<ReturnType<typeof aProcess>>, id: string, orgId = org) => by.findOn(orgId, id);
     const past = () => lines('audit.holds_waiting_past_memory');
 
-    it('the next is in the table and not here, Tx A refuses, and a poll brings it in, said once', async () => {
+    it('the next is in the table and not here, said, and a poll brings it in', async () => {
       const bound = await aProcessBoundAtOne();
       await bound.hold('head');
       const [first, second] = [newId(), newId()];
@@ -1398,19 +1406,21 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
       expect(await rowsNamedElsewhere()).toHaveLength(1);
     });
 
-    it('said again once back under the bound and past it again', async () => {
+    it('said at most once for each poll in which one is left out', async () => {
       const bound = await aProcessBoundAtOne();
       await bound.hold('head');
       await found(bound, newId());
       await found(bound, newId());
+      await found(bound, newId());
+      // Two left out since the last poll: said once.
       expect(past()).toHaveLength(1);
-      await clearTheHold(bound);
-      await bound.read('none');
-      expect(await actions()).toEqual([...ONE_SET, 'integrity_hold.cleared', 'integrity_hold.set']);
-      await bound.poll();
-      await found(bound, newId());
-      await found(bound, newId());
 
+      await bound.poll();
+      // A poll alone leaves none of them out: nothing said.
+      expect(past()).toHaveLength(1);
+
+      await found(bound, newId());
+      await found(bound, newId());
       expect(past()).toHaveLength(2);
     });
   });
