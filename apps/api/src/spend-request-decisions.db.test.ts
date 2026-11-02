@@ -985,6 +985,11 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect(line?.supplierLockTrip).toBe(6);
     expect(line?.trips).toBe(23);
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(18);
+    // The month it added, dated the instant it was asked.
+    const periods = await withTenant(app, w.org, (tx) =>
+      tx.selectFrom('limit_reservations.agent_periods').select(['month', 'created_at']).execute(),
+    );
+    expect(periods).toEqual([{ month: '2026-10', created_at: clock.now() }]);
   });
 });
 
