@@ -953,11 +953,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
       ? "The database goes to the load run's size, D2ads_v5 (about $0.22 an hour, $5.20 a day): it restarts for a few minutes, and the run's measurements (Query Store) switch on. Run foundation again without --load-size the same day to size it back and switch them off."
       : 'The database stays at (or goes back to) its normal size, B1ms; a change of size restarts it for a few minutes.',
   );
-  steps.terminal.say(
-    alwaysOn
-      ? 'The alerts on the jobs stopping go on. Staging sleeps, so they fire unless apps runs with --keep-running: run foundation again without --always-on before it stops.'
-      : 'The alerts on the jobs stopping stay off: staging sleeps.',
-  );
+  steps.terminal.say(whatFoundationDoesToDeadMen(deadMenOn(steps, subscription), alwaysOn));
   checkPolicy(steps, values);
   const outputs = sendWithWhatIf(steps, subscription, 'foundation', values);
   if (outputs === undefined) return 1;
@@ -996,6 +992,58 @@ function diskNow(steps: Steps, subscription: string): number {
   } catch {
     return LEAST_DISK_GB;
   }
+}
+
+/** One of the two rules on the jobs having stopped (main.bicep's name), which foundation sets together. */
+export const DEAD_MAN_RULE = 'alert-agentx-stg-anchor-stopped';
+
+/** Whether those rules are on now: undefined where it can't be told, as a first deploy has none. */
+function deadMenOn(steps: Steps, subscription: string): boolean | undefined {
+  try {
+    const enabled = azJson(steps.az, [
+      'resource',
+      'show',
+      '--subscription',
+      subscription,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--resource-type',
+      'Microsoft.Insights/scheduledQueryRules',
+      '--name',
+      DEAD_MAN_RULE,
+      '--query',
+      'properties.enabled',
+    ]);
+    return typeof enabled === 'boolean' ? enabled : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const STOP_THE_EMAILS = 'To stop the emails, run node deploy/azure/deploy.ts foundation.';
+
+/** Foundation sets those rules by its flag alone, so it says what that does to how they are now. */
+function whatFoundationDoesToDeadMen(now: boolean | undefined, wanted: boolean): string {
+  const where =
+    now === undefined ? 'This run' : `The alerts on the jobs stopping are ${now ? 'on' : 'off'} now, and this run`;
+  if (!wanted) {
+    return now === false
+      ? 'The alerts on the jobs stopping are off now, and stay off: staging sleeps.'
+      : `${where} ${now === true ? 'turns them off' : 'leaves the alerts on the jobs stopping off'}: staging sleeps.`;
+  }
+  const said = now === true ? 'The alerts on the jobs stopping are on now, and stay on.' : `${where} turns them on.`;
+  return `${said} Staging sleeps, so they email you every 10 minutes unless apps runs with --keep-running. When that ends, run foundation without --always-on.`;
+}
+
+/** What apps says of those rules against what it just did: a warning, never a refusal. */
+function whatAppsMeansForDeadMen(now: boolean | undefined, keepRunning: boolean): string | undefined {
+  if (now === true && !keepRunning) {
+    return `The alerts on the jobs stopping are on, and staging now sleeps, so they will email you every 10 minutes. ${STOP_THE_EMAILS}`;
+  }
+  if (now === false && keepRunning) {
+    return 'Nothing is watching for stopped jobs: those alerts are off. To turn them on while this keeps running, run node deploy/azure/deploy.ts foundation --always-on.';
+  }
+  return undefined;
 }
 
 /**
@@ -1652,6 +1700,8 @@ async function deployApps(
   if (keepRunning) {
     steps.terminal.say('Each app now keeps one replica running, billed: run apps without --keep-running to stop it.');
   }
+  const deadMen = whatAppsMeansForDeadMen(deadMenOn(steps, subscription), keepRunning);
+  if (deadMen !== undefined) steps.terminal.say(deadMen);
   return 0;
 }
 

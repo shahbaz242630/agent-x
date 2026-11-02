@@ -4,6 +4,7 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { APP_KEYS } from './app-keys.ts';
+import { DEAD_MAN_RULE } from './deploy.ts';
 import {
   at,
   bicepGuid,
@@ -1893,15 +1894,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to Q.
+    // The playbook's sections run from A to R.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
       properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
       expect(properties(alert).description).not.toBe(before);
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('Q')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('R')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('R')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('S')))).toEqual(['alert-runbook']);
     // The log cap's own section (T1c): section D is about dependencies.
     for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
       const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
@@ -2885,6 +2886,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
       expect(rulesOf(on)).not.toContain('alert-delivery');
       expect(rulesOf(off)).toContain('dead-man-alerts');
       expect(rulesOf(off)).toContain('alert-delivery');
+    });
+
+    it.each(RULES)('%#: points at the runbook for the jobs having stopped', (rule) => {
+      expect(String(at(staging.predictedResources.find(rule)?.properties, 'description'))).toMatch(
+        / Runbook: Incident-Response-Playbook\.md section R\.$/,
+      );
+    });
+
+    it('the tool reads the rule the deployment makes', () => {
+      expect(staging.predictedResources.find(ANCHOR_STOPPED_ALERT)?.name).toBe(DEAD_MAN_RULE);
     });
 
     it('the anchor rule is the SEV-1 and stateless, the pulse the SEV-2', () => {
