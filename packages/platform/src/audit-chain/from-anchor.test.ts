@@ -249,6 +249,19 @@ describe('checking from an anchor (4D2e E1)', () => {
       expect(await verifyFromAnchor(keys, CHAIN, tables, from)).toEqual(refusal('anchor', 5n));
     });
 
+    it('refuses a head behind the anchor by the head alone, whatever a failing store says of the anchored event', async () => {
+      const tables = new Tables(keys, 5);
+      const from = tables.point(5n);
+      const anchored = tables.row(5n);
+      tables.remove(5n);
+      tables.remove(4n);
+      tables.head = tables.headAt(3n);
+      // Redundant with the anchored event being gone, in a store that keeps its contract: a security check, kept.
+      tables.edgesAs = (edges) => ({ ...edges, anchored });
+
+      expect(await verifyFromAnchor(keys, CHAIN, tables, from)).toEqual(refusal('anchor', 5n));
+    });
+
     it('refuses a chain wound back and grown again past the anchor: another event stands where the anchored one was', async () => {
       const tables = new Tables(keys, 5);
       const from = tables.point(5n);
