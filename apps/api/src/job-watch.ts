@@ -56,8 +56,8 @@ export function createJobWatch({
 }: {
   readonly logger: Logger;
   readonly now: () => number;
-  /** False where this process has no job of the `jobs` side, whose line it would stand in for. */
-  readonly pulsing: boolean;
+  /** Whether this process runs the `jobs` side now: a `web` copy, or a follower, would hide those jobs having stopped. */
+  readonly pulsing: () => boolean;
 }): JobWatch {
   const jobs = new Map<string, JobState>();
   let lastPulse = now();
@@ -107,7 +107,7 @@ export function createJobWatch({
       if (at - lastPulse > ASLEEP_AFTER_MS) forgive(at);
       lastPulse = at;
       const running = sayStalled(at);
-      if (pulsing) logger.info('jobs.pulse', { jobs: jobs.size, running });
+      if (pulsing()) logger.info('jobs.pulse', { jobs: jobs.size, running });
       return Promise.resolve();
     },
   };

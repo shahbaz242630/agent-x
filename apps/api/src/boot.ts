@@ -23,7 +23,7 @@ import {
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { MandatesTables } from '@agentx/core/modules/mandates';
 import type { OrganizationsTables } from '@agentx/core/modules/organizations';
-import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { type PlatformControlsTables, releaseJobLease, takeJobLease } from '@agentx/core/modules/platform-controls';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources';
@@ -64,6 +64,7 @@ import {
 } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 
+import { createLeadership, LEASE_TERM_MS, type Leadership } from './background.ts';
 import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads.ts';
 import { railFor } from './funding-source-links.ts';
 import { directoryNamesFrom } from './kept-names.ts';
@@ -294,8 +295,21 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
   return { host, config, keys, logger, database };
 }
 
+/** The lease on the jobs, where this process has them: this process's own, by an ID of its own. */
+export function leadershipOf({ config, logger, database }: Booted): Leadership | undefined {
+  if (config.role === 'web') return undefined;
+  const holder = uuidV7Ids.next();
+  return createLeadership({
+    store: {
+      take: (beating) => takeJobLease(database, holder, beating, LEASE_TERM_MS / 1000),
+      release: () => releaseJobLease(database, holder),
+    },
+    logger,
+  });
+}
+
 /** What both sides of the API use: none opens a connection or starts a timer as it is made. */
-export function sharedParts({ config, keys, logger, database }: Booted) {
+export function sharedParts({ config, keys, logger, database }: Booted, leadership: Leadership | undefined) {
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
   const securityEvents = createSecurityEvents({
@@ -326,7 +340,7 @@ export function sharedParts({ config, keys, logger, database }: Booted) {
     watch: createJobWatch({
       logger,
       now: () => systemClock.now().getTime(),
-      pulsing: config.role !== 'web',
+      pulsing: () => leadership?.leading() ?? false,
     }),
     recorder: createSecurityRecorder({
       write: (events) => securityEvents.record(database, events),

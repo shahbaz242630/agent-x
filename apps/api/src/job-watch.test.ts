@@ -15,7 +15,8 @@ beforeEach(() => {
   capture = new LogCapture();
 });
 
-const watchOf = (pulsing = true) => createJobWatch({ logger: testLogger(capture), now: () => at, pulsing });
+const watchOf = (pulsing = true) =>
+  createJobWatch({ logger: testLogger(capture), now: () => at, pulsing: () => pulsing });
 
 /** A run that ends when told to. */
 function hanging() {

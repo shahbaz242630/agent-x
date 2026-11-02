@@ -415,6 +415,11 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         "The platform hand-off pause's one row (0057, SEC-OPS-03): one switch for every organisation's hand-offs to the bank, and the platform event that set it",
       columns: ['only_row', 'paused', 'event_seq', 'event_id'],
     },
+    'platform_controls.job_lease': {
+      reason:
+        "The lease on the API's jobs (0068, 4D2e D): one row saying which process leads, until when, and when the hand-off last beat. Of no organisation; a forged row delays jobs, which the dead-man rules see, and decides nothing",
+      columns: ['name', 'holder', 'until', 'renewed_at', 'beating_at'],
+    },
   },
   // The audit trails' schemas (ADR-004 §4): the app role may only add audit rows and read them (ADR-005 §9).
   appendOnlySchemas: ['audit', 'platform_controls', 'access'],
@@ -425,6 +430,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
     'platform_controls.handoff_pause':
       'The platform hand-off pause (0057, SEC-OPS-03): the app locks its one row first (ADR-006 §6 level 1) and moves it with the platform event that pauses or resumes, never adding or deleting a row',
+    'platform_controls.job_lease':
+      "The jobs' lease (0068): the app moves its one row as a process takes, renews and gives it up, never adding or deleting a row",
   },
   fillInTables: {
     'activity_exports.exports': {

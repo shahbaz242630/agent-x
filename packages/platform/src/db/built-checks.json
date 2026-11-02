@@ -214,6 +214,7 @@
   {"table":"platform_controls.handoff_pause","name":"event_whole","expression":"((event_seq IS NULL) = (event_id IS NULL))"},
   {"table":"platform_controls.handoff_pause","name":"handoff_pause_event_seq_check","expression":"(event_seq >= 1)"},
   {"table":"platform_controls.handoff_pause","name":"handoff_pause_only_row_check","expression":"only_row"},
+  {"table":"platform_controls.job_lease","name":"job_lease_name_check","expression":"(name = 'jobs'::text)"},
   {"table":"provider_events.inbox","name":"body_only_when_unknown","expression":"((body_ciphertext IS NULL) OR (org_id IS NULL))"},
   {"table":"provider_events.inbox","name":"body_with_its_key","expression":"((body_ciphertext IS NULL) = (body_key_version IS NULL))"},
   {"table":"provider_events.inbox","name":"inbox_attempts_check","expression":"((attempts >= 0) AND (attempts <= 1000))"},
