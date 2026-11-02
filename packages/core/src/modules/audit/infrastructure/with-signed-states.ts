@@ -36,8 +36,8 @@
 // one is cleared. A row only adds caution, and really does: a row forged sets the
 // hold. So a row raises the alarm (`from_row`) when its hold is set from it, and
 // once when a process first finds its record isn't the one held: one foothold can
-// hold every organisation. That one then waits (a minute, or until a read here finds the
-// hold clear), and Tx A reads the row itself all the while. A row gone from the table
+// hold every organisation. That one then rests (about a minute, or until a read here
+// finds the hold clear), tried by no poll or request, while Tx A reads the row itself. A row gone from the table
 // leaves each process that held that record to try once more: finding the hold
 // recorded is the usual way, and nothing is said; recording it means the row was
 // deleted with no hold, the alarm (`row_gone`).

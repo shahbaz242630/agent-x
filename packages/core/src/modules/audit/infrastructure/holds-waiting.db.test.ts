@@ -18,6 +18,7 @@ import type { Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { createAuditTrail, recordHoldEvent } from './audit-trail.ts';
+import type * as Waiting from './holds-waiting.ts';
 import type { SignedStates } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
 
@@ -856,6 +857,41 @@ describe(`holds waiting: the database in trouble (4D2e D5, Postgres ${server.ver
     expect(await waitingRows()).toEqual([{ reason: 'chain' }]);
     // Destroyed already: the sweep after the test has one less to end.
     pools.splice(pools.indexOf(finder.pool), 1);
+  });
+
+  it('a hold kept while the read was on its way is new to that read, not a row gone', async () => {
+    let readDone = (): void => undefined;
+    let release = (): void => undefined;
+    const read = new Promise<void>((resolve) => {
+      readDone = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.doMock('./holds-waiting.ts', async (actual) => {
+      const real = await actual<typeof Waiting>();
+      return {
+        ...real,
+        holdsWaiting: async (db: Parameters<typeof real.holdsWaiting>[0]) => {
+          const rows = await real.holdsWaiting(db);
+          readDone();
+          await gate;
+          return rows;
+        },
+      };
+    });
+    const slow = await aProcess();
+    vi.doUnmock('./holds-waiting.ts');
+
+    const polling = slow.poll();
+    await read;
+    await leftWaiting(slow);
+    release();
+    await polling;
+
+    expect(rowGone()).toEqual([]);
+    expect(await actions()).toEqual(['integrity_hold.created']);
+    expect(await waitingRows()).toEqual([{ reason: 'chain' }]);
   });
 
   it('a poll leaves a hold being recorded to the one recording it, rather than queue on the head beside it', async () => {
