@@ -818,9 +818,8 @@ export function createHandoff({
     return anchorGate.run(orgId, async () => {
       // A long queue of these may outlast the run: none begun past its budget or a stop.
       if (runSpent()) return;
-      // A long chain takes minutes: beaten for each, so /health doesn't read a run of them as stopped.
-      beatNow();
       await anchoring.anchorFirst(orgId, stopping);
+      // A long chain takes minutes: beaten for each, so /health doesn't read a run of them as stopped.
       beatNow();
     });
   };

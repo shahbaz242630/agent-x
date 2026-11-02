@@ -869,6 +869,54 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
     ]);
   });
 
+  it('half-open, a request that never reached the bank gives its place back', async () => {
+    const { w, acting } = await ready();
+    // Three older, to the supplier with no payee yet: each reaches Tx A, and waits. Then one that goes.
+    for (let at = 0; at < 3; at += 1) await ask(acting, w, { amount: TINY, supplierId: w.suppliers[1] ?? '' });
+    const younger = await ask(acting, w, { amount: TINY });
+    unknownsFrom(['x', 'x', 'y', 'y', 'z']);
+    lookupsFor(['anyone']);
+    const { rail, sent } = railOver([w]);
+
+    await handoffOver([w], rail).run();
+
+    expect(sent).toHaveLength(1);
+    expect(await statusOf(w, younger.id)).toBe('HANDED_OFF');
+  });
+
+  it('takes a lane’s own note to speak for the platform’s hold that follows: one note, not two', async () => {
+    const { w } = await worldWith(4);
+    const { rail } = railOver([w], () => noAnswer);
+    const job = handoffOver([w], rail);
+    await job.run();
+    expect(await heldNotesOf(w)).toHaveLength(1);
+
+    unknownsFrom(['p', 'p', 'q', 'q', 'r']);
+    expect(health.heldFor(w.org)).toBe('bank');
+    await job.run();
+
+    expect(await heldNotesOf(w)).toHaveLength(1);
+  });
+
+  it('counts a rejection with its proof as neutral: it breaks no row', async () => {
+    const { w } = await worldWith(4);
+    // Two unknown, one rejected with its proof, one unknown: three in a row, the rejection not breaking it.
+    let sentSoFar = 0;
+    const { rail } = railOver([w], (real) => async (intent) => {
+      sentSoFar += 1;
+      if (sentSoFar !== 3) return noAnswer(intent);
+      const answer = await real(intent);
+      return answer.kind === 'accepted'
+        ? { ...answer, execution: { ...answer.execution, providerStatus: 'Rejected' as const, noDebitProven: true } }
+        : answer;
+    });
+
+    await handoffOver([w], rail).run();
+
+    expect(sentSoFar).toBe(4);
+    expect(health.heldFor(w.org)).toBe('lane');
+  });
+
   it('goes one at a time past a lane’s hold, until the bank accepts one', async () => {
     const { w } = await worldWith(3);
     unknownsFrom([w.org, w.org, w.org]);
