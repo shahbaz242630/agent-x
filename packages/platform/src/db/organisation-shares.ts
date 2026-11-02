@@ -35,6 +35,13 @@ const LOCK_NOT_AVAILABLE = '55P03';
 export const isLockWaitRunOut = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === LOCK_NOT_AVAILABLE;
 
+/** Postgres's `query_canceled`: a statement ran past its limit, a wait for a lock included. */
+const STATEMENT_LIMIT = '57014';
+
+/** Whether a statement of a transaction, now rolled back, ran past its limit. */
+export const isStatementLimit = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === STATEMENT_LIMIT;
+
 /** A transaction that waited its whole bound for its organisation's share: it never began, so nothing of it was made. */
 export class OrganisationBusy extends Error {
   readonly waitedMs: number;

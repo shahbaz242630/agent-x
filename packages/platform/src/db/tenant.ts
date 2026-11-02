@@ -266,6 +266,75 @@ export async function holdTransactionLock<Schema>(
   await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`.execute(tx);
 }
 
+/** Every decision's side of the lock a freeze or a policy change takes (ADR-006 level 1a). */
+export const ORGANISATION_BRAKE = 'organisation-brake';
+/** Every decision and key check's side of the lock a change to an agent, its keys or its mandates takes (level 1b). */
+export const AGENT_BRAKE = 'agent-brake';
+/** Every decision's side of the lock a change to the funding source it names takes (level 1c). */
+export const SOURCE_BRAKE = 'source-brake';
+/**
+ * The longest a brake waits for each lock. Past a statement's limit, as that is how long one inside can really take:
+ * a decision queued behind another for a stuck supplier's row waits its 5 s for the row's queue, then 5 s more on its
+ * holder, each wait timed alone (measured, S168: at 8 s a freeze behind them failed every time). New ones line up
+ * behind the brake from its first moment, so what it waits for is only those already inside. It doesn't cover the
+ * longest one inside: a decision can also wait on its month's and the chain head's locks while it holds the shared side,
+ * each up to its own bound. Then the stop answers busy, honestly, with nothing changed, and pressing it again usually lands.
+ */
+const BRAKE_WAIT_SECONDS = STATEMENT_SECONDS + 2;
+const BRAKE_WAIT = `${String(BRAKE_WAIT_SECONDS)}s`;
+/** A brake's own limit on a statement, past its wait, so that the wait runs out as a lock's. */
+const BRAKE_STATEMENT = `${String(BRAKE_WAIT_SECONDS + 3)}s`;
+/** A stop's bound on its waits, in a statement of their own. */
+const STOP_WAITS = sql`select pg_catalog.set_config('lock_timeout', ${BRAKE_WAIT}, true),
+  pg_catalog.set_config('statement_timeout', ${BRAKE_STATEMENT}, true)`;
+/**
+ * A routine change's bound on its waits (a policy, a draft, a consent choice): under a decision's 5 s, so that decisions
+ * queued behind it outlast it and go on, and one change can't turn away a whole organisation's or agent's traffic.
+ */
+const ROUTINE_WAITS = sql`select pg_catalog.set_config('lock_timeout', '3s', true)`;
+
+/**
+ * The shared side of a brake, a statement of its own ahead of what it guards, so that the read behind it takes its
+ * snapshot only once the wait is over (S157). Why a brake and not the row's own lock: a row's FOR SHARE doesn't queue
+ * behind a waiting FOR NO KEY UPDATE while its holders only hold locks, so a stream of them starves it, each new holder
+ * restarting its wait; an advisory lock honours whoever waits first. Takes no transaction ID.
+ */
+export const brakeShared = (scope: string, ...ids: readonly string[]): RawBuilder<unknown> =>
+  sql`select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(${lockName(scope, ...ids)}, 0))`;
+
+/**
+ * Holds the exclusive side of the brake `name` gives for the rest of the transaction: new takers of its shared side
+ * line up behind it, those inside drain. Its wait is bounded to BRAKE_WAIT_SECONDS, as is every lock's after it here, on
+ * the lock's own trip. That is a wait's bound and not the brake's whole: a statement behind it is held to BRAKE_STATEMENT.
+ * First in a transaction, its key's claim and that brake's own alone before it: it never waits holding a row.
+ */
+export async function holdBrakeNamed<Schema>(
+  tx: Transaction<Schema>,
+  name: RawBuilder<unknown> | string,
+  waits: RawBuilder<unknown> = STOP_WAITS,
+): Promise<void> {
+  await sendTogether(tx, [
+    waits,
+    sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`,
+  ]);
+}
+
+/** holdBrakeNamed for a routine change: its waits, and its brake's, are ROUTINE_WAITS'. */
+export const holdRoutineBrakeNamed = <Schema>(
+  tx: Transaction<Schema>,
+  name: RawBuilder<unknown> | string,
+): Promise<void> => holdBrakeNamed(tx, name, ROUTINE_WAITS);
+
+/** holdBrakeNamed for a brake named by its scope and IDs. */
+export const holdBrake = <Schema>(tx: Transaction<Schema>, scope: string, ...ids: readonly string[]): Promise<void> =>
+  holdBrakeNamed(tx, lockName(scope, ...ids));
+
+/**
+ * A statement of its own that bounds the rest of the transaction's waits as a claim's does, for one with no claim:
+ * so a read behind a brake waiting is told busy, not cut off by a statement's limit.
+ */
+export const lockWaitBoundedAlone = (): RawBuilder<unknown> => sql`select ${lockWaitBounded()}`;
+
 /**
  * What a connection must carry before any work runs on it: no tenant, and the
  * `search_path` the startup packet pinned. Both come back from one statement,
@@ -591,6 +660,16 @@ function checked(connection: DatabaseConnection): CheckedConnection {
   return connection;
 }
 
+/** A statement sendTogether takes. */
+export interface SentTogether {
+  compile(executorProvider: QueryExecutorProvider): CompiledQuery;
+}
+
+/** What each of the statements sent together answered, in their order. */
+export type AnswersOf<Statements extends readonly SentTogether[]> = {
+  -readonly [At in keyof Statements]: QueryResult<unknown>;
+};
+
 /**
  * The statements on one trip of the transaction's connection, in the order
  * given (4D2d P16). Kysely holds each of a transaction's statements back for
@@ -598,17 +677,14 @@ function checked(connection: DatabaseConnection): CheckedConnection {
  * none of whose text needs an answer to one before it. An answer checked in
  * code is checked after the trip, so a commit never goes on one.
  */
-export function sendTogether<
-  Schema,
-  const Statements extends readonly { compile(executorProvider: QueryExecutorProvider): CompiledQuery }[],
->(
+export function sendTogether<Schema, const Statements extends readonly SentTogether[]>(
   tx: Transaction<Schema>,
   statements: Statements,
-): Promise<{ -readonly [At in keyof Statements]: QueryResult<unknown> }> {
+): Promise<AnswersOf<Statements>> {
   const queries = statements.map((statement) => statement.compile(tx));
-  return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries)) as Promise<{
-    -readonly [At in keyof Statements]: QueryResult<unknown>;
-  }>;
+  return tx.getExecutor().provideConnection((connection) => checked(connection).executeTogether(queries)) as Promise<
+    AnswersOf<Statements>
+  >;
 }
 
 /**

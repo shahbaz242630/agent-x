@@ -41,7 +41,11 @@
 //   one with no version in force yet, MANDATE_NOT_ACCEPTED (its draft's own
 //   choice applies once accepted).
 //
-// Lock order (ADR-006 §6): the idempotency key, the session's challenges (0b,
+// A confirm takes its agent's brake first (1b, tenant.ts; an over-limit choice's a
+// routine change's shorter wait), so the agent's decisions can't starve it (PL-63 item 3, 4D2e C3); past its wait, busy, nothing changed, with
+// an alarm. An ask reads the mandate as they do, so nothing holds it up.
+//
+// Lock order (ADR-006 §6): the idempotency key, the agent's brake (a confirm's), the session's challenges (0b,
 // confirm only), the admin's membership (2a), the mandate (4), the version in
 // force (a resume's, read), the challenge consumed, the mandate's pending
 // requests (8) and their holdings (11), the chain head last. The agent (3) is
@@ -58,6 +62,8 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import {
+  agentBrakeOfMandate,
+  agentBrakeNameOfMandate,
   MandateRefused,
   type MandateTables,
   type MandateTx,
@@ -280,7 +286,8 @@ export function createMandateMoves({
 
     async confirm(member, idempotent, mandateId, chosen, stepUpChallengeId, correlationId) {
       const { move } = chosen;
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const hold = (tx: MandateTx) => agentBrakeOfMandate(tx, member.orgId, mandateId);
+      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, MOVING_ROLES);
         const read = await movable(tx, states, member.orgId, mandateId, chosen, 'change');
@@ -329,7 +336,8 @@ export function createMandateMoves({
     },
 
     async chooseOverLimitConfirm(member, idempotent, mandateId, overLimit, stepUpChallengeId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const brake = agentBrakeNameOfMandate(member.orgId, mandateId);
+      const done = await work.routineBrakeWrite(member, idempotent, correlationId, brake, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, MOVING_ROLES);
         const read = await choosable(tx, states, member.orgId, mandateId, 'change');

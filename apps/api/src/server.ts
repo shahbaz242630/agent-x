@@ -57,7 +57,7 @@ import { answerClientError } from './client-errors.ts';
 import { type ConsoleFiles, putConsoleInFront } from './console-files.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
-import { BUSY_RETRY_SECONDS, responseFor, sendErrorBody } from './errors.ts';
+import { BUSY_RETRY_SECONDS, responseFor, sendErrorBody, troubleOf } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
@@ -273,7 +273,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
 
   /** Sends the error's plain response, then logs a failure on our side with its detail. */
   const sendError = (error: unknown, request: FastifyRequest, reply: FastifyReply): FastifyReply => {
-    const { status, code } = responseFor(error);
+    const { operation } = request.routeOptions.config;
+    const { status, code } = responseFor(error, operation);
     for (const name of Object.keys(reply.getHeaders())) {
       if (!ERROR_HEADERS.has(name)) reply.removeHeader(name);
     }
@@ -285,6 +286,11 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     if (status === 500) logger.child({ correlationId: request.id }).error(REQUEST_FAILED, { err: error });
     // The share's own refusal logs itself, naming the organisation; this one's lock is the line to look for.
     if (isLockWaitRunOut(error)) logger.child({ correlationId: request.id }).warn('api.lock_wait_ran_out');
+    const trouble = troubleOf(error, operation);
+    if (trouble === 'stop') logger.child({ correlationId: request.id }).error('api.stop_in_trouble', { err: error });
+    if (trouble === 'decision') {
+      logger.child({ correlationId: request.id }).warn('api.decision_in_trouble', { err: error });
+    }
     return reply;
   };
 

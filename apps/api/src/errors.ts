@@ -4,7 +4,7 @@
 // unexpected error is logged with its detail instead. Addresses that don't
 // exist, and features that are off, get the same plain 404.
 import { isReasonCode, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
-import { isLockWaitRunOut, OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
+import { isLockWaitRunOut, isRetryable, isStatementLimit, OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 
@@ -105,6 +105,57 @@ export class IntegrityFailure extends Error {}
 /** How long a client is told to wait before sending a busy request again: as long as the store waited, time for most writes holding the key to end. */
 export const BUSY_RETRY_SECONDS = 5;
 
+/** The agent's decision: answered busy under trouble too, as it can safely resend under its key (partner, 4D2e C3). */
+const DECISION_OPERATION = 'spend-requests.create';
+
+/**
+ * Every stop an admin presses, ask and confirm, and an agent's decision: under trouble, a statement past its limit or a
+ * deadlock rolled it back and is answered busy like a lock's wait, never a plain 500, on any statement of it, its
+ * answer's read after it included (partner, 4D2e C3). One committed is replayed by the same key. Written out;
+ * contract.test.ts holds each to an operation of the API. A key check answers its own (key-check.ts).
+ */
+export const BUSY_UNDER_TROUBLE: ReadonlySet<string> = new Set([
+  DECISION_OPERATION,
+  'organization.freeze',
+  'organization.unfreeze',
+  'organization.unfreeze.confirm',
+  'agents.suspend',
+  'agents.reactivate',
+  'agents.reactivate.confirm',
+  'agents.owner',
+  'agents.owner.confirm',
+  'agents.keys.revoke',
+  'agents.keys.revoke.confirm',
+  'agents.keys.rotate',
+  'agents.keys.rotate.confirm',
+  'mandates.suspend',
+  'mandates.suspend.confirm',
+  'mandates.resume',
+  'mandates.resume.confirm',
+  'mandates.revoke',
+  'mandates.revoke.confirm',
+  'funding-sources.suspend',
+  'funding-sources.reactivate',
+  'funding-sources.reactivate.confirm',
+  'funding-sources.refresh',
+  'suppliers.suspend',
+  'suppliers.reactivate',
+  'suppliers.reactivate.confirm',
+]);
+
+/**
+ * What a failure on a route answered busy under trouble is, for its line (server.ts): a stop's, which an admin relies
+ * on and which may have committed before its answer's read, or a decision's, one organisation's own trouble. A stop
+ * whose write takes a brake has raised its alarm and answered already: this is for what's left. A decision's own lock
+ * wait keeps its usual line.
+ */
+export function troubleOf(error: unknown, operation: string | undefined): 'stop' | 'decision' | undefined {
+  if (operation === undefined || !BUSY_UNDER_TROUBLE.has(operation)) return undefined;
+  const failed = isStatementLimit(error) || isRetryable(error);
+  if (operation === DECISION_OPERATION) return failed ? 'decision' : undefined;
+  return failed || isLockWaitRunOut(error) ? 'stop' : undefined;
+}
+
 /**
  * What to send for an error, from its own status; an integrity failure is 503
  * INTEGRITY_FAILED. Its organisation past its share of the connections, or a
@@ -112,8 +163,9 @@ export const BUSY_RETRY_SECONDS = 5;
  * 500 (partner, S161). Its transaction made nothing; one before it may have, so
  * the same request again, under its key, answers as that one did.
  */
-export function responseFor(error: unknown): ErrorResponse {
+export function responseFor(error: unknown, operation?: string): ErrorResponse {
   if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };
+  if (troubleOf(error, operation) !== undefined) return { status: 503, code: 'ORGANISATION_BUSY' };
   if (error instanceof OrganisationBusy || isLockWaitRunOut(error)) return { status: 503, code: 'ORGANISATION_BUSY' };
   // Every connection in use, past the pool's own wait: the platform's, for whichever organisation or job was next.
   if (error instanceof PoolWaitRanOut) return { status: 503, code: 'PLATFORM_BUSY' };

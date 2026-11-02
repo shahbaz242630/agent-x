@@ -77,10 +77,18 @@ import {
   verifyChain,
   verifyFromAnchor,
 } from '@agentx/platform/audit-chain';
-import { assertTenant, type GatheredRead, sendTogether, timedLock, withTenant } from '@agentx/platform/db';
+import {
+  type AnswersOf,
+  assertTenant,
+  type GatheredRead,
+  sendTogether,
+  type SentTogether,
+  timedLock,
+  withTenant,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { type Compilable, type Kysely, type QueryResult, type RawBuilder, sql, type Transaction } from 'kysely';
+import { type Kysely, type QueryResult, type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import {
@@ -359,13 +367,16 @@ export interface AuditTrail {
     orgId: string,
     reads: readonly GatheredRead[],
   ): Promise<readonly GatheredLatest[]>;
-  /** latestSignedStatesGathered of at least one read, with `before` on the same trip ahead of it (4D2d P17). */
-  latestSignedStatesGatheredBehind(
+  /**
+   * latestSignedStatesGathered of at least one read, with `before` on the same trip ahead of it, in its order (4D2d
+   * P17): each its own statement, so what the read's snapshot sees is what stood once `before` had its locks.
+   */
+  latestSignedStatesGatheredBehind<const Before extends readonly SentTogether[]>(
     tx: AuditTransaction,
     orgId: string,
-    before: Compilable,
+    before: Before,
     reads: readonly GatheredRead[],
-  ): Promise<{ readonly ahead: QueryResult<unknown>; readonly answers: readonly GatheredLatest[] }>;
+  ): Promise<{ readonly ahead: AnswersOf<Before>; readonly answers: readonly GatheredLatest[] }>;
   /**
    * latestSignedState for many objects of one type, in one statement: each
    * ID asked, in lower case, with its object's latest signed state, judged
@@ -1349,17 +1360,22 @@ export function createAuditTrail({
       return gatheredAnswers(chain, reads, await gatheredWithHead(chain, reads).execute(tx));
     },
 
-    async latestSignedStatesGatheredBehind(
+    async latestSignedStatesGatheredBehind<const Before extends readonly SentTogether[]>(
       tx: AuditTransaction,
       orgId: string,
-      before: Compilable,
+      before: Before,
       reads: readonly GatheredRead[],
     ) {
       gatheredAllowed(reads);
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const [ahead, gathered] = await sendTogether(tx, [before, gatheredWithHead(chain, reads)]);
-      return { ahead, answers: gatheredAnswers(chain, reads, gathered) };
+      const query = gatheredWithHead(chain, reads);
+      const answered: readonly QueryResult<unknown>[] = await sendTogether(tx, [...before, query]);
+      const gathered = answered.at(-1) as Awaited<ReturnType<typeof query.execute>>;
+      return {
+        ahead: answered.slice(0, -1) as unknown as AnswersOf<Before>,
+        answers: gatheredAnswers(chain, reads, gathered),
+      };
     },
 
     async latestSignedStates(

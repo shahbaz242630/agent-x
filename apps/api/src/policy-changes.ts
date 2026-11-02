@@ -54,7 +54,7 @@ import type { Outbox } from '@agentx/core/modules/notifications';
 import type { ApprovalWaitHours } from '@agentx/core/modules/spend-requests';
 import { suppliersFound } from '@agentx/core/modules/suppliers';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten, lockName, ORGANISATION_BRAKE } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -377,7 +377,8 @@ export function createPolicyChanges({
     },
 
     async confirm(member, idempotent, target, sent, waiting, stepUpChallengeId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+      const brake = lockName(ORGANISATION_BRAKE, member.orgId);
+      const done = await work.routineBrakeWrite(member, idempotent, correlationId, brake, async (tx, states) => {
         const asked = askedOf(target, sent);
         const { rules, capChoice, approvalWait } = asked;
         const now = clock.now();

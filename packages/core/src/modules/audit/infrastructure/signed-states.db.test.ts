@@ -18,6 +18,8 @@ import {
 } from '@agentx/testing';
 import { type StateSeal, stateSealIn, stateSealMatches } from '@agentx/platform/audit-chain';
 import {
+  brakeShared,
+  lockName,
   createDatabase,
   type Database,
   type GatheredId,
@@ -2236,23 +2238,60 @@ describe('gather (4D2d P8): rows in one statement, each answered once, with no t
     ).rejects.toBeInstanceOf(RangeError);
   });
 
+  it('reads behind a brake on a snapshot taken after its wait (4D2e C3, S157): a change made during it believed, with no read of its own', async () => {
+    const agent = await newAgent();
+    let readsAlone = 0;
+    const using = statesWith({
+      ...trail,
+      latestSignedStateWithRow: (...args: Parameters<AuditTrail['latestSignedStateWithRow']>) => {
+        readsAlone += 1;
+        return trail.latestSignedStateWithRow(...args);
+      },
+    });
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+      lockName('a-brake', org),
+    ]);
+    const read = withTenant(app, org, async (tx) => {
+      await using.gatherBehind(
+        tx,
+        org,
+        [brakeShared('a-brake', org)],
+        [{ table: AGENTS, id: { id: agent }, lock: 'share' }],
+      );
+      return using.verifiedState(tx, AGENTS, { orgId: org, id: agent }, 'share');
+    });
+    await waitUntilQueued(attacker, 1);
+
+    await changeStatus(agent, 'suspend');
+    await holder.query('commit');
+    await holder.end();
+
+    const seen = await read;
+    expect(seen.outcome === 'verified' && seen.fields.get('status')).toBe('SUSPENDED');
+    expect(readsAlone).toBe(0);
+    expect(found).toEqual([]);
+  });
+
   it('gathers behind another statement on one trip (P17), refusing what a gather refuses', async () => {
     const agent = await newAgent();
     const other = await newAgent();
     const row = (id: string) => ({ table: AGENTS, id: { id }, lock: 'share' as const });
     const behind = (rows: readonly GatheredRow[]) =>
       withTenant(app, org, async (tx) => ({
-        ahead: await states.gatherBehind(
+        behind: await states.gatherBehind(
           tx,
           org,
-          tx.selectNoFrom((eb) => eb.val('ahead').as('said')),
+          [tx.selectNoFrom((eb) => eb.val('ahead').as('said')), tx.selectNoFrom((eb) => eb.val('next').as('said'))],
           rows,
         ),
         checked: await states.verifiedState(tx, AGENTS, { orgId: org, id: agent }, 'share'),
       }));
 
-    const { ahead, checked } = await behind([row(agent), row(other)]);
-    expect(ahead.rows).toEqual([{ said: 'ahead' }]);
+    const { behind: answered, checked } = await behind([row(agent), row(other)]);
+    expect(answered.ahead.map(({ rows }) => rows)).toEqual([[{ said: 'ahead' }], [{ said: 'next' }]]);
+    expect(answered.found).toEqual([agent, other]);
     expect(checked).toMatchObject({ outcome: 'verified', version: 1 });
 
     const hold = { ...row(agent), table: { ...AGENTS, subject: HOLD_SUBJECT } };

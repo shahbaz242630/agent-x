@@ -38,6 +38,7 @@
 // against other subjects.
 import { type AnchorPoint, sealState, stateSealDetails, stateSealMatches } from '@agentx/platform/audit-chain';
 import {
+  type AnswersOf,
   createStatusChanger,
   type FieldText,
   type GatheredRow,
@@ -46,6 +47,7 @@ import {
   readSignedRow,
   readSignedRows,
   type RowLock,
+  type SentTogether,
   type SignedFieldValues,
   type SignedRow,
   type SignedRowKey,
@@ -60,7 +62,6 @@ import {
   writeSignedRow,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import type { Compilable, QueryResult } from 'kysely';
 import type { Logger } from '@agentx/platform/observability';
 
 import { UUID } from '../../../shared-kernel/index.ts';
@@ -397,13 +398,17 @@ export interface SignedStates {
    * ID as its read named it, in the order given, null for none found.
    */
   gather(tx: AuditTransaction, orgId: string, rows: readonly GatheredRow[]): Promise<readonly (string | null)[]>;
-  /** gather, with `before` on the same trip ahead of it (4D2d P17): what `before` answered. */
-  gatherBehind(
+  /**
+   * gather, with `before` on the same trip ahead of it (4D2d P17): what each of `before` answered. Each its own
+   * statement, so the gather's snapshot is taken only once a lock `before` waited for is held (4D2e C3): what
+   * changed during that wait is seen, and believed. `found`: gather's answer.
+   */
+  gatherBehind<const Before extends readonly SentTogether[]>(
     tx: AuditTransaction,
     orgId: string,
-    before: Compilable,
+    before: Before,
     rows: readonly GatheredRow[],
-  ): Promise<QueryResult<unknown>>;
+  ): Promise<{ readonly ahead: AnswersOf<Before>; readonly found: readonly (string | null)[] }>;
   /**
    * verifiedState for many rows of one table in the organisation, each locked
    * `share`: the rows in one statement and their signed states in another,
@@ -973,12 +978,12 @@ export function createSignedStates({
     );
   };
 
-  const gatherBehind = async (
+  const gatherBehind = async <const Before extends readonly SentTogether[]>(
     tx: AuditTransaction,
     orgId: string,
-    before: Compilable,
+    before: Before,
     list: readonly GatheredRow[],
-  ): Promise<QueryResult<unknown>> => {
+  ) => {
     gatherAllowed(tx, orgId, list);
     const { ahead, answers } = await trail.latestSignedStatesGatheredBehind(
       tx,
@@ -986,8 +991,7 @@ export function createSignedStates({
       before,
       gatheredRowReads(orgId, list),
     );
-    gatherJudged(tx, orgId, list, answers);
-    return ahead;
+    return { ahead, found: gatherJudged(tx, orgId, list, answers) };
   };
 
   /** What a gather believed of the row, once, if it was gathered with this lock: no trip (P8). */

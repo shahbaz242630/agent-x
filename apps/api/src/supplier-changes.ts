@@ -63,7 +63,7 @@ import {
   toldEveryone,
 } from './supplier-work.ts';
 import { choiceDetails, chosenAgain, pausedOf, reactivationChoiceDetails } from './suspensions.ts';
-import { createStepUps } from './use-case-work.ts';
+import { braked, createStepUps } from './use-case-work.ts';
 
 /** The brake on a supplier. */
 export const SUSPEND_OPERATION = 'suppliers.suspend';
@@ -154,35 +154,37 @@ export function createSupplierChanges({
 
   return {
     async suspend(member, idempotent, supplierId, pendingRequests, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        await work.memberIn(tx, states, member, SUSPENDING_ROLES);
-        const key = { orgId: member.orgId, id: supplierId };
-        const found = await work.supplierIn(tx, states, key, 'change');
-        const braked = { supplierId: found.supplier.id };
-        const cancelledBefore =
-          pendingRequests === 'pause' && (await cancelledByItsStop(tx, states, member.orgId, found.supplier));
-        if (pendingRequests === 'cancel' || cancelledBefore) {
-          await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
-        }
-        // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).
-        if (found.supplier.status === 'SUSPENDED') {
-          const again = await chosenAgain(
-            tx,
-            states,
-            { which: 'supplier', table: SUPPLIERS, key, state: found.state },
-            pendingRequests,
-            { type: 'user', id: member.userId },
-          );
-          if (again === 'refused') throw new SupplierRefused(409, 'PENDING_REQUESTS_CANCELLED');
-        } else {
-          await suspendSupplier(tx, states, key, found, {
-            actor: { type: 'user', id: member.userId },
-            details: choiceDetails(pendingRequests),
-          });
-          await outbox.add(tx, toldEveryone(member.orgId, found.supplier.id, 'supplier_suspended'));
-        }
-        return { status: 200, resourceId: found.supplier.id };
-      });
+      const done = await braked(logger, member.orgId, correlationId, () =>
+        work.write(member, idempotent, correlationId, async (tx, states) => {
+          await work.memberIn(tx, states, member, SUSPENDING_ROLES);
+          const key = { orgId: member.orgId, id: supplierId };
+          const found = await work.supplierIn(tx, states, key, 'change');
+          const braked = { supplierId: found.supplier.id };
+          const cancelledBefore =
+            pendingRequests === 'pause' && (await cancelledByItsStop(tx, states, member.orgId, found.supplier));
+          if (pendingRequests === 'cancel' || cancelledBefore) {
+            await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
+          }
+          // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).
+          if (found.supplier.status === 'SUSPENDED') {
+            const again = await chosenAgain(
+              tx,
+              states,
+              { which: 'supplier', table: SUPPLIERS, key, state: found.state },
+              pendingRequests,
+              { type: 'user', id: member.userId },
+            );
+            if (again === 'refused') throw new SupplierRefused(409, 'PENDING_REQUESTS_CANCELLED');
+          } else {
+            await suspendSupplier(tx, states, key, found, {
+              actor: { type: 'user', id: member.userId },
+              details: choiceDetails(pendingRequests),
+            });
+            await outbox.add(tx, toldEveryone(member.orgId, found.supplier.id, 'supplier_suspended'));
+          }
+          return { status: 200, resourceId: found.supplier.id };
+        }),
+      );
       return work.changedAfter(member.orgId, correlationId, done);
     },
 

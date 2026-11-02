@@ -8,6 +8,9 @@
 //
 // Lock order (ADR-006 §6), each read through its signed state:
 // - 0: the idempotency key (the work's write);
+// - 1a, 1b, 1c: the organisation's, the agent's and the source's brakes, shared,
+//   so any stop or change of them waiting goes first (PL-63 item 3, 4D2e C3;
+//   tenant.ts);
 // - 2: the organisation FOR SHARE, refused while FROZEN (ORG_FROZEN: nothing
 //   made, the key unused, ADR-007 §4);
 // - 3, 3a: the agent and the key it came with FOR SHARE, the key live and
@@ -84,17 +87,21 @@ import {
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { type Clock, type IdGenerator, type Money, money, windowStart } from '@agentx/core/shared-kernel';
 import {
+  AGENT_BRAKE,
+  brakeShared,
   type Database,
   type DatabaseTransaction,
   type GatheredRow,
   type IdempotentRequest,
   isUnwritten,
   noStatementTimes,
+  ORGANISATION_BRAKE,
   retryingTransaction,
   statementTimesForLog,
   timedLock,
   timingStatements,
   sendTogether,
+  SOURCE_BRAKE,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -526,12 +533,21 @@ export function createSpendRequestDecisions({
     // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
     // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them. The
-    // currency's read and the acting rows on one trip (P17); what is refused on them is refused here, before the
-    // supplier's lock below is asked for, so a request refused anyway never queues on it.
-    const currency = await states.gatherBehind(
+    // brakes, the currency's read and the acting rows on one trip (P17), each its own statement: a brake waited for
+    // behind a freeze or a kill switch comes before the acting rows' snapshot, so they read what it did (S157). What
+    // is refused on them is refused here, before the supplier's lock below is asked for, so a request refused
+    // anyway never queues on it.
+    const {
+      ahead: [, , , currency],
+    } = await states.gatherBehind(
       tx,
       orgId,
-      allowedCurrencyRead(tx, asked.amount.currency),
+      [
+        brakeShared(ORGANISATION_BRAKE, orgId),
+        brakeShared(AGENT_BRAKE, orgId, agentId),
+        brakeShared(SOURCE_BRAKE, orgId, asked.fundingSourceId),
+        allowedCurrencyRead(tx, asked.amount.currency),
+      ],
       actingRows(acting),
     );
     if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');

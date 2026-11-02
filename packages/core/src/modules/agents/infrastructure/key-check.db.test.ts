@@ -23,6 +23,7 @@ import {
   createDatabase,
   type Database,
   noStatementTimes,
+  OrganisationBusy,
   timingStatements,
   withTenant,
 } from '@agentx/platform/db';
@@ -313,7 +314,7 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
 });
 
 describe('the key check: bounded', () => {
-  it('gives up after 10 seconds, a wait for a lock included, rather than hold the request', async () => {
+  it('gives up on a lock after 5 seconds, rather than hold the request: told busy, not cut off at its 10 (4D2e C3)', async () => {
     const agent = await newAgent();
     const { text } = await issue(agent);
     const holder = await database.connect('admin');
@@ -321,12 +322,38 @@ describe('the key check: bounded', () => {
     await holder.query('lock table agents.agent_keys in access exclusive mode');
     try {
       const began = performance.now();
-      await expect(within(20_000, check(text), 'the check')).rejects.toThrow(/statement timeout/);
-      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+      await expect(within(20_000, check(text), 'the check')).rejects.toThrow(/lock timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(4_500);
     } finally {
       await holder.query('rollback');
       await holder.end();
     }
+  });
+});
+
+describe('the key check under trouble (4D2e C3)', () => {
+  it.each(['57014', '40P01'])('answers %s told busy, with its line, never as it failed', async (code) => {
+    const agent = await newAgent();
+    const { text } = await issue(agent);
+    const lines = new LogCapture();
+    const failing = new Proxy(app, {
+      get: (target, name) => {
+        if (name === 'transaction') {
+          return () => {
+            throw Object.assign(new Error('forced'), { code });
+          };
+        }
+        const value = Reflect.get(target, name) as unknown;
+        // Kysely's own private fields want the real object as `this`.
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const checker = createAgentKeyCheck({ database: failing, keys, ids, clock, logger: testLogger(lines) });
+
+    await expect(checker.check(text, '0199a0f0-0000-7000-8000-00000000c011')).rejects.toBeInstanceOf(OrganisationBusy);
+    expect(lines.lines().filter(({ event }) => event === 'agent_key.check_in_trouble')).toMatchObject([
+      { level: 'warn', orgId: org },
+    ]);
   });
 });
 

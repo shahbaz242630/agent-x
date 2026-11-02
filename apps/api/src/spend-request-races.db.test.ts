@@ -37,6 +37,7 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { createAgentChanges, SUSPEND_OPERATION } from './agent-changes.ts';
 import { createAgentTurns } from './agent-turns.ts';
 import { createDecisionEntry } from './decision-entry.ts';
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
@@ -50,6 +51,7 @@ import {
   refused,
   type World,
 } from './mandate-world.helper.test.ts';
+import { createOrganizationChanges, FREEZE_OPERATION } from './organization-changes.ts';
 import {
   type Approved,
   APPROVE_CONFIRM_OPERATION,
@@ -370,6 +372,128 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
       Array(6 - decided.length).fill({ outcome: 'refused', status: 401, code: 'UNAUTHENTICATED' }),
     );
     expect(retries()).toEqual([]);
+  });
+});
+
+describe('the deadlock suite: a freeze racing each change and the agent’s requests (4D2e C3, SEC-AV-04)', () => {
+  const services = () => ({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: createStepUpChallenges({ ids, clock }),
+    outbox: createOutbox({ ids, clock }),
+    logger: testLogger(capture),
+  });
+  const freeze = (w: World, choice: 'pause' | 'cancel' = 'pause') =>
+    createOrganizationChanges(services()).freeze(w.admin, keyed(w.admin, FREEZE_OPERATION), choice, CORRELATION);
+
+  const killSwitch = (w: World) => () =>
+    createAgentChanges(services()).suspend(w.admin, keyed(w.admin, SUSPEND_OPERATION), w.agent, 'cancel', CORRELATION);
+
+  /** A request committed before the freeze, none after: those after it read FROZEN, nothing made. */
+  async function expectFrozen(w: World, answers: readonly SpendRequestDecided[]) {
+    const frozenAt = (await chainOf(w.org))(FREEZE_OPERATION, w.org);
+    for (const { seq } of await committed(w.org, answers)) expect(seq < frozenAt).toBe(true);
+    for (const answer of answers) {
+      if (answer.outcome !== 'decided') expect(answer).toEqual(refused(409, 'ORG_FROZEN'));
+    }
+    expect(answers.slice(0, 2).map((answer) => answer.outcome)).toEqual(['decided', 'decided']);
+    expect(answers.at(-1)).toEqual(refused(409, 'ORG_FROZEN'));
+    expect(retries()).toEqual([]);
+  }
+
+  const freezing =
+    (w: World, ...others: (() => Promise<unknown>)[]) =>
+    async () => {
+      const answers = await Promise.all([freeze(w), ...others.map((other) => other())]);
+      expect(answers[0]).toMatchObject({ outcome: 'changed', organization: { status: 'FROZEN' } });
+    };
+
+  it('its agent suspended by the kill switch, its own brake and the organisation’s together', async () => {
+    const { w, acting } = await ready();
+
+    await expectFrozen(w, await racing(six(w, acting), freezing(w, killSwitch(w))));
+  });
+
+  it('its mandate superseded', async () => {
+    const { w, mandateId, acting } = await ready();
+    await registry.redraft(
+      w.admin,
+      keyed(w.admin, REDRAFT_OPERATION),
+      mandateId,
+      { terms: shared.termsOf(w, { ...TERMS, purpose: 'Office supplies, renewed' }), overLimit: 'refuse' },
+      CORRELATION,
+    );
+
+    await expectFrozen(
+      w,
+      await racing(
+        six(w, acting),
+        freezing(w, () => shared.acceptedPastTheUseCase(w, mandateId)),
+      ),
+    );
+  });
+
+  it('its mandate revoked', async () => {
+    const { w, mandateId, acting } = await ready();
+
+    await expectFrozen(
+      w,
+      await racing(
+        six(w, acting),
+        freezing(w, () => shared.movedPastTheUseCase(w, mandateId, 'revoke')),
+      ),
+    );
+  });
+
+  it('its supplier suspended', async () => {
+    const { w, acting } = await ready();
+    const supplier = w.suppliers[0] ?? '';
+    const suspend = () =>
+      withSignedStates(app, w.org, quiet(), async (tx, states) => {
+        const key = { orgId: w.org, id: supplier };
+        const found = await supplierOf(tx, states, key, 'change');
+        if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+        await suspendSupplier(tx, states, key, found, { actor: OPERATOR });
+      });
+
+    await expectFrozen(w, await racing(six(w, acting), freezing(w, suspend)));
+  });
+
+  it('its key revoked: those it refused say so, the rest as the freeze left them', async () => {
+    const { w, acting } = await ready();
+    const revoke = () =>
+      withSignedStates(app, w.org, quiet(), (tx, states) =>
+        states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: acting.keyId }, 'revoke', {
+          actor: OPERATOR,
+          action: 'agent_key.revoked',
+          details: {},
+        }),
+      );
+
+    const answers = await racing(six(w, acting), freezing(w, revoke));
+
+    const frozenAt = (await chainOf(w.org))(FREEZE_OPERATION, w.org);
+    for (const { seq } of await committed(w.org, answers)) expect(seq < frozenAt).toBe(true);
+    expect(answers.slice(0, 2).map((answer) => answer.outcome)).toEqual(['decided', 'decided']);
+    expect(answers.at(-1)).toEqual(refused(409, 'ORG_FROZEN'));
+    for (const answer of answers) {
+      if (answer.outcome !== 'decided') {
+        expect([refused(409, 'ORG_FROZEN'), refused(401, 'UNAUTHENTICATED')]).toContainEqual(answer);
+      }
+    }
+    expect(retries()).toEqual([]);
+  });
+
+  it('a cancel over pending requests, with its agent’s kill switch cancelling too', async () => {
+    const { w, acting } = await ready();
+    const cancelling = async () => {
+      const answers = await Promise.all([freeze(w, 'cancel'), killSwitch(w)()]);
+      expect(answers[0]).toMatchObject({ organization: { status: 'FROZEN' } });
+    };
+
+    await expectFrozen(w, await racing(six(w, acting), cancelling));
   });
 });
 

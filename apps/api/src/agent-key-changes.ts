@@ -34,7 +34,11 @@
 //   For a key being used against the organisation now, the instant brake is
 //   suspending its agent (no step-up), then revoking the key (ADR-014 §8).
 //
-// Lock order (ADR-006 §6): the idempotency key, the issue lock (rotation's
+// Each takes the agent's brake first (1b, tenant.ts), so the agent's decisions and
+// key checks can't starve it (PL-63 item 3, 4D2e C3); past its wait, busy, nothing
+// changed, with an alarm.
+//
+// Lock order (ADR-006 §6): the idempotency key, the agent's brake, the issue lock (rotation's
 // confirm), the member's membership (2a), the agent (3), the key (3a) and
 // then the agent's other keys (3a, by ID), the step-up challenge, the chain
 // head last.
@@ -52,7 +56,7 @@ import {
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type HeldChallenges, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { AGENT_BRAKE, type Database, holdBrake, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -161,6 +165,12 @@ export function createAgentKeyChanges({
   const work = createAgentWork({ database, keys, ids, logger });
   const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
+  /** The agent's brake, before any row: a key's change needs it against the agent's decisions and key checks. */
+  const brakeOf =
+    (member: AgentMember, { agentId }: KeyNamed) =>
+    (tx: AgentTx) =>
+      holdBrake(tx, AGENT_BRAKE, member.orgId, agentId);
+
   /**
    * The agent and its key, each read for change and verified: NOT_FOUND for
    * either missing, or a key of another agent; INTEGRITY_FAILED for either
@@ -259,7 +269,7 @@ export function createAgentKeyChanges({
   return {
     async rotate(member, idempotent, named, oldKey, correlationId) {
       return asked(
-        await work.write(member, idempotent, correlationId, async (tx, states) => {
+        await work.brakeWrite(member, idempotent, correlationId, brakeOf(member, named), async (tx, states) => {
           const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
           const { state, agent } = await keyToRotate(tx, states, member.orgId, { named, oldKey }, clock.now());
           mayRotate(role, membershipId, agent.owner);
@@ -270,69 +280,79 @@ export function createAgentKeyChanges({
 
     async rotateConfirm(member, idempotent, named, oldKey, stepUpChallengeId, correlationId) {
       let key: string | null = null;
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        await oneKeyIssueAtATime(tx, member.orgId);
-        const held = await challenges.hold(tx, member.sessionId);
-        const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
-        const now = clock.now();
-        await work.keyBudgetLeft(tx, member.orgId, now);
-        const old = await keyToRotate(tx, states, member.orgId, { named, oldKey }, now);
-        mayRotate(role, membershipId, old.agent.owner);
-        const consumed = await steppedUp(
-          tx,
-          member,
-          role,
-          ROTATE_OPERATION,
-          old.state.eventId,
-          held,
-          stepUpChallengeId,
-          oldKey,
-        );
-        const actor = { type: 'user' as const, id: member.userId };
-        // The choice, on both keys' events.
-        const chosen = rotationDetails(oldKey);
-        const issued = await work.issueKey(tx, states, {
-          orgId: member.orgId,
-          agentId: old.agent.id,
-          scopes: old.key.scopes.filter((scope) => old.agent.scopes.includes(scope)),
-          now,
-          actor,
-          details: { ...stepUpDetails(consumed), rotates: old.key.id, ...chosen },
-        });
-        const ended = { rotatedTo: issued.id, ...chosen };
-        if (oldKey === 'end_now') {
-          movedAsRead(
-            await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.key.id }, 'revoke', {
-              actor,
-              action: 'agent_key.revoked',
-              details: { reason: 'rotated', ...ended },
-            }),
-            "a live key didn't revoke",
+      let answered: AgentWithKeys | undefined;
+      const done = await work.brakeWrite(
+        member,
+        idempotent,
+        correlationId,
+        brakeOf(member, named),
+        async (tx, states) => {
+          await oneKeyIssueAtATime(tx, member.orgId);
+          const held = await challenges.hold(tx, member.sessionId);
+          const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
+          const now = clock.now();
+          await work.keyBudgetLeft(tx, member.orgId, now);
+          const old = await keyToRotate(tx, states, member.orgId, { named, oldKey }, now);
+          mayRotate(role, membershipId, old.agent.owner);
+          const consumed = await steppedUp(
+            tx,
+            member,
+            role,
+            ROTATE_OPERATION,
+            old.state.eventId,
+            held,
+            stepUpChallengeId,
+            oldKey,
           );
-        } else {
-          await bringKeyExpiryForward(tx, states, {
+          const actor = { type: 'user' as const, id: member.userId };
+          // The choice, on both keys' events.
+          const chosen = rotationDetails(oldKey);
+          const issued = await work.issueKey(tx, states, {
             orgId: member.orgId,
-            key: old.key,
-            state: old.state,
-            expiresAt: rotatedKeyExpiresAt(old.key.expiresAt, now),
+            agentId: old.agent.id,
+            scopes: old.key.scopes.filter((scope) => old.agent.scopes.includes(scope)),
+            now,
             actor,
-            action: 'agent_key.rotated',
-            details: ended,
+            details: { ...stepUpDetails(consumed), rotates: old.key.id, ...chosen },
           });
-        }
-        key = issued.text;
-        return { status: 201, resourceId: old.agent.id };
-      });
+          const ended = { rotatedTo: issued.id, ...chosen };
+          if (oldKey === 'end_now') {
+            movedAsRead(
+              await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.key.id }, 'revoke', {
+                actor,
+                action: 'agent_key.revoked',
+                details: { reason: 'rotated', ...ended },
+              }),
+              "a live key didn't revoke",
+            );
+          } else {
+            await bringKeyExpiryForward(tx, states, {
+              orgId: member.orgId,
+              key: old.key,
+              state: old.state,
+              expiresAt: rotatedKeyExpiresAt(old.key.expiresAt, now),
+              actor,
+              action: 'agent_key.rotated',
+              details: ended,
+            });
+          }
+          // Read in the transaction that issues it, on rows it holds: nothing after its commit can lose the key shown
+          // this once. A read that fails here rolls it all back, for the same request to do it again.
+          answered = await work.withKeys(tx, states, member.orgId, old.agent.id);
+          key = issued.text;
+          return { status: 201, resourceId: old.agent.id };
+        },
+      );
       if (isUnwritten(done)) return done;
       // The key is set only by a write done now: a retry answers it as null, as it was shown once.
-      const agent = await reread(member, correlationId, done.result.resourceId);
+      const agent = answered ?? (await reread(member, correlationId, done.result.resourceId));
       if ('outcome' in agent) return agent;
       return { outcome: 'rotated', agent, key, oldKey };
     },
 
     async revoke(member, idempotent, named, correlationId) {
       return asked(
-        await work.write(member, idempotent, correlationId, async (tx, states) => {
+        await work.brakeWrite(member, idempotent, correlationId, brakeOf(member, named), async (tx, states) => {
           await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
           const { state } = await keyToRevoke(tx, states, member.orgId, named);
           return ask(tx, member, REVOKE_OPERATION, state.eventId);
@@ -341,29 +361,35 @@ export function createAgentKeyChanges({
     },
 
     async revokeConfirm(member, idempotent, named, stepUpChallengeId, correlationId) {
-      const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        const held = await challenges.hold(tx, member.sessionId);
-        const { role } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
-        const read = await keyToRevoke(tx, states, member.orgId, named);
-        const consumed = await steppedUp(
-          tx,
-          member,
-          role,
-          REVOKE_OPERATION,
-          read.state.eventId,
-          held,
-          stepUpChallengeId,
-        );
-        movedAsRead(
-          await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: read.key.id }, 'revoke', {
-            actor: { type: 'user', id: member.userId },
-            action: 'agent_key.revoked',
-            details: stepUpDetails(consumed),
-          }),
-          "a key read as ACTIVE didn't revoke",
-        );
-        return { status: 200, resourceId: read.agent.id };
-      });
+      const done = await work.brakeWrite(
+        member,
+        idempotent,
+        correlationId,
+        brakeOf(member, named),
+        async (tx, states) => {
+          const held = await challenges.hold(tx, member.sessionId);
+          const { role } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
+          const read = await keyToRevoke(tx, states, member.orgId, named);
+          const consumed = await steppedUp(
+            tx,
+            member,
+            role,
+            REVOKE_OPERATION,
+            read.state.eventId,
+            held,
+            stepUpChallengeId,
+          );
+          movedAsRead(
+            await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: read.key.id }, 'revoke', {
+              actor: { type: 'user', id: member.userId },
+              action: 'agent_key.revoked',
+              details: stepUpDetails(consumed),
+            }),
+            "a key read as ACTIVE didn't revoke",
+          );
+          return { status: 200, resourceId: read.agent.id };
+        },
+      );
       if (isUnwritten(done)) return done;
       const agent = await reread(member, correlationId, done.result.resourceId);
       if ('outcome' in agent) return agent;

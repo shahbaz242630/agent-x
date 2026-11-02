@@ -85,6 +85,14 @@ export interface AgentWork {
     correlationId: string,
     work: (tx: AgentTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ): Promise<Written>;
+  /** write, with `hold` taking a brake first, before any row: past its wait, busy, with its alarm (braked). */
+  brakeWrite(
+    member: AgentMember,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    hold: (tx: AgentTx) => Promise<void>,
+    work: (tx: AgentTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+  ): Promise<Written>;
   /** Runs a read in the organisation's transaction, a refusal inside it answered. */
   answered<T extends object>(
     orgId: string,
@@ -126,11 +134,15 @@ export function createAgentWork(services: {
   readonly logger: Logger;
 }): AgentWork {
   const { keys, ids } = services;
-  const { inOrganisation, write, answered, memberIn } = createUseCaseWork({ ...services, Refusal: AgentRefused });
+  const { inOrganisation, write, brakeWrite, answered, memberIn } = createUseCaseWork({
+    ...services,
+    Refusal: AgentRefused,
+  });
 
   return {
     inOrganisation,
     write,
+    brakeWrite,
     answered,
 
     async memberIn(tx, states, member, roles) {

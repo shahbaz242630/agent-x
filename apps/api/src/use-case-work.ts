@@ -25,6 +25,10 @@ import {
   type DatabaseTransaction,
   type IdempotentRequest,
   type IdempotentWrite,
+  holdRoutineBrakeNamed,
+  isLockWaitRunOut,
+  isRetryable,
+  isStatementLimit,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -63,6 +67,39 @@ export type Written = IdempotentWrite | Refused;
 
 // A status move the work's own read said it may make (the shared kernel's, also core's: D7).
 export { movedAsRead } from '@agentx/core/shared-kernel';
+
+/** A stop that couldn't take hold: agents can still act, so the alarm. */
+const stopNotApplied = (log: Logger, fields: { readonly waitedMs: number }): void => {
+  log.error('brake.not_applied', fields);
+};
+
+/** A routine change that couldn't take hold: the old rules still apply, so nothing to raise an alarm for. */
+const routineChangeBusy = (log: Logger, fields: { readonly waitedMs: number }): void => {
+  log.warn('brake.routine_change_busy', fields);
+};
+
+/**
+ * A brake's write (an organisation's freeze, an agent's kill switch; PL-63 item 3): its wait for a lock run out, a
+ * statement past its limit, or a deadlock lost, rolled it all back, so nothing is stopped: answered busy, its key free
+ * to send again, and the alarm raised, as an admin's brake failing is never routine. A 57014 is taken as a wait: a
+ * brake's statements read and write a few rows, and row locks can restart their wait past the statement's limit.
+ */
+export async function braked(
+  logger: Logger,
+  orgId: string,
+  correlationId: string,
+  write: () => Promise<Written>,
+  gaveUp = stopNotApplied,
+): Promise<Written> {
+  const started = performance.now();
+  try {
+    return await write();
+  } catch (error) {
+    if (!isLockWaitRunOut(error) && !isStatementLimit(error) && !isRetryable(error)) throw error;
+    gaveUp(logger.child({ correlationId, orgId }), { waitedMs: Math.round(performance.now() - started) });
+    return refused(503, 'ORGANISATION_BUSY');
+  }
+}
 
 export function createUseCaseWork<Tables extends UseCaseTables>({
   database,
@@ -118,9 +155,51 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
     );
   };
 
+  /**
+   * write, with `hold` taking a brake first, before any row: braked's answer if it can't.
+   */
+  const brakeWrite = (
+    member: Pick<Member, 'orgId'>,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    hold: (tx: Tx) => Promise<void>,
+    work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+  ): Promise<Written> =>
+    braked(logger, member.orgId, correlationId, () =>
+      write(member, idempotent, correlationId, async (tx, states) => {
+        await hold(tx);
+        return work(tx, states);
+      }),
+    );
+
+  /**
+   * brakeWrite for a routine change (a policy, a draft, a consent choice): the brake `name` names, with a routine
+   * change's shorter wait and its quieter line. The one way to either, so they can't part.
+   */
+  const routineBrakeWrite = (
+    member: Pick<Member, 'orgId'>,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    name: Parameters<typeof holdRoutineBrakeNamed>[1],
+    work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+  ): Promise<Written> =>
+    braked(
+      logger,
+      member.orgId,
+      correlationId,
+      () =>
+        write(member, idempotent, correlationId, async (tx, states) => {
+          await holdRoutineBrakeNamed(tx, name);
+          return work(tx, states);
+        }),
+      routineChangeBusy,
+    );
+
   return {
     inOrganisation,
     write,
+    brakeWrite,
+    routineBrakeWrite,
 
     /** The write, a history past its read's cap (the two-person rule's, a supplier's versions) answered HISTORY_TOO_LONG. */
     historyBounded: async (...args: Parameters<typeof write>): Promise<Written> => {
