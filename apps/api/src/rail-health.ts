@@ -16,8 +16,8 @@
 //   new Tx A. That is the bank's outage, not an organisation's block (decision
 //   1). A lookup begun since the trip that answers, `not_found` included, makes
 //   it half-open, reopening in steps: 3 calls, then 6, 12, 24, then open. A step
-//   ends when its calls have all ended, at least one accepted and none unknown,
-//   so a bank that accepts only some never climbs. Any unknown goes back to held,
+//   ends when every one of its places was accepted (a refusal gives its place
+//   back), so a bank that accepts only some never climbs. Any unknown goes back to held,
 //   and a lookup can't reopen it for 1 minute, then 2, 4, up to 30; one answered
 //   during that wait is kept for its end. It stays one outage, with one error line
 //   and its wait still growing, until it has been open for 15 minutes.
@@ -127,7 +127,6 @@ export function createRailHealth({
   let step = 0;
   let letThrough = 0;
   let underWay = 0;
-  let stepAccepted = false;
   // A lookup begun since the trip has answered: kept through the wait, for when it ends.
   let lookupHeard = false;
   // Until when a further trip is still the same outage.
@@ -150,7 +149,6 @@ export function createRailHealth({
     step = next;
     letThrough = 0;
     underWay = 0;
-    stepAccepted = false;
   };
 
   /** Held with a lookup heard since its trip, and its wait over: the first step of reopening. */
@@ -266,9 +264,8 @@ export function createRailHealth({
   const countForStep = (how: Exclude<Settled, 'unknown'>): void => {
     underWay -= 1;
     if (how !== 'accepted') letThrough -= 1;
-    else stepAccepted = true;
     // Every place used: a few quick acceptances would otherwise climb past a bank still losing calls (review).
-    if (underWay === 0 && stepAccepted && letThrough >= (REOPEN_STEPS[step] ?? 0)) stepDone();
+    if (underWay === 0 && letThrough >= (REOPEN_STEPS[step] ?? 0)) stepDone();
   };
 
   /**

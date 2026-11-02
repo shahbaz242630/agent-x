@@ -1216,8 +1216,8 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     await run;
     expect(asked.filter((org) => org === hung.w.org).length).toBeLessThanOrEqual(4);
 
-    // A real acceptance takes it a step on.
-    await ask(other.acting, other.w, { amount: AED(5_000n) });
+    // Real acceptances, each of the step's three places, take it a step on (whole dirhams: the fake bank accepts).
+    for (const amount of [5_000n, 5_100n, 5_200n]) await ask(other.acting, other.w, { amount: AED(amount) });
     await createHandoff({
       list: () => Promise.resolve([other.w.org]),
       database: app,

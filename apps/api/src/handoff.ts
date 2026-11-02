@@ -394,6 +394,7 @@ export function createHandoff({
   const staleSaid = new Map<string, number>();
   const staleRead = new Map<string, number>();
   const cutAtTheGate = new Set<string>();
+  const waitingAsAWhole = new Set<string>();
   // What each organisation was told of its payments waiting for the bank: its lane's hold, and the platform's outage.
   // One signed event an outage and one a lane's hold, not one a run; an acceptance of its own clears it.
   const toldHeld = new Map<string, { readonly lane?: true; readonly bank?: number }>();
@@ -779,9 +780,12 @@ export function createHandoff({
       await tellHeld(orgId, done.hold, done.outage, log);
       return 'end_turn';
     }
-    if (done.outcome !== 'waiting') return 'next';
-    noteWaiting(orgId, id, done.why, log);
-    return isOrganisationWide(done.why) ? 'end_turn' : 'next';
+    const whole = done.outcome === 'waiting' && isOrganisationWide(done.why);
+    // Kept between runs: a later run the budget cuts before reaching it says nothing either, until one is seen moving.
+    if (whole) waitingAsAWhole.add(orgId);
+    else waitingAsAWhole.delete(orgId);
+    if (done.outcome === 'waiting') noteWaiting(orgId, id, done.why, log);
+    return whole ? 'end_turn' : 'next';
   };
 
   /** Tx A committed, known by this run: the partner called (ADR-007 §8), and Tx B records what it answered. */
@@ -875,7 +879,9 @@ export function createHandoff({
     for (const [orgId, outcome] of outcomes) {
       const lane = waitingOf(orgId);
       const cut = outcome === 'cut' || cutAtTheGate.has(orgId);
-      const counted = outcome === 'whole' || (cut && health.heldFor(orgId) === undefined);
+      // A frozen or held organisation's rows wait for that, whichever of them the run reached (review).
+      const counted =
+        outcome === 'whole' || (cut && !waitingAsAWhole.has(orgId) && health.heldFor(orgId) === undefined);
       // A pass that read no rows has nothing to count: a trip saved for each idle organisation.
       if (counted && lane.sawRows && signal?.aborted !== true) {
         await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));

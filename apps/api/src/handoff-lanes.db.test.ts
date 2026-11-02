@@ -885,6 +885,54 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
       expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 2 })]);
     });
 
+    describe('a frozen organisation', () => {
+      /** The first run reaches its pause; from then on each transaction opened spends the run's budget. */
+      const pausedThenCut = async () => {
+        const { w } = await worldWith(3);
+        const mandateId = await shared.mandateIdOf(w);
+        await shared.moved(w, mandateId, 'organization', 'pause');
+        let cutting = false;
+        const { rail, sent } = railOver([w], (real) => (intent) => {
+          clock.advanceBy(1_000);
+          return real(intent);
+        });
+        const job = handoffOver([w], rail, {
+          runBudgetMs: 1_000,
+          database: databaseWatched(() => {
+            if (cutting) clock.advanceBy(1_000);
+          }),
+        });
+        await job.run();
+        cutting = true;
+        clock.advanceBy(QUEUE_STALE_MS + 60_000);
+        const stopCutting = () => {
+          cutting = false;
+        };
+        return { w, mandateId, job, sent, stopCutting };
+      };
+
+      it('raises no stale alert on a run the budget cuts before reaching it: its rows wait for that', async () => {
+        const { job, sent } = await pausedThenCut();
+
+        await job.run();
+
+        expect(sent).toEqual([]);
+        expect(lines('handoff.queue_stale')).toEqual([]);
+      });
+
+      it('is counted again once a run has seen it moving', async () => {
+        const { w, mandateId, job, sent, stopCutting } = await pausedThenCut();
+        stopCutting();
+        await shared.moved(w, mandateId, 'organization', 'resume');
+
+        await job.run();
+
+        // Its first request reached and sent, the call spending the budget, the others unreached.
+        expect(sent).toHaveLength(1);
+        expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 2 })]);
+      });
+    });
+
     it('reads a cut lane’s age at most once a minute, though it found none', async () => {
       const { w } = await worldWith(5);
       const { rail } = railOver([w], (real) => (intent) => {
