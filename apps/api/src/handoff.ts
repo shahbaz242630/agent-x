@@ -12,7 +12,15 @@
 // one an organisation a pass), each organisation's oldest first, a page at a
 // time, each page after the last and the place kept between runs, so a page of
 // requests left waiting never keeps a younger one from its turn; a reason that
-// is the whole organisation's ends its turn. Each in a transaction of its own:
+// is the whole organisation's ends its turn. Up to 24 at once, 4 an organisation,
+// in this order: a bank slot, the database gate (2 at once), Tx A's commit, the
+// gate let go, the bank's call, the gate again, ahead of any new Tx A, Tx B,
+// both let go. A run starts new work for 30 s, then waits for what it started.
+// A stop leaves up to 24 SUBMISSION_PENDING, as a crash would; the bank check
+// settles them. No SKIP LOCKED: the page takes no locks, one copy of this job
+// runs, and skipping at Tx A would break ADR-006's order; what keeps a request
+// safe is Tx A's locks and compare-and-set, and `one_instruction_a_request`.
+// Each in a transaction of its own:
 //
 // Tx A, in ADR-006 §6's lock order:
 // 1. the platform hand-off pause, FOR SHARE (level 1): paused, or a row that
@@ -128,7 +136,8 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { createFairLanes, isOrganisationWide, type LaneStep } from './fair-lanes.ts';
+import { finishedWithinStop } from './background.ts';
+import { createFairLanes, createGate, isOrganisationWide, type LaneStep } from './fair-lanes.ts';
 import { alertAdmins } from './payment-alerts.ts';
 import type { RailEntry, RailHealth, RailHold } from './rail-health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
@@ -154,9 +163,27 @@ const SWEEP_EVERY_MS = 60_000;
 /** How many of an organisation's approved requests are read at once: the run then takes the next page after them. */
 const HANDOFF_PAGE = 50;
 
-/** How many requests are worked at once, across every organisation and in each (4D2e Stage F): the new shape, one at a time. */
-const HANDOFF_SLOTS = 1;
-const HANDOFF_SLOTS_AN_ORGANISATION = 1;
+/**
+ * How many bank calls are under way at once, across every organisation and in
+ * each (4D2e Stage F): a bank hung at 30 s takes 48 a minute against one at a
+ * time's 2; a hung organisation holds 1/6. First numbers; Stage G measures.
+ */
+const HANDOFF_LIMITS = { total: 24, perOrganisation: 4 } as const;
+
+/** The hand-off's transactions at once: the database, not the bank, is the ceiling. At most a third of the pool (refused at start). */
+const DATABASE_GATE = 2;
+
+/** How long a run starts new work for: about 40 s at worst, with the last calls' answers. */
+const RUN_BUDGET_MS = 30_000;
+
+/**
+ * How long a stop waits for calls under way: well inside the API's own stop deadline (25 s), which a hung bank's 30 s
+ * would pass, losing the log's flush. Those left stay SUBMISSION_PENDING, as after a crash: the bank check settles them.
+ */
+const STOP_WAIT_MS = 15_000;
+
+/** First anchors made at once: each may take 120 s on a long chain, and holds no bank slot while it does. */
+const ANCHOR_GATE = 2;
 
 /**
  * The statuses a request is handed off from. This job never commits one
@@ -205,6 +232,13 @@ type TxA =
   | { readonly outcome: 'denied'; readonly causes: string }
   | { readonly outcome: 'waiting'; readonly why: string }
   | { readonly outcome: 'not_approved' };
+
+/** What the check before Tx A came to: Tx A's, with its breaker's place if sent; or never begun, and why. */
+type Cleared =
+  | Exclude<TxA, { outcome: 'handed_off' }>
+  | (Extract<TxA, { outcome: 'handed_off' }> & { readonly settle: Extract<RailEntry, { settle: unknown }>['settle'] })
+  | { readonly outcome: 'held'; readonly hold: RailHold; readonly outage: number }
+  | { readonly outcome: 'stopped' };
 
 /**
  * What a standing request still waits for, comma-joined, or '' for nothing: a
@@ -271,6 +305,10 @@ export function createHandoff({
   page = HANDOFF_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
   unknownAfterMs = UNKNOWN_AFTER_MS,
+  limits = HANDOFF_LIMITS,
+  runBudgetMs = RUN_BUDGET_MS,
+  poolMax,
+  stopWaitMs = STOP_WAIT_MS,
   anchoring,
 }: {
   /** The organisations to look in: the directory's list, which job-list.ts passes. */
@@ -291,6 +329,14 @@ export function createHandoff({
   readonly callTimeoutMs?: number;
   /** How long a transaction waits for its answer before UNKNOWN (UNKNOWN_AFTER_MS unless a test names less). */
   readonly unknownAfterMs?: number;
+  /** How many bank calls at once (HANDOFF_LIMITS unless a test names fewer). */
+  readonly limits?: { readonly total: number; readonly perOrganisation: number };
+  /** How long a run starts new work for (RUN_BUDGET_MS unless a test names less). */
+  readonly runBudgetMs?: number;
+  /** The pool's size of the process it runs in: refused at start where the gate would take over a third of it. */
+  readonly poolMax: number;
+  /** How long a stop waits for calls under way (STOP_WAIT_MS unless a test names less). */
+  readonly stopWaitMs?: number;
   /**
    * The anchor check's last anchors, and its check of one organisation (job-list.ts
    * passes both): Tx A refuses a chain behind its anchor (ADR-012 §2, H11).
@@ -305,6 +351,12 @@ export function createHandoff({
   if (unknownAfterMs <= callTimeoutMs) {
     throw new RangeError("A transaction's wait for its answer must be longer than the partner's call may take");
   }
+  // Refused at start: past a third of the pool, the hand-off could keep agents' decisions from their connections.
+  if (DATABASE_GATE > Math.floor(poolMax / 3)) {
+    throw new RangeError(`The hand-off's ${String(DATABASE_GATE)} transactions at once need a pool of at least 6`);
+  }
+  const databaseGate = createGate(DATABASE_GATE);
+  const anchorGate = createGate(ANCHOR_GATE);
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
   // Its first beat is its start, so /health gives a new process HEARTBEAT_STALE_MS to make its first run; after that
   // only a run that reads its organisations beats, so one failing every time reads as stopped.
@@ -312,8 +364,11 @@ export function createHandoff({
   let sweptAt = Number.NEGATIVE_INFINITY;
   // Why hand-offs were held at the last run (gate H5): said on change.
   let heldWas: string | null = null;
-  // The run under way's signal: the lanes' work is one job's, and runs never overlap.
+  // The run under way's signal and budget: the lanes' work is one job's, and runs never overlap.
   let stopping: AbortSignal | undefined;
+  let budgetEnds = Number.POSITIVE_INFINITY;
+  let gaveUpWaiting = false;
+  const runSpent = (): boolean => stopping?.aborted === true || clock.now().getTime() >= budgetEnds;
   // Each organisation's waiting requests and why (gate H5, H8): `said` as of its last full pass, `now` in the pass under
   // way, which may take several runs; replaced only after a full pass, so a lane cut short forgets nothing, and a lane
   // that ended its turn on its first request never reads as if the rest had stopped waiting.
@@ -645,13 +700,15 @@ export function createHandoff({
     toldHeld.set(orgId, hold === 'lane' ? { ...told, lane: true } : { ...told, bank: outage });
     if (already) return;
     try {
-      await withSignedStates(database, orgId, services(log), (tx) =>
-        createAuditTrail({ keys, ids }).record(tx, orgId, {
-          actor: ACTOR,
-          action: 'handoff.held_for_bank',
-          subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
-          details: { hold },
-        }),
+      await databaseGate.run(orgId, () =>
+        withSignedStates(database, orgId, services(log), (tx) =>
+          createAuditTrail({ keys, ids }).record(tx, orgId, {
+            actor: ACTOR,
+            action: 'handoff.held_for_bank',
+            subject: { type: 'handoff_hold', id: ids.next(), version: 1 },
+            details: { hold },
+          }),
+        ),
       );
     } catch (error) {
       toldHeld.set(orgId, told);
@@ -659,27 +716,53 @@ export function createHandoff({
     }
   };
 
+  /**
+   * Inside the gate, as the last thing before Tx A: the wait for the gate may
+   * have outlasted the bank, the run's budget or the process (a stop leaves a
+   * request as it was, rather than start one it may not be here to finish). The
+   * breaker's place is taken here, so half-open's few are counted as they go.
+   */
+  const txAIfClear = async (orgId: string, id: string, log: Logger): Promise<Cleared> => {
+    const entry = health.enter(orgId);
+    if ('hold' in entry) return { outcome: 'held', hold: entry.hold, outage: entry.outage };
+    const { settle } = entry;
+    if (runSpent()) {
+      settle('not_sent');
+      return { outcome: 'stopped' };
+    }
+    try {
+      const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        txA(tx, states, orgId, id, log),
+      );
+      if (done.outcome === 'handed_off') return { ...done, settle };
+      settle('not_sent');
+      return done;
+    } catch (error) {
+      settle('not_sent');
+      throw error;
+    }
+  };
+
   /** One request handed off if it may go, its outcome logged: whether its organisation's turn goes on. */
   const handOff = async (orgId: string, id: string, log: Logger): Promise<LaneStep> => {
     beatNow();
-    const entry = health.enter(orgId);
-    if ('hold' in entry) {
-      noteWaiting(orgId, id, `hold_${entry.hold}`, log);
-      await tellHeld(orgId, entry.hold, entry.outage, log);
-      return 'end_turn';
-    }
-    let done: TxA;
+    let done: Cleared;
     try {
-      done = await withSignedStates(database, orgId, services(log), (tx, states) => txA(tx, states, orgId, id, log));
+      // Its bank slot already taken (its lane's turn), so a committed Tx A never queues before its call.
+      done = await databaseGate.run(orgId, () => txAIfClear(orgId, id, log));
     } catch (error) {
       // Tx A's outcome unclear (a commit lost with the connection) or a bug: the partner is never called.
-      entry.settle('not_sent');
       log.error('handoff.failed', { requestId: id, err: error });
       return 'next';
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
-    if (done.outcome === 'handed_off') await sent(orgId, id, done, entry, log);
-    else entry.settle('not_sent');
+    if (done.outcome === 'handed_off') await sent(orgId, id, done, log);
+    if (done.outcome === 'stopped') return 'end_turn';
+    if (done.outcome === 'held') {
+      noteWaiting(orgId, id, `hold_${done.hold}`, log);
+      await tellHeld(orgId, done.hold, done.outage, log);
+      return 'end_turn';
+    }
     if (done.outcome !== 'waiting') return 'next';
     noteWaiting(orgId, id, done.why, log);
     return isOrganisationWide(done.why) ? 'end_turn' : 'next';
@@ -689,8 +772,7 @@ export function createHandoff({
   const sent = async (
     orgId: string,
     id: string,
-    { intent, transactionId }: Extract<TxA, { outcome: 'handed_off' }>,
-    { settle }: Extract<RailEntry, { settle: unknown }>,
+    { intent, transactionId, settle }: Extract<Cleared, { outcome: 'handed_off' }>,
     log: Logger,
   ): Promise<void> => {
     const answer = await answerOf(intent, id, log);
@@ -698,8 +780,12 @@ export function createHandoff({
     const word = breakerWordOf(answer, intent);
     settle(word);
     if (word === 'accepted') toldHeld.delete(orgId);
+    // The run gave up waiting for this call at a stop: its Tx B would meet a closing pool. SUBMISSION_PENDING, as after
+    // a crash, for the bank check to settle.
+    if (gaveUpWaiting) return;
     try {
-      const recorded = await txB(orgId, id, transactionId, answer, log);
+      // Ahead of any new Tx A: it frees a bank slot, and speaks for money already at the bank.
+      const recorded = await databaseGate.run(orgId, () => txB(orgId, id, transactionId, answer, log), true);
       log.info('handoff.handed_off', {
         requestId: id,
         instructionId: intent.instructionId,
@@ -716,7 +802,7 @@ export function createHandoff({
   const laneRead = async (orgId: string, after: string | undefined): Promise<string[] | null> => {
     const log = logger.child({ orgId });
     try {
-      const approved = await approvedOf(orgId, after, log);
+      const approved = await databaseGate.run(orgId, () => approvedOf(orgId, after, log));
       if (approved.length > 0) waitingOf(orgId).sawRows = true;
       return approved;
     } catch (error) {
@@ -728,12 +814,21 @@ export function createHandoff({
   /** A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first. */
   const anchorFirstIn = (orgId: string): Promise<void> | undefined => {
     const held = anchoring?.anchors.latest({ kind: 'organisation', orgId });
-    return anchoring === undefined || held !== undefined ? undefined : anchoring.anchorFirst(orgId, stopping);
+    if (anchoring === undefined || held !== undefined) return undefined;
+    return anchorGate.run(orgId, async () => {
+      // A long queue of these may outlast the run: none begun past its budget or a stop.
+      if (runSpent()) return;
+      // A long chain takes minutes: beaten for each, so /health doesn't read a run of them as stopped.
+      beatNow();
+      await anchoring.anchorFirst(orgId, stopping);
+      beatNow();
+    });
   };
 
   const lanes = createFairLanes<string>({
-    total: HANDOFF_SLOTS,
-    limitOf: () => HANDOFF_SLOTS_AN_ORGANISATION,
+    total: limits.total,
+    // One at a time past a lane's hold, until the bank answers one of its payments (rail-health.ts).
+    limitOf: (orgId) => (health.oneAtATime(orgId) ? 1 : limits.perOrganisation),
     page,
     idOf: (id) => id,
     read: laneRead,
@@ -746,19 +841,28 @@ export function createHandoff({
 
   /**
    * Every organisation's turns at its approved requests, until each lane is
-   * done or the run stops; then, for a lane that reached its end, the stale
-   * count and what it waits for settled. A lane stopped short has seen only some
-   * of its requests, so counting the rest as left standing would be a false alarm.
+   * done, the run's budget is spent, or the run stops. What it started is waited
+   * for, at a stop only so long: a hung bank must not take the process's stop
+   * past its deadline. Then, for a lane that reached its end, the stale count and
+   * what it waits for settled. A lane stopped short has seen only some of its
+   * requests, so counting the rest as left standing would be a false alarm.
    */
   const handOffLanes = async (orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
     stopping = signal;
-    const stopped = () => signal?.aborted === true;
-    const outcomes = await lanes.run(orgs, stopped);
+    gaveUpWaiting = false;
+    budgetEnds = clock.now().getTime() + runBudgetMs;
+    const outcomes = await finishedWithinStop(lanes.run(orgs, runSpent), signal, stopWaitMs);
+    if (outcomes === undefined) {
+      gaveUpWaiting = true;
+      return;
+    }
     for (const [orgId, outcome] of outcomes) {
       if (outcome !== 'whole') continue;
       const lane = waitingOf(orgId);
       // A pass that read no rows has nothing to count: a trip saved for each idle organisation.
-      if (lane.sawRows && !stopped()) await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));
+      if (lane.sawRows && signal?.aborted !== true) {
+        await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));
+      }
       lane.sawRows = false;
       lane.said = lane.now;
       lane.now = new Map();

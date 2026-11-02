@@ -92,6 +92,7 @@ const handoffOf = (w: World) =>
     clock,
     logger: testLogger(capture),
     health: createRailHealth({ clock, logger: testLogger(capture) }),
+    poolMax: 6,
   });
 
 /** The bank check over the world alone, taking the inbox's messages first, asking `rail`. */

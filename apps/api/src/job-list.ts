@@ -182,6 +182,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       ...clocked,
       rail,
       health: railHealth,
+      poolMax: config.db.poolMax,
       outbox,
       // The anchor check starts before the hand-off's first run: this list's order.
       anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },

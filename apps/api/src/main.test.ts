@@ -501,7 +501,8 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
       ...ENV,
       AGENTX_DB_PORT: '6432',
       AGENTX_DB_NAME: 'agentx_t',
-      AGENTX_DB_POOL_MAX: '3',
+      // The smallest the hand-off's database gate allows: a third of the pool at most.
+      AGENTX_DB_POOL_MAX: '6',
     });
     expect(server).toBeDefined();
     expect(fake.created.map((database) => database.options)).toEqual([
@@ -512,7 +513,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
         user: 'agentx_app',
         password: DB_LOGIN,
         tls: 'verify-full',
-        maxConnections: 3,
+        maxConnections: 6,
         organisationShare: 1,
         applicationName: 'agentx-api',
       },

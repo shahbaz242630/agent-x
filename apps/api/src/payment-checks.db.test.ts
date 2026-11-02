@@ -92,6 +92,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
     clock,
     logger: testLogger(capture),
     health: createRailHealth({ clock, logger: testLogger(capture) }),
+    poolMax: 6,
   });
 
 /** The bank check over the world alone, asking `rail` (the world's own fake unless given). */

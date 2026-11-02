@@ -124,6 +124,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
     clock,
     logger: testLogger(capture),
     health: createRailHealth({ clock, logger: testLogger(capture) }),
+    poolMax: 6,
   });
 
 const checksOf = (w: World) =>

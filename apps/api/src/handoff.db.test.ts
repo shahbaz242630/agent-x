@@ -150,6 +150,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resol
     clock,
     logger: testLogger(capture),
     health: createRailHealth({ clock, logger: testLogger(capture) }),
+    poolMax: 6,
   });
 
 /** The platform's hand-off pause moved in the caller's transaction, as the operator's command moves it (B1). */
@@ -298,6 +299,27 @@ describe('an approved request handed to the partner once (B4)', () => {
     expect(lines('handoff.failed')).toEqual([]);
   });
 
+  it('takes one left INSTRUCTION_READY by anything else, so it is never stranded', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const key = { orgId: w.org, id: request.id };
+    await signed(w, async (tx, states) => {
+      await requestOf(tx, states, key, 'change');
+      await states.changeStatus(tx, SPEND_REQUESTS, key, 'make_ready', {
+        actor: OPERATOR,
+        action: 'spend_request.made_ready',
+        details: {},
+      });
+    });
+    expect(await statusOf(w, request.id)).toBe('INSTRUCTION_READY');
+
+    await handoffOf(w).run();
+
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    const events = await shared.eventsAbout(w.org, request.id, SPEND_REQUESTS.subject);
+    expect(events.filter(({ action }) => action === 'spend_request.made_ready')).toHaveLength(1);
+  });
+
   it('pages past requests left waiting, so a younger one still goes in the same run', async () => {
     const { w, acting } = await ready();
     // Older, to the supplier with no payee yet: it waits.
@@ -314,6 +336,7 @@ describe('an approved request handed to the partner once (B4)', () => {
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
+      poolMax: 6,
       page: 1,
     }).run();
 
@@ -396,6 +419,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
+      poolMax: 6,
     });
 
     await job.run();
@@ -433,6 +457,41 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
       await pausing;
       await pauseMoved(false);
     }
+  });
+
+  it('holds at its own Tx A a request reached after a pause taken mid-run, ending the organisation’s turn', async () => {
+    const { w, acting } = await ready();
+    const first = await ask(acting, w, { amount: SMALL() });
+    const second = await ask(acting, w, { amount: SMALL() });
+    // The run read the pause as running at its start: taken as the first is at the bank, only Tx A can see it.
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await pauseMoved(true);
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+    try {
+      await createHandoff({
+        list: () => Promise.resolve([w.org]),
+        database: app,
+        outbox: createOutbox({ ids, clock }),
+        rail,
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        health: createRailHealth({ clock, logger: testLogger(capture) }),
+        poolMax: 6,
+        limits: { total: 1, perOrganisation: 1 },
+      }).run();
+    } finally {
+      await pauseMoved(false);
+    }
+
+    expect(await statusOf(w, first.id)).toBe('HANDED_OFF');
+    expect(await statusOf(w, second.id)).toBe('APPROVED');
+    expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: second.id, why: 'pause_paused' })]);
   });
 
   it('waits while the organisation is on its integrity hold', async () => {
@@ -713,6 +772,7 @@ describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, S
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
+      poolMax: 6,
       unknownAfterMs: 60_000,
     });
 
@@ -837,6 +897,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
+      poolMax: 6,
       ...limits,
     });
 
@@ -1104,6 +1165,7 @@ describe('approved requests left standing, said for the queue-age alert (gate H8
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
+      poolMax: 6,
     });
 
     await job.run();
@@ -1448,6 +1510,9 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
               logger: testLogger(capture),
               // Many unknowns in a row are this model's point: the breaker has tests of its own (handoff-lanes.db.test.ts).
               health: createRailHealth({ clock, logger: testLogger(capture), laneUnknowns: 1_000 }),
+              poolMax: 6,
+              // One at a time, each run reaching one that dies at most: at concurrency, handoff-lanes.db.test.ts.
+              limits: { total: 1, perOrganisation: 1 },
               ...LIMITS,
             }).run();
 

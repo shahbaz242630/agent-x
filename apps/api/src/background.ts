@@ -20,9 +20,38 @@ export async function withinDeadline<T>(
   const stop = (): void => {
     cutOff(new Stopped('the check was stopped'));
   };
+  // A signal already aborted never fires its event.
+  if (signal?.aborted === true) stop();
   signal?.addEventListener('abort', stop, { once: true });
   try {
     return await Promise.race([checking, cut]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', stop);
+  }
+}
+
+/**
+ * The work's result, or undefined once `ms` have passed from the signal's stop:
+ * for a run whose steps can't be cut short (a bank call under way), so a stop
+ * still ends within its deadline. No signal, or none stopping: as long as it takes.
+ */
+export async function finishedWithinStop<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+  ms: number,
+): Promise<T | undefined> {
+  const { promise: gaveUp, resolve: giveUp } = Promise.withResolvers<undefined>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = (): void => {
+    timer = setTimeout(() => {
+      giveUp(undefined);
+    }, ms);
+  };
+  if (signal?.aborted === true) stop();
+  signal?.addEventListener('abort', stop, { once: true });
+  try {
+    return await Promise.race([work, gaveUp]);
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', stop);

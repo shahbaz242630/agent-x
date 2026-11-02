@@ -470,6 +470,7 @@ async function seedPayment(): Promise<string> {
       clock,
       logger: testLogger(),
       health: createRailHealth({ clock, logger: testLogger() }),
+      poolMax: 6,
     }).run();
   } finally {
     if (before.outcome === 'paused') await pause(true);

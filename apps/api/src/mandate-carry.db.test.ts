@@ -569,6 +569,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
       clock,
       logger: logger(),
       health: createRailHealth({ clock, logger: logger() }),
+      poolMax: 6,
     }).run();
     for (const { id } of pending.slice(20)) expect(await statusOf(w, id)).toBe('APPROVED');
     expect(capture.lines().filter((line) => line.event === 'handoff.waiting' && line.why === 'carry')).toHaveLength(2);
