@@ -34,8 +34,9 @@
 // drift (schema-check.ts), for its own shape alone. It must be a plain table of the
 // owner's: anything else no migration of ours makes, and PUBLIC's rights and rewrite
 // rules aren't its shape. A table the file names is held at once, as ever. One gone
-// from the live database is release-shaped too, or a rename would pass a known
-// table off as new.
+// from the live database means a new name may be a known table renamed, with its
+// walls stripped to wait out one run: then a new table's shape is the alarm at once.
+// A release renaming a table keeps its walls, so raises nothing that way.
 //
 // **What it can read.** Everything here is readable by an ordinary role —
 // checked on 16 and 18 before it was written (pg_class, pg_namespace,
@@ -1693,6 +1694,7 @@ export async function liveSchemaDrift<Schema>(
     (one) => !built.has(one.name) && one.kind === 'r' && !one.inherits && one.owner === ownerRole,
   );
   const isNew = new Set(newTables.map(({ name }) => name));
+  const gone = BUILT_TABLES.filter((name) => !known.has(name));
   /** What a table's own shape breaks: the same rules, for those that stand and those new. */
   const shapeProblems = (
     tables: readonly RelationRow[],
@@ -1714,8 +1716,12 @@ export async function liveSchemaDrift<Schema>(
     ...columnProblems(allColumns, listed, tables, globalTables),
   ];
 
+  const newShape = shapeProblems(newTables, (table) => isNew.has(table), {});
+
   const problems: SchemaProblem[] = [
     ...schemaOwnerProblems(allSchemas, ownerRole),
+    ...(gone.length === 0 ? [] : newShape),
+    ...policy.tablesThatStay.filter((name) => !known.has(name)).map((name) => `${name} must be there`),
     ...shapeProblems(
       allRelations.filter((one) => !isNew.has(one.name)),
       (table) => !isNew.has(table),
@@ -1758,10 +1764,8 @@ export async function liveSchemaDrift<Schema>(
     releaseShaped: inOrder([
       ...builtCheckProblems(allChecks, BUILT_CHECKS),
       ...unknownFunctionProblems(allFunctions),
-      ...shapeProblems(newTables, (table) => isNew.has(table), {}),
-      ...BUILT_TABLES.filter((name) => !known.has(name)).map(
-        (name) => `${name} is a table the migrations built, and is not there`,
-      ),
+      ...(gone.length === 0 ? newShape : []),
+      ...gone.map((name) => `${name} is a table the migrations built, and is not there`),
     ]),
   };
 }

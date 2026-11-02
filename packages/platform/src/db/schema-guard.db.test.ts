@@ -2084,12 +2084,56 @@ describe('which drift a release can also make (schema-check.ts holds it one run 
       }
     });
 
-    it('a known table renamed to pass as new shows as gone: release-shaped, its old walls still its own', async () => {
-      await owner.query('alter table identity.login_flows rename to login_flows_moved');
+    it.each([
+      ['access', 'requests'],
+      ['audit', 'events'],
+      ['audit', 'heads'],
+    ])(
+      'a known table on no other list, %s.%s, renamed with its walls stripped to pass as new: the alarm at once',
+      async (schema, table) => {
+        const named = `${schema}.${table}`;
+        const moved = `${table}_moved`;
+        // eslint-disable-next-line agentx/no-string-built-sql -- Names from the fixed list above.
+        await owner.query(`alter table ${named} rename to ${moved}`);
+        // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+        await owner.query(`alter table ${schema}.${moved} no force row level security`);
+        try {
+          const { atOnce, releaseShaped } = await drift();
+          expect(atOnce).toContain(`${schema}.${moved} does not have row-level security forced`);
+          expect(atOnce).toContain(`${named} must be there`);
+          expect(releaseShaped).toContain(`${named} is a table the migrations built, and is not there`);
+          expect(releaseShaped).not.toContain(`${schema}.${moved} does not have row-level security forced`);
+        } finally {
+          // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+          await owner.query(`alter table ${schema}.${moved} force row level security`);
+          // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+          await owner.query(`alter table ${schema}.${moved} rename to ${table}`);
+        }
+      },
+    );
+
+    it('one renamed with its walls kept raises nothing of its shape: only that it must be there', async () => {
+      await owner.query('alter table access.requests rename to requests_moved');
       try {
-        const { releaseShaped } = await drift();
+        const { atOnce, releaseShaped } = await drift();
+        expect(atOnce).toEqual(['access.requests must be there']);
+        expect(releaseShaped.filter((problem) => !problem.includes('CHECK constraint'))).toEqual([
+          'access.requests is a table the migrations built, and is not there',
+        ]);
+      } finally {
+        await owner.query('alter table access.requests_moved rename to requests');
+      }
+    });
+
+    it('a table gone and a new one with no walls: the new shape is the alarm at once, even if it is a true new table', async () => {
+      await owner.query('alter table identity.login_flows rename to login_flows_moved');
+      await owner.query(MADE);
+      try {
+        const { atOnce, releaseShaped } = await drift();
+        expect(atOnce).toContain('audit.planted has no org_id');
+        expect(atOnce).toContain('identity.login_flows_moved has no org_id');
+        expect(releaseShaped).not.toContain('audit.planted has no org_id');
         expect(releaseShaped).toContain('identity.login_flows is a table the migrations built, and is not there');
-        expect(releaseShaped).toContain('identity.login_flows_moved has no org_id');
       } finally {
         await owner.query('alter table identity.login_flows_moved rename to login_flows');
       }
