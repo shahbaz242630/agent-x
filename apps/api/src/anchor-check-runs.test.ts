@@ -177,23 +177,51 @@ describe('one slow or locked organisation holds its own lane alone (partner: its
     const all = orgs(3);
     let hanging = true;
     const { organizations, started, release } = directory(all, (orgId) =>
-      orgId === org(1) && hanging ? undefined : ok(1n),
+      orgId === org(3) && hanging ? undefined : ok(1n),
     );
     const { check } = checking(organizations, { lanes: 2 });
     const first = check.run();
     await settled();
     await vi.advanceTimersByTimeAsync(SLOW_AFTER_MS);
-    release(org(1));
+    release(org(3));
     await first;
     hanging = false;
     started.length = 0;
-    // Slow: lane 0 takes it first, while lane 1 has the rest.
+    // Slow: lane 0 takes it ahead of its place, while lane 1 has the rest.
     await check.run();
-    expect(started).toEqual([org(1), org(2), org(3)]);
+    expect(started).toEqual([org(3), org(1), org(2)]);
     started.length = 0;
     await check.run();
-    // Quick again: in its place in the list, whichever lane.
-    expect(new Set(started)).toEqual(new Set(all));
+    // Quick again: back in its place in the list.
+    expect(started).toEqual(all);
+  });
+
+  it('a new round waits for the slow chains of this one, even with all the quick ones done', async () => {
+    vi.useFakeTimers();
+    const all = orgs(4);
+    const hanging = new Set([org(1), org(2)]);
+    const { organizations, started, release } = directory(all, (orgId) => (hanging.has(orgId) ? undefined : ok(1n)));
+    const { check } = checking(organizations, { lanes: 2, runWithinMs: SLOW_AFTER_MS * 2 });
+    const asSlow = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(SLOW_AFTER_MS);
+    release(org(1));
+    release(org(2));
+    await asSlow;
+
+    // Lane 0 on one slow chain to its end, lane 1 through the quick ones, with the other slow chain waiting.
+    hanging.delete(org(2));
+    const cut = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(SLOW_AFTER_MS * 2);
+    await cut;
+    release(org(1));
+    await settled();
+
+    hanging.clear();
+    started.length = 0;
+    await check.run();
+    expect(started).toEqual([org(1), org(2)]);
   });
 
   it('a lone lane leaves a slow chain until everyone else has had their turn', async () => {
@@ -370,10 +398,11 @@ describe('a run ends in its time, with its line, and the next goes on from there
     expect(started).toEqual([org(2), org(3), org(4)]);
   });
 
-  it('an organisation leaving the list in the middle of a round is the alarm at once, and no check', async () => {
+  it('an organisation leaving the list in the middle of a round is the alarm once, and no check', async () => {
     vi.useFakeTimers();
     const all = orgs(4);
-    const { organizations, started, list, release, holds } = directory(all, () => undefined);
+    let hanging = true;
+    const { organizations, started, list, release, holds } = directory(all, () => (hanging ? undefined : ok(1n)));
     const { check, capture } = checking(organizations, { lanes: 1, runWithinMs: 1000 });
     const first = check.run();
     await settled();
@@ -384,16 +413,14 @@ describe('a run ends in its time, with its line, and the next goes on from there
 
     // Org 4 was waiting for its turn.
     list.now = [org(1), org(2), org(3)];
+    hanging = false;
     started.length = 0;
-    const second = check.run();
-    await settled();
-    expect(holds).toContainEqual([org(4), 'unlisted']);
+    await check.run();
+    expect(holds.filter(([orgId]) => orgId === org(4))).toEqual([[org(4), 'unlisted']]);
     expect(
       capture.lines().filter((line) => line.event === 'audit.integrity_failed' && line.reason === 'unlisted'),
     ).toEqual([expect.objectContaining({ orgId: org(4) })]);
-    expect(started).not.toContain(org(4));
-    await vi.advanceTimersByTimeAsync(1000);
-    await second;
+    expect(started).toEqual([org(1), org(2), org(3)]);
   });
 
   it('an alarm repeats every run, and first, even while the rest of the round waits', async () => {
@@ -451,15 +478,12 @@ describe('a run ends in its time, with its line, and the next goes on from there
       { ...organizations, recorded: () => new Promise<readonly string[]>(() => undefined) },
       { runWithinMs: 1000 },
     );
+    clock.advanceBy(STALE_MS);
     const run = check.run();
     await settled();
     await vi.advanceTimersByTimeAsync(1000);
     await run;
     expect(lines(capture, 'audit.anchor_check_done')).toHaveLength(1);
-    expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
-    clock.advanceBy(STALE_MS);
-    // The read before still hangs: this one fails at once, the way a hung database does.
-    await check.run();
     expect(lines(capture, 'audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'list' })]);
   });
 
@@ -831,15 +855,29 @@ describe('writes come on a schedule of their own during a run', () => {
     expect(durable.capture.lines().filter((line) => line.event === 'audit.anchor_store_write_failed')).toHaveLength(1);
   });
 
-  it('no writes after the run: the timer ends with it', async () => {
+  it('no writes after the run, even with a write under way as it ends: the timer ends with it', async () => {
     const clock = new FixedClock(AT);
     const durable = logOver(clock);
-    const { organizations, list } = directory([org(1)]);
-    list.now = [org(1)];
+    await durable.log.read();
+    const { promise: letGo, resolve: release } = Promise.withResolvers<void>();
+    durable.fake.instead.put = async (name, bytes) => {
+      await letGo;
+      return durable.fake.real.put(name, bytes);
+    };
+    const { organizations, release: endCheck } = directory(orgs(2), (orgId) => (orgId === org(1) ? undefined : ok(1n)));
     const { check } = checking(organizations, { durable: durable.log, clock, writeEveryMs: 1 });
-    await check.run();
+    const running = check.run();
+    // The timer's write under way, held at the store, as the run's last check ends.
+    await vi.waitUntil(() => durable.fake.calls.puts > 0, { timeout: 4000, interval: 1 });
+    endCheck(org(1));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release();
+    await running;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // What moves after the run waits for the next: a timer gone on would write it.
+    durable.log.keep(signAnchor(keys, { kind: 'organisation', orgId: org(9) }, ok(1n), AT));
     const after = durable.fake.calls.puts;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 30));
     expect(durable.fake.calls.puts).toBe(after);
   });
 });
