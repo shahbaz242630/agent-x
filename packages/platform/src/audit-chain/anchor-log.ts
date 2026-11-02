@@ -83,6 +83,12 @@ const MOST_AHEAD_MS = 5 * 60_000;
  */
 const heapsFileBytes = (): number => Math.floor(getHeapStatistics().heap_size_limit / 5);
 
+/** What a chain's line comes to, for counting a whole read against that: a read keeps one for each. */
+const KEPT_LINE_BYTES = 340;
+
+/** How near a file written may come to that before a successor might not read it: said in time to add memory. */
+const NEAR_MEMORY = 0.8;
+
 /** How far past that a file is read: a million lines of ones signed before, in a file anyone can add, cost little to pack. */
 const MOST_READ_PAST = 8;
 
@@ -401,32 +407,56 @@ export function createAnchorLog({
     return { anchors: lines, sound: bad === 0 && closed };
   };
 
+  /** Highest place wins. The same place with another hash is the alarm, and the older stays: the chain then says which it holds. */
+  const merge = (into: Map<string, Anchor>, line: Anchor): void => {
+    const held = into.get(line.chain);
+    if (held === undefined || line.seq > held.seq) {
+      into.set(line.chain, line);
+      return;
+    }
+    if (line.seq !== held.seq) return;
+    if (line.hash.equals(held.hash)) {
+      // The same place signed again later: an idle chain checked since (anchor-check.ts).
+      if (line.at > held.at) into.set(line.chain, line);
+    } else {
+      alarm('fork', { seq: line.seq }, line.chain);
+      if (line.at < held.at) into.set(line.chain, line);
+    }
+  };
+
+  /**
+   * A file's lines into what this read holds, one a chain, so files replayed cost nothing more. It all counts against what
+   * this process can hold, or files each under the limit could together end it, past anything a catch can see.
+   */
+  const staged = (stage: Map<string, Anchor>, lines: readonly Anchor[], kind: Kind, name: string): void => {
+    for (const line of lines) merge(stage, line);
+    if (stage.size * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, whenNamed(countdownOf(kind, name)));
+  };
+
   /**
    * The snapshots not read yet, newest first, back to the first with nothing wrong: `base`, the one deltas count from.
    * Thrown if none is left to stand for the whole, as with a failed call: what's in memory already does, once there is any.
    */
-  const newerSnapshots = async (foreign: { count: number }) => {
-    const lines: Anchor[] = [];
+  const newerSnapshots = async (foreign: { count: number }, stage: Map<string, Anchor>) => {
     let spoiled = 0;
     for await (const name of filesOf('snapshots', SNAPSHOTS_A_PAGE, foreign)) {
       const countdown = countdownOf('snapshots', name);
       if (snapshotFrom !== undefined && countdown >= snapshotFrom) break;
       if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
       const file = await opened('snapshots', name);
-      for (const line of file.anchors) lines.push(line);
-      if (file.sound) return { lines, base: countdown, sound: countdown };
+      staged(stage, file.anchors, 'snapshots', name);
+      if (file.sound) return { base: countdown, sound: countdown };
       spoiled += 1;
     }
     if (spoiled > 0 && snapshotFrom === undefined) throw new Error(tooManySpoiled(spoiled));
-    return { lines, base: snapshotFrom, sound: undefined };
+    return { base: snapshotFrom, sound: undefined };
   };
 
   /**
    * Every delta this process didn't write, newer than the last it listed or, with
    * none yet, than the snapshot: one of the same millisecond may hold more than it.
    */
-  const newerDeltas = async (snapshot: string | undefined, foreign: { count: number }) => {
-    const lines: Anchor[] = [];
+  const newerDeltas = async (snapshot: string | undefined, foreign: { count: number }, stage: Map<string, Anchor>) => {
     let newest: string | undefined;
     let files = 0;
     for await (const name of filesOf('deltas', DELTAS_A_PAGE, foreign)) {
@@ -441,27 +471,10 @@ export function createAnchorLog({
       }
       files += 1;
       const file = await opened('deltas', name);
-      for (const line of file.anchors) lines.push(line);
+      staged(stage, file.anchors, 'deltas', name);
       if (file.sound) newest ??= name;
     }
-    return { lines, newest, files };
-  };
-
-  /** Highest place wins. The same place with another hash is the alarm, and the older stays: the chain then says which it holds. */
-  const merge = (line: Anchor): void => {
-    const held = anchors.get(line.chain);
-    if (held === undefined || line.seq > held.seq) {
-      anchors.set(line.chain, line);
-      return;
-    }
-    if (line.seq !== held.seq) return;
-    if (line.hash.equals(held.hash)) {
-      // The same place signed again later: an idle chain checked since (anchor-check.ts).
-      if (line.at > held.at) anchors.set(line.chain, line);
-    } else {
-      alarm('fork', { seq: line.seq }, line.chain);
-      if (line.at < held.at) anchors.set(line.chain, line);
-    }
+    return { newest, files };
   };
 
   const readFailed = (error: unknown): void => {
@@ -482,11 +495,11 @@ export function createAnchorLog({
   const catchUp = async (): Promise<void> => {
     try {
       const foreign = { count: 0 };
-      const snapshots = await newerSnapshots(foreign);
-      const deltas = await newerDeltas(snapshots.base, foreign);
+      const stage = new Map<string, Anchor>();
+      const snapshots = await newerSnapshots(foreign, stage);
+      const deltas = await newerDeltas(snapshots.base, foreign, stage);
       // Only now, with every call answered: a part read could look like a chain never anchored.
-      for (const line of snapshots.lines) merge(line);
-      for (const line of deltas.lines) merge(line);
+      for (const line of stage.values()) merge(anchors, line);
       if (snapshots.sound !== undefined) snapshotFrom = snapshots.sound;
       if (deltas.newest !== undefined) deltasFrom = deltas.newest;
       if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
@@ -562,12 +575,20 @@ export function createAnchorLog({
       kv: keyVersion,
       sig: signature.toString('base64'),
     });
+    let lineBytes = closing.length;
     const bytes = await gzippedLines(
       (function* lined() {
-        for (const line of lines) yield `${lineOf(line)}\n`;
+        for (const line of lines) {
+          const text = lineOf(line);
+          lineBytes += text.length + 1;
+          yield `${text}\n`;
+        }
         yield `${closing}\n`;
       })(),
     );
+    if (lineBytes > mostFileBytes * NEAR_MEMORY) {
+      logger.error('audit.anchor_store_near_memory', { kind, bytes: lineBytes, mostBytes: mostFileBytes });
+    }
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);
     return { kind, name, bytes, lines };

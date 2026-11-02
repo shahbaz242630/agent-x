@@ -21,7 +21,10 @@
 // past their deadline among them, never pass the lanes, so the hand-offs' connections
 // stay theirs; every trip of theirs has a limit on its answer, so a dead connection ends.
 // A check past its deadline isn't thrown away: when it ends it is compared and anchored
-// all the same, and while it runs it is capacity, not the alarm. A run stops at four minutes, ends with its
+// all the same, and if it fails then, that counts as any failure does. While it runs it is
+// capacity, not the alarm, up to a ceiling of the same 63 minutes at the default: every trip of
+// it has a limit, but the whole has none, so someone answering each page slowly could
+// otherwise keep one chain from ever being compared. Past it, `unchecked`, no hold. A run stops at four minutes, ends with its
 // line whatever is under way, and the next goes on from where it stopped. So the
 // check's line comes at most every 10 minutes at the default interval: 5 between runs,
 // 4 of run, 1 for the last write. With lines up to 9 minutes late, the 20 minutes the
@@ -37,9 +40,10 @@
 // whose anchor landed during its check goes among
 // the first next run: its alarm comes within one interval and one run, 9 minutes.
 //
-// Any number of organisations may be listed. AGENTX_AUDIT_MOST_ORGANISATIONS only says how
-// many this check keeps its own notes on. Those past it take their turns from a cursor
-// through the list, and `audit.anchor_check_over_size`, SEV-2, says so; their anchors are
+// Any number of organisations may be listed. AGENTX_AUDIT_MOST_ORGANISATIONS only limits
+// the chains this check notes that have no anchor yet in the store: every chain in the store
+// is noted whatever it says, its notes small beside its anchor. Those past it take their turns
+// from a cursor through the list, and `audit.anchor_check_over_size`, SEV-2, says so; their anchors are
 // still held, as Tx A and their own comparison need them, the store being a log with no way
 // to read one chain's. So the true limit is memory: more anchors than the heap holds take
 // more hardware, and a store file past it says so (`audit.anchor_store_beyond_memory`).
@@ -55,9 +59,10 @@
 // repeats every run until someone looks. Someone with the database's keys can
 // also try to stop the check from finishing: so a database that refuses the
 // check (a right, a table or a
-// column gone) is the alarm too, and so is a chain left unchecked for three
-// intervals. Anything else that stops a check (the database unreachable, or
-// a check past its deadline) is a warning until then. Every run ends with one
+// column gone) is the alarm too, whenever it comes, and so is a check that keeps failing
+// for three intervals, or one still running past the ceiling above. Anything else that
+// stops a check (the database unreachable, or a check past its deadline but going on)
+// is a warning until then. Every run ends with one
 // line, so a check that has stopped can be told from one with nothing to say.
 // The platform chain is checked every run; each organisation's chain too,
 // found from the directory's list at each run (B1d-2). The list is held to
@@ -148,7 +153,7 @@ export interface AnchorCheckOptions {
   readonly staleAfterMs: number;
   /** How long an organisation may wait for its turn before it is late (see the header). As `staleAfterMs` unless given. */
   readonly reachWithinMs?: number;
-  /** How many organisations it keeps its own notes on: those past it go by a cursor (the header), never unchecked. */
+  /** How many chains with no anchor in the store it keeps notes on: those past it go by a cursor (the header), never unchecked. */
   readonly mostOrganisations?: number;
   /** A round's order where there is no store to go by: a fresh shuffle unless given. */
   readonly shuffled?: (orgIds: readonly string[]) => readonly string[];
@@ -275,11 +280,14 @@ export function createAnchorCheck({
   const keyOf = (chain: Chain): string => (chain.kind === 'platform' ? 'platform' : chain.orgId);
   // Checks, holds and the list's read under way, past their deadline or not: one each at most, each with a connection.
   const inFlight = new Set<string>();
+  // When each chain's check under way began: past the ceiling it is no longer capacity.
+  const checkBegan = new Map<string, number>();
   // Lanes waiting for room among those.
   const waitingForRoom = new Set<() => void>();
   /** One of those has ended. */
   const ended = (key: string): void => {
     inFlight.delete(key);
+    checkBegan.delete(key);
     turns.ended(key);
     for (const wake of waitingForRoom) wake();
     waitingForRoom.clear();
@@ -403,12 +411,32 @@ export function createAnchorCheck({
     alone: boolean,
   ): void => {
     try {
-      const outcome = compared(chain, log, report, last, alone);
-      if (chain.kind !== 'organisation' || (outcome !== 'failed' && outcome !== 'unanchored')) return;
-      turns.repeat(chain.orgId);
-      if (outcome === 'failed' && organizations !== undefined) void settle(organizations, chain.orgId, undefined);
+      afterLate(chain, compared(chain, log, report, last, alone));
     } catch (error) {
       log.error('audit.anchor_check_crashed', { chain: chain.kind, err: error });
+    }
+  };
+
+  /** What came of a check that ended past its turn: it goes again where that is owed, and its hold is tried. */
+  const afterLate = (chain: Chain, outcome: Outcome): void => {
+    if (chain.kind !== 'organisation' || (outcome !== 'failed' && outcome !== 'unanchored')) return;
+    turns.repeat(chain.orgId);
+    if (outcome === 'failed' && organizations !== undefined) void settle(organizations, chain.orgId, undefined);
+  };
+
+  /** How a check that didn't come back comes out, the same in its turn or after: the database's refusal, or a miss. */
+  const failedOutcome = (chain: Chain, log: Logger, error: unknown, alone: boolean): Outcome =>
+    // A store that breaks its contract may be a hostile database too (a planted operator, a view for a table).
+    error instanceof ChainStoreError || refusedByDatabase(error)
+      ? alarmed(chain, log, 'store')
+      : missedCheck(chain, log, error, alone);
+
+  /** A check that failed past its deadline or the run: said on its own line, as no run sums it up. Never throws. */
+  const failedLate = (chain: Chain, log: Logger, error: unknown): void => {
+    try {
+      afterLate(chain, failedOutcome(chain, log, error, true));
+    } catch (crash) {
+      log.error('audit.anchor_check_crashed', { chain: chain.kind, err: crash });
     }
   };
 
@@ -473,13 +501,13 @@ export function createAnchorCheck({
     const key = keyOf(chain);
     try {
       const last = anchors.latest(chain);
-      const alarm = (reason: string, seq?: bigint): Outcome => alarmed(chain, log, reason, seq);
       let report: ChainReport;
       let cutOff = false;
       const began = performance.now();
       try {
         if (inFlight.has(key)) throw new UnderWay('the last check of this chain has not finished');
         inFlight.add(key);
+        checkBegan.set(key, clock.now().getTime());
         const checking = Promise.resolve().then(() => verify(last));
         // Handled here too, so a check that ends after its deadline never goes unhandled.
         void checking.then(
@@ -487,8 +515,9 @@ export function createAnchorCheck({
             ended(key);
             if (cutOff) landedLate(chain, log, ending, last, alone);
           },
-          () => {
+          (error: unknown) => {
             ended(key);
+            if (cutOff) failedLate(chain, log, error);
           },
         );
         report = await withinDeadline(checking, deadlineMs, signal);
@@ -496,9 +525,7 @@ export function createAnchorCheck({
         cutOff = true;
         if (error instanceof Stopped) return 'unchecked';
         if (error instanceof PastDeadline) ran(performance.now() - began);
-        // A store that breaks its contract may be a hostile database too (a planted operator, a view for a table).
-        if (error instanceof ChainStoreError || refusedByDatabase(error)) return alarm('store');
-        return missedCheck(chain, log, error, alone);
+        return failedOutcome(chain, log, error, alone);
       }
       ran(performance.now() - began);
       return compared(chain, log, report, last, alone);
@@ -733,17 +760,43 @@ export function createAnchorCheck({
   };
 
   /**
+   * Checks still under way past the ceiling, which no longer read as capacity: the alarm, no hold, as for any chain unchecked
+   * (one line for the organisations'). Slow answers could otherwise keep a chain from being compared for ever.
+   */
+  const sayOverCeiling = (at: number): ReadonlySet<string> => {
+    const over = new Set([...checkBegan].filter(([, began]) => at - began >= reachWithinMs).map(([key]) => key));
+    if (over.delete('platform')) {
+      alarmed({ kind: 'platform' }, logger, 'unchecked');
+      over.add('platform');
+    }
+    const organisations = [...over].filter((key) => key !== 'platform');
+    if (organisations.length > 0) {
+      logger.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'anchor',
+        reason: 'unchecked',
+        organisations: organisations.length,
+        firstFew: organisations.slice(0, NAMED_ON_A_LINE),
+      });
+    }
+    return over;
+  };
+
+  /**
    * Those past the bound, over all of them, by count as there may be thousands: capacity, or with no run's turn completed
    * for that whole time, the alarm. In a bad run while a turn has completed since, nothing: the next run says.
    */
   const sayLate = (): void => {
     const at = clock.now().getTime();
-    const late = (inUse ?? [...seen]).filter((orgId) => at - lastKnown(orgId) >= reachWithinMs);
+    const overCeiling = sayOverCeiling(at);
+    const late = (inUse ?? [...seen]).filter(
+      (orgId) => at - lastKnown(orgId) >= reachWithinMs && !overCeiling.has(orgId),
+    );
     const pastLate = pastCap.length > 0 && at - pastCapSince >= reachWithinMs ? pastCap : [];
     // One whose own check fails has its own alarm: this is for one that goes on.
     const others = chains
       .map(({ chain }) => keyOf(chain))
-      .filter((key) => !misses.has(key) && at - since(key) >= reachWithinMs);
+      .filter((key) => !misses.has(key) && !overCeiling.has(key) && at - since(key) >= reachWithinMs);
     const named = [...others, ...late, ...pastLate.slice(0, NAMED_ON_A_LINE)];
     if (named.length === 0) return;
     const count = {

@@ -207,6 +207,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing: all are still checked, those past the number in turn from a place in the list, more slowly.',
     next: 'Raise the number it keeps notes on, if there is memory for it, and restart.',
   },
+  'audit.anchor_store_near_memory': {
+    happened: 'The file of audit anchors just written is nearly too large for a process of this size to read back.',
+    broke: 'Nothing yet. A restart with a little more could make payments wait for every organisation.',
+    next: 'Give the process more memory before its next restart.',
+  },
   'audit.anchor_store_beyond_memory': {
     happened: 'The store of audit anchors holds a sound file too large for this process to take into memory.',
     broke: 'After a start, payments wait for every organisation, as their anchors could not be read. Nobody is held.',

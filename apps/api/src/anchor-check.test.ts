@@ -361,8 +361,8 @@ describe('the anchor check when a check does not finish', () => {
     );
     clock.advanceBy(STALE_MS);
     await check.run();
-    // Still under way, every trip of it bounded: capacity, not the alarm (the review, round 3).
-    expect(events()).toEqual([warning, warning, expect.objectContaining({ event: 'audit.anchor_check_behind' })]);
+    // In this rig the ceiling is the stale limit: a check that never ends is the alarm (the review, round 4).
+    expect(events()).toEqual([warning, warning, alarm('unchecked')]);
     expect(
       capture
         .lines()
@@ -385,7 +385,8 @@ describe('the anchor check when a check does not finish', () => {
       (settle: { reject: (error: Error) => void }) => {
         settle.reject(new Error('connection lost'));
       },
-      ['audit.anchor_check_failed', 'audit.anchored'],
+      // Its failure past the deadline is said too: it counts as any failure does (the review, round 4).
+      ['audit.anchor_check_failed', 'audit.anchor_check_failed', 'audit.anchored'],
     ],
   ])('checks the chain again once the late check has ended %s', async (_, end, said) => {
     vi.useFakeTimers();

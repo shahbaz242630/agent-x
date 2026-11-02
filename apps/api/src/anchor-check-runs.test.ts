@@ -6,6 +6,7 @@ import {
   type ChainReport,
   createAnchorLog,
   createMemoryAnchorStore,
+  ChainStoreError,
   signAnchor,
 } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -617,16 +618,14 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
 
     clock.advanceBy(1);
     await oneRun();
+    // The one still under way all that time is past the ceiling, its own alarm; the other 29 went unreached.
     const alarms = lines(capture, 'audit.integrity_failed');
-    expect(alarms).toHaveLength(1);
-    expect(alarms[0]).toMatchObject({
-      level: 'error',
-      chain: 'organisation',
-      check: 'anchor',
-      reason: 'unreached',
-      organisations: 30,
-    });
-    expect(alarms[0]?.firstFew as string[]).toHaveLength(5);
+    expect(alarms).toEqual([
+      expect.objectContaining({ reason: 'unchecked', organisations: 1, firstFew: [org(1)] }),
+      expect.objectContaining({ reason: 'unreached' }),
+    ]);
+    expect(alarms[1]).toMatchObject({ level: 'error', chain: 'organisation', check: 'anchor', organisations: 29 });
+    expect(alarms[1]?.firstFew as string[]).toHaveLength(5);
     expect(holds.filter(([, failure]) => failure !== undefined)).toEqual([]);
     for (const release of running.values()) release();
   });
@@ -651,8 +650,9 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
     await settled();
     await vi.advanceTimersByTimeAsync(1000);
     await third;
+    // Org 1, under way all that time, is past the ceiling, on its own line; org 4, new, has not waited.
     const alarm = lines(capture, 'audit.integrity_failed').at(-1);
-    expect(alarm?.firstFew).toEqual(all);
+    expect(alarm).toMatchObject({ reason: 'unreached', firstFew: [org(2), org(3)] });
     for (const release of running.values()) release();
   });
 
@@ -1513,7 +1513,111 @@ describe('third round (4D2e E6 review)', () => {
     ]);
   });
 
-  it('#7 the platform chain running on past the stale window is capacity too, and late it is said', async () => {
+  it('a run of more organisations than an array spread can take is no crash', { timeout: 60_000 }, async () => {
+    const all = Array.from({ length: 200_000 }, (_, index) => org(index + 1));
+    const { organizations } = directory(all);
+    const { check, capture } = checking(organizations, { mostOrganisations: 300_000 });
+    await check.run();
+    expect(lines(capture, 'audit.anchor_check_crashed')).toEqual([]);
+    expect(lines(capture, 'audit.anchor_check_done').at(-1)).toMatchObject({ chains: 200_000 });
+  });
+});
+
+describe('fourth round (4D2e E6 review)', () => {
+  /** A check of a whole chain that rejects only past its deadline, each turn: the failure `report` says. */
+  const lateFailure = (failure: () => Error) => {
+    const { organizations } = directory([org(1)]);
+    const verify: OrganisationChains['verify'] = () =>
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(failure());
+        }, DEADLINE_MS + 1000);
+      });
+    return { ...organizations, verify };
+  };
+  /** One run past the check's deadline, and then its late end. */
+  const lateRun = async (check: { run(): Promise<void> }): Promise<void> => {
+    const run = check.run();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await run;
+    await vi.advanceTimersByTimeAsync(1000);
+  };
+
+  it('#1 a check that fails past its deadline, every turn, is the alarm by the stale limit', async () => {
+    vi.useFakeTimers();
+    const { check, capture, clock } = checking(lateFailure(() => new Error('Query read timeout')));
+    await lateRun(check);
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([]);
+    clock.advanceBy(STALE_MS);
+    await lateRun(check);
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([
+      expect.objectContaining({ orgId: org(1), chain: 'organisation' }),
+    ]);
+  });
+
+  it('#1 a store’s broken contract, or a refusal, past the deadline is the `store` alarm, with its hold', async () => {
+    for (const failure of [
+      () => new ChainStoreError('a row that cannot be'),
+      () => Object.assign(new Error('permission denied'), { code: '42501' }),
+    ]) {
+      vi.useFakeTimers();
+      const organizations = lateFailure(failure);
+      const holds: (string | undefined)[] = [];
+      const { check, capture } = checking({
+        ...organizations,
+        hold: (_, reason) => {
+          holds.push(reason);
+          return Promise.resolve();
+        },
+      });
+      await lateRun(check);
+      expect(capture.lines().filter((line) => line.reason === 'store')).toEqual([
+        expect.objectContaining({ orgId: org(1) }),
+      ]);
+      expect(holds).toContain('store');
+    }
+  });
+
+  it('#1 past the run’s own end too: a check cut off that then fails is counted', async () => {
+    vi.useFakeTimers();
+    const { check, capture, clock } = checking(
+      lateFailure(() => new Error('connection lost')),
+      { runWithinMs: 1000 },
+    );
+    const first = check.run();
+    await vi.advanceTimersByTimeAsync(1000);
+    await first;
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + 1000);
+    clock.advanceBy(STALE_MS);
+    const second = check.run();
+    await vi.advanceTimersByTimeAsync(1000);
+    await second;
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + 1000);
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toHaveLength(1);
+  });
+
+  it('#2 one chain in flight past the ceiling, while others complete, is `unchecked`: no hold, and not capacity', async () => {
+    vi.useFakeTimers();
+    const { organizations, holds, running } = directory(orgs(3), (orgId) => (orgId === org(1) ? undefined : ok(1n)));
+    const { check, capture, clock } = checking(organizations, { lanes: 2 });
+    const first = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await first;
+    clock.advanceBy(REACH_MS - 1);
+    await check.run();
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([]);
+    clock.advanceBy(1);
+    await check.run();
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([
+      expect.objectContaining({ level: 'error', chain: 'organisation', organisations: 1, firstFew: [org(1)] }),
+    ]);
+    expect(lines(capture, 'audit.anchor_check_behind').at(-1)?.firstFew ?? []).not.toContain(org(1));
+    expect(holds.filter(([, reason]) => reason !== undefined)).toEqual([]);
+    expect(running.size).toBe(1);
+  });
+
+  it('#2 the same for the platform chain, on its own line', async () => {
     vi.useFakeTimers();
     const { check, capture, clock } = checking(directory([]).organizations, {
       chains: [{ chain: { kind: 'platform' }, verify: () => new Promise<ChainReport>(() => undefined) }],
@@ -1523,23 +1627,82 @@ describe('third round (4D2e E6 review)', () => {
     await first;
     clock.advanceBy(REACH_MS);
     await check.run();
-    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([]);
-    expect(
-      capture
-        .lines()
-        .filter((line) => line.firstFew !== undefined)
-        .at(-1),
-    ).toMatchObject({
-      firstFew: ['platform'],
-    });
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([
+      expect.objectContaining({ chain: 'platform' }),
+    ]);
   });
 
-  it('a run of more organisations than an array spread can take is no crash', { timeout: 60_000 }, async () => {
-    const all = Array.from({ length: 200_000 }, (_, index) => org(index + 1));
-    const { organizations } = directory(all);
-    const { check, capture } = checking(organizations, { mostOrganisations: 300_000 });
+  it('#2 in flight past the stale limit but under the ceiling is `behind` where the chain is late, never the alarm', async () => {
+    vi.useFakeTimers();
+    let hanging = false;
+    const { organizations } = directory(orgs(2), (orgId) => (orgId === org(1) && hanging ? undefined : ok(1n)));
+    const { check, capture, clock } = checking(organizations, { lanes: 2 });
     await check.run();
-    expect(lines(capture, 'audit.anchor_check_crashed')).toEqual([]);
-    expect(lines(capture, 'audit.anchor_check_done').at(-1)).toMatchObject({ chains: 200_000 });
+    clock.advanceBy(REACH_MS - STALE_MS);
+    hanging = true;
+    const second = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await second;
+    clock.advanceBy(STALE_MS);
+    await check.run();
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([]);
+    expect(lines(capture, 'audit.anchor_check_behind').at(-1)).toMatchObject({ firstFew: [org(1)] });
+  });
+
+  it('#2 ending under the ceiling clears it: a long honest chain raises nothing', async () => {
+    vi.useFakeTimers();
+    const { organizations, release } = directory(orgs(1), () => undefined);
+    const { check, capture, clock } = checking(organizations, { lanes: 2 });
+    const first = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await first;
+    clock.advanceBy(REACH_MS - 1);
+    release(org(1));
+    await settled();
+    clock.advanceBy(1);
+    const second = check.run();
+    await settled();
+    release(org(1));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await second;
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
+  });
+
+  it('#6 a run cut off in the middle, then full runs, ends the round: the lateness clock goes back', () => {
+    const turns = createTurns(
+      1,
+      (orgIds) => orgIds,
+      () => 1,
+    );
+    const past = orgs(5);
+    turns.begin([], [], [], past);
+    expect(turns.pastCapStarts()).toBe(true);
+    turns.next();
+    turns.next();
+    turns.next();
+    turns.begin([], [], [], past);
+    expect(turns.pastCapStarts()).toBe(false);
+    for (let taken = 0; taken < 5; taken += 1) turns.next();
+    turns.begin([], [], [], past);
+    expect(turns.pastCapStarts()).toBe(true);
+  });
+
+  it('#6 a list shrinking in the middle of a round does not start one', () => {
+    const turns = createTurns(
+      1,
+      (orgIds) => orgIds,
+      () => 3,
+    );
+    const past = orgs(5);
+    turns.begin([], [], [], past);
+    turns.next();
+    turns.begin([], [], [], past.slice(0, 3));
+    expect(turns.pastCapStarts()).toBe(false);
+    turns.next();
+    turns.next();
+    turns.begin([], [], [], past.slice(0, 3));
+    expect(turns.pastCapStarts()).toBe(true);
   });
 });

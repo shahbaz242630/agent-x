@@ -1107,6 +1107,100 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       });
     });
 
+    describe('a read holds one line a chain, and all of it counts against what this process can hold', () => {
+      const chain = (index: number): Chain => ({
+        kind: 'organisation',
+        orgId: `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}`,
+      });
+      const logUnder = (fake: FakeWriteOnceStore, mostFileBytes: number) => {
+        const capture = new LogCapture();
+        const log = createAnchorLog({
+          store: fake.store,
+          keys,
+          logger: testLogger(capture),
+          now: () => LATER,
+          epoch: 1,
+          alertAfterMs: 1000,
+          mostFileBytes,
+        });
+        return { log, capture };
+      };
+      /** A delta with no closing line: spoiled, its lines still counted as signed. */
+      const spoiled = (fake: FakeWriteOnceStore, minutes: number, from: number, count: number): void => {
+        const lines = Array.from({ length: count }, (_, index) => lineOf(anchorAt(chain(from + index), 1n)));
+        fake.files.set(nameOf('deltas', minutes), gzippedLines(lines));
+      };
+
+      it('two spoiled files each under the limit, together past it: no more kept, and the true reason', async () => {
+        const fake = createFakeWriteOnceStore();
+        spoiled(fake, 1, 0, 40);
+        spoiled(fake, 2, 100, 40);
+        const size = 40 * lineOf(anchorAt(chain(0), 1n)).length + 4096;
+        const { log, capture } = logUnder(fake, size);
+        await log.read();
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toHaveLength(1);
+        expect(log.state()).toBe('unreadable');
+        expect(log.organisations()).toEqual([]);
+      });
+
+      it('the same chains replayed in many files cost one line each: nothing past the limit', async () => {
+        const fake = createFakeWriteOnceStore();
+        for (let minutes = 1; minutes <= 5; minutes += 1) spoiled(fake, minutes, 0, 40);
+        const size = 40 * lineOf(anchorAt(chain(0), 1n)).length + 4096;
+        const { log, capture } = logUnder(fake, size);
+        await log.read();
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([]);
+        expect(log.organisations()).toHaveLength(40);
+      });
+
+      it('a fork between two files is still the alarm while reading, the older kept', async () => {
+        const fake = createFakeWriteOnceStore();
+        const older = anchorAt(CHAIN, 3n, START, 3);
+        const newer = anchorAt(CHAIN, 3n, new Date(START.getTime() + MINUTE), 9);
+        fake.files.set(nameOf('deltas', 1), fileOf(nameOf('deltas', 1), older));
+        fake.files.set(nameOf('deltas', 2), fileOf(nameOf('deltas', 2), newer));
+        const { log, lines: said } = logOver(fake);
+        await log.read();
+        expect(said('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'fork' })]);
+        expect(log.latest(CHAIN)?.at).toEqual(START);
+      });
+    });
+
+    describe('a file near what a process can hold', () => {
+      const near = async (mostFileBytes: number, count: number) => {
+        const capture = new LogCapture();
+        const fake = createFakeWriteOnceStore();
+        const log = createAnchorLog({
+          store: fake.store,
+          keys,
+          logger: testLogger(capture),
+          now: () => LATER,
+          epoch: 1,
+          alertAfterMs: 1000,
+          mostFileBytes,
+        });
+        await log.read();
+        for (let index = 0; index < count; index += 1) {
+          const orgId = `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}`;
+          log.keep(anchorAt({ kind: 'organisation', orgId }, 1n, LATER));
+        }
+        await log.flush();
+        return capture.lines().filter((line) => line.event === 'audit.anchor_store_near_memory');
+      };
+
+      it('past 80% of it, says to add memory before the next restart, with the sizes', async () => {
+        const size = 10 * lineOf(anchorAt(CHAIN, 1n, LATER)).length;
+        expect(await near(size, 9)).toEqual([
+          expect.objectContaining({ level: 'error', kind: 'snapshots', mostBytes: size }),
+        ]);
+      });
+
+      it('under 80% of it says nothing', async () => {
+        const size = 10 * lineOf(anchorAt(CHAIN, 1n, LATER)).length;
+        expect(await near(size, 6)).toEqual([]);
+      });
+    });
+
     it('reads a file far larger than one chunk of its opening, lines across the chunks, every one checked', async () => {
       const fake = createFakeWriteOnceStore();
       const name = nameOf('snapshots', 0);

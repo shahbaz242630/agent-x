@@ -313,8 +313,9 @@ const SETTINGS = {
   // How many organisations' chains the anchor check reads at once (4D2e E6), each on a connection; never more than
   // half the pool. What raises how many organisations a run reaches in its four minutes.
   AGENTX_AUDIT_ANCHOR_LANES: { schema: wholeNumber({ min: 1, max: 64 }), default: '4' },
-  // How many organisations the anchor check keeps its own notes on. Those past it are still checked, by a cursor through
-  // the list, with one line a run saying so. Not a limit on how many there may be; memory's is the anchors they hold.
+  // How many chains with no anchor yet in the store the anchor check keeps notes on: a chain in the store is noted anyway.
+  // Those past it are still checked, by a cursor through the list, with one line a run saying so. Not a limit on how many
+  // there may be; memory's is the anchors they hold.
   AGENTX_AUDIT_MOST_ORGANISATIONS: { schema: wholeNumber({ min: 1, max: 10_000_000 }), default: '100000' },
   // Where the chains' anchors are kept apart from the database (4D2e E, PL-58): a local folder in development and
   // test; deployed, a write-once container in the UAE, as the API's own managed identity. Unset, in memory, as today.
