@@ -510,7 +510,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       expect(after.log.latest(CHAIN)?.seq).toBe(3n);
     });
 
-    it('SIGTERM: a store that never answers holds the stop 5 seconds and no more, and says so', async () => {
+    it('finish: a store that never answers holds it 5 seconds and no more, and says so', async () => {
       vi.useFakeTimers();
       const fake = createFakeWriteOnceStore();
       const chains = chainsHolding({ [ORG]: ok(3n) });

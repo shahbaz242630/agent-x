@@ -666,6 +666,19 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ level: 'warn', files: 2 })]);
     });
 
+    it('counts a foreign name only as far as a read goes: the stated limit', async () => {
+      const fake = createFakeWriteOnceStore();
+      fake.files.set(nameOf('snapshots', 60), fileOf(anchorAt(CHAIN, 2n)));
+      fake.files.set(nameOf('deltas', 65), fileOf(anchorAt(CHAIN, 3n)));
+      fake.files.set('e1/snapshots/0-sorts-first', fileOf(anchorAt(CHAIN, 998n)));
+      fake.files.set('e1/snapshots/z-sorts-after', fileOf(anchorAt(CHAIN, 999n)));
+      const { log, lines } = logOver(fake);
+      await log.read();
+
+      expect(log.latest(CHAIN)?.seq).toBe(3n);
+      expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ files: 1 })]);
+    });
+
     it('says nothing of foreign files where there are none', async () => {
       const { lines, log } = logOver();
       await log.read();

@@ -224,7 +224,11 @@ export function createAnchorLog({
     log.error('audit.integrity_failed', { chain: 'store', check: 'anchor_store', reason, ...more });
   };
 
-  /** Every well-named file of a kind, newest first. Anything else there is counted in `foreign`. */
+  /**
+   * Every well-named file of a kind, newest first. Anything else its caller reaches is counted in `foreign`; a read stops
+   * at the first file it need not go past, so a name sorting after that is never counted, and never read. Counting them
+   * all would list every file since the epoch began, a hundred thousand a year, at each restart.
+   */
   async function* filesOf(kind: Kind, most: number, foreign: { count: number }): AsyncGenerator<string> {
     const start = folder(kind);
     let after: string | undefined;
