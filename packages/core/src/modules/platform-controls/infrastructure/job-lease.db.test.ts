@@ -42,7 +42,7 @@ const WAITING = `select pid from pg_catalog.pg_stat_activity
 const row = async () =>
   (
     await database.as('admin').query<{ holder: string | null; left: number; beaten: boolean }>(
-      `select holder, extract(epoch from until - pg_catalog.now())::float8 as left, beating_at is not null as beaten
+      `select holder, (extract(epoch from until) - extract(epoch from pg_catalog.now()))::float8 as left, beating_at is not null as beaten
          from platform_controls.job_lease`,
     )
   )[0];
