@@ -16,8 +16,12 @@ export interface StatementTimes {
   databaseMs: number;
   slowestTripMs: number;
   commitMs: number;
-  /** The round trip that locks a decision's rows, the supplier's last and the only one for change: within databaseMs (PL-62, 4D2e A). */
+  /** The round trip that locks a decision's rows before its supplier's, all shared: within databaseMs (4D2e A, C6). */
   decisionRowsMs: number;
+  /** The round trip that locks a decision's supplier, its wait inside, the only one for change: within databaseMs (PL-62, 4D2e C6). */
+  supplierLockMs: number;
+  /** Which trip, counted from the first, ended with the supplier's lock held, 0 for none: from it to the last, the trips its holder keeps it through (4D2e C6). */
+  supplierLockTrip: number;
   /** The round trip that asks for the audit chain's head, its wait inside: within databaseMs. */
   headLockMs: number;
 }
@@ -29,6 +33,8 @@ export const noStatementTimes = (): StatementTimes => ({
   slowestTripMs: 0,
   commitMs: 0,
   decisionRowsMs: 0,
+  supplierLockMs: 0,
+  supplierLockTrip: 0,
   headLockMs: 0,
 });
 
@@ -75,6 +81,14 @@ export function timedLock<T>(lock: 'decisionRowsMs' | 'headLockMs', asks: () => 
   });
 }
 
+/** The trip that locks a decision's supplier, timed under its own name and its place among the trips kept. */
+export function timedSupplierLock<T>(asks: () => Promise<T>): Promise<T> {
+  return measured(asks, (times, took) => {
+    times.supplierLockMs += took;
+    times.supplierLockTrip = times.trips;
+  });
+}
+
 /** A tenth of a millisecond is all a log line needs. */
 const tenths = (ms: number): number => Math.round(ms * 10) / 10;
 
@@ -85,6 +99,8 @@ export const statementTimesForLog = (times: StatementTimes): StatementTimes => (
   slowestTripMs: tenths(times.slowestTripMs),
   commitMs: tenths(times.commitMs),
   decisionRowsMs: tenths(times.decisionRowsMs),
+  supplierLockMs: tenths(times.supplierLockMs),
+  supplierLockTrip: times.supplierLockTrip,
   headLockMs: tenths(times.headLockMs),
 });
 

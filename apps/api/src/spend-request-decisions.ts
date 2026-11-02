@@ -17,12 +17,15 @@
 //   the agent's (UNAUTHENTICATED: a revocation committed first wins);
 // - 4: the agent's open mandate and its version in force, then the mandate's
 //   policy and the organisation's, FOR SHARE;
-// - 5: the source the agent named FOR SHARE;
-// - 6: the supplier FOR NO KEY UPDATE, serialising the duplicate check;
+// - 5: the source the agent named FOR SHARE, then the agent's zone, if it has one;
+// - 6: the supplier FOR NO KEY UPDATE, alone, after all a request can be refused
+//   on, so a request refused anyway never queues on it (4D2e C6), serialising the
+//   duplicate check; then the agent's zone added, on its first decision under a
+//   mandate, so one stuck on this supplier holds up none of its others (PL-62);
 // - 7: the agent's month FOR NO KEY UPDATE, serialising the monthly check
 //   (decision 4: the agent's, under all its mandates);
 // - then the checks, in one statement of their own after the locks, never the
-//   locking one (4D2d P12; with the mandate's split check on, the payee's
+//   locking one, on the month's lock's trip (4D2d P12, 4D2e C7; with the mandate's split check on, the payee's
 //   reservations in its rolling window, across agents: D5, serialised by the
 //   supplier's lock); the
 //   request (8); its reservation and claim (11); its two signed events (12).
@@ -44,10 +47,12 @@ import { AGENT_KEYS, agentKeyOf, agentOf, AGENTS, isLiveKey } from '@agentx/core
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
+  AGENT_ZONES,
+  keptZoneOf,
   type LimitReservationsTables,
-  lockAgentMonth,
   reserveStatement,
   sealNewZone,
+  zoneInForce,
 } from '@agentx/core/modules/limit-reservations';
 import {
   allowedCurrencyRead,
@@ -71,6 +76,7 @@ import {
 import {
   claimAnswered,
   claimStatement,
+  monthLockedAndTotalsWeighed,
   totalsWeighed,
   type HeldAs,
   holdsCapacity,
@@ -84,8 +90,8 @@ import {
   type SpendRequestRecord,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
-import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
-import { type Clock, type IdGenerator, type Money, money, windowStart } from '@agentx/core/shared-kernel';
+import { supplierOf } from '@agentx/core/modules/suppliers';
+import { type Clock, type IdGenerator, type Money, money, periodOf, windowStart } from '@agentx/core/shared-kernel';
 import {
   AGENT_BRAKE,
   brakeShared,
@@ -99,6 +105,7 @@ import {
   retryingTransaction,
   statementTimesForLog,
   timedLock,
+  timedSupplierLock,
   timingStatements,
   sendTogether,
   SOURCE_BRAKE,
@@ -317,32 +324,85 @@ export async function organizationWeighed(
   };
 }
 
+/** Level 5: the source asked for. */
+async function sourceIn(tx: DecisionTx, states: SignedStates, orgId: string, asked: SpendWeighed) {
+  const source = await sourceOf(tx, states, { orgId, id: asked.fundingSourceId }, 'share');
+  believed(source);
+  return source;
+}
+
 /**
- * Levels 5 and 6: the source asked for, and the supplier, with the order to
- * look for among the claims once the locks are held. A decision holds the
- * supplier FOR NO KEY UPDATE (`change`), serialising its orders; the simulator FOR SHARE, as all its
- * reads (C4's review): simulations never wait on each other, and a decision
+ * Level 6: the supplier, with the order to look for among the claims once the
+ * locks are held. A decision or an approval holds it FOR NO KEY UPDATE (`change`), serialising its orders; the
+ * simulator FOR SHARE, as all its reads (C4's review): simulations never wait on each other, and a decision
  * waits at most the moment one takes, each person's simulations rate-limited.
  */
-async function payingIn(
+async function supplierIn(
   tx: DecisionTx,
   states: SignedStates,
   orgId: string,
   asked: SpendWeighed,
   supplierLock: 'share' | 'change',
 ) {
-  const source = await sourceOf(tx, states, { orgId, id: asked.fundingSourceId }, 'share');
-  believed(source);
   const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, supplierLock);
   believed(supplier);
-  if (supplier.outcome !== 'found') return { source, supplier: null, order: null };
+  if (supplier.outcome !== 'found') return { supplier: null, order: null };
   const found = supplier.supplier;
   // The simulator may weigh a request with no order named: no duplicate is then looked for.
   const order =
     asked.orderReference === null
       ? null
       : { supplierId: found.id, payeeKey: found.payeeKey, reference: asked.orderReference };
-  return { source, supplier: found, order };
+  return { supplier: found, order };
+}
+
+/** What weigh and a decision read for the engine, once the locks they each take are held. */
+interface ReadToWeigh {
+  readonly asked: SpendWeighed;
+  readonly now: Date;
+  readonly agent: { readonly id: string; readonly status: string };
+  readonly mandate: MandateWeighed | null;
+  readonly policies: PoliciesWeighed;
+  readonly source: Awaited<ReturnType<typeof sourceOf>>;
+  readonly supplier: Awaited<ReturnType<typeof supplierIn>>['supplier'];
+  readonly order: Awaited<ReturnType<typeof supplierIn>>['order'];
+  readonly month: string | null;
+  readonly except?: string | undefined;
+}
+
+/** The currency weighed: the mandate's, as its limits are (a request in another is denied by decide). */
+const currencyWeighed = ({ mandate, asked }: ReadToWeigh): string =>
+  mandate?.perOrderLimit.currency ?? asked.amount.currency;
+
+/**
+ * What to read in one statement after the supplier's and the month's locks (4D2d P12). The split total only where it
+ * is weighed: the mandate's split check on, for a supplier of the organisation's.
+ */
+function totalsToWeigh(read: ReadToWeigh) {
+  const { now, agent, mandate, supplier, order, month, except } = read;
+  const currency = currencyWeighed(read);
+  return {
+    month: month === null ? null : { agentId: agent.id, month, currency, except },
+    split:
+      mandate?.splitCheck === true && supplier !== null
+        ? {
+            supplierId: supplier.id,
+            payeeKey: supplier.payeeKey,
+            since: windowStart(now, mandate.splitWindowHours),
+            currency,
+          }
+        : null,
+    order: order === null ? null : { ...order, except },
+  };
+}
+
+/** The engine's input from what was read and those totals: one way for a decision and for weigh, so the two never weigh apart. */
+function inputWith(
+  read: ReadToWeigh,
+  { spent, split, claims }: Awaited<ReturnType<typeof totalsWeighed>>,
+): DecisionInput {
+  const currency = currencyWeighed(read);
+  return inputOf({ ...read, spent: money(spent, currency), split: money(split, currency), claims });
 }
 
 /** The policies in force for the agent's mandate, as the engine weighs them. */
@@ -355,9 +415,10 @@ export interface PoliciesWeighed {
 }
 
 /**
- * Levels 4–7 and what the engine weighs, shared with the simulator (C4): the
+ * Levels 4–7 and what the engine weighs, for the simulator (C4) and an approval
+ * (a decision reads its own, on fewer trips, and weighs by the same totalsToWeigh and inputWith): the
  * agent's authority, the source and supplier, the agent's month and its
- * total. A decision locks the supplier and the month (`decides`, `monthOf`
+ * total. An approval locks the supplier and the month (`decides`, `monthOf`
  * locking it); the simulator only reads them, and `rules` lets it put
  * proposed policies in place of those in force. `except`: an approval's own
  * request (Phase 3 B4b), whose reservation and claim aren't counted; the split
@@ -375,59 +436,30 @@ export async function weigh(
     monthOf,
     rules = (inForce) => inForce,
     except,
-    mandateFound,
   }: {
     readonly now: Date;
-    /** A decision's locks (true), or the simulator's reads (false). */
+    /** An approval's locks (true), or the simulator's reads (false). */
     readonly decides: boolean;
     readonly monthOf: (zoneIfNew: string) => Promise<string>;
     readonly rules?: (inForce: PoliciesWeighed, mandate: MandateWeighed | null) => PoliciesWeighed;
     /** The request weighed again, whose own reservation and claim aren't counted. */
     readonly except?: string | undefined;
-    /** The agent's open mandate's ID as a gather found it (decisionRows). */
-    readonly mandateFound?: { readonly id: string | null };
   },
 ) {
-  const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id, 'inForce', mandateFound);
+  const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
   const policies = rules(inForce, mandate);
-  const { source, supplier, order } = await payingIn(tx, states, orgId, asked, decides ? 'change' : 'share');
+  const source = await sourceIn(tx, states, orgId, asked);
+  const { supplier, order } = await supplierIn(tx, states, orgId, asked, decides ? 'change' : 'share');
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
-  // The currency weighed: the mandate's, as its limits are (a request in another is denied by decide).
-  const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
-  // All in one statement, after the supplier's and the month's locks (4D2d P12). The split total only where it is
-  // weighed: the mandate's split check on, for a supplier of the organisation's.
-  const { spent, split, claims } = await totalsWeighed(tx, {
-    month: month === null ? null : { agentId: agent.id, month, currency, except },
-    split:
-      mandate?.splitCheck === true && supplier !== null
-        ? {
-            supplierId: supplier.id,
-            payeeKey: supplier.payeeKey,
-            since: windowStart(now, mandate.splitWindowHours),
-            currency,
-          }
-        : null,
-    order: order === null ? null : { ...order, except },
-  });
-  const input = inputOf({
-    asked,
-    now,
-    agent,
-    mandate,
-    policies,
-    supplier,
-    source,
-    spent: money(spent, currency),
-    split: money(split, currency),
-    claims,
-  });
+  const read = { asked, now, agent, mandate, policies, source, supplier, order, month, except };
+  const input = inputWith(read, await totalsWeighed(tx, totalsToWeigh(read)));
   return { input, mandate, supplier, order, month, approvalWait: inForce.approvalWait };
 }
 
 /**
  * What the engine weighs, from what was read for it: one builder for a
- * decision (weigh) and a carry's batch (E4c), so the two never weigh apart.
+ * decision, weigh and a carry's batch (E4c), so they never weigh apart.
  */
 export function inputOf({
   asked,
@@ -481,11 +513,11 @@ const actingRows = ({ orgId, agentId, keyId }: AgentActing): GatheredRow[] => [
 const AT = { mandate: 0, version: 1, mandatePolicy: 2, organizationPolicy: 4, organizationVersion: 5 } as const;
 
 /**
- * Levels 4–6 as a decision reads them, for one gather after actingRows, so
+ * Levels 4–5 as a decision reads them, for one gather after actingRows, so
  * the mandate is found once its agent is held, as before: the agent's open
  * mandate (0) and its version in force, the mandate's policy (2) and its
- * version, the organisation's (4) and its version, the source, and the
- * supplier, held for its orders.
+ * version, the organisation's (4) and its version, the source, and the agent's
+ * zone. Never the supplier: what is refused on these is refused before its queue.
  */
 const decisionRows = (orgId: string, agentId: string, asked: SpendWeighed): GatheredRow[] => [
   openMandateGathered(agentId),
@@ -495,8 +527,48 @@ const decisionRows = (orgId: string, agentId: string, asked: SpendWeighed): Gath
   { table: POLICIES, id: { id: orgId }, lock: 'share' },
   { table: POLICY_VERSIONS, id: { from: AT.organizationPolicy, column: 'current_version_id' }, lock: 'share' },
   { table: SOURCES, id: { id: asked.fundingSourceId }, lock: 'share' },
-  { table: SUPPLIERS, id: { id: asked.supplierId }, lock: 'change' },
+  { table: AGENT_ZONES, id: { id: agentId }, lock: 'share' },
 ];
+
+/**
+ * Each level's rows up to the supplier's in one statement, in the lock order (4D2d P8), for the reads after it to answer
+ * from, and their histories. The brakes, the currency's read and the acting rows on one trip (P17), each its own
+ * statement: a brake waited for behind a freeze or a kill switch comes before the acting rows' snapshot, so they read
+ * what it did (S157). All before the supplier's lock, so a request refused on any of it never queues there.
+ */
+async function rowsBeforeTheSupplier(
+  tx: DecisionTx,
+  states: SignedStates,
+  acting: AgentActing,
+  asked: SpendWeighed,
+  now: Date,
+) {
+  const { orgId, agentId } = acting;
+  const {
+    ahead: [, , , currency],
+  } = await states.gatherBehind(
+    tx,
+    orgId,
+    [
+      brakeShared(ORGANISATION_BRAKE, orgId),
+      brakeShared(AGENT_BRAKE, orgId, agentId),
+      brakeShared(SOURCE_BRAKE, orgId, asked.fundingSourceId),
+      allowedCurrencyRead(tx, asked.amount.currency),
+    ],
+    actingRows(acting),
+  );
+  if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
+  const { agent, keyId } = await actingIn(tx, states, acting, now);
+  const found = await timedLock('decisionRowsMs', () => states.gather(tx, orgId, decisionRows(orgId, agentId, asked)));
+  const mandateId = found[AT.mandate] ?? null;
+  const versionId = found[AT.version] ?? null;
+  const policyVersionId = found[AT.organizationVersion] ?? null;
+  await states.gatherHistories(tx, orgId, [
+    ...(mandateId === null || versionId === null ? [] : overLimitHistories(mandateId, versionId)),
+    ...(policyVersionId === null ? [] : [choicesHistory(policyVersionId)]),
+  ]);
+  return { agent, keyId, mandateId };
+}
 
 export function createSpendRequestDecisions({
   database,
@@ -532,50 +604,28 @@ export function createSpendRequestDecisions({
     // Read before the lock waits below (each at most 5 s), so a request can be weighed seconds past a mandate's
     // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
-    // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them. The
-    // brakes, the currency's read and the acting rows on one trip (P17), each its own statement: a brake waited for
-    // behind a freeze or a kill switch comes before the acting rows' snapshot, so they read what it did (S157). What
-    // is refused on them is refused here, before the supplier's lock below is asked for, so a request refused
-    // anyway never queues on it.
-    const {
-      ahead: [, , , currency],
-    } = await states.gatherBehind(
-      tx,
-      orgId,
-      [
-        brakeShared(ORGANISATION_BRAKE, orgId),
-        brakeShared(AGENT_BRAKE, orgId, agentId),
-        brakeShared(SOURCE_BRAKE, orgId, asked.fundingSourceId),
-        allowedCurrencyRead(tx, asked.amount.currency),
-      ],
-      actingRows(acting),
-    );
-    if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
-    const { agent, keyId } = await actingIn(tx, states, acting, now);
-    const found = await timedLock('decisionRowsMs', () =>
-      states.gather(tx, orgId, decisionRows(orgId, agentId, asked)),
-    );
-    const mandateId = found[AT.mandate] ?? null;
-    const versionId = found[AT.version] ?? null;
-    const policyVersionId = found[AT.organizationVersion] ?? null;
-    // Their histories in one statement too, once their rows are held, as before.
-    await states.gatherHistories(tx, orgId, [
-      ...(mandateId === null || versionId === null ? [] : overLimitHistories(mandateId, versionId)),
-      ...(policyVersionId === null ? [] : [choicesHistory(policyVersionId)]),
-    ]);
-    // The agent's zone, when this is its first decision: sealed with the request, as the audit head comes last.
-    let zoneKept: string | undefined;
-    const { input, mandate, supplier, order, month, approvalWait } = await weigh(tx, states, orgId, agent, asked, {
-      now,
-      decides: true,
-      mandateFound: { id: mandateId },
-      monthOf: async (zoneIfNew) => {
-        const locked = await lockAgentMonth(tx, states, { orgId, agentId, zoneIfNew, at: now });
-        if (locked.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-        if (locked.keptNow) zoneKept = zoneIfNew;
-        return locked.month;
-      },
-    });
+    const { agent, keyId, mandateId } = await rowsBeforeTheSupplier(tx, states, acting, asked, now);
+    const { mandate, ...policies } = await authorityIn(tx, states, orgId, agentId, 'inForce', { id: mandateId });
+    const source = await sourceIn(tx, states, orgId, asked);
+    // Under a mandate: none without one, as no month is then weighed.
+    const zoneRead = mandate === null ? null : await keptZoneOf(tx, states, { orgId, agentId });
+    if (zoneRead?.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+    const { supplier, order } = await timedSupplierLock(() => supplierIn(tx, states, orgId, asked, 'change'));
+    const zone =
+      mandate === null || zoneRead === null
+        ? null
+        : await zoneInForce(tx, states, zoneRead, { orgId, agentId, zoneIfNew: mandate.timeZone, at: now });
+    if (zone?.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+    // The month named at the instant asked, however long the locks take.
+    const month = zone === null ? null : periodOf(now, zone.zone).month;
+    const read = { asked, now, agent, mandate, policies, source, supplier, order, month };
+    const toWeigh = totalsToWeigh(read);
+    // Its lock and the totals on one trip, each its own statement, so the totals see what its holder committed.
+    const totals =
+      toWeigh.month === null
+        ? await totalsWeighed(tx, toWeigh)
+        : await monthLockedAndTotalsWeighed(tx, { orgId, at: now }, { ...toWeigh, month: toWeigh.month });
+    const input = inputWith(read, totals);
     const made = decide(input);
     const requestId = ids.next();
     const hash = keys.mac('decision-hash', [
@@ -605,7 +655,7 @@ export function createSpendRequestDecisions({
       decision: made.decision,
       reasons: made.reasons,
       // The wait in force now, sealed with it: a later change moves it never (decision 20); 72 until chosen (S119).
-      approvalWait: approvalWait ?? LONGEST_APPROVAL_WAIT,
+      approvalWait: policies.approvalWait ?? LONGEST_APPROVAL_WAIT,
       createdAt: now,
     };
 
@@ -639,11 +689,12 @@ export function createSpendRequestDecisions({
       if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
       held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };
     }
-    if (zoneKept !== undefined) {
+    // The agent's zone, when this is its first decision: sealed with the request, as the audit head comes last.
+    if (zone?.keptNow === true) {
       await sealNewZone(tx, states, {
         orgId,
         agentId,
-        zone: zoneKept,
+        zone: zone.zone,
         at: now,
         actor: { type: 'agent', id: agent.id },
       });

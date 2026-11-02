@@ -537,6 +537,109 @@ describe('what a signed state is recorded from', () => {
     ).rejects.toEqual(refusedFor('lock_order'));
   });
 
+  it.each([
+    ['a read', (tx: Transaction<Tables>, id: string) => states.verifiedState(tx, AGENTS, { orgId: org, id }, 'share')],
+    [
+      'a gather',
+      (tx: Transaction<Tables>, id: string) => states.gather(tx, org, [{ table: AGENTS, id: { id }, lock: 'share' }]),
+    ],
+  ])(
+    'makes a row it looked for to change, though %s for a decision found none since: its lock stays the higher',
+    async (_, look) => {
+      const id = newId();
+
+      const recorded = await withTenant(app, org, async (tx) => {
+        expect(await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change')).toEqual({ outcome: 'missing' });
+        await look(tx, id);
+        await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role: 'reader' }).execute();
+        return states.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+      });
+
+      expect(recorded).toMatchObject({ version: 1 });
+    },
+  );
+
+  describe('a table whose rows are made once (4D2e C6)', () => {
+    const MADE_ONCE = { ...AGENTS, madeOnce: true } as const;
+    const insert = (tx: Transaction<Tables>, id: string) =>
+      tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role: 'reader' }).execute();
+
+    it('makes a row it read as not there: no lock was held to raise', async () => {
+      const id = newId();
+
+      const recorded = await withTenant(app, org, async (tx) => {
+        expect(await states.verifiedState(tx, MADE_ONCE, { orgId: org, id }, 'share')).toEqual({ outcome: 'missing' });
+        await insert(tx, id);
+        return states.record(tx, MADE_ONCE, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+      });
+
+      expect(recorded).toMatchObject({ version: 1 });
+    });
+
+    it('makes a row a gather found not there, whether or not read again', async () => {
+      const [once, twice] = [newId(), newId()];
+
+      await withTenant(app, org, async (tx) => {
+        await states.gather(tx, org, [
+          { table: MADE_ONCE, id: { id: once }, lock: 'share' },
+          { table: MADE_ONCE, id: { id: twice }, lock: 'share' },
+        ]);
+        expect(await states.verifiedState(tx, MADE_ONCE, { orgId: org, id: twice }, 'share')).toEqual({
+          outcome: 'missing',
+        });
+        for (const id of [once, twice]) {
+          await insert(tx, id);
+          await states.record(tx, MADE_ONCE, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+        }
+      });
+
+      expect(await rowOf(once)).toBeDefined();
+      expect(await rowOf(twice)).toBeDefined();
+    });
+
+    it('refuses to make one it found: that row is held', async () => {
+      const found = await newAgent();
+
+      await expect(
+        withTenant(app, org, async (tx) => {
+          await states.verifiedState(tx, MADE_ONCE, { orgId: org, id: found }, 'share');
+          return states.record(tx, MADE_ONCE, { orgId: org, id: found }, 'new', NEW_AGENT, change('agent.created'));
+        }),
+      ).rejects.toEqual(refusedFor('lock_order'));
+    });
+
+    it('refuses to make one it read as not there, then as there: that row is held now', async () => {
+      const later = newId();
+      const { promise: looked, resolve: hasLooked } = Promise.withResolvers<undefined>();
+      const { promise: made, resolve: isMade } = Promise.withResolvers<undefined>();
+      const making = withTenant(app, org, async (tx) => {
+        await states.verifiedState(tx, MADE_ONCE, { orgId: org, id: later }, 'share');
+        hasLooked(undefined);
+        await made;
+        expect(await states.verifiedState(tx, MADE_ONCE, { orgId: org, id: later }, 'share')).toMatchObject({
+          outcome: 'verified',
+        });
+        return states.record(tx, MADE_ONCE, { orgId: org, id: later }, 'new', NEW_AGENT, change('agent.created'));
+      });
+      await looked;
+      await newAgent('reader', later);
+      isMade(undefined);
+
+      await expect(making).rejects.toEqual(refusedFor('lock_order'));
+    });
+
+    it('refuses to make one a gather found: that row is held', async () => {
+      const found = await newAgent();
+
+      await expect(
+        withTenant(app, org, async (tx) => {
+          await states.gather(tx, org, [{ table: MADE_ONCE, id: { id: found }, lock: 'share' }]);
+          return states.record(tx, MADE_ONCE, { orgId: org, id: found }, 'new', NEW_AGENT, change('agent.created'));
+        }),
+      ).rejects.toEqual(refusedFor('lock_order'));
+    });
+  });
+
   it('refuses a status written by record: it moves only through changeStatus, along its machine', async () => {
     const id = await newAgent();
 

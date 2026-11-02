@@ -60,8 +60,10 @@ export interface DecisionParts {
   readonly gateWaitP95: number;
   /** A typical decision's trips to the database. */
   readonly tripsP50: number;
-  /** The trip locking a decision's rows, the supplier's among them, its wait inside (PL-62). */
+  /** The trip locking a decision's rows before its supplier's, its wait inside (4D2e C6). */
   readonly decisionRowsP95: number;
+  /** The trip locking a decision's supplier, its wait inside: how a stuck supplier is seen (PL-62). Before C6 it was inside decisionRowsP95. */
+  readonly supplierLockP95: number;
   /** The trip asking for the audit chain's head, its wait inside. */
   readonly headLockP95: number;
   /** Decisions turned away as busy, none of them made: these have no `spend_request.decided` line. */
@@ -84,6 +86,7 @@ interface Line {
   readonly gateWaitMs?: number;
   readonly trips?: number;
   readonly decisionRowsMs?: number;
+  readonly supplierLockMs?: number;
   readonly headLockMs?: number;
 }
 
@@ -181,6 +184,7 @@ const partsOf = (lines: readonly Line[], busyRefusals: number): DecisionParts =>
   gateWaitP95: percentilesOf(lines.map(({ gateWaitMs = 0 }) => gateWaitMs)).p95,
   tripsP50: percentilesOf(lines.map(({ trips = 0 }) => trips)).p50,
   decisionRowsP95: percentilesOf(lines.map(({ decisionRowsMs = 0 }) => decisionRowsMs)).p95,
+  supplierLockP95: percentilesOf(lines.map(({ supplierLockMs = 0 }) => supplierLockMs)).p95,
   headLockP95: percentilesOf(lines.map(({ headLockMs = 0 }) => headLockMs)).p95,
   busyRefusals,
 });

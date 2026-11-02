@@ -277,8 +277,8 @@ export const SOURCE_BRAKE = 'source-brake';
  * a decision queued behind another for a stuck supplier's row waits its 5 s for the row's queue, then 5 s more on its
  * holder, each wait timed alone (measured, S168: at 8 s a freeze behind them failed every time). New ones line up
  * behind the brake from its first moment, so what it waits for is only those already inside. It doesn't cover the
- * longest one inside: a decision can also wait on its month's and the chain head's locks while it holds the shared side,
- * each up to its own bound. Then the stop answers busy, honestly, with nothing changed, and pressing it again usually lands.
+ * longest one inside: a decision can also wait on its agent's new zone (a first decision's), its month's and the chain
+ * head's locks while it holds the shared side, each up to its own bound. Then the stop answers busy, honestly, with nothing changed, and pressing it again usually lands.
  */
 const BRAKE_WAIT_SECONDS = STATEMENT_SECONDS + 2;
 const BRAKE_WAIT = `${String(BRAKE_WAIT_SECONDS)}s`;

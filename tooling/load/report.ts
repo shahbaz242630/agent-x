@@ -238,6 +238,7 @@ const partsCells = ({
   gateWaitP95,
   tripsP50,
   decisionRowsP95,
+  supplierLockP95,
   headLockP95,
   busyRefusals,
 }: DecisionParts) =>
@@ -248,6 +249,7 @@ const partsCells = ({
     gateWaitP95,
     tripsP50,
     decisionRowsP95,
+    supplierLockP95,
     headLockP95,
     busyRefusals,
   ]
@@ -255,10 +257,10 @@ const partsCells = ({
     .join(' | ');
 
 /** As many as partsCells gives: the tables' dashes are counted from it. */
-const PARTS_COLUMNS = 8;
+const PARTS_COLUMNS = 9;
 
 const PARTS_HEADINGS =
-  "Connection wait p95 ms | Own agent wait p95 ms | Supplier wait p95 ms | Gate wait p95 ms | Trips p50 | Decision rows trip p95 ms (the supplier's lock inside) | Chain head trip p95 ms | Turned away busy";
+  "Connection wait p95 ms | Own agent wait p95 ms | Supplier wait p95 ms | Gate wait p95 ms | Trips p50 | Decision rows trip p95 ms (before the supplier's lock; reports before 4D2e C6 had that lock inside) | Supplier lock trip p95 ms | Chain head trip p95 ms | Turned away busy";
 
 /** What an admin's freeze was answered under the stuck organisation's trouble (PL-63 item 3): reported, never failing a run. */
 const freezeLine = ({ freezeProbe }: RunResult): string =>
