@@ -46,6 +46,7 @@ import {
   type Chain,
   type ChainReport,
   ChainStoreError,
+  type CheckedPoint,
   createMemoryAnchorStore,
   signAnchor,
 } from '@agentx/platform/audit-chain';
@@ -152,6 +153,10 @@ const refusedByDatabase = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && CHANGED_DATABASE.has(String(error.code));
 
 /** `unanchored`: checked and sound, and not anchored because the store is yet to be read. */
+/** Whether a chain's head is at or past its anchor, and at it, the same event. */
+const stillHolds = (head: CheckedPoint, anchor: AnchorPoint): boolean =>
+  head.seq > anchor.seq || (head.seq === anchor.seq && head.hash.equals(anchor.hash));
+
 type Outcome = 'anchored' | 'unchanged' | 'unanchored' | 'failed' | 'unchecked';
 
 /** The in-flight key of the organisations' list, which no chain's key can be. */
@@ -185,6 +190,9 @@ export function createAnchorCheck({
   let listRead: number | undefined;
   /** The time a chain's stale period counts from. */
   const since = (key: string): number => lastChecked.get(key) ?? firstSeen.get(key) ?? started;
+
+  /** Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read. */
+  const storeUnread = (): boolean => durable !== undefined && durable.state() !== 'read';
 
   const checkOne = async ({ chain, verify }: CheckedChain, signal: AbortSignal | undefined): Promise<Outcome> => {
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
@@ -224,14 +232,9 @@ export function createAnchorCheck({
       lastChecked.set(key, clock.now().getTime());
       if (!report.ok) return alarm(report.problem.reason, report.problem.seq);
       // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
-      if (
-        last !== undefined &&
-        (report.seq < last.seq || (report.seq === last.seq && !report.hash.equals(last.hash)))
-      ) {
-        return alarm('anchor', last.seq);
-      }
+      if (last !== undefined && !stillHolds(report, last)) return alarm('anchor', last.seq);
       if (last?.seq === report.seq) return 'unchanged';
-      if (durable !== undefined && durable.state() !== 'read') return 'unanchored';
+      if (storeUnread()) return 'unanchored';
       const anchor = signAnchor(keys, chain, report, clock.now());
       anchors.keep(anchor);
       log.info('audit.anchored', {
@@ -413,7 +416,7 @@ export function createAnchorCheck({
       if (organizations === undefined) return;
       // A hand-off may come before the run's first read, and joins it; once the store has failed, the run alone tries again.
       if (durable?.state() === 'unread') await readStore(durable, signal);
-      if (durable !== undefined && durable.state() !== 'read') return;
+      if (storeUnread()) return;
       const id = orgId.toLowerCase();
       const outcome = await checkOne(
         { chain: { kind: 'organisation', orgId: id }, verify: (anchor) => organizations.verify(id, anchor) },

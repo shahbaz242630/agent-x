@@ -16,7 +16,7 @@ const keys = createKeyProvider(
   ),
 );
 const AT = new Date('2026-11-02T09:00:00.000Z');
-const services = { keys, logger: testLogger(new LogCapture()), now: () => AT, unwritableAfterMs: 900_000 };
+const services = { keys, logger: testLogger(new LogCapture()), clock: { now: () => AT }, unwritableAfterMs: 900_000 };
 const CONTAINER = {
   url: 'http://127.0.0.1:1/audit-anchors',
   clientId: 'c',

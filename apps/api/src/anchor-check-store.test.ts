@@ -43,7 +43,7 @@ function chainsHolding(reports: Record<string, ChainReport>) {
     list: () => Promise.resolve(listed),
     recorded: () => Promise.resolve(listed),
     verify: (orgId, anchor) => {
-      (given[orgId] ??= []).push(anchor?.seq);
+      given[orgId] = [...(given[orgId] ?? []), anchor?.seq];
       const report = held[orgId];
       if (report === undefined) throw new Error('The test holds no chain for it');
       return Promise.resolve(report);
@@ -245,7 +245,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
     it('a read that outlasts its deadline counts as failed, and the run goes on; it may still land later', async () => {
       vi.useFakeTimers();
       const fake = createFakeWriteOnceStore();
-      const { promise: answer, resolve: answers } = Promise.withResolvers<void>();
+      const { promise: answer, resolve: answers } = Promise.withResolvers<undefined>();
       fake.instead.list = async (start, most, after) => {
         await answer;
         return fake.real.list(start, most, after);
@@ -260,7 +260,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       expect(after.log.latest(CHAIN)).toBeUndefined();
       expect(after.lines('audit.anchor_check_done')).toEqual([expect.objectContaining({ chains: 1, unanchored: 1 })]);
 
-      answers();
+      answers(undefined);
       await vi.advanceTimersByTimeAsync(0);
       expect(after.log.state()).toBe('read');
     });
@@ -402,7 +402,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       expect(first.lines('audit.anchor_store_write_failed')).toEqual([
         expect.objectContaining({
           level: 'warn',
-          err: expect.objectContaining({ message: 'the check did not finish within 5000 ms' }),
+          err: expect.objectContaining({ message: 'the check did not finish within 5000 ms' }) as unknown,
         }),
       ]);
     });
@@ -413,7 +413,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       const first = process(fake, chains.organizations);
       await first.log.read();
       await first.check.anchorOrganisation(ORG);
-      const { promise: answer, resolve: answers } = Promise.withResolvers<void>();
+      const { promise: answer, resolve: answers } = Promise.withResolvers<undefined>();
       fake.instead.put = async (name, bytes) => {
         await answer;
         return fake.real.put(name, bytes);
@@ -426,7 +426,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       await first.check.anchorOrganisation(OTHER_ORG);
 
       const finishing = first.check.finish();
-      answers();
+      answers(undefined);
       await Promise.all([under, finishing]);
 
       expect(fake.calls.puts).toBe(2);
