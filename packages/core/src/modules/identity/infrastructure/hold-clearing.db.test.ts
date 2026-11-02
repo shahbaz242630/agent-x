@@ -25,7 +25,7 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
-import { type AuditTables, createAuditTrail, withSignedStates } from '../../audit/index.ts';
+import { type AuditTables, createAuditTrail, pollHoldsWaiting, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
@@ -215,6 +215,40 @@ beforeEach(async () => {
   );
   admin = await member(org, 'admin');
 });
+
+/** Refused and still HELD while the check given what the hold names says not whole; then cleared. */
+async function refusedUntilWhole(id: string, investigationId: string, challengeId: string): Promise<void> {
+  const asked: string[] = [];
+  let whole = false;
+  const withTheirs = createHoldClearings({
+    database: app,
+    keys,
+    ids,
+    challenges: challenges(),
+    logger: testLogger(),
+    authorityTables: AUTHORITY_TABLES,
+    namedRecordChecks: {
+      [MEMBERSHIPS.subject]: (_tx, _states, orgId, objectId) => {
+        asked.push(`${orgId} ${objectId}`);
+        return Promise.resolve(whole);
+      },
+    },
+  });
+  const confirmTheirs = () =>
+    withTheirs.confirm(
+      admin,
+      keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
+      investigationId,
+      challengeId,
+      CORRELATION,
+    );
+
+  expect(await confirmTheirs()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+  expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+  whole = true;
+  expect(await confirmTheirs()).toMatchObject({ outcome: 'cleared' });
+  expect(asked).toEqual([`${org} ${id}`, `${org} ${id}`]);
+}
 
 describe(`clearing the integrity hold as its admin (Postgres ${server.version})`, () => {
   it('asks, signs in again, and clears: the hold CLEAR, one version on', async () => {
@@ -524,36 +558,23 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     const row = await holdThenRepair();
     const investigationId = await investigate();
     const challengeId = await steppedUp(investigationId);
-    const asked: string[] = [];
-    let whole = false;
-    const withTheirs = createHoldClearings({
-      database: app,
-      keys,
-      ids,
-      challenges: challenges(),
-      logger: testLogger(),
-      authorityTables: AUTHORITY_TABLES,
-      namedRecordChecks: {
-        [MEMBERSHIPS.subject]: (_tx, _states, orgId, objectId) => {
-          asked.push(`${orgId} ${objectId}`);
-          return Promise.resolve(whole);
-        },
-      },
-    });
-    const confirmTheirs = () =>
-      withTheirs.confirm(
-        admin,
-        keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
-        investigationId,
-        challengeId,
-        CORRELATION,
-      );
+    await refusedUntilWhole(row.id, investigationId, challengeId);
+  });
 
-    expect(await confirmTheirs()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+  it('a hold recorded from a row, by a process that never saw the finding: the same check, and it stays held (D5)', async () => {
+    const { membershipId: id } = await member(org, 'viewer');
+    await database
+      .as('app')
+      .query(
+        "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'holding')",
+        [org, MEMBERSHIPS.subject, id],
+      );
+    await pollHoldsWaiting(app, services());
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
-    whole = true;
-    expect(await confirmTheirs()).toMatchObject({ outcome: 'cleared' });
-    expect(asked).toEqual([`${org} ${row.id}`, `${org} ${row.id}`]);
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+
+    await refusedUntilWhole(id, investigationId, challengeId);
   });
 
   it('fails rather than judge part of a table past the objects it checks, leaving it HELD', async () => {

@@ -66,10 +66,10 @@ async function newOrganisation(listed = true): Promise<string> {
 const pools: { destroy(): Promise<void> }[] = [];
 
 /** A process of its own: a fresh copy of the modules, so nothing in another's memory, or this one's before a restart. */
-async function aProcess() {
+async function aProcess(maxConnections = 4) {
   vi.resetModules();
   const [signed, platform] = await Promise.all([import('./with-signed-states.ts'), import('@agentx/platform/db')]);
-  const pool = platform.createDatabase<AuditTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
+  const pool = platform.createDatabase<AuditTables>({ ...database.connection('app'), maxConnections }, testLogger());
   pools.push(pool);
   return {
     pool,
@@ -87,6 +87,18 @@ async function aProcess() {
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 const notRecorded = () => lines('audit.integrity_failed').filter(({ reason }) => reason === 'not_recorded');
 const rowGone = () => lines('audit.integrity_failed').filter(({ reason }) => reason === 'row_gone');
+const fromRow = () => lines('audit.integrity_failed').filter(({ reason }) => reason === 'from_row');
+
+/** A row as anyone with the app's rights could write it, by default naming what `head`'s failure names. */
+const plant = (reason: string, orgId = org, subjectType = 'audit_chain', objectId = orgId) =>
+  database
+    .as('app')
+    .query('insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, $4)', [
+      orgId,
+      subjectType,
+      objectId,
+      reason,
+    ]);
 
 /** The organisation's hold events, oldest first. */
 async function holdEvents(orgId = org): Promise<{ action: string; details: Record<string, unknown> }[]> {
@@ -119,6 +131,28 @@ async function withHeadLocked<T>(work: () => Promise<T>): Promise<T> {
 async function leftWaiting(by: Awaited<ReturnType<typeof aProcess>>): Promise<void> {
   await withHeadLocked(() => by.hold('head'));
   expect(await actions()).toEqual(['integrity_hold.created']);
+}
+
+/** The hold cleared by its own steps, as an admin's clearing does once all is whole: its investigation first. */
+async function clearTheHold(by: Awaited<ReturnType<typeof aProcess>>): Promise<void> {
+  const actor = { type: 'user' as const, id: newId() };
+  await by.work(async (tx, states) => {
+    const recorded = await states.recordInvestigation(tx, org, {
+      id: newId(),
+      actor,
+      conclusion: 'CAUSE_REMOVED',
+      reference: 'INC-000001',
+    });
+    if (recorded.outcome !== 'recorded') throw new Error('not investigated');
+    await states.verifyAll(tx, org, [], 1);
+    const cleared = await states.clearIntegrityHold(tx, org, {
+      actor,
+      holdEventId: recorded.investigation.holdEventId,
+      investigationId: recorded.investigation.id,
+      stepUp: { stepUpChallengeId: newId() },
+    });
+    if (cleared.outcome !== 'cleared') throw new Error(`not cleared: ${cleared.outcome}`);
+  });
 }
 
 /** The table refusing every insert, or delete, while `work` runs. */
@@ -185,14 +219,18 @@ describe(`holds waiting: another process (4D2e D5, Postgres ${server.version})`,
 
     expect(await restarted.read('none')).toMatchObject({ outcome: 'held', version: 2 });
     expect(await actions()).toEqual(ONE_SET);
-    // A row says the sign and no more: what was found is in the line of the process that found it.
+    // The row names the record as the process that found it would: clearing checks the same.
     expect((await holdEvents()).at(-1)?.details).toMatchObject({
       reason: 'chain',
-      foundOn: 'hold_waiting',
+      foundOn: 'audit_chain',
       objectId: org,
       findings: 1,
     });
     expect(await waitingRows()).toEqual([]);
+    // Set from its row alone: the line the integrity alert reads, not only a warning.
+    expect(fromRow()).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, subjectType: 'audit_chain', objectId: org }),
+    ]);
   });
 
   it('polled while the head stays locked: kept in the process, and recorded by a later try', async () => {
@@ -248,6 +286,8 @@ describe(`holds waiting: another process (4D2e D5, Postgres ${server.version})`,
     expect(await actions()).toEqual(ONE_SET);
     expect(lines('audit.integrity_hold_set')).toHaveLength(1);
     expect(rowGone()).toEqual([]);
+    // Its finder recorded it, whose alarm is already up.
+    expect(fromRow()).toEqual([]);
   });
 
   it('two processes both picking it up record one hold', async () => {
@@ -282,7 +322,7 @@ describe(`holds waiting: another process (4D2e D5, Postgres ${server.version})`,
 
   it("recording one organisation's hold leaves another's row where it is", async () => {
     const neighbour = await newOrganisation();
-    await attacker.query("insert into directory.holds_waiting (org_id, reason) values ($1, 'seal')", [neighbour]);
+    await plant('seal', neighbour);
     const finder = await aProcess();
     await leftWaiting(finder);
 
@@ -302,23 +342,20 @@ describe(`holds waiting: another process (4D2e D5, Postgres ${server.version})`,
 });
 
 describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.version})`, () => {
-  /** What the app role itself could write. */
-  const forge = (reason: string, orgId = org) =>
-    database.as('app').query('insert into directory.holds_waiting (org_id, reason) values ($1, $2)', [orgId, reason]);
-
   it('a forged row naming a sign: a wait, and a hold attempt that sets it, never a clear', async () => {
-    await forge('seal');
+    await plant('seal');
     const other = await aProcess();
 
     expect(await other.read('head')).toEqual({ outcome: 'tampered', sign: 'seal' });
     await other.poll();
 
     expect(await other.read('head')).toMatchObject({ outcome: 'held', version: 2 });
-    expect((await holdEvents()).at(-1)?.details).toMatchObject({ reason: 'seal', foundOn: 'hold_waiting' });
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ reason: 'seal', foundOn: 'audit_chain' });
+    expect(fromRow()).toHaveLength(1);
   });
 
   it('a row naming no sign is a row not as the app writes one: still a wait, recorded as such', async () => {
-    await forge('nonsense');
+    await plant('nonsense');
     const other = await aProcess();
 
     expect(await other.read('head')).toEqual({ outcome: 'tampered', sign: 'row' });
@@ -331,7 +368,7 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
   it('a row beside a verified hold changes nothing, and goes', async () => {
     const other = await aProcess();
     await other.hold('head');
-    await forge('seal');
+    await plant('seal');
     expect(await other.read('head')).toMatchObject({ outcome: 'held', version: 2 });
 
     await other.poll();
@@ -342,12 +379,107 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
   });
 
   it('the table refuses a row for no organisation, a reason that is not a word, and any change', async () => {
-    await expect(forge('seal', newId())).rejects.toMatchObject({ code: '23503' });
-    await expect(forge('Not A Word')).rejects.toMatchObject({ code: '23514' });
-    await forge('seal');
+    await expect(plant('seal', newId())).rejects.toMatchObject({ code: '23503' });
+    await expect(plant('Not A Word')).rejects.toMatchObject({ code: '23514' });
+    await expect(plant('seal', org, 'Not A Type')).rejects.toMatchObject({ code: '23514' });
+    await expect(plant('seal', org, 'agent', '')).rejects.toMatchObject({ code: '23514' });
+    await plant('seal');
     await expect(
       database.as('app').query("update directory.holds_waiting set reason = 'log' where org_id = $1", [org]),
     ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('a second record is a row of its own: Tx A waits on either, and each hold names its own', async () => {
+    const [first, second] = [newId(), newId()];
+    await plant('holding', org, 'spend_request', first);
+    await plant('seal', org, 'membership', second);
+    const other = await aProcess();
+    expect(await other.read('head')).toMatchObject({ outcome: 'tampered' });
+
+    await other.poll();
+
+    const named = (await holdEvents()).at(-1)?.details.objectId;
+    expect(await actions()).toEqual(ONE_SET);
+    expect([first, second]).toContain(named);
+    const left = named === first ? second : first;
+    // The hold names one: the other stays, and repeated polls add nothing to the log.
+    const rows = () =>
+      attacker.query<{ object_id: string }>('select object_id from directory.holds_waiting where org_id = $1', [org]);
+    expect(await rows()).toEqual([{ object_id: left }]);
+    await other.poll();
+    expect(await actions()).toEqual(ONE_SET);
+    expect(await rows()).toEqual([{ object_id: left }]);
+    expect(await other.read('head')).toMatchObject({ outcome: 'held', version: 2 });
+
+    await clearTheHold(other);
+    expect(await other.read('head')).toMatchObject({ outcome: 'tampered' });
+    await other.poll();
+
+    // Its own hold now, for its own investigation and check.
+    expect(await actions()).toEqual([...ONE_SET, 'integrity_hold.cleared', 'integrity_hold.set']);
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ objectId: left });
+    expect(await rows()).toEqual([]);
+  });
+
+  it('frozen between the read and its try: a row gone by then is not held over, with no alarm', async () => {
+    await plant('seal');
+    const frozen = await aProcess(1);
+    const locker = await database.connect('admin');
+    await locker.query('begin');
+    await locker.query('lock table directory.holds_waiting in access exclusive mode');
+    // The read is on the one connection; the gate queues for it ahead of the try.
+    const polling = frozen.poll();
+    await waitUntilQueued(attacker, 1);
+    const gate = frozen.platform.withTenant(frozen.pool, org, () =>
+      attacker.query('delete from directory.holds_waiting where org_id = $1', [org]),
+    );
+    await locker.query('rollback');
+    await locker.end();
+    await gate;
+    await polling;
+
+    expect(await actions()).toEqual(['integrity_hold.created']);
+    expect(fromRow()).toEqual([]);
+    expect(rowGone()).toEqual([]);
+    expect(await frozen.read('none')).toMatchObject({ outcome: 'clear' });
+  });
+
+  it('frozen likewise, with another record still waiting: only the row gone goes unheld', async () => {
+    const [gone, stays] = [newId(), newId()];
+    await plant('seal', org, 'membership', gone);
+    await plant('seal', org, 'membership', stays);
+    const frozen = await aProcess(1);
+    const locker = await database.connect('admin');
+    await locker.query('begin');
+    await locker.query('lock table directory.holds_waiting in access exclusive mode');
+    const polling = frozen.poll();
+    await waitUntilQueued(attacker, 1);
+    const gate = frozen.platform.withTenant(frozen.pool, org, () =>
+      attacker.query('delete from directory.holds_waiting where object_id = $1', [gone]),
+    );
+    await locker.query('rollback');
+    await locker.end();
+    await gate;
+    await polling;
+
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ objectId: stays });
+  });
+
+  it('a row for the record the hold names goes, though a row for another comes before it', async () => {
+    const other = await aProcess();
+    await other.hold('head');
+    const elsewhere = newId();
+    await plant('seal', org, 'membership', elsewhere);
+    await plant('seal');
+
+    await other.poll();
+
+    const rows = await attacker.query<{ object_id: string }>(
+      'select object_id from directory.holds_waiting where org_id = $1',
+      [org],
+    );
+    expect(rows).toEqual([{ object_id: elsewhere }]);
+    expect(await actions()).toEqual(ONE_SET);
   });
 
   it('a row deleted before its hold is recorded: the process that found it records it, with the alarm', async () => {
@@ -427,7 +559,7 @@ describe(`holds waiting: the database in trouble (4D2e D5, Postgres ${server.ver
   it('a hold kept here alone that a later poll finds a row for: that row deleted is the alarm', async () => {
     const finder = await aProcess();
     await withTableRefusing('insert', () => leftWaiting(finder));
-    await attacker.query("insert into directory.holds_waiting (org_id, reason) values ($1, 'chain')", [org]);
+    await plant('chain');
     await finder.poll();
     await attacker.query('delete from directory.holds_waiting where org_id = $1', [org]);
 
@@ -455,7 +587,7 @@ describe(`holds waiting: the database in trouble (4D2e D5, Postgres ${server.ver
     await withHeadLocked(async () => {
       const recording = finder.hold('head');
       await waitUntilQueued(attacker, 1);
-      await attacker.query("insert into directory.holds_waiting (org_id, reason) values ($1, 'seal')", [org]);
+      await plant('seal');
       await finder.poll();
       return { recording };
     }).then(({ recording }) => recording);
@@ -509,7 +641,7 @@ describe(`holds waiting: few trips (4D2e D5, Postgres ${server.version})`, () =>
       const deciding = reader.read('head');
       await waitUntilQueued(attacker, 1);
       // Left while the decision waited for the lock: its read comes after, so it sees it.
-      await attacker.query("insert into directory.holds_waiting (org_id, reason) values ($1, 'seal')", [org]);
+      await plant('seal');
       return { deciding };
     });
     expect(await (await waiting).deciding).toEqual({ outcome: 'tampered', sign: 'seal' });

@@ -694,13 +694,14 @@ export interface HoldingSignedStates extends SignedStates {
   /**
    * Puts the finding's organisation on hold, in this transaction (withTenant's
    * for it): HELD, recorded as its newest signed state, unless a verified
-   * HELD is already there (`already`). Over a hold that can't be verified the
+   * HELD is already there: `already` if it names this finding's record, else
+   * `named_elsewhere`, as clearing checks only what a hold names. Over a hold that can't be verified the
    * event is added all the same, so the hold can be set whatever has been
    * tampered with, as long as the chain takes new events. Locks the chain head
    * first, so two can't both start from the same state; the transaction takes
    * no other lock.
    */
-  hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'>;
+  hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already' | 'named_elsewhere'>;
 }
 
 type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
@@ -1848,11 +1849,21 @@ export function createSignedStates({
       return Object.freeze({ outcome: 'cleared', version: recorded.version, eventId: recorded.eventId });
     },
 
-    async hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'> {
+    async hold(
+      tx: AuditTransaction,
+      finding: TamperFinding,
+      findings: number,
+    ): Promise<'set' | 'already' | 'named_elsewhere'> {
       const { orgId } = finding;
       await lockChainHead(tx, orgId);
       const { check, version } = await readHold(tx, orgId);
-      if (check.outcome === 'held') return 'already';
+      if (check.outcome === 'held') {
+        const event = await trail.recordedEvent(tx, orgId, { eventId: check.eventId });
+        const details = event.kind === 'recorded' ? event.event.details : undefined;
+        return details?.foundOn === finding.subjectType && details.objectId === finding.objectId
+          ? 'already'
+          : 'named_elsewhere';
+      }
       await recordHold(tx, orgId, version + 1, 'HELD', {
         actor: HOLDER,
         action: 'integrity_hold.set',

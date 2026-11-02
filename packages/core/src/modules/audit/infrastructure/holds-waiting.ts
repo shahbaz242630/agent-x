@@ -6,33 +6,69 @@ import type { Kysely, Transaction } from 'kysely';
 
 import type { AuditTables } from './tables.ts';
 
-/** One hold waiting: an ID and how the tampering showed, as far as a row may say. */
+/** One hold waiting: IDs and the sign, naming the record as a hold found directly names it. */
 export interface HoldWaiting {
   readonly org_id: string;
+  readonly subject_type: string;
+  readonly object_id: string;
   readonly reason: string;
 }
 
-/** Keeps a hold that couldn't be recorded. One there already stands. Its own transaction, so a hung statement ends. */
-export async function keepHoldWaiting(db: Kysely<AuditTables>, orgId: string, reason: string): Promise<void> {
+/** What names a row: the record, in its organisation. */
+interface NamedRecord {
+  readonly orgId: string;
+  readonly subjectType: string;
+  readonly objectId: string;
+}
+
+const named = (tx: Transaction<AuditTables>, { orgId, subjectType, objectId }: NamedRecord) =>
+  tx
+    .selectFrom('directory.holds_waiting')
+    .select('reason')
+    .where('org_id', '=', orgId)
+    .where('subject_type', '=', subjectType)
+    .where('object_id', '=', objectId);
+
+/** Keeps a hold that couldn't be recorded. One there for this record stands. Its own transaction, so a hung statement ends. */
+export async function keepHoldWaiting(
+  db: Kysely<AuditTables>,
+  { orgId, subjectType, objectId }: NamedRecord,
+  reason: string,
+): Promise<void> {
   await limitedTransaction(db, (tx) =>
     tx
       .insertInto('directory.holds_waiting')
-      .values({ org_id: orgId, reason })
-      .onConflict((conflict) => conflict.column('org_id').doNothing())
+      .values({ org_id: orgId, subject_type: subjectType, object_id: objectId, reason })
+      .onConflict((conflict) => conflict.doNothing())
       .execute(),
   );
 }
 
-/** Takes the row away, in the transaction that recorded the hold (or found it held), so the two can't part. */
-export async function holdNoLongerWaiting(tx: Transaction<AuditTables>, orgId: string): Promise<void> {
-  await tx.deleteFrom('directory.holds_waiting').where('org_id', '=', orgId).execute();
+/** Whether the record's row is there now. */
+export async function holdStillWaiting(tx: Transaction<AuditTables>, record: NamedRecord): Promise<boolean> {
+  return (await named(tx, record).execute()).length > 0;
+}
+
+/** Takes the record's row away, in the transaction that recorded the hold (or found it held), so the two can't part. */
+export async function holdNoLongerWaiting(
+  tx: Transaction<AuditTables>,
+  { orgId, subjectType, objectId }: NamedRecord,
+): Promise<void> {
+  await tx
+    .deleteFrom('directory.holds_waiting')
+    .where('org_id', '=', orgId)
+    .where('subject_type', '=', subjectType)
+    .where('object_id', '=', objectId)
+    .execute();
 }
 
 /**
  * Every hold waiting, on one trip: an empty table is the usual answer. No limit,
- * as the key and the directory's list bound it to one row an organisation, and
- * a partial answer would read as rows deleted.
+ * as a partial answer would read as rows deleted: only a forged row makes it long.
  */
 export function holdsWaiting(db: Kysely<AuditTables>): Promise<readonly HoldWaiting[]> {
-  return readAloneOnOneTrip(db, db.selectFrom('directory.holds_waiting').select(['org_id', 'reason']));
+  return readAloneOnOneTrip(
+    db,
+    db.selectFrom('directory.holds_waiting').select(['org_id', 'subject_type', 'object_id', 'reason']),
+  );
 }

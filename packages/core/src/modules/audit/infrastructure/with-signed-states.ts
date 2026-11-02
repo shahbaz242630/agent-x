@@ -21,24 +21,31 @@
 //   that found it, and a later withSignedStates for the organisation tries
 //   again, one at a time, so a head held locked can't take a connection for
 //   every request; so does each run of the anchor check (holdOrganisation)
-// - in directory.holds_waiting (0069), an ID and the sign alone, so another
-//   process and this one after a restart know of it: Tx A reads the row itself,
-//   under the head's lock; every process polls it each 5 seconds (pollHoldsWaiting),
-//   tries a new one at once, and then keeps it as its own
+// - in directory.holds_waiting (0069), IDs and the sign, naming its record as
+//   the hold will, so clearing checks the same thing whichever process records
+//   it, and another process and this one after a restart know of it: Tx A reads
+//   the row itself, under the head's lock; every process polls it each 5 seconds
+//   (pollHoldsWaiting), tries a new one at once, and then keeps it as its own
 // The memory stays because the database may be just what is in trouble: a row
 // that can't be written says so (`audit.hold_not_kept`), and the process retries
 // both. A hold recorded takes its row with it, in the same transaction.
 //
-// A row only adds caution, so a row forged causes a hold attempt and a wait.
-// A row gone from the table leaves each process that held it to try once more:
-// finding the hold recorded is the usual way, and nothing is said; recording it
-// means the row was deleted with no hold, which is the alarm (`row_gone`).
+// One row a record. A hold names one record and clearing checks that one, so a
+// row for another record stays while the hold stands, tried by each poll (a
+// transaction each 5 seconds, a process), and becomes the next hold once it is
+// cleared. A row only adds caution, and really does: a row forged sets the hold.
+// So a hold set from a row alone raises the alarm (`from_row`), as one foothold
+// can hold every organisation. A row gone from the table leaves each process that
+// held it to try once more: finding the hold recorded is the usual way, and nothing
+// is said; recording it means the row was deleted with no hold, the alarm (`row_gone`).
 // What stays open: a reader without the head's lock learns of another process's
-// hold at its next poll; a hold recorded by another process names the sign and
-// not the object, which is in the alarm's line; and a row deleted once every
-// process that knew it has restarted is gone, leaving the alarm's line, with the
-// hold set when the tampering is next found. A hold's transaction is bounded by
-// the head's lock (5 s) and each statement's time (10 s).
+// hold at its next poll; a row-recorded hold has no count or chain failure, which
+// are in the alarm's line; a process frozen past a whole clearing that held an
+// entry re-holds on waking, with `row_gone`, as it can't tell that from a row
+// deleted (a new row is looked for again first, so isn't re-held); and a row
+// deleted once every process that knew it has restarted is gone, leaving the
+// alarm's line, with the hold set when the tampering is next found. A hold's
+// transaction is bounded by the head's lock (5 s) and each statement's time (10 s).
 //
 // A work whose recording meets a chain that refuses new events has met
 // tampering too, and raises the alarm (`check: record`) before its error goes
@@ -51,7 +58,13 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
-import { holdNoLongerWaiting, holdsWaiting, type HoldWaiting, keepHoldWaiting } from './holds-waiting.ts';
+import {
+  holdNoLongerWaiting,
+  holdStillWaiting,
+  holdsWaiting,
+  type HoldWaiting,
+  keepHoldWaiting,
+} from './holds-waiting.ts';
 import {
   CHAIN_SUBJECT,
   createSignedStates,
@@ -77,10 +90,9 @@ interface Found {
   readonly count: number;
   /** Its row in the holds waiting was written or seen: with it gone, it was recorded, or deleted. */
   readonly inTable?: boolean;
+  /** This process knows it from its row alone: whoever found it may have raised the alarm, or no one did (a row forged). */
+  readonly fromRow?: boolean;
 }
-
-/** The subject of a hold known from its row alone, which doesn't say what was found or on which record. */
-const WAITING_SUBJECT = 'hold_waiting';
 
 /** How often every process looks for holds another left waiting. */
 export const HOLDS_WAITING_EVERY_MS = 5_000;
@@ -110,7 +122,7 @@ function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
 async function keepWaiting(db: Kysely<AuditTables>, held: string, found: Found, log: Logger): Promise<void> {
   unrecorded.set(held, { ...found, inTable: false });
   try {
-    await keepHoldWaiting(db, held, found.finding.sign);
+    await keepHoldWaiting(db, found.finding, found.finding.sign);
     unrecorded.set(held, { ...found, inTable: true });
   } catch (error) {
     log.error('audit.hold_not_kept', { reason: found.finding.sign, err: error });
@@ -122,14 +134,17 @@ async function keepWaiting(db: Kysely<AuditTables>, held: string, found: Found, 
  * for it, bounded by the head's lock (5 s) and each statement's time (10 s),
  * so neither a locked head nor a slow database holds the caller up for long.
  * One that can't be recorded raises the alarm (`check: hold`) and waits, here
- * and in its row. Never throws: what it came to, or `failed`.
+ * and in its row. `rowMustStand`: one just read from its row is looked for again
+ * first, so one frozen between that read and this try doesn't hold over a clearing:
+ * gone means recorded, and reads `already`. Never throws: what it came to, or `failed`.
  */
 async function setHold(
   db: Kysely<AuditTables>,
   held: string,
   found: Found,
   { keys, ids, logger, correlationId }: SignedStatesServices,
-): Promise<'set' | 'already' | 'failed'> {
+  rowMustStand = false,
+): Promise<'set' | 'already' | 'named_elsewhere' | 'failed'> {
   const { finding, count } = found;
   const log = logger.child({ orgId: held });
   recording.set(held, (recording.get(held) ?? 0) + 1);
@@ -143,13 +158,15 @@ async function setHold(
       // It sets the hold, and reads none: nothing waiting could change what it does.
       unrecorded: () => undefined,
     });
-    const outcome = await withTenant<AuditTables, 'set' | 'already'>(
+    const outcome = await withTenant<AuditTables, 'set' | 'already' | 'named_elsewhere'>(
       db,
       held,
       async (tx) => {
         await sql`set local lock_timeout = '5s'`.execute(tx);
+        if (rowMustStand && !(await holdStillWaiting(tx, finding))) return 'already';
         const recorded = await holder.hold(tx, finding, count);
-        await holdNoLongerWaiting(tx, held);
+        // Named elsewhere: clearing won't check this record, so its row stays to be the next hold.
+        if (recorded !== 'named_elsewhere') await holdNoLongerWaiting(tx, finding);
         return recorded;
       },
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
@@ -162,6 +179,15 @@ async function setHold(
         subjectType: finding.subjectType,
         findings: count,
       });
+      if (found.fromRow === true) {
+        log.error('audit.integrity_failed', {
+          chain: 'organisation',
+          check: 'hold',
+          reason: 'from_row',
+          subjectType: finding.subjectType,
+          objectId: finding.objectId,
+        });
+      }
     }
     return outcome;
   } catch (error) {
@@ -180,10 +206,11 @@ async function setHold(
   }
 }
 
-/** What a row says of a hold this process hadn't heard of: its finding is in the line of whichever process found it. */
-const foundInRow = ({ org_id: orgId, reason }: HoldWaiting): Found => ({
-  finding: { orgId, subjectType: WAITING_SUBJECT, objectId: orgId, sign: signOfWaiting(reason) },
+/** What a row says of a hold this process hadn't heard of: how many were found, and how a chain failed, stay in the alarm's line. */
+const foundInRow = ({ org_id: orgId, subject_type: subjectType, object_id: objectId, reason }: HoldWaiting): Found => ({
+  finding: { orgId, subjectType, objectId, sign: signOfWaiting(reason) },
   count: 1,
+  fromRow: true,
 });
 
 /**
@@ -226,12 +253,13 @@ export async function pollHoldsWaiting(db: Kysely<AuditTables>, services: Signed
   const inTable = new Set(rows.map(({ org_id: orgId }) => orgId));
   const fresh: [string, Found][] = [];
   for (const row of rows) {
+    const inRow: Found = { ...foundInRow(row), inTable: true };
     const here = unrecorded.get(row.org_id);
-    const kept: Found = { ...(here ?? foundInRow(row)), inTable: true };
-    unrecorded.set(row.org_id, kept);
-    if (here === undefined && !recording.has(row.org_id)) fresh.push([row.org_id, kept]);
+    unrecorded.set(row.org_id, here === undefined ? inRow : { ...here, inTable: true });
+    // Each row of an organisation not known here: a hold named elsewhere must not keep the next row from its try.
+    if (!known.has(row.org_id) && !recording.has(row.org_id)) fresh.push([row.org_id, inRow]);
   }
-  for (const [held, found] of fresh) await setHold(db, held, found, services);
+  for (const [held, found] of fresh) await setHold(db, held, found, services, true);
   for (const [held, found] of known) {
     if (!inTable.has(held) && !recording.has(held)) await goneFromTable(db, held, found, services);
   }

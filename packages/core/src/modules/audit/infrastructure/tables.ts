@@ -11,6 +11,8 @@ export interface AuditTables {
 
 interface HoldsWaitingTable {
   org_id: string;
+  subject_type: string;
+  object_id: string;
   reason: string;
 }
 

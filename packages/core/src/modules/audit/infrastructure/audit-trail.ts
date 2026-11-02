@@ -1025,7 +1025,7 @@ const headLocking = (tx: AuditTransaction, orgId: string) =>
  * snapshot taken once the lock is held, and one left while it was waited for is seen.
  */
 export async function lockChainHeadSeeingWaiting(tx: AuditTransaction, orgId: string): Promise<string | undefined> {
-  const waiting = tx.selectFrom('directory.holds_waiting').select('reason').where('org_id', '=', orgId);
+  const waiting = tx.selectFrom('directory.holds_waiting').select('reason').where('org_id', '=', orgId).limit(1);
   const [, found] = await sendTogether(tx, [headLocking(tx, orgId), waiting]);
   return (found.rows[0] as { readonly reason: string } | undefined)?.reason;
 }
