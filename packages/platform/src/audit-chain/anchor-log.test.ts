@@ -34,8 +34,8 @@ const START = new Date('2026-11-02T09:00:00.000Z');
 const MINUTE = 60_000;
 const ALERT_AFTER_MS = 15 * MINUTE;
 
-const anchorAt = (chain: Chain, seq: bigint, at = START, fill = Number(seq), signing = keys): Anchor =>
-  signAnchor(signing, chain, { seq, hash: Buffer.alloc(32, fill), macKeyVersion: 2 }, at);
+const anchorAt = (chain: Chain, seq: bigint, at = START, fill = Number(seq), signing = keys, epoch = 1): Anchor =>
+  signAnchor(signing, chain, { seq, hash: Buffer.alloc(32, fill), macKeyVersion: 2 }, at, epoch);
 
 /** A closing line, as the log writes one. */
 const closingOf = (
@@ -399,6 +399,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       ['another MAC key version', withField({ mk: 3 })],
       ['another time', withField({ at: '2026-11-02T09:00:00.001Z' })],
       ['another chain', withField({ chain: `organisation:${OTHER_ORG}` })],
+      ['another epoch', lineOf(anchorAt(CHAIN, 7n, START, 7, keys, 2))],
       ['a signing key this process has not', withField({ kv: 9 })],
       ['a signature cut short', withField({ sig: good.signature.subarray(1).toString('base64') })],
     ])('refuses a line signed for something else: %s', async (_what, line) => {

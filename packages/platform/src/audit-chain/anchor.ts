@@ -22,7 +22,7 @@ export interface Anchor extends CheckedPoint {
   readonly at: Date;
   /** The signing key's version; `macKeyVersion` is the audit MAC key's at the anchored event, signed with the rest. */
   readonly keyVersion: number;
-  /** Ed25519 over `['audit-anchor', chain, seq, hash, macKeyVersion, at]`, as length-prefixed parts. */
+  /** Ed25519 over `['audit-anchor', epoch, chain, seq, hash, macKeyVersion, at]`, as length-prefixed parts. */
   readonly signature: Buffer;
 }
 
@@ -32,9 +32,13 @@ export interface AnchorStore {
   keep(anchor: Anchor): void;
 }
 
-/** What an anchor's signature covers. */
-export const anchorMessage = (chain: string, point: CheckedPoint, at: Date): Message => [
+/** The epoch of an anchor kept in memory alone: real ones count from 1, and it's never written, so never read back. */
+export const NO_EPOCH = 0;
+
+/** What an anchor's signature covers: the epoch too, so a line copied from one into another fails. */
+export const anchorMessage = (chain: string, point: CheckedPoint, at: Date, epoch: number): Message => [
   'audit-anchor',
+  String(epoch),
   chain,
   point.seq.toString(),
   point.hash,
@@ -42,10 +46,10 @@ export const anchorMessage = (chain: string, point: CheckedPoint, at: Date): Mes
   at.toISOString(),
 ];
 
-/** Signs a chain's checked head as its new anchor. */
-export function signAnchor(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date): Anchor {
+/** Signs a chain's checked head as its new anchor, for the store's epoch where it will be kept there. */
+export function signAnchor(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date, epoch = NO_EPOCH): Anchor {
   const name = chainName(chain);
-  const { signature, keyVersion } = keys.sign('audit-anchor', anchorMessage(name, point, at));
+  const { signature, keyVersion } = keys.sign('audit-anchor', anchorMessage(name, point, at, epoch));
   const { seq, hash, macKeyVersion } = point;
   return Object.freeze({ chain: name, seq, hash, macKeyVersion, at, keyVersion, signature });
 }

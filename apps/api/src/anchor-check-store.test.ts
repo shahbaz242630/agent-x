@@ -1,7 +1,7 @@
 // The anchor check with its anchors in the write-once store (4D2e E, PL-58): the
 // forced cases, a restart being a new log and a new check over the same store.
 // The real chains, with the real Tx A, are in handoff.db.test.ts.
-import { gzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 
 import { type ChainReport, createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -83,6 +83,7 @@ function process(
   organizations: OrganisationChains,
   chains: readonly CheckedChain[] = [],
   holding = keys,
+  epoch = 1,
 ) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
@@ -92,7 +93,7 @@ function process(
     keys: holding,
     logger,
     now: () => clock.now(),
-    epoch: 1,
+    epoch,
     alertAfterMs: STALE_MS,
   });
   const check = createAnchorCheck({
@@ -643,7 +644,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       return gzipSync(`${[...lines, closing].map((line) => JSON.stringify(line)).join('\n')}\n`);
     };
     const lineFrom = (signing: typeof keys, seq: bigint, fill: number, at = AT) => {
-      const anchor = signAnchor(signing, CHAIN, ok(seq, fill) as Extract<ChainReport, { ok: true }>, at);
+      const anchor = signAnchor(signing, CHAIN, ok(seq, fill) as Extract<ChainReport, { ok: true }>, at, 1);
       return {
         k: 'a',
         chain: anchor.chain,
@@ -769,6 +770,33 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       expect(after.lines('audit.integrity_failed')).toContainEqual(expect.objectContaining({ check: 'anchor_store' }));
       expect(chains.holds).toEqual([[ORG, 'anchor']]);
     });
+  });
+
+  it("SEC-DB-11 after a sanctioned restore, the old epoch's lines copied into the new count for nothing: the spoiled-file alarm, no hold", async () => {
+    const fake = createFakeWriteOnceStore();
+    const chains = chainsHolding({ [ORG]: ok(100n), [OTHER_ORG]: ok(90n) });
+    await process(fake, chains.organizations).check.run();
+    const [[name, bytes] = ['', Buffer.alloc(0)]] = fake.files;
+    const copied = gunzipSync(bytes)
+      .toString('utf8')
+      .split('\n')
+      .filter((line) => line.includes('"k":"a"'));
+    expect(copied).toHaveLength(2);
+    fake.files.set(`e2/deltas/${name.slice('e1/snapshots/'.length)}`, gzipSync(`${copied.join('\n')}\n`));
+
+    // The database restored, so each chain stands well below where the old epoch had it.
+    chains.held[ORG] = ok(3n);
+    chains.held[OTHER_ORG] = ok(2n);
+    const after = process(fake, chains.organizations, [], keys, 2);
+    await after.check.run();
+
+    expect(after.log.state()).toBe('read');
+    expect(after.log.latest(CHAIN)?.seq).toBe(3n);
+    expect(after.lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ check: 'anchor_store', reason: 'signature', lines: 2 }),
+      expect.objectContaining({ check: 'anchor_store', reason: 'unclosed' }),
+    ]);
+    expect(chains.holds).toEqual([]);
   });
 
   it('without a store the check keeps its anchors in memory as it did, and a run reads and writes nothing', async () => {

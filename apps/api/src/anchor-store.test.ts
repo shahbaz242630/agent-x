@@ -61,7 +61,7 @@ describe("where the chains' anchors are kept (PL-58)", () => {
     folders.push(directory);
     const log = anchorLogOf(configWith({ directory, container: null }, 2), services);
     await log?.read();
-    log?.keep(signAnchor(keys, { kind: 'platform' }, { seq: 4n, hash: Buffer.alloc(32, 4), macKeyVersion: 1 }, AT));
+    log?.keep(signAnchor(keys, { kind: 'platform' }, { seq: 4n, hash: Buffer.alloc(32, 4), macKeyVersion: 1 }, AT, 2));
     await log?.flush();
 
     const after = anchorLogOf(configWith({ directory, container: null }, 2), services);

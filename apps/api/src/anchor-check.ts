@@ -220,7 +220,7 @@ export function createAnchorCheck({
     if (last !== undefined && !stillHolds(report, last)) return alarmed(chain, log, 'anchor', last.seq);
     if (last?.seq === report.seq) return 'unchanged';
     if (storeUnread()) return 'unanchored';
-    const anchor = signAnchor(keys, chain, report, clock.now());
+    const anchor = signAnchor(keys, chain, report, clock.now(), durable?.epoch);
     anchors.keep(anchor);
     log.info('audit.anchored', {
       chain: chain.kind,

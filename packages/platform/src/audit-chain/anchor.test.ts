@@ -26,7 +26,7 @@ describe('an anchor (ADR-012 §2)', () => {
     const publicKey = keys.describe().find((key) => key.purpose === 'audit-anchor')?.versions[0]?.publicKey;
     if (publicKey === undefined) throw new Error('The anchor key has no public half');
     const outsiders = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: publicKey }, format: 'jwk' });
-    const message = encodeMessage(['audit-anchor', 'platform', '7', POINT.hash, '3', '2026-09-19T09:00:00.000Z']);
+    const message = encodeMessage(['audit-anchor', '0', 'platform', '7', POINT.hash, '3', '2026-09-19T09:00:00.000Z']);
 
     expect(anchor).toMatchObject({
       chain: 'platform',
@@ -40,7 +40,7 @@ describe('an anchor (ADR-012 §2)', () => {
     expect(
       verify(
         null,
-        encodeMessage(['audit-anchor', 'platform', '6', POINT.hash, '3', AT.toISOString()]),
+        encodeMessage(['audit-anchor', '0', 'platform', '6', POINT.hash, '3', AT.toISOString()]),
         outsiders,
         anchor.signature,
       ),
@@ -49,7 +49,7 @@ describe('an anchor (ADR-012 §2)', () => {
     expect(
       verify(
         null,
-        encodeMessage(['audit-anchor', 'platform', '7', POINT.hash, '2', AT.toISOString()]),
+        encodeMessage(['audit-anchor', '0', 'platform', '7', POINT.hash, '2', AT.toISOString()]),
         outsiders,
         anchor.signature,
       ),
@@ -57,6 +57,9 @@ describe('an anchor (ADR-012 §2)', () => {
   });
 
   it("names its chain, so one chain's anchor can't stand for another's", () => {
+    expect(signAnchor(keys, PLATFORM, POINT, AT, 2).signature).not.toEqual(
+      signAnchor(keys, PLATFORM, POINT, AT, 3).signature,
+    );
     const org = signAnchor(keys, { kind: 'organisation', orgId: ORG }, POINT, AT);
 
     expect(org.chain).toBe(`organisation:${ORG}`);

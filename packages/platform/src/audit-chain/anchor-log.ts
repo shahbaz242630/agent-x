@@ -12,7 +12,7 @@
 // another process wrote, so a copy that takes the lease back holds what the
 // one before it found. Nothing is written if nothing moved.
 //
-// Every line is signed with the `audit-anchor` key, and every file ends with a
+// Every line is signed with the `audit-anchor` key for its epoch, and every file ends with a
 // signed closing line naming the file, its epoch and how many lines it holds, so
 // an empty file or signed lines copied under a new name can't pass for one of ours.
 // A line that fails is skipped and is the alarm, never a hold; so is a file with no
@@ -90,6 +90,8 @@ const LATER_KINDS: ReadonlySet<unknown> = new Set(['p', 'r']);
 type Kind = 'deltas' | 'snapshots';
 
 export interface AnchorLog extends AnchorStore {
+  /** The epoch anchors kept here must be signed for. */
+  readonly epoch: number;
   /**
    * Reads what the store holds that this process has not read: all of it, or
    * none of it if any call fails. Never throws: every outcome is logged. One
@@ -217,7 +219,7 @@ function readLines(keys: KeyProvider, text: string, name: string, epoch: number)
     const anchor = kind === 'a' ? anchorFrom(fields as Record<string, unknown>) : undefined;
     if (
       anchor !== undefined &&
-      isSigned(keys, anchor.keyVersion, anchorMessage(anchor.chain, anchor, anchor.at), anchor.signature)
+      isSigned(keys, anchor.keyVersion, anchorMessage(anchor.chain, anchor, anchor.at, epoch), anchor.signature)
     ) {
       anchors.push(anchor);
     } else {
@@ -483,6 +485,7 @@ export function createAnchorLog({
   };
 
   return Object.freeze({
+    epoch,
     latest: (chain: Chain) => anchors.get(chainName(chain)),
     keep(anchor: Anchor) {
       // The check reads the anchor again first; this holds should a caller not, as a wound-back head must never replace it.
