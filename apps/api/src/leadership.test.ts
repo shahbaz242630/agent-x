@@ -370,15 +370,23 @@ describe('a try that goes unanswered has a deadline', () => {
     expect(said('jobs.lease_renew_failed')).toHaveLength(1);
   });
 
-  it('a renewal: it counts as failed, the next try still comes, and the lease is kept if that one is answered', async () => {
+  /** A try the database ends itself, as the statement's own limit does, sooner than the deadline. */
+  const endedBy = (ms: number) => () =>
+    new Promise<boolean>((_resolve, reject) => {
+      setTimeout(() => {
+        reject(new Error('canceling statement due to lock timeout'));
+      }, ms);
+    });
+
+  it('a renewal the database ends: it counts as failed, the next comes soon, and the lease is kept if that is answered', async () => {
     const take = vi
       .fn<LeaseStore['take']>()
       .mockResolvedValueOnce(true)
-      .mockImplementationOnce(never)
+      .mockImplementationOnce(endedBy(8 * SECOND))
       .mockResolvedValue(true);
     const { one, begun } = leadershipOf({ take, release: () => Promise.resolve() });
     await begun;
-    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS + LEASE_TRY_WITHIN_MS);
+    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS + 8 * SECOND);
     expect(said('jobs.lease_renew_failed')).toHaveLength(1);
     expect(take).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(LEASE_RETRY_AFTER_MS);
@@ -387,7 +395,55 @@ describe('a try that goes unanswered has a deadline', () => {
     expect(said('jobs.lease_lost')).toEqual([]);
   });
 
-  it('every renewal unanswered: it let go at the term, from the last answered try, not a try later', async () => {
+  it('every renewal ended by the database: several tries in the term, and it lets go at the term from the last answered', async () => {
+    const take = vi
+      .fn<LeaseStore['take']>()
+      .mockResolvedValueOnce(true)
+      .mockImplementation(endedBy(8 * SECOND));
+    const { one, begun } = leadershipOf({ take, release: () => Promise.resolve() });
+    await begun;
+    await vi.advanceTimersByTimeAsync(LEASE_TERM_MS - 1);
+    expect(one.leading()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(one.leading()).toBe(false);
+    expect(said('jobs.lease_lost')).toHaveLength(1);
+    // The first answer, then T+20, T+33, T+46, T+59.
+    expect(take).toHaveBeenCalledTimes(5);
+  });
+
+  it('a try unanswered past its deadline is the only one out: no second until it ends, then they go on', async () => {
+    const answers: ((held: boolean) => void)[] = [];
+    const take = vi.fn(() => new Promise<boolean>((resolve) => answers.push(resolve)));
+    const { one, begun } = leadershipOf({ take, release: () => Promise.resolve() });
+    await vi.advanceTimersByTimeAsync(LEASE_TRY_WITHIN_MS);
+    await begun;
+    await vi.advanceTimersByTimeAsync(10 * LEASE_RETRY_AFTER_MS);
+    expect(take).toHaveBeenCalledTimes(1);
+    expect(said('jobs.lease_renew_failed')).toHaveLength(1);
+
+    // Its late answer holds nothing: this process took its deadline as a failure.
+    answers[0]?.(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(one.leading()).toBe(false);
+    await vi.advanceTimersByTimeAsync(LEASE_RETRY_AFTER_MS);
+    expect(take).toHaveBeenCalledTimes(2);
+    answers[1]?.(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(one.leading()).toBe(true);
+  });
+
+  it('a try that fails after its deadline goes unhandled nowhere, and frees the next', async () => {
+    const answers: ((why: Error) => void)[] = [];
+    const take = vi.fn(() => new Promise<boolean>((_resolve, reject) => answers.push(reject)));
+    const { begun } = leadershipOf({ take, release: () => Promise.resolve() });
+    await vi.advanceTimersByTimeAsync(LEASE_TRY_WITHIN_MS);
+    await begun;
+    answers[0]?.(new Error('connection lost'));
+    await vi.advanceTimersByTimeAsync(LEASE_RETRY_AFTER_MS);
+    expect(take).toHaveBeenCalledTimes(2);
+  });
+
+  it('every renewal unanswered: it let go at the term, from the last answered try, with no pile of tries', async () => {
     const take = vi.fn<LeaseStore['take']>().mockResolvedValueOnce(true).mockImplementation(never);
     const { one, begun } = leadershipOf({ take, release: () => Promise.resolve() });
     await begun;
@@ -396,8 +452,7 @@ describe('a try that goes unanswered has a deadline', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(one.leading()).toBe(false);
     expect(said('jobs.lease_lost')).toHaveLength(1);
-    // T+20 hung to T+30, then a try each 15 s: more than the two a plain 20 s renewal would have had.
-    expect(take.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(take).toHaveBeenCalledTimes(2);
   });
 
   it('a stop with a take unanswered ends at once, and still gives the lease up', async () => {

@@ -98,9 +98,11 @@ export interface Leadership {
  * One copy of the jobs at a time (4D2e D). A process believes it leads only until
  * its last renewal's sending time plus the term: the database counted that term
  * from later, so this process has let go before another can take it. A try that
- * fails or goes unanswered within its own deadline (the pool's statements carry no
- * limit outside withTenant) leaves it leading until then, and is tried again soon;
- * a refusal ends it at once. It goes on trying either way, so a process that lost
+ * fails or goes unanswered within its own deadline leaves it leading until then,
+ * and is tried again soon; a refusal ends it at once. One try at a time: the
+ * statement has limits of its own (job-lease.ts) and the deadline cancels nothing,
+ * so a try past them is a connection lost, and another would hold another. It goes
+ * on trying either way, so a process that lost
  * the lease takes it back when it can. A monotonic clock by default: a wall clock
  * moved back would hold the lease longer.
  *
@@ -136,6 +138,7 @@ export function createLeadership({
   let expiry: ReturnType<typeof setTimeout> | undefined;
   let renewal: ReturnType<typeof setTimeout> | undefined;
   let renewing: Promise<void> = Promise.resolve();
+  let trying = false;
   let beating = (): boolean => false;
   const waiting = new Set<(held: AbortController) => void>();
   // A longer gap than any try can make between two means the process was frozen, not refused.
@@ -176,9 +179,17 @@ export function createLeadership({
 
   /** Whether the database answered: a refusal is an answer. */
   const renew = async (): Promise<boolean> => {
+    // The last try is still out: past its deadline, said then, and its connection still held.
+    if (trying) return false;
     const sentAt = now();
+    trying = true;
+    const taking = store.take(beating()).finally(() => {
+      trying = false;
+    });
+    // Handled here too, so a try that fails after its deadline never goes unhandled.
+    void taking.catch(() => undefined);
     try {
-      if (await withinDeadline(store.take(beating()), tryWithinMs, stopping.signal)) hold(sentAt);
+      if (await withinDeadline(taking, tryWithinMs, stopping.signal)) hold(sentAt);
       else refused();
       return true;
     } catch (error) {

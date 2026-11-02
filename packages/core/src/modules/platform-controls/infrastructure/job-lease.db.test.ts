@@ -1,6 +1,7 @@
 // The lease's own statements against a real Postgres (0068, 4D2e D).
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { jobsBeating, releaseJobLease, takeJobLease } from './job-lease.ts';
@@ -34,6 +35,9 @@ beforeEach(async () => {
       "update platform_controls.job_lease set holder = null, until = '-infinity', renewed_at = null, beating_at = null",
     );
 });
+
+const WAITING = `select pid from pg_catalog.pg_stat_activity
+  where datname = pg_catalog.current_database() and pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid)) > 0`;
 
 const row = async () =>
   (
@@ -112,6 +116,72 @@ describe(`the jobs' lease (Postgres ${server.version})`, () => {
       expect((await row())?.holder).toBe(B);
     } finally {
       await leaving.end();
+    }
+  });
+
+  it.each([
+    ['its lock wait', { statementMs: 5000, lockMs: 100 }, /lock timeout/],
+    ['the statement', { statementMs: 100, lockMs: 5000 }, /statement timeout/],
+  ])(
+    'forced: a session sitting on the row: %s ends the take, and frees its connection',
+    async (_what, limits, error) => {
+      const sitting = await database.connect('admin');
+      await sitting.query('begin');
+      await sitting.query('select name from platform_controls.job_lease for update');
+      try {
+        await expect(takeJobLease(app, A, false, TERM, limits)).rejects.toThrow(error);
+        await expect(releaseJobLease(app, A, limits)).resolves.toBeUndefined();
+        expect(await database.as('admin').query(WAITING)).toEqual([]);
+      } finally {
+        await sitting.query('rollback');
+        await sitting.end();
+      }
+    },
+  );
+
+  it('forced: a release behind a session sitting on the row held by this holder ends too', async () => {
+    await takeJobLease(app, A, false, TERM);
+    const sitting = await database.connect('admin');
+    await sitting.query('begin');
+    await sitting.query('select name from platform_controls.job_lease for update');
+    try {
+      await expect(releaseJobLease(app, A, { statementMs: 5000, lockMs: 100 })).rejects.toThrow(/lock timeout/);
+      expect(await database.as('admin').query(WAITING)).toEqual([]);
+    } finally {
+      await sitting.query('rollback');
+      await sitting.end();
+    }
+  });
+
+  it('forced: left to its own limits, a take behind a session sitting on the row gives up inside the process deadline', async () => {
+    const sitting = await database.connect('admin');
+    await sitting.query('begin');
+    await sitting.query('select name from platform_controls.job_lease for update');
+    const started = performance.now();
+    try {
+      await expect(takeJobLease(app, A, false, TERM)).rejects.toThrow(/lock timeout/);
+      expect(performance.now() - started).toBeGreaterThanOrEqual(4_500);
+      expect(performance.now() - started).toBeLessThan(10_000);
+    } finally {
+      await sitting.query('rollback');
+      await sitting.end();
+    }
+  });
+
+  it('its limits end with its transaction: the connection goes back as it came', async () => {
+    const one = createDatabase<PlatformControlsTables>(
+      { ...database.connection('app'), tls: 'disable', maxConnections: 1 },
+      testLogger(),
+    );
+    try {
+      await takeJobLease(one, A, false, TERM, { statementMs: 1234, lockMs: 567 });
+      const { rows } = await sql<{ statement: string; lock: string }>`
+        select pg_catalog.current_setting('statement_timeout') as statement,
+               pg_catalog.current_setting('lock_timeout') as lock`.execute(one);
+      expect(rows[0]?.statement).not.toBe('1234ms');
+      expect(rows[0]?.lock).not.toBe('567ms');
+    } finally {
+      await one.destroy();
     }
   });
 

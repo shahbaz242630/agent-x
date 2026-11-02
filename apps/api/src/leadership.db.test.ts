@@ -1,11 +1,11 @@
 // The lease's process side over the real row (0068, 4D2e D): short terms on a real Postgres. job-lease.db.test.ts holds
 // the statements; leadership.test.ts every timing on a clock it moves.
 import { type PlatformControlsTables, releaseJobLease, takeJobLease } from '@agentx/core/modules/platform-controls';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, timedRoundTrips } from '@agentx/platform/db';
 import { createTestDatabase, LogCapture, type TestDatabase, testLogger } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
-import { createLeadership, type Leadership } from './background.ts';
+import { createLeadership, type Leadership, withinDeadline } from './background.ts';
 
 const server = inject('postgres');
 const A = '0199a0f0-0000-7000-8000-00000000aaaa';
@@ -63,6 +63,7 @@ function aProcess(holder: string, answering: () => boolean = () => true) {
 }
 
 const said = (event: string) => capture.lines().filter((line) => line.event === event);
+const withinTime = <T>(work: Promise<T>, ms: number) => withinDeadline(work, ms, undefined);
 
 describe(`a process and the lease's row (Postgres ${server.version})`, () => {
   it('two never both lead: expiry hands over on the real clock, the old holder having let go first', async () => {
@@ -145,6 +146,61 @@ describe(`a process and the lease's row (Postgres ${server.version})`, () => {
       );
     } finally {
       await admin.query("insert into platform_controls.job_lease (name, until) values ('jobs', '-infinity')");
+    }
+  });
+
+  it('forced: a session sitting on the row never takes the pool: one try out at most, and requests still answer', async () => {
+    const small = createDatabase<PlatformControlsTables>(
+      { ...database.connection('app'), tls: 'disable', maxConnections: 3 },
+      testLogger(),
+    );
+    const sitting = await database.connect('admin');
+    await sitting.query('begin');
+    await sitting.query('select name from platform_controls.job_lease for update');
+    const limits = { statementMs: 400, lockMs: 200 };
+    const one = createLeadership({
+      store: {
+        take: (beating) => takeJobLease(small, A, beating, TERM_MS / 1000, limits),
+        release: () => releaseJobLease(small, A, limits),
+      },
+      logger: testLogger(capture),
+      notLeadingAfterMs: 60_000,
+      renewEveryMs: RENEW_MS,
+      termMs: TERM_MS,
+      tryWithinMs: 500,
+      retryAfterMs: 50,
+    });
+    try {
+      const begun = one.start(() => false);
+      const waiting = () =>
+        database.as('admin').query<{ pid: number }>(
+          `select pid from pg_catalog.pg_stat_activity
+           where datname = pg_catalog.current_database()
+             and pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid)) > 0`,
+        );
+      let most = 0;
+      const until = Date.now() + 2500;
+      while (Date.now() < until) {
+        most = Math.max(most, (await waiting()).length);
+        // Every connection but the one try's is free: as many reads as that at once, at once.
+        const reads = Array.from({ length: 2 }, () => withinTime(timedRoundTrips(small, 1), 1000));
+        await Promise.all(reads);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await begun;
+      expect(most).toBeLessThanOrEqual(1);
+      // Several rounds did run, and each was ended by the database's limit, not left to pile up.
+      expect(said('jobs.lease_renew_failed').length).toBeGreaterThanOrEqual(4);
+      expect(one.leading()).toBe(false);
+
+      await sitting.query('commit');
+      await vi.waitFor(() => {
+        expect(one.leading()).toBe(true);
+      });
+    } finally {
+      await one.stop();
+      await sitting.end();
+      await small.destroy();
     }
   });
 
