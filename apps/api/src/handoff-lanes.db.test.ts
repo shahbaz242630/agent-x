@@ -174,6 +174,145 @@ const unknownsFrom = (orgs: readonly string[]) => {
 const lookedFor = (w: World, rail: FakeRail) =>
   watchedRail(rail, health).getExecution({ organizationId: w.org, instructionId: ids.next() });
 
+/** The app's database, `opened` called at each transaction it opens: a run's trips counted, or stopped at one. */
+const databaseWatched = (opened: () => void): Database<HandoffWorldTables> =>
+  new Proxy(app, {
+    get(target, name, receiver) {
+      const value: unknown = Reflect.get(target, name, receiver);
+      if (typeof value !== 'function') return value;
+      if (name !== 'transaction') return (value as (...args: unknown[]) => unknown).bind(target);
+      return () => {
+        opened();
+        return (value as () => unknown).call(target);
+      };
+    },
+  });
+
+describe('turns: fair, kept between runs (fair-lanes.ts)', () => {
+  it('gives each organisation one request a pass, whichever has most', async () => {
+    const big = await worldWith(3);
+    const small = await worldWith(1);
+    const { rail, sent } = railOver([big.w, small.w]);
+
+    await handoffOver([big.w, small.w], rail).run();
+
+    expect(sent).toEqual([big.w.org, small.w.org, big.w.org, big.w.org]);
+  });
+
+  it('a long run of waiting requests keeps no younger one out', async () => {
+    const { w, acting } = await ready();
+    // Older, to the supplier with no payee yet: each waits. Each run is stopped as its first request's Tx A opens.
+    const older = [];
+    for (let at = 0; at < 3; at += 1) {
+      older.push(await ask(acting, w, { amount: TINY, supplierId: w.suppliers[1] ?? '' }));
+    }
+    const younger = await ask(acting, w, { amount: TINY });
+    let stopping = new AbortController();
+    let opened = 0;
+    const job = handoffOver([w], railOver([w]).rail, {
+      database: databaseWatched(() => {
+        opened += 1;
+        // A run's transactions: the pause (1), the page (2), the first request's Tx A (3).
+        if (opened === 3) stopping.abort();
+      }),
+    });
+    const stoppedRun = async () => {
+      stopping = new AbortController();
+      opened = 0;
+      await job.run(stopping.signal);
+    };
+
+    await stoppedRun();
+    await stoppedRun();
+    await stoppedRun();
+    // Each run took the next: none read twice, though no run reached the end.
+    expect(lines('handoff.waiting').map(({ requestId }) => requestId)).toEqual(older.map(({ id }) => id));
+    expect(await statusOf(w, younger.id)).toBe('APPROVED');
+
+    await stoppedRun();
+    expect(await statusOf(w, younger.id)).toBe('HANDED_OFF');
+  });
+
+  it('wraps to the start after its end: one left waiting is tried again, not said again', async () => {
+    const { w, acting } = await ready();
+    const stuck = await ask(acting, w, { amount: TINY, supplierId: w.suppliers[1] ?? '' });
+    const job = handoffOver([w], railOver([w]).rail);
+
+    await job.run();
+    await job.run();
+
+    expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: stuck.id })]);
+    expect(await statusOf(w, stuck.id)).toBe('APPROVED');
+  });
+
+  it('never counts the rest as left standing while a pass is cut short; once it is whole, it does', async () => {
+    const { w } = await worldWith(3);
+    // Every Tx A fails, so they stand for no reason the run knows; the first run is stopped at its first.
+    let stopping: AbortController | undefined = new AbortController();
+    let opened = 0;
+    const failing = new Proxy(app, {
+      get(target, name, receiver) {
+        const value: unknown = Reflect.get(target, name, receiver);
+        if (typeof value !== 'function') return value;
+        if (name !== 'transaction') return (value as (...args: unknown[]) => unknown).bind(target);
+        return () => {
+          opened += 1;
+          // The pause (1), the page (2); then a Tx A, which fails.
+          if (opened === 3) {
+            stopping?.abort();
+            throw new Error('the database is away');
+          }
+          return (value as () => unknown).call(target);
+        };
+      },
+    });
+    const job = handoffOver([w], railOver([w], () => noAnswer).rail, { database: failing });
+    clock.advanceBy(QUEUE_STALE_MS + 60_000);
+
+    await job.run(stopping.signal);
+    expect(lines('handoff.failed')).toHaveLength(1);
+    expect(lines('handoff.queue_stale')).toEqual([]);
+
+    // On from where it stopped, to its end: the one that failed is now left standing, and said.
+    stopping = undefined;
+    opened = 100;
+    await job.run();
+    expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 1 })]);
+  });
+
+  it('a frozen organisation stops its turn and raises no stale alert', async () => {
+    const { w, requests } = await worldWith(3);
+    const mandateId = await shared.mandateIdOf(w);
+    await shared.moved(w, mandateId, 'organization', 'pause');
+    let opened = 0;
+    const { rail, sent } = railOver([w]);
+    const job = handoffOver([w], rail, {
+      database: databaseWatched(() => {
+        opened += 1;
+      }),
+    });
+
+    await job.run();
+    // Past the queue's age, its sweep already done: the pause (1), the page (2), the first request's Tx A (3), and no more.
+    clock.advanceBy(QUEUE_STALE_MS + 60_000);
+    await job.run();
+    opened = 0;
+    await job.run();
+    expect(opened).toBe(3);
+
+    expect(sent).toEqual([]);
+    expect(lines('handoff.queue_stale')).toEqual([]);
+    // Said once, for the one request it reached; the rest not walked for the same answer.
+    expect(lines('handoff.waiting')).toEqual([
+      expect.objectContaining({ requestId: requests[0] ?? '', why: 'organization' }),
+    ]);
+
+    await shared.moved(w, mandateId, 'organization', 'resume');
+    await job.run();
+    for (const id of requests) expect(await statusOf(w, id)).toBe('HANDED_OFF');
+  });
+});
+
 describe('a lane held: 3 unknowns in a row from one organisation', () => {
   it('sends no more; a hung organisation sends nothing past its hold; a lookup lets one; an acceptance clears it', async () => {
     const { w, requests } = await worldWith(5);

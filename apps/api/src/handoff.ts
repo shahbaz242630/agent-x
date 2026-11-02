@@ -8,9 +8,11 @@
 // The queue is the request's own status (decision 2: no "send" step): an
 // APPROVED request is waiting to be handed off, committed with its approval
 // or decision, so nothing is lost between the two (ADR-007 §6's outbox).
-// Each run takes each organisation's approved requests, oldest first, a page
-// at a time, each page after the last, so a page of requests left waiting
-// never keeps a younger one from its turn; each in a transaction of its own:
+// Each run takes the organisations' approved requests in turns (fair-lanes.ts:
+// one an organisation a pass), each organisation's oldest first, a page at a
+// time, each page after the last and the place kept between runs, so a page of
+// requests left waiting never keeps a younger one from its turn; a reason that
+// is the whole organisation's ends its turn. Each in a transaction of its own:
 //
 // Tx A, in ADR-006 §6's lock order:
 // 1. the platform hand-off pause, FOR SHARE (level 1): paused, or a row that
@@ -126,6 +128,7 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { createFairLanes, isOrganisationWide, type LaneStep } from './fair-lanes.ts';
 import { alertAdmins } from './payment-alerts.ts';
 import type { RailEntry, RailHealth, RailHold } from './rail-health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
@@ -150,6 +153,10 @@ const SWEEP_EVERY_MS = 60_000;
 
 /** How many of an organisation's approved requests are read at once: the run then takes the next page after them. */
 const HANDOFF_PAGE = 50;
+
+/** How many requests are worked at once, across every organisation and in each (4D2e Stage F): the new shape, one at a time. */
+const HANDOFF_SLOTS = 1;
+const HANDOFF_SLOTS_AN_ORGANISATION = 1;
 
 /**
  * The statuses a request is handed off from. This job never commits one
@@ -303,12 +310,19 @@ export function createHandoff({
   // only a run that reads its organisations beats, so one failing every time reads as stopped.
   let beat = clock.now().getTime();
   let sweptAt = Number.NEGATIVE_INFINITY;
-  // Why hand-offs were held at the last run, and the reason each request waited for there (gate H5): said on change.
+  // Why hand-offs were held at the last run (gate H5): said on change.
   let heldWas: string | null = null;
-  let waitedFor = new Map<string, string>();
-  let waitingNow = new Map<string, string>();
-  // This run's waiting requests by organisation, left out of its stale count (gate H8).
-  const waitingIn = new Map<string, string[]>();
+  // The run under way's signal: the lanes' work is one job's, and runs never overlap.
+  let stopping: AbortSignal | undefined;
+  // Each organisation's waiting requests and why (gate H5, H8): `said` as of its last full pass, `now` in the pass under
+  // way, which may take several runs; replaced only after a full pass, so a lane cut short forgets nothing, and a lane
+  // that ended its turn on its first request never reads as if the rest had stopped waiting.
+  const waiting = new Map<string, { said: Map<string, string>; now: Map<string, string> }>();
+  const waitingOf = (orgId: string) => {
+    const lane = waiting.get(orgId) ?? { said: new Map<string, string>(), now: new Map<string, string>() };
+    waiting.set(orgId, lane);
+    return lane;
+  };
   // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
   const staleSaid = new Map<string, number>();
   // What each organisation was told of its payments waiting for the bank: its lane's hold, and the platform's outage.
@@ -319,9 +333,9 @@ export function createHandoff({
   };
   /** A request left waiting noted. Said once a reason, not every run it still waits (gate H5): a long hold is one line a request. */
   const noteWaiting = (orgId: string, id: string, why: string, log: Logger): void => {
-    if (waitedFor.get(id) !== why) log.info('handoff.waiting', { requestId: id, why });
-    waitingNow.set(id, why);
-    waitingIn.set(orgId, [...(waitingIn.get(orgId) ?? []), id]);
+    const lane = waitingOf(orgId);
+    if ((lane.now.get(id) ?? lane.said.get(id)) !== why) log.info('handoff.waiting', { requestId: id, why });
+    lane.now.set(id, why);
   };
 
   /** A page of the organisation's approved requests after `after`, oldest first, by their rows, unverified: each read through its signed state in Tx A. */
@@ -368,12 +382,11 @@ export function createHandoff({
    * left standing past QUEUE_STALE_MS that this run neither handed off nor
    * found waiting for a reason (gate H8): the queue-age alert reads it.
    */
-  const staleIn = async (orgId: string, log: Logger): Promise<void> => {
+  const staleIn = async (orgId: string, waitingIds: readonly string[], log: Logger): Promise<void> => {
     const now = clock.now().getTime();
     if (now - (staleSaid.get(orgId) ?? Number.NEGATIVE_INFINITY) < QUEUE_STALE_MS) return;
     try {
-      const waiting = waitingIn.get(orgId) ?? [];
-      const { count, oldest } = await staleOf(orgId, new Date(now - QUEUE_STALE_MS), waiting, log);
+      const { count, oldest } = await staleOf(orgId, new Date(now - QUEUE_STALE_MS), waitingIds, log);
       // None standing: the oldest is none too.
       if (Number(count) === 0) return;
       staleSaid.set(orgId, now);
@@ -642,14 +655,14 @@ export function createHandoff({
     }
   };
 
-  /** One request handed off if it may go, its outcome logged; false where the bank's hold ended the organisation's turn. */
-  const handOff = async (orgId: string, id: string, log: Logger): Promise<boolean> => {
+  /** One request handed off if it may go, its outcome logged: whether its organisation's turn goes on. */
+  const handOff = async (orgId: string, id: string, log: Logger): Promise<LaneStep> => {
     beatNow();
     const entry = health.enter(orgId);
     if ('hold' in entry) {
       noteWaiting(orgId, id, `hold_${entry.hold}`, log);
       await tellHeld(orgId, entry.hold, entry.outage, log);
-      return false;
+      return 'end_turn';
     }
     let done: TxA;
     try {
@@ -658,13 +671,14 @@ export function createHandoff({
       // Tx A's outcome unclear (a commit lost with the connection) or a bug: the partner is never called.
       entry.settle('not_sent');
       log.error('handoff.failed', { requestId: id, err: error });
-      return true;
+      return 'next';
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
-    if (done.outcome === 'waiting') noteWaiting(orgId, id, done.why, log);
     if (done.outcome === 'handed_off') await sent(orgId, id, done, entry, log);
     else entry.settle('not_sent');
-    return true;
+    if (done.outcome !== 'waiting') return 'next';
+    noteWaiting(orgId, id, done.why, log);
+    return isOrganisationWide(done.why) ? 'end_turn' : 'next';
   };
 
   /** Tx A committed, known by this run: the partner called (ADR-007 §8), and Tx B records what it answered. */
@@ -694,38 +708,52 @@ export function createHandoff({
     }
   };
 
-  /** A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first. */
-  const anchorFirstIn = (orgId: string, signal: AbortSignal | undefined): Promise<void> | undefined => {
-    const held = anchoring?.anchors.latest({ kind: 'organisation', orgId });
-    return anchoring === undefined || held !== undefined ? undefined : anchoring.anchorFirst(orgId, signal);
+  /** A page of the organisation's approved requests, or null where it couldn't be read (said; its turn ends). */
+  const laneRead = async (orgId: string, after: string | undefined): Promise<string[] | null> => {
+    const log = logger.child({ orgId });
+    try {
+      return await approvedOf(orgId, after, log);
+    } catch (error) {
+      log.error('handoff.failed', { err: error });
+      return null;
+    }
   };
 
+  /** A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first. */
+  const anchorFirstIn = (orgId: string): Promise<void> | undefined => {
+    const held = anchoring?.anchors.latest({ kind: 'organisation', orgId });
+    return anchoring === undefined || held !== undefined ? undefined : anchoring.anchorFirst(orgId, stopping);
+  };
+
+  const lanes = createFairLanes<string>({
+    total: HANDOFF_SLOTS,
+    limitOf: () => HANDOFF_SLOTS_AN_ORGANISATION,
+    page,
+    idOf: (id) => id,
+    read: laneRead,
+    prepare: anchorFirstIn,
+    work: (orgId, id) => handOff(orgId, id, logger.child({ orgId })),
+    thrown: (orgId, error) => {
+      logger.child({ orgId }).error('handoff.failed', { err: error });
+    },
+  });
+
   /**
-   * The organisation's approved requests handed off, a page at a time:
-   * `stopped` if the signal stopped the run, `held` if the bank's hold ended its
-   * turn (its requests behind it unread, so never counted as left standing).
+   * Every organisation's turns at its approved requests, until each lane is
+   * done or the run stops; then, for a lane that reached its end, the stale
+   * count and what it waits for settled. A lane stopped short has seen only some
+   * of its requests, so counting the rest as left standing would be a false alarm.
    */
-  const handOffAll = async (
-    orgId: string,
-    log: Logger,
-    signal: AbortSignal | undefined,
-  ): Promise<'done' | 'stopped' | 'held'> => {
-    let after: string | undefined;
-    for (;;) {
-      let approved: string[];
-      try {
-        approved = await approvedOf(orgId, after, log);
-      } catch (error) {
-        log.error('handoff.failed', { err: error });
-        return 'done';
-      }
-      if (approved.length > 0) await anchorFirstIn(orgId, signal);
-      for (const id of approved) {
-        if (signal?.aborted === true) return 'stopped';
-        if (!(await handOff(orgId, id, log))) return 'held';
-      }
-      if (approved.length < page) return 'done';
-      after = approved.at(-1);
+  const handOffLanes = async (orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
+    stopping = signal;
+    const stopped = () => signal?.aborted === true;
+    const outcomes = await lanes.run(orgs, stopped);
+    for (const [orgId, outcome] of outcomes) {
+      if (outcome !== 'whole') continue;
+      const lane = waitingOf(orgId);
+      if (!stopped()) await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));
+      lane.said = lane.now;
+      lane.now = new Map();
     }
   };
 
@@ -831,23 +859,6 @@ export function createHandoff({
     }
   };
 
-  /** One organisation's turn of a run: its hand-offs and stale count unless held, its sweep when due; false if stopped. */
-  const runIn = async (
-    orgId: string,
-    handingOff: boolean,
-    sweeping: boolean,
-    signal: AbortSignal | undefined,
-  ): Promise<boolean> => {
-    const log = logger.child({ orgId });
-    if (handingOff) {
-      const turn = await handOffAll(orgId, log, signal);
-      if (turn === 'stopped') return false;
-      if (turn === 'done') await staleIn(orgId, log);
-    }
-    if (sweeping) await sweepIn(orgId, log);
-    return true;
-  };
-
   return {
     async run(signal) {
       let orgs: readonly string[];
@@ -865,16 +876,12 @@ export function createHandoff({
       const held = await heldNow();
       if (held !== heldWas) logger.info(held === null ? 'handoff.running' : 'handoff.held', { why: held ?? 'none' });
       heldWas = held;
-      try {
-        for (const orgId of orgs) {
-          // Stopped between organisations too, so the process stops promptly however many there are.
-          if (signal?.aborted === true || !(await runIn(orgId, held === null, sweeping, signal))) return;
-        }
-      } finally {
-        // The reasons this run's requests wait for, said again only once one changes; one gone, forgotten.
-        if (held === null) waitedFor = waitingNow;
-        waitingNow = new Map();
-        waitingIn.clear();
+      if (held === null) await handOffLanes(orgs, signal);
+      // A pass of its own, once the hand-offs have ended, so it never waits behind a lane or holds one up.
+      for (const orgId of sweeping ? orgs : []) {
+        // Stopped between organisations too, so the process stops promptly however many there are.
+        if (signal?.aborted === true) return;
+        await sweepIn(orgId, logger.child({ orgId }));
       }
       beatNow();
     },
