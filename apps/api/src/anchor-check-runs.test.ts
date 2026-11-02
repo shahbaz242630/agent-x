@@ -307,6 +307,17 @@ describe('a run ends in its time, with its line, and the next goes on from there
     expect(lines(capture, 'audit.anchor_check_done').at(-1)).toMatchObject({ anchored: 4, left: 0 });
   });
 
+  it('says so when its time ran out on the last one, with none waiting', async () => {
+    vi.useFakeTimers();
+    const { organizations } = directory(orgs(1), () => undefined);
+    const { check, capture } = checking(organizations, { lanes: 1, runWithinMs: 1000 });
+    const run = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    await run;
+    expect(lines(capture, 'audit.anchor_check_unfinished')).toEqual([expect.objectContaining({ left: 0 })]);
+  });
+
   it('a whole round goes by across runs, each organisation in its turn, before the next begins', async () => {
     vi.useFakeTimers();
     const all = orgs(4);
@@ -524,6 +535,35 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
     await check.run();
     expect(lines(capture, 'audit.anchor_check_failed').length).toBeGreaterThan(0);
     expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
+  });
+
+  it('the platform’s chain keeps the short limit however long the organisations’ round: a run always comes to it', async () => {
+    vi.useFakeTimers();
+    const { organizations } = directory(orgs(3), () => undefined);
+    let failing = false;
+    const { check, capture, clock } = checking(organizations, {
+      lanes: 1,
+      runWithinMs: 1000,
+      chains: [
+        {
+          chain: { kind: 'platform' },
+          verify: () => (failing ? Promise.reject(new Error('connect ECONNREFUSED')) : Promise.resolve(ok(1n))),
+        },
+      ],
+    });
+    const first = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    await first;
+    clock.advanceBy(STALE_MS);
+    failing = true;
+    const second = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    await second;
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([
+      expect.objectContaining({ chain: 'platform', reason: 'unchecked' }),
+    ]);
   });
 
   it('the alarm for a failed check still comes at the short limit where a run reaches them all', async () => {
