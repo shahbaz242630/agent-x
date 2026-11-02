@@ -4,7 +4,6 @@
 // Product code can't open a socket (SEC-WEB-05), so these live here.
 import net from 'node:net';
 
-import type { FastifyRequest } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -59,7 +58,7 @@ async function listening() {
   const inHandler = new Promise<void>((resolve) => (entered = resolve));
   let sawHangUp = (): void => undefined;
   const hungUp = new Promise<void>((resolve) => (sawHangUp = resolve));
-  const slow = async (asked: FastifyRequest) => {
+  const slow = async (asked: { readonly raw: { readonly socket: net.Socket } }) => {
     asked.raw.socket.once('close', sawHangUp);
     entered();
     await new Promise<void>((resolve) => (release = resolve));
