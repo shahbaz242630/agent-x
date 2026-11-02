@@ -799,6 +799,18 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
     expect(chains.holds).toEqual([]);
   });
 
+  it('in a later epoch, what the check signs reads back sound across a restart', async () => {
+    const fake = createFakeWriteOnceStore();
+    const chains = chainsHolding({ [ORG]: ok(3n) });
+    await process(fake, chains.organizations, [], keys, 2).check.run();
+
+    const after = process(fake, chains.organizations, [], keys, 2);
+    await after.check.run();
+
+    expect(after.log.latest(CHAIN)?.seq).toBe(3n);
+    expect(after.lines('audit.integrity_failed')).toEqual([]);
+  });
+
   it('without a store the check keeps its anchors in memory as it did, and a run reads and writes nothing', async () => {
     const chains = chainsHolding({ [ORG]: ok(3n) });
     const capture = new LogCapture();

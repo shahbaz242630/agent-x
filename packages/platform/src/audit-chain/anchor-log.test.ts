@@ -1044,6 +1044,12 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ files: 1 })]);
     });
 
+    it('says no snapshot was read where none is there', async () => {
+      const { log, lines } = logOver();
+      await log.read();
+      expect(lines('audit.anchors_read')).toEqual([expect.objectContaining({ chains: 0, snapshot: false, deltas: 0 })]);
+    });
+
     it('says nothing of foreign files where there are none', async () => {
       const { lines, log } = logOver();
       await log.read();
