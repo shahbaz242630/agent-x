@@ -2365,7 +2365,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
       logger: testLogger(capture),
       now: () => clock.now(),
       epoch: 1,
-      unwritableAfterMs: 60_000,
+      alertAfterMs: 60_000,
     });
     const check = anchorCheckOf(w, durable, durable);
     return {
