@@ -537,6 +537,28 @@ describe('what a signed state is recorded from', () => {
     ).rejects.toEqual(refusedFor('lock_order'));
   });
 
+  it.each([
+    ['a read', (tx: Transaction<Tables>, id: string) => states.verifiedState(tx, AGENTS, { orgId: org, id }, 'share')],
+    [
+      'a gather',
+      (tx: Transaction<Tables>, id: string) => states.gather(tx, org, [{ table: AGENTS, id: { id }, lock: 'share' }]),
+    ],
+  ])(
+    'makes a row it looked for to change, though %s for a decision found none since: its lock stays the higher',
+    async (_, look) => {
+      const id = newId();
+
+      const recorded = await withTenant(app, org, async (tx) => {
+        expect(await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change')).toEqual({ outcome: 'missing' });
+        await look(tx, id);
+        await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role: 'reader' }).execute();
+        return states.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+      });
+
+      expect(recorded).toMatchObject({ version: 1 });
+    },
+  );
+
   describe('a table whose rows are made once (4D2e C6)', () => {
     const MADE_ONCE = { ...AGENTS, madeOnce: true } as const;
     const insert = (tx: Transaction<Tables>, id: string) =>

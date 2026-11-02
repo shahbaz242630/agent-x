@@ -1240,6 +1240,25 @@ describe('refusable reads before the supplier’s lock (4D2e C6, forced)', () =>
     expect(events).toHaveLength(1);
   });
 
+  it('names a later decision’s month in the agent’s kept zone, not its mandate’s, so no new mandate moves it', async () => {
+    const { w, acting } = await ready();
+    await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const zone = { orgId: w.org, agentId: w.agent, zone: 'Pacific/Kiritimati', at: clock.now() };
+      await addZone(tx, zone);
+      await sealNewZone(tx, states, { ...zone, actor: { type: 'agent', id: w.agent } });
+    });
+    // UTC+14: already November there, still October in the mandate's Dubai.
+    clock.advanceBy(Date.parse('2026-10-31T12:00:00Z') - clock.now().getTime());
+
+    const request = decidedOf(await ask(acting, asking(w)));
+
+    expect((await heldBy(w.org, request.id)).reservation).toMatchObject({ month: '2026-11' });
+    expect(await zoneKept(w)).toMatchObject({
+      rows: [{ time_zone: 'Pacific/Kiritimati' }],
+      events: [expect.anything()],
+    });
+  });
+
   it('a zone planted during its wait for the supplier, no seal behind it, is judged and refused, nothing made', async () => {
     const { w, acting } = await ready();
 
