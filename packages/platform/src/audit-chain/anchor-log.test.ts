@@ -162,6 +162,18 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(files(fake, 'snapshots').filter((name) => name.startsWith('e2/'))).toHaveLength(1);
     });
 
+    it('a later anchor of a chain, kept while its file is compressed, goes in the next file', async () => {
+      const { log, fake } = await started();
+      log.keep(anchorAt(CHAIN, 2n));
+      const writing = log.flush();
+      log.keep(anchorAt(CHAIN, 3n));
+      await writing;
+      await log.flush();
+
+      const seqs = files(fake, 'deltas').flatMap((name) => linesIn(fake.files.get(name)).map((line) => line.seq));
+      expect(seqs.toSorted()).toEqual(['2', '3']);
+    });
+
     it('holds an anchor kept while a file is being made for the next file', async () => {
       const { log, fake } = await started();
       const { promise: holding, resolve: letGo } = Promise.withResolvers<void>();

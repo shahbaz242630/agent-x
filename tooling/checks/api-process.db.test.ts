@@ -6,6 +6,8 @@
 // (Stopping on a signal is tested in-process: Windows can't send one a process
 // can catch.)
 import { type ChildProcess, spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
@@ -46,6 +48,7 @@ interface Line {
   ports?: number[];
   configHash?: string;
   status?: number;
+  chains?: number;
 }
 
 let database: TestDatabase;
@@ -147,6 +150,46 @@ describe(`the API process (Postgres ${server.version})`, () => {
       await new Promise((resolve) => jobs.once('exit', resolve));
     }
   }, 60_000);
+
+  it('PL-58: on plain Node the anchors reach their store, and a second start reads them back', async () => {
+    // A database of its own, so this process is the only one with the jobs there.
+    const own = await createTestDatabase(server, { schema: 'migrated' });
+    const folder = mkdtempSync(path.join(tmpdir(), 'agentx-anchors-'));
+    /** Runs `jobs` until it says `until`, then ends it, and gives back its lines. */
+    const runUntil = async (until: string): Promise<Line[]> => {
+      const said: Line[] = [];
+      const jobs = spawn(process.execPath, [MAIN], {
+        env: { ...childEnv(own), AGENTX_ROLE: 'jobs', AGENTX_AUDIT_ANCHORS_DIR: folder },
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      jobs.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+        for (const line of chunk.split('\n')) if (line.startsWith('{')) said.push(JSON.parse(line) as Line);
+      });
+      try {
+        await vi.waitFor(
+          () => {
+            expect(said.map((line) => line.event)).toContain(until);
+          },
+          { timeout: 30_000, interval: 100 },
+        );
+      } finally {
+        jobs.kill();
+        await new Promise((resolve) => jobs.once('exit', resolve));
+      }
+      return said;
+    };
+    try {
+      const first = await runUntil('audit.anchors_written');
+      expect(first.find((line) => line.event === 'audit.anchors_read')?.chains).toBe(0);
+
+      const second = await runUntil('audit.anchors_read');
+      expect(second.find((line) => line.event === 'audit.anchors_read')?.chains).toBeGreaterThan(0);
+      expect(second.map((line) => line.event)).not.toContain('audit.integrity_failed');
+    } finally {
+      await own.drop();
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it('SEC-WEB-02 answers the health check, with the security headers and a correlation ID', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`);
