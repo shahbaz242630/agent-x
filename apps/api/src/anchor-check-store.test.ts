@@ -343,10 +343,20 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
         return { after, chains, fake, writes };
       }
 
-      it('SEC-DB-11 a head wound back is the alarm and the hold, and the anchor stays', async () => {
+      it('SEC-DB-11 a head wound back waits for the next run, one interval, whose compare is the alarm and the hold', async () => {
         const { after, chains, fake, writes } = await landingMidCheck(ok(50n));
 
+        // Tx A has the anchor from the moment it landed, so a payment is already refused; only the alarm waits.
         expect(chains.given[ORG]).toEqual([undefined, undefined]);
+        expect(after.log.latest(CHAIN)?.seq).toBe(100n);
+        expect(after.lines('audit.integrity_failed')).toEqual([]);
+        expect(after.lines('audit.anchored')).toEqual([]);
+        expect(after.lines('audit.anchor_check_done')).toEqual([expect.objectContaining({ unanchored: 1, failed: 0 })]);
+        expect(fake.calls.puts).toBe(writes);
+
+        await after.check.run();
+
+        expect(chains.given[ORG]?.at(-1)).toBe(100n);
         expect(after.lines('audit.integrity_failed')).toEqual([
           expect.objectContaining({
             level: 'error',
@@ -359,28 +369,33 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
         ]);
         expect(chains.holds).toEqual([[ORG, 'anchor']]);
         expect(after.log.latest(CHAIN)?.seq).toBe(100n);
-        expect(after.lines('audit.anchored')).toEqual([]);
-        expect(fake.calls.puts).toBe(writes);
       });
 
-      it('SEC-DB-11 the same place with another hash is the alarm and the hold', async () => {
+      it('an honest head read before another copy moved it on is no alarm and no hold', async () => {
+        const { after, chains } = await landingMidCheck(ok(90n));
+        expect(after.lines('audit.integrity_failed')).toEqual([]);
+        expect(chains.holds).toEqual([]);
+
+        // Where the chain really stands, as the copy that anchored 100 found it.
+        chains.held[ORG] = ok(100n);
+        await after.check.run();
+
+        expect(after.lines('audit.integrity_failed')).toEqual([]);
+        expect(chains.holds).toEqual([]);
+        expect(after.log.latest(CHAIN)?.seq).toBe(100n);
+      });
+
+      it('SEC-DB-11 the same place with another hash waits for the next run too', async () => {
         const { after, chains } = await landingMidCheck(ok(100n, 7));
+        expect(after.lines('audit.integrity_failed')).toEqual([]);
+
+        await after.check.run();
 
         expect(after.lines('audit.integrity_failed')).toEqual([
           expect.objectContaining({ reason: 'anchor', anchorSeq: '100', orgId: ORG }),
         ]);
         expect(chains.holds).toEqual([[ORG, 'anchor']]);
         expect(after.log.latest(CHAIN)?.hash).toEqual(Buffer.alloc(32, 100));
-      });
-
-      it('the head just where the store has it is unchanged', async () => {
-        const { after, chains } = await landingMidCheck(ok(100n));
-
-        expect(after.lines('audit.integrity_failed')).toEqual([]);
-        expect(after.lines('audit.anchor_check_done')).toEqual([
-          expect.objectContaining({ unchanged: 1, anchored: 0 }),
-        ]);
-        expect(chains.holds).toEqual([]);
       });
 
       it('a head past it is not anchored, as nothing compared it with that anchor: the next run does', async () => {

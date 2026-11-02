@@ -232,13 +232,14 @@ export function createAnchorCheck({
       }
       lastChecked.set(key, clock.now().getTime());
       if (!report.ok) return alarm(report.problem.reason, report.problem.seq);
-      // Read again: a store's read that outlasted its deadline can land during the check, which then saw no anchor. Where
-      // nothing landed, the check compared the anchored event already, and this backs it up should a store not pass it on.
-      const held = anchors.latest(chain);
-      if (held !== undefined && !stillHolds(report, held)) return alarm('anchor', held.seq);
-      if (held?.seq === report.seq) return 'unchanged';
-      // A head past what landed wasn't compared with its anchored event, so it can't be anchored yet: the next run does.
-      if (storeUnread() || held !== last) return 'unanchored';
+      // A store's read past its deadline, or another copy's anchor, can land during the check, and the head read before
+      // it says nothing against it: an honest copy may have moved on since. The next run compares with it, the alarm a run
+      // late at most, one interval and that run's length; Tx A compares with it at once, so a payment is refused meanwhile.
+      if (anchors.latest(chain) !== last) return 'unanchored';
+      // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
+      if (last !== undefined && !stillHolds(report, last)) return alarm('anchor', last.seq);
+      if (last?.seq === report.seq) return 'unchanged';
+      if (storeUnread()) return 'unanchored';
       const anchor = signAnchor(keys, chain, report, clock.now());
       anchors.keep(anchor);
       log.info('audit.anchored', {
