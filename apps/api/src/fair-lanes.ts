@@ -175,8 +175,9 @@ export function createFairLanes<Item>({
       const turn = async (lane: Lane<Item>): Promise<void> => {
         try {
           if (lane.buffer.length === 0 && !(await fill(lane))) return;
-          // Its read may have taken long enough for the run to stop.
-          const item = stopped() ? undefined : lane.buffer.shift();
+          // Its read may have taken long enough for the run to stop, the lane to close, or its limit to fall.
+          const mayTake = !stopped() && lane.closed === undefined && lane.active < limitOf(lane.id);
+          const item = mayTake ? lane.buffer.shift() : undefined;
           if (item === undefined) return;
           const before = lane.after;
           lane.after = idOf(item);
@@ -233,43 +234,55 @@ function rotated(ids: readonly string[], last: string | undefined): readonly str
 }
 
 /**
- * At most `limit` at once; those marked `ahead` go before any waiting without
- * (a payment's answer ahead of a new payment's start: it frees its bank slot,
- * and the money it speaks for is already at the bank).
+ * At most `limit` at once, and at most one of a key (an organisation): one whose
+ * work is stuck behind its own organisation's lock can't fill the gate for the
+ * rest, who pass it. Those marked `ahead` go before any waiting without (a
+ * payment's answer ahead of a new payment's start: it frees its bank slot, and
+ * the money it speaks for is already at the bank). Work inside must never wait
+ * on this gate.
  */
 export function createGate(limit: number): {
-  run<T>(work: () => Promise<T>, ahead?: boolean): Promise<T>;
+  run<T>(key: string, work: () => Promise<T>, ahead?: boolean): Promise<T>;
 } {
-  let inside = 0;
-  const first: (() => void)[] = [];
-  const rest: (() => void)[] = [];
+  interface Waiting {
+    readonly key: string;
+    readonly go: () => void;
+  }
+  const inside = new Set<string>();
+  const first: Waiting[] = [];
+  const rest: Waiting[] = [];
 
-  const entered = async (ahead: boolean): Promise<void> => {
-    if (inside < limit) {
-      inside += 1;
-      return;
-    }
-    const { promise, resolve } = Promise.withResolvers<undefined>();
-    (ahead ? first : rest).push(() => {
-      resolve(undefined);
-    });
-    await promise;
+  /** The first waiting whose key has no one inside, taken from its queue. */
+  const taken = (queue: Waiting[]): Waiting | undefined => {
+    const at = queue.findIndex(({ key }) => !inside.has(key));
+    return at === -1 ? undefined : queue.splice(at, 1)[0];
   };
 
-  const left = (): void => {
-    // Handed straight to the next, so no one arriving in between gets past those waiting.
-    const next = first.shift() ?? rest.shift();
-    if (next === undefined) inside -= 1;
-    else next();
+  const admit = (): void => {
+    while (inside.size < limit) {
+      const next = taken(first) ?? taken(rest);
+      if (next === undefined) return;
+      inside.add(next.key);
+      next.go();
+    }
   };
 
   return {
-    async run(work, ahead = false) {
-      await entered(ahead);
+    async run(key, work, ahead = false) {
+      const { promise, resolve } = Promise.withResolvers<undefined>();
+      (ahead ? first : rest).push({
+        key,
+        go: () => {
+          resolve(undefined);
+        },
+      });
+      admit();
+      await promise;
       try {
         return await work();
       } finally {
-        left();
+        inside.delete(key);
+        admit();
       }
     },
   };

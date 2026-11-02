@@ -224,6 +224,81 @@ describe('the cursor, kept between runs', () => {
   });
 });
 
+describe('what a page read may have changed (L5)', () => {
+  /** A lane whose read waits for the test: `limit` read each turn, a first item already under way when a second page is read. */
+  function lanesWithSlowRead() {
+    const pages: (() => void)[] = [];
+    const worked: string[] = [];
+    const finishing: (() => void)[] = [];
+    let limit = 2;
+    let endTurn = false;
+    const lanes = createFairLanes<string>({
+      total: 5,
+      limitOf: () => limit,
+      page: 1,
+      idOf: (item) => item,
+      read: async (_lane, after) => {
+        await new Promise<void>((resolve) => pages.push(resolve));
+        return after === undefined ? ['a01'] : after === 'a01' ? ['a02'] : [];
+      },
+      work: async (_lane, item) => {
+        worked.push(item);
+        await new Promise<void>((resolve) => finishing.push(resolve));
+        return endTurn ? 'end_turn' : 'next';
+      },
+      thrown: () => undefined,
+    });
+    const set = (next: { limit?: number; endTurn?: boolean }) => {
+      limit = next.limit ?? limit;
+      endTurn = next.endTurn ?? endTurn;
+    };
+    return { lanes, pages, worked, finishing, set };
+  }
+
+  const ticks = async () => {
+    for (let at = 0; at < 5; at += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  it('takes no item past a limit that fell during the read: it waits for the one under way', async () => {
+    const { lanes, pages, worked, finishing, set } = lanesWithSlowRead();
+    const running = lanes.run(['a'], never);
+    await ticks();
+    pages.shift()?.();
+    await ticks();
+    expect(worked).toEqual(['a01']);
+
+    set({ limit: 1 });
+    pages.shift()?.();
+    await ticks();
+    expect(worked).toEqual(['a01']);
+
+    finishing.shift()?.();
+    await ticks();
+    expect(worked).toEqual(['a01', 'a02']);
+    finishing.shift()?.();
+    await ticks();
+    pages.shift()?.();
+    await running;
+  });
+
+  it('takes no item from a lane closed during the read', async () => {
+    const { lanes, pages, worked, finishing, set } = lanesWithSlowRead();
+    const running = lanes.run(['a'], never);
+    await ticks();
+    pages.shift()?.();
+    await ticks();
+
+    set({ endTurn: true });
+    finishing.shift()?.();
+    await ticks();
+    pages.shift()?.();
+    const outcomes = await running;
+
+    expect(worked).toEqual(['a01']);
+    expect(outcomes.get('a')).toBe('ended');
+  });
+});
+
 describe('a lane’s turn ended', () => {
   it('stops at an organisation-wide reason: nothing behind it walked, the same item tried next run', async () => {
     let frozen = true;
@@ -455,12 +530,12 @@ describe('the gate', () => {
     const { promise: held, resolve: release } = Promise.withResolvers<undefined>();
     const order: string[] = [];
 
-    const first = gate.run(async () => {
+    const first = gate.run('a', async () => {
       await held;
       order.push('first');
       throw new Error('it failed');
     });
-    const second = gate.run(() => {
+    const second = gate.run('a', () => {
       order.push('second');
       return Promise.resolve('second answered');
     });
@@ -483,11 +558,11 @@ describe('the gate', () => {
     };
 
     const all = [
-      gate.run(() => held),
-      gate.run(noted('new a')),
-      gate.run(noted('new b')),
-      gate.run(noted('answer a'), true),
-      gate.run(noted('answer b'), true),
+      gate.run('z', () => held),
+      gate.run('a', noted('new a')),
+      gate.run('b', noted('new b')),
+      gate.run('c', noted('answer a'), true),
+      gate.run('d', noted('answer b'), true),
     ];
     await new Promise((resolve) => setImmediate(resolve));
     release(undefined);
@@ -500,15 +575,15 @@ describe('the gate', () => {
     const gate = createGate(1);
     const { promise: held, resolve: release } = Promise.withResolvers<undefined>();
     const order: string[] = [];
-    const first = gate.run(() => held);
-    const waiting = gate.run(() => {
+    const first = gate.run('a', () => held);
+    const waiting = gate.run('a', () => {
       order.push('waiting');
       return Promise.resolve();
     });
     await new Promise((resolve) => setImmediate(resolve));
     release(undefined);
     await first;
-    const late = gate.run(() => {
+    const late = gate.run('a', () => {
       order.push('late');
       return Promise.resolve();
     });
@@ -525,7 +600,7 @@ describe('the gate', () => {
       inside += 1;
       return held;
     };
-    const all = [gate.run(entered), gate.run(entered), gate.run(entered)];
+    const all = [gate.run('a', entered), gate.run('b', entered), gate.run('c', entered)];
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(inside).toBe(2);
@@ -533,5 +608,34 @@ describe('the gate', () => {
     release(undefined);
     await Promise.all(all);
     expect(inside).toBe(3);
+  });
+
+  it('holds at most one of a key: the rest pass it, and it goes as its own ends', async () => {
+    const gate = createGate(2);
+    const { promise: stuck, resolve: unstick } = Promise.withResolvers<undefined>();
+    const order: string[] = [];
+    const noted = (name: string) => () => {
+      order.push(name);
+      return Promise.resolve();
+    };
+
+    const blocked = gate.run('x', () => stuck);
+    const sameOrganisation = gate.run('x', noted('x again'));
+    const answer = gate.run('x', noted('x answer'), true);
+    await gate.run('y', noted('y'));
+    await gate.run('y', noted('y again'), true);
+    expect(order).toEqual(['y', 'y again']);
+
+    unstick(undefined);
+    await Promise.all([blocked, sameOrganisation, answer]);
+    expect(order).toEqual(['y', 'y again', 'x answer', 'x again']);
+  });
+
+  it('lets a key in again after work inside it threw', async () => {
+    const gate = createGate(1);
+
+    await expect(gate.run('x', () => Promise.reject(new Error('it failed')))).rejects.toThrow('it failed');
+
+    await expect(gate.run('x', () => Promise.resolve('in'))).resolves.toBe('in');
   });
 });
