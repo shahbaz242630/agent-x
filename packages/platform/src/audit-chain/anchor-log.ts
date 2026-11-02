@@ -192,11 +192,13 @@ function parsed(line: string): unknown {
 const kindOf = (fields: unknown): unknown =>
   typeof fields === 'object' && fields !== null && 'k' in fields ? fields.k : undefined;
 
-/** Whether a parsed line closes this file: its own name, its epoch, as many lines as came before it, signed. */
+/**
+ * Whether a parsed line closes this file: signed for its own name, its epoch and as many lines as came before it, as
+ * this read finds them. The line says them too, for someone reading the file; the signature is what's relied on.
+ */
 function closes(keys: KeyProvider, fields: unknown, name: string, epoch: number, lines: number): boolean {
   if (kindOf(fields) !== 'c') return false;
   const said = fields as Record<string, unknown>;
-  if (said.name !== name || said.epoch !== epoch || said.lines !== lines) return false;
   if (!isCount(said.kv) || typeof said.sig !== 'string') return false;
   return isSigned(keys, said.kv, closingMessage(name, epoch, lines), Buffer.from(said.sig, 'base64'));
 }
