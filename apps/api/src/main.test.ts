@@ -408,6 +408,7 @@ async function start(env: Readonly<Record<string, string>> = ENV) {
 const EACH_PROCESS: [string, number][] = [
   ['recorder', 60_000],
   ['round_trips', 15_000],
+  ['holds_waiting', 5_000],
   ['pulse', 60_000],
 ];
 
