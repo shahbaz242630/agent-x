@@ -56,7 +56,10 @@ async function listening() {
   let release = (): void => undefined;
   let entered = (): void => undefined;
   const inHandler = new Promise<void>((resolve) => (entered = resolve));
-  const slow = async () => {
+  let sawHangUp = (): void => undefined;
+  const hungUp = new Promise<void>((resolve) => (sawHangUp = resolve));
+  const slow = async (asked: { readonly raw: { readonly socket: net.Socket } }) => {
+    asked.raw.socket.once('close', sawHangUp);
     entered();
     await new Promise<void>((resolve) => (release = resolve));
     return { done: true };
@@ -68,6 +71,27 @@ async function listening() {
   app.get('/test/fail', OPEN, () => {
     throw new Error('failed on our side');
   });
+  app.post('/test/says', OPEN, () => {
+    logger.info('test.said');
+    return { ok: true };
+  });
+  const { promise: woken, resolve: wake } = Promise.withResolvers<undefined>();
+  app.post('/test/waits', OPEN, async () => {
+    logger.info('test.waiting');
+    await woken;
+    logger.info('test.woken');
+    return { ok: true };
+  });
+  app.post('/test/wakes', OPEN, () => {
+    logger.info('test.waking');
+    wake(undefined);
+    return { ok: true };
+  });
+  // As the activity row's write, whose database lines go through a bare logger.
+  app.addHook('onResponse', (request, _reply, done) => {
+    logger.info('test.after_answer', { requestId: request.id });
+    done();
+  });
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });
   const port = app.addresses()[0]?.port ?? 0;
@@ -76,6 +100,7 @@ async function listening() {
     port,
     capture,
     inHandler,
+    hungUp,
     release: () => {
       release();
     },
@@ -130,6 +155,142 @@ async function within<T>(promise: Promise<T>, ms: number, failure: string): Prom
 
 const headerBlock = (response: string): string => (response.split(CRLF + CRLF)[0] ?? '').toLowerCase();
 const bodyOf = (response: string): unknown => JSON.parse(response.slice(response.indexOf(CRLF + CRLF) + 4)) as unknown;
+
+const ID_A = '0190a000-0000-7000-8000-00000000000a';
+const ID_B = '0190a000-0000-7000-8000-00000000000b';
+const BODY = '{"any":"body"}';
+
+/** A POST's headers, with the ID it asks for; its body goes on separately. */
+const postHeaders = (path: string, id: string, connection: string): string =>
+  request(
+    `POST ${path} HTTP/1.1`,
+    'Host: localhost',
+    `Origin: ${PUBLIC_ORIGIN}`,
+    'Content-Type: application/json',
+    `Content-Length: ${String(BODY.length)}`,
+    `X-Correlation-Id: ${id}`,
+    `Connection: ${connection}`,
+  );
+
+describe('4D2e Stage F a request and its lines', () => {
+  it('keeps two requests under way at once apart, bodies interleaved, one woken from inside the other', async () => {
+    const { port, capture } = await listening();
+    const waits = connect(port);
+    const wakes = connect(port);
+    await Promise.all([waits.opened, wakes.opened]);
+    waits.socket.write(postHeaders('/test/waits', ID_A, 'close'));
+    wakes.socket.write(postHeaders('/test/wakes', ID_B, 'close'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    waits.socket.write(BODY);
+    await vi.waitFor(() => {
+      expect(capture.lines().map((line) => line.event)).toContain('test.waiting');
+    });
+    wakes.socket.write(BODY);
+    await Promise.all([waits.closed, wakes.closed]);
+    const idOf = (event: string) => capture.lines().find((line) => line.event === event)?.correlationId;
+    expect([idOf('test.waiting'), idOf('test.woken'), idOf('test.waking')]).toEqual([ID_A, ID_A, ID_B]);
+  });
+
+  /** Each request's work after its answer, as that request's own bare-logger line says it. */
+  const afterAnswers = (capture: LogCapture) =>
+    capture
+      .lines()
+      .filter((line) => line.event === 'test.after_answer')
+      .map((line) => [line.requestId, line.correlationId]);
+
+  it('says the right request on the work after each answer when two come pipelined in one packet', async () => {
+    const { port, capture } = await listening();
+    const connection = connect(port);
+    await connection.opened;
+    connection.socket.write(
+      postHeaders('/test/says', ID_A, 'keep-alive') + BODY + postHeaders('/test/says', ID_B, 'close') + BODY,
+    );
+    await connection.closed;
+    await vi.waitFor(() => {
+      expect(afterAnswers(capture)).toHaveLength(2);
+    });
+    expect(afterAnswers(capture)).toEqual([
+      [ID_A, ID_A],
+      [ID_B, ID_B],
+    ]);
+    const completed = capture.lines().filter((line) => line.event === 'http.request_completed');
+    expect(completed.map((line) => line.correlationId)).toEqual([ID_A, ID_B]);
+  });
+
+  it('says the right request on a line for an answer the client hung up on; Fastify runs no after-answer work then', async () => {
+    const { port, capture, inHandler, hungUp, release } = await listening();
+    const connection = connect(port);
+    await connection.opened;
+    connection.socket.write(postHeaders('/test/slow', ID_A, 'keep-alive') + BODY);
+    await inHandler;
+    connection.socket.destroy();
+    // The server's own side: the client's closing first, a handler let go now would answer as usual (seen on CI).
+    await hungUp;
+    release();
+    await vi.waitFor(() => {
+      expect(capture.lines().find((line) => line.event === 'http.request_aborted')?.correlationId).toBe(ID_A);
+    });
+    expect(afterAnswers(capture)).toEqual([]);
+  });
+
+  it('says the right request when the second of two pipelined answers goes out from inside the first', async () => {
+    const { port, capture } = await listening();
+    const connection = connect(port);
+    await connection.opened;
+    // B answers first but waits behind A on the connection, so Node sends it, and finishes it, as A finishes.
+    connection.socket.write(
+      postHeaders('/test/waits', ID_A, 'keep-alive') + BODY + postHeaders('/test/wakes', ID_B, 'close') + BODY,
+    );
+    await connection.closed;
+    await vi.waitFor(() => {
+      expect(afterAnswers(capture)).toHaveLength(2);
+    });
+    expect(afterAnswers(capture)).toEqual([
+      [ID_A, ID_A],
+      [ID_B, ID_B],
+    ]);
+  });
+
+  it('gives a second request on one connection its own ID, none left from the first', async () => {
+    const { port, capture } = await listening();
+    const connection = connect(port);
+    await connection.opened;
+    connection.socket.write(postHeaders('/test/says', ID_A, 'keep-alive') + BODY);
+    await vi.waitFor(() => {
+      expect(capture.lines().filter((line) => line.event === 'test.said')).toHaveLength(1);
+    });
+    connection.socket.write(postHeaders('/test/says', ID_B, 'close') + BODY);
+    await connection.closed;
+    const said = capture.lines().filter((line) => line.event === 'test.said');
+    expect(said.map((line) => line.correlationId)).toEqual([ID_A, ID_B]);
+  });
+
+  it("keeps its ID on a bare logger's line though its body came well after its headers", async () => {
+    const { port, capture } = await listening();
+    const body = '{"any":"body"}';
+    const connection = connect(port);
+    await connection.opened;
+    connection.socket.write(
+      request(
+        'POST /test/says HTTP/1.1',
+        'Host: localhost',
+        `Origin: ${PUBLIC_ORIGIN}`,
+        'Content-Type: application/json',
+        `Content-Length: ${String(body.length)}`,
+        'Connection: close',
+      ),
+    );
+    // In a packet of its own: stream events are what deliver it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    connection.socket.write(body);
+    await connection.closed;
+    const answer = headerBlock(connection.received());
+    expect(answer).toContain('200');
+    const [said] = capture.lines().filter((line) => line.event === 'test.said');
+    expect(said?.correlationId).toEqual(expect.any(String));
+    expect(answer).toContain(`x-correlation-id: ${String(said?.correlationId)}`);
+  });
+});
 
 describe("SEC-WEB-02, SEC-DATA-04 bytes Node's parser refuses get our plain answer", () => {
   it.each([

@@ -40,3 +40,8 @@ savePrefix: ''
 # dependencies at all, silencing Dependabot alerts and Dependency review
 # (pnpm/pnpm#13805). SEC-SC-01 checks the lockfile stays one document.
 pmOnFail: ignore
+
+# GHSA-g3hv-75wg-m249 (a denial of service in dev tools only, eslint's path:
+# nothing in production uses it): eslint's own range stops at 10.
+overrides:
+  minimatch: 11.0.3

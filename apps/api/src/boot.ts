@@ -55,12 +55,14 @@ import {
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import {
+  asNoWork,
   createLogger,
   createStartupLogger,
   guardOutputs,
   type Logger,
   type LoggerOptions,
   type Output,
+  workUnderWay,
 } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 
@@ -248,7 +250,12 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
 
   const logger = createLogger({ service: SERVICE, config, destination });
   host.on('uncaughtException', (error, origin) => {
-    logger.error('api.crashed', { err: error, origin });
+    // Node runs this in the context of what threw. That is usually the culprit, but a throw from an old connection's
+    // socket is in whoever opened it (logger.ts). So the line names the work, in a field of its own, and doesn't claim it.
+    const workAtCrash = workUnderWay();
+    asNoWork(() => {
+      logger.error('api.crashed', { err: error, origin, ...(workAtCrash && { workAtCrash }) });
+    });
     logger.flush();
     host.exit(1);
   });
