@@ -17,12 +17,16 @@ import type { Message } from '../keys/message.ts';
 import {
   type AnchorPoint,
   type Chain,
+  CHAIN_START,
   type ChainHead,
   type ChainLink,
   type ChainProblem,
   type ChainReport,
-  type ChainVerifier,
+  type ChainWalker,
+  type CheckedPoint,
   createChainVerifier,
+  createChainWalker,
+  entryIsSealed,
   GENESIS_HASH,
   genesisHead,
   headIsSealed,
@@ -101,6 +105,36 @@ export interface ChainReader {
   events(after: bigint, upTo: bigint, limit: number): Promise<readonly (StoredEntry | undefined)[]>;
 }
 
+/** A check's answer when it found a problem. */
+type ChainRefusal = Extract<ChainReport, { ok: false }>;
+
+/** A chain's edges (ChainEdgeReader.edges), all read in one statement, so all from one moment. */
+export interface ChainEdges {
+  /** As ChainReader.state's head. */
+  readonly head: ChainHead | 'none' | 'unreadable';
+  /** The lowest and highest numbers stored, null with no event stored. */
+  readonly lowest: bigint | null;
+  readonly highest: bigint | null;
+  /** The hash stored on the event numbered as the head is; undefined if there is none. */
+  readonly headEventHash: Buffer | undefined;
+  /** The event at the number asked, whole; undefined if there is none or its row can't be read. */
+  readonly anchored: StoredEntry | undefined;
+}
+
+/** What checking from an anchor needs: nothing that reads a whole chain. */
+export interface ChainEdgeReader extends Pick<ChainReader, 'events'> {
+  /** The chain's edges and the event numbered `anchored`, in **one statement**, on indexes alone. Never throws for a bad row. */
+  edges(anchored: bigint): Promise<ChainEdges>;
+  /** How many events are stored numbered after `after` and at most `upTo`. */
+  countBetween(after: bigint, upTo: bigint): Promise<bigint>;
+}
+
+/**
+ * How a check made in steps stands: it has checked up to `seq`, and is going to
+ * `to` (`seq === to` when it has got there), or the first problem it found.
+ */
+export type ChainStep = (Extract<ChainReport, { ok: true }> & { readonly to: bigint }) | ChainRefusal;
+
 /** A store broke its contract in a way the steps can see: a bug in the store, not a tampered chain. */
 export class ChainStoreError extends Error {
   constructor(message: string) {
@@ -129,6 +163,9 @@ export class ChainBroken extends Error {
 
 /** How many events the check reads at a time. */
 const BATCH = 500;
+
+/** The most events one check from an anchor walks (ADR-012 §2, 4D2e E): the anchor moves on, and the next run goes on from it. */
+const MOST_EVENTS_A_STEP = 100_000;
 
 /**
  * Adds an event to the chain, in the caller's transaction. Takes the head's
@@ -201,7 +238,7 @@ export async function appendEvents(
 }
 
 /** Events with no usable head: the head row was removed, or can't be read. */
-const NO_HEAD: ChainReport = Object.freeze({ ok: false, problem: Object.freeze({ reason: 'head', seq: 0n }) });
+const NO_HEAD: ChainRefusal = Object.freeze({ ok: false, problem: Object.freeze({ reason: 'head', seq: 0n }) });
 
 /** The report on a chain with no head row, given how many events are stored and the last anchor. */
 function headlessReport(stored: bigint, anchor: AnchorPoint | undefined): ChainReport {
@@ -209,25 +246,47 @@ function headlessReport(stored: bigint, anchor: AnchorPoint | undefined): ChainR
   if (stored !== 0n) return NO_HEAD;
   return anchor !== undefined && anchor.seq > 0n
     ? { ok: false, problem: { reason: 'anchor', seq: anchor.seq } }
-    : { ok: true, seq: 0n, hash: GENESIS_HASH };
+    : { ok: true, ...CHAIN_START };
 }
 
-/** The next batch of events after `after`, up to the head: a store giving more than were asked for is failing. */
+/** The next batch of events after `after`, up to `upTo`: a store giving more than were asked for is failing. */
 async function readBatch(
-  reader: ChainReader,
+  reader: Pick<ChainReader, 'events'>,
   after: bigint,
   upTo: bigint,
+  size: number,
 ): Promise<readonly (StoredEntry | undefined)[]> {
-  const batch = await reader.events(after, upTo, BATCH);
-  if (batch.length > BATCH)
-    throw new ChainStoreError(`it gave ${batch.length} events where at most ${BATCH} were asked for`);
+  const batch = await reader.events(after, upTo, size);
+  if (batch.length > size)
+    throw new ChainStoreError(`it gave ${batch.length} events where at most ${size} were asked for`);
   return batch;
 }
 
-/** The verifier's problem with an event, if any: one past the head the store was asked to read up to is its failure. */
-function entryProblem(verifier: ChainVerifier, entry: StoredEntry, upTo: bigint): ChainProblem | undefined {
-  if (entry.seq > upTo) throw new ChainStoreError('it gave an event past the head it was asked to read up to');
-  return verifier.check(entry);
+/**
+ * Gives `walker` every event after `after` up to `upTo`: any problem found, or
+ * nothing once the store has none left. Reads until `upTo` is reached; every
+ * batch that isn't empty moves `after` on, and an empty one ends the reading.
+ */
+async function walkEvents(
+  reader: Pick<ChainReader, 'events'>,
+  walker: Pick<ChainWalker, 'check' | 'unreadable'>,
+  from: bigint,
+  upTo: bigint,
+  size: number = BATCH,
+): Promise<ChainProblem | undefined> {
+  let after = from;
+  while (after < upTo) {
+    const batch = await readBatch(reader, after, upTo, size);
+    if (batch.length === 0) break;
+    for (const entry of batch) {
+      if (entry === undefined) return walker.unreadable();
+      if (entry.seq > upTo) throw new ChainStoreError('it gave an event past the place it was asked to read up to');
+      const problem = walker.check(entry);
+      if (problem !== undefined) return problem;
+      after = entry.seq;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -247,19 +306,152 @@ export async function verifyChain(
   if (head === 'unreadable') return NO_HEAD;
 
   const verifier = createChainVerifier(keys, chain, { head, stored, anchor });
-  // Reads until the head is reached; every batch that isn't empty moves `after` on, and an empty one ends the reading.
-  let after = 0n;
-  while (after < head.seq) {
-    const batch = await readBatch(reader, after, head.seq);
-    if (batch.length === 0) break;
-    for (const entry of batch) {
-      if (entry === undefined) return { ok: false, problem: verifier.unreadable() };
-      const problem = entryProblem(verifier, entry, head.seq);
-      if (problem !== undefined) return { ok: false, problem };
-      after = entry.seq;
-    }
+  const problem = await walkEvents(reader, verifier, 0n, head.seq);
+  return problem === undefined ? verifier.finish() : { ok: false, problem };
+}
+
+const refused = (reason: ChainProblem['reason'], seq: bigint): ChainRefusal => ({
+  ok: false,
+  problem: { reason, seq },
+});
+
+/**
+ * What the head and the stored numbers show without reading the events
+ * between: the head is sealed, it is at the last event, whose hash it holds,
+ * nothing lies past it or below 1, and it isn't behind `from`.
+ */
+function edgeProblem(
+  keys: KeyProvider,
+  chain: Chain,
+  { lowest, highest, headEventHash }: ChainEdges,
+  head: ChainHead,
+  from: CheckedPoint,
+): ChainProblem | undefined {
+  const atHead = { reason: 'head', seq: head.seq } as const;
+  if (!headIsSealed(keys, chain, head)) return atHead;
+  // No event at all is the one case where nothing need sit at the head: a chain with its first event to come.
+  const nothingStored = head.seq === 0n && highest === null;
+  if (!nothingStored && highest !== head.seq) return atHead;
+  if (lowest !== null && lowest < 1n) return atHead;
+  // After the checks above, so a head behind the anchor with events left past it reads as those events do in verifyChain.
+  if (head.seq < from.seq) return { reason: 'anchor', seq: from.seq };
+  if (lowest !== null && lowest > 1n) return { reason: 'gap', seq: 1n };
+  return nothingStored || headEventHash?.equals(head.hash) === true ? undefined : atHead;
+}
+
+/**
+ * Whether the chain still holds the place it is checked from: the event there
+ * whole, sealed, with the hash and the MAC key's version `from` was signed with.
+ * The version is what keeps "an old key can't add events after a rotation" true
+ * from an anchor: an event sealed again under an older key isn't the one anchored.
+ */
+function holdsPoint(keys: KeyProvider, chain: Chain, from: CheckedPoint, anchored: StoredEntry | undefined): boolean {
+  if (from.seq === 0n) return from.hash.equals(GENESIS_HASH) && from.macKeyVersion === 0;
+  return (
+    anchored !== undefined &&
+    entryIsSealed(keys, chain, anchored) &&
+    anchored.hash.equals(from.hash) &&
+    anchored.macKeyVersion === from.macKeyVersion
+  );
+}
+
+/** Walks from a checked place to `upTo`, which it must reach: a store with no event left short of it has a gap there. */
+async function walkTo(
+  keys: KeyProvider,
+  chain: Chain,
+  reader: Pick<ChainReader, 'events'>,
+  from: CheckedPoint,
+  upTo: bigint,
+  size?: number,
+): Promise<ChainReport> {
+  const walker = createChainWalker(keys, chain, from);
+  const problem = await walkEvents(reader, walker, from.seq, upTo, size);
+  if (problem !== undefined) return { ok: false, problem };
+  const reached = walker.reached();
+  return reached.ok && reached.seq !== upTo ? refused('gap', reached.seq + 1n) : reached;
+}
+
+function checkedMost(most: number): number {
+  if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('A step checks a whole number of events, from 1');
+  return most;
+}
+
+/**
+ * Checks a chain from its last anchor (4D2e E): the edges in one read, then only
+ * the events past the anchor, at most `most` of them. Takes a chain that hasn't
+ * moved in one read. What it can't see is an event edited or deleted below the
+ * anchor: passStep and countStep are for those. verifyChain stays whole, for
+ * clearing a hold and for the restore check. A report short of the head (`seq`
+ * below `to`) is good as far as it went, and the anchor can move on to it.
+ */
+export async function verifyFromAnchor(
+  keys: KeyProvider,
+  chain: Chain,
+  reader: ChainEdgeReader,
+  from: CheckedPoint,
+  most: number = MOST_EVENTS_A_STEP,
+): Promise<ChainStep> {
+  checkedMost(most);
+  const edges = await reader.edges(from.seq);
+  const { head } = edges;
+  if (head === 'none') {
+    const report = headlessReport(edges.highest === null ? 0n : 1n, from);
+    return report.ok ? { ...report, to: 0n } : report;
   }
-  return verifier.finish();
+  if (head === 'unreadable') return NO_HEAD;
+  const problem = edgeProblem(keys, chain, edges, head, from);
+  if (problem !== undefined) return { ok: false, problem };
+  if (!holdsPoint(keys, chain, from, edges.anchored)) return refused('anchor', from.seq);
+
+  const upTo = head.seq < from.seq + BigInt(most) ? head.seq : from.seq + BigInt(most);
+  const report = await walkTo(keys, chain, reader, from, upTo);
+  if (!report.ok) return report;
+  // The events read after the edges must end at the hash the head holds: the edges alone only compare the stored row.
+  if (report.seq === head.seq && !report.hash.equals(head.hash)) return refused('head', head.seq);
+  return { ...report, to: head.seq };
+}
+
+/**
+ * One step of a full pass over a chain's old events (4D2e E): the next `most`
+ * events after `cursor`, up to `target`, the place the pass set out for, and
+ * there the hash and the MAC key's version must be the ones the anchor signed.
+ * Reads no head: the check from the anchor sees to that.
+ */
+export async function passStep(
+  keys: KeyProvider,
+  chain: Chain,
+  reader: Pick<ChainReader, 'events'>,
+  cursor: CheckedPoint,
+  target: CheckedPoint,
+  most: number,
+): Promise<ChainStep> {
+  checkedMost(most);
+  if (cursor.seq > target.seq) throw new RangeError('A pass never goes past where it set out for');
+  const upTo = target.seq < cursor.seq + BigInt(most) ? target.seq : cursor.seq + BigInt(most);
+  const report = await walkTo(keys, chain, reader, cursor, upTo, most);
+  if (!report.ok) return report;
+  if (
+    report.seq === target.seq &&
+    (!report.hash.equals(target.hash) || report.macKeyVersion !== target.macKeyVersion)
+  ) {
+    return refused('anchor', target.seq);
+  }
+  return { ...report, to: target.seq };
+}
+
+/**
+ * Whether every event numbered after `after` and at most `upTo` is stored (4D2e
+ * E): a deleted one, which no read of a signed state can see, shows as a count
+ * short. Says where the stretch starts, as a count can't say which is gone.
+ */
+export async function countStep(
+  reader: Pick<ChainEdgeReader, 'countBetween'>,
+  after: bigint,
+  upTo: bigint,
+): Promise<ChainProblem | undefined> {
+  if (after >= upTo) throw new RangeError('A stretch to count holds at least one event');
+  const stored = await reader.countBetween(after, upTo);
+  return stored === upTo - after ? undefined : { reason: 'gap', seq: after + 1n };
 }
 
 const isBytes = (value: unknown): value is Buffer => Buffer.isBuffer(value);

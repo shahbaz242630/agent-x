@@ -128,7 +128,12 @@ describe('appending events together (4D2d P13)', () => {
     expect([second?.seq, third?.seq]).toEqual([2n, 3n]);
     expect(third?.prevHash).toEqual(second?.hash);
     expect([second?.recordedAt, third?.recordedAt]).toEqual([NOW, NOW]);
-    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({ ok: true, seq: 3n, hash: third?.hash });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+      ok: true,
+      seq: 3n,
+      hash: third?.hash,
+      macKeyVersion: 1,
+    });
   });
 
   it('starts a chain with no head, as one event does', async () => {
@@ -201,7 +206,12 @@ describe('appending an event', () => {
     expect([first.seq, second.seq]).toEqual([1n, 2n]);
     expect(second.prevHash).toEqual(first.hash);
     expect(first.recordedAt).toBe(NOW);
-    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({ ok: true, seq: 2n, hash: second.hash });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+      ok: true,
+      seq: 2n,
+      hash: second.hash,
+      macKeyVersion: 1,
+    });
   });
 
   it('takes the time the head was locked with, then writes: two trips an event (4D2d P2)', async () => {
@@ -314,6 +324,7 @@ describe('checking a chain', () => {
       ok: true,
       seq: 0n,
       hash: GENESIS_HASH,
+      macKeyVersion: 0,
     });
   });
 
@@ -410,7 +421,7 @@ describe('checking a chain', () => {
     };
 
     await expect(verifyChain(keys, CHAIN, broken, undefined)).rejects.toThrow(
-      new ChainStoreError('it gave an event past the head it was asked to read up to'),
+      new ChainStoreError('it gave an event past the place it was asked to read up to'),
     );
   });
 

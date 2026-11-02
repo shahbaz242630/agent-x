@@ -209,7 +209,7 @@ export function createAnchorCheck({
         return alarm('anchor', last.seq);
       }
       if (last?.seq === report.seq) return 'unchanged';
-      const anchor = signAnchor(keys, chain, { seq: report.seq, hash: report.hash }, clock.now());
+      const anchor = signAnchor(keys, chain, report, clock.now());
       anchors.keep(anchor);
       log.info('audit.anchored', {
         chain: chain.kind,
