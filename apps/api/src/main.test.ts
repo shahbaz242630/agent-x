@@ -617,7 +617,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     await start({ ...ENV, AGENTX_AUDIT_ANCHORS_DIR: '/tmp/anchors-not-made' });
 
     expect(anchorChecks.durable.at(-2)).toBeUndefined();
-    expect(anchorChecks.durable.at(-1)).toEqual(expect.objectContaining({ flush: expect.any(Function) }));
+    expect(anchorChecks.durable.at(-1)).toEqual(expect.objectContaining({ flush: expect.any(Function) as unknown }));
     await anchorChecks.finishes.at(-1)?.();
     expect(anchorChecks.finished).toBe(1);
   });

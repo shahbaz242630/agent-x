@@ -176,7 +176,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it('holds an anchor kept while a file is being made for the next file', async () => {
       const { log, fake } = await started();
-      const { promise: holding, resolve: letGo } = Promise.withResolvers<void>();
+      const { promise: holding, resolve: letGo } = Promise.withResolvers<undefined>();
       fake.instead.put = async (name, bytes) => {
         await holding;
         return fake.real.put(name, bytes);
@@ -185,7 +185,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const writing = log.flush();
       await new Promise((resolve) => setTimeout(resolve, 20));
       log.keep(anchorAt(OTHER_CHAIN, 3n));
-      letGo();
+      letGo(undefined);
       await writing;
       delete fake.instead.put;
       await log.flush();
@@ -290,7 +290,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(log.latest(CHAIN)).toBeUndefined();
       expect(log.organisations()).toEqual([]);
       expect(lines('audit.anchor_store_unreadable')).toEqual([
-        expect.objectContaining({ level: 'error', err: expect.objectContaining({ message: 'the store is away' }) }),
+        expect.objectContaining({
+          level: 'error',
+          err: expect.objectContaining({ message: 'the store is away' }) as unknown,
+        }),
       ]);
       expect(lines('audit.anchors_read')).toEqual([]);
 
@@ -503,9 +506,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const planted = 'e1/deltas/0000000000000-not-an-id';
       fake.files.set(planted, fileOf(anchorAt(CHAIN, 999n)));
       fake.files.set(nameOf('deltas', 0), fileOf(anchorAt(CHAIN, 2n)));
-      const inner = fake.real.list;
       fake.instead.list = async (start, most, after) => {
-        const page = await inner(start, most, after);
+        const page = await fake.real.list(start, most, after);
         return start.includes('/deltas/') ? { ...page, foreign: 1 } : page;
       };
       const { log, lines } = logOver(fake);
@@ -726,7 +728,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     });
   });
 
-  it('can be told a read or a write ran out of time, as its caller bounds them', async () => {
+  it('can be told a read or a write ran out of time, as its caller bounds them', () => {
     const { log, lines } = logOver();
     log.readFailed(new Error('past its deadline'));
     expect(log.state()).toBe('unreadable');
