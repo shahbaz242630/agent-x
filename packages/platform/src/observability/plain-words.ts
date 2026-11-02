@@ -730,6 +730,11 @@ export const PLAIN_WORDS = {
     broke: 'The clearing was refused, so the hold stays on.',
     next: "A broken audit trail needs an operator's restore, not an admin's button: follow the incident runbook.",
   },
+  'integrity_hold.named_record_never_signed': {
+    happened: 'A security hold was cleared that named a record with no row and no history in this organisation.',
+    broke: 'Nothing: there was nothing to repair. But the hold may have come from a forged row on the waiting list.',
+    next: 'Read the tamper alarm from when the hold was set, and find out who could write to the database.',
+  },
   'log.invalid_event': {
     happened: 'Part of the app wrote a log line with a badly formed name.',
     broke: 'The line was still kept, under a general name, so alerts that watch for its real name may miss it.',
