@@ -6,9 +6,10 @@
 // (Stopping on a signal is tested in-process: Windows can't send one a process
 // can catch.)
 import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { gunzipSync } from 'node:zlib';
 
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
@@ -151,45 +152,40 @@ describe(`the API process (Postgres ${server.version})`, () => {
     }
   }, 60_000);
 
-  it('PL-58: on plain Node the anchors reach their store, and a second start reads them back', async () => {
-    // A database of its own, so this process is the only one with the jobs there.
+  it('PL-58: on plain Node the anchors reach their store, signed lines in a gzipped file', async () => {
+    // A database of its own, so this process has the jobs there at once. A restart reading them is
+    // proven in anchor-check-store.test.ts and handoff.db.test.ts: killed here, a lease would hold a second start back.
     const own = await createTestDatabase(server, { schema: 'migrated' });
     const folder = mkdtempSync(path.join(tmpdir(), 'agentx-anchors-'));
-    /** Runs `jobs` until it says `until`, then ends it, and gives back its lines. */
-    const runUntil = async (until: string): Promise<Line[]> => {
-      const said: Line[] = [];
-      const jobs = spawn(process.execPath, [MAIN], {
-        env: { ...childEnv(own), AGENTX_ROLE: 'jobs', AGENTX_AUDIT_ANCHORS_DIR: folder },
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
-      jobs.stdout.setEncoding('utf8').on('data', (chunk: string) => {
-        for (const line of chunk.split('\n')) if (line.startsWith('{')) said.push(JSON.parse(line) as Line);
-      });
-      try {
-        await vi.waitFor(
-          () => {
-            expect(said.map((line) => line.event)).toContain(until);
-          },
-          { timeout: 30_000, interval: 100 },
-        );
-      } finally {
-        jobs.kill();
-        await new Promise((resolve) => jobs.once('exit', resolve));
-      }
-      return said;
-    };
+    const said: Line[] = [];
+    const jobs = spawn(process.execPath, [MAIN], {
+      env: { ...childEnv(own), AGENTX_ROLE: 'jobs', AGENTX_AUDIT_ANCHORS_DIR: folder },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    jobs.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      for (const line of chunk.split('\n')) if (line.startsWith('{')) said.push(JSON.parse(line) as Line);
+    });
     try {
-      const first = await runUntil('audit.anchors_written');
-      expect(first.find((line) => line.event === 'audit.anchors_read')?.chains).toBe(0);
-
-      const second = await runUntil('audit.anchors_read');
-      expect(second.find((line) => line.event === 'audit.anchors_read')?.chains).toBeGreaterThan(0);
-      expect(second.map((line) => line.event)).not.toContain('audit.integrity_failed');
+      await vi.waitFor(
+        () => {
+          expect(said.map((line) => line.event)).toContain('audit.anchors_written');
+        },
+        { timeout: 30_000, interval: 100 },
+      );
+      expect(said.find((line) => line.event === 'audit.anchors_read')?.chains).toBe(0);
+      const files = readdirSync(path.join(folder, 'e1', 'snapshots'));
+      expect(files).toHaveLength(1);
+      const text = gunzipSync(readFileSync(path.join(folder, 'e1', 'snapshots', String(files[0])))).toString('utf8');
+      expect(
+        text.split('\n').map((line) => (line === '' ? 'end' : (JSON.parse(line) as { chain: string }).chain)),
+      ).toEqual(['platform', 'end']);
     } finally {
+      jobs.kill();
+      await new Promise((resolve) => jobs.once('exit', resolve));
       await own.drop();
       rmSync(folder, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 60_000);
 
   it('SEC-WEB-02 answers the health check, with the security headers and a correlation ID', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`);
