@@ -67,6 +67,7 @@ import type { FastifyInstance } from 'fastify';
 import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads.ts';
 import { railFor } from './funding-source-links.ts';
 import { directoryNamesFrom } from './kept-names.ts';
+import { createJobWatch } from './job-watch.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { recordStart } from './start-record.ts';
 
@@ -320,6 +321,12 @@ export function sharedParts({ config, keys, logger, database }: Booted) {
       outbox,
       directory,
       logger,
+    }),
+    // Sees a job stopped from inside (PL-33 part, PL-34). The `jobs.pulse` line is the `jobs` side's to say.
+    watch: createJobWatch({
+      logger,
+      now: () => systemClock.now().getTime(),
+      pulsing: config.role !== 'web',
     }),
     recorder: createSecurityRecorder({
       write: (events) => securityEvents.record(database, events),

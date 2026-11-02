@@ -490,7 +490,7 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
       away ? new IdpFeedUnavailable('it answered 403') : [event('user.unlocked', who.subject)],
     );
 
-    await expect(copierWith(feed).run()).resolves.toBeUndefined();
+    await expect(copierWith(feed).run()).resolves.toBe('skipped');
     expect(lines('idp_events.run_failed')).toEqual([expect.objectContaining({ level: 'warn' })]);
     away = false;
     await copierWith(feed).run();

@@ -125,8 +125,8 @@ const ACTOR = { type: 'system', id: 'api' } as const;
 type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables & PlatformControlsTables;
 
 export interface IdpEventCopier {
-  /** Copies the events since the last run, until none is left or the signal is aborted. Never throws. */
-  run(signal?: AbortSignal): Promise<void>;
+  /** Copies the events since the last run, until none is left or the signal is aborted. Never throws: says if it failed. */
+  run(signal?: AbortSignal): Promise<'ran' | 'skipped'>;
 }
 
 /** An event's name: its aggregate and its place among the aggregate's events. */
@@ -329,8 +329,10 @@ export function createIdpEventCopier({
       try {
         const { events, written } = await copyAll(signal);
         if (written > 0) logger.info('idp_events.copied', { events, records: written });
+        return 'ran';
       } catch (error) {
         logger.warn('idp_events.run_failed', { err: error });
+        return 'skipped';
       }
     },
   };

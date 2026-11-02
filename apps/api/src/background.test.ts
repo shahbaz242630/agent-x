@@ -1,20 +1,12 @@
-// B6-2b: background work a config may leave off: a handle that runs nothing,
-// says so and stops at once; and one that runs the work, and stops it.
+// The jobs' timer: runs now, and again after each run ends; stops at once.
 import { describe, expect, it } from 'vitest';
 
-import { scheduleRunsIfAny } from './background.ts';
+import { scheduleRuns } from './background.ts';
 
-describe('work the config may leave off (B6-2b)', () => {
-  it('runs nothing without work, says so, and stops at once', async () => {
-    const handle = scheduleRunsIfAny(undefined, 60_000);
-
-    expect(handle.running).toBe(false);
-    await expect(handle.stop()).resolves.toBeUndefined();
-  });
-
-  it('runs the work now, says so, and stops it', async () => {
+describe('a job on a timer of its own', () => {
+  it('runs now, and stopping aborts the run and ends', async () => {
     const runs: (AbortSignal | undefined)[] = [];
-    const handle = scheduleRunsIfAny(
+    const handle = scheduleRuns(
       {
         run: (signal) => {
           runs.push(signal);
@@ -24,9 +16,26 @@ describe('work the config may leave off (B6-2b)', () => {
       60_000,
     );
 
-    expect(handle.running).toBe(true);
     await handle.stop();
     expect(runs).toHaveLength(1);
     expect(runs[0]?.aborted).toBe(true);
+  });
+
+  it('runs again only after a run has ended, whatever a run gives back', async () => {
+    let runs = 0;
+    const { promise: ranTwice, resolve } = Promise.withResolvers<undefined>();
+    const handle = scheduleRuns(
+      {
+        run: () => {
+          runs += 1;
+          if (runs === 2) resolve(undefined);
+          return Promise.resolve('skipped');
+        },
+      },
+      1,
+    );
+    await ranTwice;
+    await handle.stop();
+    expect(runs).toBeGreaterThanOrEqual(2);
   });
 });

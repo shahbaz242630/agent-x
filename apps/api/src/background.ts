@@ -36,7 +36,7 @@ export async function withinDeadline<T>(
  * the pool waits for.
  */
 export function scheduleRuns(
-  work: { run(signal?: AbortSignal): Promise<void> },
+  work: { run(signal?: AbortSignal): Promise<unknown> },
   intervalMs: number,
 ): { stop(): Promise<void> } {
   const stopping = new AbortController();
@@ -58,18 +58,4 @@ export function scheduleRuns(
       await running;
     },
   });
-}
-
-/**
- * Runs the work as scheduleRuns does, when there is any: work a config left
- * off (the notices, the login service's events) gives a handle that runs
- * nothing, says so, and stops at once.
- */
-export function scheduleRunsIfAny(
-  work: { run(signal?: AbortSignal): Promise<void> } | undefined,
-  intervalMs: number,
-): { readonly running: boolean; stop(): Promise<void> } {
-  if (work === undefined) return Object.freeze({ running: false, stop: () => Promise.resolve() });
-  const runs = scheduleRuns(work, intervalMs);
-  return Object.freeze({ running: true, stop: () => runs.stop() });
 }

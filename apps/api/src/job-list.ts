@@ -36,6 +36,7 @@ import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { contactFillFrom } from './kept-names.ts';
 import { CARRY_REST_EVERY_MS, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
+import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
 import { createRemittances } from './remittances.ts';
@@ -75,11 +76,6 @@ const CONTACT_FILL_EVERY_MS = HOUR_MS;
 /** How often the recorder writes the security events' counts whose minute has ended (B2-5b). */
 const RECORD_EVERY_MS = 60_000;
 
-/** A job's work: what a timer runs. */
-export interface Work {
-  run(signal?: AbortSignal): Promise<void>;
-}
-
 interface Handle {
   stop(): Promise<void>;
 }
@@ -92,37 +88,54 @@ export interface Job {
 }
 
 /**
- * A job's entry. A job the config left off has no timer, and with `says` logs
- * that it is off as it would that it is on.
+ * How long a run may take before it counts as stalled (job-watch.ts). Far past
+ * any run seen, and an error, which reaches the partner: each is what a job at
+ * 10k organisations could take on a slow day, not what it should.
  */
-function job<W extends Work>(
-  name: string,
-  work: W | undefined,
-  everyMs: number,
-  says?: (running: boolean) => void,
-  schedule: (work: W, everyMs: number) => Handle = scheduleRuns,
-): Job {
-  return {
-    name,
-    start: () => {
-      const handle = work === undefined ? { stop: () => Promise.resolve() } : schedule(work, everyMs);
-      says?.(work !== undefined);
-      return handle;
-    },
+const QUICK_MS = 15 * 60_000;
+const HALF_HOUR_MS = 30 * 60_000;
+const LONG_MS = 2 * HOUR_MS;
+
+/** Makes the list's entries, each one's runs recorded by the watch. */
+function jobsWatchedBy(watch: JobWatch) {
+  return function job(
+    name: string,
+    work: Work | undefined,
+    everyMs: number,
+    stalledAfterMs: number,
+    /** A job the config can leave off says whether it is on, as it starts. */
+    says?: (running: boolean) => void,
+    schedule: (work: WatchedWork, everyMs: number) => Handle = scheduleRuns,
+  ): Job {
+    return {
+      name,
+      start: () => {
+        const handle =
+          work === undefined
+            ? { stop: () => Promise.resolve() }
+            : schedule(watch.watching(name, work, stalledAfterMs), everyMs);
+        says?.(work !== undefined);
+        return handle;
+      },
+    };
   };
 }
 
 /** What every process runs for itself: the counts it holds in memory, and how a trip feels from it. */
-export function eachProcessJobs({ logger, database }: Booted, { recorder }: SharedParts): readonly Job[] {
+export function eachProcessJobs({ logger, database }: Booted, { recorder, watch }: SharedParts): readonly Job[] {
+  const job = jobsWatchedBy(watch);
   return [
     // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
-    job('recorder', recorder, RECORD_EVERY_MS),
+    job('recorder', recorder, RECORD_EVERY_MS, QUICK_MS),
     // A trip's time through the API's life (4D2d): what its decisions' times are read against.
     job(
       'round_trips',
       createRoundTripTiming({ timed: () => timedRoundTrips(database, ROUND_TRIPS_A_RUN), logger }),
       ROUND_TRIP_EVERY_MS,
+      QUICK_MS,
     ),
+    // What sees the rest (job-watch.ts): not watched itself, and each minute whatever the others do.
+    { name: 'pulse', start: () => scheduleRuns(watch, PULSE_EVERY_MS) },
   ];
 }
 
@@ -132,7 +145,8 @@ export function eachProcessJobs({ logger, database }: Booted, { recorder }: Shar
  * a process at `all` answers.
  */
 export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts) {
-  const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents } = parts;
+  const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch } = parts;
+  const job = jobsWatchedBy(watch);
   const list = () => listedOrganizations(database);
   const organisationJob = { list, database, keys, ids: uuidV7Ids, logger };
   const clocked = { ...organisationJob, clock: systemClock };
@@ -182,9 +196,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // A table's own sweep on a timer of its own, each batch within the anchor check's deadline.
   const sweepRows = (rows: SweptRows, sweep: (most: number) => Promise<number>): Job =>
     job(
-      `sweep:${rows}`,
+      rows,
       createRowSweep({ rows, sweep, logger, deadlineMs: ANCHOR_CHECK_DEADLINE_MS, ...ROW_SWEEP }),
       SWEEP_EVERY_MS,
+      HOUR_MS,
       undefined,
       scheduleRowSweep,
     );
@@ -199,8 +214,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
           checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal }, fullServer, releaseDrift),
       },
       config.audit.anchorSeconds * 1000,
+      QUICK_MS,
     ),
-    job('anchor_check', anchors, config.audit.anchorSeconds * 1000, undefined, scheduleAnchorCheck),
+    job('anchor_check', anchors, config.audit.anchorSeconds * 1000, HOUR_MS, undefined, scheduleAnchorCheck),
     // On a timer of its own (B1e-3): a long sweep must never hold up the anchor
     // check. The two share the pool, and both start at once: each statement is
     // bounded, and a pool at its limit queues rather than refuses. Nothing orders
@@ -215,6 +231,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         ...SWEEP,
       }),
       SWEEP_EVERY_MS,
+      LONG_MS,
       undefined,
       scheduleRetentionSweep,
     ),
@@ -256,6 +273,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         logger,
       }),
       NOTICES_EVERY_MS,
+      HALF_HOUR_MS,
       (running) => {
         logger.info('api.notices', { sending: running });
       },
@@ -265,6 +283,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       'idp_events',
       idpEventCopierFrom({ config, database, ...logged, clock: systemClock, outbox, fetch: outboundFetch }),
       IDP_EVENTS_EVERY_MS,
+      HALF_HOUR_MS,
       (running) => {
         logger.info('api.idp_events', { copying: running });
       },
@@ -274,6 +293,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       'contact_fill',
       contactFillFrom({ config, fetch: outboundFetch, database, keys, clock: systemClock, logger }),
       CONTACT_FILL_EVERY_MS,
+      HOUR_MS,
       (running) => {
         logger.info('api.contact_fill', { filling: running });
       },
@@ -283,44 +303,46 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       'factor_resets',
       resetRemovalsFrom({ config, database, ...logged, clock: systemClock, outbox, fetch: outboundFetch }),
       FACTOR_REMOVALS_EVERY_MS,
+      HOUR_MS,
       (running) => {
         logger.info('api.factor_resets', { removing: running });
       },
     ),
     // Mandates past their end expired (Phase 2 B4).
-    job('mandate_expiry', createMandateExpiry({ ...clocked, outbox }), MANDATE_EXPIRY_EVERY_MS),
+    job('mandate_expiry', createMandateExpiry({ ...clocked, outbox }), MANDATE_EXPIRY_EVERY_MS, HOUR_MS),
     // A held organisation's whole history checked in batches before its clearing is confirmed (Phase 2 D1c).
     job(
       'hold_history',
       createHoldHistoryCheck({ ...organisationJob, tables: AUTHORITY_TABLES }),
       HOLD_HISTORY_EVERY_MS,
+      HOUR_MS,
     ),
-    job('zone_sealing', zoneSealing, ZONE_SEALING_EVERY_MS),
+    job('zone_sealing', zoneSealing, ZONE_SEALING_EVERY_MS, HOUR_MS),
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
-    job('holdings_check', createHoldingsCheck(organisationJob), HOLDINGS_CHECK_EVERY_MS),
+    job('holdings_check', createHoldingsCheck(organisationJob), HOLDINGS_CHECK_EVERY_MS, LONG_MS),
     // Spend requests waiting for approval past their wait expired, their holdings released (Phase 2 D7).
-    job('request_expiry', createRequestExpiry(clocked), REQUEST_EXPIRY_EVERY_MS),
+    job('request_expiry', createRequestExpiry(clocked), REQUEST_EXPIRY_EVERY_MS, HOUR_MS),
     // Pending spend requests whose authority no longer stands voided, their holdings released (Phase 3 C1).
-    job('request_voids', createRequestVoids(clocked), REQUEST_VOIDS_EVERY_MS),
+    job('request_voids', createRequestVoids(clocked), REQUEST_VOIDS_EVERY_MS, HOUR_MS),
     // The hand-off, where there is one.
-    job('handoff', handoff, HANDOFF_EVERY_MS, (running) => {
+    job('handoff', handoff, HANDOFF_EVERY_MS, HALF_HOUR_MS, (running) => {
       logger.info('api.handoff', { running });
     }),
-    job('payment_checks', paymentChecks, PAYMENT_CHECKS_EVERY_MS, (running) => {
+    job('payment_checks', paymentChecks, PAYMENT_CHECKS_EVERY_MS, HALF_HOUR_MS, (running) => {
       logger.info('api.payment_checks', { running });
     }),
     // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b).
-    job('waiting_rejections', createWaitingRejections(clocked), WAITING_REJECTIONS_EVERY_MS),
+    job('waiting_rejections', createWaitingRejections(clocked), WAITING_REJECTIONS_EVERY_MS, HOUR_MS),
     // A carry past 20's rest weighed and carried onto the version in force (Phase 4 A3, PL-47).
-    job('carry_rest', createCarryRest(clocked), CARRY_REST_EVERY_MS),
+    job('carry_rest', createCarryRest(clocked), CARRY_REST_EVERY_MS, HOUR_MS),
     // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6).
-    job('activity_seal', createActivitySeal(clocked), ACTIVITY_SEAL_EVERY_MS),
+    job('activity_seal', createActivitySeal(clocked), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
     // The activity log's background downloads built, a month a file (Phase 3 L5c).
-    job('background_downloads', downloads.builder, ACTIVITY_EXPORTS_EVERY_MS, (running) => {
+    job('background_downloads', downloads.builder, ACTIVITY_EXPORTS_EVERY_MS, HOUR_MS, (running) => {
       logger.info('api.background_downloads', { building: running });
     }),
     // Each sealed day digested again and held to its seal, a few a run (Phase 3 L6c).
-    job('activity_seal_check', createActivitySealCheck(organisationJob), ACTIVITY_SEAL_CHECK_EVERY_MS),
+    job('activity_seal_check', createActivitySealCheck(organisationJob), ACTIVITY_SEAL_CHECK_EVERY_MS, LONG_MS),
   ];
   return { jobs, handoff, paymentChecks, zoneSealing };
 }

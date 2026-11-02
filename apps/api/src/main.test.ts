@@ -172,82 +172,42 @@ vi.mock('./retention-sweep.ts', () => ({
 const rowSweeps = vi.hoisted(() => ({ scheduled: [] as string[], stopped: [] as string[] }));
 
 vi.mock('./row-sweep.ts', () => ({
-  createRowSweep: (options: { rows: string }) => ({ rows: options.rows, run: () => Promise.resolve() }),
-  scheduleRowSweep: (sweep: { rows: string }) => {
-    rowSweeps.scheduled.push(sweep.rows);
+  createRowSweep: () => ({ run: () => Promise.resolve() }),
+  scheduleRowSweep: (sweep: { name: string }) => {
+    rowSweeps.scheduled.push(sweep.name);
     return {
       stop: () => {
-        rowSweeps.stopped.push(sweep.rows);
+        rowSweeps.stopped.push(sweep.name);
         return Promise.resolve();
       },
     };
   },
 }));
 
-/**
- * Phase 2's jobs, each tagged as main.ts makes it, and the interval each is
- * scheduled at (the jobs' own tests run them); the hold history check's tables.
- */
-const phase2Jobs = vi.hoisted(() => {
-  const made = new Map<object, string>();
-  return {
-    made,
-    scheduled: [] as [string, number][],
-    historyTables: [] as unknown[],
-    /** The module's `create` export, its job tagged with `name`. */
-    tagged:
-      <Options, Job extends object>(name: string, create: (options: Options) => Job) =>
-      (options: Options): Job => {
-        const job = create(options);
-        made.set(job, name);
-        return job;
-      },
-  };
-});
+/** The jobs scheduled by the timer they share, each by its name and interval; the hold history check's tables. */
+const phase2Jobs = vi.hoisted(() => ({
+  scheduled: [] as [string, number][],
+  historyTables: [] as unknown[],
+}));
 
 vi.mock('./background.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./background.ts')>();
   return {
     ...actual,
-    scheduleRuns: (work: { run(signal?: AbortSignal): Promise<void> }, intervalMs: number) => {
-      const name = phase2Jobs.made.get(work);
-      if (name !== undefined) phase2Jobs.scheduled.push([name, intervalMs]);
+    scheduleRuns: (work: { run(signal?: AbortSignal): Promise<unknown> }, intervalMs: number) => {
+      phase2Jobs.scheduled.push([(work as { name?: string }).name ?? '', intervalMs]);
       return actual.scheduleRuns(work, intervalMs);
     },
   };
 });
-vi.mock('./mandate-expiry.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./mandate-expiry.ts')>();
-  return { ...actual, createMandateExpiry: phase2Jobs.tagged('mandate expiry', actual.createMandateExpiry) };
-});
 vi.mock('./hold-history-check.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./hold-history-check.ts')>();
-  const create = phase2Jobs.tagged('hold history check', actual.createHoldHistoryCheck);
   return {
     ...actual,
     createHoldHistoryCheck: (options: Parameters<typeof actual.createHoldHistoryCheck>[0]) => {
       phase2Jobs.historyTables.push(options.tables);
-      return create(options);
+      return actual.createHoldHistoryCheck(options);
     },
-  };
-});
-vi.mock('./holdings-check.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./holdings-check.ts')>();
-  return { ...actual, createHoldingsCheck: phase2Jobs.tagged('holdings check', actual.createHoldingsCheck) };
-});
-vi.mock('./request-expiry.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./request-expiry.ts')>();
-  return { ...actual, createRequestExpiry: phase2Jobs.tagged('request expiry', actual.createRequestExpiry) };
-});
-vi.mock('./request-voids.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./request-voids.ts')>();
-  return { ...actual, createRequestVoids: phase2Jobs.tagged('request voids', actual.createRequestVoids) };
-});
-vi.mock('./waiting-rejections.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./waiting-rejections.ts')>();
-  return {
-    ...actual,
-    createWaitingRejections: phase2Jobs.tagged('waiting rejections', actual.createWaitingRejections),
   };
 });
 
@@ -414,6 +374,31 @@ async function start(env: Readonly<Record<string, string>> = ENV) {
   };
 }
 
+/** What every process runs by the shared timer: names and intervals written out, so a changed one fails here. */
+const EACH_PROCESS: [string, number][] = [
+  ['recorder', 60_000],
+  ['round_trips', 15_000],
+  ['pulse', 60_000],
+];
+
+/** And what the `jobs` side does, in order, with no email, reset token or download store in this config: those are off. */
+const EVERY_TIMER: [string, number][] = [
+  ['schema_check', 300_000],
+  ['mandate_expiry', 300_000],
+  ['hold_history', 30_000],
+  ['zone_sealing', 900_000],
+  ['holdings_check', 900_000],
+  ['request_expiry', 300_000],
+  ['request_voids', 300_000],
+  ['handoff', 10_000],
+  ['payment_checks', 60_000],
+  ['waiting_rejections', 300_000],
+  ['carry_rest', 300_000],
+  ['activity_seal', 900_000],
+  ['activity_seal_check', 1_800_000],
+  ...EACH_PROCESS,
+];
+
 describe('SEC-AV-03 the API refuses to start on a bad config', () => {
   it('says why, naming each setting and never its value, and exits with a failure', async () => {
     const { host, server, capture } = await start({ ...ENV, AGENTX_ENV: MISPLACED, AGENTX_HTTP_PORT: 'eighty' });
@@ -572,14 +557,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     await start();
 
     // Written out, not the modules' constants, so a changed interval fails here (B4, D1c, E1, D7: partner decision 10; C1; F1 G8).
-    expect(phase2Jobs.scheduled).toEqual([
-      ['mandate expiry', 300_000],
-      ['hold history check', 30_000],
-      ['holdings check', 900_000],
-      ['request expiry', 300_000],
-      ['request voids', 300_000],
-      ['waiting rejections', 300_000],
-    ]);
+    expect(phase2Jobs.scheduled).toEqual(EVERY_TIMER);
     expect(phase2Jobs.historyTables).toEqual([AUTHORITY_TABLES]);
     expect(AUTHORITY_TABLES.length).toBeGreaterThan(0);
   });
@@ -836,6 +814,16 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     await stopped(host);
   });
 
+  it('says `jobs.pulse` where the jobs are, and never from `web`, whose pulses would hide the jobs having stopped', async () => {
+    const pulses = (capture: LogCapture) => capture.lines().filter((line) => line.event === 'jobs.pulse');
+    const { capture: all } = await start();
+    const { capture: jobs } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
+    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(pulses(all)).toHaveLength(1);
+    expect(pulses(jobs)).toHaveLength(1);
+    expect(pulses(web)).toEqual([]);
+  });
+
   it('names the role on the first line, `all` where none is set', async () => {
     const { capture } = await start();
     expect(capture.lines()[0]).toEqual(expect.objectContaining({ event: 'api.starting', role: 'all' }));
@@ -850,7 +838,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     expect(anchorChecks.intervals).toEqual([300_000]);
     expect(sweeps.everyMs).toEqual([3_600_000]);
     expect(rowSweeps.scheduled).toEqual(TABLES);
-    expect(phase2Jobs.scheduled).toHaveLength(6);
+    expect(phase2Jobs.scheduled).toEqual(EVERY_TIMER);
   });
 
   it('`web` runs the server and no job the `jobs` side keeps: no anchor check, sweep, hand-off or heartbeat of them', async () => {
@@ -867,7 +855,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     expect(schemaCheck.scheduledRuns).toBe(0);
     expect(sweeps.everyMs).toEqual([]);
     expect(rowSweeps.scheduled).toEqual([]);
-    expect(phase2Jobs.scheduled).toEqual([]);
+    expect(phase2Jobs.scheduled).toEqual(EACH_PROCESS);
     // It answers, the start's own schema check still run.
     expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded']);
     expect((await server?.inject('/health'))?.json()).toEqual({ status: 'ok' });
@@ -891,7 +879,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     expect(anchorChecks.intervals).toEqual([300_000]);
     expect(sweeps.everyMs).toEqual([3_600_000]);
     expect(rowSweeps.scheduled).toEqual(TABLES);
-    expect(phase2Jobs.scheduled).toHaveLength(6);
+    expect(phase2Jobs.scheduled).toEqual(EVERY_TIMER);
     await stopped(host);
     expect(events().slice(-2)).toEqual(['api.stopping', 'api.stopped']);
     expect(rowSweeps.stopped.toSorted()).toEqual(TABLES.toSorted());
