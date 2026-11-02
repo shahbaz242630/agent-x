@@ -686,7 +686,7 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
       // Of 30: the one cut off each run has had its turn, and goes again.
       organisations: 29,
     });
-    expect((alarms[0]?.firstFew as string[]).length).toBe(20);
+    expect(alarms[0]?.firstFew as string[]).toHaveLength(20);
     expect((alarms[0]?.firstFew as string[])[0]).toBe(org(2));
     expect(holds.filter(([, failure]) => failure !== undefined)).toEqual([]);
   });
@@ -866,7 +866,7 @@ describe('writes come on a schedule of their own during a run', () => {
     const clock = new FixedClock(AT);
     const durable = logOver(clock);
     await durable.log.read();
-    const { promise: letGo, resolve: release } = Promise.withResolvers<void>();
+    const { promise: letGo, resolve: release } = Promise.withResolvers<undefined>();
     durable.fake.instead.put = async (name, bytes) => {
       await letGo;
       return durable.fake.real.put(name, bytes);
@@ -878,7 +878,7 @@ describe('writes come on a schedule of their own during a run', () => {
     await vi.waitUntil(() => durable.fake.calls.puts > 0, { timeout: 4000, interval: 1 });
     endCheck(org(1));
     await new Promise((resolve) => setTimeout(resolve, 5));
-    release();
+    release(undefined);
     await running;
     await new Promise((resolve) => setTimeout(resolve, 5));
     // What moves after the run waits for the next: a timer gone on would write it.

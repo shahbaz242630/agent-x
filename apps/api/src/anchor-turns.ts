@@ -46,11 +46,11 @@ export function createTurns(lanes: number): Turns {
     (slowChains.has(orgId) ? slow : quick).add(orgId);
   };
 
-  const taken = (from: Set<string>, places: Iterator<string, unknown>): string | undefined => {
+  const taken = (from: Set<string>, places: Iterator<string, undefined>): string | undefined => {
     const { done, value } = places.next();
     if (done === true) return undefined;
-    from.delete(value as string);
-    return value as string;
+    from.delete(value);
+    return value;
   };
 
   const takeFirst = (): string | undefined => taken(first, firsts);
