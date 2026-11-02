@@ -93,8 +93,10 @@ import {
 import {
   bankReferenceOf,
   decidedAgainst,
+  requestDueNow,
   requestOf,
   SPEND_REQUESTS,
+  type SpendRequestsTables,
   voidedWith,
   voidRequest,
 } from '@agentx/core/modules/spend-requests';
@@ -103,6 +105,7 @@ import {
   moveTransaction,
   openTransaction,
   TRANSACTIONS,
+  transactionDueAfter,
   type ProviderFacts,
   type TransactionEvent,
   type TransactionStatus,
@@ -163,6 +166,14 @@ const HANDED_FROM = ['APPROVED', 'INSTRUCTION_READY'] as const;
  * reaches it, or one failing every time.
  */
 export const QUEUE_STALE_MS = 15 * 60_000;
+
+/** When the hand-off next has work in an organisation, not run: now if a request waits. */
+export const handOffDue = (tx: DatabaseTransaction<SpendRequestsTables>, orgId: string) =>
+  requestDueNow(tx, orgId, HANDED_FROM);
+
+/** When the hand-off's sweep next has work in an organisation, not run: as the oldest left waiting passes its wait. */
+export const handOffSweepDue = (tx: DatabaseTransaction<TransactionsTables>, orgId: string) =>
+  transactionDueAfter(tx, orgId, 'SUBMISSION_PENDING', UNKNOWN_AFTER_MS);
 
 /** The route the Pilot takes (BR-12: one partner rail, a push payment), and why, as the instruction keeps it. */
 const ROUTE = { route: 'push', reason: 'mandate_source_push_rail' } as const;

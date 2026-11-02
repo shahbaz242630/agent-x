@@ -12,6 +12,7 @@
   "directory.instructions",
   "directory.invites",
   "directory.members",
+  "directory.org_work",
   "directory.orgs",
   "fake_partner.event_keys",
   "fake_partner.records",

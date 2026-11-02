@@ -21,6 +21,8 @@ export {
   paymentsOfRequests,
   type ProviderFacts,
   TRANSACTIONS,
+  transactionDueAfter,
+  transactionDueNow,
   transactionOf,
 } from './infrastructure/transactions.ts';
 export type { PaymentsTables, TransactionsTables } from './infrastructure/tables.ts';

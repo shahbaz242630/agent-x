@@ -56,6 +56,8 @@
   {"table":"directory.holds_waiting","name":"holds_waiting_reason_check","expression":"(reason ~ '^[a-z][a-z_]{0,31}$'::text)"},
   {"table":"directory.instructions","name":"instructions_account_consent_id_check","expression":"((length(account_consent_id) >= 1) AND (length(account_consent_id) <= 200))"},
   {"table":"directory.invites","name":"invites_token_hash_check","expression":"(octet_length(token_hash) = 32)"},
+  {"table":"directory.org_work","name":"org_work_due_at_check","expression":"isfinite(due_at)"},
+  {"table":"directory.org_work","name":"org_work_job_check","expression":"(job = ANY (ARRAY['hand_off'::text, 'hand_off_sweep'::text, 'payment_check'::text]))"},
   {"table":"fake_partner.event_keys","name":"event_keys_key_check","expression":"(octet_length(key) = 32)"},
   {"table":"fake_partner.event_keys","name":"event_keys_partner_check","expression":"(partner ~ '^[a-z][a-z0-9_-]{0,31}$'::text)"},
   {"table":"fake_partner.records","name":"records_alias_check","expression":"(alias ~ '^[^\\s]{1,64}$'::text)"},

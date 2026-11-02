@@ -19,7 +19,7 @@
 // - `noteTransactionFacts`: the facts alone, no move (a second "under way").
 
 import type { SignedStateTable, StatusTable } from '@agentx/platform/db';
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 
 import type {
   AuditActor,
@@ -343,3 +343,36 @@ export async function paymentsOfRequests(
   }
   return payments;
 }
+
+/**
+ * Now, if the organisation has a transaction in one of these statuses; no row if not. Not run: a statement for a
+ * caller's trip. Whether one stands alone, for choosing when to look: each is read through its signed state before it moves.
+ */
+export const transactionDueNow = (
+  tx: Transaction<TransactionsTables>,
+  orgId: string,
+  statuses: readonly TransactionStatus[],
+) =>
+  tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- whether one stands alone, as above
+    .selectFrom(TRANSACTIONS.table)
+    .select(sql<Date>`pg_catalog.now()`.as('due'))
+    .where('org_id', '=', orgId)
+    .where('status', 'in', statuses)
+    .limit(1);
+
+/** When the oldest transaction in this status has stood `afterMs`, or null where none is. Not run, and for the same use. */
+export const transactionDueAfter = (
+  tx: Transaction<TransactionsTables>,
+  orgId: string,
+  status: TransactionStatus,
+  afterMs: number,
+) =>
+  tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, as above
+    .selectFrom(TRANSACTIONS.table)
+    .select(
+      sql<Date | null>`pg_catalog.min(created_at) + pg_catalog.make_interval(secs => ${afterMs / 1000})`.as('due'),
+    )
+    .where('org_id', '=', orgId)
+    .where('status', '=', status);
