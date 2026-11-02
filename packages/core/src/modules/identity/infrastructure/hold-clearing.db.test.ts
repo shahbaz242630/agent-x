@@ -683,6 +683,42 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
     });
 
+    it('a replay reading the next hold leaves what rests behind it at rest', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      for (const next of [ids.next(), ids.next()]) {
+        await database
+          .as('app')
+          .query(
+            "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'seal')",
+            [org, MEMBERSHIPS.subject, next],
+          );
+      }
+      await pollHoldsWaiting(app, services());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+      await confirm(investigationId, challengeId);
+      // One set as the clear's read ended; the other tried now, and resting behind it.
+      await pollHoldsWaiting(app, services());
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
+      const seen = capture.lines().length;
+      const locker = await database.connect('admin');
+      await locker.query('begin');
+      await locker.query('select seq from audit.heads where org_id = $1 for no key update', [org]);
+      try {
+        // Asked again: answered, with no try of what rests, which would wait out the head's lock.
+        expect(await within(3_000, confirm(investigationId, challengeId))).toMatchObject({ outcome: 'cleared' });
+      } finally {
+        await locker.query('rollback');
+        await locker.end();
+      }
+      expect(
+        capture
+          .lines()
+          .slice(seen)
+          .filter(({ reason }) => reason === 'not_recorded'),
+      ).toEqual([]);
+    });
+
     it('a clear whose commit fails says nothing of a record never signed', async () => {
       await holdFromRow(MEMBERSHIPS.subject, ids.next());
       const investigationId = await investigate();

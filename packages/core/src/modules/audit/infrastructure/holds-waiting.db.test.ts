@@ -1139,6 +1139,12 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     expect(named().size).toBe(500);
     expect(kept()).toBeLessThanOrEqual(500);
     expect(past()).toHaveLength(1);
+    // No silent gap: rows left with no alarm of their own while the hold stands, and each poll says the table is long.
+    const spoke = lines('audit.holds_waiting_past_limit').length;
+    await other.poll();
+    expect(lines('audit.holds_waiting_past_limit').slice(spoke)).toEqual([
+      expect.objectContaining({ level: 'error', rows: 504, kept: 500, atReadLimit: false }),
+    ]);
 
     // While the hold stands no place comes free; each clear frees one, and a row left out comes in.
     for (let cleared = 0; cleared < 6; cleared += 1) {
@@ -1153,13 +1159,29 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
   it('past the bound, an organisation with none here keeps one, so it reads as waiting, though it has to wait its turn', async () => {
     const crowded = await newOrganisation();
     await plantInBulk(600, crowded);
-    await plant('seal', org, 'membership', newId());
-    await plant('seal', org, 'membership', newId());
     const other = await aProcess();
+    // Two polls: the first's hold frees a place, the next fills it, so the bound is full before this one's rows come.
+    await other.poll();
+    await other.poll();
+    expect(lines('audit.holds_waiting_past_limit').at(-1)).toMatchObject({ kept: 500 });
+    await plant('seal', org, 'membership', newId());
+    await plant('seal', org, 'membership', newId());
+
     await other.poll();
 
-    // Whichever order the rows came in: one of this organisation's, held or waiting, and never clear.
+    // One of its two, past the bound; the other left in the table.
+    expect(lines('audit.holds_waiting_past_limit').at(-1)).toMatchObject({ kept: 501 });
     expect(await other.read('none')).not.toMatchObject({ outcome: 'clear' });
+  });
+
+  it('what a process found itself takes no place from what rows may add', async () => {
+    const finder = await aProcess();
+    await leftWaiting(finder);
+    await plantInBulk(120, await newOrganisation());
+
+    await finder.poll();
+
+    expect(lines('audit.holds_waiting_past_limit').at(-1)).toMatchObject({ rows: 121, kept: 120 });
   });
 
   it('a finding this process made itself is never left out for the bound', async () => {
