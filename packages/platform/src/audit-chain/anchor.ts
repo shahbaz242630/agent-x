@@ -33,7 +33,7 @@ export interface AnchorStore {
 }
 
 /** The epoch of an anchor kept in memory alone: real ones count from 1, and it's never written, so never read back. */
-export const NO_EPOCH = 0;
+const NO_EPOCH = 0;
 
 /** What an anchor's signature covers: the epoch too, so a line copied from one into another fails. */
 export const anchorMessage = (chain: string, point: CheckedPoint, at: Date, epoch: number): Message => [
