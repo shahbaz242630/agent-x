@@ -596,35 +596,26 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
     ]);
   });
 
-  it('no turn completing with organisations past the bound is the alarm, by count, naming the first few; no hold', async () => {
+  it('no run’s turn completing for the whole bound is the alarm, by count, naming the first few; no hold', async () => {
     vi.useFakeTimers();
     const all = orgs(30);
-    const { organizations, holds, release, running } = directory(all, () => undefined);
+    const { organizations, holds, running } = directory(all, () => undefined);
     const { check, capture, clock } = checking(organizations, { lanes: 1, runWithinMs: 1000 });
-    const first = check.run();
-    await settled();
-    await vi.advanceTimersByTimeAsync(1000);
-    await first;
+    const oneRun = async (): Promise<void> => {
+      const run = check.run();
+      await settled();
+      await vi.advanceTimersByTimeAsync(1000);
+      await run;
+    };
+    await oneRun();
     expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
-    for (const orgId of [...running.keys()]) release(orgId);
-    await settled();
 
     clock.advanceBy(REACH_MS - 1);
-    const under = check.run();
-    await settled();
-    await vi.advanceTimersByTimeAsync(1000);
-    await under;
-    for (const orgId of [...running.keys()]) release(orgId);
-    await settled();
-    // Those let go ended, and so were compared; the rest are near the bound.
-    const notReached = 30 - lines(capture, 'audit.anchored').length;
+    await oneRun();
     expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
 
     clock.advanceBy(1);
-    const past = check.run();
-    await settled();
-    await vi.advanceTimersByTimeAsync(1000);
-    await past;
+    await oneRun();
     const alarms = lines(capture, 'audit.integrity_failed');
     expect(alarms).toHaveLength(1);
     expect(alarms[0]).toMatchObject({
@@ -632,11 +623,11 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
       chain: 'organisation',
       check: 'anchor',
       reason: 'unreached',
-      organisations: notReached,
+      organisations: 30,
     });
     expect(alarms[0]?.firstFew as string[]).toHaveLength(5);
     expect(holds.filter(([, failure]) => failure !== undefined)).toEqual([]);
-    for (const orgId of [...running.keys()]) release(orgId);
+    for (const release of running.values()) release();
   });
 
   it('an organisation’s wait counts from when it was first seen, as a new one can’t have waited longer', async () => {
@@ -1037,12 +1028,12 @@ describe('second round (4D2e E6 review): any number of organisations may slow it
     expect(turnsSeen).toEqual(new Set(all));
   });
 
-  it('#3 past the most it remembers it refuses nothing: it checks what fits, with one SEV-2 line and no tamper alarm', async () => {
+  it('#3 past the most it notes it refuses nothing: all checked, with one SEV-2 line and no tamper alarm', async () => {
     const all = orgs(5);
     const { organizations, started } = directory(all);
     const { check, capture } = checking(organizations, { lanes: 2, mostOrganisations: 3 });
     await check.run();
-    expect(started).toHaveLength(3);
+    expect(started).toHaveLength(5);
     expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
     expect(lines(capture, 'audit.anchor_check_over_size')).toEqual([
       expect.objectContaining({ level: 'error', listed: 5, beyond: 2, most: 3 }),
@@ -1226,5 +1217,235 @@ describe('second round (4D2e E6 review): any number of organisations may slow it
     const restarted = durable.restarted();
     await restarted.read();
     expect(restarted.latest({ kind: 'organisation', orgId: org(1) })?.seq).toBe(1n);
+  });
+});
+
+describe('third round (4D2e E6 review)', () => {
+  const unreached = (capture: LogCapture) =>
+    lines(capture, 'audit.integrity_failed').filter((line) => line.reason === 'unreached');
+
+  it('#1 a slow chain keeps its mark through a run-end cut and a "not finished" miss, so quick chains keep their lanes', async () => {
+    vi.useFakeTimers();
+    const all = orgs(3);
+    let hanging = true;
+    const { organizations, started, release } = directory(all, (orgId) =>
+      orgId === org(3) && hanging ? undefined : ok(1n),
+    );
+    const { check } = checking(organizations, { lanes: 2 });
+    const marking = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(SLOW_AFTER_MS);
+    release(org(3));
+    await marking;
+    await settled();
+
+    // Cut off soon after it starts: a second, not a check run to its end.
+    const stopping = new AbortController();
+    const cut = check.run(stopping.signal);
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    stopping.abort();
+    await cut;
+    // Still under way, so its turn meets "has not finished".
+    await check.run();
+
+    release(org(3));
+    await settled();
+    hanging = false;
+    started.length = 0;
+    await check.run();
+    await check.run();
+    // Slow still: taken ahead of its place on the slow lane's share, as a quick chain would not be.
+    expect(started.slice(0, 3)).toEqual([org(3), org(1), org(2)]);
+  });
+
+  it('#3 one bad run while behind says nothing of tamper: a turn completed within the bound', async () => {
+    const all = orgs(2);
+    const { organizations } = directory(all);
+    let downFor: (orgId: string) => boolean = () => false;
+    const verify: OrganisationChains['verify'] = (orgId, anchor) =>
+      downFor(orgId) ? Promise.reject(new Error('connect ECONNREFUSED')) : organizations.verify(orgId, anchor);
+    const { check, capture, clock } = checking({ ...organizations, verify }, { lanes: 2 });
+    await check.run();
+    clock.advanceBy(REACH_MS - 1);
+    downFor = (orgId) => orgId === org(2);
+    await check.run();
+    clock.advanceBy(1);
+    downFor = () => true;
+    await check.run();
+    expect(unreached(capture)).toEqual([]);
+    expect(lines(capture, 'audit.anchor_check_behind')).toEqual([]);
+  });
+
+  it('#3 a check landing between runs counts as a turn completed', async () => {
+    vi.useFakeTimers();
+    const all = orgs(3);
+    const { organizations, release } = directory(all, () => undefined);
+    const { check, capture, clock } = checking(organizations, { lanes: 3, runWithinMs: 1000 });
+    const first = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    await first;
+    clock.advanceBy(REACH_MS - 1);
+    // Two land between the runs; the third goes on, so the next run has no turn to complete, and it is the late one.
+    release(org(1));
+    release(org(2));
+    await settled();
+    clock.advanceBy(1);
+    const second = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    await second;
+    expect(unreached(capture)).toEqual([]);
+    release(org(3));
+  });
+
+  it('#3 wedged lanes raise the alarm at the bound, however many hand-offs land', async () => {
+    const all = orgs(2);
+    const { organizations } = directory(all);
+    let down = false;
+    let handingOff = false;
+    const verify: OrganisationChains['verify'] = (orgId, anchor) =>
+      down && !handingOff ? Promise.reject(new Error('connect ECONNREFUSED')) : organizations.verify(orgId, anchor);
+    const { check, capture, clock } = checking({ ...organizations, verify }, { lanes: 2 });
+    await check.run();
+    down = true;
+    clock.advanceBy(REACH_MS - 1);
+    handingOff = true;
+    await check.anchorOrganisation(org(1));
+    handingOff = false;
+    clock.advanceBy(1);
+    await check.run();
+    expect(unreached(capture)).toEqual([expect.objectContaining({ organisations: 1, firstFew: [org(2)] })]);
+  });
+
+  it('#5 past the cap every chain still takes its turn, by a cursor that goes on between runs', async () => {
+    vi.useFakeTimers();
+    const all = orgs(6);
+    const { organizations, started } = directory(all);
+    // Each check takes real time, so a run of a second gets through two or three on its lone lane.
+    const verify: OrganisationChains['verify'] = async (orgId, anchor) => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return organizations.verify(orgId, anchor);
+    };
+    const { check, capture } = checking(
+      { ...organizations, verify },
+      { lanes: 1, mostOrganisations: 1, runWithinMs: 1000 },
+    );
+    // The stated bound: a lone lane reaches one chain past the cap at least every second run, so ten runs for these five.
+    for (let runs = 0; runs < 10 && new Set(started).size < all.length; runs += 1) {
+      const run = check.run();
+      await vi.advanceTimersByTimeAsync(1000);
+      await run;
+      await vi.advanceTimersByTimeAsync(400);
+    }
+    expect(new Set(started)).toEqual(new Set(all));
+    expect(lines(capture, 'audit.anchor_check_over_size').at(0)).toMatchObject({ level: 'error', beyond: 5, most: 1 });
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
+  });
+
+  it('#5 a wind-back on the last chain past the cap is found, with its hold', async () => {
+    const all = orgs(4);
+    let wound = false;
+    const { organizations, holds } = directory(all, (orgId) => (orgId === org(4) && wound ? ok(1n) : ok(5n)));
+    const { check, capture } = checking(organizations, { lanes: 2, mostOrganisations: 1 });
+    await check.run();
+    wound = true;
+    await check.run();
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'anchor', orgId: org(4) }),
+    ]);
+    expect(holds).toContainEqual([org(4), 'anchor']);
+  });
+
+  it('#5 chains past the cap have a share of the lanes: known chains filling every run can’t starve them', async () => {
+    vi.useFakeTimers();
+    const known = orgs(3);
+    const past = Array.from({ length: 3 }, (_, index) => org(index + 100));
+    const { organizations, started, running, release } = directory([...known, ...past], (orgId) =>
+      known.includes(orgId) ? undefined : ok(1n),
+    );
+    const { check } = checking(organizations, { lanes: 2, mostOrganisations: 3 });
+    const run = check.run();
+    await settled();
+    // One lane on a known chain, hanging; the other goes on through those past the cap.
+    expect(started.filter((orgId) => past.includes(orgId))).toEqual(past);
+    await vi.advanceTimersByTimeAsync(RUN_WITHIN_MS);
+    for (const orgId of known) release(orgId);
+    await run;
+    expect(running.size).toBe(0);
+  });
+
+  it('#5 and #6 recorded but off the list is the alarm past the cap too, from the two lists in memory', async () => {
+    const { organizations, holds } = directory(orgs(2));
+    const { check, capture } = checking(
+      { ...organizations, recorded: () => Promise.resolve(orgs(3)) },
+      { lanes: 2, mostOrganisations: 1 },
+    );
+    await check.run();
+    expect(capture.lines().filter((line) => line.reason === 'unlisted')).toEqual([
+      expect.objectContaining({ orgId: org(3) }),
+    ]);
+    expect(holds).toContainEqual([org(3), 'unlisted']);
+  });
+
+  it('#7 a check still running past the stale window is capacity, not the alarm; one that fails past it is the alarm', async () => {
+    vi.useFakeTimers();
+    const { organizations, running, release } = directory(orgs(1), () => undefined);
+    const { check, capture, clock } = checking(organizations, { lanes: 2 });
+    const first = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await first;
+    clock.advanceBy(STALE_MS);
+    await check.run();
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([]);
+    // Still running past the bound: late, and said as capacity with a turn completing elsewhere.
+    for (const orgId of [...running.keys()]) release(orgId);
+    await settled();
+    const failing = directory(orgs(1));
+    const rejected = checking({
+      ...failing.organizations,
+      verify: (orgId, anchor) =>
+        failing.started.length > 0
+          ? Promise.reject(new Error('connect ECONNREFUSED'))
+          : failing.organizations.verify(orgId, anchor),
+    });
+    await rejected.check.run();
+    rejected.clock.advanceBy(STALE_MS);
+    await rejected.check.run();
+    expect(rejected.capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([
+      expect.objectContaining({ organisations: 1 }),
+    ]);
+  });
+
+  it('#7 the platform chain running on past the stale window is capacity too, and late it is said', async () => {
+    vi.useFakeTimers();
+    const { check, capture, clock } = checking(directory([]).organizations, {
+      chains: [{ chain: { kind: 'platform' }, verify: () => new Promise<ChainReport>(() => undefined) }],
+    });
+    const first = check.run();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await first;
+    clock.advanceBy(REACH_MS);
+    await check.run();
+    expect(capture.lines().filter((line) => line.reason === 'unchecked')).toEqual([]);
+    expect(
+      capture
+        .lines()
+        .filter((line) => line.firstFew !== undefined)
+        .at(-1),
+    ).toMatchObject({
+      firstFew: ['platform'],
+    });
+  });
+
+  it('a run of more organisations than an array spread can take is no crash', { timeout: 60_000 }, async () => {
+    const all = Array.from({ length: 200_000 }, (_, index) => org(index + 1));
+    const { organizations } = directory(all);
+    const { check, capture } = checking(organizations, { mostOrganisations: 300_000 });
+    await check.run();
+    expect(lines(capture, 'audit.anchor_check_crashed')).toEqual([]);
+    expect(lines(capture, 'audit.anchor_check_done').at(-1)).toMatchObject({ chains: 200_000 });
   });
 });

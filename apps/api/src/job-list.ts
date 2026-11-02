@@ -19,7 +19,7 @@ import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createMemoryAnchorStore } from '@agentx/platform/audit-chain';
-import { sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
+import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 
 import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
@@ -167,11 +167,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const anchors = createAnchorCheck({
     chains: [{ chain: { kind: 'platform' }, verify: (anchor) => platform.verifyAlone(database, anchor) }],
     organizations: {
-      list,
-      recorded: () => platform.createdOrganizations(database),
+      list: () => listedOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
+      recorded: () => platform.createdOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
       verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
       // The run's own logger: the hold's lines name the organisation themselves.
-      hold: (orgId, failure) => holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure),
+      hold: (orgId, failure) =>
+        holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure, JOB_ANSWER_WITHIN_MS),
     },
     keys,
     clock: systemClock,

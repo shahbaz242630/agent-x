@@ -306,10 +306,10 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 
 /**
  * The anchors' store can't be read after a start, has gone long unread or unwritten, or was never named (4D2e E, PL-58);
- * the check is behind on its turns, or over the organisations it remembers (E6): capacity, never tamper.
+ * a file too large for this process, the check behind on its turns, or past the organisations it notes (E6): capacity, never tamper.
  */
 const ANCHOR_STORE_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
 
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
 const PLATFORM_FULL_LINES =

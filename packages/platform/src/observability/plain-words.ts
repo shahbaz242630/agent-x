@@ -203,9 +203,14 @@ export const PLAIN_WORDS = {
     next: 'Add capacity: more check lanes with a bigger database pool, or more CPU for long histories.',
   },
   'audit.anchor_check_over_size': {
-    happened: 'More organisations are listed than the tamper check is set to remember in memory.',
-    broke: 'The ones past that number are not being checked. All the others are, and nobody is held.',
-    next: 'Raise the number it remembers, about 1 MB of memory for each thousand organisations, and restart.',
+    happened: 'More organisations are listed than the tamper check is set to keep notes on.',
+    broke: 'Nothing: all are still checked, those past the number in turn from a place in the list, more slowly.',
+    next: 'Raise the number it keeps notes on, if there is memory for it, and restart.',
+  },
+  'audit.anchor_store_beyond_memory': {
+    happened: 'The store of audit anchors holds a sound file too large for this process to take into memory.',
+    broke: 'After a start, payments wait for every organisation, as their anchors could not be read. Nobody is held.',
+    next: 'Give the process more memory, then restart it. Nothing has been tampered with.',
   },
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',

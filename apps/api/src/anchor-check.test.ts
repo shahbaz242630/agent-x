@@ -361,7 +361,8 @@ describe('the anchor check when a check does not finish', () => {
     );
     clock.advanceBy(STALE_MS);
     await check.run();
-    expect(events()).toEqual([warning, warning, alarm('unchecked')]);
+    // Still under way, every trip of it bounded: capacity, not the alarm (the review, round 3).
+    expect(events()).toEqual([warning, warning, expect.objectContaining({ event: 'audit.anchor_check_behind' })]);
     expect(
       capture
         .lines()
