@@ -263,7 +263,7 @@ export function createHandoff({
   unknownAfterMs = UNKNOWN_AFTER_MS,
   anchoring,
 }: {
-  /** The organisations to look in: the directory's list, which main.ts passes. */
+  /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<HandoffTables>;
   readonly rail: FinancialRailAdapter;
@@ -280,7 +280,7 @@ export function createHandoff({
   /** How long a transaction waits for its answer before UNKNOWN (UNKNOWN_AFTER_MS unless a test names less). */
   readonly unknownAfterMs?: number;
   /**
-   * The anchor check's last anchors, and its check of one organisation (main.ts
+   * The anchor check's last anchors, and its check of one organisation (job-list.ts
    * passes both): Tx A refuses a chain behind its anchor (ADR-012 §2, H11).
    * None given (some tests), nothing is compared.
    */

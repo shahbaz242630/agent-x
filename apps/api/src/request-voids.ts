@@ -421,7 +421,7 @@ export function createRequestVoids({
   logger,
   most = MOST_VOIDED_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which main.ts passes. */
+  /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<VoidTables>;
   readonly keys: KeyProvider;

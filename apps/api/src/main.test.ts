@@ -786,6 +786,119 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
   });
 });
 
+describe('4D2e D: the role says which side of the work a process does', () => {
+  const JOB_LINES = [
+    'api.notices',
+    'api.idp_events',
+    'api.contact_fill',
+    'api.factor_resets',
+    'api.handoff',
+    'api.payment_checks',
+    'api.background_downloads',
+  ];
+  const TABLES = [
+    'identity.flow',
+    'identity.session',
+    'identity.step_up_challenge',
+    'security.event',
+    'provider_events.message',
+    'notifications.notice',
+  ];
+  const stopped = async (host: FakeProcess) => {
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+  };
+
+  it('with the login service and email configured: `web` signs people in, and `jobs` turns on the work that needs them', async () => {
+    const CONFIGURED = {
+      ...ENV,
+      AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://auth.test,http://mail.test',
+      AGENTX_OIDC_ISSUER: 'http://auth.test',
+      AGENTX_OIDC_CLIENT_ID: 'agentx-api',
+      AGENTX_OIDC_CLIENT_SECRET: ['stand', 'in', 'client', 'words'].join('-'),
+      AGENTX_EMAIL_ENDPOINT: 'http://mail.test',
+      AGENTX_EMAIL_SENDER: 'noreply@example.test',
+      AGENTX_EMAIL_ACCESS_KEY: Buffer.from('stand in email words').toString('base64'),
+      AGENTX_DIRECTORY_TOKEN: ['stand', 'in', 'reader', 'words'].join('-'),
+      AGENTX_FACTOR_RESET_TOKEN: ['stand', 'in', 'reset', 'words'].join('-'),
+    };
+    const { server } = await start({ ...CONFIGURED, AGENTX_ROLE: 'web' });
+    expect(server?.hasRoute({ method: 'GET', url: '/v1/auth/callback' })).toBe(true);
+
+    const { host, capture } = await start({ ...CONFIGURED, AGENTX_ROLE: 'jobs' });
+    const said = (event: string) => capture.lines().find((line) => line.event === event);
+    expect(said('api.notices')).toEqual(expect.objectContaining({ sending: true }));
+    expect(said('api.idp_events')).toEqual(expect.objectContaining({ copying: true }));
+    expect(said('api.factor_resets')).toEqual(expect.objectContaining({ removing: true }));
+    expect(said('api.contact_fill')).toEqual(expect.objectContaining({ filling: true }));
+    await stopped(host);
+  });
+
+  it('names the role on the first line, `all` where none is set', async () => {
+    const { capture } = await start();
+    expect(capture.lines()[0]).toEqual(expect.objectContaining({ event: 'api.starting', role: 'all' }));
+    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(web.lines()[0]).toEqual(expect.objectContaining({ event: 'api.starting', role: 'web' }));
+  });
+
+  it('`all` runs the server and every job, as one process', async () => {
+    const { server, events } = await start({ ...ENV, AGENTX_ROLE: 'all' });
+    expect(server?.server.listening).toBe(true);
+    expect(events()).toEqual(expect.arrayContaining(['api.listening', ...JOB_LINES]));
+    expect(anchorChecks.intervals).toEqual([300_000]);
+    expect(sweeps.everyMs).toEqual([3_600_000]);
+    expect(rowSweeps.scheduled).toEqual(TABLES);
+    expect(phase2Jobs.scheduled).toHaveLength(6);
+  });
+
+  it('`web` runs the server and no job the `jobs` side keeps: no anchor check, sweep, hand-off or heartbeat of them', async () => {
+    const { host, server, events, capture } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(server?.server.listening).toBe(true);
+    expect(events()).toEqual([
+      'api.starting',
+      'api.partner',
+      'api.database_connected',
+      'api.start_recorded',
+      'api.listening',
+    ]);
+    expect(anchorChecks.intervals).toEqual([]);
+    expect(schemaCheck.scheduledRuns).toBe(0);
+    expect(sweeps.everyMs).toEqual([]);
+    expect(rowSweeps.scheduled).toEqual([]);
+    expect(phase2Jobs.scheduled).toEqual([]);
+    // It answers, the start's own schema check still run.
+    expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded']);
+    expect((await server?.inject('/health'))?.json()).toEqual({ status: 'ok' });
+    await stopped(host);
+    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'api.stopped' }));
+  });
+
+  it('`jobs` runs every job and no server, stays up with nothing listening, and stops cleanly', async () => {
+    const serversBefore = built.length;
+    const { host, server, events } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
+    expect(server).toBeUndefined();
+    expect(host.exitCode).toBeUndefined();
+    expect(built).toHaveLength(serversBefore);
+    expect(events()).toEqual([
+      'api.starting',
+      'api.partner',
+      'api.database_connected',
+      'api.start_recorded',
+      ...JOB_LINES,
+    ]);
+    expect(anchorChecks.intervals).toEqual([300_000]);
+    expect(sweeps.everyMs).toEqual([3_600_000]);
+    expect(rowSweeps.scheduled).toEqual(TABLES);
+    expect(phase2Jobs.scheduled).toHaveLength(6);
+    await stopped(host);
+    expect(events().slice(-2)).toEqual(['api.stopping', 'api.stopped']);
+    expect(rowSweeps.stopped.toSorted()).toEqual(TABLES.toSorted());
+    expect(fake.steps.at(-1)).toBe('pool closed');
+  });
+});
+
 describe('the API stops cleanly on a signal', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)(
     'on %s: logs the signal, stops listening, then closes the pool, exits 0',

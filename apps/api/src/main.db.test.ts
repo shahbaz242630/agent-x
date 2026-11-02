@@ -150,6 +150,38 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await expectNoApiConnections();
   });
 
+  it('4D2e D: `web` answers and runs no job: nothing anchors, nothing is swept', async () => {
+    const run = await start(envFor('app', { AGENTX_ROLE: 'web' }));
+    expect(run.events()).toEqual([
+      'api.starting',
+      'api.partner',
+      'api.database_connected',
+      'api.start_recorded',
+      'api.listening',
+    ]);
+    expect((await run.api?.inject('/health'))?.json()).toEqual({ status: 'ok' });
+    // Long enough for a job to have begun, were there one: each starts at once.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const seen = run.capture.lines().map((line) => String(line.event));
+    expect(seen.filter((event) => /^audit\.|_sweep_done$|^idempotency\./.test(event))).toEqual([]);
+    await stop(run);
+    await expectNoApiConnections();
+  });
+
+  it('4D2e D: `jobs` anchors and sweeps with nothing listening, and closes every connection when it stops', async () => {
+    const run = await start(envFor('app', { AGENTX_ROLE: 'jobs' }));
+    expect(run.api).toBeUndefined();
+    expect(run.host.exitCode).toBeUndefined();
+    await vi.waitFor(() => {
+      const seen = run.capture.lines().map((line) => line.event);
+      expect(seen).toContain('audit.anchor_check_done');
+      expect(seen).toContain('identity.flow_sweep_done');
+    });
+    expect(run.events()).not.toContain('api.listening');
+    await stop(run);
+    await expectNoApiConnections();
+  });
+
   it('refuses to run as the migration role, which owns the tables and could switch the walls off', async () => {
     const { host, api, capture, events } = await start(envFor('owner'));
     expect(api).toBeUndefined();

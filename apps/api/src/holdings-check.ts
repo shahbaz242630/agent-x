@@ -48,7 +48,7 @@ export function createHoldingsCheck({
   page = MOST_CHECKED_A_PAGE,
   pagesARun = PAGES_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which main.ts passes. */
+  /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<SpendRequestsTables & LimitReservationsTables & PaymentsTables & AuditTables>;
   readonly keys: KeyProvider;
