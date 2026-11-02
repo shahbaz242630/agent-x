@@ -525,6 +525,12 @@ describe('the reasons that end a lane’s turn', () => {
 });
 
 describe('the gate', () => {
+  /** A step that notes its name in `order`, and ends. */
+  const notingIn = (order: string[]) => (name: string) => () => {
+    order.push(name);
+    return Promise.resolve();
+  };
+
   it('holds at most its limit, the next going as one ends, whether it succeeded or threw', async () => {
     const gate = createGate(1);
     const { promise: held, resolve: release } = Promise.withResolvers<undefined>();
@@ -552,10 +558,7 @@ describe('the gate', () => {
     const gate = createGate(1);
     const { promise: held, resolve: release } = Promise.withResolvers<undefined>();
     const order: string[] = [];
-    const noted = (name: string) => () => {
-      order.push(name);
-      return Promise.resolve();
-    };
+    const noted = notingIn(order);
 
     const all = [
       gate.run('z', () => held),
@@ -614,10 +617,7 @@ describe('the gate', () => {
     const gate = createGate(2);
     const { promise: stuck, resolve: unstick } = Promise.withResolvers<undefined>();
     const order: string[] = [];
-    const noted = (name: string) => () => {
-      order.push(name);
-      return Promise.resolve();
-    };
+    const noted = notingIn(order);
 
     const blocked = gate.run('x', () => stuck);
     const sameOrganisation = gate.run('x', noted('x again'));
