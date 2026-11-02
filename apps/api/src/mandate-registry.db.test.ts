@@ -124,7 +124,7 @@ describe('drafting a mandate (B2)', () => {
 
   it('refuses another zone than the one an agent already weighed keeps its months in: AGENT_ZONE_KEPT (decision 15)', async () => {
     const w = await world();
-    // As the agent's first decision keeps it (lockAgentMonth) and seals it.
+    // As the agent's first decision keeps it (zoneInForce) and seals it.
     await withSignedStates(app, w.org, quiet(), async (tx, states) => {
       const zone = { orgId: w.org, agentId: w.agent, zone: 'Asia/Dubai', at: clock.now() };
       await addZone(tx, zone);

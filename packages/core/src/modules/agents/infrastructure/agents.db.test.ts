@@ -34,6 +34,7 @@ import {
   agentKeysOf,
   bringKeyExpiryForward,
   keysIssuedSince,
+  keysOnceIssued,
   MOST_KEYS_LISTED,
   TooManyAgentKeys,
 } from './agent-keys.ts';
@@ -526,6 +527,34 @@ describe("an agent's keys, each verified (C1-1)", () => {
         });
       }
     });
+
+  it('makes a new key as a read would give it: IDs in lower case, its scopes in their own order, sorted in by ID', () => {
+    const key = (id: string) => ({
+      id,
+      agentId: 'a',
+      status: 'ACTIVE' as const,
+      scopes: ['requests:read' as const],
+      secretMac: Buffer.alloc(32, 1),
+      secretKeyVersion: 1,
+      expiresAt: inDays(90),
+    });
+
+    const listed = keysOnceIssued(
+      [key('b'), key('d')],
+      (one) => (one.id === 'b' ? { ...one, status: 'REVOKED' } : one),
+      {
+        ...key('C'),
+        agentId: 'A',
+        scopes: ['requests:write', 'requests:read'],
+      },
+    );
+
+    expect(listed).toEqual([
+      { ...key('b'), status: 'REVOKED' },
+      { ...key('c'), scopes: ['requests:read', 'requests:write'] },
+      key('d'),
+    ]);
+  });
 
   it(`refuses an agent with more than ${String(MOST_KEYS_LISTED)} keys, rather than cut the list short`, async () => {
     const org = await organization();

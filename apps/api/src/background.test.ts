@@ -1,20 +1,12 @@
-// B6-2b: background work a config may leave off: a handle that runs nothing,
-// says so and stops at once; and one that runs the work, and stops it.
+// The jobs' timer: runs now, and again after each run ends; stops at once.
 import { describe, expect, it } from 'vitest';
 
-import { scheduleRunsIfAny } from './background.ts';
+import { finishedWithinStop, scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
-describe('work the config may leave off (B6-2b)', () => {
-  it('runs nothing without work, says so, and stops at once', async () => {
-    const handle = scheduleRunsIfAny(undefined, 60_000);
-
-    expect(handle.running).toBe(false);
-    await expect(handle.stop()).resolves.toBeUndefined();
-  });
-
-  it('runs the work now, says so, and stops it', async () => {
+describe('a job on a timer of its own', () => {
+  it('runs now, and stopping aborts the run and ends', async () => {
     const runs: (AbortSignal | undefined)[] = [];
-    const handle = scheduleRunsIfAny(
+    const handle = scheduleRuns(
       {
         run: (signal) => {
           runs.push(signal);
@@ -24,9 +16,92 @@ describe('work the config may leave off (B6-2b)', () => {
       60_000,
     );
 
-    expect(handle.running).toBe(true);
     await handle.stop();
     expect(runs).toHaveLength(1);
     expect(runs[0]?.aborted).toBe(true);
+  });
+
+  it('runs again only after a run has ended, whatever a run gives back', async () => {
+    let runs = 0;
+    const { promise: ranTwice, resolve } = Promise.withResolvers<undefined>();
+    const handle = scheduleRuns(
+      {
+        run: () => {
+          runs += 1;
+          if (runs === 2) resolve(undefined);
+          return Promise.resolve('skipped');
+        },
+      },
+      1,
+    );
+    await ranTwice;
+    await handle.stop();
+    expect(runs).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('a step within its deadline', () => {
+  const never = () => Promise.withResolvers<undefined>().promise;
+
+  it('stops at once for a signal already stopped, which never fires its event', async () => {
+    const stopping = new AbortController();
+    stopping.abort();
+
+    await expect(withinDeadline(never(), 60_000, stopping.signal)).rejects.toThrow(Stopped);
+  });
+
+  it('stops as the signal does', async () => {
+    const stopping = new AbortController();
+    const step = withinDeadline(never(), 60_000, stopping.signal);
+
+    stopping.abort();
+
+    await expect(step).rejects.toThrow(Stopped);
+  });
+
+  it('gives its answer where nothing stops it', async () => {
+    await expect(withinDeadline(Promise.resolve('done'), 60_000, undefined)).resolves.toBe('done');
+  });
+});
+
+describe('a stop’s bounded wait', () => {
+  const never = () => Promise.withResolvers<undefined>().promise;
+
+  it('gives the work’s result where it finishes in time, stopped or not', async () => {
+    const stopping = new AbortController();
+    stopping.abort();
+
+    await expect(finishedWithinStop(Promise.resolve('done'), undefined, 1)).resolves.toBe('done');
+    await expect(finishedWithinStop(Promise.resolve('done'), stopping.signal, 60_000)).resolves.toBe('done');
+  });
+
+  it('gives up after its time from a stop already made', async () => {
+    const stopping = new AbortController();
+    stopping.abort();
+
+    await expect(finishedWithinStop(never(), stopping.signal, 10)).resolves.toBeUndefined();
+  });
+
+  it('gives up after its time from the stop, not before it', async () => {
+    const stopping = new AbortController();
+    let ended = false;
+    const waiting = finishedWithinStop(never(), stopping.signal, 10).then(() => {
+      ended = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ended).toBe(false);
+
+    stopping.abort();
+    await waiting;
+    expect(ended).toBe(true);
+  });
+
+  it('waits as long as it takes with no signal at all', async () => {
+    const { promise: work, resolve: finish } = Promise.withResolvers<string>();
+    const waiting = finishedWithinStop(work, undefined, 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    finish('late');
+
+    await expect(waiting).resolves.toBe('late');
   });
 });

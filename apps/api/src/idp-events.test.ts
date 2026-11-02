@@ -84,7 +84,7 @@ describe('SEC-OPS-02 the login service’s events copied as the API runs it (B6-
   it('never throws when it can’t read where it got to: it logs, and waits for its next run', async () => {
     const { copier, capture } = copierWith(EMAIL);
 
-    await expect(copier?.run()).resolves.toBeUndefined();
+    await expect(copier?.run()).resolves.toBe('skipped');
     expect(capture.lines().map(({ event }) => event)).toEqual(['idp_events.run_failed']);
   });
 });

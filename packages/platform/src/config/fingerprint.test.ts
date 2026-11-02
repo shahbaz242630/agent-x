@@ -139,6 +139,7 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ['the live-money gate reference', { AGENTX_LIVE_MONEY_GATE_REF: `LMG-v2-sha256:${'cd'.repeat(32)}` }],
     ['the public origin', { AGENTX_PUBLIC_ORIGIN: 'https://other.agentx.example' }],
     ['the environment', { AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake', AGENTX_LIVE_MONEY_GATE_REF: undefined }],
+    ['the role', { AGENTX_ROLE: 'jobs' }],
     ['the database host', { AGENTX_DB_HOST: 'other.internal.example' }],
     ['the database port', { AGENTX_DB_PORT: '6432' }],
     ['the database name', { AGENTX_DB_NAME: 'agentx_uae' }],

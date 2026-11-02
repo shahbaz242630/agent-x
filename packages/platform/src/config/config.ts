@@ -13,7 +13,15 @@ import {
   blobContainerProblems,
   type BlobContainerSettings,
 } from './blob-container.ts';
-import { ConfigError, type Env, type Environment, LOCAL_ONLY, LOCAL_RELEASE, type LogLevel } from './common.ts';
+import {
+  type ApiRole,
+  ConfigError,
+  type Env,
+  type Environment,
+  LOCAL_ONLY,
+  LOCAL_RELEASE,
+  type LogLevel,
+} from './common.ts';
 import {
   checkLocation,
   deployedProblems,
@@ -34,6 +42,8 @@ const LOCAL_PUBLIC_ORIGIN = 'http://localhost:8080';
 
 export interface Config {
   readonly environment: Environment;
+  /** Which side of the API's work this process does (4D2e D). */
+  readonly role: ApiRole;
   /** The deployed build (for example a commit hash), named on every log line and error. */
   readonly release: string;
   /** Logging standard §2 and SEC-AV-09. */
@@ -412,6 +422,7 @@ function readSettings(env: Env, location: LocationChecks) {
     dbUser: setting(env, 'AGENTX_DB_USER'),
     dbPassword: secretSetting(env, 'AGENTX_DB_PASSWORD'),
     dbPoolMax: setting(env, 'AGENTX_DB_POOL_MAX'),
+    role: setting(env, 'AGENTX_ROLE'),
     gateActive: setting(env, 'AGENTX_DECISION_GATE_ACTIVE'),
     gatePerOrganisation: setting(env, 'AGENTX_DECISION_GATE_PER_ORGANISATION'),
     gateWaitingPerOrganisation: setting(env, 'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION'),
@@ -599,6 +610,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
 
   return Object.freeze({
     environment: checks.environment.value,
+    role: checks.role.value,
     release: checks.release.value ?? LOCAL_RELEASE,
     log: Object.freeze({ level: checks.logLevel.value, eventCapPerMinute: checks.eventCap.value }),
     http: Object.freeze({

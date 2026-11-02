@@ -9,9 +9,11 @@ import {
   type AgentKeyRecord,
   agentKeyText,
   agentOf,
+  type AgentRecord,
   type AgentShown,
   agentsShown,
   type AgentsTables,
+  type IssuedAgentKey,
   KEY_SECRET_BYTES,
   keyExpiresAt,
   keySecretMessage,
@@ -68,6 +70,13 @@ interface KeyToIssue {
   readonly details?: AuditDetails;
 }
 
+/** A key just issued: its text, shown once, and its fields, for keysOnceIssued. */
+interface IssuedKey {
+  readonly id: string;
+  readonly text: string;
+  readonly issued: IssuedAgentKey;
+}
+
 /** The agents' UseCaseRefused: the only refusal their work answers. */
 export class AgentRefused extends UseCaseRefused {}
 
@@ -111,6 +120,8 @@ export interface AgentWork {
   ): Promise<{ readonly membershipId: string; readonly role: Role }>;
   /** The agent and its keys, read (`share`) and verified: NOT_FOUND, or INTEGRITY_FAILED, otherwise. */
   withKeys(tx: AgentTx, states: SignedStates, orgId: string, agentId: string): Promise<AgentWithKeys>;
+  /** The agent read for this write, as an answer shows it: one statement, before its first event (ADR-006 §6). */
+  shown(tx: AgentTx, orgId: string, agent: AgentRecord): Promise<AgentShown>;
   /**
    * Refuses a key past the organisation's budget for the day
    * (MOST_KEYS_ISSUED_A_DAY, first keys included): AGENT_KEYS_SPENT. Counted
@@ -124,7 +135,7 @@ export interface AgentWork {
    * ID, and the key itself, `axk_<keyId>_<secret>`, for the write to show
    * this once.
    */
-  issueKey(tx: AgentTx, states: SignedStates, key: KeyToIssue): Promise<{ readonly id: string; readonly text: string }>;
+  issueKey(tx: AgentTx, states: SignedStates, key: KeyToIssue): Promise<IssuedKey>;
 }
 
 export function createAgentWork(services: {
@@ -139,7 +150,14 @@ export function createAgentWork(services: {
     Refusal: AgentRefused,
   });
 
+  const shown = async (tx: AgentTx, orgId: string, record: AgentRecord): Promise<AgentShown> => {
+    const [agent] = await agentsShown(tx, orgId, [record]);
+    if (agent === undefined) throw new Error('an agent read has nothing to show');
+    return agent;
+  };
+
   return {
+    shown,
     inOrganisation,
     write,
     brakeWrite,
@@ -156,9 +174,7 @@ export function createAgentWork(services: {
       if (read.outcome === 'missing') throw new AgentRefused(404, 'NOT_FOUND');
       const listed = await agentKeysOf(tx, states, orgId, agentId);
       if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
-      const [agent] = await agentsShown(tx, orgId, [read.agent]);
-      if (agent === undefined) throw new Error('an agent read has nothing to show');
-      return { agent, keys: listed.keys };
+      return { agent: await shown(tx, orgId, read.agent), keys: listed.keys };
     },
 
     async keyBudgetLeft(tx, orgId, now) {
@@ -171,19 +187,22 @@ export function createAgentWork(services: {
       const keyId = ids.next();
       const secret = randomBytes(KEY_SECRET_BYTES);
       const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, secret));
-      await addAgentKey(tx, states, {
-        orgId,
+      const issued = {
         id: keyId,
         agentId,
         scopes,
         secretMac: mac,
         secretKeyVersion: keyVersion,
         expiresAt: keyExpiresAt(now),
+      };
+      await addAgentKey(tx, states, {
+        ...issued,
+        orgId,
         createdAt: now,
         actor,
         ...(details !== undefined && { details }),
       });
-      return { id: keyId, text: agentKeyText(keyId, secret) };
+      return { id: keyId, text: agentKeyText(keyId, secret), issued };
     },
   };
 }

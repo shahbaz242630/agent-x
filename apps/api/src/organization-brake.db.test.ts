@@ -235,13 +235,13 @@ async function holding(...holds: readonly Hold[]): Promise<TestClient> {
  * with none, and lets go only once the next has it or waits for it. Stops when told, every one gone. Counts how many
  * had to wait: under a brake's queue, those behind it; on a bare row, none.
  */
-function relayOf(taken: () => Promise<TestClient>, { stepMs = 150, behindABrake = true } = {}) {
+async function relayOf(taken: () => Promise<TestClient>, { stepMs = 150, behindABrake = true } = {}) {
   const relaying = { on: true };
   let waited = 0;
-  let took = 0;
+  // Holding before this answers: a change sent first would take the row, and the relay would wait behind it.
+  let inside = await taken();
+  let took = 1;
   const running = (async () => {
-    let inside = await taken();
-    took += 1;
     while (relaying.on) {
       await sleep(stepMs);
       const next = taken();
@@ -295,7 +295,7 @@ describe('what a brake is up against: a stream of share holders and the row (no 
     'starves a FOR NO KEY UPDATE: each holder gets in at once while it waits, past its 5 s, until the 10 s limit',
     async () => {
       const w = await world();
-      const stop = relayOf(() => holding(orgRow(w.org)), { behindABrake: false });
+      const stop = await relayOf(() => holding(orgRow(w.org)), { behindABrake: false });
       const change = await database.connect('admin');
       await change.query('begin');
       await change.query("select pg_catalog.set_config('lock_timeout', '5s', true)");
@@ -304,8 +304,6 @@ describe('what a brake is up against: a stream of share holders and the row (no 
       const { answer, ms } = await timed(() =>
         settled(change.query('select 1 from organizations.organizations where id = $1 for no key update', [w.org])),
       );
-      // Ended before the relay is asked to stop: a failed transaction keeps its locks until it ends, and a next holder
-      // caught behind them would never come, leaving the relay and the test waiting for each other.
       await letGo(change);
       const { took, waited } = await stop();
 
@@ -368,7 +366,7 @@ describe('the freeze', () => {
     'beats a forced relay of holders, the brake and the row each, and makes them wait',
     async () => {
       const w = await world();
-      const stop = relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
+      const stop = await relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
       await sleep(400);
 
       const { answer, ms } = await timed(() => frozen(w));
@@ -520,7 +518,7 @@ describe('the unfreeze', () => {
     async () => {
       const { w } = await ready();
       expect(await frozen(w)).toMatchObject(FROZEN_NOW);
-      const stop = relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
+      const stop = await relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
       await sleep(400);
 
       const pendingRequests = 'pause' as const;
@@ -558,14 +556,16 @@ describe('the kill switch: the agent’s own brake', () => {
       const stopChecks = Array.from({ length: 3 }, () => stream(() => check.check(acting.text, CORRELATION), 5));
       await waitUntilQueued(database.as('admin'), 3);
 
-      const { answer, ms } = await timed(() => suspended(w));
+      const times = noStatementTimes();
+      const { answer, ms } = await timed(() => timingStatements(times, () => suspended(w)));
       await Promise.all([stopDecisions(), ...stopChecks.map((stop) => stop())]);
       await letGo(stuck);
 
       expect(answer).toMatchObject({ outcome: 'changed', agent: { agent: { status: 'SUSPENDED' } } });
-      // Its whole call: any wait for a connection (this stream goes round the gate and can fill the pool, so CI read 16.3 s,
-      // about 4 s past the brake), the brake's wait, then the change and its answer's read.
-      expect(ms).toBeLessThan(BRAKE_WAIT_MS * 1.75);
+      // Apart, as this stream goes round the gate and can fill the pool: the brake's wait with the change and its
+      // answer (8.5 s, six runs), and the wait for a connection, the rig's own (0.9 s to 2 s).
+      expect(ms - times.poolWaitMs).toBeLessThan(BRAKE_WAIT_MS);
+      expect(times.poolWaitMs).toBeLessThan(BRAKE_WAIT_MS);
       expect(await keyCheck().check(acting.text, CORRELATION)).toEqual({ outcome: 'refused' });
       expect(alarms()).toEqual([]);
     },
@@ -637,7 +637,7 @@ describe('the kill switch: the agent’s own brake', () => {
     async () => {
       const { w } = await ready();
       expect(await suspended(w)).toMatchObject({ agent: { agent: { status: 'SUSPENDED' } } });
-      const stop = relayOf(() => holding(brakeOf(lockName(AGENT_BRAKE, w.org, w.agent)), agentRow(w)));
+      const stop = await relayOf(() => holding(brakeOf(lockName(AGENT_BRAKE, w.org, w.agent)), agentRow(w)));
       await sleep(400);
 
       const challengeId = askedFor(

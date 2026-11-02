@@ -43,6 +43,8 @@ export interface SignedStateTable {
   readonly subject: string;
   /** Every authority field, always in this order, which is the order they are sealed in. */
   readonly fields: readonly SignedField[];
+  /** Its rows are made once and never changed (`made_once`): one read as not there may be made in that transaction. */
+  readonly madeOnce?: true;
 }
 
 /** The row, by its organisation and its own ID. */

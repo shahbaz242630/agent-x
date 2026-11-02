@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { isKeyPurpose, type KeyPurpose, PURPOSES } from '../keys/purposes.ts';
 import {
   DEFAULT_LOG,
+  API_ROLES,
   type Env,
   type Environment,
   ENVIRONMENTS,
@@ -139,6 +140,11 @@ const keyVersionList = text.transform((raw, ctx): Partial<Record<KeyPurpose, num
  */
 const SETTINGS = {
   AGENTX_ENV: { schema: text.pipe(z.enum(ENVIRONMENTS, { error: `must be one of: ${ENVIRONMENTS.join(', ')}` })) },
+  // Which side of the API's work this process does (4D2e D): the server, the jobs, or both as one process.
+  AGENTX_ROLE: {
+    schema: text.pipe(z.enum(API_ROLES, { error: `must be one of: ${API_ROLES.join(', ')}` })),
+    default: 'all',
+  },
   AGENTX_RELEASE: {
     schema: text
       .regex(/^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/, {
@@ -391,6 +397,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
     job: 'the app (apps/api)',
     reads: [
       ...COMMON,
+      'AGENTX_ROLE',
       'AGENTX_HTTP_HOST',
       'AGENTX_HTTP_PORT',
       'AGENTX_PUBLIC_ORIGIN',

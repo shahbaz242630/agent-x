@@ -19,11 +19,15 @@ import type { buildServer } from './server.ts';
 /** Every server runApi builds, including one it closes itself after a failed start. */
 const built = vi.hoisted((): FastifyInstance[] => []);
 
+/** What runApi gave buildServer last, so a test can call what it passed. */
+const serverOptions = vi.hoisted((): { last: object } => ({ last: {} }));
+
 vi.mock('./server.ts', async (importOriginal) => {
   const actual = await importOriginal<{ buildServer: typeof buildServer }>();
   return {
     ...actual,
     buildServer: async (...args: Parameters<typeof buildServer>) => {
+      serverOptions.last = args[0];
       const server = await actual.buildServer(...args);
       built.push(server);
       return server;
@@ -172,86 +176,48 @@ vi.mock('./retention-sweep.ts', () => ({
 const rowSweeps = vi.hoisted(() => ({ scheduled: [] as string[], stopped: [] as string[] }));
 
 vi.mock('./row-sweep.ts', () => ({
-  createRowSweep: (options: { rows: string }) => ({ rows: options.rows, run: () => Promise.resolve() }),
-  scheduleRowSweep: (sweep: { rows: string }) => {
-    rowSweeps.scheduled.push(sweep.rows);
+  createRowSweep: () => ({ run: () => Promise.resolve() }),
+  scheduleRowSweep: (sweep: { name: string }) => {
+    rowSweeps.scheduled.push(sweep.name);
     return {
       stop: () => {
-        rowSweeps.stopped.push(sweep.rows);
+        rowSweeps.stopped.push(sweep.name);
         return Promise.resolve();
       },
     };
   },
 }));
 
-/**
- * Phase 2's jobs, each tagged as main.ts makes it, and the interval each is
- * scheduled at (the jobs' own tests run them); the hold history check's tables.
- */
-const phase2Jobs = vi.hoisted(() => {
-  const made = new Map<object, string>();
-  return {
-    made,
-    scheduled: [] as [string, number][],
-    historyTables: [] as unknown[],
-    /** The module's `create` export, its job tagged with `name`. */
-    tagged:
-      <Options, Job extends object>(name: string, create: (options: Options) => Job) =>
-      (options: Options): Job => {
-        const job = create(options);
-        made.set(job, name);
-        return job;
-      },
-  };
-});
+/** The jobs scheduled by the timer they share, each by its name and interval; the hold history check's tables. */
+const phase2Jobs = vi.hoisted(() => ({
+  scheduled: [] as [string, number][],
+  historyTables: [] as unknown[],
+}));
 
 vi.mock('./background.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./background.ts')>();
   return {
     ...actual,
-    scheduleRuns: (work: { run(signal?: AbortSignal): Promise<void> }, intervalMs: number) => {
-      const name = phase2Jobs.made.get(work);
-      if (name !== undefined) phase2Jobs.scheduled.push([name, intervalMs]);
+    scheduleRuns: (work: { run(signal?: AbortSignal): Promise<unknown> }, intervalMs: number) => {
+      phase2Jobs.scheduled.push([(work as { name?: string }).name ?? '', intervalMs]);
       return actual.scheduleRuns(work, intervalMs);
     },
   };
 });
-vi.mock('./mandate-expiry.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./mandate-expiry.ts')>();
-  return { ...actual, createMandateExpiry: phase2Jobs.tagged('mandate expiry', actual.createMandateExpiry) };
-});
 vi.mock('./hold-history-check.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./hold-history-check.ts')>();
-  const create = phase2Jobs.tagged('hold history check', actual.createHoldHistoryCheck);
   return {
     ...actual,
     createHoldHistoryCheck: (options: Parameters<typeof actual.createHoldHistoryCheck>[0]) => {
       phase2Jobs.historyTables.push(options.tables);
-      return create(options);
+      return actual.createHoldHistoryCheck(options);
     },
-  };
-});
-vi.mock('./holdings-check.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./holdings-check.ts')>();
-  return { ...actual, createHoldingsCheck: phase2Jobs.tagged('holdings check', actual.createHoldingsCheck) };
-});
-vi.mock('./request-expiry.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./request-expiry.ts')>();
-  return { ...actual, createRequestExpiry: phase2Jobs.tagged('request expiry', actual.createRequestExpiry) };
-});
-vi.mock('./request-voids.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./request-voids.ts')>();
-  return { ...actual, createRequestVoids: phase2Jobs.tagged('request voids', actual.createRequestVoids) };
-});
-vi.mock('./waiting-rejections.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./waiting-rejections.ts')>();
-  return {
-    ...actual,
-    createWaitingRejections: phase2Jobs.tagged('waiting rejections', actual.createWaitingRejections),
   };
 });
 
 /** The subjects the hold clearing checks beyond their signed states (G1), as main.ts builds it. */
+const identityReads = vi.hoisted(() => [] as { read: string; args: readonly unknown[] }[]);
+
 const clearingChecks = vi.hoisted(() => ({ subjects: [] as string[][] }));
 
 vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
@@ -262,6 +228,15 @@ vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
     createHoldClearings: (options: { readonly namedRecordChecks?: object }) => {
       clearingChecks.subjects.push(Object.keys(options.namedRecordChecks ?? {}));
       return actual.createHoldClearings(options as never);
+    },
+    // What the server's two membership reads call: proven in identity's own tests, here who they are asked for.
+    membershipFor: (...args: readonly unknown[]) => {
+      identityReads.push({ read: 'membershipFor', args });
+      return Promise.resolve('a membership');
+    },
+    membersFor: (...args: readonly unknown[]) => {
+      identityReads.push({ read: 'membersFor', args });
+      return Promise.resolve('the members');
     },
   };
 });
@@ -302,6 +277,9 @@ vi.mock('./anchor-check.ts', () => ({
   },
 }));
 
+/** The lease's answers, as a test wants them. */
+const lease = vi.hoisted(() => ({ take: (): Promise<boolean> => Promise.resolve(true), released: 0 }));
+
 /** The platform chain as it is, but for its check on its own, which main.db.test.ts runs for real. */
 const platformChecks = vi.hoisted(() => [] as { database: unknown; anchor: unknown }[]);
 
@@ -309,6 +287,16 @@ vi.mock('@agentx/core/modules/platform-controls', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/core/modules/platform-controls')>();
   return {
     ...actual,
+    // The lease's own statements are job-lease.db.test.ts's; here it is free and this process alone.
+    takeJobLease: () => {
+      fake.steps.push('lease taken');
+      return lease.take();
+    },
+    releaseJobLease: () => {
+      lease.released += 1;
+      return Promise.resolve();
+    },
+    jobsBeating: () => Promise.resolve(true),
     createPlatformChain: (...args: Parameters<typeof actual.createPlatformChain>) => ({
       ...actual.createPlatformChain(...args),
       verifyAlone: (database: unknown, anchor: { seq: bigint; hash: Buffer }) => {
@@ -382,6 +370,8 @@ beforeEach(() => {
   anchorChecks.runs = 0;
   fake.roleCheck = () => Promise.resolve();
   fake.destroy = closePool;
+  lease.take = () => Promise.resolve(true);
+  lease.released = 0;
   startRecord.written.length = 0;
   startRecord.result = () => Promise.resolve(7n);
   anchorChecks.intervals.length = 0;
@@ -413,6 +403,31 @@ async function start(env: Readonly<Record<string, string>> = ENV) {
         .filter((event) => event.startsWith('api.')),
   };
 }
+
+/** What every process runs by the shared timer: names and intervals written out, so a changed one fails here. */
+const EACH_PROCESS: [string, number][] = [
+  ['recorder', 60_000],
+  ['round_trips', 15_000],
+  ['pulse', 60_000],
+];
+
+/** And what the `jobs` side does, in order, with no email, reset token or download store in this config: those are off. */
+const EVERY_TIMER: [string, number][] = [
+  ['schema_check', 300_000],
+  ['mandate_expiry', 300_000],
+  ['hold_history', 30_000],
+  ['zone_sealing', 900_000],
+  ['holdings_check', 900_000],
+  ['request_expiry', 300_000],
+  ['request_voids', 300_000],
+  ['handoff', 10_000],
+  ['payment_checks', 60_000],
+  ['waiting_rejections', 300_000],
+  ['carry_rest', 300_000],
+  ['activity_seal', 900_000],
+  ['activity_seal_check', 1_800_000],
+  ...EACH_PROCESS,
+];
 
 describe('SEC-AV-03 the API refuses to start on a bad config', () => {
   it('says why, naming each setting and never its value, and exits with a failure', async () => {
@@ -496,12 +511,18 @@ describe('SEC-AV-03 the API refuses to start on a bad config', () => {
 });
 
 describe('APP-02 the API opens its database as its own role, and checks that role before it listens', () => {
+  it('builds no hand-off in `web`, so a pool too small for its gate starts all the same', async () => {
+    const { server } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_DB_POOL_MAX: '3' });
+    expect(server).toBeDefined();
+  });
+
   it('connects with the database settings, named agentx-api, with the configured pool size', async () => {
     const { server } = await start({
       ...ENV,
       AGENTX_DB_PORT: '6432',
       AGENTX_DB_NAME: 'agentx_t',
-      AGENTX_DB_POOL_MAX: '3',
+      // The smallest the hand-off's database gate allows: a third of the pool at most.
+      AGENTX_DB_POOL_MAX: '6',
     });
     expect(server).toBeDefined();
     expect(fake.created.map((database) => database.options)).toEqual([
@@ -512,7 +533,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
         user: 'agentx_app',
         password: DB_LOGIN,
         tls: 'verify-full',
-        maxConnections: 3,
+        maxConnections: 6,
         organisationShare: 1,
         applicationName: 'agentx-api',
       },
@@ -523,7 +544,13 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     const { events, capture } = await start();
     // The schema is checked before anything is written: the platform chain's
     // own tables are among what the check covers (A3e-1b).
-    expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded', 'anchor check started']);
+    expect(fake.steps).toEqual([
+      'role checked',
+      'schema checked',
+      'start recorded',
+      'lease taken',
+      'anchor check started',
+    ]);
     expect(events()).toEqual([
       'api.starting',
       'api.partner',
@@ -572,14 +599,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     await start();
 
     // Written out, not the modules' constants, so a changed interval fails here (B4, D1c, E1, D7: partner decision 10; C1; F1 G8).
-    expect(phase2Jobs.scheduled).toEqual([
-      ['mandate expiry', 300_000],
-      ['hold history check', 30_000],
-      ['holdings check', 900_000],
-      ['request expiry', 300_000],
-      ['request voids', 300_000],
-      ['waiting rejections', 300_000],
-    ]);
+    expect(phase2Jobs.scheduled).toEqual(EVERY_TIMER);
     expect(phase2Jobs.historyTables).toEqual([AUTHORITY_TABLES]);
     expect(AUTHORITY_TABLES.length).toBeGreaterThan(0);
   });
@@ -786,6 +806,242 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
   });
 });
 
+describe("the server's two membership reads, as the process wires them", () => {
+  const ORG = '0199a0f0-0000-7000-8000-00000000a001';
+  const USER = '0199a0f0-0000-7000-8000-00000000a002';
+  const CORRELATION = '0199a0f0-0000-7000-8000-00000000a003';
+
+  interface Services {
+    readonly keys: unknown;
+    readonly ids: unknown;
+    readonly correlationId: string;
+    readonly logger: { info(event: string): void };
+  }
+
+  /** The services a read was given, its logger's line naming the correlation ID. */
+  const expectServices = (capture: LogCapture, services: unknown) => {
+    const given = services as Services;
+    expect(given.correlationId).toBe(CORRELATION);
+    expect(given.keys).toBeDefined();
+    expect(given.ids).toBeDefined();
+    given.logger.info('test.from_a_read');
+    expect(capture.lines().at(-1)).toEqual(
+      expect.objectContaining({ event: 'test.from_a_read', correlationId: CORRELATION }),
+    );
+  };
+
+  beforeEach(() => {
+    identityReads.length = 0;
+  });
+
+  it('findMembership asks for that organisation and person, on the pool, with a logger naming the request', async () => {
+    const { capture } = await start();
+    const { findMembership } = serverOptions.last as {
+      findMembership: (orgId: string, userId: string, correlationId: string) => Promise<unknown>;
+    };
+
+    await expect(findMembership(ORG, USER, CORRELATION)).resolves.toBe('a membership');
+
+    const [asked] = identityReads;
+    expect(asked?.read).toBe('membershipFor');
+    expect(asked?.args[0]).toBe(fake.created[0]);
+    expect(asked?.args.slice(2)).toEqual([ORG, USER]);
+    expectServices(capture, asked?.args[1]);
+  });
+
+  it('listMembers asks for that organisation, on the pool, with a logger naming the request', async () => {
+    const { capture } = await start();
+    const { listMembers } = serverOptions.last as {
+      listMembers: (orgId: string, correlationId: string) => Promise<unknown>;
+    };
+
+    await expect(listMembers(ORG, CORRELATION)).resolves.toBe('the members');
+
+    const [asked] = identityReads;
+    expect(asked?.read).toBe('membersFor');
+    expect(asked?.args[0]).toBe(fake.created[0]);
+    expect(asked?.args.slice(2)).toEqual([ORG]);
+    expectServices(capture, asked?.args[1]);
+  });
+});
+
+describe('4D2e D: the role says which side of the work a process does', () => {
+  const JOB_LINES = [
+    'api.notices',
+    'api.idp_events',
+    'api.contact_fill',
+    'api.factor_resets',
+    'api.handoff',
+    'api.payment_checks',
+    'api.background_downloads',
+  ];
+  const TABLES = [
+    'identity.flow',
+    'identity.session',
+    'identity.step_up_challenge',
+    'security.event',
+    'provider_events.message',
+    'notifications.notice',
+  ];
+  const stopped = async (host: FakeProcess) => {
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+  };
+
+  it('with the login service and email configured: `web` signs people in, and `jobs` turns on the work that needs them', async () => {
+    const CONFIGURED = {
+      ...ENV,
+      AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://auth.test,http://mail.test',
+      AGENTX_OIDC_ISSUER: 'http://auth.test',
+      AGENTX_OIDC_CLIENT_ID: 'agentx-api',
+      AGENTX_OIDC_CLIENT_SECRET: ['stand', 'in', 'client', 'words'].join('-'),
+      AGENTX_EMAIL_ENDPOINT: 'http://mail.test',
+      AGENTX_EMAIL_SENDER: 'noreply@example.test',
+      AGENTX_EMAIL_ACCESS_KEY: Buffer.from('stand in email words').toString('base64'),
+      AGENTX_DIRECTORY_TOKEN: ['stand', 'in', 'reader', 'words'].join('-'),
+      AGENTX_FACTOR_RESET_TOKEN: ['stand', 'in', 'reset', 'words'].join('-'),
+    };
+    const { server } = await start({ ...CONFIGURED, AGENTX_ROLE: 'web' });
+    expect(server?.hasRoute({ method: 'GET', url: '/v1/auth/callback' })).toBe(true);
+
+    const { host, capture } = await start({ ...CONFIGURED, AGENTX_ROLE: 'jobs' });
+    const said = (event: string) => capture.lines().find((line) => line.event === event);
+    expect(said('api.notices')).toEqual(expect.objectContaining({ sending: true }));
+    expect(said('api.idp_events')).toEqual(expect.objectContaining({ copying: true }));
+    expect(said('api.factor_resets')).toEqual(expect.objectContaining({ removing: true }));
+    expect(said('api.contact_fill')).toEqual(expect.objectContaining({ filling: true }));
+    await stopped(host);
+  });
+
+  it('says `jobs.pulse` where the jobs are, and never from `web`, whose pulses would hide the jobs having stopped', async () => {
+    const pulses = (capture: LogCapture) => capture.lines().filter((line) => line.event === 'jobs.pulse');
+    const { capture: all } = await start();
+    const { capture: jobs } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
+    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(pulses(all)).toHaveLength(1);
+    expect(pulses(jobs)).toHaveLength(1);
+    expect(pulses(web)).toEqual([]);
+  });
+
+  it('names the role on the first line, `all` where none is set', async () => {
+    const { capture } = await start();
+    expect(capture.lines()[0]).toEqual(expect.objectContaining({ event: 'api.starting', role: 'all' }));
+    const { capture: web } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(web.lines()[0]).toEqual(expect.objectContaining({ event: 'api.starting', role: 'web' }));
+  });
+
+  it('`all` runs the server and every job, as one process', async () => {
+    const { server, events } = await start({ ...ENV, AGENTX_ROLE: 'all' });
+    expect(server?.server.listening).toBe(true);
+    expect(events()).toEqual(expect.arrayContaining(['api.listening', ...JOB_LINES]));
+    expect(anchorChecks.intervals).toEqual([300_000]);
+    expect(sweeps.everyMs).toEqual([3_600_000]);
+    expect(rowSweeps.scheduled).toEqual(TABLES);
+    expect(phase2Jobs.scheduled).toEqual(EVERY_TIMER);
+  });
+
+  it('`web` runs the server and no job the `jobs` side keeps: no anchor check, sweep, hand-off or heartbeat of them', async () => {
+    const { host, server, events, capture } = await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(server?.server.listening).toBe(true);
+    expect(events()).toEqual([
+      'api.starting',
+      'api.partner',
+      'api.database_connected',
+      'api.start_recorded',
+      'api.listening',
+    ]);
+    expect(anchorChecks.intervals).toEqual([]);
+    expect(schemaCheck.scheduledRuns).toBe(0);
+    expect(sweeps.everyMs).toEqual([]);
+    expect(rowSweeps.scheduled).toEqual([]);
+    expect(phase2Jobs.scheduled).toEqual(EACH_PROCESS);
+    // It answers, the start's own schema check still run.
+    expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded']);
+    expect((await server?.inject('/health'))?.json()).toEqual({ status: 'ok' });
+    await stopped(host);
+    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'api.stopped' }));
+  });
+
+  it('`jobs` runs every job and no server, stays up with nothing listening, and stops cleanly', async () => {
+    const serversBefore = built.length;
+    const { host, server, events } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
+    expect(server).toBeUndefined();
+    expect(host.exitCode).toBeUndefined();
+    expect(built).toHaveLength(serversBefore);
+    expect(events()).toEqual([
+      'api.starting',
+      'api.partner',
+      'api.database_connected',
+      'api.start_recorded',
+      ...JOB_LINES,
+    ]);
+    expect(anchorChecks.intervals).toEqual([300_000]);
+    expect(sweeps.everyMs).toEqual([3_600_000]);
+    expect(rowSweeps.scheduled).toEqual(TABLES);
+    expect(phase2Jobs.scheduled).toEqual(EVERY_TIMER);
+    await stopped(host);
+    expect(events().slice(-2)).toEqual(['api.stopping', 'api.stopped']);
+    expect(rowSweeps.stopped.toSorted()).toEqual(TABLES.toSorted());
+    expect(fake.steps.at(-1)).toBe('pool closed');
+  });
+});
+
+describe('4D2e D: the first try at the lease', () => {
+  it('comes before anything answers, so a process alone leads as it listens', async () => {
+    const { server } = await start();
+    const taken = fake.steps.indexOf('lease taken');
+    expect(taken).toBe(fake.steps.indexOf('start recorded') + 1);
+    expect(fake.steps.indexOf('anchor check started')).toBeGreaterThan(taken);
+    expect(server?.server.listening).toBe(true);
+  });
+
+  it('`web` has no lease to try', async () => {
+    await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(fake.steps).not.toContain('lease taken');
+  });
+
+  it('a stop while it goes unanswered is a clean stop: exit 0, nothing started, nothing listening', async () => {
+    lease.take = () => new Promise(() => undefined);
+    const serversBefore = built.length;
+    const host = new FakeProcess();
+    const capture = new LogCapture();
+    const running = runApi(host, { env: ENV, destination: capture });
+    await vi.waitFor(() => {
+      expect(fake.steps).toContain('lease taken');
+    });
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+    await expect(running).resolves.toBeUndefined();
+    expect(built).toHaveLength(serversBefore);
+    expect(fake.steps).not.toContain('anchor check started');
+    expect(lease.released).toBe(1);
+    expect(fake.steps.at(-1)).toBe('pool closed');
+  });
+
+  it('a failure to listen gives the lease up while the pool is still open', async () => {
+    const first = await start();
+    const port = String(first.server?.addresses()[0]?.port);
+    lease.released = 0;
+    const { host } = await start({ ...ENV, AGENTX_HTTP_PORT: port });
+    expect(host.exitCode).toBe(1);
+    expect(lease.released).toBe(1);
+  });
+
+  it('a stop once it has started gives the lease up', async () => {
+    const { host, server } = await start();
+    expect(server).toBeDefined();
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+    expect(lease.released).toBe(1);
+  });
+});
+
 describe('the API stops cleanly on a signal', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)(
     'on %s: logs the signal, stops listening, then closes the pool, exits 0',
@@ -804,6 +1060,7 @@ describe('the API stops cleanly on a signal', () => {
         'role checked',
         'schema checked',
         'start recorded',
+        'lease taken',
         'anchor check started',
         'anchor check stopping',
         'anchor check stopped',
@@ -846,18 +1103,19 @@ describe('the API stops cleanly on a signal', () => {
     await vi.waitFor(() => {
       expect(host.exits).toEqual([0]);
     });
-    expect(fake.steps.slice(0, 6)).toEqual([
+    expect(fake.steps.slice(0, 7)).toEqual([
       'role checked',
       'schema checked',
       'start recorded',
+      'lease taken',
       'anchor check started',
       'http closing',
       'anchor check stopping',
     ]);
-    expect(fake.steps.slice(6, 9)).toEqual(
+    expect(fake.steps.slice(7, 10)).toEqual(
       expect.arrayContaining(['http closed', 'anchor check stopped', 'sweep stopped']),
     );
-    expect(fake.steps.slice(9)).toEqual(['pool closed']);
+    expect(fake.steps.slice(10)).toEqual(['pool closed']);
   });
 
   it.each([

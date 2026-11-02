@@ -9,6 +9,10 @@ export const LOCAL_ONLY: readonly Environment[] = ['development', 'test'];
 /** The release name a local run uses when none is set. */
 export const LOCAL_RELEASE = 'local';
 
+/** Which side of the API's work a process does (4D2e D): one image, one start command. */
+export const API_ROLES = ['all', 'web', 'jobs'] as const;
+export type ApiRole = (typeof API_ROLES)[number];
+
 /** The logging standard's levels, most to least severe. */
 export const LOG_LEVELS = ['error', 'warn', 'info', 'debug'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];

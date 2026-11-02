@@ -54,6 +54,7 @@ export {
   statementTimesForLog,
   timedLock,
   timedRoundTrips,
+  timedSupplierLock,
   timingStatements,
 } from './statement-times.ts';
 export {
@@ -106,6 +107,7 @@ export {
   limitedTransaction,
   holdOpenOnPurpose,
   limitStatements,
+  limitStatementsTo,
   lockName,
   ORGANISATION_BRAKE,
   readAloneOnOneTrip,

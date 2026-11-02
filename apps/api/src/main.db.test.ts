@@ -150,6 +150,89 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await expectNoApiConnections();
   });
 
+  it('4D2e D: `web` answers and runs no job: nothing anchors, nothing is swept', async () => {
+    const run = await start(envFor('app', { AGENTX_ROLE: 'web' }));
+    expect(run.events()).toEqual([
+      'api.starting',
+      'api.partner',
+      'api.database_connected',
+      'api.start_recorded',
+      'api.listening',
+    ]);
+    await database.as('admin').query('update platform_controls.job_lease set beating_at = pg_catalog.now()');
+    expect((await run.api?.inject('/health'))?.json()).toEqual({ status: 'ok' });
+    // Long enough for a job to have begun, were there one: each starts at once.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const seen = run.capture.lines().map((line) => String(line.event));
+    expect(seen.filter((event) => /^audit\.|_sweep_done$|^idempotency\./.test(event))).toEqual([]);
+    await stop(run);
+    await expectNoApiConnections();
+  });
+
+  it('4D2e D: `jobs` anchors and sweeps with nothing listening, and closes every connection when it stops', async () => {
+    const run = await start(envFor('app', { AGENTX_ROLE: 'jobs' }));
+    expect(run.api).toBeUndefined();
+    expect(run.host.exitCode).toBeUndefined();
+    await vi.waitFor(() => {
+      const seen = run.capture.lines().map((line) => line.event);
+      expect(seen).toContain('audit.anchor_check_done');
+      expect(seen).toContain('identity.flow_sweep_done');
+    });
+    expect(run.events()).not.toContain('api.listening');
+    await stop(run);
+    await expectNoApiConnections();
+  });
+
+  it('4D2e D: of two copies at `all`, one runs the jobs; the other takes over the moment the first stops', async () => {
+    const said = (run: { capture: LogCapture }, event: string) =>
+      run.capture.lines().filter((line) => line.event === event);
+    const first = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(said(first, 'audit.anchor_check_done').length).toBeGreaterThan(0);
+    });
+    const second = await start(envFor('app'));
+    try {
+      // It answers, and its own jobs wait: the follower's health reads the leader's heartbeat, which moved at its start.
+      expect((await second.api?.inject('/health'))?.json()).toEqual({ status: 'ok' });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(said(second, 'jobs.lease_taken')).toEqual([]);
+      expect(said(second, 'audit.anchor_check_done')).toEqual([]);
+      expect(said(second, 'jobs.pulse')).toEqual([]);
+      expect(said(first, 'jobs.pulse')).toHaveLength(1);
+
+      await stop(first);
+      await vi.waitFor(
+        () => {
+          expect(said(second, 'audit.anchor_check_done').length).toBeGreaterThan(0);
+        },
+        { timeout: 25_000, interval: 100 },
+      );
+      expect(said(second, 'jobs.lease_taken')).toHaveLength(1);
+    } finally {
+      await stop(second);
+    }
+    // Stopped, it gave the lease back.
+    expect(await database.as('admin').query('select holder from platform_controls.job_lease')).toEqual([
+      { holder: null },
+    ]);
+  }, 45_000);
+
+  it('4D2e D: `web` reads the heartbeat for /health, and a heartbeat gone stale makes it unavailable', async () => {
+    const admin = database.as('admin');
+    await admin.query('update platform_controls.job_lease set beating_at = pg_catalog.now()');
+    const fresh = await start(envFor('app', { AGENTX_ROLE: 'web' }));
+    expect((await fresh.api?.inject('/health'))?.statusCode).toBe(200);
+    await stop(fresh);
+
+    await admin.query("update platform_controls.job_lease set beating_at = pg_catalog.now() - interval '6 minutes'");
+    const stale = await start(envFor('app', { AGENTX_ROLE: 'web' }));
+    expect((await stale.api?.inject('/health'))?.statusCode).toBe(503);
+    expect(stale.capture.lines().find((line) => line.event === 'health.check_failed')).toEqual(
+      expect.objectContaining({ level: 'warn', check: 'jobs_heartbeat' }),
+    );
+    await stop(stale);
+  });
+
   it('refuses to run as the migration role, which owns the tables and could switch the walls off', async () => {
     const { host, api, capture, events } = await start(envFor('owner'));
     expect(api).toBeUndefined();

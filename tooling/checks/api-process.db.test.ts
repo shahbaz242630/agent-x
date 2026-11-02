@@ -122,6 +122,32 @@ describe(`the API process (Postgres ${server.version})`, () => {
     expect(lines().find((line) => line.event === 'api.starting')?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
+  it('4D2e D: `jobs` on plain Node stays up with nothing listening, its timers letting go only of what they may', async () => {
+    const jobsLines: Line[] = [];
+    const jobs = spawn(process.execPath, [MAIN], {
+      env: { ...childEnv(database), AGENTX_ROLE: 'jobs' },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    jobs.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      for (const line of chunk.split('\n')) if (line.startsWith('{')) jobsLines.push(JSON.parse(line) as Line);
+    });
+    try {
+      await vi.waitFor(
+        () => {
+          expect(jobsLines.map((line) => line.event)).toContain('api.background_downloads');
+        },
+        { timeout: 30_000, interval: 100 },
+      );
+      // Past every first run's quick end: a process holding nothing open would have exited by now.
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      expect(jobs.exitCode).toBeNull();
+      expect(jobsLines.map((line) => line.event)).not.toContain('api.listening');
+    } finally {
+      jobs.kill();
+      await new Promise((resolve) => jobs.once('exit', resolve));
+    }
+  }, 60_000);
+
   it('SEC-WEB-02 answers the health check, with the security headers and a correlation ID', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`);
     expect(response.status).toBe(200);

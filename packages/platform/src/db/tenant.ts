@@ -226,6 +226,19 @@ export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<
 }
 
 /**
+ * Limits every later statement of the transaction, and its wait for a lock, to
+ * these milliseconds, shorter than limitStatements: for work a caller gives a
+ * deadline of its own, which cancels nothing (the jobs' lease, 0068).
+ */
+export async function limitStatementsTo<Schema>(
+  tx: Transaction<Schema>,
+  { statementMs, lockMs }: { readonly statementMs: number; readonly lockMs: number },
+): Promise<void> {
+  await sql`select pg_catalog.set_config('statement_timeout', ${String(statementMs)}, true),
+                   pg_catalog.set_config('lock_timeout', ${String(lockMs)}, true)`.execute(tx);
+}
+
+/**
  * Raises the idle limit (database.ts) for this transaction alone, to past a load
  * phase, for the load test's stuck organisation, which holds its rows open for a
  * whole phase on purpose, and for nothing in the product. Still a limit: a hung
@@ -277,8 +290,8 @@ export const SOURCE_BRAKE = 'source-brake';
  * a decision queued behind another for a stuck supplier's row waits its 5 s for the row's queue, then 5 s more on its
  * holder, each wait timed alone (measured, S168: at 8 s a freeze behind them failed every time). New ones line up
  * behind the brake from its first moment, so what it waits for is only those already inside. It doesn't cover the
- * longest one inside: a decision can also wait on its month's and the chain head's locks while it holds the shared side,
- * each up to its own bound. Then the stop answers busy, honestly, with nothing changed, and pressing it again usually lands.
+ * longest one inside: a decision can also wait on its agent's new zone (a first decision's), its month's and the chain
+ * head's locks while it holds the shared side, each up to its own bound. Then the stop answers busy, honestly, with nothing changed, and pressing it again usually lands.
  */
 const BRAKE_WAIT_SECONDS = STATEMENT_SECONDS + 2;
 const BRAKE_WAIT = `${String(BRAKE_WAIT_SECONDS)}s`;

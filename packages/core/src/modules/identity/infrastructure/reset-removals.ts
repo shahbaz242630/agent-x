@@ -79,8 +79,8 @@ type RemovalOutcome = 'completed' | 'cancelled' | 'not_due' | 'removed_after_can
 type NotCarriedOut = 'done' | 'not_due' | 'member_deactivated' | 'member_elsewhere';
 
 export interface ResetRemovals {
-  /** Carries out every due reset, until none is left or the signal is aborted. Never throws. */
-  run(signal?: AbortSignal): Promise<void>;
+  /** Carries out every due reset, until none is left or the signal is aborted. Never throws: says if it couldn't begin. */
+  run(signal?: AbortSignal): Promise<'ran' | 'skipped'>;
 }
 
 /** A reset or person that can't be believed as its rows read: the alarm is raised where it was read. */
@@ -252,7 +252,7 @@ export function createResetRemovals({
         orgs = await listedOrganizations(database);
       } catch (error) {
         logger.warn('factor_resets.run_failed', { err: error });
-        return;
+        return 'skipped';
       }
       for (const orgId of orgs) {
         let due: string[];
@@ -265,10 +265,11 @@ export function createResetRemovals({
           continue;
         }
         for (const resetId of due) {
-          if (signal?.aborted === true) return;
+          if (signal?.aborted === true) return 'ran';
           await carryOutLogged(log, orgId, resetId);
         }
       }
+      return 'ran';
     },
   };
 }
