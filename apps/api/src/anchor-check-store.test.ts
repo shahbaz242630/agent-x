@@ -319,12 +319,11 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
           return fake.real.list(start, most, after);
         };
         const { promise: chainAnswer, resolve: chainAnswers } = Promise.withResolvers<undefined>();
-        const verify = chains.organizations.verify;
         const organizations: OrganisationChains = {
           ...chains.organizations,
           verify: async (orgId, anchor) => {
             await chainAnswer;
-            return verify(orgId, anchor);
+            return chains.organizations.verify(orgId, anchor);
           },
         };
         const after = process(fake, organizations);
@@ -392,6 +391,10 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
         expect(after.lines('audit.anchor_check_done')).toEqual([
           expect.objectContaining({ unanchored: 1, anchored: 0, failed: 0 }),
         ]);
+
+        await after.check.run();
+        expect(chains.given[ORG]?.at(-1)).toBe(100n);
+        expect(after.log.latest(CHAIN)?.seq).toBe(120n);
       });
     });
 
