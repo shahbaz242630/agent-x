@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 
 import type { KeyDescription } from '../keys/key-provider.ts';
+import type { BlobContainer } from './blob-container.ts';
 import type { Env } from './common.ts';
 import type { Config } from './config.ts';
 import { gateRefOf } from './partner.ts';
@@ -66,6 +67,11 @@ export interface ConfigFingerprint {
  * are left out: they're secrets.
  */
 export function fingerprintedSettings(config: Config): Record<string, unknown> {
+  // Azure's identity header is left out: it's a secret. Where its token is asked is kept.
+  const place = (container: BlobContainer | null) =>
+    container === null
+      ? null
+      : { url: container.url, clientId: container.clientId, identityEndpoint: container.identityEndpoint };
   return {
     environment: config.environment,
     log: { level: config.log.level, eventCapPerMinute: config.log.eventCapPerMinute },
@@ -112,18 +118,11 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     // ADR-014 §4: a live start's gate reference too, which names the gate record, never a secret.
     partner: { mode: config.partner.mode, gateRef: gateRefOf(config.partner) },
     payees: { coolingOffHours: config.payees.coolingOffHours },
-    audit: { anchorSeconds: config.audit.anchorSeconds },
-    // Azure's identity header is left out: it's a secret. Where its token is asked is kept.
+    audit: { anchorSeconds: config.audit.anchorSeconds, anchorEpoch: config.audit.anchorEpoch },
+    anchorStore: { directory: config.anchorStore.directory, container: place(config.anchorStore.container) },
     activityDownloads: {
       directory: config.activityDownloads.directory,
-      container:
-        config.activityDownloads.container === null
-          ? null
-          : {
-              url: config.activityDownloads.container.url,
-              clientId: config.activityDownloads.container.clientId,
-              identityEndpoint: config.activityDownloads.container.identityEndpoint,
-            },
+      container: place(config.activityDownloads.container),
     },
     keys: { directory: config.keys.directory, current: config.keys.current },
   };

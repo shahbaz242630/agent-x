@@ -7,14 +7,14 @@
 // Get Blob with a range to read a part. In development and test, a local
 // folder standing in for it, a file made whole only once it is committed.
 //
-// A token is asked once and kept for a few minutes (Azure's last hours), so a
+// A token is asked once and kept for a few minutes (blobServiceCaller), so a
 // file of a thousand blocks asks the identity endpoint a handful of times.
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { OutboundFetch } from '../outbound/index.ts';
-import { type AzureBlobSettings, BLOB_API_VERSION, blobErrorCode, blobServiceToken, BlobStoreFailed } from './azure.ts';
+import { type AzureBlobSettings, blobErrorCode, blobServiceCaller, BlobStoreFailed, checkedBlobName } from './azure.ts';
 
 /** A committed file's own facts, kept with it. */
 export interface BlockFileFacts {
@@ -38,19 +38,8 @@ const STORE = 'download store';
 /** How long one call may take: a block is a few MB. */
 const CALL_TIMEOUT_MS = 60_000;
 
-/** How long a token is used before another is asked. */
-const TOKEN_KEPT_MS = 10 * 60_000;
-
 /** The most blocks a file may have: Azure's limit. */
 const MOST_BLOCKS = 50_000;
-
-/** A name the stores take: path segments of letters, digits, dots, dashes and underscores, never `..`. */
-const NAME = /^(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9._-]{1,100}(?:\/[A-Za-z0-9._-]{1,100}){0,4}$/;
-
-function checkedName(name: string): string {
-  if (!NAME.test(name)) throw new RangeError('A stored file is named by plain path segments');
-  return name;
-}
 
 function checkedRange(offset: number, length: number): void {
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1) {
@@ -77,40 +66,29 @@ const blockList = (blocks: number): string =>
 export function azureBlockStore({
   settings,
   fetch,
-  now = () => Date.now(),
+  now,
 }: {
   readonly settings: AzureBlobSettings;
   readonly fetch: OutboundFetch;
   /** The clock a kept token is timed by. */
   readonly now?: () => number;
 }): BlockStore {
-  let kept: { readonly value: string; readonly until: number } | undefined;
-
-  const bearer = async (): Promise<string> => {
-    if (kept !== undefined && now() < kept.until) return kept.value;
-    const value = await blobServiceToken(settings, fetch, { store: STORE, timeoutMs: CALL_TIMEOUT_MS });
-    kept = { value, until: now() + TOKEN_KEPT_MS };
-    return value;
-  };
+  const send = blobServiceCaller({
+    settings,
+    fetch,
+    store: STORE,
+    timeoutMs: CALL_TIMEOUT_MS,
+    ...(now === undefined ? {} : { now }),
+  });
 
   /** One call to the blob service, refused unless it answers `expected`. */
   const call = async (
     name: string,
     query: string,
     expected: number,
-    { method, headers, body }: { method: string; headers: Record<string, string>; body?: Buffer | string },
+    request: Parameters<typeof send>[1],
   ): Promise<Response> => {
-    const response = await fetch(`${settings.url}/${checkedName(name)}${query}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${await bearer()}`,
-        'x-ms-version': BLOB_API_VERSION,
-        'x-ms-date': new Date(now()).toUTCString(),
-        ...headers,
-      },
-      ...(body === undefined ? {} : { body }),
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-    });
+    const response = await send(`/${checkedBlobName(name)}${query}`, request);
     if (response.status === expected) return response;
     await response.body?.cancel();
     throw new BlobStoreFailed(
@@ -163,7 +141,7 @@ const OWNER_ONLY_FOLDER = 0o700;
 
 /** The local folder standing in for the container (development and test alone). */
 export function folderBlockStore(directory: string): BlockStore {
-  const pathOf = (name: string) => join(directory, checkedName(name));
+  const pathOf = (name: string) => join(directory, checkedBlobName(name));
   const blocksOf = (name: string) => `${pathOf(name)}.blocks`;
 
   return {

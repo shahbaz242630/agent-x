@@ -303,6 +303,13 @@ const SETTINGS = {
     }),
     default: '300',
   },
+  // Where the chains' anchors are kept apart from the database (4D2e E, PL-58): a local folder in development and
+  // test; deployed, a write-once container in the UAE, as the API's own managed identity. Unset, in memory, as today.
+  AGENTX_AUDIT_ANCHORS_DIR: { schema: mountedFolder.optional() },
+  AGENTX_AUDIT_ANCHORS_URL: { schema: blobContainer.optional() },
+  AGENTX_AUDIT_ANCHORS_CLIENT_ID: { schema: clientId.optional() },
+  // Moves on only for a sanctioned restore of the whole database: anchors of an earlier epoch are no longer held to.
+  AGENTX_ANCHOR_EPOCH: { schema: wholeNumber({ min: 1, max: 1_000_000 }), default: '1' },
   // The app's keys (ADR-011 §2): one file per key version, mounted by the
   // platform, and each key's current version where it isn't 1.
   AGENTX_KEYS_DIR: { schema: mountedFolder },
@@ -413,6 +420,10 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_LIVE_MONEY_GATE_REF',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
       'AGENTX_AUDIT_ANCHOR_SECONDS',
+      'AGENTX_AUDIT_ANCHORS_DIR',
+      'AGENTX_AUDIT_ANCHORS_URL',
+      'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+      'AGENTX_ANCHOR_EPOCH',
       'AGENTX_ACTIVITY_DOWNLOADS_DIR',
       'AGENTX_ACTIVITY_DOWNLOADS_URL',
       'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
