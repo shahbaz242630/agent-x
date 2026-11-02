@@ -97,6 +97,8 @@ export interface SchemaPolicy {
    * schema guard holds the running database to as well.
    */
   readonly requiredForeignKeys: readonly RequiredForeignKey[];
+  /** Tables on no other list here, each of which the migrations must have made (the live guard: gone is the alarm). */
+  readonly tablesThatStay: readonly string[];
   /**
    * The only unique indexes that may be partial, each with its reason, held
    * to their table, name, key columns and printed condition (E2-1a).
@@ -657,6 +659,7 @@ const CHECKED_LISTS: readonly string[] = [
   'fillInTables',
   'requiredForeignKeys',
   'partialUniqueIndexes',
+  'tablesThatStay',
 ] satisfies readonly (keyof SchemaPolicy)[];
 
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
@@ -673,6 +676,9 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
     ...appendOnlyListProblems(policy, facts),
     ...fillInListProblems(policy, facts, roles),
     ...requiredForeignKeyProblems(policy, facts),
+    ...policy.tablesThatStay
+      .filter((name) => !facts.relations.some((relation) => relation.name === name))
+      .map((name) => `${name}: the schema policy says it stays, but the migrations don't make it`),
     ...facts.relations.flatMap((relation) => relationProblems(relation, isGlobal(relation.name))),
     ...tenantTables.flatMap((table) => [
       ...orgIdProblems(
