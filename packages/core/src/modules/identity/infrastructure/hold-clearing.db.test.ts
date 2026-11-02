@@ -706,7 +706,9 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       await locker.query('select seq from audit.heads where org_id = $1 for no key update', [org]);
       try {
         // Asked again: answered, with no try of what rests, which would wait out the head's lock.
-        expect(await within(3_000, confirm(investigationId, challengeId))).toMatchObject({ outcome: 'cleared' });
+        expect(await within(3_000, confirm(investigationId, challengeId), 'the replay')).toMatchObject({
+          outcome: 'cleared',
+        });
       } finally {
         await locker.query('rollback');
         await locker.end();
