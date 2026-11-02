@@ -95,8 +95,26 @@ function lines(): Line[] {
     .map((line) => JSON.parse(line) as Line);
 }
 
-/** Lines of the process itself once it listens, no request's and no run's: what it says of itself, its hold on the jobs' lease (on a timer of its own, so load could bring one here), and the logger's and the requests' sums. */
-const PROCESS_LINES = /^(api\.|jobs\.lease_|jobs\.not_leading$|log\.|http\.minute$)/;
+/**
+ * Lines of the process itself once it listens, named one by one so a request's line can't pass as one: what it says
+ * of itself, its hold on the jobs' lease (on a timer of its own, so load could bring one here), the logger's sum.
+ */
+const PROCESS_LINES: ReadonlySet<string> = new Set([
+  'api.listening',
+  'api.notices',
+  'api.idp_events',
+  'api.contact_fill',
+  'api.factor_resets',
+  'api.handoff',
+  'api.payment_checks',
+  'api.background_downloads',
+  'jobs.lease_taken',
+  'jobs.lease_lost',
+  'jobs.lease_held_elsewhere',
+  'jobs.lease_renew_failed',
+  'jobs.not_leading',
+  'log.suppressed',
+]);
 
 describe(`the API process (Postgres ${server.version})`, () => {
   it('SEC-OPS-05 logs its config fingerprint, connects as the app role, records the start, then listens', async () => {
@@ -170,7 +188,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
     expect(await response.json()).toMatchObject({ error: { code: 'ORIGIN_REFUSED' } });
   });
 
-  it('4D2e Stage F level 4: every line a request or a job writes says which, on real sockets, a body read too', async () => {
+  it("4D2e Stage F level 4: on real stdout, a /health, a refused POST with a body and the jobs' early runs each say which they are", async () => {
     const seen = lines().length;
     await fetch(`http://127.0.0.1:${port}/health`);
     await fetch(`http://127.0.0.1:${port}/v1/spend-requests`, {
@@ -187,7 +205,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
       .slice(listening)
       .filter(
         (line) =>
-          line.correlationId === undefined && line.runId === undefined && !PROCESS_LINES.test(String(line.event)),
+          line.correlationId === undefined && line.runId === undefined && !PROCESS_LINES.has(String(line.event)),
       );
     expect(unclaimed.map((line) => line.event)).toEqual([]);
     // The jobs' first runs have written by now, each under its own run's ID.
