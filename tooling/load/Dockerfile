@@ -31,7 +31,7 @@ RUN corepack enable pnpm \
   && pnpm install --frozen-lockfile --filter "@agentx/api..." --filter "@agentx/testing..."
 
 # k6 is one static binary; only it is taken from its image.
-FROM grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34 AS k6
+FROM grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8 AS k6
 
 FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
 
