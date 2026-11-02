@@ -5,12 +5,28 @@
 // wound-back head, passes its own seals; only the anchor, held apart from the
 // database, shows it.
 //
-// A run first reads the store, then checks, then writes what moved. A store that
+// A run first reads the store, then checks, writing what moved each minute and
+// at its end. A store that
 // can't be read after a restart means no chain is anchored for the first time,
 // every organisation's payments wait (`anchor_pending`), the seals are still
 // checked and decisions go on; one that can't be written is a warning and in time
-// the store's own alert, never a hold. As the API stops, what moved is written
-// within a few seconds; after a crash, the last run's is what's kept.
+// the store's own alert, never a hold. As the API stops, or the lease goes, what
+// moved is written within a few seconds; after a crash, what's kept is at most a
+// minute behind, and one store write.
+//
+// A run is bounded (4D2e E6). Organisations' chains are checked side by side, a few
+// lanes of them (AGENTX_AUDIT_ANCHOR_LANES), so one slow or locked organisation
+// holds its own lane and nobody else's; one seen to be slow keeps to a single lane
+// from then on (anchor-turns.ts). A run stops at four minutes, ends with its line
+// whatever is under way, and the next goes on from where it stopped. So the check's
+// line comes at most every 10 minutes at the default interval: 5 between runs, 4 of
+// run, 1 for the last write. With lines up to 9 minutes late, the 20 minutes the
+// outside's dead-man rule allows hold (D3). Every organisation's turn comes within
+// seven runs' time (63 minutes at the default), and in one run wherever the lanes get
+// through them all; a chain that fails is caught at its turn. Past that bound it is
+// the alarm, by count, naming the first few (`unreached`). A chain whose anchor
+// landed during its check goes first next run, so its alarm comes within one interval
+// and one run: 9 minutes at the default.
 //
 // A chain that fails raises the integrity alarm (`audit.integrity_failed`; its
 // SEV-1 alert rule is A2c-2) and keeps its last good anchor, so the alarm
@@ -54,6 +70,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { createTurns } from './anchor-turns.ts';
 import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
@@ -64,8 +81,9 @@ export interface CheckedChain {
 
 export interface AnchorCheck {
   /**
-   * Checks every chain once, one after another, and ends at once when `signal`
-   * aborts. Never throws: every outcome is logged.
+   * Checks the platform's chain, then as many organisations' as its time allows,
+   * going on from where the last run stopped, and ends at once when `signal` aborts
+   * or its time is up. Never throws: every outcome is logged.
    */
   run(signal?: AbortSignal): Promise<void>;
   /**
@@ -104,8 +122,10 @@ export interface AnchorCheckOptions {
   readonly keys: KeyProvider;
   readonly clock: Clock;
   readonly logger: Logger;
-  /** How long a chain may go without a completed check before that is the alarm too. */
+  /** How long a chain may go without a completed check before that is the alarm too, where a run reaches them all. */
   readonly staleAfterMs: number;
+  /** The same for an organisation's chain while runs aren't reaching them all, and how long one may wait for its turn. Past it, the alarm. As `staleAfterMs` unless given. */
+  readonly reachWithinMs?: number;
   /**
    * How long one chain's check may take. Postgres's own limits can be got round
    * by someone who owns the database, and a connection can die without a word,
@@ -117,10 +137,40 @@ export interface AnchorCheckOptions {
   readonly durable?: AnchorLog;
   /** How long the last write may take as the API stops: the store's calls may take 30 seconds, and the stop has 25 in all. */
   readonly stopFlushMs?: number;
+  /** How many organisations are checked at once. */
+  readonly lanes?: number;
+  /** How long a run may go on. */
+  readonly runWithinMs?: number;
+  /** How often a run writes what has moved so far. */
+  readonly writeEveryMs?: number;
 }
 
 /** See `stopFlushMs`. */
 const STOP_FLUSH_MS = 5_000;
+
+/** See `lanes`. Each holds a connection for a check, and none across a call to the store. */
+const LANES = 4;
+
+/**
+ * See `runWithinMs`. Not the interval's double: lines are up to 9 minutes late, so 10 minutes of run and 5 between would
+ * read as stopped under the dead-man rule's 20 (the header).
+ */
+export const RUN_WITHIN_MS = 240_000;
+
+/** See `writeEveryMs`: a crash loses at most this much, and a store gone is known this soon. */
+const WRITE_EVERY_MS = 60_000;
+
+/** How long a run's write may take: two of the store's calls at 30 seconds, a file unsent and a new one. */
+const WRITE_WITHIN_MS = 60_000;
+
+/** How many runs' time an organisation may wait for its turn. */
+const RUNS_FOR_A_TURN = 7;
+
+/** How long an organisation may wait for its turn, at this interval between runs: the answer for `reachWithinMs`. */
+export const reachWithin = (intervalMs: number): number => RUNS_FOR_A_TURN * (intervalMs + RUN_WITHIN_MS);
+
+/** How many IDs the `unreached` alarm names. The count is the whole of it; any more would be a very long line. */
+const UNREACHED_NAMED = 20;
 
 /**
  * Postgres's refusals that only a changed database gives the app's role: a
@@ -170,10 +220,14 @@ export function createAnchorCheck({
   clock,
   logger,
   staleAfterMs,
+  reachWithinMs = staleAfterMs,
   deadlineMs,
   durable,
   anchors = durable ?? createMemoryAnchorStore(),
   stopFlushMs = STOP_FLUSH_MS,
+  lanes = LANES,
+  runWithinMs = RUN_WITHIN_MS,
+  writeEveryMs = WRITE_EVERY_MS,
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
@@ -191,6 +245,14 @@ export function createAnchorCheck({
   let listRead: number | undefined;
   /** The time a chain's stale period counts from. */
   const since = (key: string): number => lastChecked.get(key) ?? firstSeen.get(key) ?? started;
+  const turns = createTurns(lanes);
+  // Whether the last run left organisations waiting, so a chain's last check may rightly be longer ago than a run's.
+  let spreading = false;
+  let leftLastRun = false;
+  /** How long this chain may go unchecked: the platform's stays short, as a run always comes to it. */
+  const staleLimit = (key: string): number => (spreading && key !== 'platform' ? reachWithinMs : staleAfterMs);
+  /** Whether it has gone unchecked past that. */
+  const isStale = (key: string): boolean => clock.now().getTime() - since(key) >= staleLimit(key);
 
   /** Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read. */
   const storeUnread = (): boolean => durable !== undefined && durable.state() !== 'read';
@@ -254,7 +316,7 @@ export function createAnchorCheck({
         // A store that breaks its contract may be a hostile database too (a planted operator, a view for a table).
         if (error instanceof ChainStoreError || refusedByDatabase(error)) return alarm('store');
         log.warn('audit.anchor_check_failed', { chain: chain.kind, err: error });
-        return clock.now().getTime() - since(key) >= staleAfterMs ? alarm('unchecked') : 'unchecked';
+        return isStale(key) ? alarm('unchecked') : 'unchecked';
       }
       lastChecked.set(key, clock.now().getTime());
       return afterCheck(chain, log, report, last);
@@ -310,7 +372,7 @@ export function createAnchorCheck({
 
   /** An organisation seen before and not reached this run: unlisted, or its chain gone unchecked too long. */
   const missed = (orgId: string, reason: 'unlisted' | 'unchecked'): Outcome => {
-    if (reason === 'unchecked' && clock.now().getTime() - since(orgId) < staleAfterMs) return 'unchecked';
+    if (reason === 'unchecked' && !isStale(orgId)) return 'unchecked';
     const last = anchors.latest({ kind: 'organisation', orgId });
     failures.set(orgId, reason);
     logger.child({ orgId }).error('audit.integrity_failed', {
@@ -378,31 +440,93 @@ export function createAnchorCheck({
     return outcomes;
   };
 
-  const checkOrganizations = async (from: OrganisationChains, signal: AbortSignal | undefined): Promise<Outcome[]> => {
-    const read = await listOrganizations(from, signal);
-    if (read === 'stopped') return [];
-    if (typeof read === 'string') return checkUnlisted(from, read, signal);
-    const now = new Set(read.listed);
-    for (const orgId of read.recorded) remember(orgId);
-    const outcomes: Outcome[] = [];
-    for (const orgId of seen) {
-      if (signal?.aborted === true) break;
-      if (now.has(orgId)) continue;
-      outcomes.push(missed(orgId, 'unlisted'));
-      await settle(from, orgId, signal);
-    }
-    for (const orgId of now) {
-      if (signal?.aborted === true) break;
-      remember(orgId);
-      outcomes.push(
-        await checkOne(
+  /**
+   * One organisation's turn: its check, or, off the list, its alarm; then its hold. A chain reached with the run's time
+   * up goes first next run, as does one whose alarm must repeat or whose comparison is owed.
+   */
+  const turn = async (
+    from: OrganisationChains,
+    orgId: string,
+    listed: ReadonlySet<string>,
+    signal: AbortSignal,
+  ): Promise<Outcome> => {
+    const began = performance.now();
+    const outcome = listed.has(orgId)
+      ? await checkOne(
           { chain: { kind: 'organisation', orgId }, verify: (anchor) => from.verify(orgId, anchor) },
           signal,
-        ),
-      );
-      await settle(from, orgId, signal);
-    }
+        )
+      : missed(orgId, 'unlisted');
+    await settle(from, orgId, signal);
+    turns.after(orgId, {
+      ms: performance.now() - began,
+      again: outcome === 'failed' || outcome === 'unanchored' || (outcome === 'unchecked' && signal.aborted),
+    });
+    return outcome;
+  };
+
+  /**
+   * Turns taken in `lanes` side by side until none is left or the run's time is up. A lane stops, too, when the check
+   * holds twice its lanes in checks and holds, those past their deadline among them: each has a connection until it
+   * ends, and it must not take the API's. Those left wait for the next run, which says so if it can't reach them.
+   */
+  const takeTurns = async (from: OrganisationChains, listed: ReadonlySet<string>, signal: AbortSignal) => {
+    const outcomes: Outcome[] = [];
+    const lane = async (index: number): Promise<void> => {
+      while (!signal.aborted && inFlight.size < 2 * lanes) {
+        const orgId = turns.next(index);
+        if (orgId === undefined) return;
+        outcomes.push(await turn(from, orgId, listed, signal));
+      }
+    };
+    await Promise.all(Array.from({ length: lanes }, (_, index) => lane(index)));
     return outcomes;
+  };
+
+  const checkOrganizations = async (
+    from: OrganisationChains,
+    cap: AbortSignal,
+    stop: AbortSignal | undefined,
+  ): Promise<Outcome[]> => {
+    const read = await listOrganizations(from, cap);
+    if (read === 'stopped' && stop?.aborted === true) return [];
+    // The run's time gone before the list was read counts against the list, or a run that always is would go unsaid.
+    if (typeof read === 'string') return checkUnlisted(from, read === 'refused' ? 'refused' : 'failed', cap);
+    const listed = new Set(read.listed);
+    const fresh = read.listed.filter((orgId) => !seen.has(orgId));
+    for (const orgId of read.recorded) remember(orgId);
+    for (const orgId of fresh) remember(orgId);
+    turns.begin(
+      listed,
+      fresh,
+      [...seen].filter((orgId) => !listed.has(orgId)),
+    );
+    return takeTurns(from, listed, cap);
+  };
+
+  /** Organisations that have waited past the bound for a turn they haven't had: the alarm, by count, as there may be thousands. */
+  const sayUnreached = (): void => {
+    const late = [...turns.waiting()].filter((orgId) => clock.now().getTime() - since(orgId) >= reachWithinMs);
+    if (late.length === 0) return;
+    logger.error('audit.integrity_failed', {
+      chain: 'organisation',
+      check: 'anchor',
+      reason: 'unreached',
+      organisations: late.length,
+      firstFew: late.slice(0, UNREACHED_NAMED),
+    });
+  };
+
+  /** What a run that ran out of time, or left organisations for the next, says it has left. */
+  const sayLeft = (cap: AbortSignal): void => {
+    const left = turns.left() > 0;
+    // Until a whole round has gone by in one run: after the run finishing a long round come chains checked long ago.
+    spreading = left || leftLastRun;
+    leftLastRun = left;
+    if (left || cap.aborted) {
+      logger.warn('audit.anchor_check_unfinished', { left: turns.left(), lanes, withinMs: runWithinMs });
+    }
+    sayUnreached();
   };
 
   /** What the store holds that this process hasn't read, and every organisation in it as seen. Never throws. */
@@ -416,13 +540,53 @@ export function createAnchorCheck({
     for (const orgId of from.organisations()) remember(orgId);
   };
 
-  /** What moved this run into the store. A run stopped leaves it to `finish`. Never throws. */
-  const writeStore = async (to: AnchorLog, signal: AbortSignal | undefined): Promise<void> => {
+  /** What has moved so far into the store. A run stopped leaves it to `finish`. Never throws. */
+  const writeStore = async (to: AnchorLog, stop: AbortSignal | undefined): Promise<void> => {
     try {
-      await withinDeadline(to.flush(), deadlineMs, signal);
+      await withinDeadline(to.flush(), Math.min(deadlineMs, WRITE_WITHIN_MS), stop);
     } catch (error) {
       if (!(error instanceof Stopped)) to.writeFailed(error);
     }
+  };
+
+  /**
+   * Writes on a timer of their own while a run goes on, so what a lane has finished is kept however long another takes:
+   * no lane waits for a write, and a write holds no connection. One at a time; `flush` joins any under way. Ends when told.
+   */
+  const writeAlong = (to: AnchorLog, stop: AbortSignal | undefined): (() => void) => {
+    let timer: ReturnType<typeof setTimeout>;
+    let ended = false;
+    const later = (): void => {
+      timer = setTimeout(() => {
+        void writeStore(to, stop).then(() => {
+          if (!ended) later();
+        });
+      }, writeEveryMs);
+      timer.unref();
+    };
+    later();
+    return () => {
+      ended = true;
+      clearTimeout(timer);
+    };
+  };
+
+  /** Everything a run does up to its last write, each step cut off by `cap`: the run's time, or the stop. */
+  const checkAll = async (cap: AbortSignal, stop: AbortSignal | undefined): Promise<Outcome[]> => {
+    const outcomes: Outcome[] = [];
+    for (const one of chains) {
+      if (cap.aborted) break;
+      outcomes.push(await checkOne(one, cap));
+    }
+    if (organizations !== undefined && !cap.aborted) {
+      try {
+        outcomes.push(...(await checkOrganizations(organizations, cap, stop)));
+      } catch (error) {
+        // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
+        logger.error('audit.anchor_check_crashed', { chain: 'organisation', err: error });
+      }
+    }
+    return outcomes;
   };
 
   return Object.freeze({
@@ -451,21 +615,28 @@ export function createAnchorCheck({
     },
 
     async run(signal?: AbortSignal): Promise<void> {
-      if (durable !== undefined) await readStore(durable, signal);
-      const outcomes: Outcome[] = [];
-      for (const one of chains) {
-        if (signal?.aborted === true) break;
-        outcomes.push(await checkOne(one, signal));
+      // Ended by the run's time or the stop, whichever comes first.
+      const ending = new AbortController();
+      const end = (): void => {
+        ending.abort();
+      };
+      const cap = ending.signal;
+      const timer = setTimeout(end, runWithinMs);
+      timer.unref();
+      if (signal?.aborted === true) end();
+      signal?.addEventListener('abort', end, { once: true });
+      if (durable !== undefined) await readStore(durable, cap);
+      const endWrites = durable === undefined ? undefined : writeAlong(durable, signal);
+      const outcomes = await checkAll(cap, signal);
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', end);
+      endWrites?.();
+      if (signal?.aborted !== true) sayLeft(cap);
+      if (durable !== undefined) {
+        // A run stopped ends at once: `flush` never throws, and `finish`, where the API is stopping, joins it.
+        if (signal?.aborted === true) void durable.flush();
+        else await writeStore(durable, signal);
       }
-      if (organizations !== undefined && signal?.aborted !== true) {
-        try {
-          outcomes.push(...(await checkOrganizations(organizations, signal)));
-        } catch (error) {
-          // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
-          logger.error('audit.anchor_check_crashed', { chain: 'organisation', err: error });
-        }
-      }
-      if (durable !== undefined && signal?.aborted !== true) await writeStore(durable, signal);
       const count = (outcome: Outcome): number => outcomes.filter((each) => each === outcome).length;
       logger.info('audit.anchor_check_done', {
         chains: outcomes.length,
@@ -474,6 +645,7 @@ export function createAnchorCheck({
         unanchored: count('unanchored'),
         failed: count('failed'),
         unchecked: count('unchecked'),
+        left: turns.left(),
       });
     },
   });

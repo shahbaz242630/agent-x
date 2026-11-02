@@ -192,6 +192,11 @@ export const PLAIN_WORDS = {
     broke: 'One audit history went unchecked this time, or all of them if the list could not be read.',
     next: 'It is tried again at the next check. Three misses in a row raise the integrity alarm.',
   },
+  'audit.anchor_check_unfinished': {
+    happened: 'The tamper check of the audit history ran out of time before reaching every organisation.',
+    broke: 'Nothing yet: the next check goes on from where this one stopped.',
+    next: 'If it stays, raise AGENTX_AUDIT_ANCHOR_LANES with the database pool, or look for slow chains.',
+  },
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',
     broke: 'Nothing: those files were left unread and the check went on without them.',

@@ -5,10 +5,11 @@
 //
 // Files, gzipped lines, each ending in a closing line, named so the newest lists first, under an epoch a
 // sanctioned restore of the whole database moves on (AGENTX_ANCHOR_EPOCH):
-//   e<epoch>/deltas/<inverted-ms>-<id>     what moved, at the end of a run
+//   e<epoch>/deltas/<inverted-ms>-<id>     what moved, each minute of a run and at its end
 //   e<epoch>/snapshots/<inverted-ms>-<id>  every chain's anchor, hourly
 // A restart reads the newest snapshot and every delta since: at the default
-// interval, 2 lists and at most 13 gets. Each run then reads again whatever
+// interval, 2 lists and about 13 gets, or about 35 where every run goes its whole
+// four minutes (anchor-check.ts). Each run then reads again whatever
 // another process wrote, so a copy that takes the lease back holds what the
 // one before it found. Nothing is written if nothing moved.
 //

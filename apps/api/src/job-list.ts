@@ -26,7 +26,7 @@ import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
 import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
-import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
+import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { anchorLogOf } from './anchor-store.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
@@ -176,7 +176,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     clock: systemClock,
     logger,
     staleAfterMs,
+    reachWithinMs: reachWithin(config.audit.anchorSeconds * 1000),
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+    // Half the pool at most: the requests and the other jobs have the rest. A smaller pool's check goes slower, no less.
+    lanes: Math.min(config.audit.anchorLanes, Math.max(1, Math.floor(config.db.poolMax / 2))),
     anchors: anchorStore,
     ...(anchorLog === undefined ? {} : { durable: anchorLog }),
   });

@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   type AnchorCheck,
+  type AnchorCheckOptions,
   type CheckedChain,
   createAnchorCheck,
   MOST_ORGANIZATIONS,
@@ -58,6 +59,8 @@ function checking(
   chains: readonly CheckedChain[],
   anchors: AnchorStore = createMemoryAnchorStore(),
   organizations?: OrganisationChains,
+  /** One lane where a test is about what comes after what; the lanes side by side have their own tests (anchor-check-runs.test.ts). */
+  more: Pick<AnchorCheckOptions, 'lanes'> = {},
 ) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
@@ -71,6 +74,7 @@ function checking(
     deadlineMs: DEADLINE_MS,
     anchors,
     ...(organizations === undefined ? {} : { organizations }),
+    ...more,
   });
   /** Each chain's lines, without the run's closing line. */
   const events = () =>
@@ -670,7 +674,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
         return Promise.resolve(ok(1n));
       },
     };
-    const { check } = checking([], undefined, organizations);
+    const { check } = checking([], undefined, organizations, { lanes: 1 });
     await check.run(stopping.signal);
 
     expect(verified).toEqual([ORG]);
@@ -922,7 +926,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     const { organizations, steps } = holding([[ORG, OTHER_ORG]], {
       [ORG]: { ok: false, problem: { reason: 'hash', seq: 2n } },
     });
-    const { check } = checking([], undefined, organizations);
+    const { check } = checking([], undefined, organizations, { lanes: 1 });
     await check.run();
 
     expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} hash`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
@@ -968,7 +972,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
         return Promise.resolve();
       },
     };
-    const { check, events } = checking([], undefined, organizations);
+    const { check, events } = checking([], undefined, organizations, { lanes: 1 });
     await check.run(stopping.signal);
 
     expect(steps).toEqual([ORG]);
@@ -1019,7 +1023,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     const { organizations, steps } = holding([[ORG, OTHER_ORG]], {}, (orgId) =>
       orgId === ORG ? Promise.reject(new Error('the hold broke its word')) : Promise.resolve(),
     );
-    const { check, events, done } = checking([], undefined, organizations);
+    const { check, events, done } = checking([], undefined, organizations, { lanes: 1 });
     await check.run();
 
     expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
@@ -1063,7 +1067,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
       stopping.abort();
       return new Promise<never>(() => undefined);
     });
-    const { check, events } = checking([], undefined, organizations);
+    const { check, events } = checking([], undefined, organizations, { lanes: 1 });
     await check.run(stopping.signal);
 
     expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`]);
