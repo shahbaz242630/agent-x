@@ -95,8 +95,8 @@ function lines(): Line[] {
     .map((line) => JSON.parse(line) as Line);
 }
 
-/** Lines of the process itself once it listens, no request's and no run's: what it says of itself, and the logger's and the requests' sums. */
-const PROCESS_LINES = /^(api\.|log\.|http\.minute$)/;
+/** Lines of the process itself once it listens, no request's and no run's: what it says of itself, its hold on the jobs' lease (on a timer of its own, so load could bring one here), and the logger's and the requests' sums. */
+const PROCESS_LINES = /^(api\.|jobs\.lease_|jobs\.not_leading$|log\.|http\.minute$)/;
 
 describe(`the API process (Postgres ${server.version})`, () => {
   it('SEC-OPS-05 logs its config fingerprint, connects as the app role, records the start, then listens', async () => {

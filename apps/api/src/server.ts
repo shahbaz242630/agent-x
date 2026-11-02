@@ -334,7 +334,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
 
   if (options.consoleFiles !== undefined) putConsoleInFront(app.server, options.consoleFiles);
   // Every line of a request carries its ID, whichever logger writes it (logger.ts); before anything that could write
-  // one. Once is enough on this Node, a body arriving late included: api-sockets.test.ts holds that to account on a real socket.
+  // one. Once is enough, a body arriving late included: Fastify's parser goes back into the scope it was entered from
+  // (an AsyncResource), which api-sockets.test.ts holds to account on a real socket, an upgrade being what could change it.
   app.addHook('onRequest', (request, _reply, done) => {
     withLogContext({ correlationId: request.id }, done);
   });

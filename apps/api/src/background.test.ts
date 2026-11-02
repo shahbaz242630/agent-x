@@ -1,5 +1,5 @@
 // The jobs' timer: runs now, and again after each run ends; stops at once.
-import { createLogger, type Logger } from '@agentx/platform/observability';
+import { createLogger, type Logger, withLogContext } from '@agentx/platform/observability';
 import { LogCapture } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
@@ -74,6 +74,44 @@ describe('a job on a timer of its own', () => {
     // Outside a run, nothing of it is left.
     logger.info('job.after');
     expect(capture.lines().at(-1)).not.toHaveProperty('runId');
+  });
+
+  it('Stage F keeps two jobs under way at once apart, one woken by the other, and out of a request that started them', async () => {
+    const capture = new LogCapture();
+    const logger: Logger = createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+      destination: capture,
+    });
+    const { promise: woken, resolve: wake } = Promise.withResolvers<undefined>();
+    const waits = {
+      run: async () => {
+        logger.info('job.began', { job: 'waits' });
+        // Goes on only when the other job lets it, as a waiter let through by another's leave does.
+        await woken;
+        logger.info('job.went_on', { job: 'waits' });
+      },
+    };
+    const wakes = {
+      run: () => {
+        logger.info('job.began', { job: 'wakes' });
+        wake(undefined);
+        return Promise.resolve();
+      },
+    };
+    const handles = withLogContext({ correlationId: 'a-request' }, () => [
+      scheduleRuns(waits, 60_000),
+      scheduleRuns(wakes, 60_000),
+    ]);
+    await Promise.all(handles.map((handle) => handle.stop()));
+    const lines = capture.lines();
+    const runsOf = (job: string) => new Set(lines.filter((line) => line.job === job).map((line) => line.runId));
+    expect(lines.map((line) => line.event).toSorted()).toEqual(['job.began', 'job.began', 'job.went_on']);
+    const [ofWaits] = runsOf('waits');
+    expect(runsOf('waits').size).toBe(1);
+    expect(ofWaits).toEqual(expect.any(String));
+    expect(runsOf('wakes').has(ofWaits)).toBe(false);
+    expect(lines.every((line) => line.correlationId === undefined)).toBe(true);
   });
 });
 

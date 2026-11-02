@@ -72,6 +72,18 @@ async function listening() {
     logger.info('test.said');
     return { ok: true };
   });
+  const { promise: woken, resolve: wake } = Promise.withResolvers<undefined>();
+  app.post('/test/waits', OPEN, async () => {
+    logger.info('test.waiting');
+    await woken;
+    logger.info('test.woken');
+    return { ok: true };
+  });
+  app.post('/test/wakes', OPEN, () => {
+    logger.info('test.waking');
+    wake(undefined);
+    return { ok: true };
+  });
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });
   const port = app.addresses()[0]?.port ?? 0;
@@ -135,7 +147,55 @@ async function within<T>(promise: Promise<T>, ms: number, failure: string): Prom
 const headerBlock = (response: string): string => (response.split(CRLF + CRLF)[0] ?? '').toLowerCase();
 const bodyOf = (response: string): unknown => JSON.parse(response.slice(response.indexOf(CRLF + CRLF) + 4)) as unknown;
 
+const ID_A = '0190a000-0000-7000-8000-00000000000a';
+const ID_B = '0190a000-0000-7000-8000-00000000000b';
+const BODY = '{"any":"body"}';
+
+/** A POST's headers, with the ID it asks for; its body goes on separately. */
+const postHeaders = (path: string, id: string, connection: string): string =>
+  request(
+    `POST ${path} HTTP/1.1`,
+    'Host: localhost',
+    `Origin: ${PUBLIC_ORIGIN}`,
+    'Content-Type: application/json',
+    `Content-Length: ${String(BODY.length)}`,
+    `X-Correlation-Id: ${id}`,
+    `Connection: ${connection}`,
+  );
+
 describe('4D2e Stage F a request and its lines', () => {
+  it('keeps two requests under way at once apart, bodies interleaved, one woken from inside the other', async () => {
+    const { port, capture } = await listening();
+    const waits = connect(port);
+    const wakes = connect(port);
+    await Promise.all([waits.opened, wakes.opened]);
+    waits.socket.write(postHeaders('/test/waits', ID_A, 'close'));
+    wakes.socket.write(postHeaders('/test/wakes', ID_B, 'close'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    waits.socket.write(BODY);
+    await vi.waitFor(() => {
+      expect(capture.lines().map((line) => line.event)).toContain('test.waiting');
+    });
+    wakes.socket.write(BODY);
+    await Promise.all([waits.closed, wakes.closed]);
+    const idOf = (event: string) => capture.lines().find((line) => line.event === event)?.correlationId;
+    expect([idOf('test.waiting'), idOf('test.woken'), idOf('test.waking')]).toEqual([ID_A, ID_A, ID_B]);
+  });
+
+  it('gives a second request on one connection its own ID, none left from the first', async () => {
+    const { port, capture } = await listening();
+    const connection = connect(port);
+    await connection.opened;
+    connection.socket.write(postHeaders('/test/says', ID_A, 'keep-alive') + BODY);
+    await vi.waitFor(() => {
+      expect(capture.lines().filter((line) => line.event === 'test.said')).toHaveLength(1);
+    });
+    connection.socket.write(postHeaders('/test/says', ID_B, 'close') + BODY);
+    await connection.closed;
+    const said = capture.lines().filter((line) => line.event === 'test.said');
+    expect(said.map((line) => line.correlationId)).toEqual([ID_A, ID_B]);
+  });
+
   it("keeps its ID on a bare logger's line though its body came well after its headers", async () => {
     const { port, capture } = await listening();
     const body = '{"any":"body"}';
