@@ -747,6 +747,37 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       expect(nothingToRepair()).toEqual([]);
     });
 
+    it('a row there with nothing signed is no record that never was: refused', async () => {
+      const id = ids.next();
+      const user = await userForSubject(
+        app,
+        { issuer: 'https://auth.example.test', subject: `planted-${id}` },
+        { ids, clock },
+      );
+      await asOwner(async (owner) => {
+        await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+          user,
+          org,
+          id,
+        ]);
+        await owner.query(
+          "insert into identity.memberships (org_id, id, user_id, role, status, joined_at) values ($1, $2, $3, 'viewer', 'ACTIVE', now())",
+          [org, id, user],
+        );
+      });
+      await holdFromRow(MEMBERSHIPS.subject, id);
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirmLiveOnly(investigationId, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      expect(nothingToRepair()).toEqual([]);
+    });
+
     it('the same with no history at all, read only by the check of what the hold names: cleared', async () => {
       await holdFromRow(MEMBERSHIPS.subject, ids.next());
       const investigationId = await investigate();

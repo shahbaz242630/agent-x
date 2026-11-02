@@ -465,6 +465,35 @@ describe(`holds waiting: forged and deleted rows (4D2e D5, Postgres ${server.ver
     });
   });
 
+  it('two such rows are two entries: both go, by their own names, the second as the hold it already is', async () => {
+    await withChecksDropped(async () => {
+      await plant('seal', org, 'agent', 'a\nb');
+      await plant('seal', org, 'agent', 'c\nd');
+
+      await (await aProcess()).poll();
+
+      expect(await actions()).toEqual(ONE_SET);
+      expect(await waitingRows()).toEqual([]);
+    });
+  });
+
+  it('such a row meeting a hold on another record stays as it is: no row of the fixed name, and the alarm', async () => {
+    await withChecksDropped(async () => {
+      const other = await aProcess();
+      await plant('seal', org, 'membership', newId());
+      await other.poll();
+      expect(await waitingRows()).toEqual([]);
+      await plant('seal', org, 'agent', 'a\nb');
+
+      await other.poll();
+
+      expect(await attacker.query('select object_id from directory.holds_waiting where org_id = $1', [org])).toEqual([
+        { object_id: 'a\nb' },
+      ]);
+      expect(fromRow()).toHaveLength(2);
+    });
+  });
+
   it('such a row deleted before its hold is recorded: the alarm, and the hold all the same', async () => {
     await withChecksDropped(async () => {
       await plant('seal', org, 'agent', 'a\nb');
@@ -1026,13 +1055,24 @@ describe(`holds waiting: a poll is bounded (4D2e D5, Postgres ${server.version})
     expect(await actions()).toEqual(ONE_SET);
   });
 
-  it('past the limit, Tx A still reads the row of its own organisation', async () => {
+  it('a table past the limit is read to the limit alone', async () => {
     const neighbour = await newOrganisation();
     await plantInBulk(1500, neighbour);
     await plant('seal');
     const other = await aProcess();
 
-    expect(await other.read('head')).toEqual({ outcome: 'tampered', sign: 'seal' });
+    await other.poll();
+
+    // Read at most the limit, whatever the table holds.
+    expect(lines('audit.holds_waiting_past_limit')).toEqual([expect.objectContaining({ rows: 1000 })]);
+    expect(await other.read('head')).toMatchObject({ outcome: expect.stringMatching('tampered|held') as string });
+  });
+
+  it('past the limit, Tx A reads the row of its own organisation, which the poll may never reach', async () => {
+    await plantInBulk(1500, await newOrganisation());
+    await plant('seal');
+
+    expect(await (await aProcess()).read('head')).toEqual({ outcome: 'tampered', sign: 'seal' });
   });
 });
 

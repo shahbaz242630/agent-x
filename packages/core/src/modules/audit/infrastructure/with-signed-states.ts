@@ -241,8 +241,8 @@ async function setHold(
         if (rowMustStand && !(await holdStillWaiting(tx, itsRow))) return 'already';
         const recorded = await holder.hold(tx, finding, count);
         if (recorded !== 'named_elsewhere') await holdNoLongerWaiting(tx, itsRow);
-        // Clearing won't check this record: its row stays, or comes now if it may have none, to be the next hold.
-        else if (found.row === undefined && !rowMustStand) await keepHoldWaitingHere(tx, finding, finding.sign);
+        // Clearing won't check this record: its row stays, or comes now if it has none, to be the next hold.
+        else if (found.row === undefined) await keepHoldWaitingHere(tx, finding, finding.sign);
         return recorded;
       },
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
