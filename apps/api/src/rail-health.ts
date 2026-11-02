@@ -267,7 +267,8 @@ export function createRailHealth({
     underWay -= 1;
     if (how !== 'accepted') letThrough -= 1;
     else stepAccepted = true;
-    if (underWay === 0 && stepAccepted) stepDone();
+    // Every place used: a few quick acceptances would otherwise climb past a bank still losing calls (review).
+    if (underWay === 0 && stepAccepted && letThrough >= (REOPEN_STEPS[step] ?? 0)) stepDone();
   };
 
   /**

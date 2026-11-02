@@ -199,6 +199,7 @@ const HANDED_FROM = ['APPROVED', 'INSTRUCTION_READY'] as const;
  * reaches it, or one failing every time.
  */
 export const QUEUE_STALE_MS = 15 * 60_000;
+const STALE_READ_EVERY_MS = 60_000;
 
 /** The route the Pilot takes (BR-12: one partner rail, a push payment), and why, as the instruction keeps it. */
 const ROUTE = { route: 'push', reason: 'mandate_source_push_rail' } as const;
@@ -391,6 +392,8 @@ export function createHandoff({
   };
   // When each organisation's stale queue was last said (gate H8): at most once in QUEUE_STALE_MS.
   const staleSaid = new Map<string, number>();
+  const staleRead = new Map<string, number>();
+  const cutAtTheGate = new Set<string>();
   // What each organisation was told of its payments waiting for the bank: its lane's hold, and the platform's outage.
   // One signed event an outage and one a lane's hold, not one a run; an acceptance of its own clears it.
   const toldHeld = new Map<string, { readonly lane?: true; readonly bank?: number }>();
@@ -451,6 +454,9 @@ export function createHandoff({
   const staleIn = async (orgId: string, waitingIds: readonly string[], log: Logger): Promise<void> => {
     const now = clock.now().getTime();
     if (now - (staleSaid.get(orgId) ?? Number.NEGATIVE_INFINITY) < QUEUE_STALE_MS) return;
+    // Finding none says nothing, so without this every cut lane would read again each run, past the budget (review).
+    if (now - (staleRead.get(orgId) ?? Number.NEGATIVE_INFINITY) < STALE_READ_EVERY_MS) return;
+    staleRead.set(orgId, now);
     try {
       const { count, oldest } = await staleOf(orgId, new Date(now - QUEUE_STALE_MS), waitingIds, log);
       // None standing: the oldest is none too.
@@ -763,7 +769,11 @@ export function createHandoff({
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
     if (done.outcome === 'handed_off') await sent(orgId, id, done, log);
-    if (done.outcome === 'stopped') return 'end_turn';
+    if (done.outcome === 'stopped') {
+      // At the default limits a backlogged lane usually ends here, not cut by the lanes themselves: still counted (review).
+      cutAtTheGate.add(orgId);
+      return 'end_turn';
+    }
     if (done.outcome === 'held') {
       noteWaiting(orgId, id, `hold_${done.hold}`, log);
       await tellHeld(orgId, done.hold, done.outage, log);
@@ -855,6 +865,7 @@ export function createHandoff({
   const handOffLanes = async (orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
     stopping = signal;
     gaveUpWaiting = false;
+    cutAtTheGate.clear();
     budgetEnds = clock.now().getTime() + runBudgetMs;
     const outcomes = await finishedWithinStop(lanes.run(orgs, runSpent), signal, stopWaitMs);
     if (outcomes === undefined) {
@@ -863,7 +874,8 @@ export function createHandoff({
     }
     for (const [orgId, outcome] of outcomes) {
       const lane = waitingOf(orgId);
-      const counted = outcome === 'whole' || (outcome === 'cut' && health.heldFor(orgId) === undefined);
+      const cut = outcome === 'cut' || cutAtTheGate.has(orgId);
+      const counted = outcome === 'whole' || (cut && health.heldFor(orgId) === undefined);
       // A pass that read no rows has nothing to count: a trip saved for each idle organisation.
       if (counted && lane.sawRows && signal?.aborted !== true) {
         await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));

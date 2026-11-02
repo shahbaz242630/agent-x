@@ -867,6 +867,45 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
       expect(health.heldFor(w.org)).toBe('bank');
       expect(lines('handoff.queue_stale')).toEqual([]);
     });
+
+    it('says those the budget left waiting at the gate, as the default limits usually leave them', async () => {
+      const { w } = await worldWith(3);
+      const { rail, sent } = railOver([w]);
+      const job = handoffOver([w], rail, { limits: AT_ONCE, runBudgetMs: 1_000 });
+      clock.advanceBy(QUEUE_STALE_MS + 60_000);
+      const release = await headHeld(w);
+
+      const run = job.run();
+      await waitUntilQueued(database.as('admin'), 1);
+      clock.advanceBy(1_000);
+      await release();
+      await run;
+
+      expect(sent).toHaveLength(1);
+      expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 2 })]);
+    });
+
+    it('reads a cut lane’s age at most once a minute, though it found none', async () => {
+      const { w } = await worldWith(5);
+      const { rail } = railOver([w], (real) => (intent) => {
+        clock.advanceBy(1_000);
+        return real(intent);
+      });
+      const job = handoffOver([w], rail, { runBudgetMs: 1_000 });
+
+      clock.advanceBy(QUEUE_STALE_MS - 30_000);
+      await job.run();
+      expect(lines('handoff.queue_stale')).toEqual([]);
+
+      // Past their age now, but 54 s since the last read.
+      clock.advanceBy(53_000);
+      await job.run();
+      expect(lines('handoff.queue_stale')).toEqual([]);
+
+      clock.advanceBy(10_000);
+      await job.run();
+      expect(lines('handoff.queue_stale')).toHaveLength(1);
+    });
   });
 
   it('begins no Tx A past its budget while waiting at the gate (L4)', async () => {

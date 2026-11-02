@@ -334,12 +334,33 @@ describe('the platform', () => {
     expect(six).toHaveLength(6);
   });
 
-  it('climbs a step on few calls where few are waiting: one accepted, nothing out', () => {
+  it('climbs no step on few calls where few are waiting: all its places used first', () => {
     tripped();
     looked();
 
     accepted('only');
+    expect(lines('handoff.bank_step')).toEqual([]);
+    // Thin traffic stays under the step's number, so isn't held by it.
+    expect(health.heldFor('w')).toBeUndefined();
 
+    accepted('second');
+    expect(lines('handoff.bank_step')).toEqual([]);
+    accepted('third');
+    expect(lines('handoff.bank_step').map(({ calls }) => calls)).toEqual([6]);
+  });
+
+  it('a place a refusal gave back must be used too before the step ends', () => {
+    tripped();
+    looked();
+    const first = [entered('p'), entered('q'), entered('r')];
+
+    first[0]?.settle('accepted');
+    first[1]?.settle('accepted');
+    first[2]?.settle('refused');
+    expect(lines('handoff.bank_step')).toEqual([]);
+    expect(health.heldFor('w')).toBeUndefined();
+
+    accepted('again');
     expect(lines('handoff.bank_step').map(({ calls }) => calls)).toEqual([6]);
   });
 

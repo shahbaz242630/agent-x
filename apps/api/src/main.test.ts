@@ -496,6 +496,11 @@ describe('SEC-AV-03 the API refuses to start on a bad config', () => {
 });
 
 describe('APP-02 the API opens its database as its own role, and checks that role before it listens', () => {
+  it('builds no hand-off in `web`, so a pool too small for its gate starts all the same', async () => {
+    const { server } = await start({ ...ENV, AGENTX_ROLE: 'web', AGENTX_DB_POOL_MAX: '3' });
+    expect(server).toBeDefined();
+  });
+
   it('connects with the database settings, named agentx-api, with the configured pool size', async () => {
     const { server } = await start({
       ...ENV,
