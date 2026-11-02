@@ -652,7 +652,8 @@ describe.each(ROUTED)('$name, through its route', ({ path, standing, stopped, be
       expect(answer.json()).toMatchObject({ error: { code: 'ORGANISATION_BUSY' } });
       expect(ms).toBeGreaterThan(BRAKE_WAIT_MS * 0.9);
       expect(ms).toBeLessThan(BRAKE_WAIT_MS * 1.1);
-      expect(capture.lines().filter(({ event }) => event === 'brake.not_applied')).toHaveLength(1);
+      expect(linesOf('brake.not_applied')).toMatchObject([{ level: 'error', orgId: r.w.org }]);
+      expect(linesOf('brake.routine_change_busy')).toEqual([]);
       expect(await standing(r)).toBe(before);
 
       await letGo(holder);
@@ -1026,6 +1027,9 @@ describe('every routine change gives up on its brake in 3 s', () => {
       expect(answer).toEqual(refused(503, 'ORGANISATION_BUSY'));
       expect(ms).toBeLessThan(4_500);
       expect(ms).toBeGreaterThan(2_500);
+      // Its own quiet line: the old rules still apply, so no alarm that nothing was stopped.
+      expect(linesOf('brake.routine_change_busy')).toMatchObject([{ level: 'warn', orgId: r.w.org }]);
+      expect(linesOf('brake.not_applied')).toEqual([]);
     },
     LONG,
   );

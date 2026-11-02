@@ -25,6 +25,7 @@ import {
   type DatabaseTransaction,
   type IdempotentRequest,
   type IdempotentWrite,
+  holdRoutineBrakeNamed,
   isLockWaitRunOut,
   isRetryable,
   isStatementLimit,
@@ -67,6 +68,16 @@ export type Written = IdempotentWrite | Refused;
 // A status move the work's own read said it may make (the shared kernel's, also core's: D7).
 export { movedAsRead } from '@agentx/core/shared-kernel';
 
+/** A stop that couldn't take hold: agents can still act, so the alarm. */
+const stopNotApplied = (log: Logger, fields: { readonly waitedMs: number }): void => {
+  log.error('brake.not_applied', fields);
+};
+
+/** A routine change that couldn't take hold: the old rules still apply, so nothing to raise an alarm for. */
+const routineChangeBusy = (log: Logger, fields: { readonly waitedMs: number }): void => {
+  log.warn('brake.routine_change_busy', fields);
+};
+
 /**
  * A brake's write (an organisation's freeze, an agent's kill switch; PL-63 item 3): its wait for a lock run out, a
  * statement past its limit, or a deadlock lost, rolled it all back, so nothing is stopped: answered busy, its key free
@@ -78,15 +89,14 @@ export async function braked(
   orgId: string,
   correlationId: string,
   write: () => Promise<Written>,
+  gaveUp = stopNotApplied,
 ): Promise<Written> {
   const started = performance.now();
   try {
     return await write();
   } catch (error) {
     if (!isLockWaitRunOut(error) && !isStatementLimit(error) && !isRetryable(error)) throw error;
-    logger
-      .child({ correlationId, orgId })
-      .error('brake.not_applied', { waitedMs: Math.round(performance.now() - started) });
+    gaveUp(logger.child({ correlationId, orgId }), { waitedMs: Math.round(performance.now() - started) });
     return refused(503, 'ORGANISATION_BUSY');
   }
 }
@@ -162,10 +172,34 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
       }),
     );
 
+  /**
+   * brakeWrite for a routine change (a policy, a draft, a consent choice): the brake `name` names, with a routine
+   * change's shorter wait and its quieter line. The one way to either, so they can't part.
+   */
+  const routineBrakeWrite = (
+    member: Pick<Member, 'orgId'>,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    name: Parameters<typeof holdRoutineBrakeNamed>[1],
+    work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+  ): Promise<Written> =>
+    braked(
+      logger,
+      member.orgId,
+      correlationId,
+      () =>
+        write(member, idempotent, correlationId, async (tx, states) => {
+          await holdRoutineBrakeNamed(tx, name);
+          return work(tx, states);
+        }),
+      routineChangeBusy,
+    );
+
   return {
     inOrganisation,
     write,
     brakeWrite,
+    routineBrakeWrite,
 
     /** The write, a history past its read's cap (the two-person rule's, a supplier's versions) answered HISTORY_TOO_LONG. */
     historyBounded: async (...args: Parameters<typeof write>): Promise<Written> => {

@@ -260,6 +260,11 @@ export const PLAIN_WORDS = {
       'The admin was told busy. It may or may not have taken effect, as the failure may have come after it was saved.',
     next: 'Send the same request again, which shows what it did. If this repeats, find what is holding the rows.',
   },
+  'brake.routine_change_busy': {
+    happened: "An admin's routine change could not get its lock in time, so it was not made.",
+    broke: 'Nothing is at risk: the old rules still apply. The admin was told busy.',
+    next: 'Try the change again shortly. If it keeps failing, find what is holding that organisation up.',
+  },
   'brake.not_applied': {
     happened: 'An admin pressed a stop or changed an authority, and it could not get its lock or lost a deadlock.',
     broke: 'Nothing was stopped, so agents can still act. The admin was told busy.',

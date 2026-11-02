@@ -32,12 +32,7 @@ import type { ApprovalWaitHours, SpendRequestsTables } from '@agentx/core/module
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { monthlyCapOf, type MonthlyCapFrom } from '@agentx/core/modules/policies';
 import { compare, type Money, money } from '@agentx/core/shared-kernel';
-import {
-  AGENT_BRAKE,
-  type DatabaseTransaction,
-  holdBrakeLookedUp,
-  holdRoutineBrakeLookedUp,
-} from '@agentx/platform/db';
+import { AGENT_BRAKE, brakeNameLookedUp, type DatabaseTransaction, holdBrakeLookedUp } from '@agentx/platform/db';
 
 import { waitChoiceIn } from './approval-wait-choice.ts';
 import { capChoiceIn, type MonthlyCapChoice } from './monthly-cap-choice.ts';
@@ -61,9 +56,9 @@ export type MandateTx = DatabaseTransaction<MandateTables>;
 export const agentBrakeOfMandate = (tx: MandateTx, orgId: string, mandateId: string): Promise<void> =>
   holdBrakeLookedUp(tx, AGENT_BRAKE, orgId, { table: MANDATES, id: mandateId, column: 'agent_id' });
 
-/** agentBrakeOfMandate for a routine change of the mandate: a shorter wait, so its agent's decisions outlast it. */
-export const routineBrakeOfMandate = (tx: MandateTx, orgId: string, mandateId: string): Promise<void> =>
-  holdRoutineBrakeLookedUp(tx, AGENT_BRAKE, orgId, { table: MANDATES, id: mandateId, column: 'agent_id' });
+/** The name of that brake, for a routine change of the mandate (routineBrakeWrite). */
+export const agentBrakeNameOfMandate = (orgId: string, mandateId: string): ReturnType<typeof brakeNameLookedUp> =>
+  brakeNameLookedUp(AGENT_BRAKE, orgId, { table: MANDATES, id: mandateId, column: 'agent_id' });
 
 /** The mandates' UseCaseRefused: the only refusal their work answers. */
 export class MandateRefused extends UseCaseRefused {}

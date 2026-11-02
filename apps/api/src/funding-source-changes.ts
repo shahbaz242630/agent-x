@@ -64,9 +64,9 @@ import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import {
   type Database,
   holdBrake,
-  holdRoutineBrake,
   type IdempotentRequest,
   isUnwritten,
+  lockName,
   SOURCE_BRAKE,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -345,8 +345,8 @@ export function createFundingSourceChanges({
     },
 
     async chooseConsentExpiry(member, idempotent, sourceId, consentExpiry, correlationId) {
-      const hold = (tx: FundingSourceTx) => holdRoutineBrake(tx, SOURCE_BRAKE, member.orgId, sourceId);
-      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
+      const brake = lockName(SOURCE_BRAKE, member.orgId, sourceId);
+      const done = await work.routineBrakeWrite(member, idempotent, correlationId, brake, async (tx, states) => {
         await work.memberIn(tx, states, member, CONSENT_EXPIRY_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
         const read = await work.sourceIn(tx, states, key, 'change');

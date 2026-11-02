@@ -25,7 +25,7 @@
 import { type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { TABLE, UUID } from './patterns.ts';
-import { assertTenant, holdBrakeNamed, holdRoutineBrakeNamed, lockName } from './tenant.ts';
+import { assertTenant, holdBrakeNamed, lockName } from './tenant.ts';
 
 /** The Postgres type of an authority field, which decides how it is read as text. */
 export type SignedFieldType = 'text' | 'uuid' | 'integer' | 'timestamptz';
@@ -413,7 +413,7 @@ export interface LookedUp {
 }
 
 /** The name of a brake whose last ID is a uuid field of another row, as lockName would write it: null for none found. */
-const brakeNameLookedUp = (scope: string, orgId: string, lookedUp: LookedUp): RawBuilder<unknown> =>
+export const brakeNameLookedUp = (scope: string, orgId: string, lookedUp: LookedUp): RawBuilder<unknown> =>
   sql`${lockName(scope, orgId, '')} || (${lookedUpId(orgId, lookedUp)})::text`;
 
 /**
@@ -431,14 +431,6 @@ export const holdBrakeLookedUp = <Schema>(
   orgId: string,
   lookedUp: LookedUp,
 ): Promise<void> => holdBrakeNamed(tx, brakeNameLookedUp(scope, orgId, lookedUp));
-
-/** holdBrakeLookedUp for a routine change: holdRoutineBrakeNamed's waits. */
-export const holdRoutineBrakeLookedUp = <Schema>(
-  tx: Transaction<Schema>,
-  scope: string,
-  orgId: string,
-  lookedUp: LookedUp,
-): Promise<void> => holdRoutineBrakeNamed(tx, brakeNameLookedUp(scope, orgId, lookedUp));
 
 /** The read of an earlier row of the gather. */
 function earlier(reads: readonly GatheredRead[], index: number): GatheredRead {

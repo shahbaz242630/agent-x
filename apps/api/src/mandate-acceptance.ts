@@ -62,7 +62,7 @@ import {
   toldAdminsAndApprovers,
   versionIn,
   viewIn,
-  routineBrakeOfMandate,
+  agentBrakeNameOfMandate,
 } from './mandate-reads.ts';
 import {
   carryOut,
@@ -309,8 +309,8 @@ export function createMandateAcceptance({
     },
 
     async acceptConfirm(member, idempotent, mandateId, stepUpChallengeId, pendingRequests, correlationId) {
-      const hold = (tx: MandateTx) => routineBrakeOfMandate(tx, member.orgId, mandateId);
-      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
+      const brake = agentBrakeNameOfMandate(member.orgId, mandateId);
+      const done = await work.routineBrakeWrite(member, idempotent, correlationId, brake, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         const admin = await work.memberIn(tx, states, member, ACCEPTING_ROLES);
         const read = await acceptable(tx, states, member.orgId, mandateId, null, 'change');

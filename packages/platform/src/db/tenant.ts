@@ -329,13 +329,6 @@ export const holdRoutineBrakeNamed = <Schema>(
 export const holdBrake = <Schema>(tx: Transaction<Schema>, scope: string, ...ids: readonly string[]): Promise<void> =>
   holdBrakeNamed(tx, lockName(scope, ...ids));
 
-/** holdRoutineBrakeNamed for a brake named by its scope and IDs. */
-export const holdRoutineBrake = <Schema>(
-  tx: Transaction<Schema>,
-  scope: string,
-  ...ids: readonly string[]
-): Promise<void> => holdRoutineBrakeNamed(tx, lockName(scope, ...ids));
-
 /**
  * A statement of its own that bounds the rest of the transaction's waits as a claim's does, for one with no claim:
  * so a read behind a brake waiting is told busy, not cut off by a statement's limit.

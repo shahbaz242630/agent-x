@@ -63,7 +63,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import {
   agentBrakeOfMandate,
-  routineBrakeOfMandate,
+  agentBrakeNameOfMandate,
   MandateRefused,
   type MandateTables,
   type MandateTx,
@@ -336,8 +336,8 @@ export function createMandateMoves({
     },
 
     async chooseOverLimitConfirm(member, idempotent, mandateId, overLimit, stepUpChallengeId, correlationId) {
-      const hold = (tx: MandateTx) => routineBrakeOfMandate(tx, member.orgId, mandateId);
-      const done = await work.brakeWrite(member, idempotent, correlationId, hold, async (tx, states) => {
+      const brake = agentBrakeNameOfMandate(member.orgId, mandateId);
+      const done = await work.routineBrakeWrite(member, idempotent, correlationId, brake, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, MOVING_ROLES);
         const read = await choosable(tx, states, member.orgId, mandateId, 'change');

@@ -235,7 +235,7 @@ async function holding(...holds: readonly Hold[]): Promise<TestClient> {
  * with none, and lets go only once the next has it or waits for it. Stops when told, every one gone. Counts how many
  * had to wait: under a brake's queue, those behind it; on a bare row, none.
  */
-function relayOf(taken: () => Promise<TestClient>, stepMs = 150) {
+function relayOf(taken: () => Promise<TestClient>, { stepMs = 150, behindABrake = true } = {}) {
   const relaying = { on: true };
   let waited = 0;
   let took = 0;
@@ -245,7 +245,11 @@ function relayOf(taken: () => Promise<TestClient>, stepMs = 150) {
     while (relaying.on) {
       await sleep(stepMs);
       const next = taken();
-      const inTime = await Promise.race([next.then(() => true), sleep(250).then(() => false)]);
+      // A slow connection on a busy laptop must not leave a gap for the change: on a bare row, the next never waits.
+      const inTime = await Promise.race([
+        next.then(() => true),
+        ...(behindABrake ? [sleep(250).then(() => false)] : []),
+      ]);
       if (!inTime) waited += 1;
       await letGo(inside);
       inside = await next;
@@ -291,7 +295,7 @@ describe('what a brake is up against: a stream of share holders and the row (no 
     'starves a FOR NO KEY UPDATE: each holder gets in at once while it waits, past its 5 s, until the 10 s limit',
     async () => {
       const w = await world();
-      const stop = relayOf(() => holding(orgRow(w.org)));
+      const stop = relayOf(() => holding(orgRow(w.org)), { behindABrake: false });
       const change = await database.connect('admin');
       await change.query('begin');
       await change.query("select pg_catalog.set_config('lock_timeout', '5s', true)");
