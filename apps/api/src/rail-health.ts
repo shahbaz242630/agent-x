@@ -25,7 +25,6 @@
 // In this process's memory: a restart forgets it, and the next unknowns count
 // again. Nothing here decides a payment: a held one waits, APPROVED, its money
 // held, and is judged whole by Tx A when it goes.
-import type { FinancialRailAdapter } from '@agentx/core/modules/providers';
 import type { Clock } from '@agentx/core/shared-kernel';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -354,21 +353,4 @@ export function createRailHealth({
       };
     },
   };
-}
-
-/**
- * The rail, each status lookup that answers telling `health`: the bank check's
- * own calls are the probe, so nothing is sent to the bank for its sake alone.
- * A child of the rail, not a copy, so an adapter's methods keep working
- * whichever way it is built.
- */
-export function watchedRail(rail: FinancialRailAdapter, health: Pick<RailHealth, 'lookupBegun'>): FinancialRailAdapter {
-  return Object.assign(Object.create(rail) as FinancialRailAdapter, {
-    getExecution: async (...lookup: Parameters<FinancialRailAdapter['getExecution']>) => {
-      const answered = health.lookupBegun(lookup[0].organizationId);
-      const answer = await rail.getExecution(...lookup);
-      answered();
-      return answer;
-    },
-  });
 }

@@ -137,7 +137,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { finishedWithinStop } from './background.ts';
-import { createFairLanes, createGate, isOrganisationWide, type LaneStep } from './fair-lanes.ts';
+import { createFairLanes, createGate, type Gate, isOrganisationWide, type LaneStep } from './fair-lanes.ts';
 import { alertAdmins } from './payment-alerts.ts';
 import type { RailEntry, RailHealth, RailHold } from './rail-health.ts';
 import { type AuthorityRead, authorityOf, type VoidTables } from './request-voids.ts';
@@ -174,13 +174,13 @@ const HANDOFF_LIMITS = { total: 24, perOrganisation: 4 } as const;
 const DATABASE_GATE = 2;
 
 /** How long a run starts new work for: about 40 s at worst, with the last calls' answers. */
-const RUN_BUDGET_MS = 30_000;
+export const RUN_BUDGET_MS = 30_000;
 
 /**
  * How long a stop waits for calls under way: well inside the API's own stop deadline (25 s), which a hung bank's 30 s
  * would pass, losing the log's flush. Those left stay SUBMISSION_PENDING, as after a crash: the bank check settles them.
  */
-const STOP_WAIT_MS = 15_000;
+export const STOP_WAIT_MS = 15_000;
 
 /** First anchors made at once: each may take 120 s on a long chain, and holds no bank slot while it does. */
 const ANCHOR_GATE = 2;
@@ -292,6 +292,18 @@ export async function withinTime<T>(answer: Promise<T>, ms: number): Promise<T> 
   }
 }
 
+/**
+ * The gate the hand-off and the bank check share, made once for the process. Refused
+ * at start where it would take over a third of the pool: past it, these jobs
+ * could keep agents' decisions from their connections.
+ */
+export function handoffDatabaseGate(poolMax: number): Gate {
+  if (DATABASE_GATE > Math.floor(poolMax / 3)) {
+    throw new RangeError(`The hand-off's ${String(DATABASE_GATE)} transactions at once need a pool of at least 6`);
+  }
+  return createGate(DATABASE_GATE);
+}
+
 export function createHandoff({
   list,
   database,
@@ -307,7 +319,7 @@ export function createHandoff({
   unknownAfterMs = UNKNOWN_AFTER_MS,
   limits = HANDOFF_LIMITS,
   runBudgetMs = RUN_BUDGET_MS,
-  poolMax,
+  databaseGate,
   stopWaitMs = STOP_WAIT_MS,
   anchoring,
 }: {
@@ -333,8 +345,8 @@ export function createHandoff({
   readonly limits?: { readonly total: number; readonly perOrganisation: number };
   /** How long a run starts new work for (RUN_BUDGET_MS unless a test names less). */
   readonly runBudgetMs?: number;
-  /** The pool's size of the process it runs in: refused at start where the gate would take over a third of it. */
-  readonly poolMax: number;
+  /** Its transactions, and the bank check's, at once (`handoffDatabaseGate`). */
+  readonly databaseGate: Gate;
   /** How long a stop waits for calls under way (STOP_WAIT_MS unless a test names less). */
   readonly stopWaitMs?: number;
   /**
@@ -351,11 +363,6 @@ export function createHandoff({
   if (unknownAfterMs <= callTimeoutMs) {
     throw new RangeError("A transaction's wait for its answer must be longer than the partner's call may take");
   }
-  // Refused at start: past a third of the pool, the hand-off could keep agents' decisions from their connections.
-  if (DATABASE_GATE > Math.floor(poolMax / 3)) {
-    throw new RangeError(`The hand-off's ${String(DATABASE_GATE)} transactions at once need a pool of at least 6`);
-  }
-  const databaseGate = createGate(DATABASE_GATE);
   const anchorGate = createGate(ANCHOR_GATE);
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
   // Its first beat is its start, so /health gives a new process HEARTBEAT_STALE_MS to make its first run; after that

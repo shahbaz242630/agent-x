@@ -233,6 +233,10 @@ function rotated(ids: readonly string[], last: string | undefined): readonly str
   return [...ids.slice(at + 1), ...ids.slice(0, at + 1)];
 }
 
+export interface Gate {
+  run<T>(key: string, work: () => Promise<T>, ahead?: boolean): Promise<T>;
+}
+
 /**
  * At most `limit` at once, and at most one of a key (an organisation): one whose
  * work is stuck behind its own organisation's lock can't fill the gate for the
@@ -241,9 +245,7 @@ function rotated(ids: readonly string[], last: string | undefined): readonly str
  * the money it speaks for is already at the bank). Work inside must never wait
  * on this gate.
  */
-export function createGate(limit: number): {
-  run<T>(key: string, work: () => Promise<T>, ahead?: boolean): Promise<T>;
-} {
+export function createGate(limit: number): Gate {
   interface Waiting {
     readonly key: string;
     readonly go: () => void;

@@ -45,7 +45,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff } from './handoff.ts';
+import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { createRailHealth } from './rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
@@ -124,7 +124,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
     clock,
     logger: testLogger(capture),
     health: createRailHealth({ clock, logger: testLogger(capture) }),
-    poolMax: 6,
+    databaseGate: handoffDatabaseGate(6),
   });
 
 const checksOf = (w: World) =>
@@ -137,6 +137,8 @@ const checksOf = (w: World) =>
     ids,
     clock,
     logger: testLogger(capture),
+    health: createRailHealth({ clock, logger: testLogger(capture) }),
+    databaseGate: handoffDatabaseGate(6),
   });
 
 /** The request's transaction as it stands. */

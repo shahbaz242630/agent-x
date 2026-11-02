@@ -29,7 +29,7 @@ import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
-import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
+import { createHandoff, HANDOFF_EVERY_MS, handoffDatabaseGate } from './handoff.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
 import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
@@ -39,7 +39,7 @@ import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.t
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
-import { createRailHealth, watchedRail } from './rail-health.ts';
+import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
@@ -172,25 +172,27 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     anchors: anchorStore,
   });
-  // The bank breaker the hand-off holds to, reopened by the bank check's own lookups (4D2e Stage F).
-  const railHealth = createRailHealth({ clock: systemClock, logger });
+  // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
+  // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.
+  const railWork = rail && {
+    rail,
+    health: createRailHealth({ clock: systemClock, logger }),
+    databaseGate: handoffDatabaseGate(config.db.poolMax),
+  };
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
   const handoff =
-    rail &&
+    railWork &&
     createHandoff({
       ...clocked,
-      rail,
-      health: railHealth,
-      poolMax: config.db.poolMax,
+      ...railWork,
       outbox,
       // The anchor check starts before the hand-off's first run: this list's order.
       anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
     });
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
   // the payments the partner's messages name first (E1b).
-  const paymentChecks =
-    rail && createPaymentChecks({ ...clocked, rail: watchedRail(rail, railHealth), outbox, events: providerEvents });
+  const paymentChecks = railWork && createPaymentChecks({ ...clocked, ...railWork, outbox, events: providerEvents });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).

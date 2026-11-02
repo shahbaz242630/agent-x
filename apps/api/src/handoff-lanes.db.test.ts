@@ -24,12 +24,12 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff, HEARTBEAT_STALE_MS, QUEUE_STALE_MS } from './handoff.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, QUEUE_STALE_MS, handoffDatabaseGate } from './handoff.ts';
 import { handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createPaymentChecks } from './payment-checks.ts';
-import { createRailHealth, type RailHealth, watchedRail } from './rail-health.ts';
+import { createRailHealth, type RailHealth } from './rail-health.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
 
@@ -108,7 +108,7 @@ const handoffOver = (worlds: readonly World[], rail: FakeRail, options: Partial<
     ids,
     clock,
     logger: testLogger(capture),
-    poolMax: 6,
+    databaseGate: handoffDatabaseGate(6),
     // One at a time unless a test says otherwise, so what it counts falls the same each run.
     limits: { total: 1, perOrganisation: 1 },
     ...options,
@@ -182,8 +182,13 @@ const unknownsFrom = (orgs: readonly string[]) => {
 };
 
 /** Answers a status lookup for the organisation, as the bank check would. */
-const lookedFor = (w: World, rail: FakeRail) =>
-  watchedRail(rail, health).getExecution({ organizationId: w.org, instructionId: ids.next() });
+const lookedFor = (w: World, rail: FakeRail) => {
+  const answered = health.lookupBegun(w.org);
+  return rail.getExecution({ organizationId: w.org, instructionId: ids.next() }).then((lookup) => {
+    answered();
+    return lookup;
+  });
+};
 
 /** The app's database, `opened` called at each transaction it opens: a run's trips counted, or stopped at one. */
 const databaseWatched = (opened: () => void): Database<HandoffWorldTables> =>
@@ -581,6 +586,8 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
       ids,
       clock,
       logger: testLogger(capture),
+      health: createRailHealth({ clock, logger: testLogger(capture) }),
+      databaseGate: handoffDatabaseGate(6),
     }).run();
     for (const id of under) {
       expect(await paymentOf(w, id)).toMatchObject({ transactions: 1, transaction: { status: 'PROCESSING' } });
@@ -695,7 +702,7 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
       outbox: createOutbox({ ids, clock }),
       rail: hanging.rail,
       health,
-      poolMax: 6,
+      databaseGate: handoffDatabaseGate(6),
       keys,
       ids,
       clock,
@@ -1107,22 +1114,8 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
   });
 
   it('refuses to start with a gate over a third of the pool', () => {
-    const job = (poolMax: number) => () =>
-      createHandoff({
-        list: () => Promise.resolve([]),
-        database: app,
-        outbox: createOutbox({ ids, clock }),
-        rail: {} as FakeRail,
-        health,
-        keys,
-        ids,
-        clock,
-        logger: testLogger(capture),
-        poolMax,
-      });
-
-    expect(job(5)).toThrow(RangeError);
-    expect(job(6)).not.toThrow();
+    expect(() => handoffDatabaseGate(5)).toThrow(RangeError);
+    expect(() => handoffDatabaseGate(6)).not.toThrow();
   });
 });
 

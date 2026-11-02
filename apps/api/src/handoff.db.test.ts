@@ -66,7 +66,7 @@ import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createAnchorCheck } from './anchor-check.ts';
-import { createHandoff, HEARTBEAT_STALE_MS, QUEUE_STALE_MS } from './handoff.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, QUEUE_STALE_MS, handoffDatabaseGate } from './handoff.ts';
 import {
   ALLOWED,
   handoffWorld,
@@ -150,7 +150,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resol
     clock,
     logger: testLogger(capture),
     health: createRailHealth({ clock, logger: testLogger(capture) }),
-    poolMax: 6,
+    databaseGate: handoffDatabaseGate(6),
   });
 
 /** The platform's hand-off pause moved in the caller's transaction, as the operator's command moves it (B1). */
@@ -336,7 +336,7 @@ describe('an approved request handed to the partner once (B4)', () => {
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
-      poolMax: 6,
+      databaseGate: handoffDatabaseGate(6),
       page: 1,
     }).run();
 
@@ -419,7 +419,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
-      poolMax: 6,
+      databaseGate: handoffDatabaseGate(6),
     });
 
     await job.run();
@@ -482,7 +482,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
         clock,
         logger: testLogger(capture),
         health: createRailHealth({ clock, logger: testLogger(capture) }),
-        poolMax: 6,
+        databaseGate: handoffDatabaseGate(6),
         limits: { total: 1, perOrganisation: 1 },
       }).run();
     } finally {
@@ -772,7 +772,7 @@ describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, S
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
-      poolMax: 6,
+      databaseGate: handoffDatabaseGate(6),
       unknownAfterMs: 60_000,
     });
 
@@ -897,7 +897,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
-      poolMax: 6,
+      databaseGate: handoffDatabaseGate(6),
       ...limits,
     });
 
@@ -1165,7 +1165,7 @@ describe('approved requests left standing, said for the queue-age alert (gate H8
       clock,
       logger: testLogger(capture),
       health: createRailHealth({ clock, logger: testLogger(capture) }),
-      poolMax: 6,
+      databaseGate: handoffDatabaseGate(6),
     });
 
     await job.run();
@@ -1510,7 +1510,7 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
               logger: testLogger(capture),
               // Many unknowns in a row are this model's point: the breaker has tests of its own (handoff-lanes.db.test.ts).
               health: createRailHealth({ clock, logger: testLogger(capture), laneUnknowns: 1_000 }),
-              poolMax: 6,
+              databaseGate: handoffDatabaseGate(6),
               // One at a time, each run reaching one that dies at most: at concurrency, handoff-lanes.db.test.ts.
               limits: { total: 1, perOrganisation: 1 },
               ...LIMITS,

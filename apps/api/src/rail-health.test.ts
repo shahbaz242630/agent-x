@@ -3,11 +3,10 @@
 // for it answered; everyone held by 5 unknowns from 3 organisations in 60 s,
 // half-open by a lookup begun since, 3 calls at once until an acceptance, tripped
 // again by any unknown with a growing wait; and only a long hold an error.
-import { type FinancialRailAdapter, RailUnavailable } from '@agentx/core/modules/providers';
 import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { createRailHealth, type RailEntry, type RailHealth, watchedRail } from './rail-health.ts';
+import { createRailHealth, type RailEntry, type RailHealth } from './rail-health.ts';
 
 let clock: FixedClock;
 let capture: LogCapture;
@@ -793,65 +792,5 @@ describe('only a long hold is an error', () => {
     health.enter('a');
 
     expect(lines('handoff.hold_lasting')).toEqual([expect.objectContaining({ minutes: 15 })]);
-  });
-});
-
-describe('the rail, watched', () => {
-  const REF = { organizationId: 'a', instructionId: 'i' };
-  const railAnswering = (getExecution: FinancialRailAdapter['getExecution']) =>
-    ({ identity: { partner: 'fake' }, getExecution }) as unknown as FinancialRailAdapter;
-
-  it.each([
-    ['not found', { kind: 'not_found' }],
-    ['found', { kind: 'found', execution: {} }],
-  ] as const)('tells the health a lookup answered, for its organisation: %s', async (_name, answer) => {
-    unknowns('a', 3);
-    clock.advanceBy(5 * MINUTE);
-    const lookup = () => Promise.resolve(answer) as ReturnType<FinancialRailAdapter['getExecution']>;
-
-    await expect(watchedRail(railAnswering(lookup), health).getExecution(REF)).resolves.toEqual(answer);
-
-    expect(health.heldFor('a')).toBeUndefined();
-  });
-
-  it('begins it before the call: one under way at a trip proves nothing', async () => {
-    unknowns('a', 2);
-    unknowns('b', 2);
-    const { promise, resolve } = Promise.withResolvers<{ readonly kind: 'not_found' }>();
-    const under = watchedRail(
-      railAnswering(() => promise),
-      health,
-    ).getExecution(REF);
-    unknowns('c', 1);
-
-    resolve({ kind: 'not_found' });
-    await under;
-
-    expect(health.heldFor('z')).toBe('bank');
-  });
-
-  it('tells it nothing for a lookup that didn’t answer', async () => {
-    tripped();
-    const lookup = () => Promise.reject(new RailUnavailable());
-
-    await expect(watchedRail(railAnswering(lookup), health).getExecution(REF)).rejects.toThrow(RailUnavailable);
-
-    expect(health.heldFor('z')).toBe('bank');
-  });
-
-  it('keeps everything else of the rail, a class’s methods among them', () => {
-    class Adapter {
-      readonly name = 'adapter';
-      nameOf() {
-        return this.name;
-      }
-      getExecution() {
-        return Promise.resolve({ kind: 'not_found' as const });
-      }
-    }
-
-    const watched = watchedRail(new Adapter() as unknown as FinancialRailAdapter, health) as unknown as Adapter;
-
-    expect(watched.nameOf()).toBe('adapter');
   });
 });
