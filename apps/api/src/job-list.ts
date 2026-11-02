@@ -26,9 +26,9 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
-import { anchorLogOf } from './anchor-store.ts';
 import { scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
+import { anchorLogOf } from './anchor-store.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
