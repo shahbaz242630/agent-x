@@ -5,7 +5,7 @@
 // with the count in one statement, and events read back exactly.
 import { AsyncResource } from 'node:async_hooks';
 
-import { ChainBroken, type ChainReport } from '@agentx/platform/audit-chain';
+import { CHAIN_START, ChainBroken, type ChainReport } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, limitStatements } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -551,5 +551,107 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
         'alter table platform_controls.audit_events alter column details set not null',
       );
     }
+  });
+});
+
+describe('checking the platform chain from its anchor (4D2e E2)', () => {
+  const ORGS = ['0199a0f0-0000-7000-8000-00000000c001', '0199a0f0-0000-7000-8000-00000000c002'];
+  const created = (orgId: string | undefined): PlatformEvent => ({
+    actor: { type: 'system', id: 'api' },
+    action: 'organization.created',
+    details: { orgId: orgId ?? '' },
+  });
+
+  const checked = async () => {
+    const report = await verify();
+    if (!report.ok) throw new Error('the chain should check out');
+    const { seq, hash, macKeyVersion } = report;
+    return { seq, hash, macKeyVersion };
+  };
+
+  it('reads an empty chain as empty, in one trip', async () => {
+    expect(await chain.checkFromAnchor(app, CHAIN_START)).toMatchObject({ ok: true, seq: 0n, to: 0n });
+  });
+
+  it('goes on past its anchor, stopping at its limit, and passes a count and a full pass', async () => {
+    await record(started(1), started(2));
+    const from = await checked();
+    await record(started(3), started(4));
+
+    expect(await chain.checkFromAnchor(app, from)).toMatchObject({ ok: true, seq: 4n, to: 4n, macKeyVersion: 1 });
+    expect(await chain.checkFromAnchor(app, from, 1)).toMatchObject({ ok: true, seq: 3n, to: 4n });
+    expect(await chain.countStep(app, 0n, 4n)).toBeUndefined();
+    expect(await chain.passStep(app, CHAIN_START, from, 10)).toMatchObject({ ok: true, seq: 2n, to: 2n });
+  });
+
+  it('finds the tail removed, the anchored event gone, and a middle event by count and pass alone', async () => {
+    await record(started(1), started(2), started(3));
+    const whole = await checked();
+
+    await tamper('delete from platform_controls.audit_events where seq = 2');
+    expect(await chain.checkFromAnchor(app, whole)).toMatchObject({ ok: true, seq: 3n });
+    expect(await chain.countStep(app, 0n, 3n)).toEqual({ reason: 'gap', seq: 1n });
+    expect(await chain.passStep(app, CHAIN_START, whole, 10)).toEqual({
+      ok: false,
+      problem: { reason: 'gap', seq: 2n },
+    });
+
+    await tamper('delete from platform_controls.audit_events where seq = 3');
+    expect(await chain.checkFromAnchor(app, whole)).toEqual({ ok: false, problem: { reason: 'head', seq: 3n } });
+  });
+
+  it('finds the anchored event edited', async () => {
+    await record(started(1), started(2));
+    const from = await checked();
+    await tamper(`update platform_controls.audit_events set action = 'probe.edited' where seq = 2`);
+
+    expect(await chain.checkFromAnchor(app, from)).toEqual({ ok: false, problem: { reason: 'anchor', seq: 2n } });
+  });
+
+  it("reads two heads as none it can use, the table's only-row key gone", async () => {
+    await record(started(1));
+    const from = await checked();
+    await tamper(
+      'alter table platform_controls.audit_head drop constraint audit_head_pkey',
+      'insert into platform_controls.audit_head select * from platform_controls.audit_head',
+    );
+    try {
+      expect(await chain.checkFromAnchor(app, from)).toEqual({ ok: false, problem: { reason: 'head', seq: 0n } });
+    } finally {
+      await tamper(
+        'truncate platform_controls.audit_head',
+        'alter table platform_controls.audit_head add primary key (only_row)',
+      );
+    }
+  });
+
+  it("believes no anchored event with another at its number, the table's key gone", async () => {
+    await record(started(1), started(2));
+    const from = await checked();
+    await tamper(
+      'alter table platform_controls.audit_events drop constraint audit_events_pkey cascade',
+      `insert into platform_controls.audit_events
+       select seq, gen_random_uuid(), recorded_at, actor_type, actor_id, action, details, prev_hash, hash, mac,
+              mac_key_version from platform_controls.audit_events where seq = 2`,
+    );
+    try {
+      expect(await chain.checkFromAnchor(app, from)).toEqual({ ok: false, problem: { reason: 'anchor', seq: 2n } });
+    } finally {
+      await tamper(
+        'truncate platform_controls.audit_events',
+        'alter table platform_controls.audit_events add primary key (seq)',
+      );
+    }
+  });
+
+  it('gives the organisations recorded past a number, and the number to ask from next', async () => {
+    const [first, second] = ORGS;
+    expect(await chain.createdOrganizationsSince(app, 0n)).toEqual({ orgIds: [], seq: 0n });
+
+    await record(started(1), created(first), started(2), created(second), started(3));
+
+    expect(await chain.createdOrganizationsSince(app, 0n)).toEqual({ orgIds: [first, second], seq: 4n });
+    expect(await chain.createdOrganizationsSince(app, 2n)).toEqual({ orgIds: [second], seq: 4n });
+    expect(await chain.createdOrganizationsSince(app, 4n)).toEqual({ orgIds: [], seq: 4n });
   });
 });

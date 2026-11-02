@@ -460,6 +460,48 @@ export async function countStep(
 
 const isBytes = (value: unknown): value is Buffer => Buffer.isBuffer(value);
 
+/** A stored number as it should read: a bigint, or null where a stretch holds none. Otherwise undefined. */
+const numberIn = (value: unknown): bigint | null | undefined =>
+  typeof value === 'bigint' || value === null ? value : undefined;
+
+/**
+ * A chain's edges from the one row a store's edges() read: the head's columns
+ * as `head_*`, how many heads there are as `heads`, `lowest`, `highest` and
+ * `head_event_hash`, and the anchored event's as sealedFields reads them, with
+ * its content made by the store. A column of the wrong type reads as a head
+ * that can't be read: the database owner could have changed any of them.
+ */
+export function edgesIn(
+  row: Readonly<Record<string, unknown>>,
+  content: StoredEntry['content'] | undefined,
+): ChainEdges {
+  const { heads, lowest, highest, head_event_hash: headEventHash } = row;
+  const [low, high] = [numberIn(lowest), numberIn(highest)];
+  const sealed = sealedFields(row);
+  const shared = {
+    lowest: low ?? null,
+    highest: high ?? null,
+    headEventHash: isBytes(headEventHash) ? headEventHash : undefined,
+    anchored: sealed === undefined || content === undefined ? undefined : { ...sealed, content },
+  };
+  if (low === undefined || high === undefined) return { ...shared, head: 'unreadable' };
+  if (heads === 0n) return { ...shared, head: 'none' };
+  const head = headFields({
+    seq: row.head_seq,
+    hash: row.head_hash,
+    mac: row.head_mac,
+    mac_key_version: row.head_mac_key_version,
+  });
+  return { ...shared, head: heads === 1n && head !== undefined ? head : 'unreadable' };
+}
+
+/** A stretch's count, as a store's countBetween read it: anything but a whole number is the store failing. */
+export function countIn(row: Readonly<Record<string, unknown>> | undefined): bigint {
+  const stored = row?.stored;
+  if (typeof stored !== 'bigint') throw new ChainStoreError('it read no count of the events');
+  return stored;
+}
+
 /**
  * A head row's fields as a head, or nothing if one is missing or of the wrong
  * type: the database owner could have changed any of them, or their types.

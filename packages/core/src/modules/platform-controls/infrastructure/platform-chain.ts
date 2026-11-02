@@ -11,19 +11,28 @@ import {
   type AnchorPoint,
   appendEvent,
   type Chain,
+  type ChainEdgeReader,
+  type ChainProblem,
   type ChainReader,
   type ChainReport,
+  type ChainStep,
   type ChainWriter,
+  type CheckedPoint,
   clockOf,
+  countIn,
+  countStep,
+  edgesIn,
   entryIsSealed,
   headFields,
+  passStep,
   sealedFields,
   type StoredEntry,
   verifyChain,
+  verifyFromAnchor,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { limitStatements } from '@agentx/platform/db';
+import { limitedTransaction, limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
@@ -75,6 +84,31 @@ export interface PlatformChain {
    * text give nothing.
    */
   createdOrganizations(db: Kysely<PlatformControlsTables>): Promise<string[]>;
+  /**
+   * The chain checked from its last anchor (verifyFromAnchor, 4D2e E): at most
+   * `most` events past it, in a limited transaction of its own.
+   */
+  checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep>;
+  /** One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  passStep(
+    db: Kysely<PlatformControlsTables>,
+    cursor: CheckedPoint,
+    target: CheckedPoint,
+    most: number,
+  ): Promise<ChainStep>;
+  /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  countStep(db: Kysely<PlatformControlsTables>, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
+  /**
+   * The organisations `createdOrganizations` gives, recorded past `afterSeq`
+   * alone, and the number to ask from next time: the last such event's, or
+   * `afterSeq` if there were none (4D2e E: not the whole list every run). Read
+   * as stored, as it is; an event's number moves on even where its details
+   * give no organisation. Limited as checkFromAnchor's.
+   */
+  createdOrganizationsSince(
+    db: Kysely<PlatformControlsTables>,
+    afterSeq: bigint,
+  ): Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
 }
 
 /** The platform event that records an organisation made, with its `orgId` in the details. */
@@ -169,8 +203,35 @@ function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: strin
 }
 
 /** Checking's reads of the platform-controls tables. */
-function readerFor(tx: PlatformTransaction): ChainReader {
+function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
   return {
+    async edges(anchored) {
+      // One statement, so all of it comes from one moment. Each on the events' key, whatever the chain's length.
+      const { rows } = await sql<Record<string, unknown>>`
+        select (select pg_catalog.count(*) from platform_controls.audit_head) as heads,
+               h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
+               (select pg_catalog.min(p.seq) from platform_controls.audit_events p) as lowest,
+               (select pg_catalog.max(p.seq) from platform_controls.audit_events p) as highest,
+               (select p.hash from platform_controls.audit_events p where p.seq = h.seq limit 1) as head_event_hash,
+               e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+        from (values (1)) as one (x)
+        left join (select * from platform_controls.audit_head limit 1) as h on true
+        left join platform_controls.audit_events e on e.seq = ${anchored}
+      `.execute(tx);
+      const [row, ...others] = rows;
+      // Two events at one number means the table's key is gone: neither is the one anchored.
+      const anchoredRow = row === undefined || others.length > 0 ? { ...row, seq: null } : row;
+      return edgesIn(anchoredRow, contentOf(anchoredRow));
+    },
+
+    async countBetween(after, upTo) {
+      const { rows } = await sql<Record<string, unknown>>`
+        select pg_catalog.count(*) as stored from platform_controls.audit_events e
+        where e.seq > ${after} and e.seq <= ${upTo}
+      `.execute(tx);
+      return countIn(rows[0]);
+    },
+
     async state() {
       // One statement, so the head and the count of events come from the same moment.
       const { rows } = await sql<Record<string, unknown>>`
@@ -285,6 +346,39 @@ export function createPlatformChain({
             .execute();
           return rows.map((row) => orgIdIn(row.details)).filter((id) => id !== undefined);
         });
+    },
+
+    checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep> {
+      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx), from, most));
+    },
+
+    passStep(
+      db: Kysely<PlatformControlsTables>,
+      cursor: CheckedPoint,
+      target: CheckedPoint,
+      most: number,
+    ): Promise<ChainStep> {
+      return limitedTransaction(db, (tx) => passStep(keys, CHAIN, readerFor(tx), cursor, target, most));
+    },
+
+    countStep(db: Kysely<PlatformControlsTables>, after: bigint, upTo: bigint): Promise<ChainProblem | undefined> {
+      return limitedTransaction(db, (tx) => countStep(readerFor(tx), after, upTo));
+    },
+
+    async createdOrganizationsSince(db: Kysely<PlatformControlsTables>, afterSeq: bigint) {
+      const rows = await limitedTransaction(db, (tx) =>
+        tx
+          .selectFrom('platform_controls.audit_events')
+          .select(['seq', 'details'])
+          .where('action', '=', ORGANIZATION_CREATED)
+          .where('seq', '>', afterSeq)
+          .orderBy('seq')
+          .execute(),
+      );
+      return Object.freeze({
+        orgIds: rows.map((row) => orgIdIn(row.details)).filter((id) => id !== undefined),
+        seq: rows.at(-1)?.seq ?? afterSeq,
+      });
     },
   });
 }
