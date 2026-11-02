@@ -19,11 +19,15 @@ import type { buildServer } from './server.ts';
 /** Every server runApi builds, including one it closes itself after a failed start. */
 const built = vi.hoisted((): FastifyInstance[] => []);
 
+/** What runApi gave buildServer last, so a test can call what it passed. */
+const serverOptions = vi.hoisted((): { last: object } => ({ last: {} }));
+
 vi.mock('./server.ts', async (importOriginal) => {
   const actual = await importOriginal<{ buildServer: typeof buildServer }>();
   return {
     ...actual,
     buildServer: async (...args: Parameters<typeof buildServer>) => {
+      serverOptions.last = args[0];
       const server = await actual.buildServer(...args);
       built.push(server);
       return server;
@@ -212,6 +216,8 @@ vi.mock('./hold-history-check.ts', async (importOriginal) => {
 });
 
 /** The subjects the hold clearing checks beyond their signed states (G1), as main.ts builds it. */
+const identityReads = vi.hoisted(() => [] as { read: string; args: readonly unknown[] }[]);
+
 const clearingChecks = vi.hoisted(() => ({ subjects: [] as string[][] }));
 
 vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
@@ -222,6 +228,15 @@ vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
     createHoldClearings: (options: { readonly namedRecordChecks?: object }) => {
       clearingChecks.subjects.push(Object.keys(options.namedRecordChecks ?? {}));
       return actual.createHoldClearings(options as never);
+    },
+    // What the server's two membership reads call: proven in identity's own tests, here who they are asked for.
+    membershipFor: (...args: readonly unknown[]) => {
+      identityReads.push({ read: 'membershipFor', args });
+      return Promise.resolve('a membership');
+    },
+    membersFor: (...args: readonly unknown[]) => {
+      identityReads.push({ read: 'membersFor', args });
+      return Promise.resolve('the members');
     },
   };
 });
@@ -761,6 +776,65 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
     expect(events()).toContain('api.listen_failed');
     await expect(built.at(-1)?.inject('/health')).rejects.toThrow();
     expect(fake.created.map((database) => database.destroyed)).toEqual([false, true]);
+  });
+});
+
+describe("the server's two membership reads, as the process wires them", () => {
+  const ORG = '0199a0f0-0000-7000-8000-00000000a001';
+  const USER = '0199a0f0-0000-7000-8000-00000000a002';
+  const CORRELATION = '0199a0f0-0000-7000-8000-00000000a003';
+
+  interface Services {
+    readonly keys: unknown;
+    readonly ids: unknown;
+    readonly correlationId: string;
+    readonly logger: { info(event: string): void };
+  }
+
+  /** The services a read was given, its logger's line naming the correlation ID. */
+  const expectServices = (capture: LogCapture, services: unknown) => {
+    const given = services as Services;
+    expect(given.correlationId).toBe(CORRELATION);
+    expect(given.keys).toBeDefined();
+    expect(given.ids).toBeDefined();
+    given.logger.info('test.from_a_read');
+    expect(capture.lines().at(-1)).toEqual(
+      expect.objectContaining({ event: 'test.from_a_read', correlationId: CORRELATION }),
+    );
+  };
+
+  beforeEach(() => {
+    identityReads.length = 0;
+  });
+
+  it('findMembership asks for that organisation and person, on the pool, with a logger naming the request', async () => {
+    const { capture } = await start();
+    const { findMembership } = serverOptions.last as {
+      findMembership: (orgId: string, userId: string, correlationId: string) => Promise<unknown>;
+    };
+
+    await expect(findMembership(ORG, USER, CORRELATION)).resolves.toBe('a membership');
+
+    const [asked] = identityReads;
+    expect(asked?.read).toBe('membershipFor');
+    expect(asked?.args[0]).toBe(fake.created[0]);
+    expect(asked?.args.slice(2)).toEqual([ORG, USER]);
+    expectServices(capture, asked?.args[1]);
+  });
+
+  it('listMembers asks for that organisation, on the pool, with a logger naming the request', async () => {
+    const { capture } = await start();
+    const { listMembers } = serverOptions.last as {
+      listMembers: (orgId: string, correlationId: string) => Promise<unknown>;
+    };
+
+    await expect(listMembers(ORG, CORRELATION)).resolves.toBe('the members');
+
+    const [asked] = identityReads;
+    expect(asked?.read).toBe('membersFor');
+    expect(asked?.args[0]).toBe(fake.created[0]);
+    expect(asked?.args.slice(2)).toEqual([ORG]);
+    expectServices(capture, asked?.args[1]);
   });
 });
 

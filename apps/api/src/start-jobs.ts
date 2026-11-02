@@ -16,8 +16,8 @@ export function startJobs(jobs: readonly Job[]): { stop(): Promise<void> } {
 }
 
 /** Holds a process with no server open until it stops. */
-export function keepAlive(): { stop(): void } {
-  const timer = setInterval(() => undefined, KEEP_ALIVE_EVERY_MS);
+export function keepAlive(everyMs = KEEP_ALIVE_EVERY_MS): { stop(): void } {
+  const timer = setInterval(() => undefined, everyMs);
   return {
     stop: () => {
       clearInterval(timer);
