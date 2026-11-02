@@ -67,32 +67,51 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     await oneCopy?.zoneSealing.run();
   };
 
-  let server: FastifyInstance | undefined;
-  if (role === 'jobs') {
-    await firstZonePass();
-  } else {
-    server = await startWeb(booted, parts, healthChecksOf(booted, parts, leadership, oneCopy), firstZonePass);
-    if (server === undefined) return undefined;
-  }
-
-  // One try at the lease before the jobs start, so a process alone runs them at once, as it always has.
-  await leadership?.start(() => oneCopy?.handoff?.beating() === true && oneCopy.paymentChecks?.beating() === true);
-  const jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);
+  // What a stop finds, which comes at any moment from here on.
+  const started: {
+    server?: FastifyInstance | undefined;
+    jobs?: ReturnType<typeof startJobs>;
+    stopped?: boolean;
+  } = {};
+  const stopping = (): boolean => started.stopped === true;
   const holding = role === 'jobs' ? keepAlive() : undefined;
+  // Before the first wait on the lease: a stop now needn't kill the process halfway.
   onStopSignals(
     booted,
-    server,
+    () => started.server,
     {
       stop: async () => {
+        started.stopped = true;
         // The lease last: another copy takes over only once this one's runs have ended.
-        await jobs.stop();
+        await started.jobs?.stop();
         await leadership?.stop();
         holding?.stop();
       },
     },
     parts.recorder,
   );
-  return server;
+
+  // One try at the lease, within its own deadline, before anything answers or runs: a process alone leads at once,
+  // so a wake's first /health is its own jobs', not a heartbeat left old by its sleep. A database that doesn't answer
+  // holds the listening up to that deadline.
+  await leadership?.start(() => oneCopy?.handoff?.beating() === true && oneCopy.paymentChecks?.beating() === true);
+  if (stopping()) return undefined;
+  if (role === 'jobs') {
+    await firstZonePass();
+  } else {
+    started.server = await startWeb(
+      booted,
+      parts,
+      healthChecksOf(booted, parts, leadership, oneCopy),
+      firstZonePass,
+      async () => {
+        await leadership?.stop();
+      },
+    );
+    if (started.server === undefined) return undefined;
+  }
+  if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);
+  return started.server;
 }
 
 // Only when Node runs this file itself. That's a real process, which in-process

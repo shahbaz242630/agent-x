@@ -28,6 +28,11 @@ export const PLAIN_WORDS = {
     broke: 'A page before signing in, such as the sign-in page, may not have worked; the server is fine.',
     next: 'If many come, a developer should read them. Anyone can send these, so they may be forged.',
   },
+  'jobs.not_leading': {
+    happened: 'This copy of the API has gone too long without the right to run the background jobs.',
+    broke: 'Unless another copy has it, the tamper checks, payment hand-offs and sweeps are not running.',
+    next: 'Check the database answers and its job lease row: a row changed or deleted may be tampering. See the runbook.',
+  },
   'jobs.lease_lost': {
     happened: 'This copy of the API stopped being the one running the background jobs.',
     broke: 'Its jobs were stopped part way; each picks up where it was once a copy leads again.',

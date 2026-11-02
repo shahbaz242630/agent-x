@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createLeadership,
+  LEASE_RETRY_AFTER_MS,
+  LEASE_TRY_WITHIN_MS,
   type Leadership,
   type LeaseStore,
   LEASE_RENEW_EVERY_MS,
@@ -38,6 +40,8 @@ function rowAt(now: () => number) {
 }
 
 const SECOND = 1000;
+/** Three anchor intervals, as it is run. */
+const NOT_LEADING_MS = 15 * 60 * SECOND;
 const now = () => Date.now();
 
 let capture: LogCapture;
@@ -54,7 +58,7 @@ afterEach(async () => {
 });
 
 const leadershipOf = (store: LeaseStore, beating = () => false) => {
-  const one = createLeadership({ store, logger: testLogger(capture), now });
+  const one = createLeadership({ store, logger: testLogger(capture), now, notLeadingAfterMs: NOT_LEADING_MS });
   started.push(one);
   return { one, begun: one.start(beating) };
 };
@@ -147,6 +151,7 @@ describe('two processes never both lead', () => {
     const one = createLeadership({
       store: { take: () => Promise.resolve(true), release: () => Promise.resolve() },
       logger: testLogger(capture),
+      notLeadingAfterMs: NOT_LEADING_MS,
       now: () => at,
     });
     started.push(one);
@@ -304,7 +309,12 @@ describe('the holder releases on stop', () => {
     const answers: ((held: boolean) => void)[] = [];
     const take = vi.fn(() => new Promise<boolean>((resolve) => answers.push(resolve)));
     const release = vi.fn(() => Promise.resolve());
-    const one = createLeadership({ store: { take, release }, logger: testLogger(capture), now });
+    const one = createLeadership({
+      store: { take, release },
+      logger: testLogger(capture),
+      now,
+      notLeadingAfterMs: NOT_LEADING_MS,
+    });
     const begun = one.start(() => false);
     const stopping = one.stop();
     answers[0]?.(true);
@@ -340,5 +350,147 @@ describe('the heartbeat', () => {
     beating = false;
     await vi.advanceTimersByTimeAsync(2 * LEASE_RENEW_EVERY_MS);
     expect(row.beats).toBe(2);
+  });
+});
+
+describe('a try that goes unanswered has a deadline', () => {
+  const never = () => new Promise<boolean>(() => undefined);
+
+  it('the first take: start ends within it, so the process goes on, following', async () => {
+    const { one, begun } = leadershipOf({ take: never, release: () => Promise.resolve() });
+    let ended = false;
+    void begun.then(() => {
+      ended = true;
+    });
+    await vi.advanceTimersByTimeAsync(LEASE_TRY_WITHIN_MS - 1);
+    expect(ended).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ended).toBe(true);
+    expect(one.leading()).toBe(false);
+    expect(said('jobs.lease_renew_failed')).toHaveLength(1);
+  });
+
+  it('a renewal: it counts as failed, the next try still comes, and the lease is kept if that one is answered', async () => {
+    const take = vi
+      .fn<LeaseStore['take']>()
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(never)
+      .mockResolvedValue(true);
+    const { one, begun } = leadershipOf({ take, release: () => Promise.resolve() });
+    await begun;
+    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS + LEASE_TRY_WITHIN_MS);
+    expect(said('jobs.lease_renew_failed')).toHaveLength(1);
+    expect(take).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(LEASE_RETRY_AFTER_MS);
+    expect(take).toHaveBeenCalledTimes(3);
+    expect(one.leading()).toBe(true);
+    expect(said('jobs.lease_lost')).toEqual([]);
+  });
+
+  it('every renewal unanswered: it let go at the term, from the last answered try, not a try later', async () => {
+    const take = vi.fn<LeaseStore['take']>().mockResolvedValueOnce(true).mockImplementation(never);
+    const { one, begun } = leadershipOf({ take, release: () => Promise.resolve() });
+    await begun;
+    await vi.advanceTimersByTimeAsync(LEASE_TERM_MS - 1);
+    expect(one.leading()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(one.leading()).toBe(false);
+    expect(said('jobs.lease_lost')).toHaveLength(1);
+    // T+20 hung to T+30, then a try each 15 s: more than the two a plain 20 s renewal would have had.
+    expect(take.mock.calls.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('a stop with a take unanswered ends at once, and still gives the lease up', async () => {
+    const release = vi.fn(() => Promise.resolve());
+    const { one } = leadershipOf({ take: never, release });
+    await vi.advanceTimersByTimeAsync(SECOND);
+    await one.stop();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(said('jobs.lease_renew_failed')).toEqual([]);
+  });
+
+  it('a release unanswered: the stop ends within the deadline, with a warning', async () => {
+    const { one, begun } = leadershipOf({
+      take: () => Promise.resolve(true),
+      release: () => new Promise(() => undefined),
+    });
+    await begun;
+    let ended = false;
+    const stopping = one.stop().then(() => {
+      ended = true;
+    });
+    await vi.advanceTimersByTimeAsync(LEASE_TRY_WITHIN_MS - 1);
+    expect(ended).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await stopping;
+    expect(said('jobs.lease_release_failed')).toHaveLength(1);
+    // Stopped here: the same hung release would hold up afterEach's stop, on a clock no one moves.
+    started.length = 0;
+  });
+});
+
+describe('a process long without the lease says so', () => {
+  const refusing = { take: () => Promise.resolve(false), release: () => Promise.resolve() };
+
+  it('says a refusal once a stretch, and the error at the limit, once, then again past the same again', async () => {
+    const { begun } = leadershipOf(refusing);
+    await begun;
+    expect(said('jobs.lease_held_elsewhere')).toEqual([expect.objectContaining({ level: 'info' })]);
+
+    await vi.advanceTimersByTimeAsync(NOT_LEADING_MS - 2 * LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.not_leading')).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2 * LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.not_leading')).toEqual([expect.objectContaining({ level: 'error', forMs: NOT_LEADING_MS })]);
+    await vi.advanceTimersByTimeAsync(NOT_LEADING_MS - LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.not_leading')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.not_leading')).toHaveLength(2);
+    expect(said('jobs.lease_held_elsewhere')).toHaveLength(1);
+  });
+
+  it('a database that never answers is the same error', async () => {
+    const { begun } = leadershipOf({ take: () => new Promise(() => undefined), release: () => Promise.resolve() });
+    await vi.advanceTimersByTimeAsync(NOT_LEADING_MS + LEASE_RENEW_EVERY_MS);
+    await begun;
+    expect(said('jobs.not_leading')).toHaveLength(1);
+  });
+
+  it('never while leading, however long', async () => {
+    const { storeFor } = rowAt(now);
+    const { begun } = leadershipOf(storeFor('a'));
+    await begun;
+    await vi.advanceTimersByTimeAsync(3 * NOT_LEADING_MS);
+    expect(said('jobs.not_leading')).toEqual([]);
+  });
+
+  it('a lease taken again starts the count and the refusal line again', async () => {
+    let held = false;
+    const { begun } = leadershipOf({ take: () => Promise.resolve(held), release: () => Promise.resolve() });
+    await begun;
+    await vi.advanceTimersByTimeAsync(NOT_LEADING_MS);
+    expect(said('jobs.not_leading')).toHaveLength(1);
+    held = true;
+    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS);
+    held = false;
+    await vi.advanceTimersByTimeAsync(NOT_LEADING_MS - LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.not_leading')).toHaveLength(1);
+    expect(said('jobs.lease_held_elsewhere')).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2 * LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.not_leading')).toHaveLength(2);
+  });
+
+  it('a process frozen past the limit says nothing at its wake: it counts from there', async () => {
+    let at = 0;
+    const one = createLeadership({
+      store: refusing,
+      logger: testLogger(capture),
+      notLeadingAfterMs: NOT_LEADING_MS,
+      now: () => at,
+    });
+    started.push(one);
+    await one.start(() => false);
+    at += 2 * NOT_LEADING_MS;
+    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.not_leading')).toEqual([]);
   });
 });
