@@ -801,7 +801,10 @@ export function createSignedStates({
   readonly trail: AuditTrail;
   readonly logger: Logger;
   readonly onTamper: (finding: TamperFinding) => void;
-  /** The finding of a hold this process couldn't record yet for the organisation, if one is waiting. */
+  /**
+   * The finding of a hold this process couldn't record yet for the organisation, if one is waiting. Asked only when
+   * the hold reads verified CLEAR, which tells it any hold it was waiting behind has moved.
+   */
   readonly unrecorded: (orgId: string) => TamperFinding | undefined;
 }): HoldingSignedStates {
   const statuses = createStatusChanger({ logger });
@@ -1415,8 +1418,9 @@ export function createSignedStates({
       headLocked.add(tx);
     }
     const { check } = await readHold(tx, orgId);
+    if (check.outcome !== 'clear') return check;
     const sign = unrecorded(orgId)?.sign ?? (inTable === undefined ? undefined : signOfWaiting(inTable));
-    if (check.outcome !== 'clear' || sign === undefined) return check;
+    if (sign === undefined) return check;
     // Found, but not recorded yet (withSignedStates tries again once this transaction ends): denied meanwhile.
     return Object.freeze({ outcome: 'tampered', sign });
   };

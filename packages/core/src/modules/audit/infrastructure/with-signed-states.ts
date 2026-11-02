@@ -25,27 +25,41 @@
 //   the hold will, so clearing checks the same thing whichever process records
 //   it, and another process and this one after a restart know of it: Tx A reads
 //   the row itself, under the head's lock; every process polls it each 5 seconds
-//   (pollHoldsWaiting), tries a new one at once, and then keeps it as its own
+//   (pollHoldsWaiting), tries a new one, and then keeps it as its own
 // The memory stays because the database may be just what is in trouble: a row
 // that can't be written says so (`audit.hold_not_kept`), and the process retries
 // both. A hold recorded takes its row with it, in the same transaction.
 //
-// One row a record. A hold names one record and clearing checks that one, so a
-// row for another record stays while the hold stands, tried by each poll (a
-// transaction each 5 seconds, a process), and becomes the next hold once it is
-// cleared. A row only adds caution, and really does: a row forged sets the hold.
-// So a hold set from a row alone raises the alarm (`from_row`), as one foothold
-// can hold every organisation. A row gone from the table leaves each process that
-// held it to try once more: finding the hold recorded is the usual way, and nothing
-// is said; recording it means the row was deleted with no hold, the alarm (`row_gone`).
+// One row a record, and here one entry a record. A hold names one record and
+// clearing checks that one, so a finding meeting a hold on another record writes
+// its row in that same transaction, and that row becomes the next hold once this
+// one is cleared. A row only adds caution, and really does: a row forged sets the
+// hold. So a row raises the alarm (`from_row`) when its hold is set from it, and
+// once when a process first finds its record isn't the one held: one foothold can
+// hold every organisation. That one then waits (a minute, or until a read here finds the
+// hold clear), and Tx A reads the row itself all the while. A row gone from the table
+// leaves each process that held that record to try once more: finding the hold
+// recorded is the usual way, and nothing is said; recording it means the row was
+// deleted with no hold, the alarm (`row_gone`).
+//
+// A poll is bounded. It reads at most HOLDS_READ_AT_ONCE rows: at that limit it can't
+// tell a row gone from one not read, so judges none gone, and says the table is past
+// what the app could have written (`audit.holds_waiting_past_limit`). It tries at most
+// MOST_TRIES_A_POLL holds, one an organisation in turn, starting after the last one
+// tried, and a try that fails ends that organisation's turn: so on locked heads a poll
+// takes about 20 s (4 tries at 5 s each), and what isn't reached comes next poll.
+//
 // What stays open: a reader without the head's lock learns of another process's
 // hold at its next poll; a row-recorded hold has no count or chain failure, which
-// are in the alarm's line; a process frozen past a whole clearing that held an
-// entry re-holds on waking, with `row_gone`, as it can't tell that from a row
-// deleted (a new row is looked for again first, so isn't re-held); and a row
-// deleted once every process that knew it has restarted is gone, leaving the
-// alarm's line, with the hold set when the tampering is next found. A hold's
-// transaction is bounded by the head's lock (5 s) and each statement's time (10 s).
+// are in the alarm's line; one transaction's findings name its first alone; a process
+// frozen past a whole clearing that held an entry sets it again on waking, with
+// `row_gone` or as a row for the next hold, as it can't tell that from a row deleted
+// (a new row is looked for again first, so isn't); a row deleted once every process
+// that knew it has restarted is gone, leaving the alarm's line, with the hold set
+// when the tampering is next found; rows past the limit are read by Tx A alone until
+// the table shrinks, and each row read stays here in memory until its record's row
+// goes. A hold's transaction is bounded by the head's lock (5 s) and each statement's
+// time (10 s).
 //
 // A work whose recording meets a chain that refuses new events has met
 // tampering too, and raises the alarm (`check: record`) before its error goes
@@ -61,6 +75,7 @@ import { createAuditTrail } from './audit-trail.ts';
 import {
   holdNoLongerWaiting,
   holdStillWaiting,
+  HOLDS_READ_AT_ONCE,
   holdsWaiting,
   type HoldWaiting,
   keepHoldWaiting,
@@ -97,10 +112,21 @@ interface Found {
   readonly fromRow?: boolean;
   /** Its row's own naming, where the app could not have written it: the finding then names the fixed name instead. */
   readonly row?: NamedRecord;
+  /**
+   * For the poll: how many polls to wait before trying it, 0 for its next (a new row, or one whose hold was read clear).
+   * Unset after a try that failed: left to the next request and the anchor check, so a locked head isn't tried each poll.
+   */
+  readonly pollsToWait?: number | undefined;
+  /** The alarm for a row whose record isn't the one held was raised here. */
+  readonly raised?: boolean;
 }
 
 /** How often every process looks for holds another left waiting. */
 export const HOLDS_WAITING_EVERY_MS = 5_000;
+/** The most holds one poll tries: each can wait 5 s on a locked head, with every other organisation behind it. */
+const MOST_TRIES_A_POLL = 4;
+/** About a minute: how long a record not the one held waits, rather than a transaction a row each poll. */
+const POLLS_NAMED_ELSEWHERE_WAITS = 60_000 / HOLDS_WAITING_EVERY_MS;
 
 /** Holds this process found or polled but couldn't record yet, by organisation (lower case), then by record, with their findings. */
 const unrecorded = new Map<string, Map<string, Found>>();
@@ -109,6 +135,8 @@ const unrecorded = new Map<string, Map<string, Found>>();
  * one is tried only while none is, so by one request at a time.
  */
 const recording = new Map<string, number>();
+/** The organisation a poll last tried: the next starts after it, so no organisation is always the last reached. */
+let lastTried = '';
 
 /** What tells one record's entry from another's, as its row is named. */
 const entryName = ({ row, finding }: Found): string => `${(row ?? finding).subjectType}|${(row ?? finding).objectId}`;
@@ -125,8 +153,23 @@ function forgetEntry(held: string, found: Found): void {
   if (entries?.size === 0) unrecorded.delete(held);
 }
 
-/** The one a read answers with, and the next try takes. */
-const firstWaiting = (held: string): Found | undefined => unrecorded.get(held)?.values().next().value;
+const isResting = ({ pollsToWait }: Found): boolean => pollsToWait !== undefined && pollsToWait > 0;
+
+/** The one a request's or the anchor check's next try takes: never one resting, or each request would be a transaction. */
+const dueWaiting = (held: string): Found | undefined =>
+  [...(unrecorded.get(held)?.values() ?? [])].find((found) => !isResting(found));
+
+/**
+ * What a read of a clear hold answers with: the first waiting. Anything resting because another record was held needn't
+ * rest any more, as that hold has moved: tried next.
+ */
+function waitingOnAClearHold(held: string): TamperFinding | undefined {
+  const entries = unrecorded.get(held);
+  for (const [name, found] of entries ?? []) {
+    if (isResting(found)) entries?.set(name, { ...found, pollsToWait: 0 });
+  }
+  return entries?.values().next().value?.finding;
+}
 
 /** The first finding for each organisation, with how many there were. */
 function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
@@ -138,20 +181,23 @@ function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
   return each;
 }
 
+type HoldOutcome = 'set' | 'already' | 'named_elsewhere' | 'failed';
+
 /**
  * Keeps a hold that couldn't be recorded, in this process and then in its row;
  * a row that can't be written leaves it in this process alone, and says so.
  */
 async function keepWaiting(db: Kysely<AuditTables>, held: string, found: Found, log: Logger): Promise<void> {
-  keepEntry(held, { ...found, inTable: false });
+  const failed = { ...found, pollsToWait: undefined };
   // A row the app couldn't have written is never written again: it stands or it doesn't, and this entry says which.
   if (found.row !== undefined) {
-    keepEntry(held, found);
+    keepEntry(held, failed);
     return;
   }
+  keepEntry(held, { ...failed, inTable: false });
   try {
     await keepHoldWaiting(db, found.finding, found.finding.sign);
-    keepEntry(held, { ...found, inTable: true });
+    keepEntry(held, { ...failed, inTable: true });
   } catch (error) {
     log.error('audit.hold_not_kept', { reason: found.finding.sign, err: error });
   }
@@ -172,7 +218,7 @@ async function setHold(
   found: Found,
   { keys, ids, logger, correlationId }: SignedStatesServices,
   rowMustStand = false,
-): Promise<'set' | 'already' | 'named_elsewhere' | 'failed'> {
+): Promise<HoldOutcome> {
   const { finding, count } = found;
   const log = logger.child({ orgId: held });
   recording.set(held, (recording.get(held) ?? 0) + 1);
@@ -202,22 +248,26 @@ async function setHold(
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
       { limited: true, unshared: true },
     );
-    forgetEntry(held, found);
+    if (outcome === 'named_elsewhere') {
+      keepEntry(held, { ...found, inTable: true, raised: true, pollsToWait: POLLS_NAMED_ELSEWHERE_WAITS });
+    } else {
+      forgetEntry(held, found);
+    }
     if (outcome === 'set') {
       log.warn('audit.integrity_hold_set', {
         reason: finding.sign,
         subjectType: finding.subjectType,
         findings: count,
       });
-      if (found.fromRow === true) {
-        log.error('audit.integrity_failed', {
-          chain: 'organisation',
-          check: 'hold',
-          reason: 'from_row',
-          subjectType: finding.subjectType,
-          objectId: finding.objectId,
-        });
-      }
+    }
+    if (found.fromRow === true && (outcome === 'set' || (outcome === 'named_elsewhere' && found.raised !== true))) {
+      log.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'hold',
+        reason: 'from_row',
+        subjectType: finding.subjectType,
+        objectId: finding.objectId,
+      });
     }
     return outcome;
   } catch (error) {
@@ -260,25 +310,87 @@ async function goneFromTable(
   held: string,
   found: Found,
   services: SignedStatesServices,
-): Promise<void> {
+): Promise<HoldOutcome> {
   const outcome = await setHold(db, held, found, services);
   if (outcome === 'set' && found.inTable === true) {
     services.logger
       .child({ orgId: held })
       .error('audit.integrity_failed', { chain: 'organisation', check: 'hold', reason: 'row_gone' });
   }
+  return outcome;
+}
+
+/** A try a poll owes: `gone`, its row wasn't there. */
+interface PollTry {
+  readonly found: Found;
+  readonly gone: boolean;
+}
+
+/**
+ * The tries this poll owes, by organisation, each resting entry a poll nearer its turn. `known`: what was here before
+ * the read: one kept while it was on its way is new to it, not gone. `judgeGone`: whether the read saw every row.
+ */
+function triesDue(
+  known: ReadonlySet<string>,
+  standing: ReadonlySet<string>,
+  judgeGone: boolean,
+): Map<string, PollTry[]> {
+  const due = new Map<string, PollTry[]>();
+  for (const [held, entries] of unrecorded) {
+    // Left to the try under way, rather than queue on the head beside it.
+    if (recording.has(held)) continue;
+    const tries: PollTry[] = [];
+    for (const [name, found] of entries) {
+      const stands = standing.has(`${held}|${name}`);
+      if (!stands && !(judgeGone && known.has(`${held}|${name}`))) continue;
+      const waits = found.pollsToWait ?? 0;
+      if (waits > 0) entries.set(name, { ...found, pollsToWait: waits - 1 });
+      else if (!stands || found.pollsToWait === 0) tries.push({ found, gone: !stands });
+    }
+    if (tries.length > 0) due.set(held, tries);
+  }
+  return due;
+}
+
+/**
+ * The tries, one an organisation in turn, starting after the one last tried, at most MOST_TRIES_A_POLL: so no number of
+ * rows for one organisation, and no list order, keeps another from its try for long. One that fails ends its turn.
+ */
+async function triedInTurn(
+  db: Kysely<AuditTables>,
+  due: ReadonlyMap<string, PollTry[]>,
+  services: SignedStatesServices,
+): Promise<void> {
+  const organisations = [...due].toSorted(([one], [other]) => (one < other ? -1 : 1));
+  const after = organisations.filter(([held]) => held > lastTried);
+  const inTurn = [...after, ...organisations.slice(0, organisations.length - after.length)]
+    .flatMap(([held, tries]) => tries.map((one, round) => ({ ...one, held, round })))
+    .toSorted((one, other) => one.round - other.round);
+  const ended = new Set<string>();
+  let tried = 0;
+  for (const { held, found, gone } of inTurn) {
+    if (tried === MOST_TRIES_A_POLL) return;
+    if (ended.has(held)) continue;
+    tried += 1;
+    lastTried = held;
+    const outcome = gone
+      ? await goneFromTable(db, held, found, services)
+      : await setHold(db, held, found, services, true);
+    if (outcome === 'failed') ended.add(held);
+  }
 }
 
 /**
  * One look at the holds waiting (4D2e D5), for every process: each row is kept
- * here, and one new here tried at once; each hold known here with no row is
- * tried once more. Only caution comes of it: nothing here lifts a hold, as an
- * entry goes only when its hold is recorded. One trip while the table is empty
- * and nothing waits here. Never throws.
+ * here, and what is due of them tried, as is each hold known here with no row,
+ * within this poll's limits (above). Only caution comes of it: nothing here lifts
+ * a hold, as an entry goes only when its hold is recorded. One trip while the
+ * table is empty and nothing waits here. Never throws.
  */
 export async function pollHoldsWaiting(db: Kysely<AuditTables>, services: SignedStatesServices): Promise<void> {
-  // Read first: one kept while the read was on its way is new to it, not gone.
-  const known = [...unrecorded].flatMap(([held, entries]) => [...entries.values()].map((found) => ({ held, found })));
+  const known = new Set(
+    [...unrecorded].flatMap(([held, entries]) => [...entries.keys()].map((name) => `${held}|${name}`)),
+  );
   let rows: readonly HoldWaiting[];
   try {
     rows = await holdsWaiting(db);
@@ -287,21 +399,17 @@ export async function pollHoldsWaiting(db: Kysely<AuditTables>, services: Signed
     services.logger.warn('audit.holds_waiting_unread', { err: error });
     return;
   }
-  const inTable = new Set<string>();
-  const fresh: Found[] = [];
+  const atTheLimit = rows.length >= HOLDS_READ_AT_ONCE;
+  if (atTheLimit) services.logger.error('audit.holds_waiting_past_limit', { rows: rows.length });
+  const standing = new Set<string>();
   for (const row of rows) {
-    const inRow: Found = { ...foundInRow(row), inTable: true };
+    const inRow: Found = { ...foundInRow(row), inTable: true, pollsToWait: 0 };
     const name = entryName(inRow);
-    inTable.add(`${row.org_id}|${name}`);
+    standing.add(`${row.org_id}|${name}`);
     const here = unrecorded.get(row.org_id)?.get(name);
     keepEntry(row.org_id, here === undefined ? inRow : { ...here, inTable: true });
-    if (here === undefined && !recording.has(row.org_id)) fresh.push(inRow);
   }
-  for (const found of fresh) await setHold(db, found.finding.orgId, found, services, true);
-  for (const { held, found } of known) {
-    if (!inTable.has(`${held}|${entryName(found)}`) && !recording.has(held))
-      await goneFromTable(db, held, found, services);
-  }
+  await triedInTurn(db, triesDue(known, standing, !atTheLimit), services);
 }
 
 /**
@@ -319,7 +427,7 @@ export async function holdOrganisation(
   failure: string | undefined,
 ): Promise<void> {
   const held = orgId.toLowerCase();
-  const waiting = firstWaiting(held);
+  const waiting = dueWaiting(held);
   if (failure !== undefined) {
     const finding: TamperFinding = {
       orgId: held,
@@ -355,7 +463,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     trail,
     logger,
     onTamper: (finding) => found.push(finding),
-    unrecorded: (id) => firstWaiting(id.toLowerCase())?.finding,
+    unrecorded: (id) => waitingOnAClearHold(id.toLowerCase()),
   });
   // Whether the work's transaction began: one refused outright (nested, a bad ID) found nothing, and tries nothing.
   const opened = { began: false };
@@ -383,7 +491,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   } finally {
     const due = byOrganisation(found);
     const own = orgId.toLowerCase();
-    const waiting = firstWaiting(own);
+    const waiting = dueWaiting(own);
     if (opened.began && waiting !== undefined && !due.has(own) && !recording.has(own)) due.set(own, waiting);
     for (const [held, one] of due) await setHold(db, held, one, services);
   }

@@ -77,13 +77,16 @@ export async function holdNoLongerWaiting(
     .execute();
 }
 
-/**
- * Every hold waiting, on one trip: an empty table is the usual answer. No limit,
- * as a partial answer would read as rows deleted: only a forged row makes it long.
- */
+/** Far past what the app writes (a row for each record found tampered with and not yet recorded), and quick to read. */
+export const HOLDS_READ_AT_ONCE = 1000;
+
+/** The holds waiting, on one trip, at most HOLDS_READ_AT_ONCE: an empty table is the usual answer. */
 export function holdsWaiting(db: Kysely<AuditTables>): Promise<readonly HoldWaiting[]> {
   return readAloneOnOneTrip(
     db,
-    db.selectFrom('directory.holds_waiting').select(['org_id', 'subject_type', 'object_id', 'reason']),
+    db
+      .selectFrom('directory.holds_waiting')
+      .select(['org_id', 'subject_type', 'object_id', 'reason'])
+      .limit(HOLDS_READ_AT_ONCE),
   );
 }

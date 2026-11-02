@@ -12,15 +12,18 @@
 -- how the tampering showed. Those two name the record as a hold found directly
 -- names it, as clearing checks what the hold names, whichever process recorded it.
 --
--- One row a record: a second finding on another record is a row of its own. A
--- hold names one record, so that row stays while the hold stands, and becomes the
--- next hold once it is cleared: its own investigation, and its own check.
+-- One row a record: a second finding on another record is a row of its own,
+-- written in the transaction that finds the hold names another. A hold names one
+-- record, so that row stays while the hold stands, and becomes the next hold once
+-- it is cleared: its own investigation, and its own check.
 --
 -- A row only adds caution, and that caution is real: a row forged really sets the
 -- hold, stopping the organisation's hand-offs. One foothold as the app role can so
--- hold every organisation. No payment passes because of a row, each hold set from
--- one raises the integrity alarm, and each clear needs an investigation and a
--- passkey. No read treats a row's absence as a hold lifted: that is the signed
+-- hold every organisation. No payment passes because of a row; each hold set from
+-- one raises the integrity alarm, as does each row a process first finds on a record
+-- not the one held; and each clear needs an investigation and a passkey. A forged
+-- row naming a record that never was can still be cleared: nothing to repair.
+-- No read treats a row's absence as a hold lifted: that is the signed
 -- state's. A row deleted past the app is seen by each process that held it
 -- (with-signed-states.ts); once every such process has restarted too, it is gone,
 -- leaving the alarm's line, and the tampering sets its hold when next found.

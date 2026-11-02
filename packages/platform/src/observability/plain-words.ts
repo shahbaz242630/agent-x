@@ -208,6 +208,11 @@ export const PLAIN_WORDS = {
     broke: 'Only the process that found it knows of it, and a restart would forget it.',
     next: 'Check the database first. The process keeps trying both, and the tamper alarm before this line still stands.',
   },
+  'audit.holds_waiting_past_limit': {
+    happened: 'The list of security holds waiting is longer than the app could have written.',
+    broke: 'This process read only part of it. Payments still read the list themselves.',
+    next: 'Treat it as tampering: find who can write to the database, then clear the forged rows.',
+  },
   'audit.holds_waiting_unread': {
     happened: 'A process could not read the list of security holds waiting to be recorded.',
     broke:
