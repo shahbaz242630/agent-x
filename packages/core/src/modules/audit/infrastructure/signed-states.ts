@@ -961,7 +961,7 @@ export function createSignedStates({
       const check = believing ? believedPair(table, key, answer.latest, answer.rows) : undefined;
       believing = check !== undefined;
       // No row came back, believed or not: no lock was taken on it.
-      if (answer.rows?.length === 0 && held === undefined) rows.set(name, { lock, none: true });
+      if (answer.rows?.length === 0) rows.set(name, { lock: held?.lock ?? lock, none: true });
       // A row not believed here keeps what an earlier gather believed of it: the row has been locked since.
       if (check !== undefined) kept.set(name, { lock, check });
       return answer.id;
@@ -1032,9 +1032,7 @@ export function createSignedStates({
     const quick = takeGathered(tx, name, lock) ?? (await inOneStatement(tx, table, key, lock));
     const checked = quick ?? (await inTwoStatements(tx, table, key, lock));
     if (checked.outcome === 'verified' && lock === 'change') rows.set(name, { lock, from: { table, state: checked } });
-    if (checked.outcome === 'missing' && (held === undefined || held.none === true)) {
-      rows.set(name, { lock, none: true });
-    }
+    if (checked.outcome === 'missing') rows.set(name, { lock: held?.lock ?? lock, none: true });
     return checked;
   };
 
