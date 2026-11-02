@@ -3,17 +3,17 @@
 // operator's command (B1c) checks it at its start, before it writes anything.
 //
 // It holds CHECK constraints to the image's own built-checks.json, and the
-// backup role to reading. A release migrates first, so its new CHECK or function
-// is drift to the image before it until the new image is in. That image refuses
-// a start on it, as on any drift.
+// backup role to reading. A release migrates first, so its new CHECK, function or
+// table is drift to the image before it until the new image is in. That image
+// refuses a start on it, as on any drift.
 //
 // **On the schedule, the first sighting of that drift in a process's life is a
 // warning, and every later one the alarm**, however many clean runs lie between:
 // a migration doesn't undo itself, and the old image is replaced at release, so
 // drift that goes and comes back is nothing a release does. It compares whether
 // any such drift was seen, never which, so rotating plants gain nothing, and every
-// other problem is the alarm in the same run. The cost: one planted CHECK or
-// function, seen by one run and gone by the next, stays one warning line a process.
+// other problem is the alarm in the same run. The cost: one planted CHECK, function
+// or table, seen by one run and gone by the next, stays one warning line a process.
 // A restart forgets the sighting, and meets the start check, which waits for nothing.
 //
 // **At start it refuses to start.** A database whose walls have been rewritten

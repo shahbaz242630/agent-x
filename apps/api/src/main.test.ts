@@ -258,9 +258,10 @@ vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/core/modules/identity')>();
   return {
     ...actual,
-    createHoldClearings: (options: Parameters<typeof actual.createHoldClearings>[0]) => {
+    // Its own options read as object: their whole type is past what tsc will build here.
+    createHoldClearings: (options: { readonly namedRecordChecks?: object }) => {
       clearingChecks.subjects.push(Object.keys(options.namedRecordChecks ?? {}));
-      return actual.createHoldClearings(options);
+      return actual.createHoldClearings(options as never);
     },
   };
 });

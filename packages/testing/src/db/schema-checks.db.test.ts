@@ -32,6 +32,7 @@ const POLICY: SchemaPolicy = {
   appendOnlyExceptions: REAL_EXCEPTIONS,
   fillInTables: SCHEMA_POLICY.fillInTables,
   requiredForeignKeys: SCHEMA_POLICY.requiredForeignKeys,
+  tablesThatStay: [],
   partialUniqueIndexes: SCHEMA_POLICY.partialUniqueIndexes,
 };
 /** The real global tables but the ledger, for the fixtures about the ledger alone. */
@@ -1284,6 +1285,12 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       ];
       const problems = await problemsAfter(statements);
       expect(problems).toContain(`${ORGS_KEY}: column org_id may be null`);
+    });
+
+    it('fails a table the policy says stays that the migrations do not make', async () => {
+      expect(await problemsAfter([], { ...POLICY, tablesThatStay: ['audit.gone', 'audit.events'] })).toEqual([
+        "audit.gone: the schema policy says it stays, but the migrations don't make it",
+      ]);
     });
 
     it('fails a key from other columns, or to another table, than the entry names', async () => {

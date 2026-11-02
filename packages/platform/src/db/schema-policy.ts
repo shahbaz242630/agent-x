@@ -111,6 +111,11 @@ export interface SchemaPolicy {
    * (`schema.table`). Every other table is a tenant table.
    */
   readonly globalTables: Readonly<Record<string, GlobalTable>>;
+  /**
+   * Tables on no other list here, each of which no release drops or renames: every other table's absence is
+   * named by its list. Gone, or moved, is the alarm at once.
+   */
+  readonly tablesThatStay: readonly string[];
   /** Schemas whose tables the app role may only add to and read, such as the audit trail (SEC-EVD-01). */
   readonly appendOnlySchemas: readonly string[];
   /**
@@ -140,6 +145,8 @@ export interface SchemaPolicy {
 }
 
 export const SCHEMA_POLICY: SchemaPolicy = {
+  // The person-level access log, and each organisation's audit chain and its head.
+  tablesThatStay: ['access.requests', 'audit.events', 'audit.heads'],
   globalTables: {
     'directory.orgs': {
       reason:
