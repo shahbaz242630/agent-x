@@ -195,7 +195,17 @@ export const PLAIN_WORDS = {
   'audit.anchor_check_unfinished': {
     happened: 'The tamper check of the audit history ran out of time before reaching every organisation.',
     broke: 'Nothing yet: the next check goes on from where this one stopped.',
-    next: 'If it stays, raise AGENTX_AUDIT_ANCHOR_LANES with the database pool, or look for slow chains.',
+    next: 'Nothing if it is rare. If it stays, see whether the database is slow.',
+  },
+  'audit.anchor_check_behind': {
+    happened: 'Tamper checks are working, but some organisations waited too long for their turn.',
+    broke: 'Those audit histories are checked late, so a change goes unseen for longer. Nobody is held.',
+    next: 'Add capacity: more check lanes with a bigger database pool, or more CPU for long histories.',
+  },
+  'audit.anchor_check_over_size': {
+    happened: 'More organisations are listed than the tamper check is set to remember in memory.',
+    broke: 'The ones past that number are not being checked. All the others are, and nobody is held.',
+    next: 'Raise the number it remembers, about 1 MB of memory for each thousand organisations, and restart.',
   },
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',

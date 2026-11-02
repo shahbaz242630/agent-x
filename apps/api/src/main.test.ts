@@ -612,15 +612,15 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 
   it('starts the anchor check of the platform chain once it listens, at the configured interval (ADR-012 §2)', async () => {
     await start();
-    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_SECONDS: '600' });
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_SECONDS: '120' });
 
     expect(anchorChecks.chains).toEqual([{ kind: 'platform' }, { kind: 'platform' }]);
-    expect(anchorChecks.intervals).toEqual([300_000, 600_000]);
+    expect(anchorChecks.intervals).toEqual([300_000, 120_000]);
     // Three intervals without a completed check are the alarm.
-    expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
+    expect(anchorChecks.staleAfter).toEqual([900_000, 360_000]);
     expect(anchorChecks.deadlines).toEqual([120_000, 120_000]);
     // How long a turn may wait goes with the interval.
-    expect(anchorChecks.reachWithin).toEqual([2_100_000, 4_200_000]);
+    expect(anchorChecks.reachWithin).toEqual([2_100_000, 840_000]);
   });
 
   it('gives the anchor check the lanes the setting names, never more than half the pool (4D2e E6)', async () => {

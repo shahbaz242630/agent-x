@@ -53,9 +53,9 @@ import { createWaitingRequests } from './waiting-requests.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 
 /**
- * How long the anchor check of one chain may take before it counts as not
- * completed (anchor-check.ts). Each of its statements has 10 seconds at most
- * (verifyAlone); this bounds the whole check, whatever the database does.
+ * How long the anchor check of one chain may hold its lane before it counts as
+ * not completed (anchor-check.ts). Each of its statements has 10 seconds at most
+ * (verifyAlone), and it may go on past this, its result still compared.
  */
 const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
@@ -180,6 +180,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     reachWithinMs: reachWithin(config.audit.anchorSeconds * 1000),
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     lanes: lanesWithin(config.audit.anchorLanes, config.db.poolMax),
+    mostOrganisations: config.audit.mostOrganisations,
     anchors: anchorStore,
     ...(anchorLog === undefined ? {} : { durable: anchorLog }),
   });
