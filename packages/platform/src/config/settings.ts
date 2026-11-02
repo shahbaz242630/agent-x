@@ -302,8 +302,9 @@ const SETTINGS = {
   // seen, so the window is kept short.
   AGENTX_AUDIT_ANCHOR_SECONDS: {
     schema: wholeNumber({
+      // 6 minutes or more, with a run's 4, its last write's 1 and lines 9 late, passes the 20 of the dead-man alert (D3).
       min: 60,
-      max: 3600,
+      max: 359,
       unit: 'seconds',
       minimumReason: 'more often only repeats the whole check of every chain',
     }),
@@ -312,6 +313,9 @@ const SETTINGS = {
   // How many organisations' chains the anchor check reads at once (4D2e E6), each on a connection; never more than
   // half the pool. What raises how many organisations a run reaches in its four minutes.
   AGENTX_AUDIT_ANCHOR_LANES: { schema: wholeNumber({ min: 1, max: 64 }), default: '4' },
+  // How many organisations the anchor check remembers, about 885 bytes each for the process's life, and the most chains a
+  // store file opens to: sized to memory. Past it the rest go unchecked, with one line a run; never a refusal.
+  AGENTX_AUDIT_MOST_ORGANISATIONS: { schema: wholeNumber({ min: 1, max: 10_000_000 }), default: '100000' },
   // Where the chains' anchors are kept apart from the database (4D2e E, PL-58): a local folder in development and
   // test; deployed, a write-once container in the UAE, as the API's own managed identity. Unset, in memory, as today.
   AGENTX_AUDIT_ANCHORS_DIR: { schema: mountedFolder.optional() },
@@ -431,6 +435,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
       'AGENTX_AUDIT_ANCHOR_SECONDS',
       'AGENTX_AUDIT_ANCHOR_LANES',
+      'AGENTX_AUDIT_MOST_ORGANISATIONS',
       'AGENTX_AUDIT_ANCHORS_DIR',
       'AGENTX_AUDIT_ANCHORS_URL',
       'AGENTX_AUDIT_ANCHORS_CLIENT_ID',

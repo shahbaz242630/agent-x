@@ -157,7 +157,12 @@ export interface Config {
    * and anchored again; the epoch its anchors are kept under, which moves on only
    * for a sanctioned restore of the whole database (4D2e E).
    */
-  readonly audit: { readonly anchorSeconds: number; readonly anchorEpoch: number; readonly anchorLanes: number };
+  readonly audit: {
+    readonly anchorSeconds: number;
+    readonly anchorEpoch: number;
+    readonly anchorLanes: number;
+    readonly mostOrganisations: number;
+  };
   /**
    * Where the anchors are kept apart from the database (4D2e E, PL-58): a local
    * folder, development and test alone, or the write-once container in the UAE;
@@ -408,6 +413,7 @@ function readSettings(env: Env, location: LocationChecks) {
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
     anchorEpoch: setting(env, 'AGENTX_ANCHOR_EPOCH'),
     anchorLanes: setting(env, 'AGENTX_AUDIT_ANCHOR_LANES'),
+    mostOrganisations: setting(env, 'AGENTX_AUDIT_MOST_ORGANISATIONS'),
     anchorsDirectory: setting(env, 'AGENTX_AUDIT_ANCHORS_DIR'),
     anchorsContainer: setting(env, 'AGENTX_AUDIT_ANCHORS_URL'),
     anchorsClientId: setting(env, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'),
@@ -684,6 +690,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       anchorSeconds: checks.anchorSeconds.value,
       anchorEpoch: checks.anchorEpoch.value,
       anchorLanes: checks.anchorLanes.value,
+      mostOrganisations: checks.mostOrganisations.value,
     }),
     anchorStore: Object.freeze({
       directory: checks.anchorsDirectory.value ?? null,

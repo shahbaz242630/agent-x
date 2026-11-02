@@ -123,6 +123,7 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
       anchorSeconds: config.audit.anchorSeconds,
       anchorEpoch: config.audit.anchorEpoch,
       anchorLanes: config.audit.anchorLanes,
+      mostOrganisations: config.audit.mostOrganisations,
     },
     anchorStore: { directory: config.anchorStore.directory, container: place(config.anchorStore.container) },
     activityDownloads: {

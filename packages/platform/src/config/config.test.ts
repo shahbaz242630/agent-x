@@ -123,7 +123,7 @@ describe('config: a correct config loads', () => {
       sessions: { idleSeconds: 1800, absoluteSeconds: 43_200 },
       securityEvents: { retentionDays: 90 },
       payees: { coolingOffHours: 24 },
-      audit: { anchorSeconds: 300, anchorEpoch: 1, anchorLanes: 4 },
+      audit: { anchorSeconds: 300, anchorEpoch: 1, anchorLanes: 4, mostOrganisations: 100_000 },
       anchorStore: { directory: null, container: null },
       activityDownloads: { directory: null, container: null },
       keys: { directory: KEYS_DIR, current: {} },
@@ -159,8 +159,9 @@ describe('config: a correct config loads', () => {
       AGENTX_SECURITY_EVENT_RETENTION_DAYS: '180',
       AGENTX_PARTNER_MODE: 'fake',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
-      AGENTX_AUDIT_ANCHOR_SECONDS: '600',
+      AGENTX_AUDIT_ANCHOR_SECONDS: '120',
       AGENTX_AUDIT_ANCHOR_LANES: '6',
+      AGENTX_AUDIT_MOST_ORGANISATIONS: '200000',
       AGENTX_DB_HOST: '10.0.0.5',
       AGENTX_DB_PORT: '6432',
       AGENTX_DB_NAME: 'agentx_uae',
@@ -212,7 +213,7 @@ describe('config: a correct config loads', () => {
       securityEvents: { retentionDays: 180 },
       partner: { mode: 'fake' },
       payees: { coolingOffHours: 48 },
-      audit: { anchorSeconds: 600, anchorEpoch: 1, anchorLanes: 6 },
+      audit: { anchorSeconds: 120, anchorEpoch: 1, anchorLanes: 6, mostOrganisations: 200_000 },
       anchorStore: { directory: null, container: null },
       activityDownloads: { directory: null, container: null },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
@@ -277,6 +278,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_PAYEE_COOLING_OFF_HOURS',
     'AGENTX_AUDIT_ANCHOR_SECONDS',
     'AGENTX_AUDIT_ANCHOR_LANES',
+    'AGENTX_AUDIT_MOST_ORGANISATIONS',
     'AGENTX_ANCHOR_EPOCH',
     'AGENTX_KEYS_DIR',
     'AGENTX_KEYS_CURRENT',
@@ -360,7 +362,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
   describe('the audit anchor check, every 1 to 60 minutes (ADR-012 §2)', () => {
     it.each([
       ['60', 60],
-      ['3600', 3600],
+      ['359', 359],
     ])('accepts %s seconds', (seconds, expected) => {
       expect(loadConfig({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: seconds }).audit.anchorSeconds).toBe(expected);
     });
@@ -378,8 +380,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     });
 
     it('refuses less often than once an hour, which would leave a rollback unseen for longer', () => {
-      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: '3601' })).toEqual([
-        'AGENTX_AUDIT_ANCHOR_SECONDS: must be at most 3600 seconds',
+      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: '360' })).toEqual([
+        'AGENTX_AUDIT_ANCHOR_SECONDS: must be at most 359 seconds',
       ]);
     });
   });
@@ -1742,7 +1744,7 @@ describe('4D2e E3 where the chains’ anchors are kept', () => {
   it('keeps the store and the epoch in the fingerprint, never Azure’s header', () => {
     const settings = fingerprintedSettings(loadConfig({ ...WITH_CONTAINER, AGENTX_ANCHOR_EPOCH: '2' }));
 
-    expect(settings.audit).toEqual({ anchorSeconds: 300, anchorEpoch: 2, anchorLanes: 4 });
+    expect(settings.audit).toEqual({ anchorSeconds: 300, anchorEpoch: 2, anchorLanes: 4, mostOrganisations: 100_000 });
     expect(settings.anchorStore).toEqual({
       directory: null,
       container: { url: CONTAINER, clientId: CLIENT_ID, identityEndpoint: 'http://localhost:42356/msi/token' },
