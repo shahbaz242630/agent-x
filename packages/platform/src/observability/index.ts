@@ -7,6 +7,8 @@ export {
   type Logger,
   type LoggerOptions,
   type LogMethod,
+  withLogContext,
+  type WorkContext,
 } from './logger.ts';
 export { guardOutputs, type Output } from './output-guard.ts';
 export type { ProblemEvent } from './plain-words.ts';

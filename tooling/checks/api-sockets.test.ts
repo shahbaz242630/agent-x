@@ -68,6 +68,10 @@ async function listening() {
   app.get('/test/fail', OPEN, () => {
     throw new Error('failed on our side');
   });
+  app.post('/test/says', OPEN, () => {
+    logger.info('test.said');
+    return { ok: true };
+  });
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });
   const port = app.addresses()[0]?.port ?? 0;
@@ -130,6 +134,34 @@ async function within<T>(promise: Promise<T>, ms: number, failure: string): Prom
 
 const headerBlock = (response: string): string => (response.split(CRLF + CRLF)[0] ?? '').toLowerCase();
 const bodyOf = (response: string): unknown => JSON.parse(response.slice(response.indexOf(CRLF + CRLF) + 4)) as unknown;
+
+describe('4D2e Stage F a request and its lines', () => {
+  it("keeps its ID on a bare logger's line though its body came well after its headers", async () => {
+    const { port, capture } = await listening();
+    const body = '{"any":"body"}';
+    const connection = connect(port);
+    await connection.opened;
+    connection.socket.write(
+      request(
+        'POST /test/says HTTP/1.1',
+        'Host: localhost',
+        `Origin: ${PUBLIC_ORIGIN}`,
+        'Content-Type: application/json',
+        `Content-Length: ${String(body.length)}`,
+        'Connection: close',
+      ),
+    );
+    // In a packet of its own: stream events are what deliver it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    connection.socket.write(body);
+    await connection.closed;
+    const answer = headerBlock(connection.received());
+    expect(answer).toContain('200');
+    const [said] = capture.lines().filter((line) => line.event === 'test.said');
+    expect(said?.correlationId).toEqual(expect.any(String));
+    expect(answer).toContain(`x-correlation-id: ${String(said?.correlationId)}`);
+  });
+});
 
 describe("SEC-WEB-02, SEC-DATA-04 bytes Node's parser refuses get our plain answer", () => {
   it.each([

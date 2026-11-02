@@ -41,7 +41,7 @@ import type { FakeBank } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import { asAgentTraffic, isLockWaitRunOut } from '@agentx/platform/db';
-import type { Logger } from '@agentx/platform/observability';
+import { type Logger, withLogContext } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
@@ -333,6 +333,11 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   if (options.consoleFiles !== undefined) putConsoleInFront(app.server, options.consoleFiles);
+  // Every line of a request carries its ID, whichever logger writes it (logger.ts); before anything that could write
+  // one. Once is enough on this Node, a body arriving late included: api-sockets.test.ts holds that to account on a real socket.
+  app.addHook('onRequest', (request, _reply, done) => {
+    withLogContext({ correlationId: request.id }, done);
+  });
   // First, so no route escapes it.
   await registerContract(app);
   await registerRateLimit(app, config.http.rateLimitPerMinute, trust);

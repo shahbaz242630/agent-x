@@ -3,7 +3,9 @@
 // the app's own deadline and ending at once when the API stops. Postgres's own
 // limits can be got round by someone who owns the database, and a connection
 // can die without a word, so the app keeps its own.
-import type { Logger } from '@agentx/platform/observability';
+import { randomUUID } from 'node:crypto';
+
+import { type Logger, withLogContext } from '@agentx/platform/observability';
 
 /** How often a process takes or renews the jobs' lease, and for how long it holds. */
 export const LEASE_RENEW_EVERY_MS = 20_000;
@@ -42,7 +44,7 @@ export async function withinDeadline<T>(
  * Runs the work now and then `intervalMs` after each run ends, so runs never
  * overlap. `stop` ends a run in flight at once and waits for it to end; a
  * statement it had begun is left to the database's own limit, which closing
- * the pool waits for.
+ * the pool waits for. Each run has an ID, on every line it writes (logger.ts).
  */
 export function scheduleRuns(
   work: { run(signal?: AbortSignal): Promise<unknown> },
@@ -52,7 +54,7 @@ export function scheduleRuns(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> = Promise.resolve();
   const tick = (): void => {
-    running = work.run(stopping.signal).then(() => {
+    running = withLogContext({ runId: randomUUID() }, () => work.run(stopping.signal)).then(() => {
       if (stopping.signal.aborted) return;
       timer = setTimeout(tick, intervalMs);
       // The server keeps the process alive; background work alone shouldn't.
