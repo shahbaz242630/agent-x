@@ -76,6 +76,7 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     environment: config.environment,
     role: config.role,
     log: { level: config.log.level, eventCapPerMinute: config.log.eventCapPerMinute },
+    logSuccessSampleOneIn: config.logSuccessSampleOneIn,
     http: {
       host: config.http.host,
       port: config.http.port,
