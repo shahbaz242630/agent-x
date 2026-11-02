@@ -156,6 +156,7 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ["a person's rate limit", { AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '60' }],
     ["the security events' retention", { AGENTX_SECURITY_EVENT_RETENTION_DAYS: '120' }],
     ['the anchor interval', { AGENTX_AUDIT_ANCHOR_SECONDS: '600' }],
+    ['the anchor lanes', { AGENTX_AUDIT_ANCHOR_LANES: '6' }],
     ['the log cap', { AGENTX_LOG_EVENT_CAP_PER_MINUTE: '1200' }],
     ['the keys folder', { AGENTX_KEYS_DIR: '/mnt/keys' }],
     ["a key's current version", { AGENTX_KEYS_CURRENT: 'audit-mac:2' }],

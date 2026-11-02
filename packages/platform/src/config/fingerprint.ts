@@ -119,7 +119,11 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     // ADR-014 §4: a live start's gate reference too, which names the gate record, never a secret.
     partner: { mode: config.partner.mode, gateRef: gateRefOf(config.partner) },
     payees: { coolingOffHours: config.payees.coolingOffHours },
-    audit: { anchorSeconds: config.audit.anchorSeconds, anchorEpoch: config.audit.anchorEpoch },
+    audit: {
+      anchorSeconds: config.audit.anchorSeconds,
+      anchorEpoch: config.audit.anchorEpoch,
+      anchorLanes: config.audit.anchorLanes,
+    },
     anchorStore: { directory: config.anchorStore.directory, container: place(config.anchorStore.container) },
     activityDownloads: {
       directory: config.activityDownloads.directory,

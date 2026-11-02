@@ -157,7 +157,7 @@ export interface Config {
    * and anchored again; the epoch its anchors are kept under, which moves on only
    * for a sanctioned restore of the whole database (4D2e E).
    */
-  readonly audit: { readonly anchorSeconds: number; readonly anchorEpoch: number };
+  readonly audit: { readonly anchorSeconds: number; readonly anchorEpoch: number; readonly anchorLanes: number };
   /**
    * Where the anchors are kept apart from the database (4D2e E, PL-58): a local
    * folder, development and test alone, or the write-once container in the UAE;
@@ -407,6 +407,7 @@ function readSettings(env: Env, location: LocationChecks) {
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
     anchorEpoch: setting(env, 'AGENTX_ANCHOR_EPOCH'),
+    anchorLanes: setting(env, 'AGENTX_AUDIT_ANCHOR_LANES'),
     anchorsDirectory: setting(env, 'AGENTX_AUDIT_ANCHORS_DIR'),
     anchorsContainer: setting(env, 'AGENTX_AUDIT_ANCHORS_URL'),
     anchorsClientId: setting(env, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'),
@@ -679,7 +680,11 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     securityEvents: Object.freeze({ retentionDays: checks.securityEventRetention.value }),
     partner: partnerFrom(checks.partnerMode.value, checks.gateRef.value),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
-    audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value, anchorEpoch: checks.anchorEpoch.value }),
+    audit: Object.freeze({
+      anchorSeconds: checks.anchorSeconds.value,
+      anchorEpoch: checks.anchorEpoch.value,
+      anchorLanes: checks.anchorLanes.value,
+    }),
     anchorStore: Object.freeze({
       directory: checks.anchorsDirectory.value ?? null,
       container: blobContainerOf(env, checks.anchorsContainer.value, checks.anchorsClientId.value),
