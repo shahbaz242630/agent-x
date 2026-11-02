@@ -1097,6 +1097,28 @@ describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
       });
     });
 
+    it("believes no anchored event with another at its number, the table's key gone", async () => {
+      const from = await anchoredAtTwo();
+      await attacker.query('alter table audit.events drop constraint events_pkey cascade');
+      const copy = await attacker.query<{ id: string }>(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+                                   subject_version, details, prev_hash, hash, mac, mac_key_version)
+         select org_id, seq, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+                subject_version, details, prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1 and seq = 2 returning id`,
+        [org],
+      );
+      try {
+        expect(await trail.checkFromAnchor(app, org, from)).toEqual({
+          ok: false,
+          problem: { reason: 'anchor', seq: 2n },
+        });
+      } finally {
+        await attacker.query('delete from audit.events where id = $1', [copy[0]?.id]);
+        await attacker.query('alter table audit.events add primary key (org_id, seq)');
+      }
+    });
+
     it('reads a head removed, its events left, as no usable head', async () => {
       const from = await anchoredAtTwo();
       await attacker.query('delete from audit.heads where org_id = $1', [org]);

@@ -625,6 +625,62 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
     }
   });
 
+  describe('FX-TAMPER: the attacker, holding none of the keys', () => {
+    const savedHead = async () => {
+      const [head] = await attacker.query<{ seq: bigint; hash: Buffer; mac: Buffer; mac_key_version: number }>(
+        'select seq, hash, mac, mac_key_version from platform_controls.audit_head',
+      );
+      if (head === undefined) throw new Error('no head');
+      return head;
+    };
+
+    /** The head put back to one it genuinely had, its own MAC and all. */
+    const putBack = async ({ seq, hash, mac, mac_key_version: version }: Awaited<ReturnType<typeof savedHead>>) => {
+      await attacker.query(
+        'update platform_controls.audit_head set seq = $1, hash = $2, mac = $3, mac_key_version = $4',
+        [seq, hash, mac, version],
+      );
+    };
+
+    it('finds a chain wound back, its head moved with its tail', async () => {
+      await record(started(1), started(2));
+      const earlier = await savedHead();
+      await record(started(3), started(4));
+      const from = await checked();
+      await tamper('delete from platform_controls.audit_events where seq > 2');
+      await putBack(earlier);
+
+      expect(await chain.checkFromAnchor(app, from)).toEqual({ ok: false, problem: { reason: 'anchor', seq: 4n } });
+    });
+
+    it('finds an event left past a wound-back head, reading no event', async () => {
+      await record(started(1), started(2));
+      const earlier = await savedHead();
+      const from = await checked();
+      await record(started(3));
+      await putBack(earlier);
+
+      expect(await chain.checkFromAnchor(app, from)).toEqual({ ok: false, problem: { reason: 'head', seq: 2n } });
+    });
+
+    it('finds the first event deleted, wherever the anchor stands', async () => {
+      await record(started(1), started(2), started(3));
+      const from = await checked();
+      await tamper('delete from platform_controls.audit_events where seq = 1');
+
+      expect(await chain.checkFromAnchor(app, from)).toEqual({ ok: false, problem: { reason: 'gap', seq: 1n } });
+    });
+
+    it('finds an event after the anchor edited, at its place', async () => {
+      await record(started(1), started(2));
+      const from = await checked();
+      await record(started(3));
+      await tamper(`update platform_controls.audit_events set action = 'probe.edited' where seq = 3`);
+
+      expect(await chain.checkFromAnchor(app, from)).toEqual({ ok: false, problem: { reason: 'hash', seq: 3n } });
+    });
+  });
+
   it("believes no anchored event with another at its number, the table's key gone", async () => {
     await record(started(1), started(2));
     const from = await checked();
@@ -646,12 +702,47 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
 
   it('gives the organisations recorded past a number, and the number to ask from next', async () => {
     const [first, second] = ORGS;
-    expect(await chain.createdOrganizationsSince(app, 0n)).toEqual({ orgIds: [], seq: 0n });
+    expect(await chain.createdOrganizationsSince(app, 0n, 0n)).toEqual({ orgIds: [], seq: 0n });
 
     await record(started(1), created(first), started(2), created(second), started(3));
 
-    expect(await chain.createdOrganizationsSince(app, 0n)).toEqual({ orgIds: [first, second], seq: 4n });
-    expect(await chain.createdOrganizationsSince(app, 2n)).toEqual({ orgIds: [second], seq: 4n });
-    expect(await chain.createdOrganizationsSince(app, 4n)).toEqual({ orgIds: [], seq: 4n });
+    expect(await chain.createdOrganizationsSince(app, 0n, 5n)).toEqual({ orgIds: [first, second], seq: 4n });
+    expect(await chain.createdOrganizationsSince(app, 2n, 5n)).toEqual({ orgIds: [second], seq: 4n });
+    expect(await chain.createdOrganizationsSince(app, 4n, 5n)).toEqual({ orgIds: [], seq: 4n });
+  });
+
+  it('reads nothing past where the chain check reached: a step short of the head goes on from there', async () => {
+    const [first, second] = ORGS;
+    await record(started(1), created(first), started(2), created(second));
+
+    const short = await chain.createdOrganizationsSince(app, 0n, 3n);
+    expect(short).toEqual({ orgIds: [first], seq: 2n });
+    expect(await chain.createdOrganizationsSince(app, short.seq, 4n)).toEqual({ orgIds: [second], seq: 4n });
+  });
+
+  it('neither reads a row planted past the head nor moves its number, so later organisations are still found', async () => {
+    const [first, second] = ORGS;
+    await record(created(first));
+    await attacker.query(
+      `insert into platform_controls.audit_events
+       select 4611686018427387904, gen_random_uuid(), recorded_at, actor_type, actor_id, action, $1, prev_hash,
+              hash, mac, mac_key_version from platform_controls.audit_events where seq = 1`,
+      [JSON.stringify({ orgId: second })],
+    );
+
+    const read = await chain.createdOrganizationsSince(app, 0n, 1n);
+    expect(read).toEqual({ orgIds: [first], seq: 1n });
+
+    await tamper('delete from platform_controls.audit_events where seq = 4611686018427387904');
+    await record(created(second));
+    expect(await chain.createdOrganizationsSince(app, read.seq, 2n)).toEqual({ orgIds: [second], seq: 2n });
+  });
+
+  it('moves its number on past an event whose details give no organisation', async () => {
+    const [first] = ORGS;
+    await record(created(first));
+    await record({ actor: { type: 'system', id: 'api' }, action: 'organization.created', details: { note: 'none' } });
+
+    expect(await chain.createdOrganizationsSince(app, 1n, 2n)).toEqual({ orgIds: [], seq: 2n });
   });
 });

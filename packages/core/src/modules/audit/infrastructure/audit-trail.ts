@@ -901,10 +901,10 @@ function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdge
         left join (select * from audit.heads a where a.org_id = ${orgId} limit 1) as h on true
         left join audit.events e on e.org_id = ${orgId} and e.seq = ${anchored}
       `.execute(tx);
-      const [row, ...others] = rows;
-      // Two events at one number means the table's key is gone: neither is the one anchored.
-      const anchoredRow = row === undefined || others.length > 0 ? { ...row, seq: null } : row;
-      return edgesIn(anchoredRow, contentOf(anchoredRow));
+      // One row always (`values` and left joins), but two where two events share a number, the table's key
+      // gone: neither is the one anchored.
+      const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
+      return edgesIn(row, contentOf(row));
     },
 
     async countBetween(after, upTo) {

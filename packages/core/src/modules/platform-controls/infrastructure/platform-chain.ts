@@ -100,14 +100,18 @@ export interface PlatformChain {
   countStep(db: Kysely<PlatformControlsTables>, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
   /**
    * The organisations `createdOrganizations` gives, recorded past `afterSeq`
-   * alone, and the number to ask from next time: the last such event's, or
-   * `afterSeq` if there were none (4D2e E: not the whole list every run). Read
-   * as stored, as it is; an event's number moves on even where its details
-   * give no organisation. Limited as checkFromAnchor's.
+   * and no further than `upTo`, and the number to ask from next time: the last
+   * such event's, or `afterSeq` if there were none (4D2e E: not the whole list
+   * every run). `upTo` is the place the chain's check just reached: a row it
+   * hasn't reached is neither believed nor moves the number on, or one planted
+   * far past the head and deleted after a single alarm would leave every later
+   * organisation unread. An event's number moves on even where its details give
+   * no organisation. Limited as checkFromAnchor's.
    */
   createdOrganizationsSince(
     db: Kysely<PlatformControlsTables>,
     afterSeq: bigint,
+    upTo: bigint,
   ): Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
 }
 
@@ -218,10 +222,10 @@ function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
         left join (select * from platform_controls.audit_head limit 1) as h on true
         left join platform_controls.audit_events e on e.seq = ${anchored}
       `.execute(tx);
-      const [row, ...others] = rows;
-      // Two events at one number means the table's key is gone: neither is the one anchored.
-      const anchoredRow = row === undefined || others.length > 0 ? { ...row, seq: null } : row;
-      return edgesIn(anchoredRow, contentOf(anchoredRow));
+      // One row always (`values` and left joins), but two where two events share a number, the table's key
+      // gone: neither is the one anchored.
+      const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
+      return edgesIn(row, contentOf(row));
     },
 
     async countBetween(after, upTo) {
@@ -365,13 +369,14 @@ export function createPlatformChain({
       return limitedTransaction(db, (tx) => countStep(readerFor(tx), after, upTo));
     },
 
-    async createdOrganizationsSince(db: Kysely<PlatformControlsTables>, afterSeq: bigint) {
+    async createdOrganizationsSince(db: Kysely<PlatformControlsTables>, afterSeq: bigint, upTo: bigint) {
       const rows = await limitedTransaction(db, (tx) =>
         tx
           .selectFrom('platform_controls.audit_events')
           .select(['seq', 'details'])
           .where('action', '=', ORGANIZATION_CREATED)
           .where('seq', '>', afterSeq)
+          .where('seq', '<=', upTo)
           .orderBy('seq')
           .execute(),
       );
