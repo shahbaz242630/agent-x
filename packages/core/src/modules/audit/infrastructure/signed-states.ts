@@ -595,8 +595,9 @@ export interface SignedStates {
   /**
    * The hold for showing, from its newest signed event and that event itself,
    * read as integrityHold reads it with no lock: nothing is decided on it.
+   * `asSigned`: what the log holds alone, with nothing waiting here counted: what a clear just committed answers.
    */
-  holdRecord(tx: AuditTransaction, orgId: string): Promise<HoldRecord>;
+  holdRecord(tx: AuditTransaction, orgId: string, as?: 'asSigned'): Promise<HoldRecord>;
   /**
    * Records an investigation of the organisation's hold (B3+-2b), by a person
    * (a user, never the app or an agent), only while the hold is a verified
@@ -1425,6 +1426,13 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'tampered', sign });
   };
 
+  /** The hold as the log holds it. Read clear, what rested behind a hold is told, though its answer isn't used. */
+  const holdAsSigned = async (tx: AuditTransaction, orgId: string): Promise<HoldCheck> => {
+    const { check } = await readHold(tx, orgId);
+    if (check.outcome === 'clear') unrecorded(orgId);
+    return check;
+  };
+
   const holdInvestigation = async (tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck> => {
     const found = await trail.recordedEvent(tx, orgId, { onlyAbout: { type: INVESTIGATION_SUBJECT, id } });
     if (found.kind === 'none') return MISSING;
@@ -1758,8 +1766,8 @@ export function createSignedStates({
       });
     },
 
-    async holdRecord(tx: AuditTransaction, orgId: string): Promise<HoldRecord> {
-      const check = await integrityHold(tx, orgId, 'none');
+    async holdRecord(tx: AuditTransaction, orgId: string, as?: 'asSigned'): Promise<HoldRecord> {
+      const check = as === undefined ? await integrityHold(tx, orgId, 'none') : await holdAsSigned(tx, orgId);
       if (check.outcome === 'tampered') return check;
       const found = await trail.recordedEvent(tx, orgId, { eventId: check.eventId });
       // The newest signed event was just read whole: gone or broken now is tampering in between.

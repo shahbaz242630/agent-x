@@ -28,6 +28,13 @@
 //    then the audit module clears it, reading the hold with the chain head's
 //    lock, last of all, and refusing a hold set or cleared since.
 //
+// What that way out rests on, and its limits. `verify` runs here with no anchor, and
+// anchors are held in memory alone until 4D2e E5, so a chain wound back to before a
+// record, with that record's row deleted, reads as never signed; a hold naming the
+// chain clears the same way, so this adds no new power. Findings of this process's own
+// can reach it too: `row` on a creation that rolled back, or a planted `unsigned` row
+// later deleted. That is acceptable, as nothing was ever authorised from such a row.
+//
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
@@ -266,6 +273,7 @@ export function createHoldClearings<Theirs extends object = object>({
     },
 
     async confirm(admin, idempotent, investigationId, stepUpChallengeId, correlationId) {
+      let neverSigned: NeverSigned | undefined;
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, admin.sessionId);
         const whole = await states.verifyAll(tx, admin.orgId, authorityTables, objectsChecked);
@@ -282,7 +290,7 @@ export function createHoldClearings<Theirs extends object = object>({
         }
         await activeAdminId(tx, states, admin, ClearingRefused);
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
-        const neverSigned = await namedRecordWhole(tx, states, admin.orgId, holdEventId);
+        neverSigned = await namedRecordWhole(tx, states, admin.orgId, holdEventId);
         const consumed = await challenges.consume(
           tx,
           held,
@@ -308,20 +316,22 @@ export function createHoldClearings<Theirs extends object = object>({
         if (cleared.outcome !== 'cleared') {
           throw new ClearingRefused(409, cleared.outcome === 'no_investigation' ? 'NO_INVESTIGATION' : 'HOLD_CHANGED');
         }
-        if (neverSigned !== undefined) {
-          logger
-            .child({ correlationId, orgId: admin.orgId.toLowerCase() })
-            .warn('integrity_hold.named_record_never_signed', { ...neverSigned });
-        }
         return { status: 200, resourceId: cleared.eventId };
       });
       if (isUnwritten(done)) return done;
+      // Past the commit, so never of a clear that didn't happen; none on a replay, whose first answer said it.
+      if (neverSigned !== undefined) {
+        logger
+          .child({ correlationId, orgId: admin.orgId.toLowerCase() })
+          .warn('integrity_hold.named_record_never_signed', { ...neverSigned });
+      }
       // Answered from the hold as it now stands, on a replay too.
       const read = await withSignedStates(
         ours,
         admin.orgId,
         { keys, ids, logger: logger.child({ correlationId }), correlationId },
-        (tx, states) => states.holdRecord(tx, admin.orgId),
+        // As signed: a clear that committed says so, though the next record waits here to be the next hold.
+        (tx, states) => states.holdRecord(tx, admin.orgId, 'asSigned'),
       );
       if (read.outcome === 'tampered') return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
       return { outcome: 'cleared', hold: read };

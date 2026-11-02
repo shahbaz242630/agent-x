@@ -661,6 +661,50 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       expect(nothingToRepair()).toEqual([]);
     });
 
+    it('a clear that commits says cleared, though another record waits here to be the next hold, which it then is', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      const next = ids.next();
+      await database
+        .as('app')
+        .query(
+          "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'seal')",
+          [org, MEMBERSHIPS.subject, next],
+        );
+      await pollHoldsWaiting(app, services());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirm(investigationId, challengeId)).toMatchObject({
+        outcome: 'cleared',
+        hold: { outcome: 'clear', version: 3 },
+      });
+
+      // The next hold stands by its own row: set by that same read's end, with no wait.
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
+    });
+
+    it('a clear whose commit fails says nothing of a record never signed', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+      const owner = database.as('owner');
+      await owner.query(
+        "create function audit.refuse_at_commit() returns trigger language plpgsql as $$ begin raise exception 'refused at commit'; end $$",
+      );
+      await owner.query(
+        'create constraint trigger refuse_at_commit after update on audit.heads deferrable initially deferred for each row execute function audit.refuse_at_commit()',
+      );
+      try {
+        await expect(confirm(investigationId, challengeId)).rejects.toThrow();
+      } finally {
+        await owner.query('drop trigger refuse_at_commit on audit.heads');
+        await owner.query('drop function audit.refuse_at_commit()');
+      }
+
+      expect(nothingToRepair()).toEqual([]);
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    });
+
     it('the way out skips nothing else: no step-up, no history check, and it stays held, with nothing said', async () => {
       await holdFromRow(MEMBERSHIPS.subject, ids.next());
       const investigationId = await investigate();
