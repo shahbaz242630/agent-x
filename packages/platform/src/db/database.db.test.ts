@@ -2,8 +2,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { createTestDatabase, LogCapture, type TestDatabase, testLogger } from '@agentx/testing';
 import { type Kysely, sql } from 'kysely';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
+import { withLogContext } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 
 const server = inject('postgres');
@@ -64,6 +65,25 @@ describe(`createDatabase (Postgres ${server.version})`, () => {
     expect(await lostReaches(1)).toBe(1);
     expect(capture.lines().slice(logged)).toHaveLength(1);
     expect(await backendId(app)).not.toBe(before);
+  });
+
+  it("4D2e Stage F: a lost connection's line claims no request or run, though one opened it and another last used it", async () => {
+    const own = new LogCapture();
+    const db = createDatabase({ ...database.connection('app'), maxConnections: 1 }, testLogger(own));
+    try {
+      // The socket, whose events report the loss, is made inside this request's work and outlives it.
+      await withLogContext({ correlationId: 'opened-it' }, () => backendId(db));
+      const pid = await withLogContext({ runId: 'used-it-last' }, () => backendId(db));
+      await database.as('admin').query('select pg_catalog.pg_terminate_backend($1)', [pid]);
+      await vi.waitFor(() => {
+        expect(own.lines().map((line) => line.event)).toContain('db.connection_lost');
+      });
+      const [lost] = own.lines().filter((line) => line.event === 'db.connection_lost');
+      expect(lost).not.toHaveProperty('correlationId');
+      expect(lost).not.toHaveProperty('runId');
+    } finally {
+      await db.destroy();
+    }
   });
 
   it('survives a connection being cut off in the middle of a query: the query fails, the app carries on', async () => {
