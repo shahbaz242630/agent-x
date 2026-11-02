@@ -7,7 +7,7 @@
 // request, and puts the organisation on hold: a reservation released,
 // lowered or deleted, a claim deleted or released. (A claim moved to another
 // order or supplier is refused even then, by 0039's `for_its_request` key.)
-import { createAuditTrail, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
+import { createAuditTrail, pollHoldsWaiting, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import {
@@ -420,6 +420,42 @@ describe('the holdings check (E1)', () => {
     // The mismatch is alarmed: the organisation held, naming the request.
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
     expect(await whole(ids.next())).toBe(false);
+  });
+
+  it('a hold recorded from a row names the request as one found directly, so its mismatch still stops the clearing (D5)', async () => {
+    const { w, acting } = await ready();
+    const held = await requests(acting, w);
+    await pastTheApp(w, (owner) =>
+      owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [held.allowed]),
+    );
+    await database
+      .as('app')
+      .query(
+        "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'holding')",
+        [w.org, SPEND_REQUESTS.subject, held.allowed],
+      );
+
+    await pollHoldsWaiting(app, quiet());
+
+    const [event] = await database
+      .as('admin')
+      .query<{ details: string }>(
+        "select details from audit.events where org_id = $1 and action = 'integrity_hold.set'",
+        [w.org],
+      );
+    const { foundOn, objectId } = JSON.parse(event?.details ?? '{}') as { foundOn?: string; objectId?: string };
+    expect(foundOn).toBe(SPEND_REQUESTS.subject);
+    // What clearing asks of what the hold names: not whole, so the clearing is refused.
+    expect(
+      await withSignedStates(app, w.org, quiet(), (tx, states) =>
+        holdingsRecordChecks<DatabaseTransaction<Tables>>(keys, paymentHoldsOf)[SPEND_REQUESTS.subject](
+          tx,
+          states,
+          w.org,
+          objectId ?? '',
+        ),
+      ),
+    ).toBe(false);
   });
 
   it('passes requests on a payee key as their decisions sealed it (E1b)', async () => {
