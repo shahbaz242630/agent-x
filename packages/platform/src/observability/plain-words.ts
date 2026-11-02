@@ -205,8 +205,7 @@ export const PLAIN_WORDS = {
   },
   'audit.hold_not_kept': {
     happened: 'A security hold that could not be recorded could not be written to the waiting list either.',
-    broke:
-      'Only the process that found it knows of it: another process may read the organisation as clear, and a restart would forget it.',
+    broke: 'Only the process that found it knows of it, and a restart would forget it.',
     next: 'Check the database first. The process keeps trying both, and the tamper alarm before this line still stands.',
   },
   'audit.holds_waiting_unread': {
