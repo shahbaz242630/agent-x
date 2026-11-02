@@ -23,7 +23,7 @@ import {
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { MandatesTables } from '@agentx/core/modules/mandates';
 import type { OrganizationsTables } from '@agentx/core/modules/organizations';
-import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { type PlatformControlsTables, releaseJobLease, takeJobLease } from '@agentx/core/modules/platform-controls';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources';
@@ -64,6 +64,7 @@ import {
 } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 
+import { createLeadership, LEASE_TERM_MS, type Leadership } from './background.ts';
 import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads.ts';
 import { railFor } from './funding-source-links.ts';
 import { directoryNamesFrom } from './kept-names.ts';
@@ -142,11 +143,12 @@ export interface Booted {
 /**
  * Stops the process once, however many signals arrive, then exits. The listeners
  * stay on: without one, Node's default for a second SIGTERM would end the
- * process at once, before the counts are written. `jobs` has no server.
+ * process at once, before the counts are written. `jobs` has no server, and a
+ * process stopped while it starts has none yet.
  */
 export function onStopSignals(
   { host, logger, database }: Booted,
-  server: FastifyInstance | undefined,
+  server: () => FastifyInstance | undefined,
   background: { stop(): Promise<void> },
   recorder: SecurityRecorder,
 ): void {
@@ -166,7 +168,7 @@ export function onStopSignals(
       // Requests are still answered while the server stops (return503OnClosing is
       // off), so the pool closes only once the last of them, and the anchor
       // check and the sweep, have finished with it.
-      await Promise.all([server?.close(), background.stop()]);
+      await Promise.all([server()?.close(), background.stop()]);
       // After the last request, so none of its events is left behind.
       await recorder.flush(stoppingAt + RECORDER_DONE_BY_MS);
       await database.destroy();
@@ -294,8 +296,23 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
   return { host, config, keys, logger, database };
 }
 
+/** The lease on the jobs, where this process has them: this process's own, by an ID of its own. */
+export function leadershipOf({ config, logger, database }: Booted): Leadership | undefined {
+  if (config.role === 'web') return undefined;
+  const holder = uuidV7Ids.next();
+  return createLeadership({
+    store: {
+      take: (beating) => takeJobLease(database, holder, beating, LEASE_TERM_MS / 1000),
+      release: () => releaseJobLease(database, holder),
+    },
+    logger,
+    // As the anchor check's own stale limit: what a chain may go unchecked before that is the alarm.
+    notLeadingAfterMs: config.audit.anchorSeconds * 3 * 1000,
+  });
+}
+
 /** What both sides of the API use: none opens a connection or starts a timer as it is made. */
-export function sharedParts({ config, keys, logger, database }: Booted) {
+export function sharedParts({ config, keys, logger, database }: Booted, leadership: Leadership | undefined) {
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
   const securityEvents = createSecurityEvents({
@@ -326,7 +343,7 @@ export function sharedParts({ config, keys, logger, database }: Booted) {
     watch: createJobWatch({
       logger,
       now: () => systemClock.now().getTime(),
-      pulsing: config.role !== 'web',
+      pulsing: () => leadership?.leading() ?? false,
     }),
     recorder: createSecurityRecorder({
       write: (events) => securityEvents.record(database, events),
