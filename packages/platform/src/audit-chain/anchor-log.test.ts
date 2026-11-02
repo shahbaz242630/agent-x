@@ -1233,6 +1233,81 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(beyond(capture)).toEqual([]);
       });
 
+      it('a lease return with every chain moved, what is held at the very limit, reads in full: nothing staged', async () => {
+        const fake = createFakeWriteOnceStore();
+        // A single line staged would pass this limit.
+        const { log, capture } = await holding(fake, 20 * KEPT_LINE, 20);
+        const moved = Array.from({ length: 20 }, (_, index) => anchorAt(chain(index), 2n));
+        fake.files.set(nameOf('snapshots', 60), fileOf(nameOf('snapshots', 60), ...moved));
+        await log.read();
+        expect(beyond(capture)).toEqual([]);
+        for (let index = 0; index < 20; index += 1) expect(log.latest(chain(index))?.seq).toBe(2n);
+      });
+
+      it('a line behind what is held changes nothing, and a chain new to this process comes in with the whole read', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log } = await holding(fake, 40 * KEPT_LINE, 20);
+        fake.files.set(nameOf('deltas', 2), fileOf(nameOf('deltas', 2), anchorAt(chain(1), 5n)));
+        await log.read();
+        fake.files.set(
+          nameOf('deltas', 3),
+          fileOf(nameOf('deltas', 3), anchorAt(chain(1), 3n), anchorAt(chain(50), 1n)),
+        );
+        await log.read();
+        expect(log.latest(chain(1))?.seq).toBe(5n);
+        expect(log.latest(chain(50))?.seq).toBe(1n);
+      });
+
+      it('a failed read keeps what it applied, signed and higher, a new chain out, and its marks where they were', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log } = await holding(fake, 40 * KEPT_LINE, 20);
+        const snapshot = nameOf('snapshots', 60);
+        fake.files.set(snapshot, fileOf(snapshot, anchorAt(chain(0), 7n), anchorAt(chain(50), 1n)));
+        const delta = nameOf('deltas', 61);
+        fake.files.set(delta, fileOf(delta, anchorAt(chain(1), 7n)));
+        const real = fake.real.get;
+        fake.instead.get = (name) => (name === delta ? Promise.reject(new Error('the store is away')) : real(name));
+        await log.read();
+        expect(log.state()).toBe('read');
+        expect(log.latest(chain(0))?.seq).toBe(7n);
+        expect(log.latest(chain(50))).toBeUndefined();
+
+        // Nothing moved the marks: the next read opens that snapshot again, and takes all of it.
+        const opened: string[] = [];
+        fake.instead.get = (name) => {
+          opened.push(name);
+          return real(name);
+        };
+        await log.read();
+        expect(opened).toContain(snapshot);
+        expect(log.latest(chain(50))?.seq).toBe(1n);
+        expect(log.latest(chain(1))?.seq).toBe(7n);
+      });
+
+      it('a read refused past the budget keeps what it applied, a new chain out, and its marks where they were', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, capture } = await holding(fake, 20 * KEPT_LINE, 20);
+        const snapshot = nameOf('snapshots', 60);
+        fake.files.set(snapshot, fileOf(snapshot, anchorAt(chain(0), 7n), anchorAt(chain(50), 1n)));
+        await log.read();
+        expect(beyond(capture)).toHaveLength(1);
+        expect(log.state()).toBe('read');
+        expect(log.latest(chain(0))?.seq).toBe(7n);
+        expect(log.latest(chain(50))).toBeUndefined();
+        await log.read();
+        expect(beyond(capture)).toHaveLength(2);
+      });
+
+      it('another hash at the place held still goes by the whole read, and is the alarm, however it arrives', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, capture } = await holding(fake, 40 * KEPT_LINE, 20);
+        const other = anchorAt(chain(0), 1n, new Date(START.getTime() + MINUTE), 9);
+        fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), other));
+        await log.read();
+        expect(capture.lines().filter((line) => line.reason === 'fork')).toHaveLength(1);
+        expect(log.latest(chain(0))?.at).toEqual(START);
+      });
+
       it('a fork between two files is still the alarm while reading, the older kept', async () => {
         const fake = createFakeWriteOnceStore();
         const older = anchorAt(CHAIN, 3n, START, 3);

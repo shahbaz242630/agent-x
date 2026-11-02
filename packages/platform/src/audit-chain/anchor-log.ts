@@ -32,6 +32,13 @@
 // is the alarm, so it can't hide later files. Every chain in the store counts as
 // seen, so an organisation taken off the list and the record is still missed.
 //
+// Signed lines stand, and the highest place wins, so they count as they are read. A chain
+// this process holds moves on at once, even if the read then fails, or the file turns out
+// broken: its line is signed and higher. A check under way as that happens can't be compared
+// with what landed, so it says nothing and goes again. A chain new to this process waits
+// for the whole read, as a part read could look like one never anchored; and the read's marks
+// move only with a whole read. What's held and what waits count against memory together.
+//
 // So the API identity's token alone (add and read) can raise alarms and, with enough
 // spoiled files before a restart, make payments wait, but can't move an anchor back.
 // Whoever also holds the `audit-anchor` signing key can write anything a file may
@@ -432,16 +439,15 @@ export function createAnchorLog({
   };
 
   /**
-   * A line into what this read holds, if it changes anything: a higher place, or another hash at the same one for the alarm.
-   * The same place and hash holds no new object, only its later time, for the order a restart goes in. So files replayed, or
-   * another copy's snapshot of what this one holds, cost nothing. What's held and staged counts together against what this
-   * process can hold, or a read could end it, past anything a catch can see.
+   * A line as it is read, by `merge`'s rules. On a chain held it goes straight there, so a read of every chain moved costs
+   * nothing more, and a line behind or the same costs nothing. Another hash at the place held, like a chain new to this
+   * process, waits for the whole read. What's held and what waits count together against what this process can hold, or a
+   * read could end it, past anything a catch can see.
    */
   const staged = (stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
     const held = anchors.get(line.chain);
-    if (held !== undefined && line.seq < held.seq) return;
-    if (held?.seq === line.seq && held.hash.equals(line.hash)) {
-      if (line.at > held.at) anchors.set(line.chain, line);
+    if (held !== undefined && (line.seq !== held.seq || line.hash.equals(held.hash))) {
+      merge(anchors, line);
       return;
     }
     merge(stage, line);
@@ -511,7 +517,7 @@ export function createAnchorLog({
       const stage = new Map<string, Anchor>();
       const snapshots = await newerSnapshots(foreign, stage);
       const deltas = await newerDeltas(snapshots.base, foreign, stage);
-      // Only now, with every call answered: a part read could look like a chain never anchored.
+      // Only now, with every call answered: a part read could look like a chain never anchored, or settle a fork.
       for (const line of stage.values()) merge(anchors, line);
       if (snapshots.sound !== undefined) snapshotFrom = snapshots.sound;
       if (deltas.newest !== undefined) deltasFrom = deltas.newest;

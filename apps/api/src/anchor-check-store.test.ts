@@ -35,8 +35,8 @@ const AT = new Date('2026-11-02T09:00:00.000Z');
 const STALE_MS = 900_000;
 const DEADLINE_MS = 120_000;
 
-const ok = (seq: bigint, fill = Number(seq)): ChainReport => ({
-  ok: true,
+const ok = (seq: bigint, fill = Number(seq)) => ({
+  ok: true as const,
   seq,
   hash: Buffer.alloc(32, fill),
   macKeyVersion: 1,
@@ -809,6 +809,47 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
 
     expect(after.log.latest(CHAIN)?.seq).toBe(3n);
     expect(after.lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a check under way as a read moves its anchor on is no alarm: it repeats, and then compares with the newer', async () => {
+    const fake = createFakeWriteOnceStore();
+    const chains = chainsHolding({ [ORG]: ok(3n) });
+    const running = process(fake, chains.organizations);
+    await running.check.run();
+
+    // Forced: the chain's check is held open until another copy's anchor has landed.
+    const { promise: answer, resolve: answerWith } = Promise.withResolvers<ChainReport>();
+    const given: unknown[] = [];
+    const { organizations } = chainsHolding({ [ORG]: ok(3n) });
+    const held = process(fake, {
+      ...organizations,
+      verify: (_, anchor) => {
+        given.push(anchor?.seq);
+        return given.length === 1 ? answer : Promise.resolve(ok(9n));
+      },
+    });
+    await held.log.read();
+    const run = held.check.run();
+    await vi.waitFor(() => {
+      expect(given).toEqual([3n]);
+    });
+    // Another copy's anchor, a moment later, found by a read, as a lease coming back finds one.
+    const other = process(fake, organizations);
+    other.clock.advanceBy(1000);
+    await other.log.read();
+    other.log.keep(signAnchor(keys, CHAIN, ok(9n), other.clock.now(), 1));
+    await other.log.flush();
+    held.clock.advanceBy(1000);
+    await held.log.read();
+    expect(held.log.latest(CHAIN)?.seq).toBe(9n);
+    answerWith(ok(3n));
+    await run;
+
+    expect(held.lines('audit.integrity_failed')).toEqual([]);
+    expect(chains.holds).toEqual([]);
+    await held.check.run();
+    expect(given).toEqual([3n, 9n]);
+    expect(held.lines('audit.integrity_failed')).toEqual([]);
   });
 
   it('without a store the check keeps its anchors in memory as it did, and a run reads and writes nothing', async () => {
