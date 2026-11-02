@@ -17,11 +17,11 @@
 //   the agent's (UNAUTHENTICATED: a revocation committed first wins);
 // - 4: the agent's open mandate and its version in force, then the mandate's
 //   policy and the organisation's, FOR SHARE;
-// - 5: the source the agent named FOR SHARE, then the agent's zone, added on its
-//   first decision under a mandate;
+// - 5: the source the agent named FOR SHARE, then the agent's zone, if it has one;
 // - 6: the supplier FOR NO KEY UPDATE, alone, after all a request can be refused
 //   on, so a request refused anyway never queues on it (4D2e C6), serialising the
-//   duplicate check;
+//   duplicate check; then the agent's zone added, on its first decision under a
+//   mandate, so one stuck on this supplier holds up none of its others (PL-62);
 // - 7: the agent's month FOR NO KEY UPDATE, serialising the monthly check
 //   (decision 4: the agent's, under all its mandates);
 // - then the checks, in one statement of their own after the locks, never the
@@ -48,6 +48,7 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   AGENT_ZONES,
+  keptZoneOf,
   type LimitReservationsTables,
   lockAgentMonth,
   reserveStatement,
@@ -518,6 +519,46 @@ const decisionRows = (orgId: string, agentId: string, asked: SpendWeighed): Gath
   { table: AGENT_ZONES, id: { id: agentId }, lock: 'share' },
 ];
 
+/**
+ * Each level's rows up to the supplier's in one statement, in the lock order (4D2d P8), for the reads after it to answer
+ * from, and their histories. The brakes, the currency's read and the acting rows on one trip (P17), each its own
+ * statement: a brake waited for behind a freeze or a kill switch comes before the acting rows' snapshot, so they read
+ * what it did (S157). All before the supplier's lock, so a request refused on any of it never queues there.
+ */
+async function rowsBeforeTheSupplier(
+  tx: DecisionTx,
+  states: SignedStates,
+  acting: AgentActing,
+  asked: SpendWeighed,
+  now: Date,
+) {
+  const { orgId, agentId } = acting;
+  const {
+    ahead: [, , , currency],
+  } = await states.gatherBehind(
+    tx,
+    orgId,
+    [
+      brakeShared(ORGANISATION_BRAKE, orgId),
+      brakeShared(AGENT_BRAKE, orgId, agentId),
+      brakeShared(SOURCE_BRAKE, orgId, asked.fundingSourceId),
+      allowedCurrencyRead(tx, asked.amount.currency),
+    ],
+    actingRows(acting),
+  );
+  if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
+  const { agent, keyId } = await actingIn(tx, states, acting, now);
+  const found = await timedLock('decisionRowsMs', () => states.gather(tx, orgId, decisionRows(orgId, agentId, asked)));
+  const mandateId = found[AT.mandate] ?? null;
+  const versionId = found[AT.version] ?? null;
+  const policyVersionId = found[AT.organizationVersion] ?? null;
+  await states.gatherHistories(tx, orgId, [
+    ...(mandateId === null || versionId === null ? [] : overLimitHistories(mandateId, versionId)),
+    ...(policyVersionId === null ? [] : [choicesHistory(policyVersionId)]),
+  ]);
+  return { agent, keyId, mandateId };
+}
+
 export function createSpendRequestDecisions({
   database,
   outbox,
@@ -552,43 +593,18 @@ export function createSpendRequestDecisions({
     // Read before the lock waits below (each at most 5 s), so a request can be weighed seconds past a mandate's
     // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
-    // Each level's rows in one statement, in the lock order (4D2d P8): the reads below answer from them. The
-    // brakes, the currency's read and the acting rows on one trip (P17), each its own statement: a brake waited for
-    // behind a freeze or a kill switch comes before the acting rows' snapshot, so they read what it did (S157).
-    const {
-      ahead: [, , , currency],
-    } = await states.gatherBehind(
-      tx,
-      orgId,
-      [
-        brakeShared(ORGANISATION_BRAKE, orgId),
-        brakeShared(AGENT_BRAKE, orgId, agentId),
-        brakeShared(SOURCE_BRAKE, orgId, asked.fundingSourceId),
-        allowedCurrencyRead(tx, asked.amount.currency),
-      ],
-      actingRows(acting),
-    );
-    if (currency.rows.length === 0) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
-    const { agent, keyId } = await actingIn(tx, states, acting, now);
-    const found = await timedLock('decisionRowsMs', () =>
-      states.gather(tx, orgId, decisionRows(orgId, agentId, asked)),
-    );
-    const mandateId = found[AT.mandate] ?? null;
-    const versionId = found[AT.version] ?? null;
-    const policyVersionId = found[AT.organizationVersion] ?? null;
-    // Their histories in one statement too, once their rows are held, as before. All before the supplier's lock below,
-    // so a request refused on any of it never queues there.
-    await states.gatherHistories(tx, orgId, [
-      ...(mandateId === null || versionId === null ? [] : overLimitHistories(mandateId, versionId)),
-      ...(policyVersionId === null ? [] : [choicesHistory(policyVersionId)]),
-    ]);
+    const { agent, keyId, mandateId } = await rowsBeforeTheSupplier(tx, states, acting, asked, now);
     const { mandate, ...policies } = await authorityIn(tx, states, orgId, agentId, 'inForce', { id: mandateId });
     const source = await sourceIn(tx, states, orgId, asked);
     // Under a mandate: none without one, as no month is then weighed.
-    const zone =
-      mandate === null ? null : await zoneInForce(tx, states, { orgId, agentId, zoneIfNew: mandate.timeZone, at: now });
-    if (zone?.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+    const zoneRead = mandate === null ? null : await keptZoneOf(tx, states, { orgId, agentId });
+    if (zoneRead?.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
     const { supplier, order } = await timedSupplierLock(() => supplierIn(tx, states, orgId, asked, 'change'));
+    const zone =
+      mandate === null || zoneRead === null
+        ? null
+        : await zoneInForce(tx, states, zoneRead, { orgId, agentId, zoneIfNew: mandate.timeZone, at: now });
+    if (zone?.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
     const month = zone === null ? null : await lockAgentMonth(tx, { orgId, agentId, zone: zone.zone, at: now });
     const input = await inputRead(tx, { asked, now, agent, mandate, policies, source, supplier, order, month });
     const made = decide(input);

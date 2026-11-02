@@ -44,7 +44,7 @@ describe('timing statements', () => {
     await expect(timedLock('headLockMs', () => Promise.resolve('untimed'))).resolves.toBe('untimed');
   });
 
-  it('keeps which trip the supplier’s lock ended on, with its time among the rows’, the last attempt’s after a retry', async () => {
+  it('keeps which trip the supplier’s lock ended on, with its time its own, the last attempt’s after a retry', async () => {
     const times = noStatementTimes();
     await timingStatements(times, async () => {
       await timedTrip(() => Promise.resolve());
@@ -54,7 +54,8 @@ describe('timing statements', () => {
       await timedSupplierLock(() => timedTrip(() => Promise.resolve()));
     });
     expect(times.supplierLockTrip).toBe(4);
-    expect(times.decisionRowsMs).toBeGreaterThan(0);
+    expect(times.supplierLockMs).toBeGreaterThan(0);
+    expect(times.decisionRowsMs).toBe(0);
     await expect(timedSupplierLock(() => Promise.resolve('untimed'))).resolves.toBe('untimed');
   });
 
@@ -103,10 +104,12 @@ describe('timing statements', () => {
         slowestTripMs: 9.96,
         commitMs: 2.25,
         decisionRowsMs: 4.44,
+        supplierLockMs: 3.33,
         supplierLockTrip: 2,
         headLockMs: 1.26,
       }),
     ).toEqual({
+      supplierLockMs: 3.3,
       supplierLockTrip: 2,
       poolWaitMs: 0,
       trips: 3,

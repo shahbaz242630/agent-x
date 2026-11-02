@@ -60,6 +60,7 @@ import {
   LogCapture,
   SequentialIds,
   tamperAsOwner,
+  type TestClient,
   type TestDatabase,
   testLogger,
   waitUntilQueued,
@@ -236,6 +237,36 @@ async function whileHeld(
   open(undefined);
   await holder;
   return Promise.all(asking);
+}
+
+/**
+ * The organisation's chain head held, so a decision that got that far holds its supplier and its month, its capacity
+ * still unsaid: `first` queued there, `second` queued behind what `first` holds, `whileQueued` looking on, then let go.
+ * Their answers.
+ */
+async function headHeld(
+  w: World,
+  first: () => Promise<SpendRequestDecided>,
+  second: () => Promise<SpendRequestDecided>,
+  whileQueued: (looker: TestClient) => Promise<void> = () => Promise.resolve(),
+) {
+  const holder = await database.connect('admin');
+  const looker = await database.connect('admin');
+  try {
+    await holder.query('begin');
+    await holder.query('select 1 from audit.heads where org_id = $1 for update', [w.org]);
+    const ahead = within(20_000, first(), 'the decision at the head');
+    await waitUntilQueued(database.as('admin'), 1);
+    const behind = within(20_000, second(), 'the decision behind it');
+    await waitUntilQueued(database.as('admin'), 2);
+    await whileQueued(looker);
+    await holder.query('rollback');
+    return [await ahead, await behind];
+  } finally {
+    await holder.query('rollback');
+    await holder.end();
+    await looker.end();
+  }
 }
 
 /** A status move of the organisation, its agent or a key, in its own transaction, which `wait`s once it is made. */
@@ -613,8 +644,11 @@ describe('deciding a spend request and reserving it (D4)', () => {
       expect(line.poolWaitMs).toBeGreaterThanOrEqual(0);
       // Its two contended locks' trips, each within the whole (4D2e A).
       expect(line.decisionRowsMs).toBeGreaterThan(0);
+      expect(line.supplierLockMs).toBeGreaterThan(0);
       expect(line.headLockMs).toBeGreaterThan(0);
-      expect(line.databaseMs).toBeGreaterThanOrEqual((line.decisionRowsMs as number) + (line.headLockMs as number));
+      expect(line.databaseMs).toBeGreaterThanOrEqual(
+        (line.decisionRowsMs as number) + (line.supplierLockMs as number) + (line.headLockMs as number),
+      );
     }
     // The signal alone: no order, amount or supplier in the line.
     const lines = JSON.stringify(decided());
@@ -939,14 +973,17 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(13);
   });
 
-  it("pays one trip more on an agent's first decision alone, for its zone's insert", async () => {
+  it("makes an agent's first decision's zone after the supplier's lock, its trips all held", async () => {
     const { w, acting } = await ready();
     decidedOf(await ask(acting, asking(w)));
     const line = capture
       .lines()
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
-    expect(line?.supplierLockTrip).toBe(7);
+    // Its gather reads the zone as not there, the insert comes after the supplier's lock, and the zone's seal adds trips.
+    expect(line?.supplierLockTrip).toBe(6);
+    expect(line?.trips).toBe(24);
+    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(19);
   });
 });
 
@@ -1074,38 +1111,155 @@ describe('refusable reads before the supplier’s lock (4D2e C6, forced)', () =>
     expect(events).toHaveLength(1);
   });
 
-  it('two first decisions on two suppliers: the zone held before the supplier, one zone kept, no deadlock', async () => {
-    const { w, acting } = await ready();
-    const [first, second] = w.suppliers as [string, string];
+  /** Admin connections: a stuck supplier's holder, and one to look with. */
+  async function withHolderAndLooker<T>(work: (holder: TestClient, looker: TestClient) => Promise<T>): Promise<T> {
     const holder = await database.connect('admin');
     const looker = await database.connect('admin');
     try {
       await holder.query('begin');
-      await holder.query('select 1 from suppliers.suppliers where id = $1 for update', [first]);
-      // Held at the supplier's lock, having made the agent's zone.
-      const atTheSupplier = within(20_000, ask(acting, asking(w)), 'the first decision');
-      await waitUntilQueued(database.as('admin'), 1);
-      // Queued on the zone, before the other supplier's lock, which is free for anyone meanwhile.
-      const atTheZone = within(
-        20_000,
-        ask(acting, asking(w, { supplierId: second, orderReference: 'INV-2', amount: AED(10_000n) })),
-        'the second decision',
-      );
-      await waitUntilQueued(database.as('admin'), 2);
-      await looker.query('select 1 from suppliers.suppliers where id = $1 for no key update nowait', [second]);
-
-      await holder.query('rollback');
-      expect(decidedOf(await atTheSupplier).decision).toBe('ALLOW');
-      expect(decidedOf(await atTheZone).decision).toBe('ALLOW');
+      return await work(holder, looker);
     } finally {
       await holder.query('rollback');
       await holder.end();
       await looker.end();
     }
+  }
+
+  const stuckOn = (holder: TestClient, supplier: string) =>
+    holder.query('select 1 from suppliers.suppliers where id = $1 for update', [supplier]);
+
+  /** Whether anyone holds the agent's zone being made: an insert of its own, undone, would wait for them. */
+  async function zoneFree(looker: TestClient, w: World): Promise<void> {
+    await looker.query('begin');
+    await looker.query("set local lock_timeout = '300ms'");
+    await looker.query(
+      `insert into limit_reservations.agent_zones (org_id, id, agent_id, time_zone, created_at)
+       values ($1, $2, $2, 'Asia/Dubai', now()) on conflict do nothing`,
+      [w.org, w.agent],
+    );
+    await looker.query('rollback');
+  }
+
+  it('a first decision waiting on its supplier holds no zone', async () => {
+    const { w, acting } = await ready();
+    await withHolderAndLooker(async (holder, looker) => {
+      await stuckOn(holder, w.suppliers[0] ?? '');
+      const waiting = within(20_000, ask(acting, asking(w)), 'the first decision');
+      await waitUntilQueued(database.as('admin'), 1);
+
+      await zoneFree(looker, w);
+
+      await holder.query('rollback');
+      expect(decidedOf(await waiting).decision).toBe('ALLOW');
+    });
+    const { rows, events } = await zoneKept(w);
+    expect(rows).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    expect(events).toHaveLength(1);
+  });
+
+  it('a first decision on a stuck supplier holds up none of the agent’s first decisions on another (PL-62)', async () => {
+    const { w, acting } = await ready();
+    await withHolderAndLooker(async (holder) => {
+      await stuckOn(holder, w.suppliers[0] ?? '');
+      const stuck = within(20_000, ask(acting, asking(w)), 'the one on the stuck supplier');
+      await waitUntilQueued(database.as('admin'), 1);
+
+      // Its own speed, not the other's 5 s, and under the stuck supplier's holder still.
+      const other = await within(
+        2_000,
+        ask(acting, asking(w, { supplierId: w.suppliers[1] ?? '', orderReference: 'INV-2', amount: AED(10_000n) })),
+        'the one on the other supplier',
+      );
+      expect(decidedOf(other).decision).toBe('ALLOW');
+
+      await holder.query('rollback');
+      // It finds the zone the other kept, and the other's capacity.
+      expect(decidedOf(await stuck).decision).toBe('ALLOW');
+    });
     const { rows, events } = await zoneKept(w);
     expect(rows).toEqual([{ time_zone: 'Asia/Dubai' }]);
     expect(events).toHaveLength(1);
     expect(retried()).toEqual([]);
+  });
+
+  it('two first decisions both past their suppliers keep one zone: no deadlock, no retry', async () => {
+    const { w, acting } = await ready();
+    const [, second] = w.suppliers as [string, string];
+    const [ahead, behind] = await headHeld(
+      w,
+      () => ask(acting, asking(w, { amount: AED(1_200_000n), orderReference: 'INV-1' })),
+      () => ask(acting, asking(w, { amount: AED(1_200_000n), orderReference: 'INV-2', supplierId: second })),
+      async (looker) => {
+        // The one behind holds its supplier while it waits on the zone the one ahead made.
+        await expect(
+          looker.query('select 1 from suppliers.suppliers where id = $1 for no key update nowait', [second]),
+        ).rejects.toMatchObject({ code: '55P03' });
+      },
+    );
+
+    expect(decidedOf(ahead ?? { outcome: 'busy' }).decision).toBe('ALLOW');
+    // AED 12,000 twice is past the AED 20,000 cap: the second saw the first's capacity.
+    expect(decidedOf(behind ?? { outcome: 'busy' })).toMatchObject({
+      decision: 'DENY',
+      reasons: ['POLICY_MONTHLY_CAP'],
+    });
+    const { rows, events } = await zoneKept(w);
+    expect(rows).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    expect(events).toHaveLength(1);
+    expect(retried()).toEqual([]);
+  });
+
+  /** A first decision held at its supplier, having read no zone, while `meanwhile` runs: its answer once let go. */
+  async function firstDecisionWhile(w: World, acting: AgentActing, meanwhile: () => Promise<unknown>) {
+    return withHolderAndLooker(async (holder) => {
+      await stuckOn(holder, w.suppliers[0] ?? '');
+      const waiting = within(20_000, ask(acting, asking(w)), 'the first decision');
+      await waitUntilQueued(database.as('admin'), 1);
+      await meanwhile();
+      await holder.query('rollback');
+      return waiting;
+    });
+  }
+
+  it('a zone sealed during its wait for the supplier is read again, and is the one its month is named in', async () => {
+    const { w, acting } = await ready();
+    clock.advanceBy(Date.parse('2026-10-31T12:00:00Z') - clock.now().getTime());
+
+    const answer = await firstDecisionWhile(w, acting, () =>
+      withSignedStates(app, w.org, quiet(), async (tx, states) => {
+        const zone = { orgId: w.org, agentId: w.agent, zone: 'Pacific/Kiritimati', at: clock.now() };
+        await addZone(tx, zone);
+        await sealNewZone(tx, states, { ...zone, actor: { type: 'agent', id: w.agent } });
+      }),
+    );
+
+    const request = decidedOf(answer);
+    expect((await heldBy(w.org, request.id)).reservation).toMatchObject({ month: '2026-11' });
+    const { rows, events } = await zoneKept(w);
+    expect(rows).toEqual([{ time_zone: 'Pacific/Kiritimati' }]);
+    expect(events).toHaveLength(1);
+  });
+
+  it('a zone planted during its wait for the supplier, no seal behind it, is judged and refused, nothing made', async () => {
+    const { w, acting } = await ready();
+
+    const answer = await firstDecisionWhile(w, acting, () =>
+      withTenant(app, w.org, (tx) =>
+        tx
+          .insertInto('limit_reservations.agent_zones')
+          .values({
+            org_id: w.org,
+            id: w.agent,
+            agent_id: w.agent,
+            time_zone: 'Pacific/Kiritimati',
+            created_at: clock.now(),
+          })
+          .execute(),
+      ),
+    );
+
+    expect(answer).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
   });
 
   it('two first decisions at once, unforced, on two suppliers: one zone, both decided, no retry', async () => {

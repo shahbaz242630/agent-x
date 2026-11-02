@@ -63,13 +63,17 @@ export type ZoneInForce =
   { readonly outcome: 'kept'; readonly zone: string; readonly keptNow: boolean } | { readonly outcome: 'tampered' };
 
 /**
- * The agent's zone for a decision, before its supplier's lock (4D2e C6): read first, so only an agent's first decision
- * adds one, `zoneIfNew`, the mandate in force's. Two first decisions keep one: the second's insert waits for the first
- * to end, then finds its row, and reads it on a snapshot from after that wait. A row still not there is one deleted.
+ * The agent's zone for a decision, from `read`, its keptZoneOf before its supplier's lock (4D2e C6), so a later decision
+ * costs no trip here and a tampered one is refused before that queue. Called once that lock is held, so a first decision
+ * stuck on a supplier holds up no other supplier's: only then does it add one, `zoneIfNew`, the mandate in force's.
+ * `read` saw none on a snapshot older than that wait, so the insert may find a row: another's, committed since, or one
+ * being added, which it waits for. Two first decisions keep one. That row is read again, on a snapshot from after those
+ * waits, and judged against its seal; a row still not there is one deleted.
  */
 export async function zoneInForce(
   tx: ZonesTransaction,
   states: SignedStates,
+  read: Exclude<ZoneCheck, { readonly outcome: 'tampered' }>,
   {
     orgId,
     agentId,
@@ -77,11 +81,11 @@ export async function zoneInForce(
     at,
   }: { readonly orgId: string; readonly agentId: string; readonly zoneIfNew: string; readonly at: Date },
 ): Promise<ZoneInForce> {
-  const read = await keptZoneOf(tx, states, { orgId, agentId });
-  if (read.outcome === 'none' && (await addZone(tx, { orgId, agentId, zone: zoneIfNew, at }))) {
+  if (read.outcome === 'kept') return { outcome: 'kept', zone: read.zone, keptNow: false };
+  if (await addZone(tx, { orgId, agentId, zone: zoneIfNew, at })) {
     return { outcome: 'kept', zone: zoneIfNew, keptNow: true };
   }
-  const kept = read.outcome === 'none' ? await keptZoneOf(tx, states, { orgId, agentId }) : read;
+  const kept = await keptZoneOf(tx, states, { orgId, agentId });
   return kept.outcome === 'kept' ? { outcome: 'kept', zone: kept.zone, keptNow: false } : { outcome: 'tampered' };
 }
 

@@ -699,7 +699,7 @@ interface Held {
   from?: { readonly table: SignedStateTable; readonly state: VerifiedState };
   /** The state this transaction just recorded on the row, still locked, for changeStatus to go on from (4D2d P3b). */
   wrote?: { readonly table: SignedStateTable; readonly state: VerifiedState };
-  /** Every read of it found no row: no lock is held, so making it raises none (4D2e C6). */
+  /** Its last read found no row: no lock is held by that read, so making it raises none (4D2e C6). */
   none?: true;
 }
 

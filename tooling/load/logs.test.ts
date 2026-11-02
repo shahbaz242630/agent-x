@@ -13,6 +13,7 @@ const NO_PARTS = {
   gateWaitP95: 0,
   tripsP50: 0,
   decisionRowsP95: 0,
+  supplierLockP95: 0,
   headLockP95: 0,
   busyRefusals: 0,
 };
@@ -160,6 +161,7 @@ describe('the API’s log after a load run', () => {
         trips,
         decision: 'ALLOW',
         decisionRowsMs: trips + 100,
+        supplierLockMs: trips + 300,
         headLockMs: trips + 200,
       });
     const summary = summariseLogs(
@@ -181,6 +183,7 @@ describe('the API’s log after a load run', () => {
       gateWaitP95: 0,
       tripsP50: 19,
       decisionRowsP95: 119,
+      supplierLockP95: 319,
       headLockP95: 219,
       busyRefusals: 0,
     });
@@ -194,6 +197,7 @@ describe('the API’s log after a load run', () => {
         gateWaitP95: 0,
         tripsP50: 20,
         decisionRowsP95: 120,
+        supplierLockP95: 320,
         headLockP95: 220,
         busyRefusals: 0,
       },
@@ -205,6 +209,7 @@ describe('the API’s log after a load run', () => {
         gateWaitP95: 0,
         tripsP50: 21,
         decisionRowsP95: 121,
+        supplierLockP95: 321,
         headLockP95: 221,
         busyRefusals: 0,
       },
@@ -216,6 +221,7 @@ describe('the API’s log after a load run', () => {
         gateWaitP95: 0,
         tripsP50: 22,
         decisionRowsP95: 122,
+        supplierLockP95: 322,
         headLockP95: 222,
         busyRefusals: 0,
       },

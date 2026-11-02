@@ -2,10 +2,10 @@
 // decision 4; Phase 2 D4): what a decision locks to serialise an agent's
 // monthly check, the total it checks, and the capacity it holds.
 //
-// The caller (D4's decideAndReserve) has taken ADR-006's locks 2–6 first, the
-// agent's zone among them (zoneInForce, before the supplier's lock: added from
-// the mandate in force on its first decision, then kept for good: D2's review;
-// a signed record, 0054, agent-zones.ts), then:
+// The caller (D4's decideAndReserve) has taken ADR-006's locks 2–6 first, and
+// holds the agent's zone (zoneInForce, read before the supplier's lock, added
+// after it from the mandate in force on its first decision, then kept for good:
+// D2's review; a signed record, 0054, agent-zones.ts), then:
 // - `lockAgentMonth`: its month at `at` in that zone, and that month's period
 //   row locked FOR NO KEY UPDATE (level 7);
 // - `monthSpentRead`: the agent's month, every reservation but a released one,

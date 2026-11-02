@@ -480,8 +480,6 @@ describe('the brake itself', () => {
     'lets decisions run side by side: one held on a stuck supplier never holds up another',
     async () => {
       const { w, acting } = await ready();
-      // Not its first: two first decisions of an agent line up on its new zone, once (4D2e C6), which isn't the brake's doing.
-      await decision(w, acting, w.suppliers[1]);
       const stuck = await stuckSupplier(w.suppliers[0] ?? '');
       const waiting = settled(decision(w, acting));
       await waitUntilQueued(database.as('admin'), 1);
