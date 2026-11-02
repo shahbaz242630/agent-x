@@ -104,6 +104,7 @@ export {
   lockWaitBoundedAlone,
   SOURCE_BRAKE,
   holdTransactionLock,
+  JOB_ANSWER_WITHIN_MS,
   limitedTransaction,
   holdOpenOnPurpose,
   limitStatements,

@@ -88,6 +88,7 @@ async function setHold(
   held: string,
   { finding, count }: Found,
   { keys, ids, logger, correlationId }: SignedStatesServices,
+  answeredWithinMs?: number,
 ): Promise<void> {
   const log = logger.child({ orgId: held });
   recording.set(held, (recording.get(held) ?? 0) + 1);
@@ -109,7 +110,7 @@ async function setHold(
         return holder.hold(tx, finding, count);
       },
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
-      { limited: true, unshared: true },
+      { limited: true, unshared: true, ...(answeredWithinMs === undefined ? {} : { answeredWithinMs }) },
     );
     unrecorded.delete(held);
     if (outcome === 'set') {
@@ -147,6 +148,7 @@ export async function holdOrganisation(
   orgId: string,
   services: SignedStatesServices,
   failure: string | undefined,
+  answeredWithinMs?: number,
 ): Promise<void> {
   const held = orgId.toLowerCase();
   const waiting = unrecorded.get(held);
@@ -158,9 +160,9 @@ export async function holdOrganisation(
       sign: 'chain',
       chainFailure: failure,
     };
-    await setHold(db, held, { finding, count: 1 }, services);
+    await setHold(db, held, { finding, count: 1 }, services, answeredWithinMs);
   } else if (waiting !== undefined && !recording.has(held)) {
-    await setHold(db, held, waiting, services);
+    await setHold(db, held, waiting, services, answeredWithinMs);
   }
 }
 

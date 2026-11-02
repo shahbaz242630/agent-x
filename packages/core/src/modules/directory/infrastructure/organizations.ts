@@ -31,21 +31,28 @@ const LIST_PAGE = 50_000;
  * transaction, each statement limited to 10 seconds, so a hung read gives
  * its connection back.
  */
-export async function listedOrganizations(db: Kysely<DirectoryTables>, page = LIST_PAGE): Promise<string[]> {
+export async function listedOrganizations(
+  db: Kysely<DirectoryTables>,
+  page = LIST_PAGE,
+  answeredWithinMs?: number,
+): Promise<string[]> {
   const listed: string[] = [];
   // In pages, each a statement within its limit, so no number of organisations can make the read fail whole.
   for (;;) {
     const after = listed.at(-1);
-    const rows = await readAlone(db, (tx) =>
-      tx
-        .selectFrom('directory.orgs')
-        .select('org_id')
-        .$if(after !== undefined, (query) => query.where('org_id', '>', after as string))
-        .orderBy('org_id')
-        .limit(page)
-        .execute(),
+    const rows = await readAlone(
+      db,
+      (tx) =>
+        tx
+          .selectFrom('directory.orgs')
+          .select('org_id')
+          .$if(after !== undefined, (query) => query.where('org_id', '>', after as string))
+          .orderBy('org_id')
+          .limit(page)
+          .execute(),
+      answeredWithinMs,
     );
-    listed.push(...rows.map((row) => row.org_id));
+    for (const row of rows) listed.push(row.org_id);
     if (rows.length < page) return listed;
   }
 }

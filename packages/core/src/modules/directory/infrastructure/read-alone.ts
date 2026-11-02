@@ -11,6 +11,7 @@ import type { DirectoryTables } from './tables.ts';
 export function readAlone<T>(
   db: Kysely<DirectoryTables>,
   read: (tx: Transaction<DirectoryTables>) => Promise<T>,
+  answeredWithinMs?: number,
 ): Promise<T> {
-  return limitedTransaction(db, read);
+  return limitedTransaction(db, read, answeredWithinMs === undefined ? {} : { answeredWithinMs });
 }
