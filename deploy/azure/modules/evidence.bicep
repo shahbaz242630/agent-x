@@ -1,10 +1,15 @@
-// The write-once store for our team's exports of an organisation's audit log
-// (ADR-005 §6, Phase 3 E10c; decision 27). The operator's `audit-export` job
-// writes each file once, as its own identity (apps/operator/src/azure-blob-store.ts),
-// and nothing, us included, can change or delete it until its time is up.
+// The write-once store, with two containers: our team's exports of an
+// organisation's audit log (`audit-exports`; ADR-005 §6, Phase 3 E10c; decision
+// 27), and the audit chains' anchors (`audit-anchors`; 4D2e E, PL-58), kept apart
+// from the database so a chain wound back shows, across restarts too. The
+// operator's `audit-export` job writes each export once, as its own identity
+// (apps/operator/src/azure-blob-store.ts); the API writes each anchor file once,
+// as its own (packages/platform/src/storage/write-once.ts). Nothing, us included,
+// can change or delete either until its time is up.
 //
 // - version-level immutability, set when the account is created (Microsoft:
-//   it can't be added later): staging keeps a file a few days, Unlocked;
+//   it can't be added later), and every container takes the account's policy,
+//   so the two keep a file alike: staging a few days, Unlocked;
 //   production five years, Locked. A policy can't be created Locked, so
 //   production's first foundation runs twice, Unlocked then Locked, and a
 //   Locked account can't be deleted until its last file's time is up
@@ -15,9 +20,10 @@
 //   its Storage service endpoint, as the key vault takes them. Nobody reads an
 //   export from a laptop or the portal: how one is handed over is decided
 //   separately (decision 28)
-// - the operator's identity may only add a new file to the one container
-//   (`blobs/add/action`): it can't read, overwrite or list, and no one else is
-//   given anything here
+// - the operator's identity may only add a new file to `audit-exports`
+//   (`blobs/add/action`): it can't read, overwrite or list. The API's may add a
+//   new file to `audit-anchors` and read and list what is there (`blobs/read`, as
+//   a restart must), and can't overwrite or delete. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -25,8 +31,12 @@
 func evidenceAccountName(short string, nameSuffix string) string => 'stagentx${short}${nameSuffix}'
 
 @export()
-@description('The one container the exports are written to.')
+@description('The container the exports are written to.')
 func evidenceContainerName() string => 'audit-exports'
+
+@export()
+@description('The container the audit chains\' anchors are kept in.')
+func anchorContainerName() string => 'audit-anchors'
 
 param location string
 param name string
@@ -37,6 +47,12 @@ param writerIdentityName string
 
 @description('A custom role\'s name is the whole directory\'s, so it carries the environment and the suffix.')
 param writerRoleName string
+
+@description('The identity that keeps the anchors: the API\'s. Created by the foundation under this name, as the writer\'s is.')
+param anchorKeeperIdentityName string
+
+@description('As `writerRoleName`, for the anchors\' role.')
+param anchorRoleName string
 
 @description('How many days each file is kept unchangeable.')
 @minValue(1)
@@ -128,6 +144,14 @@ resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@20
   }
 }
 
+resource anchorContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = {
+  parent: blobs
+  name: anchorContainerName()
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 // Created by the foundation (environment.bicep) under this name.
 resource writer 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
   name: writerIdentityName
@@ -165,6 +189,47 @@ resource writes 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     principalId: writer.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'operator adds audit exports (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+resource anchorKeeper 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: anchorKeeperIdentityName
+}
+
+// Put Blob of a file that isn't there yet; Get Blob and List Blobs, which a
+// restart needs (Microsoft: both are `blobs/read`). Never `blobs/write`, which
+// would overwrite one, or `blobs/delete`.
+resource anchorRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, 'audit-anchors')
+  properties: {
+    roleName: anchorRoleName
+    description: 'The API\'s audit anchors: add a new file to the anchors container, and read and list them. Nothing else.'
+    type: 'CustomRole'
+    assignableScopes: [
+      resourceGroup().id
+    ]
+    permissions: [
+      {
+        actions: []
+        notActions: []
+        dataActions: [
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
+        ]
+        notDataActions: []
+      }
+    ]
+  }
+}
+
+resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: anchorContainer
+  name: guid(anchorContainer.id, anchorKeeper.id, anchorRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorRole.name)
+    principalId: anchorKeeper.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)'
   }
 }
 

@@ -541,6 +541,15 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-exports$/,
       ),
       expect.stringMatching(
+        /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-anchors$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
@@ -1492,6 +1501,139 @@ describe('SEC-OPS-09 each rule can fail', () => {
         message: "sets AGENTX_EVIDENCE_DIR: only the operator's job writes to the store",
       },
     ]);
+  });
+
+  describe("evidence-store: the chains' anchors (4D2e E, PL-58)", () => {
+    const ACTIONS_OF = 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs';
+    const ANCHORS = (resource: PredictedResource) =>
+      IN_EVIDENCE_STORE('Microsoft.Storage/storageAccounts/blobServices/containers')(resource) &&
+      resource.id.endsWith('/audit-anchors');
+    const ROLE = (resource: PredictedResource) =>
+      ROLE_DEFINITIONS(resource) &&
+      resource.name ===
+        bicepGuid(
+          String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id),
+          'audit-anchors',
+        );
+    const KEEPS = (resource: PredictedResource) =>
+      ASSIGNMENTS(resource) && String(at(resource.properties, 'description')).startsWith('api keeps audit anchors');
+    const WRITES = (resource: PredictedResource) =>
+      ASSIGNMENTS(resource) && String(at(resource.properties, 'description')).startsWith('operator adds audit exports');
+    const permissionsOf = (role: Mutable): Mutable => first(at(role, 'properties', 'permissions'));
+
+    it("a second container in the write-once account, private, kept by the account's own policy", () => {
+      expect(staging.predictedResources.filter(ANCHORS)).toHaveLength(1);
+      expect(brokenRules(changed(ANCHORS, (found) => (inside(found, 'properties').publicAccess = 'Blob')))).toEqual([
+        'evidence-store',
+      ]);
+      expect(brokenRules(without(ANCHORS))).toEqual(['required', 'evidence-store']);
+      // A third of any name, or a container of another name in its place.
+      const third = structuredClone(staging.predictedResources.find(ANCHORS)) as unknown as Mutable;
+      third.id = String(third.id).replace(/audit-anchors$/, 'audit-other');
+      expect(brokenRules(withExtra(third))).toEqual(['required', 'evidence-store']);
+      expect(
+        brokenRules(changed(ANCHORS, (found) => (found.id = String(found.id).replace(/audit-anchors$/, 'other')))),
+      ).toEqual(['evidence-store']);
+      // In the downloads' account instead, it is that account's second container.
+      expect(
+        brokenRules(changed(ANCHORS, (found) => (found.id = String(found.id).replace(/stagentxstg/, 'stagentxdlstg')))),
+      ).toContain('evidence-store');
+    });
+
+    it('its role adds a new file and reads, and can never overwrite or delete', () => {
+      expect(at(staging.predictedResources.find(ROLE)?.properties, 'permissions')).toEqual([
+        {
+          actions: [],
+          notActions: [],
+          dataActions: [`${ACTIONS_OF}/add/action`, `${ACTIONS_OF}/read`],
+          notDataActions: [],
+        },
+      ]);
+      for (const change of [
+        (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
+        (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
+        (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/read`]),
+        (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/add/action`]),
+        (role: Mutable) => (permissionsOf(role).dataActions = ['*']),
+        (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+        (role: Mutable) =>
+          (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
+      ]) {
+        expect(brokenRules(changed(ROLE, change))).toEqual(['evidence-store']);
+      }
+      expect(brokenRules(without(ROLE))).toEqual(['evidence-store']);
+    });
+
+    it('given once, on its own container alone, to the API alone; the exports role stays on the exports', () => {
+      const replaced = (grant: Mutable): void => {
+        grant.id = String(grant.id).replace('/containers/audit-anchors', '/containers/audit-exports');
+      };
+      for (const change of [
+        replaced,
+        (grant: Mutable) => (grant.id = String(grant.id).replace('/blobServices/default/containers/audit-anchors', '')),
+        (grant: Mutable) =>
+          (inside(grant, 'properties').principalId = String(at(grant, 'properties', 'principalId')).replace(
+            'id-agentx-stg-api',
+            'id-agentx-stg-operator',
+          )),
+        (grant: Mutable) => (inside(grant, 'properties').principalType = 'User'),
+      ]) {
+        expect(brokenRules(changed(KEEPS, change))).toEqual(['evidence-store']);
+      }
+      expect(brokenRules(without(KEEPS))).toEqual(['evidence-store']);
+      const twice = structuredClone(staging.predictedResources.find(KEEPS)) as unknown as Mutable;
+      twice.id = `${String(twice.id)}-second`;
+      expect(brokenRules(withExtra(twice))).toEqual(['evidence-store']);
+      // The operator's role moved onto the anchors: it could then add a file a restart reads.
+      expect(
+        brokenRules(
+          changed(WRITES, (grant) => {
+            grant.id = String(grant.id).replace('/containers/audit-exports', '/containers/audit-anchors');
+          }),
+        ),
+      ).toEqual(['evidence-store']);
+    });
+
+    it('the API alone is told of it, with its own identity', () => {
+      const STORE_NAME = String(staging.predictedResources.find(EVIDENCE_STORE)?.name);
+      const anchorSettings = (app: Mutable): Mutable[] =>
+        settingsOf(app).filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHORS_'));
+      const apiId = String(
+        staging.predictedResources.find(
+          (resource) =>
+            resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' && resource.name.endsWith('-api'),
+        )?.id,
+      );
+      expect(anchorSettings(staging.predictedResources.find(APP('api')) as unknown as Mutable)).toEqual([
+        {
+          name: 'AGENTX_AUDIT_ANCHORS_URL',
+          value: `[format('https://{0}.blob.{1}/{2}', '${STORE_NAME}', environment().suffixes.storage, 'audit-anchors')]`,
+        },
+        { name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID', value: `[reference('${apiId}', '2024-11-30').clientId]` },
+      ]);
+      const url = (app: Mutable): Mutable =>
+        anchorSettings(app).find((entry) => entry.name === 'AGENTX_AUDIT_ANCHORS_URL') ?? {};
+      for (const change of [
+        (app: Mutable) => (url(app).value = String(url(app).value).replace("'audit-anchors'", "'audit-exports'")),
+        (app: Mutable) => (url(app).value = String(url(app).value).replace(`'${STORE_NAME}'`, "'stagentxother'")),
+        (app: Mutable) => settingsOf(app).push({ name: 'AGENTX_AUDIT_ANCHORS_DIR', value: '/mnt/anchors' }),
+        (app: Mutable) => {
+          containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== 'AGENTX_AUDIT_ANCHORS_CLIENT_ID');
+        },
+      ]) {
+        expect(brokenRules(changed(APP('api'), change))).toEqual(['evidence-store']);
+      }
+      const told = changed(JOB('migrate'), (job) =>
+        settingsOf(job).push({ name: 'AGENTX_AUDIT_ANCHORS_URL', value: 'x' }),
+      );
+      expect(policyProblems(told, STAGING)).toEqual([
+        {
+          rule: 'evidence-store',
+          resource: 'job-agentx-stg-migrate',
+          message: "sets AGENTX_AUDIT_ANCHORS_URL: only the API keeps the chains' anchors",
+        },
+      ]);
+    });
   });
 
   it('activity-downloads: a downloads store anyone else can reach, that keeps a file past its week, or that another identity uses (L5c, decision 31)', () => {
