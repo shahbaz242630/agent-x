@@ -511,6 +511,20 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         ]);
       });
 
+      it('reads none of them twice: the next read starts from the newest, spoiled or not', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('snapshots', 60), spoiled());
+        const { log, lines } = logOver(fake);
+        await log.read();
+        fake.calls.gets = 0;
+
+        await log.read();
+
+        expect(fake.calls.gets).toBe(0);
+        expect(lines('audit.integrity_failed')).toHaveLength(1);
+      });
+
       it('goes no further back than the first one with nothing wrong', async () => {
         const fake = createFakeWriteOnceStore();
         fake.files.set(nameOf('snapshots', -60), fileOf(anchorAt(OTHER_CHAIN, 1n)));
@@ -707,6 +721,17 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       // And never again.
       await log.read();
       expect(fake.calls.gets).toBe(1);
+    });
+
+    it('reads no delta older than the snapshot it wrote itself', async () => {
+      const fake = createFakeWriteOnceStore();
+      const { log } = await started(fake);
+      fake.files.set(nameOf('deltas', -60, 7), fileOf(anchorAt(CHAIN, 8n)));
+      fake.calls.gets = 0;
+      await log.read();
+
+      expect(fake.calls.gets).toBe(0);
+      expect(log.latest(CHAIN)).toBeUndefined();
     });
 
     it("reads another copy's newer snapshot, and no older one", async () => {
