@@ -209,8 +209,13 @@ export const PLAIN_WORDS = {
     next: 'Check the database first. The process keeps trying both, and the tamper alarm before this line still stands.',
   },
   'audit.holds_waiting_past_limit': {
-    happened: 'The list of security holds waiting is longer than the app could have written.',
-    broke: 'This process read only part of it. Payments still read the list themselves.',
+    happened: 'The list of security holds waiting is longer than honest work would leave.',
+    broke: 'At its read limit a process reads only part of it. Payments still read the list themselves.',
+    next: 'Treat it as tampering: find who can write to the database, then clear the forged rows.',
+  },
+  'audit.holds_waiting_past_memory': {
+    happened: 'A process left some rows of the list of security holds waiting out of its memory, at its limit.',
+    broke: 'Nothing passes: they stay on the list, which payments read. Their alarms come as room frees.',
     next: 'Treat it as tampering: find who can write to the database, then clear the forged rows.',
   },
   'audit.holds_waiting_unread': {
@@ -736,9 +741,9 @@ export const PLAIN_WORDS = {
     next: "A broken audit trail needs an operator's restore, not an admin's button: follow the incident runbook.",
   },
   'integrity_hold.named_record_never_signed': {
-    happened: 'A security hold was cleared that named a record with no row and no history in this organisation.',
-    broke: 'Nothing: there was nothing to repair. But the hold may have come from a forged row on the waiting list.',
-    next: 'Read the tamper alarm from when the hold was set, and find out who could write to the database.',
+    happened: "A security hold was cleared that names a record this organisation's chain never signed.",
+    broke: 'Nothing: the record has no row and no history, so there was nothing to repair.',
+    next: 'Read the tamper alarm from when the hold was set: it may have come from a forged row.',
   },
   'log.invalid_event': {
     happened: 'Part of the app wrote a log line with a badly formed name.',
