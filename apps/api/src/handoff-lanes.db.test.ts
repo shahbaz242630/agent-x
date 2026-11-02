@@ -466,7 +466,9 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
       const grown = await owner.saveHead();
       const anchors = createMemoryAnchorStore();
       const chainOf = { kind: 'organisation', orgId: w.org } as const;
-      anchors.keep(signAnchor(keys, chainOf, { seq: BigInt(grown.seq), hash: grown.hash }, clock.now()));
+      anchors.keep(
+        signAnchor(keys, chainOf, { seq: BigInt(grown.seq), hash: grown.hash, macKeyVersion: 1 }, clock.now()),
+      );
       await owner.windBack(head);
       const { rail, sent } = railOver([w]);
 
@@ -954,7 +956,9 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
       try {
         const head = await owner.saveHead();
         const chainOf = { kind: 'organisation', orgId: anchored.w.org } as const;
-        anchors.keep(signAnchor(keys, chainOf, { seq: BigInt(head.seq), hash: head.hash }, clock.now()));
+        anchors.keep(
+          signAnchor(keys, chainOf, { seq: BigInt(head.seq), hash: head.hash, macKeyVersion: 1 }, clock.now()),
+        );
       } finally {
         await owner.end();
       }
