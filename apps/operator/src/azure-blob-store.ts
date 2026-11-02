@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 
 import type { OutboundFetch } from '@agentx/platform/outbound';
 import {
+  blobAlreadyThere,
   BLOB_API_VERSION,
   blobErrorCode,
   blobServiceToken,
@@ -32,21 +33,6 @@ const STORE = 'evidence store';
 
 /** How long one call may take: a file of 10,000 events is about 20 MB. */
 const CALL_TIMEOUT_MS = 120_000;
-
-/**
- * Azure's own answers to a write refused because the blob is there already:
- * 403 UnauthorizedBlobOverwrite, as staging answered a second write of one
- * export (S125: the writer role holds `blobs/add/action` alone, which may
- * add a blob but never write over one); 409
- * BlobAlreadyExists, as it answers `If-None-Match: *` for an identity that
- * may write; 412 ConditionNotMet, as its page on conditions describes it.
- * Only these codes: any other 403 is a refusal of the identity, a failure.
- */
-const ALREADY_THERE: ReadonlySet<string> = new Set([
-  '403 UnauthorizedBlobOverwrite',
-  '409 BlobAlreadyExists',
-  '412 ConditionNotMet',
-]);
 
 export function azureBlobStore({
   settings,
@@ -76,9 +62,11 @@ export function azureBlobStore({
       // Nothing of the answer is read but its status and code.
       await response.body?.cancel();
       if (response.status === 201) return 'written';
-      const code = blobErrorCode(response);
-      if (ALREADY_THERE.has(`${String(response.status)} ${code}`)) return 'there_already';
-      throw new BlobStoreFailed(STORE, `the blob service answered ${String(response.status)} (${code})`);
+      if (blobAlreadyThere(response)) return 'there_already';
+      throw new BlobStoreFailed(
+        STORE,
+        `the blob service answered ${String(response.status)} (${blobErrorCode(response)})`,
+      );
     },
   };
 }

@@ -204,6 +204,20 @@ export interface AnchorPoint {
   readonly hash: Buffer;
 }
 
+/**
+ * A place a check of the chain has reached, and the MAC key's version there:
+ * the check goes on from it as if it had read every event before. The version
+ * must come with the place. A check started at 0 would take an event sealed
+ * with a key rotated out long ago, and the anchor's own key version is the
+ * signing key's, which says nothing about this one.
+ */
+export interface CheckedPoint extends AnchorPoint {
+  readonly macKeyVersion: number;
+}
+
+/** Where a chain's check starts when nothing has been checked: before its first event, no key version yet. */
+export const CHAIN_START: CheckedPoint = Object.freeze({ seq: 0n, hash: GENESIS_HASH, macKeyVersion: 0 });
+
 export interface ChainProblem {
   readonly reason: ChainProblemReason;
   /** Where: the event's sequence number, or for `head`, the head's. */
@@ -212,8 +226,7 @@ export interface ChainProblem {
 
 /** A chain that checks out, up to its head, or the first problem found. */
 export type ChainReport =
-  | { readonly ok: true; readonly seq: bigint; readonly hash: Buffer }
-  | { readonly ok: false; readonly problem: ChainProblem };
+  ({ readonly ok: true } & CheckedPoint) | { readonly ok: false; readonly problem: ChainProblem };
 
 /**
  * Where a chain's store stands: its head, and how many events it holds, read
@@ -246,17 +259,30 @@ export interface ChainVerifier {
   finish(): ChainReport;
 }
 
-export function createChainVerifier(
+/**
+ * Checks events one at a time, in order, from a place already checked: the
+ * part of a check that needs no head, so a check can start part way along a
+ * chain and stop before its end. Each must follow the last in number and link,
+ * hash to its hash and carry its MAC, with a key version never below the one
+ * before it, `from`'s for the first.
+ */
+export interface ChainWalker {
+  /** Checks the next event; the first problem ends the walk. */
+  check(entry: StoredEntry): ChainProblem | undefined;
+  /** The next event's row can't be read as an event: a problem at its place. */
+  unreadable(): ChainProblem;
+  /** The last event checked, or the first problem found. */
+  reached(): ChainReport;
+}
+
+export function createChainWalker(
   keys: KeyProvider,
   chain: Chain,
-  { head, stored, anchor }: ChainState,
-): ChainVerifier {
-  let seq = 0n;
-  let hash: Buffer = GENESIS_HASH;
-  let keyVersion = 0;
-  let problem: ChainProblem | undefined = headIsSealed(keys, chain, head)
-    ? undefined
-    : { reason: 'head', seq: head.seq };
+  from: CheckedPoint = CHAIN_START,
+  anchor?: AnchorPoint,
+): ChainWalker {
+  let { seq, hash, macKeyVersion: keyVersion } = from;
+  let problem: ChainProblem | undefined;
 
   const problemWith = (entry: StoredEntry): ChainProblem | undefined => {
     const expected = seq + 1n;
@@ -285,18 +311,44 @@ export function createChainVerifier(
       problem ??= { reason: 'unreadable', seq: seq + 1n };
       return problem;
     },
+    reached() {
+      return problem === undefined ? { ok: true, seq, hash, macKeyVersion: keyVersion } : { ok: false, problem };
+    },
+  };
+}
+
+export function createChainVerifier(
+  keys: KeyProvider,
+  chain: Chain,
+  { head, stored, anchor }: ChainState,
+): ChainVerifier {
+  const walker = createChainWalker(keys, chain, CHAIN_START, anchor);
+  let problem: ChainProblem | undefined = headIsSealed(keys, chain, head)
+    ? undefined
+    : { reason: 'head', seq: head.seq };
+
+  return {
+    check(entry) {
+      problem ??= walker.check(entry);
+      return problem;
+    },
+    unreadable() {
+      problem ??= walker.unreadable();
+      return problem;
+    },
     finish() {
+      const reached = walker.reached();
       // Compared last, so a missing event is reported where it is missing. The hash settles where the chain
       // ended (it covers its event's number, and a head can't be sealed without the key); the count, that
       // the store holds nothing else.
-      if (problem === undefined && (stored !== head.seq || !hash.equals(head.hash))) {
+      if (problem === undefined && reached.ok && (stored !== head.seq || !reached.hash.equals(head.hash))) {
         problem = { reason: 'head', seq: head.seq };
       }
       // A whole chain can be wound back to an earlier head it once had: only the anchor, held apart, shows it.
       if (problem === undefined && anchor !== undefined && head.seq < anchor.seq) {
         problem = { reason: 'anchor', seq: anchor.seq };
       }
-      return problem === undefined ? { ok: true, seq, hash } : { ok: false, problem };
+      return problem === undefined ? reached : { ok: false, problem };
     },
   };
 }

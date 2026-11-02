@@ -12,15 +12,16 @@
 // API logs at start (`api.starting`, keys).
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
-import { type AnchorPoint, type Chain, chainName } from './chain.ts';
+import { type Chain, chainName, type CheckedPoint } from './chain.ts';
 
-export interface Anchor extends AnchorPoint {
+export interface Anchor extends CheckedPoint {
   /** The chain's name, as its hashes and MACs name it. */
   readonly chain: string;
   /** When the app anchored it. */
   readonly at: Date;
+  /** The signing key's version; `macKeyVersion` is the audit MAC key's at the anchored event, signed with the rest. */
   readonly keyVersion: number;
-  /** Ed25519 over `['audit-anchor', chain, seq, hash, at]`, as length-prefixed parts. */
+  /** Ed25519 over `['audit-anchor', chain, seq, hash, macKeyVersion, at]`, as length-prefixed parts. */
   readonly signature: Buffer;
 }
 
@@ -30,19 +31,21 @@ export interface AnchorStore {
   keep(anchor: Anchor): void;
 }
 
-const anchorMessage = (chain: string, point: AnchorPoint, at: Date): Message => [
+const anchorMessage = (chain: string, point: CheckedPoint, at: Date): Message => [
   'audit-anchor',
   chain,
   point.seq.toString(),
   point.hash,
+  point.macKeyVersion.toString(),
   at.toISOString(),
 ];
 
 /** Signs a chain's checked head as its new anchor. */
-export function signAnchor(keys: KeyProvider, chain: Chain, point: AnchorPoint, at: Date): Anchor {
+export function signAnchor(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date): Anchor {
   const name = chainName(chain);
   const { signature, keyVersion } = keys.sign('audit-anchor', anchorMessage(name, point, at));
-  return Object.freeze({ chain: name, seq: point.seq, hash: point.hash, at, keyVersion, signature });
+  const { seq, hash, macKeyVersion } = point;
+  return Object.freeze({ chain: name, seq, hash, macKeyVersion, at, keyVersion, signature });
 }
 
 /** The last anchor of each chain, in this process's memory. */
