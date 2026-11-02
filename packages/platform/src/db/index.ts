@@ -107,6 +107,7 @@ export {
   limitedTransaction,
   holdOpenOnPurpose,
   limitStatements,
+  limitStatementsTo,
   lockName,
   ORGANISATION_BRAKE,
   readAloneOnOneTrip,
