@@ -17,6 +17,13 @@ const keyMaterial = (fill: number): KeyMaterial =>
 const keys = createKeyProvider(keyMaterial(1));
 /** Someone else's signing key: their lines read as anchors, signed wrongly. */
 const otherKeys = createKeyProvider(keyMaterial(50));
+/** Holding only a later version of the `audit-anchor` key, as `keys` signs with 1. */
+const LATER_KEYS = createKeyProvider(
+  byPurpose((purpose) => {
+    const version = purpose === 'audit-anchor' ? 2 : 1;
+    return { current: version, versions: new Map([[version, Buffer.alloc(32, PURPOSES.indexOf(purpose) + 70)]]) };
+  }) satisfies KeyMaterial,
+);
 
 const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
@@ -57,12 +64,12 @@ const linesIn = (bytes: Buffer | undefined): Record<string, unknown>[] =>
     .split('\n')
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 
-const logOver = (fake: FakeWriteOnceStore = createFakeWriteOnceStore(), epoch = 1) => {
+const logOver = (fake: FakeWriteOnceStore = createFakeWriteOnceStore(), epoch = 1, holding = keys) => {
   const capture = new LogCapture();
   const clock = { at: START };
   const log = createAnchorLog({
     store: fake.store,
-    keys,
+    keys: holding,
     logger: testLogger(capture),
     now: () => clock.at,
     epoch,
@@ -328,13 +335,14 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     it('SEC-DB-11 skips a line with a bad signature and is the alarm, keeping the good ones', async () => {
       const fake = createFakeWriteOnceStore();
       const forged = anchorAt(CHAIN, 99n, START, 99, otherKeys);
+      fake.files.set(nameOf('snapshots', -60), fileOf(anchorAt(CHAIN, 2n), anchorAt(OTHER_CHAIN, 1n)));
       fake.files.set(nameOf('snapshots', 0), fileOf(forged, anchorAt(OTHER_CHAIN, 3n)));
       const { log, lines } = logOver(fake);
       await log.read();
 
-      expect(log.latest(CHAIN)).toBeUndefined();
+      expect(log.latest(CHAIN)?.seq).toBe(2n);
       expect(log.latest(OTHER_CHAIN)?.seq).toBe(3n);
-      expect(log.organisations()).toEqual([OTHER_ORG]);
+      expect(log.organisations().toSorted()).toEqual([ORG, OTHER_ORG].toSorted());
       expect(lines('audit.integrity_failed')).toEqual([
         expect.objectContaining({
           level: 'error',
@@ -478,6 +486,146 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
           fileAt: new Date(START.getTime() + 60 * MINUTE).toISOString(),
         }),
       ]);
+    });
+
+    describe('a snapshot with a line that fails can not stand for the whole', () => {
+      const spoiled = (): Buffer => fileOf('not a line');
+
+      it('the one before it is read too, and every delta since that one', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)));
+        fake.files.set(nameOf('deltas', 30), fileOf(anchorAt(CHAIN, 5n)));
+        fake.files.set(nameOf('snapshots', 60), spoiled());
+        fake.files.set(nameOf('deltas', 65), fileOf(anchorAt(OTHER_CHAIN, 6n)));
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(5n);
+        expect(log.latest(OTHER_CHAIN)?.seq).toBe(6n);
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ reason: 'signature', kind: 'snapshots', lines: 1 }),
+        ]);
+        expect(lines('audit.anchors_read')).toEqual([
+          expect.objectContaining({ chains: 2, snapshot: true, deltas: 2 }),
+        ]);
+      });
+
+      it('goes no further back than the first one with nothing wrong', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', -60), fileOf(anchorAt(OTHER_CHAIN, 1n)));
+        fake.files.set(nameOf('deltas', -30), fileOf(anchorAt(OTHER_CHAIN, 2n)));
+        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('snapshots', 60), spoiled());
+        const { log } = logOver(fake);
+        await log.read();
+
+        expect(fake.calls.gets).toBe(2);
+        expect(log.latest(OTHER_CHAIN)).toBeUndefined();
+      });
+
+      it('a key version gone: the newest signed with it, the one before still read, every chain still seen', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)));
+        fake.files.set(
+          nameOf('snapshots', 60),
+          fileOf(anchorAt(CHAIN, 5n, START, 5, LATER_KEYS), anchorAt(OTHER_CHAIN, 6n, START, 6, LATER_KEYS)),
+        );
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(3n);
+        expect(log.organisations().toSorted()).toEqual([ORG, OTHER_ORG].toSorted());
+        expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 2 })]);
+      });
+
+      it('SEC-DB-11 none with nothing wrong: the store reads as unreadable, nothing is taken from it, until the key is back', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', 0), fileOf(anchorAt(CHAIN, 3n)));
+        fake.files.set(nameOf('snapshots', 60), fileOf(anchorAt(CHAIN, 4n)));
+        const { log, lines } = logOver(fake, 1, LATER_KEYS);
+        await log.read();
+
+        expect(log.state()).toBe('unreadable');
+        expect(log.latest(CHAIN)).toBeUndefined();
+        expect(log.organisations()).toEqual([]);
+        expect(lines('audit.anchor_store_unreadable')).toEqual([
+          expect.objectContaining({
+            level: 'error',
+            err: expect.objectContaining({ message: expect.stringContaining('no snapshot') as unknown }) as unknown,
+          }),
+        ]);
+        expect(lines('audit.anchors_read')).toEqual([]);
+
+        const back = logOver(fake);
+        await back.log.read();
+        expect(back.log.state()).toBe('read');
+        expect(back.log.latest(CHAIN)?.seq).toBe(4n);
+      });
+
+      it('no snapshot that opens is the same', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', 0), Buffer.from('not gzip'));
+        fake.files.set(nameOf('deltas', 5), fileOf(anchorAt(CHAIN, 3n)));
+        const { log } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('unreadable');
+        expect(log.latest(CHAIN)).toBeUndefined();
+      });
+
+      it('goes back a day of snapshots, and no further: past that the store reads as unreadable', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', -25 * 60), fileOf(anchorAt(CHAIN, 3n)));
+        for (let hour = 0; hour < 24; hour += 1) fake.files.set(nameOf('snapshots', -hour * 60), spoiled());
+        const reached = logOver(fake);
+        await reached.log.read();
+        expect(reached.log.state()).toBe('read');
+        expect(reached.log.latest(CHAIN)?.seq).toBe(3n);
+        expect(fake.calls.gets).toBe(25);
+
+        fake.files.set(nameOf('snapshots', 60), spoiled());
+        fake.calls.gets = 0;
+        const past = logOver(fake);
+        await past.log.read();
+        expect(past.log.state()).toBe('unreadable');
+        expect(fake.calls.gets).toBe(25);
+      });
+
+      it('what it found goes in the next snapshot, so a later restart needs neither older file', async () => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', -60), fileOf(anchorAt(CHAIN, 3n), anchorAt(OTHER_CHAIN, 4n)));
+        fake.files.set(nameOf('snapshots', 0), spoiled());
+        const { log, advance } = logOver(fake);
+        await log.read();
+        advance(60);
+        log.keep(anchorAt(CHAIN, 5n));
+        await log.flush();
+        fake.calls.gets = 0;
+
+        const later = logOver(fake);
+        await later.log.read();
+        expect(fake.calls.gets).toBe(1);
+        expect(later.log.latest(CHAIN)?.seq).toBe(5n);
+        expect(later.log.latest(OTHER_CHAIN)?.seq).toBe(4n);
+      });
+
+      it('once read, another copy spoiling a snapshot costs nothing: what it read before is in memory', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, lines } = await started(fake);
+        fake.files.set(nameOf('snapshots', 60, 7), spoiled());
+        fake.calls.gets = 0;
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(fake.calls.gets).toBe(1);
+        expect(log.latest(PLATFORM)?.seq).toBe(1n);
+        expect(lines('audit.anchor_store_read_failed')).toEqual([]);
+
+        await log.read();
+        expect(fake.calls.gets).toBe(1);
+      });
     });
 
     it('a delta that will not open is the alarm, and the others are read', async () => {

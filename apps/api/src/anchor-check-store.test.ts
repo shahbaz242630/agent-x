@@ -20,6 +20,15 @@ const keysFilled = (fill: number) =>
     ),
   );
 const keys = keysFilled(1);
+/** As a process whose `audit-anchor` version 1 has gone missing: that key at version 2 alone. */
+const KEYS_LACKING_THE_OLD = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => {
+      const version = purpose === 'audit-anchor' ? 2 : 1;
+      return [purpose, { current: version, versions: new Map([[version, Buffer.alloc(32, index + 1)]]) }];
+    }),
+  ),
+);
 const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
 const AT = new Date('2026-11-02T09:00:00.000Z');
@@ -69,13 +78,18 @@ function chainsHolding(reports: Record<string, ChainReport>) {
 const PLATFORM_OK: CheckedChain = { chain: { kind: 'platform' }, verify: () => Promise.resolve(ok(1n)) };
 
 /** One process's start: a log and a check over the store. */
-function process(fake: FakeWriteOnceStore, organizations: OrganisationChains, chains: readonly CheckedChain[] = []) {
+function process(
+  fake: FakeWriteOnceStore,
+  organizations: OrganisationChains,
+  chains: readonly CheckedChain[] = [],
+  holding = keys,
+) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
   const clock = new FixedClock(AT);
   const log = createAnchorLog({
     store: fake.store,
-    keys,
+    keys: holding,
     logger,
     now: () => clock.now(),
     epoch: 1,
@@ -84,7 +98,7 @@ function process(fake: FakeWriteOnceStore, organizations: OrganisationChains, ch
   const check = createAnchorCheck({
     chains,
     organizations,
-    keys,
+    keys: holding,
     clock,
     logger,
     staleAfterMs: STALE_MS,
@@ -240,6 +254,30 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
 
       expect(after.lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'mac', orgId: ORG })]);
       expect(chains.holds).toEqual([[ORG, 'mac']]);
+    });
+
+    it('SEC-DB-11 a key version gone reads as unreadable: a chain wound back is not anchored afresh, and shows once it is back', async () => {
+      const fake = createFakeWriteOnceStore();
+      const chains = chainsHolding({ [ORG]: ok(100n) });
+      await process(fake, chains.organizations).check.run();
+
+      chains.held[ORG] = ok(50n);
+      const lacking = process(fake, chains.organizations, [], KEYS_LACKING_THE_OLD);
+      await lacking.check.run();
+      expect(lacking.log.latest(CHAIN)).toBeUndefined();
+      expect(lacking.lines('audit.anchored')).toEqual([]);
+      expect(lacking.lines('audit.anchor_store_unreadable')).toHaveLength(1);
+      expect(lacking.lines('audit.anchor_check_done')).toEqual([
+        expect.objectContaining({ unanchored: 1, anchored: 0 }),
+      ]);
+      expect(chains.holds).toEqual([]);
+
+      const back = process(fake, chains.organizations);
+      await back.check.run();
+      expect(back.lines('audit.integrity_failed')).toEqual([
+        expect.objectContaining({ reason: 'anchor', anchorSeq: '100', orgId: ORG }),
+      ]);
+      expect(chains.holds).toEqual([[ORG, 'anchor']]);
     });
 
     it('a read that outlasts its deadline counts as failed, and the run goes on; it may still land later', async () => {

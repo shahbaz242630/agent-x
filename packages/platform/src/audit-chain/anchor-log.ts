@@ -13,11 +13,17 @@
 // one before it found. Nothing is written if nothing moved.
 //
 // Every line is signed with the `audit-anchor` key. A line that fails is skipped
-// and is the alarm, never a hold. Two lines at one place with different hashes
-// are the alarm too: the older is kept, and the chain's own check then says which
-// it holds. Every chain in the store counts as seen, so an organisation taken off
-// the list and the record is still missed. Whoever holds this store's add right
-// runs as the API, with its signing key: nothing here guards against them.
+// and is the alarm, never a hold. A snapshot holding one can't stand for the whole,
+// or the chains on those lines would read as new: the read goes back to the last
+// with nothing wrong and every delta since, and if none is left (a key version
+// gone, say), the store reads as unreadable, so nothing is anchored afresh. In a
+// delta, the chain falls back on the anchor before it; a chain whose first anchor
+// that line was is anchored afresh, at most an hour's comparing lost, and the alarm
+// says so. Two lines at one place with different hashes are the alarm too: the older
+// is kept, and the chain's own check then says which it holds. Every chain in the
+// store counts as seen, so an organisation taken off the list and the record is
+// still missed. Whoever holds this store's add right runs as the API, with its
+// signing key: nothing here guards against them.
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { gunzip as gunzipCallback, gzip as gzipCallback } from 'node:zlib';
@@ -43,6 +49,12 @@ const FILE = /^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 /** How many names a list asks: a restart reads about a dozen deltas, and at most one snapshot unless some are spoiled. */
 const SNAPSHOTS_A_PAGE = 5;
 const DELTAS_A_PAGE = 100;
+
+/**
+ * How many spoiled snapshots a read goes back past, a day's at one an hour. A file spoiled by chance is one or two; a
+ * key version gone spoils every one since, and the read must not walk years of them each run before saying so.
+ */
+const MOST_SPOILED_SNAPSHOTS = 24;
 
 /** The most a file may open to: every line of 100,000 chains (MOST_ORGANIZATIONS) is about 30 MB. */
 const MOST_FILE_BYTES = 64 * 1024 * 1024;
@@ -86,6 +98,9 @@ interface Unsent {
   readonly bytes: Buffer;
   readonly lines: readonly Anchor[];
 }
+
+const tooManySpoiled = (spoiled: number): string =>
+  `no snapshot with every line sound, in the ${String(spoiled)} read: is an audit-anchor key version missing?`;
 
 const countedDown = (ms: number): string => String(LAST_MS - ms).padStart(13, '0');
 
@@ -225,8 +240,8 @@ export function createAnchorLog({
 
   const countdownOf = (kind: Kind, name: string): string => name.slice(folder(kind).length, folder(kind).length + 13);
 
-  /** A file's anchors, or nothing where it won't open, which is the alarm. A failed call to the store is thrown. */
-  const opened = async (kind: Kind, name: string): Promise<readonly Anchor[] | undefined> => {
+  /** A file's anchors and how many lines failed, or nothing where it won't open, each the alarm. A failed call to the store is thrown. */
+  const opened = async (kind: Kind, name: string): Promise<ReturnType<typeof readLines> | undefined> => {
     const bytes = await store.get(name);
     const fileAt = whenNamed(countdownOf(kind, name));
     let text: string;
@@ -238,18 +253,29 @@ export function createAnchorLog({
     }
     const lines = readLines(keys, text);
     if (lines.bad > 0) alarm('signature', { kind, fileAt, lines: lines.bad });
-    return lines.anchors;
+    return lines;
   };
 
-  /** The newest snapshot not read yet that opens: a spoiled one must not hide the one before it. */
-  const newerSnapshot = async (foreign: { count: number }) => {
+  /**
+   * The snapshots not read yet, newest first, back to the first with nothing wrong: `base`, the one deltas count from.
+   * Thrown if none is left to stand for the whole, as with a failed call: what's in memory already does, once there is any.
+   */
+  const newerSnapshots = async (foreign: { count: number }) => {
+    const lines: Anchor[] = [];
+    let newest: string | undefined;
+    let spoiled = 0;
     for await (const name of filesOf('snapshots', SNAPSHOTS_A_PAGE, foreign)) {
       const countdown = countdownOf('snapshots', name);
-      if (snapshotFrom !== undefined && countdown >= snapshotFrom) return undefined;
-      const lines = await opened('snapshots', name);
-      if (lines !== undefined) return { countdown, lines };
+      if (snapshotFrom !== undefined && countdown >= snapshotFrom) break;
+      if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
+      newest ??= countdown;
+      const file = await opened('snapshots', name);
+      lines.push(...(file?.anchors ?? []));
+      if (file?.bad === 0) return { lines, newest, base: countdown };
+      spoiled += 1;
     }
-    return undefined;
+    if (spoiled > 0 && snapshotFrom === undefined) throw new Error(tooManySpoiled(spoiled));
+    return { lines, newest, base: snapshotFrom };
   };
 
   /**
@@ -269,7 +295,7 @@ export function createAnchorLog({
       newest ??= name;
       if (written.delete(name)) continue;
       files += 1;
-      lines.push(...((await opened('deltas', name)) ?? []));
+      lines.push(...((await opened('deltas', name))?.anchors ?? []));
     }
     return { lines, newest, files };
   };
@@ -299,19 +325,19 @@ export function createAnchorLog({
   const catchUp = async (): Promise<void> => {
     try {
       const foreign = { count: 0 };
-      const snapshot = await newerSnapshot(foreign);
-      const deltas = await newerDeltas(snapshot?.countdown ?? snapshotFrom, foreign);
+      const snapshots = await newerSnapshots(foreign);
+      const deltas = await newerDeltas(snapshots.base, foreign);
       // Only now, with every call answered: a part read could look like a chain never anchored.
-      for (const line of snapshot?.lines ?? []) merge(line);
+      for (const line of snapshots.lines) merge(line);
       for (const line of deltas.lines) merge(line);
-      if (snapshot !== undefined) snapshotFrom = snapshot.countdown;
+      if (snapshots.newest !== undefined) snapshotFrom = snapshots.newest;
       if (deltas.newest !== undefined) deltasFrom = deltas.newest;
       if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
       if (state !== 'read') {
         logger.info('audit.anchors_read', {
           epoch,
           chains: anchors.size,
-          snapshot: snapshot !== undefined,
+          snapshot: snapshots.newest !== undefined,
           deltas: deltas.files,
         });
       }
