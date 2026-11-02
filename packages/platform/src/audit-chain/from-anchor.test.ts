@@ -16,6 +16,7 @@ import {
   type ChainHead,
   chainName,
   type CheckedPoint,
+  entryIsSealed,
   GENESIS_HASH,
   genesisHead,
   linkHash,
@@ -658,6 +659,75 @@ describe('a step of a full pass (4D2e E1)', () => {
     expect(tables.pages).toEqual([]);
     await expect(passStep(keys, CHAIN, tables, tables.point(2n), tables.point(1n), 5)).rejects.toThrow(RangeError);
     await expect(passStep(keys, CHAIN, tables, CHAIN_START, tables.point(1n), 0)).rejects.toThrow(RangeError);
+  });
+
+  it('refuses a step of more than 2,000 events before any read, and takes exactly that', async () => {
+    const tables = new Tables(keys, 2);
+
+    await expect(passStep(keys, CHAIN, tables, CHAIN_START, tables.point(2n), 2001)).rejects.toThrow(RangeError);
+    expect(tables.pages).toEqual([]);
+    expect(await passStep(keys, CHAIN, tables, CHAIN_START, tables.point(2n), 2000)).toMatchObject({ ok: true });
+  });
+
+  describe('a window of the last events below a signed anchor, from the event before it', () => {
+    /** The window's start as read from the row, not yet believed, and the signed anchor at the window's end. */
+    const windowOn = () => {
+      const tables = new Tables(keys, 5);
+      return { tables, start: tables.point(2n), anchor: tables.point(5n) };
+    };
+
+    it('walks the window in one page, seeing nothing below its start', async () => {
+      const { tables, start, anchor } = windowOn();
+      tables.replace(1n, { ...tables.row(1n), content: ['action', 'edited'] });
+
+      expect(await passStep(keys, CHAIN, tables, start, anchor, 1000)).toMatchObject({ ok: true, seq: 5n, to: 5n });
+      expect(tables.pages).toEqual([{ after: 2n, upTo: 5n, limit: 1000 }]);
+    });
+
+    it('finds an event in the window edited', async () => {
+      const { tables, start, anchor } = windowOn();
+      tables.replace(4n, { ...tables.row(4n), content: ['subject', 'another'] });
+
+      expect(await passStep(keys, CHAIN, tables, start, anchor, 1000)).toEqual(refusal('hash', 4n));
+    });
+
+    it('finds a start that is not the event the window links to', async () => {
+      const { tables, start, anchor } = windowOn();
+
+      expect(await passStep(keys, CHAIN, tables, { ...start, hash: fill(7) }, anchor, 1000)).toEqual(
+        refusal('link', 3n),
+      );
+    });
+
+    it('finds a whole window sealed afresh on a made-up start, even with the key: only the signed end shows it', async () => {
+      const { tables, anchor } = windowOn();
+      const made: ChainHead = { seq: 2n, hash: fill(7), mac: fill(0), macKeyVersion: 1 };
+      let head = made;
+      for (const seq of [3n, 4n, 5n]) {
+        const entry = entryAt(seq, ['action', 'rewritten']);
+        const sealed = sealNext(keys, CHAIN, head, entry);
+        tables.replace(seq, { ...entry, ...sealed.link });
+        head = sealed.head;
+      }
+      const { seq, hash, macKeyVersion } = made;
+
+      expect(await passStep(keys, CHAIN, tables, { seq, hash, macKeyVersion }, anchor, 1000)).toEqual(
+        refusal('anchor', 5n),
+      );
+      // Held to the rows' own last event instead, the same walk passes: links and seals alone prove nothing of its start.
+      expect(await passStep(keys, CHAIN, tables, { seq, hash, macKeyVersion }, tables.point(5n), 1000)).toMatchObject({
+        ok: true,
+      });
+    });
+
+    it('leaves the start row itself to its reader: edited, it no longer reads as sealed', () => {
+      const { tables } = windowOn();
+      const row = tables.row(2n);
+      expect(entryIsSealed(keys, CHAIN, row)).toBe(true);
+
+      tables.replace(2n, { ...row, content: ['action', 'edited'] });
+      expect(entryIsSealed(keys, CHAIN, tables.row(2n))).toBe(false);
+    });
   });
 
   it('throws for a store giving more than the step asked', async () => {

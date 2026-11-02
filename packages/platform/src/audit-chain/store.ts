@@ -167,6 +167,9 @@ const BATCH = 500;
 /** The most events one check from an anchor walks (ADR-012 §2, 4D2e E): the anchor moves on, and the next run goes on from it. */
 const MOST_EVENTS_A_STEP = 100_000;
 
+/** The most events one step of a full pass reads, all in one statement (4D2e E's batches). */
+const MOST_A_PASS_STEP = 2000;
+
 /**
  * Adds an event to the chain, in the caller's transaction. Takes the head's
  * lock, which comes last of all the transaction's locks (ADR-006 §6): two
@@ -425,7 +428,8 @@ export async function passStep(
   target: CheckedPoint,
   most: number,
 ): Promise<ChainStep> {
-  checkedMost(most);
+  if (checkedMost(most) > MOST_A_PASS_STEP)
+    throw new RangeError(`A pass step reads at most ${MOST_A_PASS_STEP} events`);
   if (cursor.seq > target.seq) throw new RangeError('A pass never goes past where it set out for');
   const upTo = target.seq < cursor.seq + BigInt(most) ? target.seq : cursor.seq + BigInt(most);
   const report = await walkTo(keys, chain, reader, cursor, upTo, most);
