@@ -120,6 +120,8 @@ export async function startWeb(
   { flows, sessions, challenges, outbox, directory, downloads, recorder, rail, providerEvents }: SharedParts,
   healthChecks: readonly HealthCheck[],
   beforeListen: () => Promise<void>,
+  /** What must end while the pool is open when it can't listen. */
+  whenRefused: () => Promise<void>,
 ): Promise<FastifyInstance | undefined> {
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
   // An agent's key, checked before its request goes on (C2-1).
@@ -420,6 +422,7 @@ export async function startWeb(
     logger.error('api.listen_failed', { err: error });
     // Closed, so nothing it opened keeps the process running.
     await server.close();
+    await whenRefused();
     await database.destroy();
     logger.flush();
     host.exitCode = 1;

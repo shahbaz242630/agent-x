@@ -2,6 +2,7 @@
 // never holds up another: the `jobs` side's, and what every process runs for
 // itself (the counts it holds in memory, and how a trip feels from there).
 //
+// The `jobs` side's run only while this process holds the lease (background.ts).
 // Nothing here starts until start-jobs.ts starts it: the anchor check's order
 // (it must start before the hand-off's first run) is this list's.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
@@ -26,10 +27,10 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
-import { scheduleRuns } from './background.ts';
+import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
-import { createHandoff, HANDOFF_EVERY_MS } from './handoff.ts';
+import { createHandoff, HANDOFF_EVERY_MS, handoffDatabaseGate } from './handoff.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
 import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
@@ -39,6 +40,7 @@ import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.t
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
+import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
@@ -97,7 +99,7 @@ const HALF_HOUR_MS = 30 * 60_000;
 const LONG_MS = 2 * HOUR_MS;
 
 /** Makes the list's entries, each one's runs recorded by the watch. */
-function jobsWatchedBy(watch: JobWatch) {
+function jobsWatchedBy(watch: JobWatch, gate: (work: WatchedWork) => WatchedWork = (work) => work) {
   return function job(
     name: string,
     work: Work | undefined,
@@ -113,7 +115,8 @@ function jobsWatchedBy(watch: JobWatch) {
         const handle =
           work === undefined
             ? { stop: () => Promise.resolve() }
-            : schedule(watch.watching(name, work, stalledAfterMs), everyMs);
+            : // The gate outside the watch: a run waiting for the lease isn't a run stalled.
+              schedule(gate(watch.watching(name, work, stalledAfterMs)), everyMs);
         says?.(work !== undefined);
         return handle;
       },
@@ -144,9 +147,9 @@ export function eachProcessJobs({ logger, database }: Booted, { recorder, watch 
  * come back too, for /health; the zones' sealing, whose first pass comes before
  * a process at `all` answers.
  */
-export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts) {
+export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
   const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch } = parts;
-  const job = jobsWatchedBy(watch);
+  const job = jobsWatchedBy(watch, leadership.onlyWhileLeading.bind(leadership));
   const list = () => listedOrganizations(database);
   const organisationJob = { list, database, keys, ids: uuidV7Ids, logger };
   const clocked = { ...organisationJob, clock: systemClock };
@@ -171,20 +174,27 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     anchors: anchorStore,
   });
+  // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
+  // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.
+  const railWork = rail && {
+    rail,
+    health: createRailHealth({ clock: systemClock, logger }),
+    databaseGate: handoffDatabaseGate(config.db.poolMax),
+  };
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
   const handoff =
-    rail &&
+    railWork &&
     createHandoff({
       ...clocked,
-      rail,
+      ...railWork,
       outbox,
       // The anchor check starts before the hand-off's first run: this list's order.
       anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
     });
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
   // the payments the partner's messages name first (E1b).
-  const paymentChecks = rail && createPaymentChecks({ ...clocked, rail, outbox, events: providerEvents });
+  const paymentChecks = railWork && createPaymentChecks({ ...clocked, ...railWork, outbox, events: providerEvents });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).

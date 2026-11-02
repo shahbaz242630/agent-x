@@ -71,7 +71,11 @@ export type LockedPayment = Readonly<{
  * instruction, its amount and currency (SEC-PTR-09). One that isn't is never
  * read as the payment's word, by the hand-off's Tx B or the bank check.
  */
-export const answerAbout = (execution: PaymentExecution, orgId: string, { instruction }: LockedPayment): boolean =>
+export const answerAbout = (
+  execution: PaymentExecution,
+  orgId: string,
+  { instruction }: { readonly instruction: Pick<LockedPayment['instruction'], 'id' | 'amountMinor' | 'currency'> },
+): boolean =>
   execution.organizationId.toLowerCase() === orgId.toLowerCase() &&
   execution.instructionId.toLowerCase() === instruction.id &&
   execution.amountMinor === instruction.amountMinor &&

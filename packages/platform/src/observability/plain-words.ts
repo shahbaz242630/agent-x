@@ -28,6 +28,26 @@ export const PLAIN_WORDS = {
     broke: 'A page before signing in, such as the sign-in page, may not have worked; the server is fine.',
     next: 'If many come, a developer should read them. Anyone can send these, so they may be forged.',
   },
+  'jobs.not_leading': {
+    happened: 'This copy of the API has gone too long without the right to run the background jobs.',
+    broke: 'Unless another copy has it, the tamper checks, payment hand-offs and sweeps are not running.',
+    next: 'Check the database answers and its job lease row: a row changed or deleted may be tampering. See the runbook.',
+  },
+  'jobs.lease_lost': {
+    happened: 'This copy of the API stopped being the one running the background jobs.',
+    broke: 'Its jobs were stopped part way; each picks up where it was once a copy leads again.',
+    next: 'Nothing, if another copy took over or it comes back within minutes. If not, check the database.',
+  },
+  'jobs.lease_renew_failed': {
+    happened: 'The database did not answer when this copy tried to keep the right to run the background jobs.',
+    broke: 'Nothing yet. If this goes on for a minute, this copy stops its jobs until it can reach the database.',
+    next: 'It tries again in 20 seconds. If this repeats, check the database.',
+  },
+  'jobs.lease_release_failed': {
+    happened: 'A copy of the API stopping could not give up the right to run the background jobs.',
+    broke: 'The next copy waits up to a minute more before its jobs begin.',
+    next: 'Nothing: it ends by itself. If this repeats, check the database.',
+  },
   'job.stalled': {
     happened: 'A background job has been running far longer than it ever should.',
     broke: 'While it hangs, that job does none of its work, such as payments, checks or sweeps; the rest go on.',
@@ -454,6 +474,32 @@ export const PLAIN_WORDS = {
     broke: 'Approved payments wait, their money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
+  'handoff.bank_held': {
+    happened: 'The bank gave no clear answer to payments from several organisations, so new ones are held back.',
+    broke: 'Approved payments wait, their money still held. Nothing already sent is sent again.',
+    next: 'When a status check answers, a few go to test the way, more as they are accepted. If it lasts, ask the bank.',
+  },
+  'handoff.hold_lasting': {
+    happened: 'New payments have been held back for over 15 minutes because the bank is not answering them clearly.',
+    broke: 'Approved payments wait, their money still held; a few at a time go to test the way.',
+    next: 'Ask the bank what is wrong. It reopens by itself, in steps, as the bank accepts. Said again each 15 minutes.',
+  },
+  'handoff.bank_refusing': {
+    happened: 'The bank has refused many payments from several organisations, and has accepted none since.',
+    broke: 'Those payments failed, their money given back. Nothing else is stopped.',
+    next: 'Check our access to the bank and its limits: this may be ours, not theirs. Then ask the bank.',
+  },
+  'handoff.lane_held': {
+    happened:
+      "The bank gave no clear answer to three of one organisation's payments in a row, so its are held for a time.",
+    broke: 'Its approved payments wait, their money still held. Other organisations carry on.',
+    next: 'One goes to test the way after the hold, once a status check answers. If it repeats, ask the bank why.',
+  },
+  'handoff.held_unrecorded': {
+    happened: "An organisation's payments were held for the bank, but that could not be written in its audit log.",
+    broke: 'The payments are still held and safe; the audit log is missing that one note for now.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
+  },
   'partner_event.refused': {
     happened:
       "A message sent as the payment partner's was refused: a bad signature, an old time or an unreadable body.",
@@ -464,6 +510,11 @@ export const PLAIN_WORDS = {
     happened: "The payment partner sent a message about a payment or consent Agent X doesn't hold.",
     broke: 'Nothing was changed. The message was kept, encrypted, for checking.',
     next: 'Check with the partner which payment it means: it may be one Agent X never handed off.',
+  },
+  'payment_check.lap_behind': {
+    happened: 'Asking the bank again about older payments has taken longer than its allowed time.',
+    broke: 'Some were not asked again in time. Nothing is lost: they stay as they were, their money held if it was.',
+    next: 'It carries on where it was. If this repeats, the checks cannot keep up: a developer should look at the volume.',
   },
   'payment_check.nudge_given_up': {
     happened: "The payments a partner's message named couldn't be checked after 5 tries, so the message was set aside.",
