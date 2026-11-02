@@ -12,6 +12,7 @@ import {
   type LogBindings,
   type LogFields,
   SUPPRESSED_EVENT,
+  withLogContext,
 } from './logger.ts';
 import { type ProblemEvent, saysFor } from './plain-words.ts';
 
@@ -44,6 +45,75 @@ function setup(options: { level?: LogLevel; cap?: number } = {}) {
     },
   };
 }
+
+describe('4D2e Stage F the work a line belongs to', () => {
+  it('says the correlation ID or run ID of the work under way, through any logger, past an await', async () => {
+    const { logger, lines } = setup();
+    await withLogContext({ correlationId: 'c-1' }, async () => {
+      logger.info('a.before');
+      await Promise.resolve();
+      logger.child({ module: 'm' }).info('a.after');
+    });
+    withLogContext({ runId: 'r-1' }, () => {
+      logger.info('a.run');
+    });
+    logger.info('a.none');
+    expect(lines()[0]).toMatchObject({ event: 'a.before', correlationId: 'c-1' });
+    expect(lines()[1]).toMatchObject({ event: 'a.after', correlationId: 'c-1', module: 'm' });
+    expect(lines()[2]).toMatchObject({ event: 'a.run', runId: 'r-1' });
+    expect(lines()[3]).not.toHaveProperty('correlationId');
+    expect(lines()[3]).not.toHaveProperty('runId');
+  });
+
+  it('keeps two pieces of work under way at once apart', async () => {
+    const { logger, lines } = setup();
+    const work = (id: string) =>
+      withLogContext({ correlationId: id }, async () => {
+        await Promise.resolve();
+        logger.info('a.work', { id });
+      });
+    await Promise.all([work('c-1'), work('c-2')]);
+    for (const line of lines()) expect(line.correlationId).toBe(line.id);
+  });
+
+  it('lets a correlation ID a child was given stand, the run ID beside it', () => {
+    const { logger, lines } = setup();
+    withLogContext({ runId: 'r-1' }, () => {
+      logger.child({ correlationId: 'own' }).child({ module: 'm' }).info('a.child');
+    });
+    withLogContext({ correlationId: 'request' }, () => {
+      logger.child({ correlationId: 'own' }).info('a.own');
+    });
+    expect(lines()[0]).toMatchObject({ correlationId: 'own', runId: 'r-1' });
+    expect(lines()[1]).toMatchObject({ correlationId: 'own' });
+    expect(lines()[1]).not.toHaveProperty('runId');
+  });
+
+  it("can't be forged by a line's own fields", () => {
+    const { logger, lines } = setup();
+    const forged = { runId: 'forged', correlationId: 'forged' } as unknown as LogFields;
+    logger.info('a.none', forged);
+    withLogContext({ runId: 'r-1' }, () => {
+      logger.info('a.run', forged);
+    });
+    expect(lines()[0]).not.toHaveProperty('runId');
+    expect(lines()[1]).toMatchObject({ runId: 'r-1' });
+    expect(lines()[1]).not.toHaveProperty('correlationId');
+  });
+
+  it('gives no work to the held-back counts: they belong to no request', () => {
+    const { logger, lines, advance } = setup({ cap: 1 });
+    logger.info('a.flood');
+    logger.info('a.flood');
+    advance(60_000);
+    withLogContext({ correlationId: 'c-1' }, () => {
+      logger.info('b.next');
+    });
+    const summary = lines().find(({ event }) => event === SUPPRESSED_EVENT);
+    expect(summary).toBeDefined();
+    expect(summary).not.toHaveProperty('correlationId');
+  });
+});
 
 describe('logging standard §2: one JSON line per event, with the standard fields', () => {
   it('writes the standard fields, the event and its fields, and nothing else', () => {

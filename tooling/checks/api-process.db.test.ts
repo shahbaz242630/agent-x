@@ -43,6 +43,8 @@ function childEnv(database: TestDatabase): NodeJS.ProcessEnv {
 
 interface Line {
   event?: string;
+  correlationId?: string;
+  runId?: string;
   ports?: number[];
   configHash?: string;
   status?: number;
@@ -92,6 +94,9 @@ function lines(): Line[] {
     .filter((line) => line.startsWith('{'))
     .map((line) => JSON.parse(line) as Line);
 }
+
+/** Lines of the process itself once it listens, no request's and no run's: what it says of itself, and the logger's and the requests' sums. */
+const PROCESS_LINES = /^(api\.|log\.|http\.minute$)/;
 
 describe(`the API process (Postgres ${server.version})`, () => {
   it('SEC-OPS-05 logs its config fingerprint, connects as the app role, records the start, then listens', async () => {
@@ -163,6 +168,30 @@ describe(`the API process (Postgres ${server.version})`, () => {
     });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: 'ORIGIN_REFUSED' } });
+  });
+
+  it('4D2e Stage F level 4: every line a request or a job writes says which, on real sockets, a body read too', async () => {
+    const seen = lines().length;
+    await fetch(`http://127.0.0.1:${port}/health`);
+    await fetch(`http://127.0.0.1:${port}/v1/spend-requests`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-key' },
+      body: JSON.stringify({ any: 'body' }),
+    });
+    await vi.waitFor(() => {
+      expect(lines().length).toBeGreaterThanOrEqual(seen + 2);
+    });
+    // Before it listens a process is starting up, which is neither.
+    const listening = lines().findIndex((line) => line.event === 'api.listening');
+    const unclaimed = lines()
+      .slice(listening)
+      .filter(
+        (line) =>
+          line.correlationId === undefined && line.runId === undefined && !PROCESS_LINES.test(String(line.event)),
+      );
+    expect(unclaimed.map((line) => line.event)).toEqual([]);
+    // The jobs' first runs have written by now, each under its own run's ID.
+    expect(lines().some((line) => line.runId !== undefined)).toBe(true);
   });
 
   it('SEC-DATA-01 writes only JSON lines to stdout, with no client address, query or database login in them', async () => {
