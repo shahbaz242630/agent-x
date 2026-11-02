@@ -152,11 +152,11 @@ function organisationIds(ids: unknown): string[] | undefined {
 const refusedByDatabase = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && CHANGED_DATABASE.has(String(error.code));
 
-/** `unanchored`: checked and sound, and not anchored because the store is yet to be read. */
 /** Whether a chain's head is at or past its anchor, and at it, the same event. */
 const stillHolds = (head: CheckedPoint, anchor: AnchorPoint): boolean =>
   head.seq > anchor.seq || (head.seq === anchor.seq && head.hash.equals(anchor.hash));
 
+/** `unanchored`: checked and sound, and not anchored: the store is yet to be read, or landed during the check. */
 type Outcome = 'anchored' | 'unchanged' | 'unanchored' | 'failed' | 'unchecked';
 
 /** The in-flight key of the organisations' list, which no chain's key can be. */
@@ -202,12 +202,13 @@ export function createAnchorCheck({
       const last = anchors.latest(chain);
       const alarm = (reason: string, seq?: bigint): Outcome => {
         if (chain.kind === 'organisation') failures.set(key, reason);
+        const held = anchors.latest(chain);
         log.error('audit.integrity_failed', {
           chain: chain.kind,
           check: 'anchor',
           reason,
           ...(seq === undefined ? {} : { seq }),
-          ...(last === undefined ? {} : { anchorSeq: last.seq }),
+          ...(held === undefined ? {} : { anchorSeq: held.seq }),
         });
         return 'failed';
       };
@@ -231,10 +232,13 @@ export function createAnchorCheck({
       }
       lastChecked.set(key, clock.now().getTime());
       if (!report.ok) return alarm(report.problem.reason, report.problem.seq);
-      // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
-      if (last !== undefined && !stillHolds(report, last)) return alarm('anchor', last.seq);
-      if (last?.seq === report.seq) return 'unchanged';
-      if (storeUnread()) return 'unanchored';
+      // Read again: a store's read that outlasted its deadline can land during the check, which then saw no anchor. Where
+      // nothing landed, the check compared the anchored event already, and this backs it up should a store not pass it on.
+      const held = anchors.latest(chain);
+      if (held !== undefined && !stillHolds(report, held)) return alarm('anchor', held.seq);
+      if (held?.seq === report.seq) return 'unchanged';
+      // A head past what landed wasn't compared with its anchored event, so it can't be anchored yet: the next run does.
+      if (storeUnread() || held !== last) return 'unanchored';
       const anchor = signAnchor(keys, chain, report, clock.now());
       anchors.keep(anchor);
       log.info('audit.anchored', {

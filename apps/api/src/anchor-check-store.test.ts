@@ -265,6 +265,98 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       expect(after.log.state()).toBe('read');
     });
 
+    describe('a read past its deadline that lands while a chain is being checked', () => {
+      /** A restart whose store answers, and whose one chain's check answers, only when told. */
+      async function landingMidCheck(head: ChainReport) {
+        vi.useFakeTimers();
+        const fake = createFakeWriteOnceStore();
+        const chains = chainsHolding({ [ORG]: ok(100n) });
+        await process(fake, chains.organizations).check.run();
+        const writes = fake.calls.puts;
+
+        chains.held[ORG] = head;
+        const { promise: storeAnswer, resolve: storeAnswers } = Promise.withResolvers<undefined>();
+        fake.instead.list = async (start, most, after) => {
+          await storeAnswer;
+          return fake.real.list(start, most, after);
+        };
+        const { promise: chainAnswer, resolve: chainAnswers } = Promise.withResolvers<undefined>();
+        const verify = chains.organizations.verify;
+        const organizations: OrganisationChains = {
+          ...chains.organizations,
+          verify: async (orgId, anchor) => {
+            await chainAnswer;
+            return verify(orgId, anchor);
+          },
+        };
+        const after = process(fake, organizations);
+
+        const run = after.check.run();
+        await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+        // The check began with no anchor, the store then unread.
+        expect(after.log.state()).toBe('unreadable');
+        storeAnswers(undefined);
+        // Its files open off the event loop, where fake timers don't reach.
+        await vi.waitFor(() => {
+          expect(after.log.state()).toBe('read');
+        });
+        expect(after.log.latest(CHAIN)?.seq).toBe(100n);
+        chainAnswers(undefined);
+        await run;
+        return { after, chains, fake, writes };
+      }
+
+      it('SEC-DB-11 a head wound back is the alarm and the hold, and the anchor stays', async () => {
+        const { after, chains, fake, writes } = await landingMidCheck(ok(50n));
+
+        expect(chains.given[ORG]).toEqual([undefined, undefined]);
+        expect(after.lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({
+            level: 'error',
+            check: 'anchor',
+            reason: 'anchor',
+            seq: '100',
+            anchorSeq: '100',
+            orgId: ORG,
+          }),
+        ]);
+        expect(chains.holds).toEqual([[ORG, 'anchor']]);
+        expect(after.log.latest(CHAIN)?.seq).toBe(100n);
+        expect(after.lines('audit.anchored')).toEqual([]);
+        expect(fake.calls.puts).toBe(writes);
+      });
+
+      it('SEC-DB-11 the same place with another hash is the alarm and the hold', async () => {
+        const { after, chains } = await landingMidCheck(ok(100n, 7));
+
+        expect(after.lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ reason: 'anchor', anchorSeq: '100', orgId: ORG }),
+        ]);
+        expect(chains.holds).toEqual([[ORG, 'anchor']]);
+        expect(after.log.latest(CHAIN)?.hash).toEqual(Buffer.alloc(32, 100));
+      });
+
+      it('the head just where the store has it is unchanged', async () => {
+        const { after, chains } = await landingMidCheck(ok(100n));
+
+        expect(after.lines('audit.integrity_failed')).toEqual([]);
+        expect(after.lines('audit.anchor_check_done')).toEqual([
+          expect.objectContaining({ unchanged: 1, anchored: 0 }),
+        ]);
+        expect(chains.holds).toEqual([]);
+      });
+
+      it('a head past it is not anchored, as nothing compared it with that anchor: the next run does', async () => {
+        const { after, chains } = await landingMidCheck(ok(120n));
+
+        expect(after.log.latest(CHAIN)?.seq).toBe(100n);
+        expect(after.lines('audit.anchored')).toEqual([]);
+        expect(after.lines('audit.anchor_check_done')).toEqual([
+          expect.objectContaining({ unanchored: 1, anchored: 0, failed: 0 }),
+        ]);
+      });
+    });
+
     it("a hand-off's first anchor joins the run's first read, rather than go first", async () => {
       const fake = createFakeWriteOnceStore();
       const chains = chainsHolding({ [ORG]: ok(3n) });

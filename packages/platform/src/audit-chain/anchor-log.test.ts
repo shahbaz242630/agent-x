@@ -737,6 +737,60 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     expect(lines('audit.anchor_store_write_failed')).toHaveLength(1);
   });
 
+  describe('an anchor behind the one held', () => {
+    it.each([
+      ['a lower place', anchorAt(CHAIN, 4n)],
+      ['the same place with another hash', anchorAt(CHAIN, 5n, START, 6)],
+    ])(
+      'SEC-DB-11 %s is refused and is the alarm: the one held stays, and it is never written',
+      async (_what, behind) => {
+        const { log, lines, fake } = await started();
+        const held = anchorAt(CHAIN, 5n);
+        log.keep(held);
+        await log.flush();
+        const puts = fake.calls.puts;
+
+        log.keep(behind);
+        await log.flush();
+
+        expect(log.latest(CHAIN)).toBe(held);
+        expect(fake.calls.puts).toBe(puts);
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({
+            level: 'error',
+            check: 'anchor_store',
+            reason: 'behind',
+            seq: behind.seq.toString(),
+            anchorSeq: '5',
+            orgId: ORG,
+          }),
+        ]);
+      },
+    );
+
+    it('the platform chain the same, naming no organisation', async () => {
+      const { log, lines } = await started();
+      log.keep(anchorAt(PLATFORM, 2n));
+      log.keep(anchorAt(PLATFORM, 1n));
+
+      expect(log.latest(PLATFORM)?.seq).toBe(2n);
+      const [line] = lines('audit.integrity_failed');
+      expect(line).toMatchObject({ reason: 'behind' });
+      expect(line).not.toHaveProperty('orgId');
+    });
+
+    it('the same anchor again, or one past it, is kept', async () => {
+      const { log, lines } = await started();
+      const held = anchorAt(CHAIN, 5n);
+      log.keep(held);
+      log.keep(held);
+      log.keep(anchorAt(CHAIN, 6n));
+
+      expect(log.latest(CHAIN)?.seq).toBe(6n);
+      expect(lines('audit.integrity_failed')).toEqual([]);
+    });
+  });
+
   it('keeps the current anchor in memory for Tx A, with no trip', async () => {
     const fake = createFakeWriteOnceStore();
     const log: AnchorLog = (await started(fake)).log;

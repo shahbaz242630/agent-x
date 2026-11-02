@@ -201,7 +201,10 @@ export function createAnchorLog({
   const written = new Set<string>();
   let failingSince: number | undefined;
 
-  const alarm = (reason: string, more: Record<string, unknown>, log: Logger = logger): void => {
+  /** The alarm, on a line naming the chain's organisation where it has one. */
+  const alarm = (reason: string, more: Record<string, unknown>, chain?: string): void => {
+    const log =
+      chain?.startsWith(ORGANISATION) === true ? logger.child({ orgId: chain.slice(ORGANISATION.length) }) : logger;
     log.error('audit.integrity_failed', { chain: 'store', check: 'anchor_store', reason, ...more });
   };
 
@@ -279,8 +282,7 @@ export function createAnchorLog({
       return;
     }
     if (line.seq === held.seq && !line.hash.equals(held.hash)) {
-      const orgId = line.chain.startsWith(ORGANISATION) ? line.chain.slice(ORGANISATION.length) : undefined;
-      alarm('fork', { seq: line.seq }, orgId === undefined ? logger : logger.child({ orgId }));
+      alarm('fork', { seq: line.seq }, line.chain);
       if (line.at < held.at) anchors.set(line.chain, line);
     }
   };
@@ -376,6 +378,15 @@ export function createAnchorLog({
   return Object.freeze({
     latest: (chain: Chain) => anchors.get(chainName(chain)),
     keep(anchor: Anchor) {
+      // The check reads the anchor again first; this holds should a caller not, as a wound-back head must never replace it.
+      const held = anchors.get(anchor.chain);
+      if (
+        held !== undefined &&
+        (anchor.seq < held.seq || (anchor.seq === held.seq && !anchor.hash.equals(held.hash)))
+      ) {
+        alarm('behind', { seq: anchor.seq, anchorSeq: held.seq }, anchor.chain);
+        return;
+      }
       anchors.set(anchor.chain, anchor);
       pending.set(anchor.chain, anchor);
     },
