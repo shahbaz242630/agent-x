@@ -1153,6 +1153,86 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(log.organisations()).toHaveLength(40);
       });
 
+      const KEPT_LINE = 340;
+      /** A log already holding `count` chains at place 1, from a sound snapshot. */
+      const holding = async (fake: FakeWriteOnceStore, mostFileBytes: number, count: number) => {
+        const first = Array.from({ length: count }, (_, index) => anchorAt(chain(index), 1n));
+        fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), ...first));
+        const held = logUnder(fake, mostFileBytes);
+        await held.log.read();
+        expect(held.log.state()).toBe('read');
+        return held;
+      };
+      const beyond = (capture: LogCapture) =>
+        capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory');
+
+      it('the budget counts what is held and what this read staged together, and past it refuses', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, capture } = await holding(fake, 25 * KEPT_LINE, 20);
+        // Six new chains in another copy's file: 26 in all, past 25. Neither alone is.
+        const moved = Array.from({ length: 6 }, (_, index) => anchorAt(chain(100 + index), 1n));
+        fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), ...moved));
+        await log.read();
+        expect(beyond(capture)).toHaveLength(1);
+        // It stays reading from what it holds, and none of those part-read is believed.
+        expect(log.state()).toBe('read');
+        expect(log.latest(chain(100))).toBeUndefined();
+      });
+
+      it('an honest return of the lease, mostly unchanged lines, stages almost nothing: no refusal, near the limit', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, capture } = await holding(fake, 25 * KEPT_LINE, 20);
+        // Another copy's whole snapshot: the same 20, one moved on and each signed later. 2 x 20 would be past the limit.
+        const later = new Date(START.getTime() + MINUTE);
+        const lines = Array.from({ length: 20 }, (_, index) => anchorAt(chain(index), index === 0 ? 2n : 1n, later));
+        fake.files.set(nameOf('snapshots', 60), fileOf(nameOf('snapshots', 60), ...lines));
+        await log.read();
+        expect(beyond(capture)).toEqual([]);
+        expect(log.latest(chain(0))?.seq).toBe(2n);
+        // The newer time is taken, in place, for the order a restart goes in.
+        expect(log.latest(chain(7))?.at).toEqual(later);
+      });
+
+      it('a replayed file of old lines stages none of them, whatever its size', async () => {
+        const fake = createFakeWriteOnceStore();
+        // Room for the 20 held and 20 moved on, as they stage first, and no more: a replay staged would pass it.
+        const { log, capture } = await holding(fake, 45 * KEPT_LINE, 20);
+        const later = Array.from({ length: 20 }, (_, index) => anchorAt(chain(index), 9n));
+        fake.files.set(nameOf('deltas', 2), fileOf(nameOf('deltas', 2), ...later));
+        await log.read();
+        const old = Array.from({ length: 20 }, (_, index) => anchorAt(chain(index), 1n));
+        const name = nameOf('deltas', 3);
+        fake.files.set(name, gzippedLines([...old, ...old].map((line) => lineOf(line))));
+        await log.read();
+        expect(beyond(capture)).toEqual([]);
+        expect(log.latest(chain(3))?.seq).toBe(9n);
+      });
+
+      it('stops at the budget within a file, not after reading all of it', async () => {
+        const fake = createFakeWriteOnceStore();
+        const length = lineOf(anchorAt(chain(0), 1n)).length;
+        expect(length).toBeLessThan(KEPT_LINE);
+        // Within the file's own limit in bytes, past the budget in lines; a spoiled file, whose closing is never reached.
+        spoiled(fake, 1, 0, 40);
+        const { log, capture } = logUnder(fake, 41 * length);
+        await log.read();
+        expect(beyond(capture)).toHaveLength(1);
+        expect(capture.lines().filter((line) => line.reason === 'unclosed')).toEqual([]);
+        expect(log.state()).toBe('unreadable');
+      });
+
+      it('near_memory speaks before the budget refuses: at 80% of it, in the same chains', async () => {
+        const fake = createFakeWriteOnceStore();
+        const mostFileBytes = 25 * KEPT_LINE;
+        const { log, capture } = logUnder(fake, mostFileBytes);
+        await log.read();
+        // 21 of 25: past 80%, and under the budget, by the same count a read would make.
+        for (let index = 0; index < 21; index += 1) log.keep(anchorAt(chain(index), 1n, LATER));
+        await log.flush();
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_near_memory')).toHaveLength(1);
+        expect(beyond(capture)).toEqual([]);
+      });
+
       it('a fork between two files is still the alarm while reading, the older kept', async () => {
         const fake = createFakeWriteOnceStore();
         const older = anchorAt(CHAIN, 3n, START, 3);

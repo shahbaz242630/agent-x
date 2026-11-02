@@ -135,6 +135,11 @@ export function createTurns(
   return {
     begin(listed, fresh, unlisted, pastCapNow = []) {
       pastCap = pastCapNow;
+      // Gone: those that come next are a new round, however long this one had run.
+      if (pastCap.length === 0) {
+        cursor = undefined;
+        walked = 0;
+      }
       // Only a first start or a round done begins one: a run that reached none of them must not put back how long they waited.
       roundBegins = pastCap.length > 0 && (cursor === undefined || walked >= pastCap.length);
       if (pastCap.length > 0) cursor = cursor === undefined ? pastCapStart(pastCap.length) : cursor % pastCap.length;

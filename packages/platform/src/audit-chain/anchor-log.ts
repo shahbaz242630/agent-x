@@ -259,13 +259,17 @@ async function* linesIn(bytes: Buffer, opened: { bytes: number }): AsyncGenerato
 }
 
 /**
- * A file's anchors, how many of its lines failed, whether it closes for its own name, and whether it went past `mostBytes`,
- * when it holds none: then its first wrong line, or an empty one, or going on too far, is thrown. Lines of a later piece's
- * kinds are neither sound nor failed.
+ * How many of a file's lines failed, whether it closes for its own name, and whether it went past `mostBytes`: then its first
+ * wrong line, or an empty one, or going on too far, is thrown. Each sound line goes to `keep` as it is read, up to that point,
+ * so no file is ever held whole: each is signed on its own and counts as soon as it is found. Lines of a later piece's kinds
+ * are neither sound nor failed.
  */
-async function readFile(keys: KeyProvider, bytes: Buffer, name: string, epoch: number, mostBytes: number) {
+async function readFile(
+  keys: KeyProvider,
+  { bytes, name, epoch, mostBytes }: { bytes: Buffer; name: string; epoch: number; mostBytes: number },
+  keep: (anchor: Anchor) => void,
+) {
   const opened = { bytes: 0 };
-  const anchors: Anchor[] = [];
   let bad = 0;
   let body = 0;
   const judged = (fields: unknown): void => {
@@ -279,7 +283,7 @@ async function readFile(keys: KeyProvider, bytes: Buffer, name: string, epoch: n
     ) {
       bad += 1;
     } else if (opened.bytes <= mostBytes) {
-      anchors.push(anchor);
+      keep(anchor);
     }
   };
   let last: unknown;
@@ -298,7 +302,7 @@ async function readFile(keys: KeyProvider, bytes: Buffer, name: string, epoch: n
   const closing = kindOf(last) === 'c';
   if (any && !closing) judged(last);
   const past = opened.bytes > mostBytes;
-  return { anchors: past ? [] : anchors, bad, past, closed: closing && closes(keys, last, name, epoch, body) };
+  return { bad, past, closed: closing && closes(keys, last, name, epoch, body) };
 }
 
 /** Gzipped lines, made a line at a time: the whole as one string has the same limit as on the way in. */
@@ -385,26 +389,29 @@ export function createAnchorLog({
 
   const countdownOf = (kind: Kind, name: string): string => name.slice(folder(kind).length, folder(kind).length + 13);
 
-  /** A file's anchors, and whether it stands for what it should: every line sound and closed for its name. Anything wrong is the alarm. A failed call to the store is thrown. */
-  const opened = async (kind: Kind, name: string): Promise<{ anchors: readonly Anchor[]; sound: boolean }> => {
+  /** Into `stage`, as read, what a file changes, and whether it stands for what it should: every line sound and closed for its name. Anything wrong is the alarm. A failed call to the store is thrown. */
+  const opened = async (kind: Kind, name: string, stage: Map<string, Anchor>): Promise<{ sound: boolean }> => {
     const bytes = await store.get(name);
     const fileAt = whenNamed(countdownOf(kind, name));
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
-      file = await readFile(keys, bytes, name, epoch, mostFileBytes);
+      file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line) => {
+        staged(stage, line, kind, fileAt);
+      });
     } catch (error) {
+      if (error instanceof BeyondMemory) throw error;
       alarm('file', { kind, fileAt, err: error });
-      return { anchors: [], sound: false };
+      return { sound: false };
     }
-    const { anchors: lines, bad, closed, past } = file;
+    const { bad, closed, past } = file;
     if (past) {
       if (bad === 0 && closed) throw new BeyondMemory(kind, fileAt);
       alarm('file', { kind, fileAt });
-      return { anchors: [], sound: false };
+      return { sound: false };
     }
     if (bad > 0) alarm('signature', { kind, fileAt, lines: bad });
     if (!closed) alarm('unclosed', { kind, fileAt });
-    return { anchors: lines, sound: bad === 0 && closed };
+    return { sound: bad === 0 && closed };
   };
 
   /** Highest place wins. The same place with another hash is the alarm, and the older stays: the chain then says which it holds. */
@@ -425,12 +432,20 @@ export function createAnchorLog({
   };
 
   /**
-   * A file's lines into what this read holds, one a chain, so files replayed cost nothing more. It all counts against what
-   * this process can hold, or files each under the limit could together end it, past anything a catch can see.
+   * A line into what this read holds, if it changes anything: a higher place, or another hash at the same one for the alarm.
+   * The same place and hash holds no new object, only its later time, for the order a restart goes in. So files replayed, or
+   * another copy's snapshot of what this one holds, cost nothing. What's held and staged counts together against what this
+   * process can hold, or a read could end it, past anything a catch can see.
    */
-  const staged = (stage: Map<string, Anchor>, lines: readonly Anchor[], kind: Kind, name: string): void => {
-    for (const line of lines) merge(stage, line);
-    if (stage.size * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, whenNamed(countdownOf(kind, name)));
+  const staged = (stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
+    const held = anchors.get(line.chain);
+    if (held !== undefined && line.seq < held.seq) return;
+    if (held?.seq === line.seq && held.hash.equals(line.hash)) {
+      if (line.at > held.at) anchors.set(line.chain, line);
+      return;
+    }
+    merge(stage, line);
+    if ((anchors.size + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
   };
 
   /**
@@ -443,8 +458,7 @@ export function createAnchorLog({
       const countdown = countdownOf('snapshots', name);
       if (snapshotFrom !== undefined && countdown >= snapshotFrom) break;
       if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
-      const file = await opened('snapshots', name);
-      staged(stage, file.anchors, 'snapshots', name);
+      const file = await opened('snapshots', name, stage);
       if (file.sound) return { base: countdown, sound: countdown };
       spoiled += 1;
     }
@@ -470,8 +484,7 @@ export function createAnchorLog({
         continue;
       }
       files += 1;
-      const file = await opened('deltas', name);
-      staged(stage, file.anchors, 'deltas', name);
+      const file = await opened('deltas', name, stage);
       if (file.sound) newest ??= name;
     }
     return { newest, files };
@@ -586,8 +599,10 @@ export function createAnchorLog({
         yield `${closing}\n`;
       })(),
     );
-    if (lineBytes > mostFileBytes * NEAR_MEMORY) {
-      logger.error('audit.anchor_store_near_memory', { kind, bytes: lineBytes, mostBytes: mostFileBytes });
+    // In the budget's own count as well as the file's: said before a read of this many would be refused.
+    const size = Math.max(lineBytes, anchors.size * KEPT_LINE_BYTES);
+    if (size > mostFileBytes * NEAR_MEMORY) {
+      logger.error('audit.anchor_store_near_memory', { kind, bytes: size, mostBytes: mostFileBytes });
     }
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);

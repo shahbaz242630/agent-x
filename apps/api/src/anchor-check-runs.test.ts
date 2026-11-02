@@ -1670,6 +1670,39 @@ describe('fourth round (4D2e E6 review)', () => {
     expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
   });
 
+  it('a past-cap list that empties and fills again starts afresh: nothing reads as late until a round has had its chance', async () => {
+    const { organizations, list } = directory([org(1), org(2)]);
+    const { check, capture, clock } = checking(organizations, { lanes: 2, mostOrganisations: 1 });
+    await check.run();
+    list.now = [org(1)];
+    await check.run();
+    clock.advanceBy(REACH_MS);
+    await check.run();
+    list.now = [org(1), org(3), org(4), org(5)];
+    await check.run();
+    expect(lines(capture, 'audit.anchor_check_behind')).toEqual([]);
+  });
+
+  it('a past-cap list that empties and fills again starts where it is told, once more', () => {
+    const asked: number[] = [];
+    const turns = createTurns(
+      1,
+      (orgIds) => orgIds,
+      (count) => {
+        asked.push(count);
+        return 1;
+      },
+    );
+    turns.begin([], [], [], orgs(2));
+    turns.next();
+    turns.begin([], [], [], []);
+    expect(turns.pastCapStarts()).toBe(false);
+    turns.begin([], [], [], orgs(3));
+    expect(turns.pastCapStarts()).toBe(true);
+    expect(asked).toEqual([2, 3]);
+    expect(turns.next()).toBe(org(2));
+  });
+
   it('#6 a run cut off in the middle, then full runs, ends the round: the lateness clock goes back', () => {
     const turns = createTurns(
       1,
