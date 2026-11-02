@@ -6,7 +6,12 @@
 // Nothing here starts until start-jobs.ts starts it: the anchor check's order
 // (it must start before the hand-off's first run) is this list's.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
-import { createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
+import {
+  createAuditTrail,
+  holdOrganisation,
+  HOLDS_WAITING_EVERY_MS,
+  pollHoldsWaiting,
+} from '@agentx/core/modules/audit';
 import { listedOrganizations } from '@agentx/core/modules/directory';
 import {
   activeContactsFor,
@@ -124,7 +129,7 @@ function jobsWatchedBy(watch: JobWatch, gate: (work: WatchedWork) => WatchedWork
 }
 
 /** What every process runs for itself: the counts it holds in memory, and how a trip feels from it. */
-export function eachProcessJobs({ logger, database }: Booted, { recorder, watch }: SharedParts): readonly Job[] {
+export function eachProcessJobs({ keys, logger, database }: Booted, { recorder, watch }: SharedParts): readonly Job[] {
   const job = jobsWatchedBy(watch);
   return [
     // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
@@ -134,6 +139,13 @@ export function eachProcessJobs({ logger, database }: Booted, { recorder, watch 
       'round_trips',
       createRoundTripTiming({ timed: () => timedRoundTrips(database, ROUND_TRIPS_A_RUN), logger }),
       ROUND_TRIP_EVERY_MS,
+      QUICK_MS,
+    ),
+    // A hold another process, or this one before a restart, couldn't record (4D2e D5).
+    job(
+      'holds_waiting',
+      { run: () => pollHoldsWaiting(database, { keys, ids: uuidV7Ids, logger }) },
+      HOLDS_WAITING_EVERY_MS,
       QUICK_MS,
     ),
     // What sees the rest (job-watch.ts): not watched itself, and each minute whatever the others do.

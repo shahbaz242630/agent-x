@@ -86,6 +86,7 @@ import {
   type LatestSignedState,
   type LatestWithRow,
   lockChainHead,
+  lockChainHeadSeeingWaiting,
   type ReadEvent,
   type RecordedAuditEvent,
   type RecordedEventCheck,
@@ -120,18 +121,28 @@ import {
  *   statement began, and the row reads sound again now, so nothing is left in
  *   the row or the log to find: whoever clears the hold will see it verify
  */
-export type TamperSign =
-  | 'row'
-  | 'deleted'
-  | 'unsigned'
-  | 'log'
-  | 'pointer'
-  | 'version'
-  | 'seal'
-  | 'status'
-  | 'chain'
-  | 'holding'
-  | 'moved_back';
+export type TamperSign = (typeof TAMPER_SIGNS)[number];
+
+const TAMPER_SIGNS = [
+  'row',
+  'deleted',
+  'unsigned',
+  'log',
+  'pointer',
+  'version',
+  'seal',
+  'status',
+  'chain',
+  'holding',
+  'moved_back',
+] as const;
+
+/**
+ * The sign a row of the holds waiting names (0069). One naming no sign wasn't
+ * written by the app, which is itself a row not as the app writes it: still a
+ * hold, as a row only ever adds caution.
+ */
+export const signOfWaiting = (reason: string): TamperSign => TAMPER_SIGNS.find((sign) => sign === reason) ?? 'row';
 
 /** A tamper sign, as the alarm names it: the organisation and the object's type and ID (IDs in lower case), and the sign. */
 export interface TamperFinding {
@@ -557,8 +568,9 @@ export interface SignedStates {
    * comes last of all (ADR-006 §6): every row is locked before this read,
    * and a row this transaction hasn't read through verifiedState yet is
    * refused after it (`lock_order`). A hold this
-   * process found but couldn't record yet reads as `tampered` with the sign
-   * that found it, until it is recorded.
+   * process found or polled but couldn't record yet reads as `tampered` with
+   * the sign that found it, until it is recorded; so, with `lock: 'head'`, does
+   * one any process left waiting (0069), read under that lock on the same trip.
    */
   integrityHold(tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck>;
   /**
@@ -1396,15 +1408,16 @@ export function createSignedStates({
   };
 
   const integrityHold = async (tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck> => {
+    let inTable: string | undefined;
     if (lock === 'head') {
-      await lockChainHead(tx, orgId);
+      inTable = await lockChainHeadSeeingWaiting(tx, orgId);
       headLocked.add(tx);
     }
     const { check } = await readHold(tx, orgId);
-    const waiting = unrecorded(orgId);
-    if (check.outcome !== 'clear' || waiting === undefined) return check;
+    const sign = unrecorded(orgId)?.sign ?? (inTable === undefined ? undefined : signOfWaiting(inTable));
+    if (check.outcome !== 'clear' || sign === undefined) return check;
     // Found, but not recorded yet (withSignedStates tries again once this transaction ends): denied meanwhile.
-    return Object.freeze({ outcome: 'tampered', sign: waiting.sign });
+    return Object.freeze({ outcome: 'tampered', sign });
   };
 
   const holdInvestigation = async (tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck> => {

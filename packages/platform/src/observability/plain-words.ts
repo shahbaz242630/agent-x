@@ -203,6 +203,18 @@ export const PLAIN_WORDS = {
     broke: 'Whatever met it was refused or stopped, and an organisation found tampered with is put on hold.',
     next: 'Treat it as a possible break-in and follow the incident runbook straight away.',
   },
+  'audit.hold_not_kept': {
+    happened: 'A security hold that could not be recorded could not be written to the waiting list either.',
+    broke:
+      'Only the process that found it knows of it: another process may read the organisation as clear, and a restart would forget it.',
+    next: 'Check the database first. The process keeps trying both, and the tamper alarm before this line still stands.',
+  },
+  'audit.holds_waiting_unread': {
+    happened: 'A process could not read the list of security holds waiting to be recorded.',
+    broke:
+      'It learns of a hold left by another process a little later. Payments still read the list themselves, so none goes through on this.',
+    next: 'Nothing if it passes; it tries again in 5 seconds. If it repeats, check the database.',
+  },
   'audit.integrity_hold_set': {
     happened: 'An organisation was put on its security hold because something of its was found tampered with.',
     broke: 'Its payments are not passed to the payment partner until an admin of the organisation clears the hold.',

@@ -431,6 +431,20 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     }
   });
 
+  it('waits on a hold left waiting by any process, a forged row included, with nothing in the log: never a payment', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await database.as('app').query("insert into directory.holds_waiting (org_id, reason) values ($1, 'seal')", [w.org]);
+
+    await handoffOf(w).run();
+
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    expect(lines('handoff.waiting')).toEqual([
+      expect.objectContaining({ requestId: request.id, why: 'hold_tampered' }),
+    ]);
+    expect(await paymentOf(w, request.id)).toEqual({ instruction: 'missing' });
+  });
+
   it('waits while the organisation is on its integrity hold', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
