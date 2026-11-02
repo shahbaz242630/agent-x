@@ -40,6 +40,34 @@ export const heartbeatChecks = (jobs: Readonly<Record<string, { beating(): boole
     job === undefined ? [] : [{ name: `${name}_heartbeat`, check: () => Promise.resolve(job.beating()) }],
   );
 
+/** How long a heartbeat read from the database stands: anyone can call /health, and this keeps it to one trip in this long. */
+export const SHARED_HEARTBEAT_CACHE_MS = 15_000;
+
+/**
+ * /health's check of the jobs where this process isn't running them: the lease's
+ * heartbeat (0068), read at most once in the cache's time, its failure included.
+ * Where this process leads it has its own jobs' checks, and makes no trip.
+ */
+export function sharedHeartbeat(
+  read: () => Promise<boolean>,
+  leading: () => boolean,
+  now: () => number = () => performance.now(),
+): HealthCheck {
+  let readAt = Number.NEGATIVE_INFINITY;
+  let last: Promise<boolean> = Promise.resolve(false);
+  return {
+    name: 'jobs_heartbeat',
+    check: () => {
+      if (leading()) return Promise.resolve(true);
+      if (now() - readAt >= SHARED_HEARTBEAT_CACHE_MS) {
+        readAt = now();
+        last = read();
+      }
+      return last;
+    },
+  };
+}
+
 async function run({ name, check }: HealthCheck): Promise<Outcome> {
   try {
     return { name, passed: await check() };

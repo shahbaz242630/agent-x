@@ -277,6 +277,9 @@ vi.mock('./anchor-check.ts', () => ({
   },
 }));
 
+/** The lease's answers, as a test wants them. */
+const lease = vi.hoisted(() => ({ take: (): Promise<boolean> => Promise.resolve(true), released: 0 }));
+
 /** The platform chain as it is, but for its check on its own, which main.db.test.ts runs for real. */
 const platformChecks = vi.hoisted(() => [] as { database: unknown; anchor: unknown }[]);
 
@@ -284,6 +287,16 @@ vi.mock('@agentx/core/modules/platform-controls', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/core/modules/platform-controls')>();
   return {
     ...actual,
+    // The lease's own statements are job-lease.db.test.ts's; here it is free and this process alone.
+    takeJobLease: () => {
+      fake.steps.push('lease taken');
+      return lease.take();
+    },
+    releaseJobLease: () => {
+      lease.released += 1;
+      return Promise.resolve();
+    },
+    jobsBeating: () => Promise.resolve(true),
     createPlatformChain: (...args: Parameters<typeof actual.createPlatformChain>) => ({
       ...actual.createPlatformChain(...args),
       verifyAlone: (database: unknown, anchor: { seq: bigint; hash: Buffer }) => {
@@ -357,6 +370,8 @@ beforeEach(() => {
   anchorChecks.runs = 0;
   fake.roleCheck = () => Promise.resolve();
   fake.destroy = closePool;
+  lease.take = () => Promise.resolve(true);
+  lease.released = 0;
   startRecord.written.length = 0;
   startRecord.result = () => Promise.resolve(7n);
   anchorChecks.intervals.length = 0;
@@ -523,7 +538,13 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     const { events, capture } = await start();
     // The schema is checked before anything is written: the platform chain's
     // own tables are among what the check covers (A3e-1b).
-    expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded', 'anchor check started']);
+    expect(fake.steps).toEqual([
+      'role checked',
+      'schema checked',
+      'start recorded',
+      'lease taken',
+      'anchor check started',
+    ]);
     expect(events()).toEqual([
       'api.starting',
       'api.partner',
@@ -961,6 +982,60 @@ describe('4D2e D: the role says which side of the work a process does', () => {
   });
 });
 
+describe('4D2e D: the first try at the lease', () => {
+  it('comes before anything answers, so a process alone leads as it listens', async () => {
+    const { server } = await start();
+    const taken = fake.steps.indexOf('lease taken');
+    expect(taken).toBe(fake.steps.indexOf('start recorded') + 1);
+    expect(fake.steps.indexOf('anchor check started')).toBeGreaterThan(taken);
+    expect(server?.server.listening).toBe(true);
+  });
+
+  it('`web` has no lease to try', async () => {
+    await start({ ...ENV, AGENTX_ROLE: 'web' });
+    expect(fake.steps).not.toContain('lease taken');
+  });
+
+  it('a stop while it goes unanswered is a clean stop: exit 0, nothing started, nothing listening', async () => {
+    lease.take = () => new Promise(() => undefined);
+    const serversBefore = built.length;
+    const host = new FakeProcess();
+    const capture = new LogCapture();
+    const running = runApi(host, { env: ENV, destination: capture });
+    await vi.waitFor(() => {
+      expect(fake.steps).toContain('lease taken');
+    });
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+    await expect(running).resolves.toBeUndefined();
+    expect(built).toHaveLength(serversBefore);
+    expect(fake.steps).not.toContain('anchor check started');
+    expect(lease.released).toBe(1);
+    expect(fake.steps.at(-1)).toBe('pool closed');
+  });
+
+  it('a failure to listen gives the lease up while the pool is still open', async () => {
+    const first = await start();
+    const port = String(first.server?.addresses()[0]?.port);
+    lease.released = 0;
+    const { host } = await start({ ...ENV, AGENTX_HTTP_PORT: port });
+    expect(host.exitCode).toBe(1);
+    expect(lease.released).toBe(1);
+  });
+
+  it('a stop once it has started gives the lease up', async () => {
+    const { host, server } = await start();
+    expect(server).toBeDefined();
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+    expect(lease.released).toBe(1);
+  });
+});
+
 describe('the API stops cleanly on a signal', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)(
     'on %s: logs the signal, stops listening, then closes the pool, exits 0',
@@ -979,6 +1054,7 @@ describe('the API stops cleanly on a signal', () => {
         'role checked',
         'schema checked',
         'start recorded',
+        'lease taken',
         'anchor check started',
         'anchor check stopping',
         'anchor check stopped',
@@ -1021,18 +1097,19 @@ describe('the API stops cleanly on a signal', () => {
     await vi.waitFor(() => {
       expect(host.exits).toEqual([0]);
     });
-    expect(fake.steps.slice(0, 6)).toEqual([
+    expect(fake.steps.slice(0, 7)).toEqual([
       'role checked',
       'schema checked',
       'start recorded',
+      'lease taken',
       'anchor check started',
       'http closing',
       'anchor check stopping',
     ]);
-    expect(fake.steps.slice(6, 9)).toEqual(
+    expect(fake.steps.slice(7, 10)).toEqual(
       expect.arrayContaining(['http closed', 'anchor check stopped', 'sweep stopped']),
     );
-    expect(fake.steps.slice(9)).toEqual(['pool closed']);
+    expect(fake.steps.slice(10)).toEqual(['pool closed']);
   });
 
   it.each([

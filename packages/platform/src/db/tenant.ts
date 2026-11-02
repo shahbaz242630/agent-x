@@ -226,6 +226,19 @@ export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<
 }
 
 /**
+ * Limits every later statement of the transaction, and its wait for a lock, to
+ * these milliseconds, shorter than limitStatements: for work a caller gives a
+ * deadline of its own, which cancels nothing (the jobs' lease, 0068).
+ */
+export async function limitStatementsTo<Schema>(
+  tx: Transaction<Schema>,
+  { statementMs, lockMs }: { readonly statementMs: number; readonly lockMs: number },
+): Promise<void> {
+  await sql`select pg_catalog.set_config('statement_timeout', ${String(statementMs)}, true),
+                   pg_catalog.set_config('lock_timeout', ${String(lockMs)}, true)`.execute(tx);
+}
+
+/**
  * Raises the idle limit (database.ts) for this transaction alone, to past a load
  * phase, for the load test's stuck organisation, which holds its rows open for a
  * whole phase on purpose, and for nothing in the product. Still a limit: a hung
