@@ -10,6 +10,7 @@ export {
   type LogMethod,
   withLogContext,
   type WorkContext,
+  workUnderWay,
 } from './logger.ts';
 export { guardOutputs, type Output } from './output-guard.ts';
 export type { ProblemEvent } from './plain-words.ts';

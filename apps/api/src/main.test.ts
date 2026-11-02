@@ -1034,6 +1034,13 @@ describe('4D2e D: the first try at the lease', () => {
     expect(fake.steps).not.toContain('lease taken');
   });
 
+  it('4D2e Stage F the first zone pass, before listening and off the timer, is a run: its lines say so', async () => {
+    const { capture } = await start();
+    const passLines = capture.lines().filter((line) => String(line.event).startsWith('agent_zones.'));
+    expect(passLines.map((line) => line.event)).not.toEqual([]);
+    for (const line of passLines) expect(line.runId).toEqual(expect.any(String));
+  });
+
   it('a stop while it goes unanswered is a clean stop: exit 0, nothing started, nothing listening', async () => {
     lease.take = () => new Promise(() => undefined);
     const serversBefore = built.length;
@@ -1345,14 +1352,50 @@ describe('the API logs a crash before it exits', () => {
     );
   });
 
-  it("4D2e Stage F claims no request or run: a throw from an old connection's socket would name whoever opened it", async () => {
+  it.each([
+    [
+      'a throw in a timer',
+      'uncaughtException',
+      () => {
+        setTimeout(() => {
+          throw new TypeError('bad state');
+        }, 0);
+      },
+    ],
+    [
+      'a rejection no one handles',
+      'unhandledRejection',
+      () => {
+        void Promise.reject(new TypeError('bad state'));
+      },
+    ],
+  ])('4D2e Stage F names the work, without claiming it, on %s made inside it', async (_how, origin, fail) => {
     const { host, capture } = await start();
-    withLogContext({ correlationId: 'opened-the-socket', runId: 'opened-the-socket' }, () => {
-      host.emit('uncaughtException', new TypeError('bad state'), 'uncaughtException');
+    // The real process's event, as Node raises it in the failure's own context, not the runner's: it would fail the test.
+    const kinds = ['uncaughtException', 'unhandledRejection'] as const;
+    const runners = kinds.map((kind) => [kind, process.listeners(kind as 'uncaughtException')] as const);
+    for (const kind of kinds) process.removeAllListeners(kind);
+    const raised = new Promise<void>((resolve) => {
+      process.once('uncaughtException', (error, from) => {
+        host.emit('uncaughtException', error, from);
+        resolve();
+      });
     });
-    const crashed = capture.lines().at(-1);
-    expect(crashed).toMatchObject({ event: 'api.crashed' });
+    try {
+      withLogContext({ correlationId: 'the-work', runId: 'its-run' }, fail);
+      await raised;
+    } finally {
+      for (const [kind, listeners] of runners) for (const listener of listeners) process.on(kind, listener);
+    }
+    const crashed = capture.lines().find((line) => line.event === 'api.crashed');
+    expect(crashed).toMatchObject({ origin, workAtCrash: { correlationId: 'the-work', runId: 'its-run' } });
     expect(crashed).not.toHaveProperty('correlationId');
     expect(crashed).not.toHaveProperty('runId');
+  });
+
+  it('4D2e Stage F has no work to name on a crash outside any', async () => {
+    const { host, capture } = await start();
+    host.emit('uncaughtException', new TypeError('bad state'), 'uncaughtException');
+    expect(capture.lines().find((line) => line.event === 'api.crashed')).not.toHaveProperty('workAtCrash');
   });
 });

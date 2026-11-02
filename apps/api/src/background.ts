@@ -69,11 +69,14 @@ export async function finishedWithinStop<T>(
   }
 }
 
+/** One run of a job: an ID of its own, on every line it writes (logger.ts). */
+export const asARun = <T>(work: () => T): T => withLogContext({ runId: randomUUID() }, work);
+
 /**
  * Runs the work now and then `intervalMs` after each run ends, so runs never
  * overlap. `stop` ends a run in flight at once and waits for it to end; a
  * statement it had begun is left to the database's own limit, which closing
- * the pool waits for. Each run has an ID, on every line it writes (logger.ts).
+ * the pool waits for.
  */
 export function scheduleRuns(
   work: { run(signal?: AbortSignal): Promise<unknown> },
@@ -83,7 +86,7 @@ export function scheduleRuns(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> = Promise.resolve();
   const tick = (): void => {
-    running = withLogContext({ runId: randomUUID() }, () => work.run(stopping.signal)).then(() => {
+    running = asARun(() => work.run(stopping.signal)).then(() => {
       if (stopping.signal.aborted) return;
       timer = setTimeout(tick, intervalMs);
       // The server keeps the process alive; background work alone shouldn't.

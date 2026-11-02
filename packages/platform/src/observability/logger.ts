@@ -105,6 +105,9 @@ export const withLogContext = <T>(context: WorkContext, work: () => T): T => wor
  */
 export const asNoWork = <T>(listener: () => T): T => workContexts.exit(listener);
 
+/** The work under way, for a line that names it without claiming it: `api.crashed`'s `workAtCrash`. */
+export const workUnderWay = (): WorkContext | undefined => workContexts.getStore();
+
 /** What the work under way adds to a line. A correlation ID a child was given stands: a job names one for each organisation. */
 function contextOfLine(correlationBound: boolean): WorkContext | undefined {
   const context = workContexts.getStore();

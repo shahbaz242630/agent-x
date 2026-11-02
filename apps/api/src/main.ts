@@ -9,7 +9,7 @@
 import { jobsBeating } from '@agentx/core/modules/platform-controls';
 import type { FastifyInstance } from 'fastify';
 
-import type { Leadership } from './background.ts';
+import { asARun, type Leadership } from './background.ts';
 import {
   boot,
   type ApiProcess,
@@ -64,7 +64,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const parts = sharedParts(booted, leadership);
   const oneCopy = leadership && oneCopyJobs(booted, parts, leadership);
   const firstZonePass = async (): Promise<void> => {
-    await oneCopy?.zoneSealing.run();
+    // Off the timer, the one job run before listening: a run all the same, and its lines say so.
+    await asARun(() => oneCopy?.zoneSealing.run());
   };
 
   // What a stop finds, which comes at any moment from here on.
