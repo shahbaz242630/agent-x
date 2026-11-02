@@ -651,9 +651,8 @@ export function createHandoff({
       const state = paymentStateOf(answer.execution);
       // Rejected with no proof the money stayed, in the answer itself: reconciliation's, as the bank check says it.
       if (state === 'UNKNOWN') log.error('handoff.rejected_unproven', { transactionId });
-      const submitted = await move('submitted', facts, 'accepted');
-      if (submitted === null) return 'late';
-      const recorded = await settled((await move(AFTER_SUBMITTED[state], facts, 'accepted')) ?? submitted);
+      if ((await move('submitted', facts, 'accepted')) === null) return 'late';
+      const recorded = await settled(await move(AFTER_SUBMITTED[state], facts, 'accepted'));
       // Kept and its admins told once recorded (decision 37b): a late one the bank check already told.
       if (state === 'UNKNOWN') {
         await alertAdmins(
@@ -842,8 +841,9 @@ export function createHandoff({
    * done, the run's budget is spent, or the run stops. What it started is waited
    * for, at a stop only so long: a hung bank must not take the process's stop
    * past its deadline. Then, for a lane that reached its end, the stale count and
-   * what it waits for settled. A lane stopped short has seen only some of its
-   * requests, so counting the rest as left standing would be a false alarm.
+   * what it waits for settled. A lane the budget cut short is counted too: those
+   * it hasn't reached are waiting, and past their age say so, unless a hold has
+   * them (`hold_lasting` says that). One a stop cut is counted by no one.
    */
   const handOffLanes = async (orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
     stopping = signal;
@@ -855,12 +855,13 @@ export function createHandoff({
       return;
     }
     for (const [orgId, outcome] of outcomes) {
-      if (outcome !== 'whole') continue;
       const lane = waitingOf(orgId);
+      const counted = outcome === 'whole' || (outcome === 'cut' && health.heldFor(orgId) === undefined);
       // A pass that read no rows has nothing to count: a trip saved for each idle organisation.
-      if (lane.sawRows && signal?.aborted !== true) {
+      if (counted && lane.sawRows && signal?.aborted !== true) {
         await staleIn(orgId, [...lane.now.keys()], logger.child({ orgId }));
       }
+      if (outcome !== 'whole') continue;
       lane.sawRows = false;
       lane.said = lane.now;
       lane.now = new Map();

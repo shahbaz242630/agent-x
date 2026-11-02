@@ -644,7 +644,7 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
     expect(await madeNow()).toBe(madeByTheTrip);
   });
 
-  it('half-open at concurrency: 3 at once, an acceptance reopening it for the rest', async () => {
+  it('half-open at concurrency: 3 at once, a step on once all three are accepted', async () => {
     const worlds = [await worldWith(2), await worldWith(2), await worldWith(2)];
     const allWorlds = worlds.map(({ w }) => w);
     unknownsFrom(['x', 'x', 'y', 'y', 'z']);
@@ -656,10 +656,11 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
     await settleTicks();
     expect(hanging.calls).toHaveLength(3);
 
-    // Its turn ended by the hold, each organisation waits for the next run: this one's three answered.
+    // Its turn ended by the hold, each organisation waits for the next run: this one's three answered, one step on.
     for (const call of hanging.calls) call.answer();
     await run;
-    expect(lines('handoff.bank_back')).toHaveLength(1);
+    expect(lines('handoff.bank_step').map(({ calls }) => calls)).toEqual([6]);
+    expect(lines('handoff.bank_back')).toEqual([]);
   });
 
   it('half-open at concurrency: one unknown trips it again, and no more go', async () => {
@@ -809,6 +810,56 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
     await job.run();
     expect(sent).toHaveLength(6);
     expect(new Set(sent).size).toBe(1);
+  });
+
+  describe('the queue’s age, for a lane the budget cut', () => {
+    const cutAfterTheFirst = (w: World, whenCalled: () => void = () => undefined) => {
+      let called = false;
+      const { rail, sent } = railOver([w], (real) => (intent) => {
+        if (!called) {
+          clock.advanceBy(1_000);
+          whenCalled();
+        }
+        called = true;
+        return real(intent);
+      });
+      return { job: handoffOver([w], rail, { runBudgetMs: 1_000 }), sent };
+    };
+
+    it('says those it hasn’t reached past their age: payments waiting are never silent', async () => {
+      const { w } = await worldWith(3);
+      const { job, sent } = cutAfterTheFirst(w);
+      clock.advanceBy(QUEUE_STALE_MS + 60_000);
+
+      await job.run();
+
+      expect(sent).toHaveLength(1);
+      expect(lines('handoff.queue_stale')).toEqual([expect.objectContaining({ requests: 2 })]);
+    });
+
+    it('says nothing while they are younger than their age', async () => {
+      const { w } = await worldWith(3);
+      const { job, sent } = cutAfterTheFirst(w);
+
+      await job.run();
+
+      expect(sent).toHaveLength(1);
+      expect(lines('handoff.queue_stale')).toEqual([]);
+    });
+
+    it('says nothing during a hold: the hold says it', async () => {
+      const { w } = await worldWith(3);
+      const { job, sent } = cutAfterTheFirst(w, () => {
+        unknownsFrom(['x', 'x', 'y', 'y', 'z']);
+      });
+      clock.advanceBy(QUEUE_STALE_MS + 60_000);
+
+      await job.run();
+
+      expect(sent).toHaveLength(1);
+      expect(health.heldFor(w.org)).toBe('bank');
+      expect(lines('handoff.queue_stale')).toEqual([]);
+    });
   });
 
   it('begins no Tx A past its budget while waiting at the gate (L4)', async () => {
@@ -1086,27 +1137,35 @@ describe('the model at concurrency: random batches, each sent once', () => {
   /** Pinned, so a failure replays; said, so it can be read from the log. */
   const SEED = 20_261_102;
 
-  it('makes one instruction and one transaction each, however they interleave, whatever the bank answers', async () => {
+  it('makes one instruction and one transaction each, across organisations at concurrency, whatever the bank answers', async () => {
     // eslint-disable-next-line no-restricted-properties -- a test's note for whoever replays it, holding nothing of anyone's
     process.stdout.write(`the model's seed: ${String(SEED)}\n`);
     await fc.assert(
       fc.asyncProperty(
-        fc.array(fc.constantFrom(...OUTCOMES), { minLength: 2, maxLength: 8 }),
+        fc.array(fc.record({ outcome: fc.constantFrom(...OUTCOMES), world: fc.integer({ min: 0, max: 2 }) }), {
+          minLength: 3,
+          maxLength: 12,
+        }),
         fc.integer({ min: 2, max: 6 }),
-        async (batch, limit) => {
+        fc.integer({ min: 1, max: 3 }),
+        async (batch, total, perOrganisation) => {
           capture = new LogCapture();
-          const { w, acting } = await ready();
+          const worlds = [await ready(), await ready(), await ready()];
           const asked = [];
-          for (const outcome of batch) {
-            asked.push({ outcome, request: await ask(acting, w, { amount: AED(5_000n + outcome.fils) }) });
+          for (const { outcome, world } of batch) {
+            const { w, acting } = worlds[world] ?? expect.unreachable();
+            asked.push({ w, outcome, request: await ask(acting, w, { amount: AED(5_000n + outcome.fils) }) });
           }
           const instructions: string[] = [];
-          const { rail } = railOver([w], (real) => (intent) => {
+          const allWorlds = worlds.map(({ w }) => w);
+          const { rail } = railOver(allWorlds, (real) => async (intent) => {
             instructions.push(intent.instructionId);
+            // Answers come back in a different order from their calls, so Tx As and Tx Bs really cross.
+            await new Promise((resolve) => setTimeout(resolve, instructions.length % 3));
             return real(intent);
           });
-          const job = handoffOver([w], rail, {
-            limits: { total: limit, perOrganisation: limit },
+          const job = handoffOver(allWorlds, rail, {
+            limits: { total, perOrganisation },
             health: createRailHealth({ clock, logger: testLogger(capture), laneUnknowns: 1_000 }),
           });
 
@@ -1115,7 +1174,7 @@ describe('the model at concurrency: random batches, each sent once', () => {
 
           expect(new Set(instructions).size).toBe(batch.length);
           expect(instructions).toHaveLength(batch.length);
-          for (const { outcome, request } of asked) {
+          for (const { w, outcome, request } of asked) {
             expect(await paymentOf(w, request.id)).toMatchObject({
               transactions: 1,
               transaction: { status: outcome.status },
@@ -1124,9 +1183,9 @@ describe('the model at concurrency: random batches, each sent once', () => {
           handedOffNoFailure();
         },
       ),
-      { numRuns: 4, seed: SEED, endOnFailure: true },
+      { numRuns: 3, seed: SEED, endOnFailure: true },
     );
-  }, 180_000);
+  }, 240_000);
 });
 
 describe('a lane held: 3 unknowns in a row from one organisation', () => {
