@@ -63,6 +63,7 @@ export type RuleId =
   | 'handoff-queue-alert'
   | 'platform-full-alert'
   | 'integrity-runs-alert'
+  | 'dead-man-alerts'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
   | 'identities'
@@ -2266,7 +2267,56 @@ const workspaceAndQuota: Check = (snapshot, _expected, add) => {
   }
 };
 
-const alertRules: Check = (snapshot, _expected, add) => {
+/**
+ * The rules that fire on the jobs' lines missing (4D2e D, PL-33): what stands behind a process that can say nothing.
+ * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
+ */
+const DEAD_MEN = [
+  { event: 'audit.anchor_check_done', windowSize: 'PT20M', severity: 1, autoMitigate: false },
+  { event: 'jobs.pulse', windowSize: 'PT15M', severity: 2, autoMitigate: true },
+] as const;
+
+const deadManLines = (event: string): string => `where tostring(parse_json(Log).event) == "${event}"`;
+
+/** Whether the alert counts one of those lines, however else it is set. */
+const isDeadMan = (alert: PredictedResource): boolean =>
+  list(at(alert.properties, 'criteria', 'allOf')).some((criterion) =>
+    DEAD_MEN.some(({ event }) =>
+      queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [deadManLines(event)], 'count()'),
+    ),
+  );
+
+const deadManAlerts: Check = (snapshot, expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  for (const { event, windowSize, severity, autoMitigate } of DEAD_MEN) {
+    const found = ofType(snapshot, TYPES.alert).some(
+      (alert) =>
+        (expected.environment === 'staging' || at(alert.properties, 'enabled') === true) &&
+        at(alert.properties, 'severity') === severity &&
+        at(alert.properties, 'autoMitigate') === autoMitigate &&
+        at(alert.properties, 'windowSize') === windowSize &&
+        list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
+        list(at(alert.properties, 'criteria', 'allOf')).some(
+          (criterion) =>
+            queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [deadManLines(event)], 'count()') &&
+            totals(criterion) &&
+            at(criterion, 'operator') === 'LessThan' &&
+            at(criterion, 'threshold') === 1 &&
+            at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+            at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
+        ),
+    );
+    if (!found) {
+      add({
+        rule: 'dead-man-alerts',
+        resource: event,
+        message: `needs an alert on this deployment's workspace firing, at SEV-${String(severity)}, when ${windowSize} pass with none of this line, on everywhere but staging`,
+      });
+    }
+  }
+};
+
+const alertRules: Check = (snapshot, expected, add) => {
   for (const alert of ofType(snapshot, TYPES.alert)) {
     const criteria = list(at(alert.properties, 'criteria', 'allOf'));
     const countsOnly =
@@ -2308,7 +2358,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
     // the first still passed each rule that reads it. And a SEV-1 alert is
     // never muted, which would silence every notification after the first.
     if (
-      at(alert.properties, 'enabled') !== true ||
+      (at(alert.properties, 'enabled') !== true && !(expected.environment === 'staging' && isDeadMan(alert))) ||
       criteria.length !== 1 ||
       groups.length === 0 ||
       !groups.every((group) => deliversAlerts(snapshot, group)) ||
@@ -3887,6 +3937,7 @@ const CHECKS: readonly Check[] = [
   handoffQueueAlert,
   platformFullAlert,
   integrityRunsAlert,
+  deadManAlerts,
   agentCancelsAlert,
   agentCancelCapAlert,
   ownerLoginAlert,

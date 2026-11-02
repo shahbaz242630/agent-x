@@ -190,6 +190,13 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
         immutabilityPeriodSinceCreationInDays: 1826,
       });
     }
+    // Something always runs in production: the alerts on the jobs stopping are on (4D2e D).
+    if (
+      ANCHOR_STOPPED_ALERT(resource as unknown as PredictedResource) ||
+      JOBS_STOPPED_ALERT(resource as unknown as PredictedResource)
+    ) {
+      inside(resource, 'properties').enabled = true;
+    }
     if (subject && resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials') {
       const trust = resource.properties as Mutable;
       trust.subject = String(trust.subject).replace(/:environment:staging$/, ':environment:production');
@@ -275,6 +282,8 @@ const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
+const ANCHOR_STOPPED_ALERT = named(/^alert-agentx-.+-anchor-stopped$/);
+const JOBS_STOPPED_ALERT = named(/^alert-agentx-.+-jobs-stopped$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
 const COMMUNICATION = type('Microsoft.Communication/communicationServices');
@@ -532,6 +541,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-handoff-queue',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-platform-full',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-stopped',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-jobs-stopped',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
@@ -2820,6 +2831,82 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(String(at(staging.predictedResources.find(HANDOFF_QUEUE_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section E\.$/,
     );
+  });
+
+  describe('dead-man-alerts (4D2e D, PL-33): the jobs having stopped, seen from outside', () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const RULES = [
+      [ANCHOR_STOPPED_ALERT, 'audit.anchor_check_done', 'Done', 1],
+      [JOBS_STOPPED_ALERT, 'jobs.pulse', 'Pulses', 2],
+    ] as const;
+
+    it.each(RULES)('%#: is off on staging, which sleeps, and all else stands', (rule, event, column, severity) => {
+      const alert = staging.predictedResources.find(rule);
+      expect(at(alert?.properties, 'enabled')).toBe(false);
+      expect(at(alert?.properties, 'severity')).toBe(severity);
+      const only = first(at(alert?.properties, 'criteria', 'allOf'));
+      expect(at(only, 'query')).toBe(
+        `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}" | summarize ${column} = count()`,
+      );
+      expect(brokenRules(staging)).toEqual([]);
+    });
+
+    it.each(RULES)('%#: on staging it may be on, for a keep-running window', (rule) => {
+      expect(brokenRules(changed(rule, (alert) => (properties(alert).enabled = true)))).toEqual([]);
+    });
+
+    it.each(RULES)('%#: gone, or changed so it could not fire, breaks the rule', (rule, event) => {
+      expect(brokenRules(without(rule))).toEqual(['dead-man-alerts']);
+      for (const change of [
+        (alert: Mutable) => (criterion(alert).operator = 'GreaterThan'),
+        (alert: Mutable) => (criterion(alert).threshold = 0),
+        (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+        (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
+        (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+        (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 2),
+        (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 2),
+        (alert: Mutable) =>
+          (criterion(alert).query =
+            `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize N = count()`),
+        (alert: Mutable) =>
+          (criterion(alert).query =
+            `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}.x" | summarize N = count()`),
+      ]) {
+        expect(brokenRules(changed(rule, change))).toContain('dead-man-alerts');
+      }
+    });
+
+    it.each(RULES)('%#: in production it must be on', (rule) => {
+      const production = { region: 'uaenorth', environment: 'production' } as const;
+      const on = productionLike({ subject: true });
+      const off = changed(rule, (alert) => (properties(alert).enabled = false), on);
+      const rulesOf = (snapshotted: Snapshot) => brokenRules(snapshotted, production);
+      expect(rulesOf(on)).not.toContain('dead-man-alerts');
+      expect(rulesOf(on)).not.toContain('alert-delivery');
+      expect(rulesOf(off)).toContain('dead-man-alerts');
+      expect(rulesOf(off)).toContain('alert-delivery');
+    });
+
+    it('the anchor rule is the SEV-1 and stateless, the pulse the SEV-2', () => {
+      expect(brokenRules(changed(ANCHOR_STOPPED_ALERT, (alert) => (properties(alert).severity = 2)))).toContain(
+        'dead-man-alerts',
+      );
+      expect(brokenRules(changed(ANCHOR_STOPPED_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toContain(
+        'dead-man-alerts',
+      );
+      expect(brokenRules(changed(JOBS_STOPPED_ALERT, (alert) => (properties(alert).severity = 1)))).toContain(
+        'dead-man-alerts',
+      );
+      expect(brokenRules(changed(JOBS_STOPPED_ALERT, (alert) => (properties(alert).autoMitigate = false)))).toContain(
+        'dead-man-alerts',
+      );
+    });
+
+    it('another alert off on staging is still refused: only these two', () => {
+      expect(brokenRules(changed(INTEGRITY_RUNS_ALERT, (alert) => (properties(alert).enabled = false)))).toContain(
+        'alert-delivery',
+      );
+    });
   });
 
   it("integrity-runs-alert: no alert on an integrity job's skipped run, or one that counts something else or misses a job, can't fire or fires too late", () => {

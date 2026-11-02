@@ -104,8 +104,22 @@ const pemHeader = (...label: readonly string[]): string => ['-----BEGIN', ...lab
 
 describe('parseArguments', () => {
   it('reads the ways the tool is run', () => {
-    expect(parseArguments(['foundation'])).toEqual({ command: 'foundation', loadSize: false });
-    expect(parseArguments(['foundation', '--load-size'])).toEqual({ command: 'foundation', loadSize: true });
+    expect(parseArguments(['foundation'])).toEqual({ command: 'foundation', loadSize: false, alwaysOn: false });
+    expect(parseArguments(['foundation', '--load-size'])).toEqual({
+      command: 'foundation',
+      loadSize: true,
+      alwaysOn: false,
+    });
+    expect(parseArguments(['foundation', '--always-on'])).toEqual({
+      command: 'foundation',
+      loadSize: false,
+      alwaysOn: true,
+    });
+    expect(parseArguments(['foundation', '--always-on', '--load-size'])).toEqual({
+      command: 'foundation',
+      loadSize: true,
+      alwaysOn: true,
+    });
     expect(parseArguments(['alerts'])).toEqual({ command: 'alerts' });
     expect(parseArguments(['dns'])).toEqual({ command: 'dns' });
     expect(parseArguments(['certificates'])).toEqual({ command: 'certificates' });
@@ -183,6 +197,7 @@ describe('parseArguments', () => {
       [['foundation', '--all'], /foundation takes only --load-size/],
       [['foundation', '--load-size', '--load-size'], /foundation takes only --load-size/],
       [['foundation', '--load-size=yes'], /foundation takes only --load-size/],
+      [['foundation', '--always-on', '--always-on'], /foundation takes only --load-size/],
       [['alerts', '--fix'], /alerts takes no options, not --fix/],
       [['dns', 'app.example.invalid'], /dns takes no options, not app.example.invalid/],
       [['certificates', '--keep-running'], /certificates takes no options, not --keep-running/],
@@ -879,6 +894,7 @@ describe('deploy foundation', () => {
       AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: admin,
       // Always sent: a load size left in the operator's shell never reaches Azure.
       AGENTX_AZURE_DATABASE_SIZE: 'normal',
+      AGENTX_AZURE_ALWAYS_ON: 'false',
     });
     expect(done.terminal.said).toContain(
       'The database stays at (or goes back to) its normal size, B1ms; a change of size restarts it for a few minutes.',
@@ -932,6 +948,23 @@ describe('deploy foundation', () => {
     });
     expect(skipped.status).toBe(1);
     expect(skipped.az.sequence.filter((call) => call === 'rest --method get')).toHaveLength(1);
+  });
+
+  it('keeps the alerts on the jobs stopping off, saying so, and on only with --always-on, saying how to end it (4D2e D)', async () => {
+    const admin = aPaste();
+    const off = await run(['foundation'], { answers: ['y', 'ops@example.invalid'], hidden: [admin, admin] });
+    expect(off.az.deployment?.values).toMatchObject({ AGENTX_AZURE_ALWAYS_ON: 'false' });
+    expect(off.terminal.said).toContain('The alerts on the jobs stopping stay off: staging sleeps.');
+
+    const on = await run(['foundation', '--always-on'], {
+      answers: ['y', 'ops@example.invalid'],
+      hidden: [admin, admin],
+    });
+    expect(on.status).toBe(0);
+    expect(on.az.deployment?.values).toMatchObject({ AGENTX_AZURE_ALWAYS_ON: 'true' });
+    expect(on.terminal.said).toContain(
+      'The alerts on the jobs stopping go on. Staging sleeps, so they fire unless apps runs with --keep-running: run foundation again without --always-on before it stops.',
+    );
   });
 
   it('sizes the database for the load run with --load-size, and says what it costs and how to size it back (D2c)', async () => {
