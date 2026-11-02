@@ -4,14 +4,28 @@
 // every failure named by its call, status and Azure's code alone.
 import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
-import { readdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type AzureBlobSettings, BlobStoreFailed } from './azure.ts';
 import { azureWriteOnceStore, folderWriteOnceStore, OverwriteRefused, type WriteOnceStore } from './write-once.ts';
+
+/** A disk that fills part way through a write: the bytes land, then the write fails. */
+const disk = vi.hoisted(() => ({ full: false }));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      await actual.writeFile(...args);
+      if (disk.full) throw Object.assign(new Error('no space left'), { code: 'ENOSPC' });
+    },
+  };
+});
 
 /** Plain words, so secret scanners ignore them. */
 const HEADER = 'identity header for these tests';
@@ -137,8 +151,32 @@ function behavesAsWriteOnce(make: () => WriteOnceStore): void {
   });
 }
 
+/** Both stores answer alike for a file under a name neither would write. */
+function countsForeignNames(make: () => { store: WriteOnceStore; plant: (name: string) => Promise<void> }): void {
+  it('leaves out and counts a name it would never write, in its place on a page', async () => {
+    const { store, plant } = make();
+    await store.put('e1/good', Buffer.from('a'));
+    await plant('e1/odd name');
+
+    expect(await store.list('e1/', 10)).toEqual({ names: ['e1/good'], foreign: 1, next: undefined });
+    const first = await store.list('e1/', 1);
+    expect(first).toMatchObject({ names: ['e1/good'], foreign: 0 });
+    expect(await store.list('e1/', 1, first.next)).toEqual({ names: [], foreign: 1, next: undefined });
+  });
+}
+
 describe('4D2e E3 the write-once store on Azure', () => {
   behavesAsWriteOnce(() => azure().store);
+  countsForeignNames(() => {
+    const { store, blobs } = azure();
+    return {
+      store,
+      plant: (name) => {
+        blobs.set(name, Buffer.from('planted'));
+        return Promise.resolve();
+      },
+    };
+  });
 
   it('writes once, whole, with its MD5 and SHA-256, as the workload’s identity', async () => {
     const { calls, store } = azure();
@@ -236,16 +274,35 @@ describe('4D2e E3 the write-once store on Azure', () => {
 
   it('leaves out, and counts, a name it would never write', async () => {
     const page = await answering(
-      '<Blobs><Blob><Name>e1/deltas/1</Name></Blob><Blob>\n<Name>../odd name</Name></Blob></Blobs><NextMarker />',
+      '<EnumerationResults><Blobs><Blob><Name>e1/deltas/1</Name></Blob><Blob>\n<Name>../odd name</Name></Blob></Blobs><NextMarker /></EnumerationResults>',
     ).list('e1/', 10);
 
     expect(page).toEqual({ names: ['e1/deltas/1'], foreign: 1, next: undefined });
   });
 
   it('refuses a continuation of another form rather than send it on', async () => {
-    await expect(answering('<NextMarker>a&amp;b</NextMarker>').list('e1/', 10)).rejects.toThrow(
+    await expect(
+      answering('<EnumerationResults><NextMarker>a&amp;b</NextMarker></EnumerationResults>').list('e1/', 10),
+    ).rejects.toThrow(
       'The write-once store failed: the blob service answered a list with a continuation of another form',
     );
+  });
+
+  it.each([
+    ['a page from something else', '<html><body>Sign in</body></html>'],
+    ['an empty answer', ''],
+    ['a list cut short', '<EnumerationResults><Blobs><Blob><Name>e1/deltas/1</Name></Blob>'],
+    ['a list with no start', '<Blobs /></EnumerationResults>'],
+  ])('fails on %s, never reading it as an empty store', async (_what, xml) => {
+    await expect(answering(xml).list('e1/', 10)).rejects.toThrow(
+      'The write-once store failed: the blob service answered a list with something that is not a whole list',
+    );
+  });
+
+  it('reads a list whose start carries attributes, as Azure writes it', async () => {
+    const xml = '<EnumerationResults ServiceEndpoint="x"><Blobs /><NextMarker /></EnumerationResults>';
+
+    expect(await answering(xml).list('e1/', 10)).toEqual({ names: [], foreign: 0, next: undefined });
   });
 
   it('asks a token once, and again only once it has been kept ten minutes', async () => {
@@ -276,6 +333,25 @@ describe('4D2e E3 the write-once store on a local folder', () => {
   });
 
   behavesAsWriteOnce(() => folderWriteOnceStore(folder));
+  countsForeignNames(() => ({
+    store: folderWriteOnceStore(folder),
+    plant: async (name) => {
+      await mkdir(join(folder, name, '..'), { recursive: true });
+      await writeFile(join(folder, name), 'planted');
+    },
+  }));
+
+  it('leaves no part-written file behind when the write itself fails, and no file under the name', async () => {
+    const store = folderWriteOnceStore(folder);
+    disk.full = true;
+    try {
+      await expect(store.put('e1/a', Buffer.from('half'))).rejects.toThrow('no space left');
+    } finally {
+      disk.full = false;
+    }
+
+    expect(await readdir(join(folder, 'e1'))).toEqual([]);
+  });
 
   it('leaves no part-written file behind, a refused write or not', async () => {
     const store = folderWriteOnceStore(folder);

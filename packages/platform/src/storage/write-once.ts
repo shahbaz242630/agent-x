@@ -71,8 +71,15 @@ function checkedListing(start: string, most: number): void {
   }
 }
 
-/** The names in a List Blobs answer, in its order. Azure's XML is read for these two elements alone. */
+/**
+ * The names in a List Blobs answer, in its order. Azure's XML is read for these
+ * two elements alone. An answer that isn't a whole list is a failure, never an
+ * empty store: a caller would take that for "no anchors".
+ */
 function pageIn(xml: string): WriteOncePage {
+  if (!/<EnumerationResults[\s>]/.test(xml) || !xml.includes('</EnumerationResults>')) {
+    throw new BlobStoreFailed(STORE, 'the blob service answered a list with something that is not a whole list');
+  }
   const listed = [...xml.matchAll(/<Blob>\s*<Name>([^<]*)<\/Name>/g)].map((match) => match[1] ?? '');
   const names = listed.filter(isBlobName);
   const marker = /<NextMarker>([^<]*)<\/NextMarker>/.exec(xml)?.[1] ?? '';
@@ -188,8 +195,8 @@ export function folderWriteOnceStore(directory: string): WriteOnceStore {
       const path = pathOf(name);
       const made = `${path}.${randomUUID()}.part`;
       await mkdir(dirname(path), { recursive: true, mode: OWNER_ONLY_FOLDER });
-      await writeFile(made, bytes, { flag: 'wx', mode: OWNER_ONLY });
       try {
+        await writeFile(made, bytes, { flag: 'wx', mode: OWNER_ONLY });
         // A hard link fails if the name is taken, where a rename would write over it.
         await link(made, path);
       } catch (error) {
@@ -205,8 +212,10 @@ export function folderWriteOnceStore(directory: string): WriteOnceStore {
       const names = (await allNames())
         .filter((name) => name.startsWith(start) && (after === undefined || name > after))
         .toSorted();
+      // A foreign name takes its place on a page, as Azure's `maxresults` counts it.
       const page = names.slice(0, most);
-      return { names: page, foreign: 0, next: names.length > most ? page.at(-1) : undefined };
+      const own = page.filter(isBlobName);
+      return { names: own, foreign: page.length - own.length, next: names.length > most ? page.at(-1) : undefined };
     },
 
     async get(name) {
