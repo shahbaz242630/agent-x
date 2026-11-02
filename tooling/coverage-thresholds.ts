@@ -12,8 +12,12 @@ const standard = { lines: 90, functions: 90, statements: 90, branches: 85 };
 export const MONEY_CRITICAL_GLOB =
   'packages/core/src/modules/{policies,limit-reservations,approvals,instructions,spend-requests,handoff,outcomes}/**';
 
+/** The hand-off, its fair turns and its bank breaker (4D2e Stage F): they send money, in the API's own folder. */
+const MONEY_CRITICAL_API_GLOB = 'apps/api/src/{fair-lanes,rail-health,handoff,payment-checks}.ts';
+
 export const coverageThresholds = {
   perFile: true,
   ...standard,
   [MONEY_CRITICAL_GLOB]: { ...standard, branches: 95 },
+  [MONEY_CRITICAL_API_GLOB]: { ...standard, branches: 95 },
 };

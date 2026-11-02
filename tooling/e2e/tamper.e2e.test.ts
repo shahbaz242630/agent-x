@@ -41,7 +41,8 @@ import { createDatabase, withTenant } from '../../packages/platform/src/db/index
 import { loadKeys } from '../../packages/platform/src/keys/index.ts';
 import { FixedClock, testLogger } from '../../packages/testing/src/index.ts';
 
-import { createHandoff } from '../../apps/api/src/handoff.ts';
+import { createHandoff, handoffDatabaseGate } from '../../apps/api/src/handoff.ts';
+import { createRailHealth } from '../../apps/api/src/rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables } from '../../apps/api/src/handoff-world.helper.test.ts';
 import { createMandateRegistry } from '../../apps/api/src/mandate-registry.ts';
 import { AED, mandateWorld, type World } from '../../apps/api/src/mandate-world.helper.test.ts';
@@ -468,6 +469,8 @@ async function seedPayment(): Promise<string> {
       ids: uuidV7Ids,
       clock,
       logger: testLogger(),
+      health: createRailHealth({ clock, logger: testLogger() }),
+      databaseGate: handoffDatabaseGate(6),
     }).run();
   } finally {
     if (before.outcome === 'paused') await pause(true);

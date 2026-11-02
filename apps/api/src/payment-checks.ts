@@ -6,14 +6,21 @@
 // messages early, late, twice or missed change nothing. Nothing is ever sent
 // to the bank again (ADR-007 §10).
 //
-// Each run first takes the partner's messages waiting in the inbox (E1b), and
-// checks the payments each names, ahead of their turn; a message is taken once
-// the bank answered for each, tried at most 5 runs. Then it takes each
-// organisation's transactions still under way (SUBMISSION_PENDING past its
-// answer's time, SUBMITTED, PROCESSING, UNKNOWN), oldest first, a page at a
-// time: one under 15 minutes old every run, one under a day old every 5th
-// run, every one every 30th (the real partner's rate limits), with those paid
-// in the last 7 days; none twice in a run. The bank is asked outside any
+// Each run takes the partner's messages waiting in the inbox (E1b), and checks
+// the payments each names, ahead of their turn; a message is taken once the bank
+// answered for each, tried at most 5 runs. Beside them, never behind, it takes
+// the organisations' transactions still under way (SUBMISSION_PENDING past its
+// answer's time, SUBMITTED, PROCESSING, UNKNOWN) in turns (fair-lanes.ts, 4D2e
+// Stage F: up to 8 calls at once, 2 of them the messages', 2 an organisation and
+// 1 more for a message, slots of its own beside the hand-off's), each organisation's
+// oldest first, a page at a time: one under 15 minutes old every run, one under
+// a day old every 5th run (the real partner's rate limits). Every 30th run, the
+// first after a start among them, two laps begin: every UNKNOWN of any age, then
+// the rest under way with those paid or failed in the last 7 days. A lap carries
+// on run after run, each with its own part of the budget, the UNKNOWNs' larger,
+// until every organisation has had its turn: an UNKNOWN is asked again within 30
+// runs and that lap's length, and one that outlasts its time is said. None is
+// asked twice in a run. The bank is asked outside any
 // database transaction; then one transaction a payment, in ADR-006 §6's lock order, as Tx B (`lockPayment`:
 // the transaction for change, 10; its holdings, 11; the move, the head, 12),
 // and every move settled by `settlePayment` (its holdings; on SUCCEEDED, the
@@ -24,8 +31,12 @@
 // FAILED; Rejected without it → UNKNOWN and a reconciliation alert; not found
 // proves nothing (left as it is, ADR-007 §11); an answer that can't be read or
 // isn't about this payment → UNKNOWN and an alert, never success (SEC-PTR-09);
-// the bank unreachable → asked again next time (3 in a row end the run: each
-// would wait its time limit). One SUBMISSION_PENDING (its run died before Tx B)
+// the bank unreachable → asked again next time (3 in a row end that
+// organisation's turn, not the run: one hung organisation can't keep the bank's
+// answer from another). Every answer tells the hand-off's breaker
+// (rail-health.ts), these lookups being what lets it open again, so they must
+// reach everyone. A run starts new work for 30 s, and a stop waits for calls under
+// way only 15 s. One SUBMISSION_PENDING (its run died before Tx B)
 // takes both steps in one transaction, each in its history (ADR-007 §13). A
 // move its machine doesn't allow (an UNKNOWN said to be under way) keeps the
 // bank's facts alone. A payment already settled that the bank now contradicts
@@ -82,8 +93,18 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { HEARTBEAT_STALE_MS, PARTNER_CALL_TIMEOUT_MS, PartnerTimedOut, withinTime } from './handoff.ts';
+import { finishedWithinStop } from './background.ts';
+import { createFairLanes, type FairLanes, type Gate, type LaneStep } from './fair-lanes.ts';
+import {
+  HEARTBEAT_STALE_MS,
+  PARTNER_CALL_TIMEOUT_MS,
+  PartnerTimedOut,
+  RUN_BUDGET_MS,
+  STOP_WAIT_MS,
+  withinTime,
+} from './handoff.ts';
 import { alertAdmins, type PaymentAlert } from './payment-alerts.ts';
+import type { RailHealth } from './rail-health.ts';
 import type { VoidTables } from './request-voids.ts';
 
 /** How often the payments under way are checked, once the last run has ended. */
@@ -126,8 +147,19 @@ const WATCHED = ['SUCCEEDED', 'FAILED'] as const;
 /** How many of the partner's messages a run takes, oldest first: the rest wait for the next. */
 const NUDGES_A_RUN = 100;
 
-/** How many unanswered calls in a row end a run: the bank is down, and each would wait its time limit. */
+/** How many unanswered calls in a row end an organisation's turn: each would wait its time limit. */
 const UNREACHED_IN_A_ROW = 3;
+
+/** How many calls to the bank at once, across every organisation and in each: slots of their own, beside the hand-off's. */
+const CHECK_LIMITS = { total: 8, perOrganisation: 2 } as const;
+
+/** How the run's budget is parted: the regular turns, then each lap. A message's pass has the whole of it, beside them. */
+const REGULAR_SHARE = 1 / 2;
+const UNKNOWN_LAP_SHARE = 1 / 3;
+const WATCH_LAP_SHARE = 1 / 6;
+
+/** How long the UNKNOWNs' lap may take before it is said: by then the next is due. */
+const LAP_DUE_MS = ALL_EVERY * PAYMENT_CHECKS_EVERY_MS;
 
 /** The API, as the check's actor in the signed events. */
 const ACTOR = { type: 'system', id: 'api' } as const;
@@ -145,18 +177,37 @@ interface Listed {
 /** What the bank said, as the check reads it. */
 type Word = ExecutionLookup | { readonly kind: 'unavailable' } | { readonly kind: 'unreadable' };
 
-/** Which payments a run checks: those under way made since `since` (all where none), and the paid ones or not. */
+/** Which payments a sweep checks: those in `statuses` made since `since` (all where none), and the paid ones or not. */
 interface Due {
+  readonly statuses: readonly TransactionStatus[];
   readonly since: Date | undefined;
   readonly watchPaid: boolean;
 }
 
-/** A run's own count: the bank's unanswered calls (in a row, and in all), checks that failed, and the payments checked. */
+/** What a check of one payment came to. */
+type CheckOutcome = 'checked' | 'unreached' | 'failed';
+
+/** A run's own count: the bank's unanswered calls, in all and each organisation's in a row, and the payments checked once. */
 interface Run {
   unreached: number;
-  inRow: number;
-  failed: number;
-  readonly seen: Set<string>;
+  /** How many organisations' turns ended on UNREACHED_IN_A_ROW. */
+  endedTurns: number;
+  readonly inRow: Map<string, number>;
+  readonly checks: Map<string, Promise<CheckOutcome>>;
+  readonly unreadable: Set<string>;
+}
+
+/** One of the sweeps that reach every payment of its kind, over as many runs as they take. */
+interface Lap {
+  readonly sweep: string;
+  readonly lanes: FairLanes;
+  readonly share: number;
+  /** How long it may take before it is said. */
+  readonly outlastsMs: number;
+  /** The organisations yet to have their turn: empty between laps. */
+  left: readonly string[];
+  startedAt: number;
+  said: boolean;
 }
 
 /** Where a check found the payment, and left it. */
@@ -188,8 +239,13 @@ export function createPaymentChecks({
   clock,
   logger,
   events,
+  health,
+  databaseGate,
   page = CHECK_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
+  limits = CHECK_LIMITS,
+  runBudgetMs = RUN_BUDGET_MS,
+  stopWaitMs = STOP_WAIT_MS,
 }: {
   /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -203,10 +259,20 @@ export function createPaymentChecks({
   readonly logger: Logger;
   /** The partner's messages taken in (E1b): each names payments this checks first, ahead of their turn; none where there is no inbox. */
   readonly events?: ProviderEvents;
+  /** The bank breaker it shares with the hand-off: every lookup that answers is told it, as the only way to reopen it. */
+  readonly health: RailHealth;
+  /** The hand-off's own: their transactions together stay within it (`handoffDatabaseGate`). */
+  readonly databaseGate: Gate;
   /** How many of an organisation's payments are read at once (CHECK_PAGE unless a test names fewer). */
   readonly page?: number;
   /** How long the bank has to answer (PARTNER_CALL_TIMEOUT_MS unless a test names less). */
   readonly callTimeoutMs?: number;
+  /** How many calls at once (CHECK_LIMITS unless a test names fewer). */
+  readonly limits?: { readonly total: number; readonly perOrganisation: number };
+  /** How long a run starts new work for (RUN_BUDGET_MS unless a test names less). */
+  readonly runBudgetMs?: number;
+  /** How long a stop waits for calls under way (STOP_WAIT_MS unless a test names less). */
+  readonly stopWaitMs?: number;
 }): PaymentChecks {
   // Refused at start: an answer still on its way to its Tx B must never be read as the bank's silence.
   if (ANSWER_DUE_MS <= callTimeoutMs) {
@@ -216,6 +282,12 @@ export function createPaymentChecks({
   // As the hand-off's: its first beat is its start, then only a run that reads its organisations beats.
   let beat = clock.now().getTime();
   let runs = 0;
+  // A quarter of the calls the messages': enough to go on, never all of them.
+  const nudgeSlots = Math.max(1, Math.floor(limits.total / 4));
+  // The run under way's, as the lanes' work needs them; runs never overlap.
+  let run: Run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
+  let spent: () => boolean = () => false;
+  let gaveUpWaiting = false;
   const beatNow = (): void => {
     beat = clock.now().getTime();
   };
@@ -224,7 +296,7 @@ export function createPaymentChecks({
   const underWay = (
     orgId: string,
     after: string | undefined,
-    { since, watchPaid }: Due,
+    { statuses, since, watchPaid }: Due,
     log: Logger,
   ): Promise<Listed[]> =>
     withSignedStates(database, orgId, services(log), (tx) => {
@@ -246,7 +318,7 @@ export function createPaymentChecks({
           .where((where) =>
             where.or([
               where.and([
-                where('t.status', 'in', UNDER_WAY),
+                where('t.status', 'in', statuses),
                 // One still waiting for its own answer is its Tx B's (or the hand-off's sweep's) until the answer is due.
                 where.or([where('t.status', '!=', 'SUBMISSION_PENDING'), where('t.created_at', '<=', answerDue)]),
                 since === undefined ? where.lit(true) : where('t.created_at', '>=', since),
@@ -308,47 +380,77 @@ export function createPaymentChecks({
       );
     });
 
+  /** The bank's unanswered call counted against its organisation; `end_turn` once UNREACHED_IN_A_ROW went unanswered. */
+  const stepOf = (orgId: string, checked: CheckOutcome): LaneStep => {
+    const inRow = checked === 'unreached' ? (run.inRow.get(orgId) ?? 0) + 1 : 0;
+    run.inRow.set(orgId, inRow);
+    if (inRow < UNREACHED_IN_A_ROW) return 'next';
+    run.endedTurns += 1;
+    return 'end_turn';
+  };
+
   /**
-   * The partner's messages waiting in the inbox, each one's payments checked
-   * with the bank now, ahead of their turn, then the message taken once the
-   * bank answered for each. False if the signal stopped the run or the bank
-   * went unanswered UNREACHED_IN_A_ROW times: the rest wait for the next run.
+   * One message's payments checked with the bank now, ahead of their turn, then
+   * the message taken once the bank answered for its own payments and each was
+   * recorded; else tried again next run, up to MOST_TRIES: then left to the
+   * regular check, so it never holds up the messages behind it.
    */
-  const checkNudged = async (run: Run, signal: AbortSignal | undefined): Promise<boolean> => {
-    if (events === undefined) return true;
+  const checkOneNudge = async (nudge: Nudge, inbox: ProviderEvents): Promise<LaneStep> => {
+    const { orgId } = nudge;
+    const log = logger.child({ orgId });
+    try {
+      const tries = await databaseGate.run(orgId, () => inbox.tried(database, nudge.id));
+      let answered = true;
+      const named = await databaseGate.run(orgId, () => namedBy(nudge, log));
+      for (const payment of named) {
+        if (spent()) return 'end_turn';
+        const fresh = !run.checks.has(payment.id);
+        const checked = await checkOnce(orgId, payment, log);
+        answered &&= checked === 'checked';
+        if (fresh && stepOf(orgId, checked) === 'end_turn') return 'end_turn';
+      }
+      if (answered) await databaseGate.run(orgId, () => inbox.taken(database, nudge.id));
+      else if (tries >= MOST_TRIES) log.warn('payment_check.nudge_given_up', { messageId: nudge.id });
+    } catch (error) {
+      log.error('payment_check.nudge_failed', { err: error });
+    }
+    return 'next';
+  };
+
+  /** The partner's messages waiting in the inbox, in turns by organisation. A list of this run's own: no place to keep. */
+  const checkNudged = async (): Promise<void> => {
+    if (events === undefined) return;
     let nudges: Nudge[];
     try {
       nudges = await events.waiting(database, NUDGES_A_RUN);
     } catch (error) {
       logger.error('payment_check.nudge_failed', { err: error });
-      return true;
+      return;
     }
-    for (const nudge of nudges) {
-      const log = logger.child({ orgId: nudge.orgId });
-      try {
-        const tries = await events.tried(database, nudge.id);
-        const { unreached, failed } = run;
-        for (const payment of await namedBy(nudge, log)) {
-          if (signal?.aborted === true || !(await checkCounted(nudge.orgId, payment, run, log))) return false;
-        }
-        // Taken once the bank answered for every payment it names and each was recorded; else tried again next run,
-        // up to MOST_TRIES: then left to the regular check, so it never holds up the messages behind it.
-        if (run.unreached === unreached && run.failed === failed) await events.taken(database, nudge.id);
-        else if (tries >= MOST_TRIES) log.warn('payment_check.nudge_given_up', { messageId: nudge.id });
-      } catch (error) {
-        log.error('payment_check.nudge_failed', { err: error });
-      }
-    }
-    return true;
+    const lanes = createFairLanes<Nudge>({
+      total: nudgeSlots,
+      limitOf: () => 1,
+      thrown: laneThrown,
+      // Past the most a run takes, so each lane's one read is its last.
+      page: NUDGES_A_RUN + 1,
+      idOf: ({ id }) => id,
+      read: (orgId) => Promise.resolve(nudges.filter((nudge) => nudge.orgId === orgId)),
+      work: (_orgId, nudge) => checkOneNudge(nudge, events),
+    });
+    await lanes.run([...new Set(nudges.map(({ orgId }) => orgId))], spent);
   };
 
   /** The bank's word on the payment, within its time: unreachable is asked again; anything else it can't give is unreadable. */
   const wordOf = async (orgId: string, listed: Listed, log: Logger): Promise<Word> => {
+    // Begun before the call, so one under way at a trip proves nothing since it.
+    const answered = health.lookupBegun(orgId);
     try {
-      return await withinTime(
+      const word = await withinTime(
         rail.getExecution({ organizationId: orgId, instructionId: listed.instructionId }),
         callTimeoutMs,
       );
+      answered();
+      return word;
     } catch (error) {
       if (error instanceof RailUnavailable || error instanceof PartnerTimedOut) return { kind: 'unavailable' };
       log.error('payment_check.unreadable', { transactionId: listed.id, err: error });
@@ -440,13 +542,15 @@ export function createPaymentChecks({
       return { from, to };
     });
 
-  /** One payment checked with the bank, its outcome logged; false where the bank couldn't be reached. */
-  const check = async (orgId: string, listed: Listed, log: Logger): Promise<'checked' | 'unreached' | 'failed'> => {
+  /** One payment checked with the bank, its outcome logged. */
+  const check = async (orgId: string, listed: Listed, log: Logger): Promise<CheckOutcome> => {
     beatNow();
     const word = await wordOf(orgId, listed, log);
     if (word.kind === 'unavailable') return 'unreached';
+    // The run gave up waiting for this call at a stop: its move would meet a closing pool, and the next check makes it.
+    if (gaveUpWaiting) return 'unreached';
     try {
-      const checked = await applied(orgId, listed, word, log);
+      const checked = await databaseGate.run(orgId, () => applied(orgId, listed, word, log));
       log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
       return 'checked';
     } catch (error) {
@@ -455,47 +559,101 @@ export function createPaymentChecks({
     }
   };
 
-  /**
-   * One payment checked, unless this run checked it already (a message named
-   * it), counted in `run`; false once UNREACHED_IN_A_ROW went unanswered.
-   */
-  const checkCounted = async (orgId: string, payment: Listed, run: Run, log: Logger): Promise<boolean> => {
-    if (run.seen.has(payment.id)) return true;
-    run.seen.add(payment.id);
-    const checked = await check(orgId, payment, log);
-    run.inRow = checked === 'unreached' ? run.inRow + 1 : 0;
-    if (checked === 'unreached') run.unreached += 1;
-    if (checked === 'failed') run.failed += 1;
-    return run.inRow < UNREACHED_IN_A_ROW;
+  /** One payment checked, once a run however many messages name it: each waits on the one check, and counts its answer. */
+  const checkOnce = (orgId: string, payment: Listed, log: Logger): Promise<CheckOutcome> => {
+    const under = run.checks.get(payment.id);
+    if (under !== undefined) return under;
+    const checking = check(orgId, payment, log).then((checked) => {
+      if (checked === 'unreached') run.unreached += 1;
+      return checked;
+    });
+    run.checks.set(payment.id, checking);
+    return checking;
   };
 
-  /**
-   * The organisation's due payments checked, a page at a time, the bank's
-   * unanswered calls counted in `run`; false if the signal stopped the run,
-   * or the bank left UNREACHED_IN_A_ROW unanswered.
-   */
-  const checkAll = async (
-    orgId: string,
-    due: Due,
-    run: Run,
-    log: Logger,
-    signal: AbortSignal | undefined,
-  ): Promise<boolean> => {
-    let after: string | undefined;
-    for (;;) {
-      let listed: Listed[];
-      try {
-        listed = await underWay(orgId, after, due, log);
-      } catch (error) {
-        log.error('payment_check.list_failed', { err: error });
-        return true;
-      }
-      for (const payment of listed) {
-        if (signal?.aborted === true || !(await checkCounted(orgId, payment, run, log))) return false;
-      }
-      if (listed.length < page) return true;
-      after = listed.at(-1)?.id;
+  /** A page of the organisation's due payments, or null where it couldn't be read (said; its turn ends). */
+  const laneRead = async (orgId: string, after: string | undefined, due: Due): Promise<Listed[] | null> => {
+    // Said once a run, however many sweeps come to it.
+    if (run.unreadable.has(orgId)) return null;
+    const log = logger.child({ orgId });
+    try {
+      return await databaseGate.run(orgId, () => underWay(orgId, after, due, log));
+    } catch (error) {
+      run.unreadable.add(orgId);
+      log.error('payment_check.list_failed', { err: error });
+      return null;
     }
+  };
+
+  const laneThrown = (orgId: string, error: unknown): void => {
+    logger.child({ orgId }).error('payment_check.failed', { err: error });
+  };
+
+  /** One payment's turn; an organisation already gone unanswered this run is asked no more, whichever sweep found it so. */
+  const payment = async (orgId: string, listed: Listed): Promise<LaneStep> => {
+    if ((run.inRow.get(orgId) ?? 0) >= UNREACHED_IN_A_ROW) return 'end_turn';
+    // Asked already this run, by a message or another sweep: no new call, so nothing to count.
+    if (run.checks.has(listed.id)) return 'next';
+    return stepOf(orgId, await checkOnce(orgId, listed, logger.child({ orgId })));
+  };
+
+  const lanesOf = (dueNow: () => Due): FairLanes =>
+    createFairLanes<Listed>({
+      total: Math.max(1, limits.total - nudgeSlots),
+      limitOf: () => limits.perOrganisation,
+      thrown: laneThrown,
+      page,
+      idOf: ({ id }) => id,
+      read: (orgId, after) => laneRead(orgId, after, dueNow()),
+      work: payment,
+    });
+
+  const since = (ms: number) => new Date(clock.now().getTime() - ms);
+  // A place kept for each sweep, so one cut short goes on where it left off at its next.
+  const everyRunLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(FRESH_MS), watchPaid: false }));
+  const daysLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(DAY_MS), watchPaid: false }));
+
+  const lapOf = (sweep: string, due: Due, share: number, outlastsMs: number): Lap => ({
+    sweep,
+    lanes: lanesOf(() => due),
+    share,
+    outlastsMs,
+    left: [],
+    startedAt: 0,
+    said: false,
+  });
+  // The UNKNOWNs a lap of their own, ahead of the paid watch: at volume the watch may never end a lap, and these must.
+  const laps = [
+    lapOf('unknown', { statuses: ['UNKNOWN'], since: undefined, watchPaid: false }, UNKNOWN_LAP_SHARE, LAP_DUE_MS),
+    lapOf(
+      'watched',
+      { statuses: UNDER_WAY.filter((status) => status !== 'UNKNOWN'), since: undefined, watchPaid: true },
+      WATCH_LAP_SHARE,
+      PAID_WATCH_MS,
+    ),
+  ];
+
+  /** A part of the run's budget, from now: a sweep that spends its own leaves the next its turn. */
+  const partOfBudget = (share: number, signal: AbortSignal | undefined): (() => boolean) => {
+    const ends = clock.now().getTime() + runBudgetMs * share;
+    return () => signal?.aborted === true || clock.now().getTime() >= ends;
+  };
+
+  /** A lap's next part: its organisations not yet had their turn; one hung or unreadable has had it, and tries again next lap. */
+  const lapPart = async (lap: Lap, signal: AbortSignal | undefined): Promise<void> => {
+    if (lap.left.length === 0) return;
+    const outcomes = await lap.lanes.run(lap.left, partOfBudget(lap.share, signal));
+    lap.left = lap.left.filter((orgId) => outcomes.get(orgId) === 'cut');
+    if (lap.left.length === 0 || lap.said || clock.now().getTime() - lap.startedAt < lap.outlastsMs) return;
+    lap.said = true;
+    logger.warn('payment_check.lap_behind', { sweep: lap.sweep, organisations: lap.left.length });
+  };
+
+  /** The regular turns, then the laps under way, each with its part of the budget. */
+  const sweeps = async (n: number, orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
+    const regular = n % DAY_EVERY === 0 ? daysLanes : everyRunLanes;
+    await regular.run(orgs, partOfBudget(REGULAR_SHARE, signal));
+    for (const lap of laps) await lapPart(lap, signal);
   };
 
   return {
@@ -510,29 +668,26 @@ export function createPaymentChecks({
       beatNow();
       const n = runs;
       runs += 1;
-      const now = clock.now().getTime();
-      // The first run after a start checks every one, so none waits half an hour for a restart.
-      const all = n % ALL_EVERY === 0;
-      const due = {
-        since: all ? undefined : new Date(now - (n % DAY_EVERY === 0 ? DAY_MS : FRESH_MS)),
-        watchPaid: all,
-      };
-      const run: Run = { unreached: 0, inRow: 0, failed: 0, seen: new Set() };
-      try {
-        if (!(await checkNudged(run, signal))) return;
-        for (const orgId of orgs) {
-          if (signal?.aborted === true) return;
-          if (!(await checkAll(orgId, due, run, logger.child({ orgId }), signal))) return;
-        }
-        beatNow();
-      } finally {
-        // Once a run, not once a payment: the bank down is one thing to say.
-        if (run.unreached > 0) {
-          logger.warn('payment_check.bank_unavailable', {
-            unreached: run.unreached,
-            stopped: run.inRow >= UNREACHED_IN_A_ROW,
-          });
-        }
+      // The first run after a start is among these, so none waits half an hour for a restart. One still going keeps on.
+      for (const lap of n % ALL_EVERY === 0 ? laps.filter(({ left }) => left.length === 0) : []) {
+        lap.left = orgs;
+        lap.startedAt = clock.now().getTime();
+        lap.said = false;
+      }
+      run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
+      spent = partOfBudget(1, signal);
+      gaveUpWaiting = false;
+      // Side by side: a hung lookup under a message must never spend the regular turns' budget.
+      const finished = await finishedWithinStop(
+        Promise.all([checkNudged(), sweeps(n, orgs, signal)]),
+        signal,
+        stopWaitMs,
+      );
+      gaveUpWaiting = finished === undefined;
+      beatNow();
+      // Once a run, not once a payment: the bank down is one thing to say.
+      if (run.unreached > 0) {
+        logger.warn('payment_check.bank_unavailable', { unreached: run.unreached, stopped: run.endedTurns > 0 });
       }
     },
     beating: () => clock.now().getTime() - beat <= HEARTBEAT_STALE_MS,

@@ -474,6 +474,32 @@ export const PLAIN_WORDS = {
     broke: 'Approved payments wait, their money still held.',
     next: 'It is tried again in about 10 seconds. If it keeps failing, check the database.',
   },
+  'handoff.bank_held': {
+    happened: 'The bank gave no clear answer to payments from several organisations, so new ones are held back.',
+    broke: 'Approved payments wait, their money still held. Nothing already sent is sent again.',
+    next: 'When a status check answers, a few go to test the way, more as they are accepted. If it lasts, ask the bank.',
+  },
+  'handoff.hold_lasting': {
+    happened: 'New payments have been held back for over 15 minutes because the bank is not answering them clearly.',
+    broke: 'Approved payments wait, their money still held; a few at a time go to test the way.',
+    next: 'Ask the bank what is wrong. It reopens by itself, in steps, as the bank accepts. Said again each 15 minutes.',
+  },
+  'handoff.bank_refusing': {
+    happened: 'The bank has refused many payments from several organisations, and has accepted none since.',
+    broke: 'Those payments failed, their money given back. Nothing else is stopped.',
+    next: 'Check our access to the bank and its limits: this may be ours, not theirs. Then ask the bank.',
+  },
+  'handoff.lane_held': {
+    happened:
+      "The bank gave no clear answer to three of one organisation's payments in a row, so its are held for a time.",
+    broke: 'Its approved payments wait, their money still held. Other organisations carry on.',
+    next: 'One goes to test the way after the hold, once a status check answers. If it repeats, ask the bank why.',
+  },
+  'handoff.held_unrecorded': {
+    happened: "An organisation's payments were held for the bank, but that could not be written in its audit log.",
+    broke: 'The payments are still held and safe; the audit log is missing that one note for now.',
+    next: 'It is tried again in about 10 seconds. If it keeps failing, a developer should read the error.',
+  },
   'partner_event.refused': {
     happened:
       "A message sent as the payment partner's was refused: a bad signature, an old time or an unreadable body.",
@@ -484,6 +510,11 @@ export const PLAIN_WORDS = {
     happened: "The payment partner sent a message about a payment or consent Agent X doesn't hold.",
     broke: 'Nothing was changed. The message was kept, encrypted, for checking.',
     next: 'Check with the partner which payment it means: it may be one Agent X never handed off.',
+  },
+  'payment_check.lap_behind': {
+    happened: 'Asking the bank again about older payments has taken longer than its allowed time.',
+    broke: 'Some were not asked again in time. Nothing is lost: they stay as they were, their money held if it was.',
+    next: 'It carries on where it was. If this repeats, the checks cannot keep up: a developer should look at the volume.',
   },
   'payment_check.nudge_given_up': {
     happened: "The payments a partner's message named couldn't be checked after 5 tries, so the message was set aside.",
