@@ -235,13 +235,13 @@ async function holding(...holds: readonly Hold[]): Promise<TestClient> {
  * with none, and lets go only once the next has it or waits for it. Stops when told, every one gone. Counts how many
  * had to wait: under a brake's queue, those behind it; on a bare row, none.
  */
-function relayOf(taken: () => Promise<TestClient>, { stepMs = 150, behindABrake = true } = {}) {
+async function relayOf(taken: () => Promise<TestClient>, { stepMs = 150, behindABrake = true } = {}) {
   const relaying = { on: true };
   let waited = 0;
-  let took = 0;
+  // Holding before this answers: a change sent first would take the row, and the relay would wait behind it.
+  let inside = await taken();
+  let took = 1;
   const running = (async () => {
-    let inside = await taken();
-    took += 1;
     while (relaying.on) {
       await sleep(stepMs);
       const next = taken();
@@ -295,7 +295,7 @@ describe('what a brake is up against: a stream of share holders and the row (no 
     'starves a FOR NO KEY UPDATE: each holder gets in at once while it waits, past its 5 s, until the 10 s limit',
     async () => {
       const w = await world();
-      const stop = relayOf(() => holding(orgRow(w.org)), { behindABrake: false });
+      const stop = await relayOf(() => holding(orgRow(w.org)), { behindABrake: false });
       const change = await database.connect('admin');
       await change.query('begin');
       await change.query("select pg_catalog.set_config('lock_timeout', '5s', true)");
@@ -368,7 +368,7 @@ describe('the freeze', () => {
     'beats a forced relay of holders, the brake and the row each, and makes them wait',
     async () => {
       const w = await world();
-      const stop = relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
+      const stop = await relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
       await sleep(400);
 
       const { answer, ms } = await timed(() => frozen(w));
@@ -520,7 +520,7 @@ describe('the unfreeze', () => {
     async () => {
       const { w } = await ready();
       expect(await frozen(w)).toMatchObject(FROZEN_NOW);
-      const stop = relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
+      const stop = await relayOf(() => holding(brakeOf(lockName(ORGANISATION_BRAKE, w.org)), orgRow(w.org)));
       await sleep(400);
 
       const pendingRequests = 'pause' as const;
@@ -637,7 +637,7 @@ describe('the kill switch: the agent’s own brake', () => {
     async () => {
       const { w } = await ready();
       expect(await suspended(w)).toMatchObject({ agent: { agent: { status: 'SUSPENDED' } } });
-      const stop = relayOf(() => holding(brakeOf(lockName(AGENT_BRAKE, w.org, w.agent)), agentRow(w)));
+      const stop = await relayOf(() => holding(brakeOf(lockName(AGENT_BRAKE, w.org, w.agent)), agentRow(w)));
       await sleep(400);
 
       const challengeId = askedFor(
