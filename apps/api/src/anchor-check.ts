@@ -1,14 +1,22 @@
 // The anchor check (ADR-012 §2, SEC-DB-11): every few minutes the API checks
 // each audit chain whole against its last anchor, kept in this process's
-// memory, and anchors it again. A chain wound back to an earlier state, or
-// grown again on a wound-back head, passes its own seals; only the anchor,
-// held apart from the database, shows it.
+// memory and, deployed, in the write-once store (anchor-log.ts, PL-58), and
+// anchors it again. A chain wound back to an earlier state, or grown again on a
+// wound-back head, passes its own seals; only the anchor, held apart from the
+// database, shows it.
+//
+// A run first reads the store, then checks, then writes what moved. A store that
+// can't be read after a restart means no chain is anchored for the first time,
+// every organisation's payments wait (`anchor_pending`), the seals are still
+// checked and decisions go on; one that can't be written is a warning and in time
+// the store's own alert, never a hold. As the API stops, what moved is written
+// within a few seconds; after a crash, the last run's is what's kept.
 //
 // A chain that fails raises the integrity alarm (`audit.integrity_failed`; its
 // SEV-1 alert rule is A2c-2) and keeps its last good anchor, so the alarm
 // repeats every run until someone looks. Someone with the database's keys can
-// also try to stop the check from finishing, and wait for a restart to empty
-// this memory: so a database that refuses the check (a right, a table or a
+// also try to stop the check from finishing: so a database that refuses the
+// check (a right, a table or a
 // column gone) is the alarm too, and so is a chain left unchecked for three
 // intervals. Anything else that stops a check (the database unreachable, or
 // a check past its deadline) is a warning until then. Every run ends with one
@@ -18,9 +26,9 @@
 // what the platform chain records: every organisation created there
 // (`organization.created`, sealed, so one deleted breaks the platform chain's
 // own check) must be listed, and so must every one this process has seen
-// listed. One missing is the alarm (`unlisted`): the app never deletes an
-// entry, so one gone is tampering, and its chain would otherwise never be
-// checked again, even after a restart. A list the database refuses, or one
+// listed, and every one with a chain in the store. One missing is the alarm
+// (`unlisted`): the app never deletes an entry, so one gone is tampering, and
+// its chain would otherwise never be checked again. A list the database refuses, or one
 // that isn't IDs, or too many of them, is the alarm (`list`); a list that
 // can't be read otherwise is a warning until three intervals pass without one.
 // An organisation whose chain fails is put on its integrity hold (B1d-3),
@@ -32,6 +40,7 @@
 // own admin, would do an attacker's work for them. People look at the alarm.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
+  type AnchorLog,
   type AnchorPoint,
   type AnchorStore,
   type Chain,
@@ -61,9 +70,12 @@ export interface AnchorCheck {
    * One organisation's chain checked and anchored now, as a run would (its
    * alarm and hold too): for the hand-off, which compares every payment with
    * the chain's anchor and so can't wait for the next run after a restart
-   * (gate H11, partner S146). Never throws.
+   * (gate H11, partner S146). With the store unreadable it makes no anchor, so
+   * the payment waits. Never throws.
    */
   anchorOrganisation(orgId: string, signal?: AbortSignal): Promise<void>;
+  /** Writes what has moved as the API stops, within a few seconds whatever the store does. Never throws. */
+  finish(): Promise<void>;
 }
 
 /** Where the organisations' chains come from (B1d-2). */
@@ -99,7 +111,14 @@ export interface AnchorCheckOptions {
    */
   readonly deadlineMs: number;
   readonly anchors?: AnchorStore;
+  /** The same anchors, where they are kept durable: read and written around each run. None in development with no store. */
+  readonly durable?: AnchorLog;
+  /** How long the last write may take as the API stops: the store's calls may take 30 seconds, and the stop has 25 in all. */
+  readonly stopFlushMs?: number;
 }
+
+/** See `stopFlushMs`. */
+const STOP_FLUSH_MS = 5_000;
 
 /**
  * Postgres's refusals that only a changed database gives the app's role: a
@@ -132,7 +151,8 @@ function organisationIds(ids: unknown): string[] | undefined {
 const refusedByDatabase = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && CHANGED_DATABASE.has(String(error.code));
 
-type Outcome = 'anchored' | 'unchanged' | 'failed' | 'unchecked';
+/** `unanchored`: checked and sound, and not anchored because the store is yet to be read. */
+type Outcome = 'anchored' | 'unchanged' | 'unanchored' | 'failed' | 'unchecked';
 
 /** The in-flight key of the organisations' list, which no chain's key can be. */
 const LIST = 'list';
@@ -145,7 +165,9 @@ export function createAnchorCheck({
   logger,
   staleAfterMs,
   deadlineMs,
-  anchors = createMemoryAnchorStore(),
+  durable,
+  anchors = durable ?? createMemoryAnchorStore(),
+  stopFlushMs = STOP_FLUSH_MS,
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
@@ -209,6 +231,7 @@ export function createAnchorCheck({
         return alarm('anchor', last.seq);
       }
       if (last?.seq === report.seq) return 'unchanged';
+      if (durable !== undefined && durable.state() !== 'read') return 'unanchored';
       const anchor = signAnchor(keys, chain, report, clock.now());
       anchors.keep(anchor);
       log.info('audit.anchored', {
@@ -365,9 +388,32 @@ export function createAnchorCheck({
     return outcomes;
   };
 
+  /** What the store holds that this process hasn't read, and every organisation in it as seen. Never throws. */
+  const readStore = async (from: AnchorLog, signal: AbortSignal | undefined): Promise<void> => {
+    try {
+      await withinDeadline(from.read(), deadlineMs, signal);
+    } catch (error) {
+      if (error instanceof Stopped) return;
+      from.readFailed(error);
+    }
+    for (const orgId of from.organisations()) remember(orgId);
+  };
+
+  /** What moved this run into the store. A run stopped leaves it to `finish`. Never throws. */
+  const writeStore = async (to: AnchorLog, signal: AbortSignal | undefined): Promise<void> => {
+    try {
+      await withinDeadline(to.flush(), deadlineMs, signal);
+    } catch (error) {
+      if (!(error instanceof Stopped)) to.writeFailed(error);
+    }
+  };
+
   return Object.freeze({
     async anchorOrganisation(orgId: string, signal?: AbortSignal): Promise<void> {
       if (organizations === undefined) return;
+      // A hand-off may come before the run's first read, and joins it; once the store has failed, the run alone tries again.
+      if (durable?.state() === 'unread') await readStore(durable, signal);
+      if (durable !== undefined && durable.state() !== 'read') return;
       const id = orgId.toLowerCase();
       const outcome = await checkOne(
         { chain: { kind: 'organisation', orgId: id }, verify: (anchor) => organizations.verify(id, anchor) },
@@ -376,7 +422,19 @@ export function createAnchorCheck({
       if (outcome === 'failed') await settle(organizations, id, signal);
     },
 
+    async finish(): Promise<void> {
+      if (durable === undefined) return;
+      try {
+        // Twice: a run's write may be under way, and the first joins it.
+        const writing = durable.flush().then(() => durable.flush());
+        await withinDeadline(writing, stopFlushMs, undefined);
+      } catch (error) {
+        durable.writeFailed(error);
+      }
+    },
+
     async run(signal?: AbortSignal): Promise<void> {
+      if (durable !== undefined) await readStore(durable, signal);
       const outcomes: Outcome[] = [];
       for (const one of chains) {
         if (signal?.aborted === true) break;
@@ -390,11 +448,13 @@ export function createAnchorCheck({
           logger.error('audit.anchor_check_crashed', { chain: 'organisation', err: error });
         }
       }
+      if (durable !== undefined && signal?.aborted !== true) await writeStore(durable, signal);
       const count = (outcome: Outcome): number => outcomes.filter((each) => each === outcome).length;
       logger.info('audit.anchor_check_done', {
         chains: outcomes.length,
         anchored: count('anchored'),
         unchanged: count('unchanged'),
+        unanchored: count('unanchored'),
         failed: count('failed'),
         unchecked: count('unchecked'),
       });
@@ -404,8 +464,19 @@ export function createAnchorCheck({
 
 /**
  * Runs the check now and then `intervalMs` after each run ends (scheduleRuns):
- * runs never overlap, and `stop` ends a run in flight at once and waits for it.
+ * runs never overlap, and `stop` ends a run in flight at once, waits for it,
+ * then writes what moved (`finish`).
  */
-export function scheduleAnchorCheck(check: Pick<AnchorCheck, 'run'>, intervalMs: number): { stop(): Promise<void> } {
-  return scheduleRuns(check, intervalMs);
+export function scheduleAnchorCheck(
+  check: Pick<AnchorCheck, 'run'>,
+  intervalMs: number,
+  finish: () => Promise<void> = () => Promise.resolve(),
+): { stop(): Promise<void> } {
+  const runs = scheduleRuns(check, intervalMs);
+  return {
+    stop: async () => {
+      await runs.stop();
+      await finish();
+    },
+  };
 }

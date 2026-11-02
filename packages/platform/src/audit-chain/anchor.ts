@@ -5,11 +5,12 @@
 // check compares each chain with its last anchor (verifyChain), then anchors
 // it again.
 //
-// Phase 1 keeps the last anchor in the app's memory, which ADR-012 §2 allows.
-// It is lost when the process stops, so a rollback made while no process ran
-// is left to the write-once store that comes before production. The signature
-// is what that store will keep: anyone can check it with the public key the
-// API logs at start (`api.starting`, keys).
+// Deployed, every anchor is also kept in a write-once store apart from the
+// database (anchor-log.ts, PL-58), so a rollback made while no process ran shows
+// too. In development and test with no store, the last anchor stays in memory
+// alone, as `createMemoryAnchorStore` here. The signature is what the store
+// keeps: anyone can check it with the public key the API logs at start
+// (`api.starting`, keys).
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import { type Chain, chainName, type CheckedPoint } from './chain.ts';
@@ -31,7 +32,8 @@ export interface AnchorStore {
   keep(anchor: Anchor): void;
 }
 
-const anchorMessage = (chain: string, point: CheckedPoint, at: Date): Message => [
+/** What an anchor's signature covers. */
+export const anchorMessage = (chain: string, point: CheckedPoint, at: Date): Message => [
   'audit-anchor',
   chain,
   point.seq.toString(),

@@ -21,6 +21,8 @@ export async function withinDeadline<T>(
     cutOff(new Stopped('the check was stopped'));
   };
   signal?.addEventListener('abort', stop, { once: true });
+  // A signal already stopped never fires: the step would hold its caller to the whole deadline.
+  if (signal?.aborted === true) stop();
   try {
     return await Promise.race([checking, cut]);
   } finally {

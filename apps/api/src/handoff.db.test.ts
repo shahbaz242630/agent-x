@@ -48,7 +48,13 @@ import {
   TRANSACTIONS,
   transactionOf,
 } from '@agentx/core/modules/transactions';
-import { type AnchorStore, createMemoryAnchorStore, signAnchor } from '@agentx/platform/audit-chain';
+import {
+  type AnchorLog,
+  type AnchorStore,
+  createAnchorLog,
+  createMemoryAnchorStore,
+  signAnchor,
+} from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -61,6 +67,8 @@ import {
   testLogger,
   waitUntilQueued,
   within,
+  createFakeWriteOnceStore,
+  type FakeWriteOnceStore,
 } from '@agentx/testing';
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -2255,7 +2263,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
   });
 
   /** The anchor check as main.ts makes it, over this organisation alone, its anchors in `anchors`. */
-  const anchorCheckOf = (w: World, anchors: AnchorStore) => {
+  const anchorCheckOf = (w: World, anchors: AnchorStore, durable?: AnchorLog) => {
     const trail = createAuditTrail({ keys, ids });
     return createAnchorCheck({
       chains: [],
@@ -2271,8 +2279,91 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
       staleAfterMs: 60_000,
       deadlineMs: 30_000,
       anchors,
+      ...(durable === undefined ? {} : { durable }),
     });
   };
+
+  /** What a process makes as it starts (job-list.ts): the anchors over the store, the check over them, Tx A's reads from them. */
+  const startedOver = (w: World, fake: FakeWriteOnceStore) => {
+    const durable = createAnchorLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      unwritableAfterMs: 60_000,
+    });
+    const check = anchorCheckOf(w, durable, durable);
+    return {
+      check,
+      anchoring: {
+        anchors: durable,
+        anchorFirst: (orgId: string, signal?: AbortSignal) => check.anchorOrganisation(orgId, signal),
+      },
+    };
+  };
+
+  it('SEC-DB-11 (H11, PL-58) a chain wound back while no process ran: the first Tx A after the restart refuses it, no call, the hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    let saved: Awaited<ReturnType<Owner['saveRow']>> | undefined;
+    let head: Awaited<ReturnType<Owner['saveHead']>> | undefined;
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      saved = await owner.saveRow(request.id);
+      head = await owner.saveHead();
+    });
+    await signed(w, (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: request.id },
+        { kind: 'user', userId: w.admin.userId },
+        clock.now(),
+      ),
+    );
+    // The run before the stop anchors the cancel, in the store. The process goes.
+    const fake = createFakeWriteOnceStore();
+    await startedOver(w, fake).check.run();
+    expect(fake.files.size).toBe(1);
+
+    // With no process running, the chain and the row put back: the cancel gone from each.
+    await asOwner(w, SPEND_REQUESTS, async (owner) => {
+      const [row, back] = [saved, head];
+      if (row === undefined || back === undefined) throw new Error('nothing saved');
+      await owner.windBack(back);
+      await owner.withoutStatusGuard(() => owner.restoreRow(row));
+    });
+
+    // The new process's hand-off comes first: anchored from the store, not afresh on the wound-back chain.
+    const { anchoring } = startedOver(w, fake);
+    refusedWithTheHold(await handedOnce(w, request.id, anchoring));
+    expect(anchorAlarms()).toEqual([expect.objectContaining({ level: 'error', reason: 'anchor', orgId: w.org })]);
+  });
+
+  it('(PL-58) a store outage and a restart: the payment waits and says so, no call, no hold; the store back, it goes', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const fake = createFakeWriteOnceStore();
+    await startedOver(w, fake).check.run();
+
+    fake.instead.list = () => Promise.reject(new Error('the store is away'));
+    const after = startedOver(w, fake);
+    const waiting = await handedOnce(w, request.id, after.anchoring);
+
+    expect(waiting).toMatchObject({ submitted: 0, status: 'APPROVED', hold: { outcome: 'clear' } });
+    expect(lines('handoff.waiting')).toEqual([
+      expect.objectContaining({ requestId: request.id, why: 'anchor_pending' }),
+    ]);
+    expect(lines('audit.anchor_store_unreadable')).toEqual([expect.objectContaining({ level: 'error' })]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+
+    delete fake.instead.list;
+    await after.check.run();
+    const gone = await handedOnce(w, request.id, after.anchoring);
+    expect(gone).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
 
   it('anchors a chain it holds no anchor for first, as a process just started, then hands off: no false alarm (S146)', async () => {
     const { w, acting } = await ready();
