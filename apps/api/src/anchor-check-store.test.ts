@@ -93,7 +93,7 @@ function process(
     logger,
     now: () => clock.now(),
     epoch: 1,
-    unwritableAfterMs: STALE_MS,
+    alertAfterMs: STALE_MS,
   });
   const check = createAnchorCheck({
     chains,

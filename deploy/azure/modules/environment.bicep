@@ -540,9 +540,11 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
 }
 
 // The store that keeps the chains' anchors out of reach (4D2e E, PL-58): after
-// a start it can't be read, so every organisation's payments wait, or it has gone
-// unwritten three intervals, so a restart would forget what moved. Any one line
-// tells someone; neither is a hold. Stateful, as above.
+// a start it can't be read, so every organisation's payments wait; or it has gone
+// unwritten three intervals, so a restart would forget what moved; or unread three
+// intervals, so a restart would make payments wait; or no store was named, so
+// anchors are in memory alone. Any one line tells someone; none is a hold. Stateful,
+// as above.
 resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: anchorStoreAlertName
   location: location
@@ -550,7 +552,7 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
   kind: 'LogAlert'
   properties: {
     displayName: 'Anchor store: payments waiting, or anchors not kept'
-    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation, or could not write to it for three check intervals, so a restart would forget them. Decisions go on and nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation; or could not write to it for three check intervals, so a restart would forget them; or could not read it for three, so a restart would make payments wait; or started with no store named, so anchors are in memory alone. Decisions go on and nobody is held. Runbook: Incident-Response-Playbook.md section H.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -561,7 +563,7 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

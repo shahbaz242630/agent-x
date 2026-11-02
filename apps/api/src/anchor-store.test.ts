@@ -16,15 +16,21 @@ const keys = createKeyProvider(
   ),
 );
 const AT = new Date('2026-11-02T09:00:00.000Z');
-const services = { keys, logger: testLogger(new LogCapture()), clock: { now: () => AT }, unwritableAfterMs: 900_000 };
+const services = { keys, logger: testLogger(new LogCapture()), clock: { now: () => AT }, alertAfterMs: 900_000 };
+/** The log it makes for the config, and the lines saying no store is named. */
+const madeFor = (config: Config) => {
+  const capture = new LogCapture();
+  const log = anchorLogOf(config, { ...services, logger: testLogger(capture) });
+  return { log, notSet: capture.lines().filter((line) => line.event === 'audit.anchor_store_not_set') };
+};
 const CONTAINER = {
   url: 'http://127.0.0.1:1/audit-anchors',
   clientId: 'c',
   identityEndpoint: 'http://127.0.0.1:1/token',
   identityHeader: 'h',
 };
-const configWith = (anchorStore: Config['anchorStore'], anchorEpoch = 1): Config =>
-  ({ anchorStore, audit: { anchorSeconds: 300, anchorEpoch } }) as Config;
+const configWith = (anchorStore: Config['anchorStore'], anchorEpoch = 1, environment = 'test'): Config =>
+  ({ environment, anchorStore, audit: { anchorSeconds: 300, anchorEpoch } }) as Config;
 
 const folders: string[] = [];
 afterEach(() => {
@@ -32,12 +38,22 @@ afterEach(() => {
 });
 
 describe("where the chains' anchors are kept (PL-58)", () => {
-  it('memory alone with no store named', () => {
-    expect(anchorLogOf(configWith({ directory: null, container: null }), services)).toBeUndefined();
+  it.each(['development', 'test'])('memory alone with no store named, in %s, which is no fault', (environment) => {
+    const { log, notSet } = madeFor(configWith({ directory: null, container: null }, 1, environment));
+    expect(log).toBeUndefined();
+    expect(notSet).toEqual([]);
+  });
+
+  it('staging with no store named runs from memory, and says so where the alert reads it', () => {
+    const { log, notSet } = madeFor(configWith({ directory: null, container: null }, 1, 'staging'));
+    expect(log).toBeUndefined();
+    expect(notSet).toEqual([expect.objectContaining({ level: 'error', environment: 'staging' })]);
   });
 
   it('the container where one is named', () => {
-    expect(anchorLogOf(configWith({ directory: null, container: CONTAINER }), services)?.state()).toBe('unread');
+    const { log, notSet } = madeFor(configWith({ directory: null, container: CONTAINER }, 1, 'staging'));
+    expect(log?.state()).toBe('unread');
+    expect(notSet).toEqual([]);
   });
 
   it('the folder where one is named, under the epoch the setting names, across a restart', async () => {

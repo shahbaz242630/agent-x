@@ -14,6 +14,8 @@ const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
 const loadConfig = (env: Env) => loadConfigWith(env, { liveOrigins: [], sandboxOrigins: [] });
 const SETTINGS: Env = {
   AGENTX_ENV: 'production',
+  // Runs no job, so needs no anchors' store.
+  AGENTX_ROLE: 'web',
   AGENTX_PARTNER_MODE: 'live',
   AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: 'r-1',
@@ -139,7 +141,6 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ['the live-money gate reference', { AGENTX_LIVE_MONEY_GATE_REF: `LMG-v2-sha256:${'cd'.repeat(32)}` }],
     ['the public origin', { AGENTX_PUBLIC_ORIGIN: 'https://other.agentx.example' }],
     ['the environment', { AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake', AGENTX_LIVE_MONEY_GATE_REF: undefined }],
-    ['the role', { AGENTX_ROLE: 'jobs' }],
     ['the database host', { AGENTX_DB_HOST: 'other.internal.example' }],
     ['the database port', { AGENTX_DB_PORT: '6432' }],
     ['the database name', { AGENTX_DB_NAME: 'agentx_uae' }],
@@ -179,6 +180,16 @@ describe('SEC-OPS-05 the config fingerprint', () => {
 
   it('lists the keys it hashed, as the provider described them', () => {
     expect(fingerprintOf(SETTINGS).keys).toEqual(KEYS);
+  });
+
+  it('changes when the role changes (in staging, where `jobs` starts with no anchors store)', () => {
+    const staging = {
+      ...SETTINGS,
+      AGENTX_ENV: 'staging',
+      AGENTX_PARTNER_MODE: 'fake',
+      AGENTX_LIVE_MONEY_GATE_REF: undefined,
+    };
+    expect(hashOf({ ...staging, AGENTX_ROLE: 'jobs' })).not.toBe(hashOf(staging));
   });
 
   it('changes when the TLS mode changes (in test, where disable is allowed)', () => {

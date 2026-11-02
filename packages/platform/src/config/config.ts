@@ -451,12 +451,30 @@ const AUDIT_ANCHORS: BlobContainerSettings = {
 /** The settings, each checked on its own (readSettings). */
 type Settings = ReturnType<typeof readSettings>;
 
+/**
+ * Production's jobs keep the chains' anchors in their store, as memory alone forgets them at a restart. Staging only says
+ * so (anchor-store.ts): code can reach it before the `apps` hand deploy that sets the store, and a refusal would take it down.
+ */
+function anchorStoreRequired(
+  environment: Environment,
+  { role, anchorsDirectory, anchorsContainer }: Settings,
+): string[] {
+  // A setting that's wrong in itself, or a folder deployed, is already its own problem.
+  const named = !anchorsContainer.ok || anchorsContainer.value !== undefined;
+  const folder = !anchorsDirectory.ok || anchorsDirectory.value !== undefined;
+  const web = !role.ok || role.value === 'web';
+  return environment === 'production' && !named && !folder && !web
+    ? [`${AUDIT_ANCHORS.url}: is required in production where the jobs run; without it a restart forgets every anchor`]
+    : [];
+}
+
 /** The rules of the app's stores on the blob service, where their settings are valid. */
 function blobStoreProblems(env: Env, checks: Settings): string[] {
   const { environment, downloadsDirectory, downloadsContainer, downloadsClientId } = checks;
   const { anchorsDirectory, anchorsContainer, anchorsClientId } = checks;
   if (!environment.ok) return [];
   return [
+    ...anchorStoreRequired(environment.value, checks),
     ...(downloadsDirectory.ok && downloadsContainer.ok && downloadsClientId.ok
       ? blobContainerProblems(env, environment.value, ACTIVITY_DOWNLOADS, {
           directory: downloadsDirectory.value,

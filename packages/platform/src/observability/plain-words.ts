@@ -197,16 +197,26 @@ export const PLAIN_WORDS = {
     broke: 'Nothing: those files were left unread and the check went on without them.',
     next: 'Find out who added them from the store logs. Only the API should be able to add files there.',
   },
+  'audit.anchor_store_not_set': {
+    happened: 'This API was started with no store named for the audit anchors.',
+    broke: 'Anchors are in memory alone: a restart forgets them, and a history wound back meanwhile goes unseen.',
+    next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_ANCHORS_URL: playbook section H.',
+  },
   'audit.anchor_store_read_failed': {
     happened:
       'A regular read of the store that keeps the audit anchors failed, after it had been read fine since the start.',
     broke: 'Nothing yet: the tamper check went on with the anchors already in memory.',
     next: 'It is tried again at the next check. If it keeps repeating, look at the store on Azure.',
   },
+  'audit.anchor_store_read_failing': {
+    happened: 'For some time the API has not been able to read the store that keeps the audit anchors.',
+    broke: 'Nothing yet, payments go on from memory. But the next restart would make every organisation wait.',
+    next: 'Look at the store on Azure before the next restart or release: playbook section H.',
+  },
   'audit.anchor_store_unreadable': {
-    happened: 'After a start, the API could not read the store that keeps the audit anchors.',
+    happened: 'After a start, the API could not read the store of audit anchors, or a key to check them was missing.',
     broke: 'Payments wait for every organisation, with nothing to compare them with. Agent decisions go on.',
-    next: 'It is tried again at each check and payments resume alone. Look at the store on Azure: playbook section H.',
+    next: 'Tried again at each check; payments resume alone. Look at the store and the key: playbook section H.',
   },
   'audit.anchor_store_unwritable': {
     happened: 'For some time the API has not been able to write to the store that keeps the audit anchors.',

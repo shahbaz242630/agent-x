@@ -32,7 +32,7 @@ const OTHER_CHAIN: Chain = { kind: 'organisation', orgId: OTHER_ORG };
 const PLATFORM: Chain = { kind: 'platform' };
 const START = new Date('2026-11-02T09:00:00.000Z');
 const MINUTE = 60_000;
-const UNWRITABLE_MS = 15 * MINUTE;
+const ALERT_AFTER_MS = 15 * MINUTE;
 
 const anchorAt = (chain: Chain, seq: bigint, at = START, fill = Number(seq), signing = keys): Anchor =>
   signAnchor(signing, chain, { seq, hash: Buffer.alloc(32, fill), macKeyVersion: 2 }, at);
@@ -73,7 +73,7 @@ const logOver = (fake: FakeWriteOnceStore = createFakeWriteOnceStore(), epoch = 
     logger: testLogger(capture),
     now: () => clock.at,
     epoch,
-    unwritableAfterMs: UNWRITABLE_MS,
+    alertAfterMs: ALERT_AFTER_MS,
   });
   const lines = (event: string) => capture.lines().filter((line) => line.event === event);
   const advance = (minutes: number): void => {
@@ -720,6 +720,42 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.anchor_store_read_failed')).toEqual([expect.objectContaining({ level: 'warn' })]);
       expect(lines('audit.anchor_store_unreadable')).toEqual([]);
     });
+
+    it('reads that keep failing are the alert once they have lasted, and it clears on a read', async () => {
+      const fake = createFakeWriteOnceStore();
+      const { log, lines, advance } = await started(fake);
+      fake.instead.list = failing;
+      await log.read();
+      advance(14);
+      await log.read();
+      expect(lines('audit.anchor_store_read_failed')).toHaveLength(2);
+      expect(lines('audit.anchor_store_read_failing')).toEqual([]);
+
+      advance(1);
+      await log.read();
+      expect(lines('audit.anchor_store_read_failing')).toEqual([
+        expect.objectContaining({ level: 'error', forMs: ALERT_AFTER_MS }),
+      ]);
+
+      // Its time counts afresh, and neither a read's failing nor a write's starts the other's.
+      delete fake.instead.list;
+      await log.read();
+      fake.instead.list = failing;
+      await log.read();
+      advance(14);
+      await log.read();
+      expect(lines('audit.anchor_store_read_failing')).toHaveLength(1);
+      expect(log.state()).toBe('read');
+      expect(lines('audit.anchor_store_unwritable')).toEqual([]);
+    });
+
+    it('a read run past its deadline counts toward the alert too', async () => {
+      const { log, lines, advance } = await started();
+      log.readFailed(new Error('past its deadline'));
+      advance(15);
+      log.readFailed(new Error('past its deadline'));
+      expect(lines('audit.anchor_store_read_failing')).toHaveLength(1);
+    });
   });
 
   describe('a store that can not be written', () => {
@@ -741,7 +777,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       advance(1);
       await log.flush();
       expect(lines('audit.anchor_store_unwritable')).toEqual([
-        expect.objectContaining({ level: 'error', forMs: UNWRITABLE_MS }),
+        expect.objectContaining({ level: 'error', forMs: ALERT_AFTER_MS }),
       ]);
 
       delete fake.instead.put;

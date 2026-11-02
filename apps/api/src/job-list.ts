@@ -159,7 +159,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The audit chains' last anchors (ADR-012 §2): the anchor check keeps them, Tx A reads them from memory. Durable where
   // the config names a store (PL-58). The check's first run reads it, and where a lease decides who runs the jobs, that
   // run waits for the lease: a copy that doesn't lead reads nothing, and one that comes to lead reads it then.
-  const anchorLog = anchorLogOf(config, { keys, logger, clock: systemClock, unwritableAfterMs: staleAfterMs });
+  const anchorLog = anchorLogOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs });
   const anchorStore = anchorLog ?? createMemoryAnchorStore();
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });

@@ -304,9 +304,9 @@ const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
 
-/** The anchors' store can't be read after a start, or has gone long unwritten (4D2e E, PL-58). */
+/** The anchors' store can't be read after a start, has gone long unread or unwritten, or was never named (4D2e E, PL-58). */
 const ANCHOR_STORE_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable")';
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set")';
 
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
 const PLATFORM_FULL_LINES =
@@ -2856,7 +2856,7 @@ const platformFullAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
-/** An enabled alert on the workspace fires on the anchors' store unreadable after a start, or long unwritten (4D2e E, PL-58). */
+/** An enabled alert on the workspace fires on the anchors' store unreadable after a start, long unread or unwritten, or never named (4D2e E, PL-58). */
 const anchorStoreAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
     const alerted = workspaceAlerted(
@@ -2874,7 +2874,7 @@ const anchorStoreAlert: Check = (snapshot, _expected, add) => {
         rule: 'anchor-store-alert',
         resource: environment.name,
         message:
-          "needs an enabled alert on this deployment's workspace that fires on any audit.anchor_store_unreadable or audit.anchor_store_unwritable line, watching every window and firing on the first",
+          "needs an enabled alert on this deployment's workspace that fires on any audit.anchor_store_unreadable, audit.anchor_store_unwritable, audit.anchor_store_read_failing or audit.anchor_store_not_set line, watching every window and firing on the first",
       });
     }
   }

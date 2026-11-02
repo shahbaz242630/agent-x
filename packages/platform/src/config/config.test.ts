@@ -25,6 +25,8 @@ const KEYS_DIR = '/mnt/secrets';
 const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
 const MINIMAL: Env = {
   AGENTX_ENV: 'production',
+  // Runs no job, so needs no anchors' store: the settings under test here are others.
+  AGENTX_ROLE: 'web',
   AGENTX_PARTNER_MODE: 'live',
   AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: RELEASE,
@@ -78,8 +80,15 @@ function problemsWith(env: Env, built: PartnerDeclaration | null = BUILT): reado
 }
 
 describe('config: which side of the work a process does (4D2e D)', () => {
+  // In staging, where a process with jobs starts with no anchors store.
+  const STAGING_ANY_ROLE: Env = { ...MINIMAL, AGENTX_ENV: 'staging', ...partnerFor('staging') };
+
   it.each(['all', 'web', 'jobs'] as const)('takes %s', (role) => {
-    expect(loadConfig({ ...MINIMAL, AGENTX_ROLE: role }).role).toBe(role);
+    expect(loadConfig({ ...STAGING_ANY_ROLE, AGENTX_ROLE: role }).role).toBe(role);
+  });
+
+  it('is `all` where none is named', () => {
+    expect(loadConfig({ ...STAGING_ANY_ROLE, AGENTX_ROLE: undefined }).role).toBe('all');
   });
 
   it('refuses any other, naming the ones it takes', () => {
@@ -93,7 +102,7 @@ describe('config: a correct config loads', () => {
   it('needs only the environment, the release, the public origin and where the keys are, and fills in the defaults', () => {
     expect(loadConfig(MINIMAL)).toEqual({
       environment: 'production',
-      role: 'all',
+      role: 'web',
       release: RELEASE,
       log: { level: 'info', eventCapPerMinute: 600 },
       http: {
@@ -507,6 +516,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       expect.stringMatching(/^AGENTX_PUBLIC_ORIGIN: is required in production/),
       expect.stringMatching(/^AGENTX_TRUSTED_PROXIES: is required in production/),
       expect.stringMatching(/^AGENTX_PARTNER_MODE: is required in production/),
+      expect.stringMatching(/^AGENTX_AUDIT_ANCHORS_URL: is required in production/),
     ]);
   });
 
@@ -1671,6 +1681,44 @@ describe('4D2e E3 where the chains’ anchors are kept', () => {
     ],
   ])('refuses %s', (_what, change, problem) => {
     expect(problemsWith({ ...WITH_CONTAINER, ...change })).toEqual([problem]);
+  });
+
+  describe('a production that names none', () => {
+    it('refuses to start where its jobs run, as memory alone forgets every anchor at a restart', () => {
+      const refusal =
+        'AGENTX_AUDIT_ANCHORS_URL: is required in production where the jobs run; without it a restart forgets every anchor';
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: undefined })).toEqual([refusal]);
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: 'jobs' })).toEqual([refusal]);
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: 'all' })).toEqual([refusal]);
+    });
+
+    it('says only the one problem where another setting explains it', () => {
+      const JOBS = { ...MINIMAL, AGENTX_ROLE: 'all' };
+      expect(problemsWith({ ...JOBS, AGENTX_AUDIT_ANCHORS_DIR: '/tmp/a' })).toEqual([
+        "AGENTX_AUDIT_ANCHORS_DIR: is allowed only in development and test; production keeps the chains' anchors in their write-once container",
+      ]);
+      expect(problemsWith({ ...JOBS, AGENTX_AUDIT_ANCHORS_URL: 'not a url' })).toEqual([
+        expect.stringMatching(/^AGENTX_AUDIT_ANCHORS_URL: (?!is required)/),
+      ]);
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: 'worker' })).toEqual([
+        'AGENTX_ROLE: must be one of: all, web, jobs',
+      ]);
+    });
+
+    it('starts where its jobs run with the store named', () => {
+      expect(loadConfig({ ...WITH_CONTAINER, AGENTX_ROLE: 'all' }).anchorStore.container?.url).toBe(CONTAINER);
+    });
+
+    it('starts as `web`, which runs no job', () => {
+      expect(loadConfig(MINIMAL).anchorStore).toEqual({ directory: null, container: null });
+    });
+
+    it('staging starts, as code can reach it before the hand deploy that names the store: it says so instead', () => {
+      expect(loadConfig({ ...MINIMAL, AGENTX_ENV: 'staging', ...partnerFor('staging') }).anchorStore).toEqual({
+        directory: null,
+        container: null,
+      });
+    });
   });
 
   it('reads the epoch, from 1, a whole number', () => {

@@ -189,7 +189,7 @@ export function createAnchorLog({
   logger,
   now,
   epoch,
-  unwritableAfterMs,
+  alertAfterMs,
 }: {
   readonly store: WriteOnceStore;
   readonly keys: KeyProvider;
@@ -197,8 +197,8 @@ export function createAnchorLog({
   readonly now: () => Date;
   /** AGENTX_ANCHOR_EPOCH: a sanctioned restore of the whole database starts a new one. */
   readonly epoch: number;
-  /** How long writes may fail before that is the alert, not just a warning. */
-  readonly unwritableAfterMs: number;
+  /** How long reads once the store is read, or writes, may fail before that is the alert, not just a warning. */
+  readonly alertAfterMs: number;
 }): AnchorLog {
   const folder = (kind: Kind): string => `e${String(epoch)}/${kind}/`;
   const anchors = new Map<string, Anchor>();
@@ -214,7 +214,8 @@ export function createAnchorLog({
   let snapshotFrom: string | undefined;
   // Deltas this process wrote since it last listed: nothing to read in them.
   const written = new Set<string>();
-  let failingSince: number | undefined;
+  let readFailingSince: number | undefined;
+  let writeFailingSince: number | undefined;
 
   /** The alarm, on a line naming the chain's organisation where it has one. */
   const alarm = (reason: string, more: Record<string, unknown>, chain?: string): void => {
@@ -315,7 +316,13 @@ export function createAnchorLog({
 
   const readFailed = (error: unknown): void => {
     if (state === 'read') {
+      const at = now().getTime();
+      readFailingSince ??= at;
       logger.warn('audit.anchor_store_read_failed', { err: error });
+      // Payments go on from memory, but the next restart would make every organisation's wait: someone should know first.
+      if (at - readFailingSince >= alertAfterMs) {
+        logger.error('audit.anchor_store_read_failing', { forMs: at - readFailingSince });
+      }
       return;
     }
     state = 'unreadable';
@@ -341,6 +348,7 @@ export function createAnchorLog({
           deltas: deltas.files,
         });
       }
+      readFailingSince = undefined;
       state = 'read';
     } catch (error) {
       readFailed(error);
@@ -349,10 +357,10 @@ export function createAnchorLog({
 
   const writeFailed = (error: unknown): void => {
     const at = now().getTime();
-    failingSince ??= at;
+    writeFailingSince ??= at;
     logger.warn('audit.anchor_store_write_failed', { err: error });
-    if (at - failingSince >= unwritableAfterMs) {
-      logger.error('audit.anchor_store_unwritable', { forMs: at - failingSince });
+    if (at - writeFailingSince >= alertAfterMs) {
+      logger.error('audit.anchor_store_unwritable', { forMs: at - writeFailingSince });
     }
   };
 
@@ -395,7 +403,7 @@ export function createAnchorLog({
         unsent = await madeFile();
         await send(unsent);
       }
-      failingSince = undefined;
+      writeFailingSince = undefined;
     } catch (error) {
       writeFailed(error);
     }
