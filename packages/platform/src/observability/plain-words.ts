@@ -28,6 +28,16 @@ export const PLAIN_WORDS = {
     broke: 'A page before signing in, such as the sign-in page, may not have worked; the server is fine.',
     next: 'If many come, a developer should read them. Anyone can send these, so they may be forged.',
   },
+  'job.stalled': {
+    happened: 'A background job has been running far longer than it ever should.',
+    broke: 'While it hangs, that job does none of its work, such as payments, checks or sweeps; the rest go on.',
+    next: 'The line names the job. A restart frees it; if it comes back, a developer should read why.',
+  },
+  'job.skipping_runs': {
+    happened: 'A background job has failed to do anything on three runs in a row.',
+    broke: 'Its work waits: emails, sign-in records or second-factor resets, as the line names.',
+    next: 'It keeps trying by itself. Read the run failed lines beside it, then check the login service and email.',
+  },
   'mandate_carry.failed': {
     happened: "Carrying a mandate's remaining waiting requests onto its new version failed.",
     broke: 'Those requests stay on the old version, so none of them can be approved or paid yet.',

@@ -1138,8 +1138,8 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       logger: testLogger(capture),
     });
 
-    await expect(broken.run()).resolves.toBeUndefined();
-    await expect(logged.run()).resolves.toBeUndefined();
+    await expect(broken.run()).resolves.toBe('skipped');
+    await expect(logged.run()).resolves.toBe('skipped');
     expect(capture.lines().map(({ event }) => event)).toContain('notification.run_failed');
   });
 

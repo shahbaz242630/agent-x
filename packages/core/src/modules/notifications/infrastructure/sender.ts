@@ -189,8 +189,8 @@ export const NOTICES_A_RUN = 20;
 const FAILURE = /^[a-z][a-z_]{0,63}$/;
 
 export interface NoticeSender {
-  /** Sends the due notices, a batch at a time, until none is due or the signal is aborted. Never throws. */
-  run(signal?: AbortSignal): Promise<void>;
+  /** Sends the due notices, a batch at a time, until none is due or the signal is aborted. Never throws: says if it failed. */
+  run(signal?: AbortSignal): Promise<'ran' | 'skipped'>;
 }
 
 export function createNoticeSender({
@@ -413,8 +413,10 @@ export function createNoticeSender({
     async run(signal) {
       try {
         await runBatches(signal);
+        return 'ran';
       } catch (error) {
         logger.warn('notification.run_failed', { err: error });
+        return 'skipped';
       }
     },
   };

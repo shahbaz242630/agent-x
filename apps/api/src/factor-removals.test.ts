@@ -67,7 +67,7 @@ describe('SEC-OPS-04 resets carried out as the API runs it (B6-3c)', () => {
   it('never throws when it can’t list the organisations: it logs, and waits for its next run', async () => {
     const { removals, capture } = removalsWith(RESETS);
 
-    await expect(removals?.run()).resolves.toBeUndefined();
+    await expect(removals?.run()).resolves.toBe('skipped');
     expect(capture.lines().map(({ event }) => event)).toEqual(['factor_resets.run_failed']);
   });
 });

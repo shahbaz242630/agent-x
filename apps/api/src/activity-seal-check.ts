@@ -68,7 +68,7 @@ export function createActivitySealCheck({
   batch = CHECK_BATCH,
   pick = (below: bigint) => BigInt(randomInt(1, Number(below) + 1)),
 }: {
-  /** The organisations to check: the directory's list, which main.ts passes. */
+  /** The organisations to check: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<CheckTables>;
   readonly keys: KeyProvider;

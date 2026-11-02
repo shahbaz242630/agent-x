@@ -68,7 +68,7 @@ export function createActivitySeal({
   logger,
   batch = SEAL_BATCH,
 }: {
-  /** The organisations to seal: the directory's list, which main.ts passes. */
+  /** The organisations to seal: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<SealTables>;
   readonly keys: KeyProvider;

@@ -77,10 +77,23 @@ function problemsWith(env: Env, built: PartnerDeclaration | null = BUILT): reado
   }
 }
 
+describe('config: which side of the work a process does (4D2e D)', () => {
+  it.each(['all', 'web', 'jobs'] as const)('takes %s', (role) => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_ROLE: role }).role).toBe(role);
+  });
+
+  it('refuses any other, naming the ones it takes', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: 'worker' })).toEqual([
+      'AGENTX_ROLE: must be one of: all, web, jobs',
+    ]);
+  });
+});
+
 describe('config: a correct config loads', () => {
   it('needs only the environment, the release, the public origin and where the keys are, and fills in the defaults', () => {
     expect(loadConfig(MINIMAL)).toEqual({
       environment: 'production',
+      role: 'all',
       release: RELEASE,
       log: { level: 'info', eventCapPerMinute: 600 },
       http: {
@@ -150,6 +163,7 @@ describe('config: a correct config loads', () => {
     });
     expect(config).toEqual({
       environment: 'staging',
+      role: 'all',
       release: RELEASE,
       log: { level: 'warn', eventCapPerMinute: 1200 },
       http: {

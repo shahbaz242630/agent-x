@@ -171,7 +171,7 @@ export function createActivityExportBuilder({
   batch = EXPORT_BATCH,
   blockBytes = BLOCK_BYTES,
 }: {
-  /** The organisations to look in: the directory's list, which main.ts passes. */
+  /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<BuilderTables>;
   readonly keys: KeyProvider;

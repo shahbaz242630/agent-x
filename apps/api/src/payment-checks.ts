@@ -191,7 +191,7 @@ export function createPaymentChecks({
   page = CHECK_PAGE,
   callTimeoutMs = PARTNER_CALL_TIMEOUT_MS,
 }: {
-  /** The organisations to look in: the directory's list, which main.ts passes. */
+  /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<CheckTables>;
   readonly rail: FinancialRailAdapter;

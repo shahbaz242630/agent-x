@@ -58,7 +58,7 @@ export function createMandateExpiry({
   logger,
   most = MOST_EXPIRED_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which main.ts passes. */
+  /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<MandateTables & NotificationsTables>;
   readonly keys: KeyProvider;
