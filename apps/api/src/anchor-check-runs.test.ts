@@ -32,8 +32,8 @@ const AT = new Date('2026-11-02T09:00:00.000Z');
 const STALE_MS = 900_000;
 const REACH_MS = 3_600_000;
 const DEADLINE_MS = 120_000;
-const ok = (seq: bigint, fill = Number(seq)): ChainReport => ({
-  ok: true,
+const ok = (seq: bigint, fill = Number(seq)) => ({
+  ok: true as const,
   seq,
   hash: Buffer.alloc(32, fill),
   macKeyVersion: 1,
