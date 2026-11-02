@@ -2,11 +2,12 @@
 // decision 4; Phase 2 D4): what a decision locks to serialise an agent's
 // monthly check, the total it checks, and the capacity it holds.
 //
-// The caller (D4's decideAndReserve) has taken ADR-006's locks 2–6 first, then:
-// - `lockAgentMonth`: the agent's zone (added from the mandate in force on its
-//   first decision, then kept for good: D2's review; a signed record, 0054,
-//   agent-zones.ts), its month at `at` in that
-//   zone, and that month's period row locked FOR NO KEY UPDATE (level 7);
+// The caller (D4's decideAndReserve) has taken ADR-006's locks 2–6 first, the
+// agent's zone among them (zoneInForce, before the supplier's lock: added from
+// the mandate in force on its first decision, then kept for good: D2's review;
+// a signed record, 0054, agent-zones.ts), then:
+// - `lockAgentMonth`: its month at `at` in that zone, and that month's period
+//   row locked FOR NO KEY UPDATE (level 7);
 // - `monthSpentRead`: the agent's month, every reservation but a released one,
 //   read in a statement after the lock, never the locking one, so READ
 //   COMMITTED's fresh snapshot sees every reservation the transaction it waited
@@ -30,34 +31,21 @@ import { sql, type Transaction } from 'kysely';
 import type { AuditTables, SignedStates } from '../../audit/index.ts';
 import { periodOf } from '../../../shared-kernel/index.ts';
 import { RESERVATION, type ReservationState } from '../domain/reservation.ts';
-import { addZone, keptZoneOf } from './agent-zones.ts';
+import { keptZoneOf } from './agent-zones.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 type ReservationsTransaction = Transaction<LimitReservationsTables & AuditTables>;
 
-/** The agent's month a decision locked, and whether this decision kept the agent's zone (sealNewZone's to seal); or its zone tampered with. */
-export type LockedMonth =
-  { readonly outcome: 'locked'; readonly month: string; readonly keptNow: boolean } | { readonly outcome: 'tampered' };
-
 /**
- * The agent's month at `at` (`YYYY-MM`), its period row locked FOR NO KEY
- * UPDATE: two decisions for one agent's month run one after the other. Named
- * in the agent's kept zone, read through its signed state (0054); `zoneIfNew`
- * (the mandate in force's) only for an agent with none yet, which this call
- * adds and the caller seals (`keptNow`) with its own events.
+ * The agent's month at `at` (`YYYY-MM`) in its `zone`, zoneInForce's, its
+ * period row locked FOR NO KEY UPDATE: two decisions for one agent's month run
+ * one after the other.
  */
 export async function lockAgentMonth(
   tx: ReservationsTransaction,
-  states: SignedStates,
-  { orgId, agentId, zoneIfNew, at }: { orgId: string; agentId: string; zoneIfNew: string; at: Date },
-): Promise<LockedMonth> {
-  const keptNow = await addZone(tx, { orgId, agentId, zone: zoneIfNew, at });
-  const kept = keptNow
-    ? ({ outcome: 'kept', zone: zoneIfNew } as const)
-    : await keptZoneOf(tx, states, { orgId, agentId });
-  // Not added now, its row is there (the insert waits for one being added to commit): none is one deleted.
-  if (kept.outcome !== 'kept') return { outcome: 'tampered' };
-  const month = periodOf(at, kept.zone).month;
+  { orgId, agentId, zone, at }: { orgId: string; agentId: string; zone: string; at: Date },
+): Promise<string> {
+  const { month } = periodOf(at, zone);
   const [, locked] = await sendTogether(tx, [
     tx
       .insertInto('limit_reservations.agent_periods')
@@ -66,7 +54,7 @@ export async function lockAgentMonth(
     periodLock(tx, { agentId, month }),
   ]);
   if (locked.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
-  return { outcome: 'locked', month, keptNow };
+  return month;
 }
 
 const periodLock = (tx: ReservationsTransaction, { agentId, month }: { agentId: string; month: string }) =>

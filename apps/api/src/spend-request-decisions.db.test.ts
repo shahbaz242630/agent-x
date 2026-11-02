@@ -21,7 +21,13 @@
 // VALIDATING.
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import { addZone, type LimitReservationsTables, sealNewZone } from '@agentx/core/modules/limit-reservations';
+import {
+  addZone,
+  AGENT_ZONES,
+  type LimitReservationsTables,
+  sealNewZone,
+} from '@agentx/core/modules/limit-reservations';
+import { SOURCES } from '@agentx/core/modules/funding-sources';
 import {
   draftMandate,
   MANDATE_VERSIONS,
@@ -926,8 +932,280 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .lines()
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
-    // An agent's later decision made 25 before P16, whose two trips took 3 off it; P17's two take 3 more.
-    expect(line?.trips).toBe(19);
+    // An agent's later decision made 25 before P16, whose two trips took 3 off it; P17's two take 3 more; C6's zone
+    // read in the gather takes 1.
+    expect(line?.trips).toBe(18);
+    // From the supplier's lock to the commit, both counted: 16 with the lock in the gather (C6).
+    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(13);
+  });
+
+  it("pays one trip more on an agent's first decision alone, for its zone's insert", async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w)));
+    const line = capture
+      .lines()
+      .filter(({ event }) => event === 'spend_request.decided')
+      .at(-1);
+    expect(line?.supplierLockTrip).toBe(7);
+  });
+});
+
+describe('refusable reads before the supplier’s lock (4D2e C6, forced)', () => {
+  /** The first supplier's row held as a stuck transaction would, while `work` runs; let go after. */
+  async function withSupplierStuck<T>(w: World, work: () => Promise<T>): Promise<T> {
+    const holder = await database.connect('admin');
+    try {
+      await holder.query('begin');
+      await holder.query('select 1 from suppliers.suppliers where id = $1 for update', [w.suppliers[0]]);
+      return await work();
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  }
+
+  /** Answered with the supplier stuck, under a decision's 5 s for its lock: refused without queueing on it. */
+  const refusedThoughStuck = (w: World, acting: AgentActing, overrides: Partial<SpendAskedByAgent> = {}) =>
+    withSupplierStuck(w, () => within(2_000, ask(acting, asking(w, overrides)), 'a request refused before the lock'));
+
+  it('a tampered mandate never queues on the supplier', async () => {
+    const { w, mandateId, acting } = await ready();
+    const owner = await tamperAsOwner(database, MANDATES, w.org);
+    try {
+      await owner.withoutStatusGuard(() =>
+        owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [mandateId]),
+      );
+    } finally {
+      await owner.end();
+    }
+
+    expect(await refusedThoughStuck(w, acting)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+
+  it('a tampered source never queues on the supplier', async () => {
+    const { w, acting } = await ready();
+    const owner = await tamperAsOwner(database, SOURCES, w.org);
+    try {
+      await owner.setColumn(w.source, 'holder_name', 'planted holder');
+    } finally {
+      await owner.end();
+    }
+
+    expect(await refusedThoughStuck(w, acting)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+
+  it('a tampered zone never queues on the supplier, and moves no month', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w)));
+    const before = await made(w.org);
+    const owner = await tamperAsOwner(database, AGENT_ZONES, w.org);
+    try {
+      await owner.query('begin');
+      await owner.query('alter table limit_reservations.agent_zones disable trigger made_once');
+      await owner.query(
+        "update limit_reservations.agent_zones set time_zone = 'Pacific/Kiritimati' where agent_id = $1",
+        [w.agent],
+      );
+      await owner.query('alter table limit_reservations.agent_zones enable trigger made_once');
+      await owner.query('commit');
+    } finally {
+      await owner.end();
+    }
+
+    expect(await refusedThoughStuck(w, acting, { orderReference: 'INV-2' })).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await made(w.org)).toEqual(before);
+  });
+
+  /** The agent's zone rows and their `agent_zone.kept` events. */
+  const zoneKept = async (w: World) => ({
+    rows: await withTenant(app, w.org, (tx) =>
+      tx.selectFrom('limit_reservations.agent_zones').select('time_zone').where('agent_id', '=', w.agent).execute(),
+    ),
+    events: await eventsAbout(w.org, w.agent, AGENT_ZONES.subject),
+  });
+
+  const retried = () => capture.lines().filter((line) => line.event === TRANSACTION_RETRIED);
+
+  it('a first decision waiting on another’s new zone keeps that one and seals none of its own', async () => {
+    const { w, acting } = await ready();
+    clock.advanceBy(Date.parse('2026-10-31T12:00:00Z') - clock.now().getTime());
+    // UTC+14: already November there, still October in the mandate's Dubai.
+    const [answer] = await whileHeld(
+      (wait) =>
+        withSignedStates(app, w.org, quiet(), async (tx, states) => {
+          const zone = { orgId: w.org, agentId: w.agent, zone: 'Pacific/Kiritimati', at: clock.now() };
+          await addZone(tx, zone);
+          await sealNewZone(tx, states, { ...zone, actor: { type: 'agent', id: w.agent } });
+          await wait();
+        }),
+      () => [ask(acting, asking(w))],
+    );
+
+    const request = decidedOf(answer ?? { outcome: 'busy' });
+    expect((await heldBy(w.org, request.id)).reservation).toMatchObject({ month: '2026-11' });
+    const { rows, events } = await zoneKept(w);
+    expect(rows).toEqual([{ time_zone: 'Pacific/Kiritimati' }]);
+    expect(events).toHaveLength(1);
+    expect(retried()).toEqual([]);
+  });
+
+  it('a first decision waiting on a new zone that is rolled back keeps its own', async () => {
+    const { w, acting } = await ready();
+    const stopped = new Error('stopped on purpose');
+    const { promise: held, resolve: holds } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const holder = withTenant(app, w.org, async (tx) => {
+      await addZone(tx, { orgId: w.org, agentId: w.agent, zone: 'Pacific/Kiritimati', at: clock.now() });
+      holds(undefined);
+      await gate;
+      throw stopped;
+    });
+    await held;
+    const asked = within(20_000, ask(acting, asking(w)), 'the first decision');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await expect(holder).rejects.toBe(stopped);
+
+    decidedOf(await asked);
+    const { rows, events } = await zoneKept(w);
+    expect(rows).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    expect(events).toHaveLength(1);
+  });
+
+  it('two first decisions on two suppliers: the zone held before the supplier, one zone kept, no deadlock', async () => {
+    const { w, acting } = await ready();
+    const [first, second] = w.suppliers as [string, string];
+    const holder = await database.connect('admin');
+    const looker = await database.connect('admin');
+    try {
+      await holder.query('begin');
+      await holder.query('select 1 from suppliers.suppliers where id = $1 for update', [first]);
+      // Held at the supplier's lock, having made the agent's zone.
+      const atTheSupplier = within(20_000, ask(acting, asking(w)), 'the first decision');
+      await waitUntilQueued(database.as('admin'), 1);
+      // Queued on the zone, before the other supplier's lock, which is free for anyone meanwhile.
+      const atTheZone = within(
+        20_000,
+        ask(acting, asking(w, { supplierId: second, orderReference: 'INV-2', amount: AED(10_000n) })),
+        'the second decision',
+      );
+      await waitUntilQueued(database.as('admin'), 2);
+      await looker.query('select 1 from suppliers.suppliers where id = $1 for no key update nowait', [second]);
+
+      await holder.query('rollback');
+      expect(decidedOf(await atTheSupplier).decision).toBe('ALLOW');
+      expect(decidedOf(await atTheZone).decision).toBe('ALLOW');
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+      await looker.end();
+    }
+    const { rows, events } = await zoneKept(w);
+    expect(rows).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    expect(events).toHaveLength(1);
+    expect(retried()).toEqual([]);
+  });
+
+  it('two first decisions at once, unforced, on two suppliers: one zone, both decided, no retry', async () => {
+    const { w, acting } = await ready();
+    const answers = await Promise.all([
+      ask(acting, asking(w)),
+      ask(acting, asking(w, { supplierId: w.suppliers[1] ?? '', orderReference: 'INV-2', amount: AED(10_000n) })),
+    ]);
+
+    expect(answers.map((answer) => decidedOf(answer).decision)).toEqual(['ALLOW', 'ALLOW']);
+    const { rows, events } = await zoneKept(w);
+    expect(rows).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    expect(events).toHaveLength(1);
+    expect(retried()).toEqual([]);
+  });
+
+  it('keeps the instant and the month it was asked in, across a wait past the month’s end', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w, { amount: AED(10_000n) })));
+    // Dubai's last second of October.
+    clock.advanceBy(Date.parse('2026-10-31T19:59:59Z') - clock.now().getTime());
+    const asked = clock.now();
+
+    const holder = await database.connect('admin');
+    let answer: SpendRequestDecided;
+    try {
+      await holder.query('begin');
+      await holder.query('select 1 from suppliers.suppliers where id = $1 for update', [w.suppliers[0]]);
+      const waiting = within(
+        20_000,
+        ask(acting, asking(w, { orderReference: 'INV-EDGE', amount: AED(10_000n) })),
+        'edge',
+      );
+      await waitUntilQueued(database.as('admin'), 1);
+      clock.advanceBy(HOUR_MS);
+      await holder.query('rollback');
+      answer = await waiting;
+    } finally {
+      await holder.end();
+    }
+
+    const request = decidedOf(answer);
+    const sealed = await heldBy(w.org, request.id);
+    expect(sealed.row).toMatchObject({ created_at: asked });
+    expect(sealed.reservation).toMatchObject({ month: '2026-10', reserved_at: asked });
+    const next = decidedOf(await ask(acting, asking(w, { orderReference: 'INV-NEXT', amount: AED(10_000n) })));
+    expect((await heldBy(w.org, next.id)).reservation).toMatchObject({ month: '2026-11' });
+  });
+
+  it('weighs as the simulator does, whatever decides it', async () => {
+    const { w, mandateId, acting } = await ready({ terms: { approvalThreshold: AED(1_500_000n) } });
+    const other = w.suppliers[1] ?? '';
+    const stranger = ids.next();
+    const steps: { name: string; asked: Partial<SpendAskedByAgent>; decision: string; spent: bigint }[] = [
+      { name: 'within every limit', asked: { amount: AED(1_000_000n) }, decision: 'ALLOW', spent: 0n },
+      {
+        name: 'the same order again',
+        asked: { amount: AED(10_000n) },
+        decision: 'DENY',
+        spent: 1_000_000n,
+      },
+      {
+        name: 'the split past the threshold, only with what it held',
+        asked: { amount: AED(600_000n), orderReference: 'INV-SPLIT' },
+        decision: 'REQUIRE_APPROVAL',
+        spent: 1_000_000n,
+      },
+      {
+        name: 'past the month, on the other supplier',
+        asked: { amount: AED(1_000_000n), supplierId: other, orderReference: 'INV-MONTH' },
+        decision: 'DENY',
+        spent: 1_600_000n,
+      },
+      {
+        name: 'a supplier not the organisation’s',
+        asked: { amount: AED(10_000n), supplierId: stranger, orderReference: 'INV-STRANGER' },
+        decision: 'DENY',
+        spent: 1_600_000n,
+      },
+      {
+        name: 'a source not the organisation’s',
+        asked: { amount: AED(10_000n), fundingSourceId: ids.next(), orderReference: 'INV-SOURCE' },
+        decision: 'DENY',
+        spent: 1_600_000n,
+      },
+    ];
+    for (const { name, asked, decision, spent } of steps) {
+      const simulation = simulatedOf(await simulated(w, mandateId ?? '', asked));
+      const request = decidedOf(await ask(acting, asking(w, asked)));
+      expect({ name, decision: simulation.made.decision, spent: simulation.monthSpent.minor }).toEqual({
+        name,
+        decision,
+        spent,
+      });
+      expect({ name, decision: request.decision, reasons: request.reasons }).toEqual({
+        name,
+        decision: simulation.made.decision,
+        reasons: simulation.made.reasons,
+      });
+    }
   });
 });
 

@@ -699,6 +699,8 @@ interface Held {
   from?: { readonly table: SignedStateTable; readonly state: VerifiedState };
   /** The state this transaction just recorded on the row, still locked, for changeStatus to go on from (4D2d P3b). */
   wrote?: { readonly table: SignedStateTable; readonly state: VerifiedState };
+  /** Every read of it found no row: no lock is held, so making it raises none (4D2e C6). */
+  none?: true;
 }
 
 /** A history as gatherHistories keeps it: the organisation and every field of the find, a seq as its text. */
@@ -958,6 +960,8 @@ export function createSignedStates({
       rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
       const check = believing ? believedPair(table, key, answer.latest, answer.rows) : undefined;
       believing = check !== undefined;
+      // No row came back, believed or not: no lock was taken on it.
+      if (answer.rows?.length === 0 && held === undefined) rows.set(name, { lock, none: true });
       // A row not believed here keeps what an earlier gather believed of it: the row has been locked since.
       if (check !== undefined) kept.set(name, { lock, check });
       return answer.id;
@@ -1028,6 +1032,9 @@ export function createSignedStates({
     const quick = takeGathered(tx, name, lock) ?? (await inOneStatement(tx, table, key, lock));
     const checked = quick ?? (await inTwoStatements(tx, table, key, lock));
     if (checked.outcome === 'verified' && lock === 'change') rows.set(name, { lock, from: { table, state: checked } });
+    if (checked.outcome === 'missing' && (held === undefined || held.none === true)) {
+      rows.set(name, { lock, none: true });
+    }
     return checked;
   };
 
@@ -1140,7 +1147,9 @@ export function createSignedStates({
     rows: Map<string, Held>,
     name: string,
   ): Promise<void> => {
-    if (rows.get(name)?.lock === 'share') throw lockOrder();
+    const held = rows.get(name);
+    // A row made once, read as not there, holds no lock to raise: a first decision's zone, read before it is made (4D2e C6).
+    if (held?.lock === 'share' && !(table.madeOnce === true && held.none === true)) throw lockOrder();
     const read = await readSignedRow(tx, table, key, 'change');
     if (read.outcome === 'unreadable') {
       alarm(table.subject, key, 'row');

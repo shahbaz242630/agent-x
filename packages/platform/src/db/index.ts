@@ -54,6 +54,7 @@ export {
   statementTimesForLog,
   timedLock,
   timedRoundTrips,
+  timedSupplierLock,
   timingStatements,
 } from './statement-times.ts';
 export {

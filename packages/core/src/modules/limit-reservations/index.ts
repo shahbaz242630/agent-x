@@ -14,10 +14,10 @@ export {
   type UnsealedZone,
   unsealedZones,
   type ZoneCheck,
+  zoneInForce,
 } from './infrastructure/agent-zones.ts';
 export {
   agentMonth,
-  type LockedMonth,
   lockAgentMonth,
   lockAgentPeriod,
   lockReservationsOf,
