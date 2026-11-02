@@ -304,8 +304,10 @@ describe('what a brake is up against: a stream of share holders and the row (no 
       const { answer, ms } = await timed(() =>
         settled(change.query('select 1 from organizations.organizations where id = $1 for no key update', [w.org])),
       );
-      const { took, waited } = await stop();
+      // Ended before the relay is asked to stop: a failed transaction keeps its locks until it ends, and a next holder
+      // caught behind them would never come, leaving the relay and the test waiting for each other.
       await letGo(change);
+      const { took, waited } = await stop();
 
       // Not the lock wait's own code: every holder ended within 5 s, each new wait starting it again.
       expect(answer).toEqual({ threw: '57014' });
