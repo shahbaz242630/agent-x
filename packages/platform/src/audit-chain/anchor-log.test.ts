@@ -553,7 +553,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         ]);
       });
 
-      it('reads none of them twice: the next read starts from the newest, spoiled or not', async () => {
+      it('reads the spoiled one again, its alarm with it, and the sound one behind it not', async () => {
         const fake = createFakeWriteOnceStore();
         fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 3n)));
         fake.files.set(nameOf('snapshots', 60), spoiled(nameOf('snapshots', 60)));
@@ -563,8 +563,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
         await log.read();
 
-        expect(fake.calls.gets).toBe(0);
-        expect(lines('audit.integrity_failed')).toHaveLength(1);
+        expect(fake.calls.gets).toBe(1);
+        expect(lines('audit.integrity_failed')).toHaveLength(2);
       });
 
       it('goes no further back than the first one with nothing wrong', async () => {
@@ -695,7 +695,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(lines('audit.anchor_store_read_failed')).toEqual([]);
 
         await log.read();
-        expect(fake.calls.gets).toBe(1);
+        expect(fake.calls.gets).toBe(2);
       });
     });
 
@@ -863,6 +863,61 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         // The hour from the snapshot it wrote, and no later for the one added at 20 minutes.
         expect(files(fake, 'deltas')).toHaveLength(1);
         expect(files(fake, 'snapshots')).toHaveLength(3);
+      });
+    });
+
+    describe('the read markers move only for sound files', () => {
+      it('an unsigned delta named ahead hides no honest delta named before it', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, advance } = await started(fake);
+        fake.files.set(nameOf('deltas', 4, 9), gzipSync(''));
+        await log.read();
+        fake.files.set(nameOf('deltas', 1, 8), fileOf(nameOf('deltas', 1, 8), anchorAt(CHAIN, 8n)));
+        advance(1);
+        await log.read();
+
+        expect(log.latest(CHAIN)?.seq).toBe(8n);
+      });
+
+      it('an unsigned snapshot named ahead hides no honest snapshot named before it, nor its deltas', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, advance } = await started(fake);
+        fake.files.set(nameOf('snapshots', 4, 9), gzipSync(''));
+        await log.read();
+        fake.files.set(nameOf('snapshots', 1, 8), fileOf(nameOf('snapshots', 1, 8), anchorAt(CHAIN, 8n)));
+        fake.files.set(nameOf('deltas', 2, 8), fileOf(nameOf('deltas', 2, 8), anchorAt(OTHER_CHAIN, 3n)));
+        advance(2);
+        await log.read();
+
+        expect(log.latest(CHAIN)?.seq).toBe(8n);
+        expect(log.latest(OTHER_CHAIN)?.seq).toBe(3n);
+      });
+
+      it('so the next snapshot this copy writes holds what those honest files held', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, advance } = await started(fake);
+        fake.files.set(nameOf('deltas', 4, 9), gzipSync(''));
+        await log.read();
+        fake.files.set(nameOf('deltas', 1, 8), fileOf(nameOf('deltas', 1, 8), anchorAt(CHAIN, 8n)));
+        advance(60);
+        await log.read();
+        log.keep(anchorAt(OTHER_CHAIN, 3n));
+        await log.flush();
+
+        const newest = files(fake, 'snapshots').toSorted()[0];
+        expect(linesIn(fake.files.get(String(newest))).map((line) => line.chain)).toContain(`organisation:${ORG}`);
+      });
+
+      it('a sound delta after it moves the marker on: older ones are not read again', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, advance } = await started(fake);
+        fake.files.set(nameOf('deltas', 1, 8), fileOf(nameOf('deltas', 1, 8), anchorAt(CHAIN, 8n)));
+        advance(1);
+        await log.read();
+        fake.calls.gets = 0;
+        await log.read();
+
+        expect(fake.calls.gets).toBe(0);
       });
     });
 

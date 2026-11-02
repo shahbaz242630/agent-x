@@ -256,11 +256,11 @@ export function createAnchorLog({
   let state: 'unread' | 'read' | 'unreadable' = 'unread';
   let reading: Promise<void> | undefined;
   let flushing: Promise<void> | undefined;
-  // The newest delta listed, by name, and the newest snapshot read or written, as counted down: older ones have nothing new.
+  // The newest sound delta listed, by name, and the newest sound snapshot read or written, as counted down: older ones
+  // have nothing new. Only sound ones move them, or a file anyone can add could hide honest ones named before it, or stop
+  // snapshots being written. So a spoiled file newer than both is read again at each read, its alarm with it.
   let deltasFrom: string | undefined;
   let snapshotFrom: string | undefined;
-  // When the newest sound snapshot was made: a spoiled one added each hour must not stop them being written.
-  let soundSnapshotAt: number | undefined;
   // Deltas this process wrote since it last listed: nothing to read in them.
   const written = new Set<string>();
   let readFailingSince: number | undefined;
@@ -324,20 +324,18 @@ export function createAnchorLog({
    */
   const newerSnapshots = async (foreign: { count: number }) => {
     const lines: Anchor[] = [];
-    let newest: string | undefined;
     let spoiled = 0;
     for await (const name of filesOf('snapshots', SNAPSHOTS_A_PAGE, foreign)) {
       const countdown = countdownOf('snapshots', name);
       if (snapshotFrom !== undefined && countdown >= snapshotFrom) break;
       if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
-      newest ??= countdown;
       const file = await opened('snapshots', name);
       lines.push(...file.anchors);
-      if (file.sound) return { lines, newest, base: countdown, sound: countdown };
+      if (file.sound) return { lines, base: countdown, sound: countdown };
       spoiled += 1;
     }
     if (spoiled > 0 && snapshotFrom === undefined) throw new Error(tooManySpoiled(spoiled));
-    return { lines, newest, base: snapshotFrom, sound: undefined };
+    return { lines, base: snapshotFrom, sound: undefined };
   };
 
   /**
@@ -354,10 +352,14 @@ export function createAnchorLog({
           ? snapshot !== undefined && countdownOf('deltas', name) > snapshot
           : name >= deltasFrom;
       if (old) break;
-      newest ??= name;
-      if (written.delete(name)) continue;
+      if (written.delete(name)) {
+        newest ??= name;
+        continue;
+      }
       files += 1;
-      lines.push(...(await opened('deltas', name)).anchors);
+      const file = await opened('deltas', name);
+      lines.push(...file.anchors);
+      if (file.sound) newest ??= name;
     }
     return { lines, newest, files };
   };
@@ -398,15 +400,14 @@ export function createAnchorLog({
       // Only now, with every call answered: a part read could look like a chain never anchored.
       for (const line of snapshots.lines) merge(line);
       for (const line of deltas.lines) merge(line);
-      if (snapshots.newest !== undefined) snapshotFrom = snapshots.newest;
-      if (snapshots.sound !== undefined) soundSnapshotAt = LAST_MS - Number(snapshots.sound);
+      if (snapshots.sound !== undefined) snapshotFrom = snapshots.sound;
       if (deltas.newest !== undefined) deltasFrom = deltas.newest;
       if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
       if (state !== 'read') {
         logger.info('audit.anchors_read', {
           epoch,
           chains: anchors.size,
-          snapshot: snapshots.newest !== undefined,
+          snapshot: snapshots.sound !== undefined,
           deltas: deltas.files,
         });
       }
@@ -444,7 +445,6 @@ export function createAnchorLog({
     if (file.kind === 'deltas') written.add(file.name);
     else {
       snapshotFrom = countdownOf('snapshots', file.name);
-      soundSnapshotAt = LAST_MS - Number(snapshotFrom);
     }
     logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines.length });
   };
@@ -452,8 +452,8 @@ export function createAnchorLog({
   /** The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. */
   const madeFile = async (): Promise<Unsent> => {
     const at = now().getTime();
-    const kind: Kind =
-      soundSnapshotAt === undefined || at - soundSnapshotAt >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
+    const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
+    const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
     const lines = kind === 'snapshots' ? [...anchors.values()] : [...pending.values()];
     const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
     const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, lines.length));
