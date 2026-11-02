@@ -274,6 +274,7 @@ const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
+const ANCHOR_STORE_ALERT = named(/^alert-agentx-.+-anchor-store$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
@@ -531,6 +532,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-holdings-check',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-handoff-queue',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-platform-full',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-store',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
@@ -2930,6 +2932,36 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(String(at(staging.predictedResources.find(PLATFORM_FULL_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section Q\.$/,
     );
+  });
+
+  it("anchor-store-alert: no alert on the anchors' store (PL-58), or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(ANCHOR_STORE_ALERT))).toEqual(['anchor-store-alert']);
+    for (const change of [
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_store_write_failed" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable") | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_store_unreadable" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_store_unwritable" | summarize Events = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(ANCHOR_STORE_ALERT, change))).toEqual(['anchor-store-alert']);
+    }
+    const description = String(at(staging.predictedResources.find(ANCHOR_STORE_ALERT)?.properties, 'description'));
+    expect(description).toMatch(/^SEV-2\. /);
+    expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section H\.$/);
   });
 
   it("handoff-queue-alert: no alert on approved payments left standing (gate H8), or one that counts something else, can't fire or fires too late", () => {

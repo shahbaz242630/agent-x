@@ -62,6 +62,7 @@ export type RuleId =
   | 'holdings-check-alert'
   | 'handoff-queue-alert'
   | 'platform-full-alert'
+  | 'anchor-store-alert'
   | 'integrity-runs-alert'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
@@ -302,6 +303,10 @@ const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_
 
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
+
+/** The anchors' store can't be read after a start, or has gone long unwritten (4D2e E, PL-58). */
+const ANCHOR_STORE_LINES =
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable")';
 
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
 const PLATFORM_FULL_LINES =
@@ -2851,6 +2856,30 @@ const platformFullAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on the anchors' store unreadable after a start, or long unwritten (4D2e E, PL-58). */
+const anchorStoreAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [ANCHOR_STORE_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'anchor-store-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any audit.anchor_store_unreadable or audit.anchor_store_unwritable line, watching every window and firing on the first",
+      });
+    }
+  }
+};
+
 /**
  * An enabled alert on the workspace fires on any run of the integrity jobs
  * skipped whole (Phase 2 E2c; request expiry, D7), or of the activity log's
@@ -3944,6 +3973,7 @@ const CHECKS: readonly Check[] = [
   holdingsCheckAlert,
   handoffQueueAlert,
   platformFullAlert,
+  anchorStoreAlert,
   integrityRunsAlert,
   agentCancelsAlert,
   agentCancelCapAlert,

@@ -42,6 +42,7 @@ param agentCancelCapAlertName string
 param dailyWordsAlertName string
 param handoffQueueAlertName string
 param platformFullAlertName string
+param anchorStoreAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -519,6 +520,48 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The store that keeps the chains' anchors out of reach (4D2e E, PL-58): after
+// a start it can't be read, so every organisation's payments wait, or it has gone
+// unwritten three intervals, so a restart would forget what moved. Any one line
+// tells someone; neither is a hold. Stateful, as above.
+resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: anchorStoreAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Anchor store: payments waiting, or anchors not kept'
+    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation, or could not write to it for three check intervals, so a restart would forget them. Decisions go on and nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
