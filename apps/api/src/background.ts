@@ -9,6 +9,10 @@ import type { Logger } from '@agentx/platform/observability';
 export const LEASE_RENEW_EVERY_MS = 20_000;
 export const LEASE_TERM_MS = 60_000;
 
+/** How long one try at the lease may go unanswered, as the schema check's read; and how soon after one fails the next. */
+export const LEASE_TRY_WITHIN_MS = 10_000;
+export const LEASE_RETRY_AFTER_MS = 5_000;
+
 /** The run was stopped while a step was under way. */
 export class Stopped extends Error {}
 
@@ -93,32 +97,53 @@ export interface Leadership {
 /**
  * One copy of the jobs at a time (4D2e D). A process believes it leads only until
  * its last renewal's sending time plus the term: the database counted that term
- * from later, so this process has let go before another can take it. A renewal
- * that fails leaves it leading until then; one refused ends it at once. It goes on
- * trying either way, so a process that lost the lease takes it back when it can.
- * A monotonic clock by default: a wall clock moved back would hold the lease longer.
+ * from later, so this process has let go before another can take it. A try that
+ * fails or goes unanswered within its own deadline (the pool's statements carry no
+ * limit outside withTenant) leaves it leading until then, and is tried again soon;
+ * a refusal ends it at once. It goes on trying either way, so a process that lost
+ * the lease takes it back when it can. A monotonic clock by default: a wall clock
+ * moved back would hold the lease longer.
+ *
+ * Everything the jobs do hangs on this row, the anchor check among them, and a
+ * follower runs nothing that could raise an alarm. So a process that hasn't led
+ * for `notLeadingAfterMs` says so as an error, once and again each time that long
+ * passes: a forged or deleted row, or a database that never answers. One copy is
+ * the shape we run (policy.ts's ONE_REPLICA), so a follower lasting that long isn't
+ * normal.
  */
 export function createLeadership({
   store,
   logger,
+  notLeadingAfterMs,
   now = () => performance.now(),
   renewEveryMs = LEASE_RENEW_EVERY_MS,
   termMs = LEASE_TERM_MS,
+  tryWithinMs = LEASE_TRY_WITHIN_MS,
+  retryAfterMs = LEASE_RETRY_AFTER_MS,
 }: {
   readonly store: LeaseStore;
   readonly logger: Logger;
+  readonly notLeadingAfterMs: number;
   readonly now?: () => number;
   readonly renewEveryMs?: number;
   readonly termMs?: number;
+  readonly tryWithinMs?: number;
+  readonly retryAfterMs?: number;
 }): Leadership {
+  const stopping = new AbortController();
   let lead: AbortController | undefined;
   let endsAt = Number.NEGATIVE_INFINITY;
   let expiry: ReturnType<typeof setTimeout> | undefined;
   let renewal: ReturnType<typeof setTimeout> | undefined;
-  let stopped = false;
   let renewing: Promise<void> = Promise.resolve();
   let beating = (): boolean => false;
   const waiting = new Set<(held: AbortController) => void>();
+  // A longer gap than any try can make between two means the process was frozen, not refused.
+  const frozenAfterMs = 3 * renewEveryMs + tryWithinMs;
+  let triedAt = now();
+  let ledAt = triedAt;
+  let saidAt = Number.NEGATIVE_INFINITY;
+  let refusalSaid = false;
 
   const leading = (): boolean => lead !== undefined && now() < endsAt;
 
@@ -130,7 +155,14 @@ export function createLeadership({
     logger.warn('jobs.lease_lost');
   };
 
+  const refused = (): void => {
+    lose();
+    if (!refusalSaid) logger.info('jobs.lease_held_elsewhere');
+    refusalSaid = true;
+  };
+
   const hold = (sentAt: number): void => {
+    refusalSaid = false;
     endsAt = sentAt + termMs;
     clearTimeout(expiry);
     expiry = setTimeout(lose, Math.max(0, endsAt - now()));
@@ -142,20 +174,37 @@ export function createLeadership({
     for (const wake of waiting) wake(lead);
   };
 
-  const renew = async (): Promise<void> => {
+  /** Whether the database answered: a refusal is an answer. */
+  const renew = async (): Promise<boolean> => {
     const sentAt = now();
     try {
-      if (await store.take(beating())) hold(sentAt);
-      else lose();
+      if (await withinDeadline(store.take(beating()), tryWithinMs, stopping.signal)) hold(sentAt);
+      else refused();
+      return true;
     } catch (error) {
-      logger.warn('jobs.lease_renew_failed', { err: error });
+      if (!(error instanceof Stopped)) logger.warn('jobs.lease_renew_failed', { err: error });
+      return false;
+    }
+  };
+
+  const sayIfLongWithout = (): void => {
+    const at = now();
+    if (leading() || at - triedAt > frozenAfterMs) {
+      ledAt = at;
+      saidAt = Number.NEGATIVE_INFINITY;
+    }
+    triedAt = at;
+    if (at - ledAt >= notLeadingAfterMs && at - saidAt >= notLeadingAfterMs) {
+      saidAt = at;
+      logger.error('jobs.not_leading', { forMs: at - ledAt });
     }
   };
 
   const tick = (): void => {
-    renewing = renew().then(() => {
-      if (stopped) return;
-      renewal = setTimeout(tick, renewEveryMs);
+    renewing = renew().then((answered) => {
+      if (stopping.signal.aborted) return;
+      sayIfLongWithout();
+      renewal = setTimeout(tick, answered ? renewEveryMs : retryAfterMs);
       renewal.unref();
     });
   };
@@ -204,13 +253,13 @@ export function createLeadership({
       };
     },
     async stop() {
-      stopped = true;
+      stopping.abort();
       clearTimeout(renewal);
       await renewing;
       clearTimeout(expiry);
       lead = undefined;
       try {
-        await store.release();
+        await withinDeadline(store.release(), tryWithinMs, undefined);
       } catch (error) {
         logger.warn('jobs.lease_release_failed', { err: error });
       }

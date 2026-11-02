@@ -143,11 +143,12 @@ export interface Booted {
 /**
  * Stops the process once, however many signals arrive, then exits. The listeners
  * stay on: without one, Node's default for a second SIGTERM would end the
- * process at once, before the counts are written. `jobs` has no server.
+ * process at once, before the counts are written. `jobs` has no server, and a
+ * process stopped while it starts has none yet.
  */
 export function onStopSignals(
   { host, logger, database }: Booted,
-  server: FastifyInstance | undefined,
+  server: () => FastifyInstance | undefined,
   background: { stop(): Promise<void> },
   recorder: SecurityRecorder,
 ): void {
@@ -167,7 +168,7 @@ export function onStopSignals(
       // Requests are still answered while the server stops (return503OnClosing is
       // off), so the pool closes only once the last of them, and the anchor
       // check and the sweep, have finished with it.
-      await Promise.all([server?.close(), background.stop()]);
+      await Promise.all([server()?.close(), background.stop()]);
       // After the last request, so none of its events is left behind.
       await recorder.flush(stoppingAt + RECORDER_DONE_BY_MS);
       await database.destroy();
@@ -305,6 +306,8 @@ export function leadershipOf({ config, logger, database }: Booted): Leadership |
       release: () => releaseJobLease(database, holder),
     },
     logger,
+    // As the anchor check's own stale limit: what a chain may go unchecked before that is the alarm.
+    notLeadingAfterMs: config.audit.anchorSeconds * 3 * 1000,
   });
 }
 
