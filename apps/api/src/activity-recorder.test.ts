@@ -195,7 +195,7 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
       expect.arrayContaining([
         expect.objectContaining({
           orgId: ORG,
-          actor: { type: 'agent', id: AGENT_ID },
+          actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId },
           route: '/v1/agent',
           status: 200,
         }),
@@ -244,7 +244,7 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
     expect(rows).toEqual([
       expect.objectContaining({
         orgId: ORG,
-        actor: { type: 'agent', id: AGENT_ID },
+        actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId },
         route: '/v1/spend-requests',
         status: 409,
         reason: 'ORG_FROZEN',
@@ -412,7 +412,7 @@ describe('the clues the recorder writes (L4)', () => {
     await vi.waitFor(() => {
       expect(rows).toEqual([
         expect.objectContaining({
-          actor: { type: 'agent', id: AGENT_ID },
+          actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId },
           client: { ip: '94.200.1.1', place: { country: 'AE', city: 'Abu Dhabi' }, timeZone: ORGANISATION_ZONE },
         }),
       ]);

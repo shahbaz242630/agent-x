@@ -29,6 +29,7 @@ let app: Database<MandateWorldTables & ActivityTables>;
 
 const ids = new SequentialIds(0xa15a_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000a15a0';
+const AGENT_KEY = '0199a0f0-0000-7000-8000-0000000a15a9';
 const EVER = { from: new Date('2000-01-01T00:00:00Z'), to: new Date('2100-01-01T00:00:00Z') };
 const recorder = createActivityRecorder({ ids });
 
@@ -87,7 +88,7 @@ describe('the organisation’s activity log (L5, decision 26)', () => {
     const w = await world();
     const other = await world();
     await requested(w, '2026-10-19T09:00:00.000Z');
-    await requested(w, '2026-10-19T10:00:00.000Z', { type: 'agent', id: w.agent });
+    await requested(w, '2026-10-19T10:00:00.000Z', { type: 'agent', id: w.agent, keyId: AGENT_KEY });
     await requested(other, '2026-10-19T11:00:00.000Z');
 
     const page = await pageOf(w.org);
@@ -96,10 +97,12 @@ describe('the organisation’s activity log (L5, decision 26)', () => {
       '2026-10-19T10:00:00.000Z',
       '2026-10-19T09:00:00.000Z',
     ]);
+    expect(page.rows[0]?.agentKeyId).toBe(AGENT_KEY);
     expect(page.rows[1]).toEqual({
       id: expect.any(String) as string,
       recordedAt: new Date('2026-10-19T09:00:00.000Z'),
       actor: { type: 'user', id: w.admin.userId },
+      agentKeyId: null,
       method: 'GET',
       route: '/v1/agents/:id',
       pathIds: [w.agent],
@@ -180,7 +183,7 @@ describe('the organisation’s activity log (L5, decision 26)', () => {
   it('gives one person’s or agent’s rows alone, and the range from its start up to its end', async () => {
     const w = await world();
     await requested(w, '2026-10-19T09:00:00.000Z');
-    await requested(w, '2026-10-19T10:00:00.000Z', { type: 'agent', id: w.agent });
+    await requested(w, '2026-10-19T10:00:00.000Z', { type: 'agent', id: w.agent, keyId: AGENT_KEY });
     await requested(w, '2026-10-19T11:00:00.000Z');
 
     const agents = await pageOf(w.org, { actor: { type: 'agent', id: w.agent } });
@@ -197,7 +200,7 @@ describe('the organisation’s activity log (L5, decision 26)', () => {
 
   it('refuses a page naming an agent that can’t be believed: INTEGRITY_FAILED, the organisation held', async () => {
     const w = await world();
-    await requested(w, '2026-10-19T09:00:00.000Z', { type: 'agent', id: w.agent });
+    await requested(w, '2026-10-19T09:00:00.000Z', { type: 'agent', id: w.agent, keyId: AGENT_KEY });
     await withTenant(app, w.org, (tx) =>
       tx
         .updateTable('agents.agents')

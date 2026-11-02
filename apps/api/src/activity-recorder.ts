@@ -143,7 +143,7 @@ function rowFor(
       ...facts,
       client: cluesOf(request, reading, 'agent'),
       orgId: agent.orgId,
-      actor: { type: 'agent', id: agent.agentId },
+      actor: { type: 'agent', id: agent.agentId, keyId: agent.keyId },
     });
   }
   if (person === null) return undefined;

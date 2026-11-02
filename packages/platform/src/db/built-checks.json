@@ -12,6 +12,7 @@
   {"table":"access.person_requests","name":"person_requests_time_zone_from_check","expression":"(time_zone_from = ANY (ARRAY['browser'::text, 'organisation'::text]))"},
   {"table":"access.person_requests","name":"time_zone_with_its_source","expression":"((time_zone IS NULL) = (time_zone_from IS NULL))"},
   {"table":"access.requests","name":"city_with_its_country","expression":"((city IS NULL) OR (country IS NOT NULL))"},
+  {"table":"access.requests","name":"key_on_an_agents_row_alone","expression":"((agent_key_id IS NULL) OR (actor_type = 'agent'::text))"},
   {"table":"access.requests","name":"requests_actor_type_check","expression":"(actor_type = ANY (ARRAY['user'::text, 'agent'::text]))"},
   {"table":"access.requests","name":"requests_city_check","expression":"((char_length(city) >= 1) AND (char_length(city) <= 120))"},
   {"table":"access.requests","name":"requests_country_check","expression":"(country ~ '^[A-Z]{2}$'::text)"},

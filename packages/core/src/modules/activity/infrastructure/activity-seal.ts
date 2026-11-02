@@ -12,8 +12,10 @@
 // - The digest: SHA-256 over one line a row, by ID, each the JSON array of
 //   its ID, its time to the microsecond in UTC (as text, so a tampered
 //   microsecond shows), its actor, method, route, path IDs, status, reason,
-//   correlation ID and duration, then a newline. The organisation is the
-//   chain's own. The client's IP address, place and time zone are outside
+//   correlation ID and duration, then, on a row that names one, its agent's
+//   key (0070), then a newline. A row with none reads as it always did, so
+//   every seal made before 0070 still holds, on the same form. The organisation
+//   is the chain's own. The client's IP address, place and time zone are outside
 //   it (ADR-011 §7): clues a lawful erasure may blank, the seal standing.
 //   A day with no rows digests the empty text: a quiet day is sealed too, so
 //   a day emptied after shows.
@@ -118,6 +120,7 @@ const sealedRows = (tx: SealTx, orgId: string, day: string, after: string | unde
       'reason',
       'correlation_id',
       'duration_ms',
+      'agent_key_id',
     ])
     .where('org_id', '=', orgId)
     .where(sql<boolean>`id >= ${from}::uuid and id < ${to}::uuid`)
@@ -150,6 +153,7 @@ const lineOf = (row: SealedRow): string =>
     row.reason,
     row.correlation_id,
     row.duration_ms,
+    ...(row.agent_key_id === null ? [] : [row.agent_key_id]),
   ])}\n`;
 
 /**

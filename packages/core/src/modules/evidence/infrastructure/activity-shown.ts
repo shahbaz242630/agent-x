@@ -91,6 +91,7 @@ export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, Actor
     recordedAt: row.recordedAt.toISOString(),
     localTime: timeZone === undefined ? null : localTimeOf(row.recordedAt, timeZone.name),
     actor: { ...row.actor, ...nameOf(names, row.actor) },
+    agentKeyId: row.agentKeyId,
     method: row.method,
     route: row.route,
     pathIds: [...row.pathIds],
