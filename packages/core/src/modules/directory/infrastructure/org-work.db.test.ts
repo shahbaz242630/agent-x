@@ -159,6 +159,15 @@ describe('a deferred trigger with WHEN', () => {
     expect(marks.hand_off?.due_at.getTime()).toBe(start?.now.getTime());
   });
 
+  it('the backup role reads the marks, as it reads every table it must copy', async () => {
+    const one = await connected();
+    await write(one, HAND_OFF);
+    const backup = await connected('backup');
+    expect(await backup.query('select job from directory.org_work where org_id = $1', [org])).toEqual([
+      { job: 'hand_off' },
+    ]);
+  });
+
   it('runs with the rights of who wrote the row: refused marking, the whole write is refused and nothing kept', async () => {
     // The backup role may write the test's table, and has no right on the marks. Nothing but the mark stops it.
     const other = await connected('backup');
@@ -271,13 +280,16 @@ describe('no mark is ever lost', () => {
     expect(after?.due_at).toEqual(made);
   });
 
-  it('settling only touches its own job and its own organisation', async () => {
+  it('settling only touches its own job and its own organisation, to take it away or to move it', async () => {
     const marks = await aMark();
+    const made = (await marksOf())[job]?.due_at;
     expect(await settleOrgWork(app, { orgId: org, job: 'payment_check', marks }, null)).toBe(false);
+    expect(await settleOrgWork(app, { orgId: org, job: 'payment_check', marks }, anHourOn())).toBe(false);
     const other = '0199a0f0-0000-7000-8000-ffffffffffff';
     await admin().query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [other]);
     expect(await settleOrgWork(app, { orgId: other, job, marks }, null)).toBe(false);
-    expect((await marksOf())[job]?.marks).toBe(marks);
+    expect(await settleOrgWork(app, { orgId: other, job, marks }, anHourOn())).toBe(false);
+    expect((await marksOf())[job]).toEqual({ marks, due_at: made });
   });
 
   it('a mark deleted and made again never reads as the one read before: marks starts from the clock', async () => {
