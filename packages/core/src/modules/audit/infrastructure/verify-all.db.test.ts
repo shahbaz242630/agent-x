@@ -56,7 +56,7 @@ const KEYS = {
   fields: [{ column: 'label', type: 'text' }],
 } as const satisfies SignedStateTable;
 
-/** A stand-in for a table whose rows only grow (spend requests, Phase 2 D1): checked in its LIVE rows alone. */
+/** A stand-in for a table whose rows only grow (spend requests, Phase 2 D1): checked in its LIVE rows and its newest. */
 const REQUESTS = {
   table: 'probe.requests',
   subject: 'spend_request',
@@ -433,57 +433,118 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     }
   });
 
-  it('checks a growing table in its live rows alone, so its ended ones never count to the limit', async () => {
+  /** Runs `work` as the database's owner on the requests, inside the organisation. */
+  const onRequests = async (work: (requests: OwnerTamper) => Promise<unknown>): Promise<void> => {
+    const requests = await tamperAsOwner(database, REQUESTS, org);
+    try {
+      await work(requests);
+    } finally {
+      await requests.end();
+    }
+  };
+
+  it('checks a growing table in its newest rows up to the limit and every live one, so its older ended ones never count (4D2e Stage F)', async () => {
+    await newRequest('ENDED');
     await newRequest('LIVE');
     await newRequest('ENDED');
+
+    // The newest two, the live one among them read once; the oldest, ended, is the history batches'.
+    expect(await verifyAll([REQUESTS], 2)).toEqual({ outcome: 'verified', objects: 2 });
+    expect(await verifyAll([REQUESTS], 3)).toEqual({ outcome: 'verified', objects: 3 });
+  });
+
+  it('checks every live row older than the newest, however many, a page of the limit at a time: never too_many', async () => {
+    for (let made = 0; made < 3; made += 1) await newRequest('LIVE');
     await newRequest('ENDED');
+    await newRequest('ENDED');
+
+    expect(await verifyAll([REQUESTS], 2)).toEqual({ outcome: 'verified', objects: 5 });
+    expect(await verifyAll([REQUESTS], 1)).toEqual({ outcome: 'verified', objects: 4 });
+  });
+
+  it('names what it finds in ID order, the older live rows before the newest, across pages', async () => {
+    const first = await newRequest('ENDED');
+    await newRequest('LIVE');
+    const third = await newRequest('ENDED');
+    await newRequest('ENDED');
+    const newest = await newRequest('ENDED');
+    await onRequests(async (requests) => {
+      // Moved back to live, so listed: one on the first page of the older live rows, one on the second.
+      await requests.setColumn(first, 'status', 'LIVE');
+      await requests.setColumn(third, 'status', 'LIVE');
+      await requests.setColumn(newest, 'status', 'GONE');
+    });
+
+    expect(await verifyAll([REQUESTS], 2)).toEqual({
+      outcome: 'tampered',
+      findings: [
+        finding('spend_request', first, 'seal'),
+        finding('spend_request', third, 'seal'),
+        finding('spend_request', newest, 'seal'),
+      ],
+    });
+  });
+
+  it('names an ended row among the newest changed past the app, whatever its status', async () => {
+    const ended = await newRequest('ENDED');
+    await onRequests((requests) => requests.setColumn(ended, 'status', 'GONE'));
+
+    expect(await verifyAll([REQUESTS])).toEqual({
+      outcome: 'tampered',
+      findings: [finding('spend_request', ended, 'seal')],
+    });
+  });
+
+  it('names an older ended row moved back to a live status, since it is then listed', async () => {
+    const ended = await newRequest('ENDED');
+    await newRequest('ENDED');
+    await onRequests((requests) => requests.setColumn(ended, 'status', 'LIVE'));
+
+    expect(await verifyAll([REQUESTS], 1)).toEqual({
+      outcome: 'tampered',
+      findings: [finding('spend_request', ended, 'seal')],
+    });
+  });
+
+  it('leaves an older ended row to the history batches and where it is read again: changed while ended, not judged here', async () => {
+    const ended = await newRequest('ENDED');
+    await newRequest('ENDED');
+    await onRequests((requests) => requests.setColumn(ended, 'status', 'GONE'));
+
+    expect(await verifyAll([REQUESTS], 1)).toEqual({ outcome: 'verified', objects: 1 });
+    const read = await withTenant(app, org, (tx) =>
+      states.verifiedState(tx, REQUESTS, { orgId: org, id: ended }, 'share'),
+    );
+    expect(read).toEqual({ outcome: 'tampered', sign: 'seal' });
+  });
+
+  it('leaves an older live row moved to an end, or deleted, to the clearing’s other checks: not judged here (Phase 2 D1b)', async () => {
+    const moved = await newRequest('LIVE');
+    const deleted = await newRequest('LIVE');
+    await newRequest('ENDED');
+    await onRequests(async (requests) => {
+      await requests.setColumn(moved, 'status', 'ENDED');
+      await requests.deleteRow(deleted);
+    });
 
     expect(await verifyAll([REQUESTS], 1)).toEqual({ outcome: 'verified', objects: 1 });
   });
 
-  it('names an ended row moved back to a live status, since it is then listed', async () => {
-    const ended = await newRequest('ENDED');
-    const requests = await tamperAsOwner(database, REQUESTS, org);
-    try {
-      await requests.setColumn(ended, 'status', 'LIVE');
+  it('reads the older live rows only past the newest: no more statements for a growing table that fits the limit', async () => {
+    const counted = () =>
+      withTenant(app, org, (tx) => statementsSent(tx, (each) => states.verifyAll(each, org, [REQUESTS], 2)));
+    await newRequest('ENDED');
+    const one = await counted();
+    await newRequest('ENDED');
+    const full = await counted();
+    await newRequest('LIVE');
+    const past = await counted();
 
-      expect(await verifyAll([REQUESTS])).toEqual({
-        outcome: 'tampered',
-        findings: [finding('spend_request', ended, 'seal')],
-      });
-    } finally {
-      await requests.end();
-    }
-  });
-
-  it('leaves an ended row to be verified where it is read again: changed while ended, it is not judged here', async () => {
-    const ended = await newRequest('ENDED');
-    const requests = await tamperAsOwner(database, REQUESTS, org);
-    try {
-      await requests.setColumn(ended, 'status', 'GONE');
-
-      expect(await verifyAll([REQUESTS])).toEqual({ outcome: 'verified', objects: 0 });
-      const read = await withTenant(app, org, (tx) =>
-        states.verifiedState(tx, REQUESTS, { orgId: org, id: ended }, 'share'),
-      );
-      expect(read).toEqual({ outcome: 'tampered', sign: 'seal' });
-    } finally {
-      await requests.end();
-    }
-  });
-
-  it('leaves a live row moved to an end, or deleted, to the clearing’s other checks: not judged here (Phase 2 D1b)', async () => {
-    const moved = await newRequest('LIVE');
-    const deleted = await newRequest('LIVE');
-    const requests = await tamperAsOwner(database, REQUESTS, org);
-    try {
-      await requests.setColumn(moved, 'status', 'ENDED');
-      await requests.deleteRow(deleted);
-
-      expect(await verifyAll([REQUESTS])).toEqual({ outcome: 'verified', objects: 0 });
-    } finally {
-      await requests.end();
-    }
+    expect(one.result).toEqual({ outcome: 'verified', objects: 1 });
+    expect(full.result).toEqual({ outcome: 'verified', objects: 2 });
+    expect(past.result).toEqual({ outcome: 'verified', objects: 2 });
+    expect(full.sent).toBe(one.sent);
+    expect(past.sent).toBeGreaterThan(full.sent);
   });
 
   it("refuses the integrity hold's own subject type, whose state has no row", async () => {
