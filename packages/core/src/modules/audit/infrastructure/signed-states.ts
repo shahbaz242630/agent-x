@@ -1563,7 +1563,7 @@ export function createSignedStates({
     if (oldestInWindow !== undefined && listed.length > window) {
       let after: string | null = null;
       for (let more = true; more;) {
-        const page = await signedRowIds(tx, table, orgId, window, after, live);
+        const page: readonly string[] = await signedRowIds(tx, table, orgId, window, after, live);
         // Lower-case UUID text sorts as Postgres sorts the uuids: those from the window on are judged with it.
         const before = page.slice(0, window).filter((id) => id < oldestInWindow);
         findings.push(...(await judged(tx, orgId, table, before)));
