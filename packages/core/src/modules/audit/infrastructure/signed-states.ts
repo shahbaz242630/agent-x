@@ -1617,6 +1617,7 @@ export function createSignedStates({
     let objects = 0;
     let after: string | null = null;
     do {
+      // Typed here: `after` is set from it, a loop TypeScript can't infer through.
       const listed: { readonly ids: readonly string[]; readonly next: string | null } = await objectIdsOf(
         tx,
         orgId,
