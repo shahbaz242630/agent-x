@@ -238,8 +238,10 @@ describe('the limits inside COMMIT, a mark held by another session', () => {
     await write(one, HAND_OFF);
     const committing = one.query('commit');
     await waitUntilQueued(admin(), 1);
+    // Heard before the end is sent: the commit can fail before that call answers, and must not go unheard.
+    const failed = expect(committing).rejects.toBeDefined();
     await admin().query('select pg_catalog.pg_terminate_backend($1)', [one.pid]);
-    await expect(committing).rejects.toBeDefined();
+    await failed;
     await holder.query('commit');
     expect(await admin().query('select 1 from audit.marked_rows where org_id = $1', [org])).toEqual([]);
     expect((await marksOf()).hand_off?.marks).toBe(before);
