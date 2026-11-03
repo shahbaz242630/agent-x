@@ -70,7 +70,8 @@ import {
   RATE_LIMIT_HEADERS,
   registerRateLimit,
 } from './rate-limit.ts';
-import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-log.ts';
+import type { LogSample } from './log-sample.ts';
+import { createRequestLines, registerRequestMinutes, REQUEST_FAILED, RequestLog } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
 import { registerSignIn } from './sign-in.ts';
@@ -127,6 +128,8 @@ export interface ServerOptions {
   readonly logger: Logger;
   readonly ids: IdGenerator;
   readonly healthChecks: readonly HealthCheck[];
+  /** Which requests' lines of success are kept (log-sample.ts); all when not given. */
+  readonly logSample?: LogSample | undefined;
   /** The console's sign-in (sign-in.ts), and how long its sessions may live; off when not given. */
   readonly signIn?:
     | {
@@ -262,6 +265,7 @@ const ERROR_HEADERS: ReadonlySet<string> = new Set([
 
 export async function buildServer(options: ServerOptions): Promise<FastifyInstance> {
   const { config, logger, ids } = options;
+  const requestLines = createRequestLines(logger, options.logSample);
   // SEC-AV-07: only the listed proxies' X-Forwarded-For is believed, for `request.ip` and the
   // rate limit alike. Fastify 5.12 turned off hop counts, which a client reaching the server
   // directly could fake.
@@ -308,12 +312,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
       answer = limited;
     }
     sendError(answer, request, reply);
-    logCompleted(logger, request, reply);
+    requestLines.completed(request, reply);
   };
 
   const app = Fastify({
     loggerInstance: frameworkLogger(logger, config.log.level),
-    logController: new RequestLog(logger),
+    logController: new RequestLog(requestLines),
     genReqId: (request) => correlationIdFrom(request.headers[CORRELATION_HEADER], ids),
     // So `request.ip` is the client's too, for the security events Phase 1 records.
     trustProxy: trust,
@@ -346,6 +350,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // First, so no route escapes it.
   await registerContract(app);
   await registerRateLimit(app, config.http.rateLimitPerMinute, trust);
+  registerRequestMinutes(app, requestLines);
 
   app.addHook('onRequest', async (request, reply) => {
     void reply.headers(SECURITY_HEADERS).header(CORRELATION_HEADER, request.id);
@@ -359,7 +364,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
       finished = true;
     });
     reply.raw.once('close', () => {
-      if (!finished) logAborted(logger, request);
+      if (!finished) requestLines.aborted(request);
     });
   });
   // Every request is counted, 404s and refusals included, before anything else can refuse it.

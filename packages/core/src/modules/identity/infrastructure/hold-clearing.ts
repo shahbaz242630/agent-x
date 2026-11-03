@@ -14,8 +14,11 @@
 //    authority object of the organisation verified against the log, in the
 //    lock order (ADR-006 §6: the organisation, then its invitations and
 //    memberships), so a hold is never cleared over a record still tampered
-//    with (a table whose rows only grow, spend requests, in the rows that can
-//    still act, so clearing stays bounded however long the history, and the
+//    with (every object of a table that doesn't grow, 10,000 a page, so no
+//    count stops a clearing, only slows it: past 8,000 in one table the line
+//    `identity.records_filling` says so, partner S170; a table whose rows only grow, spend requests and payments, in the
+//    rows that can still act and its newest 10,000, so no length of history
+//    stops a clearing (4D2e Stage F, decision 5), and the
 //    record the hold names, whatever its status, though one with no row and no
 //    history here has nothing to repair (4D2e D5; the line
 //    `integrity_hold.named_record_never_signed` says so); the whole history, ended rows
@@ -63,8 +66,17 @@ export const CLEAR_OPERATION = 'integrity-hold.clear';
 /** Clearing, once stepped up. */
 export const CLEAR_CONFIRM_OPERATION = 'integrity-hold.clear.confirm';
 
-/** The most authority objects of one table the check before clearing reads (verifyAll's limit), unless given. */
-const OBJECTS_CHECKED = 10_000;
+/**
+ * verifyAll's limit, unless given: the objects of a table that doesn't grow the check before clearing reads a page at
+ * a time, and the newest rows of a growing one it reads beside its live ones, its older ones left to the history batches.
+ */
+export const OBJECTS_CHECKED = 10_000;
+
+/**
+ * Past this many objects in one table that doesn't grow, clearing warns (`identity.records_filling`), unless given:
+ * four-fifths of a page, so the alert watching the line comes before a clearing reads a second page and slows.
+ */
+export const RECORDS_FILLING = 8000;
 
 /** Who is clearing: the signed-in admin, in the organisation the access hook verified, and their session. */
 export interface ClearingAdmin {
@@ -143,6 +155,7 @@ export function createHoldClearings<Theirs extends object = object>({
   authorityTables,
   namedRecordChecks = {},
   objectsChecked = OBJECTS_CHECKED,
+  recordsFilling = RECORDS_FILLING,
 }: {
   /** Both: every table the clearing reads, and those `namedRecordChecks` read too. */
   readonly database: Kysely<Tables> & Kysely<Tables & Theirs>;
@@ -154,8 +167,10 @@ export function createHoldClearings<Theirs extends object = object>({
   readonly authorityTables: readonly CheckedTable[];
   /** By the subject a hold names: what else must be whole before it clears. */
   readonly namedRecordChecks?: Readonly<Record<string, NamedRecordCheck<Theirs>>>;
-  /** The most objects of one table checked before clearing; past it, the clearing fails rather than judge part. */
+  /** verifyAll's limit (OBJECTS_CHECKED): a table that doesn't grow is read a page of it at a time. */
   readonly objectsChecked?: number;
+  /** Past this many objects in a table that doesn't grow, the clearing warns (RECORDS_FILLING). */
+  readonly recordsFilling?: number;
 }): HoldClearings {
   if (authorityTables.length === 0) throw new RangeError('Clearing checks every authority table first');
   const trail = createAuditTrail({ keys, ids });
@@ -276,9 +291,16 @@ export function createHoldClearings<Theirs extends object = object>({
       let neverSigned: NeverSigned | undefined;
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, admin.sessionId);
-        const whole = await states.verifyAll(tx, admin.orgId, authorityTables, objectsChecked);
+        const whole = await states.verifyAll(tx, admin.orgId, authorityTables, objectsChecked, {
+          counted: (records, held) => {
+            if (held > recordsFilling) {
+              logger
+                .child({ correlationId, orgId: admin.orgId.toLowerCase() })
+                .warn('identity.records_filling', { records, held, during: 'hold_clearing' });
+            }
+          },
+        });
         if (whole.outcome === 'tampered') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
-        if (whole.outcome === 'too_many') throw new Error(`more ${whole.subjectType} records than clearing checks`);
         // The chain itself, whole: the latest signed events verified above say nothing of one deleted before them.
         const chain = await trail.verify(tx, admin.orgId, undefined);
         if (!chain.ok) {

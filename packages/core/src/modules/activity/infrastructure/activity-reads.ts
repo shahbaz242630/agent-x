@@ -53,6 +53,8 @@ export interface ActivityRow {
   readonly id: string;
   readonly recordedAt: Date;
   readonly actor: ActivityActor;
+  /** The key an agent's request came with; null on a person's row, and on an agent's written before 0070. */
+  readonly agentKeyId: string | null;
   readonly method: string;
   readonly route: string;
   readonly pathIds: readonly string[];
@@ -103,6 +105,7 @@ export async function activityPage(
     id: row.id,
     recordedAt: row.recorded_at,
     actor: { type: oneOf(ACTIVITY_ACTOR_TYPES, row.actor_type, 'an actor type'), id: row.actor_id },
+    agentKeyId: row.agent_key_id,
     method: row.method,
     route: row.route,
     pathIds: row.path_ids,

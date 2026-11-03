@@ -11,6 +11,7 @@ const ROW: ActivityRow = {
   id: '0199a0f0-0000-7000-8000-0000000a15a1',
   recordedAt: new Date('2026-10-19T13:39:12.123Z'),
   actor: { type: 'user', id: '0199a0f0-0000-7000-8000-000000000011' },
+  agentKeyId: null,
   method: 'GET',
   route: '/v1/members',
   pathIds: [],

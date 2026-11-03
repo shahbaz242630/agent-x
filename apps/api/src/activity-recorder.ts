@@ -143,7 +143,7 @@ function rowFor(
       ...facts,
       client: cluesOf(request, reading, 'agent'),
       orgId: agent.orgId,
-      actor: { type: 'agent', id: agent.agentId },
+      actor: { type: 'agent', id: agent.agentId, keyId: agent.keyId },
     });
   }
   if (person === null) return undefined;
@@ -180,6 +180,10 @@ export function registerActivityLog(
         route: request.routeOptions.url,
         status: reply.statusCode,
         malformed: error instanceof RangeError,
+        // Who made it: its request line may have been sampled away. Public IDs, never a key itself.
+        agentId: request.agent?.agentId,
+        agentKeyId: request.agent?.keyId,
+        userId: request.person?.userId,
       });
     });
     writing.add(written);

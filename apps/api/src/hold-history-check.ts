@@ -1,7 +1,8 @@
 // The whole history checked while an integrity hold stands (ADR-012 §2;
 // Phase 2 D1c, partner decision 7): the API's job, on a timer of its own.
-// Clearing a hold checks a growing table (a spend request's) in the rows that
-// can still act, so it stays bounded however long the history; before the
+// Clearing a hold checks a growing table (a spend request's, a payment's) in
+// the rows that can still act and its newest 10,000 (4D2e Stage F, decision
+// 5), so no length of history stops it; before the
 // admin's confirm is let through, this job checks every object of each such
 // table, ended ones and ones the log holds but whose row is gone included, a
 // batch at a time, each batch in a transaction of its own, and records that
@@ -13,7 +14,7 @@
 // Where it has got to is kept here, in the process, never in the database an
 // owner could rewrite: a restart, a newer investigation, or a batch finding a
 // record tampered with starts it again from the beginning. A run checks at
-// most BATCHES_A_RUN batches an organisation, so an organisation with a long
+// most HOLD_HISTORY_BATCHES_A_RUN batches an organisation, so an organisation with a long
 // history can't keep the others waiting.
 //
 // A run never throws: each failure is logged, naming the organisation, and
@@ -30,13 +31,13 @@ import type { UseCaseTables } from './use-case-work.ts';
 export const HOLD_HISTORY_EVERY_MS = 30_000;
 
 /** How many objects one batch checks, in one transaction. */
-const BATCH = 500;
+export const HOLD_HISTORY_BATCH = 500;
 
 /** How many batches one run checks an organisation: about 10,000 objects a run. */
-const BATCHES_A_RUN = 20;
+export const HOLD_HISTORY_BATCHES_A_RUN = 20;
 
 export interface HoldHistoryCheck {
-  /** Checks on each held organisation's history, up to BATCHES_A_RUN batches each, until the signal is aborted. Never throws. */
+  /** Checks on each held organisation's history, up to HOLD_HISTORY_BATCHES_A_RUN batches each, until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
@@ -55,8 +56,8 @@ export function createHoldHistoryCheck({
   ids,
   logger,
   tables,
-  batch = BATCH,
-  batchesARun = BATCHES_A_RUN,
+  batch = HOLD_HISTORY_BATCH,
+  batchesARun = HOLD_HISTORY_BATCHES_A_RUN,
 }: {
   /** The organisations to look in: the directory's list, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
@@ -66,7 +67,7 @@ export function createHoldHistoryCheck({
   readonly logger: Logger;
   /** Every authority table (the product's AUTHORITY_TABLES): the growing ones, with `liveStatuses`, are checked. */
   readonly tables: readonly CheckedTable[];
-  /** BATCH and BATCHES_A_RUN, but for the tests. */
+  /** HOLD_HISTORY_BATCH and HOLD_HISTORY_BATCHES_A_RUN, but for the tests. */
   readonly batch?: number;
   readonly batchesARun?: number;
 }): HoldHistoryCheck {

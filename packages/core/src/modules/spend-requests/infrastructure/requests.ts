@@ -7,8 +7,10 @@
 // Deciding, adding and moving them come with D2–D4r. Order claims are not
 // sealed: a scheduled reconciliation checks them (E1).
 import type { SignedStateTable } from '@agentx/platform/db';
+import { sql, type Transaction } from 'kysely';
 
-import { SPEND_REQUEST } from '../domain/spend-request.ts';
+import { SPEND_REQUEST, type SpendRequestStatus } from '../domain/spend-request.ts';
+import type { SpendRequestsTables } from './tables.ts';
 
 /** A spend request's row, as the signed state reads, records and moves it. */
 export const SPEND_REQUESTS = {
@@ -64,3 +66,20 @@ export const SPEND_REQUESTS = {
   readonly fixedAtCreation: readonly string[];
   readonly liveStatuses: readonly string[];
 };
+
+/**
+ * Now, if the organisation has a request in one of these statuses; no row if not. Not run: a statement for a caller's
+ * trip. Whether one stands alone, for choosing when to look: each is read through its signed state before it moves.
+ */
+export const requestDueNow = (
+  tx: Transaction<SpendRequestsTables>,
+  orgId: string,
+  statuses: readonly SpendRequestStatus[],
+) =>
+  tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- whether one stands alone, as above
+    .selectFrom(SPEND_REQUESTS.table)
+    .select(sql<Date>`pg_catalog.now()`.as('due'))
+    .where('org_id', '=', orgId)
+    .where('status', 'in', statuses)
+    .limit(1);

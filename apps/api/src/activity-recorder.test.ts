@@ -195,13 +195,25 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
       expect.arrayContaining([
         expect.objectContaining({
           orgId: ORG,
-          actor: { type: 'agent', id: AGENT_ID },
+          actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId },
           route: '/v1/agent',
           status: 200,
         }),
         expect.objectContaining({ route: '/v1/agent/mandate', status: 403, reason: 'INSUFFICIENT_SCOPE' }),
       ]),
     );
+  });
+
+  it('Stage F decision 2 keeps a sampled read’s key on its row, its request line gone', async () => {
+    const { app, rows, capture } = await recording({ logSample: { oneIn: 20, keeps: () => false } });
+    const read = await app.inject({ method: 'GET', url: '/v1/agent', headers: { authorization: `Bearer ${KEY}` } });
+    expect(read.statusCode).toBe(200);
+    await vi.waitFor(() => {
+      expect(rows).toEqual([
+        expect.objectContaining({ actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId }, status: 200 }),
+      ]);
+    });
+    expect(capture.lines().filter(({ event }) => event === 'http.request_completed')).toEqual([]);
   });
 
   it('writes an agent’s spend request refused while its organisation is frozen: the refusal kept, nothing made (SEC-AV-08)', async () => {
@@ -244,7 +256,7 @@ describe('the activity log’s recorder (L3, decision 26)', () => {
     expect(rows).toEqual([
       expect.objectContaining({
         orgId: ORG,
-        actor: { type: 'agent', id: AGENT_ID },
+        actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId },
         route: '/v1/spend-requests',
         status: 409,
         reason: 'ORG_FROZEN',
@@ -412,7 +424,7 @@ describe('the clues the recorder writes (L4)', () => {
     await vi.waitFor(() => {
       expect(rows).toEqual([
         expect.objectContaining({
-          actor: { type: 'agent', id: AGENT_ID },
+          actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ACCEPTED.keyId },
           client: { ip: '94.200.1.1', place: { country: 'AE', city: 'Abu Dhabi' }, timeZone: ORGANISATION_ZONE },
         }),
       ]);
@@ -446,6 +458,38 @@ describe('the clues the recorder writes (L4)', () => {
         expect.objectContaining({ client: expect.objectContaining({ ip: undefined, place: undefined }) as object }),
       ]);
     });
+  });
+
+  it('names who made a request whose row can’t be written, as its request line may have been sampled away', async () => {
+    const { app, capture } = await recording({ failing: true });
+    await app.inject(asMember(LOG_URL));
+
+    await vi.waitFor(() => {
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({ event: 'access_log.write_failed', userId: LIVE.userId }),
+      );
+    });
+    const [line] = capture.lines().filter(({ event }) => event === 'access_log.write_failed');
+    expect(line).not.toHaveProperty('agentId');
+    expect(line).not.toHaveProperty('agentKeyId');
+  });
+
+  it('names the agent and its key, never the key itself, when an agent’s row can’t be written', async () => {
+    const { app, capture } = await recording({ failing: true, logSample: { oneIn: 20, keeps: () => false } });
+    await app.inject({ method: 'GET', url: '/v1/agent', headers: { authorization: `Bearer ${KEY}` } });
+
+    await vi.waitFor(() => {
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({
+          event: 'access_log.write_failed',
+          agentId: AGENT_ID,
+          agentKeyId: KEY_ACCEPTED.keyId,
+        }),
+      );
+    });
+    const [line] = capture.lines().filter(({ event }) => event === 'access_log.write_failed');
+    expect(line).not.toHaveProperty('userId');
+    expect(JSON.stringify(capture.lines())).not.toContain(KEY);
   });
 
   it('logs a row whose place couldn’t be found as one that couldn’t be written', async () => {

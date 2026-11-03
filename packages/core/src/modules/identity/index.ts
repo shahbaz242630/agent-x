@@ -171,8 +171,10 @@ export {
   type ClearingAdmin,
   type ClearingWrite,
   createHoldClearings,
+  OBJECTS_CHECKED,
   type HoldClearings,
   type NamedRecordCheck,
+  RECORDS_FILLING,
 } from './infrastructure/hold-clearing.ts';
 export {
   activeContactsFor,

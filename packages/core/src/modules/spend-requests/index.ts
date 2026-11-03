@@ -100,5 +100,5 @@ export {
 } from './infrastructure/order-claims.ts';
 export { monthLockedAndTotalsWeighed, totalsWeighed } from './infrastructure/weighed-totals.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
-export { SPEND_REQUESTS } from './infrastructure/requests.ts';
+export { requestDueNow, SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

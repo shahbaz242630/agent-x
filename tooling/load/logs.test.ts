@@ -150,6 +150,23 @@ describe('the API’s log after a load run', () => {
     });
   });
 
+  it("Stage F reads a decision's timers only where its line kept them, one in the sample standing for all it says", () => {
+    const decided = (fields: object) =>
+      line({ event: 'spend_request.decided', orgId: 'o', decision: 'ALLOW', ...fields });
+    const summary = summariseLogs(
+      [
+        checked(1),
+        // Sampled away: says nothing of where its time went, so it is no 0 among the waits.
+        ...Array.from({ length: 50 }, () => decided({ durationMs: 5 })),
+        decided({ durationMs: 5, turnWaitMs: 1, trips: 10, sampleOf: 20 }),
+        decided({ durationMs: 500, turnWaitMs: 400, trips: 12 }),
+      ].join('\n'),
+    );
+    // 21 timed decisions: 20 at 1 ms, the slow one last, so the 95th is still among the fast (20th of 21).
+    expect(summary.steadyParts).toMatchObject({ turnWaitP95: 1, tripsP50: 10 });
+    expect(summary.decisions.count).toBe(52);
+  });
+
   it('times each neighbour apart with where its time went, none of it in the steady numbers or the allowed count', () => {
     const inOrg = (orgId: string, durationMs: number, poolWaitMs: number, turnWaitMs: number, trips: number) =>
       line({

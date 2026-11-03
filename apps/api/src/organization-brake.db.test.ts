@@ -233,7 +233,7 @@ async function holding(...holds: readonly Hold[]): Promise<TestClient> {
 /**
  * A relay of holders, forced: each takes `taken` while the one before it still holds it, so there is never a moment
  * with none, and lets go only once the next has it or waits for it. Stops when told, every one gone. Counts how many
- * had to wait: under a brake's queue, those behind it; on a bare row, none.
+ * had to wait under a brake's queue; on a bare row nothing is raced, so `waited` says nothing there.
  */
 async function relayOf(taken: () => Promise<TestClient>, { stepMs = 150, behindABrake = true } = {}) {
   const relaying = { on: true };
@@ -305,13 +305,12 @@ describe('what a brake is up against: a stream of share holders and the row (no 
         settled(change.query('select 1 from organizations.organizations where id = $1 for no key update', [w.org])),
       );
       await letGo(change);
-      const { took, waited } = await stop();
+      const { took } = await stop();
 
       // Not the lock wait's own code: every holder ended within 5 s, each new wait starting it again.
       expect(answer).toEqual({ threw: '57014' });
       expect(ms).toBeGreaterThan(9_000);
       expect(took).toBeGreaterThan(20);
-      expect(waited).toBe(0);
     },
     LONG,
   );

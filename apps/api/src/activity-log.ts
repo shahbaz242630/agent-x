@@ -156,6 +156,12 @@ const ACTIVITY_ROW = z
         shownFrom: z.enum(SHOWN_FROM).nullable().describe('Where the name was found, as on the audit log.'),
       })
       .describe('Who made the request.'),
+    agentKeyId: z
+      .uuid()
+      .nullable()
+      .describe(
+        'The key an agent’s request came with, by its ID; null for a person, and for a request before this was kept.',
+      ),
     method: z.string().describe('The request’s method, such as `GET`.'),
     route: z.string().describe('The route’s pattern, such as `/v1/agents/:id/suspend`: never the address as sent.'),
     pathIds: z.array(z.uuid()).describe('The IDs its path named, in order.'),

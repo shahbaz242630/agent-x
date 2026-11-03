@@ -46,6 +46,7 @@ import { CARRY_REST_EVERY_MS, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
+import { createOrgWorkRediscovery, ORG_WORK_REDISCOVERY_EVERY_MS } from './org-work.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
@@ -378,6 +379,13 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     }),
     // Each sealed day digested again and held to its seal, a few a run (Phase 3 L6c).
     job('activity_seal_check', createActivitySealCheck(organisationJob), ACTIVITY_SEAL_CHECK_EVERY_MS, LONG_MS),
+    // Every organisation's marks of work held to what its own rows say (4D2e D6).
+    job(
+      'org_work_rediscovery',
+      createOrgWorkRediscovery({ list, database, logger }),
+      ORG_WORK_REDISCOVERY_EVERY_MS,
+      LONG_MS,
+    ),
   ];
   return { jobs, handoff, paymentChecks, zoneSealing };
 }

@@ -104,6 +104,42 @@ describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () =>
     expect(await rowsOf(SHARED_ORG)).toHaveLength(1);
   });
 
+  it("Stage F decision 2 keeps the key an agent's request came with, and none on a person's", async () => {
+    const orgId = '0199a0f0-0000-7000-8000-00000000ac07';
+    const key = '0199a0f0-0000-7000-8000-00000000ac08';
+    await log.recordForOrganisation(
+      app,
+      forOrganisation({ orgId, actor: { type: 'agent', id: AGENT, keyId: key.toUpperCase() } }),
+    );
+    await log.recordForOrganisation(app, forOrganisation({ orgId }));
+    const rows = await rowsOf(orgId);
+    expect(rows.map(({ actor_type: type, agent_key_id: keyId }) => [type, keyId])).toEqual([
+      ['agent', key],
+      ['user', null],
+    ]);
+  });
+
+  it("Stage F decision 2 refuses an agent's row with a key that is no UUID, writing nothing", async () => {
+    const orgId = '0199a0f0-0000-7000-8000-00000000ac09';
+    await expect(
+      log.recordForOrganisation(
+        app,
+        forOrganisation({ orgId, actor: { type: 'agent', id: AGENT, keyId: 'axk_not-an-id' } }),
+      ),
+    ).rejects.toThrow(RangeError);
+    expect(await rowsOf(orgId)).toEqual([]);
+  });
+
+  it("Stage F decision 2 0070 refuses a key on a person's row, whatever writes it", async () => {
+    await expect(
+      database.as('admin').query(
+        `insert into access.requests (org_id, id, recorded_at, actor_type, actor_id, method, route, path_ids, status, correlation_id, duration_ms, agent_key_id)
+           values ($1, $2, now(), 'user', $3, 'GET', '/health', '{}', 200, $2, 1, $3)`,
+        [ORG, '0199a0f0-0000-7000-8000-00000000ac0a', PERSON],
+      ),
+    ).rejects.toThrow(/key_on_an_agents_row_alone/);
+  });
+
   it("cuts off an organisation's row slowed past the app, never waited on for ever (4D2d P4: limited with the organisation)", async () => {
     const owner = database.as('owner');
     await owner.query('create schema if not exists probe');
@@ -157,7 +193,7 @@ describe(`the activity log (L3, decision 26, Postgres ${server.version})`, () =>
       app,
       forOrganisation({
         orgId: OTHER_ORG,
-        actor: { type: 'agent', id: AGENT },
+        actor: { type: 'agent', id: AGENT, keyId: PERSON },
         status: 200,
         reason: undefined,
         client: { ip: '203.0.113.7', place: { country: 'US', city: undefined }, timeZone: undefined },

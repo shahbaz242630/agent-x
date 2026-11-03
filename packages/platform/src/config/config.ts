@@ -52,6 +52,8 @@ export interface Config {
     /** The most lines of one event written per minute; the rest are counted, not written. */
     readonly eventCapPerMinute: number;
   };
+  /** 4D2e Stage F: an answered request's line is kept 1 in this many; 1 keeps them all. Beside `log`, as the logger never reads it. */
+  readonly logSuccessSampleOneIn: number;
   /** The API's HTTP server (ADR-011 §4, §6). */
   readonly http: {
     /** The address it listens on. */
@@ -386,6 +388,7 @@ function readSettings(env: Env, location: LocationChecks) {
     release: setting(env, 'AGENTX_RELEASE'),
     logLevel: setting(env, 'AGENTX_LOG_LEVEL'),
     eventCap: setting(env, 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'),
+    logSuccessSampleOneIn: setting(env, 'AGENTX_LOG_SUCCESS_SAMPLE_ONE_IN'),
     host: setting(env, 'AGENTX_HTTP_HOST'),
     httpPort: setting(env, 'AGENTX_HTTP_PORT'),
     origin: setting(env, 'AGENTX_PUBLIC_ORIGIN'),
@@ -638,6 +641,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     role: checks.role.value,
     release: checks.release.value ?? LOCAL_RELEASE,
     log: Object.freeze({ level: checks.logLevel.value, eventCapPerMinute: checks.eventCap.value }),
+    logSuccessSampleOneIn: checks.logSuccessSampleOneIn.value,
     http: Object.freeze({
       host: checks.host.value,
       port: checks.httpPort.value,

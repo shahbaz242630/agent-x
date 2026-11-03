@@ -201,6 +201,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // processes holding it. Changed: never needed.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
     },
+    'directory.org_work': {
+      reason:
+        "Which organisation has work of which kind (0072, ADR-005 §6, 4D2e D6): an organisation's ID, a job's name and a time, filled by deferred triggers as the work's own row commits, because the question comes before any organisation is chosen. A row chooses when to look and nothing is believed from it: the job reads and acts inside withTenant. Stated trade: the app role can see which organisation has work of which kind and when",
+      columns: ['org_id', 'job', 'due_at', 'marks'],
+      // A row forged only causes a visit; one deleted is found again within the hour.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['due_at', 'marks'],
+    },
     'mandates.allowed_currencies': {
       reason:
         "The deployment's currencies (ADR-006 §1, ADR-010; Phase 2 B1): AED in the Pilot, the same for every organisation, which a mandate version's currency must be one of",

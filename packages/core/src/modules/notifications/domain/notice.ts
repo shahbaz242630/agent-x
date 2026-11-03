@@ -122,10 +122,15 @@ const MARKED_FAILED_KIND = 'payment_marked_failed';
 /**
  * The kinds that tell every admin a payment the bank left unclear (0065,
  * partner decisions 37b, 38), `aboutId` the transaction: the bank went back on its
- * word, rejected it without proof the money stayed, or left it unresolved past
- * a day.
+ * word, rejected it without proof the money stayed, left it unresolved past
+ * a day, or can't find one handed to it (0071, partner S170).
  */
-const PAYMENT_ALERT_KINDS = ['payment_contradicted', 'payment_unproven', 'payment_still_unknown'] as const;
+const PAYMENT_ALERT_KINDS = [
+  'payment_contradicted',
+  'payment_unproven',
+  'payment_still_unknown',
+  'payment_bank_lost',
+] as const;
 /**
  * The kinds that tell every admin an admin proposed marking a payment failed,
  * a second admin to confirm it, or withdrew that, or the bank's answer ended
