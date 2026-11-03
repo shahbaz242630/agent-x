@@ -167,6 +167,8 @@ afterAll(async () => {
 beforeEach(async () => {
   capture = new LogCapture();
   org = newId();
+  // Listed, as the app's organisations are: a finding meeting a hold on another record writes a row, whose key needs it (D5).
+  await database.as('admin').query('insert into directory.orgs (org_id) values ($1)', [org]);
   await inOrg(async (tx, states) => {
     await insertAgent(tx, states, org);
     await states.startIntegrityHold(tx, org, OPERATOR);

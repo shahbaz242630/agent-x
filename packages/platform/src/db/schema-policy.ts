@@ -193,6 +193,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // and one deleted would leave a key no request can be placed with.
       appMay: ['SELECT', 'INSERT'],
     },
+    'directory.holds_waiting': {
+      reason:
+        "Integrity holds that couldn't be recorded yet (0069, ADR-005 §6, 4D2e D5): an organisation's ID, the type and ID of the record found, and how the tampering showed, so a second process, or the same one after a restart, knows of one and names what clearing must check; each process's poll runs across organisations, before any is chosen. The hold itself is a signed state in that organisation's log. Stated trades: the app role can see which organisations have a hold waiting, and on which record's ID; and one foothold as the app role can hold every organisation, as a row forged really sets the hold. No payment passes because of a row, each hold set from one raises the integrity alarm, and each clear needs an investigation and a passkey",
+      columns: ['org_id', 'subject_type', 'object_id', 'reason'],
+      // Added when a hold can't be recorded, read, and deleted with the hold's own event. One deleted is seen by the
+      // processes holding it. Changed: never needed.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+    },
     'mandates.allowed_currencies': {
       reason:
         "The deployment's currencies (ADR-006 §1, ADR-010; Phase 2 B1): AED in the Pilot, the same for every organisation, which a mandate version's currency must be one of",

@@ -8,6 +8,14 @@
 // publishes each line on a diagnostics channel before writing it). On the way
 // out, pino hooks cap each event per minute (volume-guard.ts) and redact the
 // finished line again (redact.ts), for every logger made from this one.
+//
+// Every line says what work it belongs to, whichever logger writes it (4D2e
+// Stage F, level 4): a request's correlation ID or a job's run ID, carried by
+// AsyncLocalStorage (withLogContext). Added where our calls come in rather than
+// by pino's mixin, so the logger's own held-back counts, which belong to no
+// request, can't pick up whichever one happened to log next.
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import pino from 'pino';
 
 import { type Config, DEFAULT_LOG, type LogLevel } from '../config/index.ts';
@@ -38,6 +46,7 @@ const RESERVED = new Set([
   'release',
   'event',
   'correlationId',
+  'runId',
   'orgId',
   'actor',
   'module',
@@ -60,6 +69,7 @@ export type LogFields = Readonly<Record<string, unknown>> & {
   readonly release?: never;
   readonly event?: never;
   readonly correlationId?: never;
+  readonly runId?: never;
   readonly orgId?: never;
   readonly actor?: never;
   readonly module?: never;
@@ -75,6 +85,34 @@ export interface LogBindings {
   readonly module?: string;
 }
 const BINDING_NAMES = ['correlationId', 'orgId', 'actor', 'module'] as const;
+
+/** The work a stretch of code is doing: its lines say so, through any logger. */
+export interface WorkContext {
+  /** The request being answered. */
+  readonly correlationId?: string;
+  /** The run of a job on a timer (scheduleRuns). */
+  readonly runId?: string | undefined;
+}
+
+const workContexts = new AsyncLocalStorage<WorkContext>();
+
+/** Runs `work`, and all it goes on to do, with its lines saying `context`. */
+export const withLogContext = <T>(context: WorkContext, work: () => T): T => workContexts.run(context, work);
+
+/**
+ * Runs `listener` as no one's work. For what outlives the work that made it: a socket's events run in the context it
+ * was opened in, so a connection a request opened would report its loss, hours on, as that request's.
+ */
+export const asNoWork = <T>(listener: () => T): T => workContexts.exit(listener);
+
+/** The work under way, for a line that names it without claiming it: `api.crashed`'s `workAtCrash`. */
+export const workUnderWay = (): WorkContext | undefined => workContexts.getStore();
+
+/** What the work under way adds to a line. A correlation ID a child was given stands: a job names one for each organisation. */
+function contextOfLine(correlationBound: boolean): WorkContext | undefined {
+  const context = workContexts.getStore();
+  return correlationBound && context?.correlationId !== undefined ? { runId: context.runId } : context;
+}
 
 export type LogMethod = (event: EventName, fields?: LogFields) => void;
 /** Warnings and errors take only events with plain words (decision 29), so a new failure can't ship without them. */
@@ -148,21 +186,31 @@ function wordsAt(level: LogLevel, event: string): { says?: string } {
   return level === 'warn' || level === 'error' ? { says: saysFor(event) } : {};
 }
 
-function wrap(instance: pino.Logger, writeSuppressed: (includeCurrentMinute?: boolean) => void): Logger {
+function wrap(
+  instance: pino.Logger,
+  writeSuppressed: (includeCurrentMinute?: boolean) => void,
+  correlationBound = false,
+): Logger {
   const at =
     (level: LogLevel): LogMethod =>
     (event, fields = {}) => {
       const valid = EVENT_NAME.test(event) && !event.startsWith(LOGGER_EVENTS);
       const invalid = valid ? {} : { invalidEvent: redactJson(event) };
       const name = valid ? event : INVALID_EVENT;
-      instance[level]({ ...prepared(fields), ...invalid, ...wordsAt(level, name) }, name);
+      instance[level](
+        { ...contextOfLine(correlationBound), ...prepared(fields), ...invalid, ...wordsAt(level, name) },
+        name,
+      );
     };
   return {
     error: at('error'),
     warn: at('warn'),
     info: at('info'),
     debug: at('debug'),
-    child: (bindings) => wrap(instance.child(bindingsOf(bindings)), writeSuppressed),
+    child: (bindings) => {
+      const kept = bindingsOf(bindings);
+      return wrap(instance.child(kept), writeSuppressed, correlationBound || kept.correlationId !== undefined);
+    },
     flush: () => {
       writeSuppressed(true);
       instance.flush();

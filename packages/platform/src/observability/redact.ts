@@ -42,6 +42,7 @@ const OWN_FIELDS = new Set([
   'release',
   'event',
   'correlationId',
+  'runId',
   'orgId',
   'actor',
   'module',

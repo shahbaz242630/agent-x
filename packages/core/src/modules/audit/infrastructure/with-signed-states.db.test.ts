@@ -440,6 +440,26 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect(lines('audit.integrity_failed')).toHaveLength(3);
   });
 
+  it('a finding on a record that met a locked head leaves a row naming that record, not the organisation (D5)', async () => {
+    // Listed, as the app's organisations are: a row names only an organisation in the directory.
+    await attacker.query('insert into directory.orgs (org_id) values ($1)', [org]);
+    const id = await newAgent();
+    await flip(id);
+
+    await withHeadLocked('for share', async () => {
+      expect(await within(15_000, check(id))).toEqual({ outcome: 'tampered', sign: 'seal' });
+    });
+
+    expect(
+      await attacker.query('select subject_type, object_id, reason from directory.holds_waiting where org_id = $1', [
+        org,
+      ]),
+    ).toEqual([{ subject_type: 'agent', object_id: id, reason: 'seal' }]);
+    await holdOrganisation(app, org, services(), undefined);
+    expect(await attacker.query('select 1 from directory.holds_waiting where org_id = $1', [org])).toEqual([]);
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ reason: 'seal', foundOn: 'agent', objectId: id });
+  });
+
   it('a hold waiting and a new finding: the hold set names the new finding, not the one waiting', async () => {
     const first = await newAgent();
     const second = await newAgent();
@@ -645,6 +665,8 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
   });
 
   it('FX-RACE holdOrganisation and a request finding tampering at once: one HELD event, and neither waits on the other for ever', async () => {
+    // Listed, as the app's organisations are: whichever comes second names another record, so writes its row (D5).
+    await attacker.query('insert into directory.orgs (org_id) values ($1)', [org]);
     const id = await newAgent();
     await flip(id);
     let finding: Promise<unknown> | undefined;

@@ -32,9 +32,13 @@ export {
   type AgentKeyRecord,
   agentKeysOf,
   addAgentKey,
+  type IssuedAgentKey,
   bringKeyExpiryForward,
   keysIssuedSince,
+  keysOnceIssued,
+  MOST_KEYS_LISTED,
   oneKeyIssueAtATime,
+  roomForAKey,
   TooManyAgentKeys,
 } from './infrastructure/agent-keys.ts';
 export {
@@ -43,6 +47,7 @@ export {
   AGENTS,
   agentsAddedSince,
   agentsNamed,
+  type AgentRecord,
   type AgentShown,
   agentsPage,
   agentsShown,

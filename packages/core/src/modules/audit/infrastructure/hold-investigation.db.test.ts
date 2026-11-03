@@ -156,6 +156,8 @@ afterAll(async () => {
 beforeEach(async () => {
   capture = new LogCapture();
   org = newId();
+  // Listed, as the app's organisations are: a finding meeting a hold on another record writes a row, whose key needs it (D5).
+  await database.as('admin').query('insert into directory.orgs (org_id) values ($1)', [org]);
   // The organisation as a module creates one: its own row, then its hold, CLEAR, in one transaction.
   await inOrg(async (tx, states) => {
     await insertAgent(tx, states, org);

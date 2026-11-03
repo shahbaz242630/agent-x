@@ -43,6 +43,8 @@ function childEnv(database: TestDatabase): NodeJS.ProcessEnv {
 
 interface Line {
   event?: string;
+  correlationId?: string;
+  runId?: string;
   ports?: number[];
   configHash?: string;
   status?: number;
@@ -92,6 +94,27 @@ function lines(): Line[] {
     .filter((line) => line.startsWith('{'))
     .map((line) => JSON.parse(line) as Line);
 }
+
+/**
+ * Lines of the process itself once it listens, named one by one so a request's line can't pass as one: what it says
+ * of itself, its hold on the jobs' lease (on a timer of its own, so load could bring one here), the logger's sum.
+ */
+const PROCESS_LINES: ReadonlySet<string> = new Set([
+  'api.listening',
+  'api.notices',
+  'api.idp_events',
+  'api.contact_fill',
+  'api.factor_resets',
+  'api.handoff',
+  'api.payment_checks',
+  'api.background_downloads',
+  'jobs.lease_taken',
+  'jobs.lease_lost',
+  'jobs.lease_held_elsewhere',
+  'jobs.lease_renew_failed',
+  'jobs.not_leading',
+  'log.suppressed',
+]);
 
 describe(`the API process (Postgres ${server.version})`, () => {
   it('SEC-OPS-05 logs its config fingerprint, connects as the app role, records the start, then listens', async () => {
@@ -163,6 +186,30 @@ describe(`the API process (Postgres ${server.version})`, () => {
     });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: 'ORIGIN_REFUSED' } });
+  });
+
+  it("4D2e Stage F level 4: on real stdout, a /health, a refused POST with a body and the jobs' early runs each say which they are", async () => {
+    const seen = lines().length;
+    await fetch(`http://127.0.0.1:${port}/health`);
+    await fetch(`http://127.0.0.1:${port}/v1/spend-requests`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-key' },
+      body: JSON.stringify({ any: 'body' }),
+    });
+    await vi.waitFor(() => {
+      expect(lines().length).toBeGreaterThanOrEqual(seen + 2);
+    });
+    // Before it listens a process is starting up, which is neither.
+    const listening = lines().findIndex((line) => line.event === 'api.listening');
+    const unclaimed = lines()
+      .slice(listening)
+      .filter(
+        (line) =>
+          line.correlationId === undefined && line.runId === undefined && !PROCESS_LINES.has(String(line.event)),
+      );
+    expect(unclaimed.map((line) => line.event)).toEqual([]);
+    // The jobs' first runs have written by now, each under its own run's ID.
+    expect(lines().some((line) => line.runId !== undefined)).toBe(true);
   });
 
   it('SEC-DATA-01 writes only JSON lines to stdout, with no client address, query or database login in them', async () => {

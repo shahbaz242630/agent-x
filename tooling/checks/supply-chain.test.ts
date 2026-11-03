@@ -39,6 +39,7 @@ const REVIEWED_WORKSPACE_KEYS = [
   'enablePrePostScripts',
   'savePrefix',
   'pmOnFail',
+  'overrides',
 ];
 /** Keys allowed only to carry exceptions registered in supply-chain-exceptions.ts. */
 const EXCEPTION_KEYS: SupplyChainException['setting'][] = [
@@ -108,6 +109,10 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
       (key) => !REVIEWED_WORKSPACE_KEYS.includes(key) && !(EXCEPTION_KEYS as string[]).includes(key),
     );
     expect(unreviewed).toEqual([]);
+  });
+
+  it('overrides only the version each was reviewed for: an override can swap any package in the tree', () => {
+    expect(workspaceFile.overrides).toEqual({ minimatch: '11.0.3' });
   });
 
   it('waits at least 3 days before installing a new release, and fails rather than guess', () => {
