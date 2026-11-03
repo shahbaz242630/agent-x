@@ -22,7 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, onTestFi
 import { createHandoff, handOffDue, handoffDatabaseGate, handOffSweepDue, HEARTBEAT_STALE_MS } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { keys, type World } from './mandate-world.helper.test.ts';
+import { AED, keys, type World } from './mandate-world.helper.test.ts';
 import { createOrgWorkRediscovery, markedOrganisations, withOrgWork } from './org-work.ts';
 import { createPaymentChecks, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
@@ -54,7 +54,6 @@ const { ready } = handoffWorld({ app: () => app, clock: () => clock, ids, regist
 
 const admin = () => database.as('admin');
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
-const WEEK_MS = 7 * 24 * 3_600_000;
 
 async function marksOf(w: World): Promise<Record<string, { due_at: Date; marks: string }>> {
   const rows = await admin().query<{ job: string; due_at: Date; marks: string }>(
@@ -85,6 +84,7 @@ const marked = (job: 'hand_off' | 'hand_off_sweep', most?: number) =>
     nextDue: job === 'hand_off' ? handOffDue : handOffSweepDue,
     database: app,
     logger: testLogger(capture),
+    clock,
     ...(most === undefined ? {} : { most }),
   });
 
@@ -114,16 +114,31 @@ function switchedHandoff(
   return { job, handOffs, sweeps };
 }
 
-/** The payment checks as job-list.ts makes them. */
-function switchedChecks(w: World, rail: FakeRail = w.rail) {
-  const base = { job: 'payment_check', nextDue: paymentCheckDue, database: app, logger: testLogger(capture) } as const;
-  const checks = markedOrganisations(base);
-  const watches = markedOrganisations({ ...base, due: 'any' });
+/** The payment checks as job-list.ts makes them, `most` of their marks a run. */
+function switchedChecks({
+  rail,
+  most,
+  runBudgetMs,
+}: {
+  readonly rail: FakeRail;
+  readonly most?: number;
+  readonly runBudgetMs?: number;
+}) {
+  const checks = markedOrganisations({
+    job: 'payment_check',
+    nextDue: paymentCheckDue,
+    database: app,
+    logger: testLogger(capture),
+    clock,
+    ...(most === undefined ? {} : { most }),
+  });
   const job = withOrgWork(
-    [checks, watches],
+    [checks],
     createPaymentChecks({
       list: checks.list,
-      watchList: watches.list,
+      unfinished: (orgId) => {
+        checks.keep(orgId);
+      },
       database: app,
       outbox: createOutbox({ ids, clock }),
       rail,
@@ -131,11 +146,28 @@ function switchedChecks(w: World, rail: FakeRail = w.rail) {
       ids,
       clock,
       logger: testLogger(capture),
-      health: createRailHealth({ clock, logger: testLogger(capture) }),
+      health: createRailHealth({ clock, logger: testLogger(capture), laneUnknowns: 1_000 }),
       databaseGate: handoffDatabaseGate(6),
+      ...(runBudgetMs === undefined ? {} : { runBudgetMs }),
     }),
   );
-  return { job, checks, watches };
+  return { job, checks };
+}
+
+/** A rail whose lookups find nothing, each noted with its organisation and the test clock's minute. */
+function noting(w: World): { rail: FakeRail; asked: { orgId: string; minute: number }[] } {
+  const asked: { orgId: string; minute: number }[] = [];
+  const startedAt = clock.now().getTime();
+  return {
+    asked,
+    rail: {
+      ...w.rail,
+      getExecution: (ref) => {
+        asked.push({ orgId: ref.organizationId, minute: Math.round((clock.now().getTime() - startedAt) / 60_000) });
+        return Promise.resolve({ kind: 'not_found' });
+      },
+    },
+  };
 }
 
 beforeAll(async () => {
@@ -391,7 +423,7 @@ describe('a mark row held only for a moment, and never lost', () => {
     expect((await marksOf(w)).hand_off).toEqual(made);
   });
 
-  it('a settle behind a commit marking the row waits for it, then leaves the mark that commit made', async () => {
+  it('a settle never waits on a commit marking the row: it skips it, and the mark that commit made stands', async () => {
     const { w } = await ready();
     // A mark with nothing due: settled alone, it would go.
     await markOrgWork(app, w.org, 'hand_off', clock.now());
@@ -404,10 +436,9 @@ describe('a mark row held only for a moment, and never lost', () => {
       await writer.query(`update directory.org_work set marks = marks + 1 where org_id = $1 and job = 'hand_off'`, [
         w.org,
       ]);
-      const settling = handOffs.settle();
-      await waitUntilQueued(admin(), 1);
+      // Returns while the writer still holds the row: had it waited, it could not.
+      await handOffs.settle();
       await writer.query('commit');
-      await settling;
     } finally {
       await writer.end();
     }
@@ -446,21 +477,28 @@ describe('a mark row held only for a moment, and never lost', () => {
     expect(await marksOf(w)).toEqual(before);
   });
 
-  it('a settle takes one transaction an organisation, on four trips, the row its last statement', async () => {
-    const { w } = await ready();
-    await markOrgWork(app, w.org, 'hand_off', clock.now());
-    const handOffs = marked('hand_off');
-    await handOffs.list();
-    const times = noStatementTimes();
-    await timingStatements(times, () => handOffs.settle());
-    // Its start with the organisation set, the read of what is due, the row, the commit.
-    expect(times.trips).toBe(4);
-    expect(await marksOf(w)).toEqual({});
+  it("a settle reads each organisation's next due in a transaction of its own, then writes the page in one", async () => {
+    const trips = async (count: number) => {
+      const orgs: string[] = [];
+      for (let n = 0; n < count; n += 1) orgs.push((await ready()).w.org);
+      await admin().query('delete from directory.org_work');
+      for (const orgId of orgs) await markOrgWork(app, orgId, 'hand_off', clock.now());
+      const handOffs = marked('hand_off');
+      await handOffs.list();
+      const times = noStatementTimes();
+      await timingStatements(times, () => handOffs.settle());
+      expect(await admin().query('select 1 from directory.org_work')).toEqual([]);
+      return times.trips;
+    };
+    const one = await trips(1);
+    // Each read: its start with the organisation set, the read, the commit; the write: its start, the statement, the commit.
+    expect(one).toBe(6);
+    expect(await trips(3)).toBe(one + 2 * 3);
   });
 });
 
 describe('the payment checks follow theirs', () => {
-  it('a payment under way keeps its mark due; settled, it is watched a week, by the laps alone', async () => {
+  it('a payment under way keeps its mark due now; one settled is watched, due in 30 minutes, not listed before', async () => {
     const { w, acting } = await ready();
     // `.01`: the fake declines it with its proof, so the hand-off's Tx B settles it FAILED.
     await ask(acting, w, { amount: ALLOWED(1n) });
@@ -469,51 +507,87 @@ describe('the payment checks follow theirs', () => {
     const other = await ready();
     await ask(other.acting, other.w, { amount: SMALL() });
     await switchedHandoff(other.w).job.run();
-    const looked: string[] = [];
-    const rail: FakeRail = {
-      ...w.rail,
-      getExecution: (ref) => {
-        looked.push(ref.organizationId);
-        return w.rail.getExecution(ref);
-      },
-    };
-    const { job, checks, watches } = switchedChecks(w, rail);
+    const { rail, asked } = noting(w);
+    const { job, checks } = switchedChecks({ rail });
 
-    const started = await serverNow();
-    // The first run after a start begins the laps: the watch's takes the paid and failed ones too.
+    // Each one's turns are due at once after a start: the failed one's watch among them.
     await job.run();
-    expect(looked).toContain(w.org);
+    expect(asked.map(({ orgId }) => orgId)).toContain(w.org);
 
-    const watched = (await marksOf(w)).payment_check?.due_at.getTime() ?? 0;
-    expect(watched).toBeGreaterThanOrEqual(started + WEEK_MS);
-    expect(watched).toBeLessThanOrEqual((await serverNow()) + WEEK_MS);
-    const underWay = (await marksOf(other.w)).payment_check?.due_at.getTime() ?? 0;
-    expect(underWay).toBeLessThanOrEqual(await serverNow());
+    expect((await marksOf(w)).payment_check?.due_at.getTime()).toBe(clock.now().getTime() + 30 * 60_000);
+    expect((await marksOf(other.w)).payment_check?.due_at.getTime()).toBe(clock.now().getTime());
     expect(await checks.list()).toEqual([other.w.org]);
-    expect((await watches.list()).toSorted()).toEqual([w.org, other.w.org].toSorted());
+    clock.advanceBy(30 * 60_000);
+    expect((await checks.list()).toSorted()).toEqual([w.org, other.w.org].toSorted());
   });
 
-  it("a watch list it can't read is said, and the regular checks go on", async () => {
-    const { w } = await ready();
-    let regular = 0;
-    const job = createPaymentChecks({
-      list: () => {
-        regular += 1;
-        return Promise.resolve([w.org]);
-      },
-      watchList: () => Promise.reject(new Error('no marks')),
-      database: app,
-      outbox: createOutbox({ ids, clock }),
-      rail: w.rail,
-      keys,
-      ids,
-      clock,
-      logger: testLogger(capture),
-      health: createRailHealth({ clock, logger: testLogger(capture) }),
-      databaseGate: handoffDatabaseGate(6),
-    });
-    await job.run();
-    expect(regular).toBe(1);
-    expect(lines('payment_check.run_failed')).toHaveLength(1);
+  it('an organisation whose turn a run cut short keeps its mark as it stood, and the next run takes it', async () => {
+    const { w, acting } = await ready();
+    await ask(acting, w, { amount: SMALL() });
+    await switchedHandoff(w).job.run();
+    const before = await marksOf(w);
+    const { rail, asked } = noting(w);
+
+    await switchedChecks({ rail, runBudgetMs: 0 }).job.run();
+    expect(asked).toEqual([]);
+    expect(await marksOf(w)).toEqual(before);
+
+    await switchedChecks({ rail }).job.run();
+    expect(asked.map(({ orgId }) => orgId)).toContain(w.org);
+  });
+
+  it("two a run of many: every organisation's older, UNKNOWN and watched payments are checked every 30 minutes or so", async () => {
+    // Three kept under way, two gone UNKNOWN, one failed (watched alone): all older than a day by the runs.
+    const slow: World[] = [];
+    for (let n = 0; n < 3; n += 1) {
+      const { w, acting } = await ready();
+      await ask(acting, w, { amount: SMALL() });
+      slow.push(w);
+    }
+    for (let n = 0; n < 2; n += 1) {
+      const { w, acting } = await ready();
+      // The fake's .02: made at the partner, its answer lost.
+      await ask(acting, w, { amount: AED(5_002n) });
+      slow.push(w);
+    }
+    const failed = await ready();
+    await ask(failed.acting, failed.w, { amount: ALLOWED(1n) });
+    slow.push(failed.w);
+    for (const w of slow) await switchedHandoff(w).job.run();
+    clock.advanceBy(2 * 24 * 3_600_000);
+    // Then more than the cap with payments under 15 minutes old, due every run.
+    const busy: World[] = [];
+    for (let n = 0; n < 3; n += 1) {
+      const { w, acting } = await ready();
+      await ask(acting, w, { amount: SMALL() });
+      await switchedHandoff(w).job.run();
+      busy.push(w);
+    }
+    const [first] = slow;
+    if (first === undefined) throw new Error('no world');
+    const { rail, asked } = noting(first);
+    const { job } = switchedChecks({ rail, most: 2 });
+
+    // 75 runs, a minute apart.
+    for (let run = 0; run < 75; run += 1) {
+      await job.run();
+      clock.advanceBy(60_000);
+    }
+
+    const minutesOf = (w: World) => [
+      ...new Set(asked.filter(({ orgId }) => orgId === w.org).map(({ minute }) => minute)),
+    ];
+    for (const w of slow) {
+      const minutes = minutesOf(w);
+      // The first soon, however many are due ahead of it; then each again 30 minutes on, within a few runs.
+      expect(minutes[0]).toBeLessThanOrEqual(10);
+      expect(minutes.length).toBeGreaterThanOrEqual(2);
+      for (let at = 1; at < minutes.length; at += 1) {
+        expect((minutes[at] ?? 0) - (minutes[at - 1] ?? 0)).toBeGreaterThanOrEqual(30);
+        expect((minutes[at] ?? 0) - (minutes[at - 1] ?? 0)).toBeLessThanOrEqual(36);
+      }
+    }
+    // The busy ones, under 15 minutes old, were asked run after run while they were.
+    for (const w of busy) expect(minutesOf(w).length).toBeGreaterThanOrEqual(10);
   });
 });

@@ -230,19 +230,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       }),
     );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
-  // the payments the partner's messages name first (E1b). Its watch's laps take every mark, the paid ones' a week on.
-  const checks = { job: 'payment_check', nextDue: paymentCheckDue, database, logger } as const;
-  const checkMarks = markedOrganisations(checks);
-  const watchMarks = markedOrganisations({ ...checks, due: 'any' });
+  // the payments the partner's messages name first (E1b). Its marks carry each organisation's own cadence of checks.
+  const checkMarks = markedOrganisations({ job: 'payment_check', nextDue: paymentCheckDue, database, logger });
   const paymentChecks =
     railWork &&
     withOrgWork(
-      [checkMarks, watchMarks],
+      [checkMarks],
       createPaymentChecks({
         ...clocked,
         ...railWork,
         list: checkMarks.list,
-        watchList: watchMarks.list,
+        unfinished: (orgId) => {
+          checkMarks.keep(orgId);
+        },
         outbox,
         events: providerEvents,
       }),
