@@ -18,11 +18,11 @@
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { markFailed } from '@agentx/core/modules/outcomes';
+import { lockHoldingsOf, markFailed, settleHoldings } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type ExecutionLookup, type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
 import { createProviderEvents } from '@agentx/core/modules/provider-events';
-import { TRANSACTIONS } from '@agentx/core/modules/transactions';
+import { moveTransaction, TRANSACTIONS, transactionOf as lockedTransaction } from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -38,7 +38,8 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff, HEARTBEAT_STALE_MS, handoffDatabaseGate } from './handoff.ts';
+import { asARun } from './background.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, handoffDatabaseGate, UNKNOWN_AFTER_MS } from './handoff.ts';
 import { createRailHealth, type RailHealth } from './rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { heartbeatChecks } from './health.ts';
@@ -78,6 +79,9 @@ const { ready, paymentOf, alertsOf } = handoffWorld({
 });
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
+
+/** Each run's count of the checks that changed nothing, for the runs that had any: those checks have no line of their own. */
+const unchangedRuns = () => lines('payment_check.run_unchanged').map(({ unchanged }) => unchanged);
 
 /** A step of the fake's payment: Pending, settled at the debtor a minute on, credited after two (B2). */
 const STEP = 60_000;
@@ -220,6 +224,8 @@ describe('a payment finished by the bank’s word (E1a; rail map §4)', () => {
     expect(await remittancesOf(w)).toEqual([transaction.id]);
     expect((await movesOf(w, request.id)).filter((action) => action === 'transaction.succeed')).toHaveLength(1);
     expect(lines('payment_check.checked').at(-1)).toMatchObject({ from: 'PROCESSING', to: 'SUCCEEDED' });
+    // Only the first run's check changed nothing: the second read the bank's new word; the run after it settled checked nothing, or there'd be another.
+    expect(unchangedRuns()).toEqual([1]);
   });
 
   it('finishes one whose answer was lost (.02): UNKNOWN until the bank says credited, then SUCCEEDED and spent', async () => {
@@ -374,7 +380,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     });
   });
 
-  it('leaves one the bank doesn’t find as it was: not found proves nothing', async () => {
+  it('leaves one the bank doesn’t find as it was: not found proves nothing, but the bank knew it, so its line stays', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await handoffOf(w).run();
@@ -386,8 +392,92 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
 
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });
     expect(lines('payment_check.checked')).toEqual([
-      expect.objectContaining({ answer: 'not_found', to: 'PROCESSING' }),
+      expect.objectContaining({ answer: 'not_found', from: 'PROCESSING', to: 'PROCESSING', bankLost: 'Pending' }),
     ]);
+    expect(lines('payment_check.run_unchanged')).toEqual([]);
+    expect(lines('payment_check.not_found_long')).toEqual([]);
+  });
+
+  it('counts an UNKNOWN payment the bank has never spoken of and can’t find: its status, not its age, keeps it from the warn', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED(2n) });
+    await handoffOf(w).run();
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN', providerStatus: null });
+    clock.advanceBy(UNKNOWN_AFTER_MS + STEP);
+
+    await checksOf(
+      w,
+      answering(w, () => ({ kind: 'not_found' })),
+    ).run();
+
+    expect(lines('payment_check.checked')).toEqual([]);
+    expect(lines('payment_check.run_unchanged')).toEqual([expect.objectContaining({ unchanged: 0, notFound: 1 })]);
+    expect(lines('payment_check.not_found_long')).toEqual([]);
+  });
+
+  it('says each check that the bank still can’t find one under way past its time, naming it; the payment stays waiting', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await handoffOf(w).run();
+    const { id } = await transactionOf(w, request.id);
+    const notFound = answering(w, () => ({ kind: 'not_found' }));
+
+    clock.advanceBy(UNKNOWN_AFTER_MS - STEP);
+    await checksOf(w, notFound).run();
+    expect(lines('payment_check.not_found_long')).toEqual([]);
+
+    clock.advanceBy(2 * STEP);
+    await checksOf(w, notFound).run();
+    await checksOf(w, notFound).run();
+    const said: unknown = expect.objectContaining({ level: 'warn', orgId: w.org, transactionId: id });
+    expect(lines('payment_check.not_found_long')).toEqual([said, said]);
+    expect(lines('payment_check.not_found_long')[0]?.says).toEqual(expect.stringContaining('waiting'));
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });
+
+    // Found again, nothing more to say.
+    await checksOf(w).run();
+    expect(lines('payment_check.not_found_long')).toHaveLength(2);
+  });
+
+  it('says it of one still SUBMITTED past its time too', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: the fake declines it, too late, so it stays where the bank's earlier word left it.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        const key = { orgId: w.org, id: (await transactionOf(w, request.id)).id };
+        await withSignedStates(app, w.org, { keys, ids, logger: testLogger() }, async (tx, states) => {
+          await lockedTransaction(tx, states, key, 'change');
+          await lockHoldingsOf(tx, request.id);
+          const moved = await moveTransaction(
+            tx,
+            states,
+            key,
+            'submitted',
+            { providerStatus: 'Pending', paymentInstructionRef: null, rejectCode: null, providerChangedAt: null },
+            { actor: { type: 'system', id: 'test' }, details: {} },
+          );
+          if (moved.outcome !== 'moved') throw new Error(`not moved: ${moved.outcome}`);
+          await settleHoldings(tx, { requestId: request.id, status: moved.to, at: clock.now() });
+        });
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+    await handoffOf(w, rail).run();
+    const { id } = await transactionOf(w, request.id);
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUBMITTED' });
+    clock.advanceBy(UNKNOWN_AFTER_MS + STEP);
+
+    await checksOf(
+      w,
+      answering(w, () => ({ kind: 'not_found' })),
+    ).run();
+
+    expect(lines('payment_check.not_found_long')).toEqual([
+      expect.objectContaining({ level: 'warn', orgId: w.org, transactionId: id }),
+    ]);
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUBMITTED' });
   });
 
   it('leaves them as they were while the bank can’t be reached, and says so once a run', async () => {
@@ -405,6 +495,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
       expect.objectContaining({ unreached: 2, stopped: false }),
     ]);
     expect(lines('payment_check.checked')).toEqual([]);
+    expect(unchangedRuns()).toEqual([]);
   });
 
   it('ends an organisation’s turn after 3 unanswered calls in a row, each of which would wait its time limit', async () => {
@@ -523,6 +614,10 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN', providerStatus: 'Pending' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(lines('payment_check.unreadable')).toHaveLength(1);
+    // Our status moved on no new word of the bank's: the move alone keeps the line.
+    expect(lines('payment_check.checked')).toEqual([
+      expect.objectContaining({ from: 'PROCESSING', to: 'UNKNOWN', newBankStatus: null }),
+    ]);
     expect(await remittancesOf(w)).toEqual([]);
   });
 
@@ -679,7 +774,9 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
 
     expect(await transactionOf(w, request.id)).toEqual(credited);
     expect(lines('payment_check.contradicts')).toEqual([]);
-    expect(lines('payment_check.checked').at(-1)).toMatchObject({ from: 'SUCCEEDED', to: 'SUCCEEDED' });
+    // The middle run's move is the only line; the late one was applied to the settled payment, and changed nothing.
+    expect(lines('payment_check.checked')).toEqual([expect.objectContaining({ from: 'PROCESSING', to: 'SUCCEEDED' })]);
+    expect(unchangedRuns()).toEqual([1]);
   });
 
   it('says each check of an UNKNOWN payment unresolved past a day, for reconciliation; its admins told once each (37b)', async () => {
@@ -792,8 +889,10 @@ describe('when and how often (the partner’s rate limits)', () => {
     await checksOf(w, rail).run(stopping.signal);
 
     // The one that stopped it, and the one already under way beside it, at 2 an organisation.
-    expect(lines('payment_check.checked').length).toBeGreaterThanOrEqual(1);
-    expect(lines('payment_check.checked').length).toBeLessThanOrEqual(2);
+    const [checked, ...others] = unchangedRuns();
+    expect(others).toEqual([]);
+    expect(checked).toBeGreaterThanOrEqual(1);
+    expect(checked).toBeLessThanOrEqual(2);
   });
 
   it('begins no more once the signal is aborted, one at a time', async () => {
@@ -821,7 +920,7 @@ describe('when and how often (the partner’s rate limits)', () => {
       limits: { total: 1, perOrganisation: 1 },
     }).run(stopping.signal);
 
-    expect(lines('payment_check.checked')).toHaveLength(1);
+    expect(unchangedRuns()).toEqual([1]);
   });
 
   it('refuses to start with the bank’s time limit past when an answer is due', () => {
@@ -883,6 +982,8 @@ describe('failures logged, the run going on', () => {
 
       expect(lines('payment_check.failed')).toEqual([expect.objectContaining({ orgId: w.org, transactionId: id })]);
       expect(await transactionOf(w, fine.id)).toMatchObject({ status: 'SUCCEEDED' });
+      // A check that failed is never counted among those that changed nothing.
+      expect(unchangedRuns()).toEqual([]);
     },
   );
 
@@ -1160,6 +1261,8 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     const { rail, asked, waiting } = railOf([hung.w, other.w], (org) => org === hung.w.org);
     // A clock that really moves, so a budget spent is spent.
     const moving = { now: () => new Date() };
+    // Credited at the bank: the other's answer moves it, so it has a line while this run is still under way.
+    clock.advanceBy(2 * STEP);
 
     const run = createPaymentChecks({
       list: () => Promise.resolve([hung.w.org, other.w.org]),
@@ -1512,7 +1615,104 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     waiting[0]?.(false);
     await run;
 
+    expect(unchangedRuns()).toEqual([1]);
+  });
+
+  it('keeps the line of a check where the bank moved but our status didn’t; the same word twice has none', async () => {
+    const { w, requests } = await paymentsUnderWay(1);
+    const checks = checksOf(w);
+    await checks.run();
+    const before = lines('payment_check.checked').length;
+    const counted = unchangedRuns().length;
+
+    // The same word again: nothing changed at all.
+    await checks.run();
+    expect(lines('payment_check.checked')).toHaveLength(before);
+    expect(unchangedRuns()).toHaveLength(counted + 1);
+
+    // The bank moved on, under the same status of ours.
+    clock.advanceBy(STEP);
+    await checks.run();
+    expect(await transactionOf(w, requests[0] ?? '')).toMatchObject({
+      status: 'PROCESSING',
+      providerStatus: 'AcceptedSettlementCompleted',
+    });
+    expect(lines('payment_check.checked').slice(before)).toEqual([
+      expect.objectContaining({
+        from: 'PROCESSING',
+        to: 'PROCESSING',
+        newBankStatus: 'AcceptedSettlementCompleted',
+      }),
+    ]);
+    expect(unchangedRuns()).toHaveLength(counted + 1);
+
+    // And that word again: nothing changed at all.
+    await checks.run();
+    expect(lines('payment_check.checked')).toHaveLength(before + 1);
+    expect(unchangedRuns()).toHaveLength(counted + 2);
+  });
+
+  it('counts the checks that changed nothing once a run; one that moved keeps its line; both name the run', async () => {
+    const { w, requests } = await paymentsUnderWay(3);
+    const moved = await transactionOf(w, requests[0] ?? '');
+    const rail: FakeRail = {
+      ...w.rail,
+      getExecution: async (ref): Promise<ExecutionLookup> => {
+        const found = await w.rail.getExecution(ref);
+        return found.kind === 'found' && ref.instructionId === moved.instructionId
+          ? {
+              kind: 'found',
+              execution: { ...found.execution, providerStatus: 'AcceptedCreditSettlementCompleted' as const },
+            }
+          : found;
+      },
+    };
+
+    await asARun(() => checksOver([w], rail, breaker()).run());
+
+    const said = lines('payment_check.checked');
+    expect(said).toEqual([
+      expect.objectContaining({
+        transactionId: moved.id,
+        from: 'PROCESSING',
+        to: 'SUCCEEDED',
+        orgId: w.org,
+        runId: expect.any(String) as string,
+      }),
+    ]);
+    expect(lines('payment_check.run_unchanged')).toEqual([
+      expect.objectContaining({ level: 'info', unchanged: 2, runId: said[0]?.runId }),
+    ]);
+  });
+
+  it('drops only the line of a check that went well: a warning or an error on an unchanged payment stays, naming its run', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: SMALL(4n) });
+    await handoffOf(w).run();
+    clock.advanceBy(2 * STEP);
+    await asARun(() => checksOf(w).run());
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+
+    clock.advanceBy(24 * 60 * STEP);
+    await asARun(() => checksOf(w).run());
+    await asARun(() =>
+      checksOf(w, { ...w.rail, getExecution: () => Promise.reject(new Error('an answer past reading')) }).run(),
+    );
+
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
+    // Both later runs' checks left it as it was, so neither has a line of its own; what each had to say stands.
     expect(lines('payment_check.checked')).toHaveLength(1);
+    expect(unchangedRuns()).toEqual([1, 1]);
+    const problems = capture
+      .lines()
+      .filter(({ level, event }) => level !== 'info' && String(event).startsWith('payment_check.'));
+    expect(problems.map(({ level, event }) => [level, event])).toEqual([
+      ['error', 'payment_check.rejected_unproven'],
+      ['warn', 'payment_check.still_unknown'],
+      ['error', 'payment_check.unreadable'],
+      ['warn', 'payment_check.still_unknown'],
+    ]);
+    for (const problem of problems) expect(problem.runId).toEqual(expect.any(String));
   });
 
   it('says it when a page can’t be read, and goes on to the next organisation', async () => {

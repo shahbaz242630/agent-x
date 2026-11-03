@@ -12,8 +12,10 @@
 // - The digest: SHA-256 over one line a row, by ID, each the JSON array of
 //   its ID, its time to the microsecond in UTC (as text, so a tampered
 //   microsecond shows), its actor, method, route, path IDs, status, reason,
-//   correlation ID and duration, then a newline. The organisation is the
-//   chain's own. The client's IP address, place and time zone are outside
+//   correlation ID and duration, then, on a row that names one, its agent's
+//   key (0070), then a newline. A row with none reads as it always did, so
+//   every seal made before 0070 still holds, on the same form. The organisation
+//   is the chain's own. The client's IP address, place and time zone are outside
 //   it (ADR-011 §7): clues a lawful erasure may blank, the seal standing.
 //   A day with no rows digests the empty text: a quiet day is sealed too, so
 //   a day emptied after shows.
@@ -42,7 +44,14 @@ export const SEAL_GRACE_MS = 15 * 60_000;
 
 const DAY_MS = 86_400_000;
 
-/** The form of the seal's lines, recorded with each seal so a later form can't be confused with this one. */
+/**
+ * The form of the seal's lines, recorded with each seal so a later form can't be confused with this one.
+ *
+ * Still 1 after 0070: a row with no key reads as it always did, so every seal made before it holds. The price: a
+ * day with keyed rows only reads right on code that knows the key. Code from before 0070 would seal such a day, or
+ * check its seal, on the shorter line, and an organisation goes on a false hold. So never roll back past 0070 once
+ * keyed rows exist, and never release across the seal's run at 00:15 UTC.
+ */
 export const SEAL_FORM = 1;
 
 /** A day, YYYY-MM-DD, UTC. */
@@ -118,6 +127,7 @@ const sealedRows = (tx: SealTx, orgId: string, day: string, after: string | unde
       'reason',
       'correlation_id',
       'duration_ms',
+      'agent_key_id',
     ])
     .where('org_id', '=', orgId)
     .where(sql<boolean>`id >= ${from}::uuid and id < ${to}::uuid`)
@@ -150,6 +160,7 @@ const lineOf = (row: SealedRow): string =>
     row.reason,
     row.correlation_id,
     row.duration_ms,
+    ...(row.agent_key_id === null ? [] : [row.agent_key_id]),
   ])}\n`;
 
 /**

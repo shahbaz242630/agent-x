@@ -81,7 +81,8 @@ export const PLAIN_WORDS = {
   },
   'access_log.write_failed': {
     happened: "A request's activity-log row could not be saved.",
-    broke: "That one request is missing from its organisation's activity log; the request itself went through.",
+    broke:
+      "That one request is missing from its organisation's activity log, this line naming who made it; the request itself went through.",
     next: 'Nothing to do if it is rare. If it repeats, the database is failing: check its health.',
   },
   'access_log_seal_check.failed': {
@@ -576,6 +577,11 @@ export const PLAIN_WORDS = {
     happened: 'The bank now says something different about a payment that was already settled.',
     broke: "The payment is left as it was settled; the bank's new answer is kept beside it.",
     next: "Check the payment against the bank's record and settle the difference with the bank.",
+  },
+  'payment_check.not_found_long': {
+    happened: 'The bank still cannot find a payment handed to it more than 10 minutes ago.',
+    broke: 'The payment stays waiting, its money held; nothing is sent again.',
+    next: 'The regular checks go on. Following the payment up is for the organisation, with its bank.',
   },
   'payment_check.still_unknown': {
     happened: 'A payment has been unknown for more than a day.',

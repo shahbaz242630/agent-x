@@ -18,6 +18,7 @@ export const ACTIVITY_CSV_HEADER = [
   'actorName',
   'actorEmail',
   'actorNameFrom',
+  'agentKeyId',
   'method',
   'route',
   'pathIds',
@@ -47,7 +48,8 @@ export const activityLineOf = (
   const { place } = client;
   return csvRow(
     [shown.id, shown.recordedAt, shown.localTime ?? '', actor.type, actor.id, actor.name ?? '']
-      .concat([actor.email ?? '', actor.shownFrom ?? '', shown.method, shown.route, shown.pathIds.join(' ')])
+      .concat([actor.email ?? '', actor.shownFrom ?? '', shown.agentKeyId ?? ''])
+      .concat([shown.method, shown.route, shown.pathIds.join(' ')])
       .concat([String(shown.status), shown.reason ?? '', shown.correlationId, String(shown.durationMs)])
       .concat([String(shown.sealed)])
       .concat([client.ip ?? '', place?.country ?? '', place?.city ?? ''])

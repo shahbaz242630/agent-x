@@ -157,6 +157,31 @@ describe('L6 a day’s digest (decision 26, ADR-011 §7)', () => {
     expect((await digestOfDay(inOrg(org), org, '2026-10-19', 100)).digest).not.toBe(before.digest);
   });
 
+  it('Stage F decision 2 holds an agent’s key in its line; a row with none reads as before 0070, so old seals stand', async () => {
+    const org = newOrg();
+    const id = await row(org, '2026-10-19T10:00:00.000Z');
+    const before = await digestOfDay(inOrg(org), org, '2026-10-19', 100);
+    // No key: the very line a seal made before 0070 hashed.
+    expect(before.digest).toBe(sha256(lineOf(id, '2026-10-19T10:00:00.000000Z')));
+    const admin = database.as('admin');
+
+    await admin.query("update access.requests set actor_type = 'agent', agent_key_id = $1 where id = $2", [
+      CORRELATION,
+      id,
+    ]);
+    const keyed = await digestOfDay(inOrg(org), org, '2026-10-19', 100);
+    expect(keyed.digest).toBe(
+      sha256(
+        `${JSON.stringify([id, '2026-10-19T10:00:00.000000Z', 'agent', PERSON, 'GET', '/v1/agents/:id', [PERSON], 200, null, CORRELATION, 7, CORRELATION])}\n`,
+      ),
+    );
+    // Another key, or the key taken away, past the app: the seal shows it.
+    await admin.query('update access.requests set agent_key_id = $1 where id = $2', [PERSON, id]);
+    expect((await digestOfDay(inOrg(org), org, '2026-10-19', 100)).digest).not.toBe(keyed.digest);
+    await admin.query('update access.requests set agent_key_id = null where id = $1', [id]);
+    expect((await digestOfDay(inOrg(org), org, '2026-10-19', 100)).digest).not.toBe(keyed.digest);
+  });
+
   it('counts the day again with its last ID, and names an organisation’s first day; none for one with no rows', async () => {
     const org = newOrg();
     await row(org, '2026-10-17T08:00:00.000Z');
