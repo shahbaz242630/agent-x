@@ -547,6 +547,23 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     expect(past.sent).toBeGreaterThan(full.sent);
   });
 
+  it('stops paging the older live rows once a page reaches the newest: one page for one older live row', async () => {
+    const counted = () =>
+      withTenant(app, org, (tx) => statementsSent(tx, (each) => states.verifyAll(each, org, [REQUESTS], 2)));
+    await newRequest('LIVE');
+    await newRequest('ENDED');
+    await newRequest('ENDED');
+    const alone = await counted();
+    // Two live rows newer still: the page holds three, two of them the newest's, and is the last.
+    await newRequest('LIVE');
+    await newRequest('LIVE');
+    const crossing = await counted();
+
+    expect(alone.result).toEqual({ outcome: 'verified', objects: 3 });
+    expect(crossing.result).toEqual({ outcome: 'verified', objects: 3 });
+    expect(crossing.sent).toBe(alone.sent);
+  });
+
   it("refuses the integrity hold's own subject type, whose state has no row", async () => {
     const hold = {
       table: 'probe.agents',
