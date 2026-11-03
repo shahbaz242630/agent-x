@@ -171,6 +171,7 @@ export {
   type ClearingAdmin,
   type ClearingWrite,
   createHoldClearings,
+  OBJECTS_CHECKED,
   type HoldClearings,
   type NamedRecordCheck,
 } from './infrastructure/hold-clearing.ts';

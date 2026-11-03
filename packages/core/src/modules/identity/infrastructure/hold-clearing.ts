@@ -68,7 +68,7 @@ export const CLEAR_CONFIRM_OPERATION = 'integrity-hold.clear.confirm';
  * verifyAll's limit, unless given: the most objects of a table that doesn't grow the check before clearing reads, and
  * the newest rows of a growing one it reads beside its live ones, its older ones left to the history batches.
  */
-const OBJECTS_CHECKED = 10_000;
+export const OBJECTS_CHECKED = 10_000;
 
 /** Who is clearing: the signed-in admin, in the organisation the access hook verified, and their session. */
 export interface ClearingAdmin {
