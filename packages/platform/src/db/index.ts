@@ -49,6 +49,7 @@ export {
   type SchemaProblem,
 } from './schema-guard.ts';
 export { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
+export { type IndexUse, type TableSize, type TableSizes, tableSizes } from './table-sizes.ts';
 export {
   noStatementTimes,
   statementTimesForLog,
