@@ -17,7 +17,8 @@
  * `--cpus 2` gives the API two CPUs instead of staging's half; `--delay-ms 2`
  * adds 2 ms to every packet the database sends, as Azure's network does
  * (4D2d P0); `--db-cpus 2` holds the database to two CPUs, so it can fill up as
- * Azure's does (4D2e C). The report counts the database trips each request cost.
+ * Azure's does (4D2e C). The report counts the database trips each request cost,
+ * and how much each table grew (4D2e F12).
  * Docker and Vitest run with argument lists and no shell.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -26,12 +27,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ENV_FILE, prepare } from '../../deploy/compose/prepare.ts';
-import { createDatabase } from '../../packages/platform/src/db/index.ts';
+import { createDatabase, type Database } from '../../packages/platform/src/db/index.ts';
 import { loadKeys } from '../../packages/platform/src/keys/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
-import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { probeFreeze, withFreezeProbe } from './freeze-probe.ts';
+import type { LoadTables } from './job.ts';
 import { apartOrgsOf, logFailures, summariseLogs, troubleWindowOf } from './logs.ts';
 import {
   API_CPUS_VARIABLE,
@@ -58,6 +59,7 @@ import {
 } from './plan.ts';
 import { type PhaseResult, type PhaseStatements, phaseFailures, renderReport } from './report.ts';
 import { whileStuck } from './stuck.ts';
+import { growthBetween, readGrowthEnd } from './table-growth.ts';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const COMPOSE = [
@@ -197,24 +199,27 @@ function reportFile(at: string, apiCpus: number, delayMs: number, dbCpus: number
   }
 }
 
-/** Phase 5, the stuck organisation's suppliers held locked for it, on a connection of the runner's own, and an admin's freeze asked near its end. */
-async function neighboursPhase(password: string) {
-  const database = createDatabase<MandateWorldTables>(
-    loadConnection({ AGENTX_LOAD_DB_PASSWORD: password }),
-    testLogger(),
-  );
+/** `work` on a connection of the runner's own, as the app's role, closed after. */
+async function asApp<T>(password: string, work: (database: Database<LoadTables>) => Promise<T>): Promise<T> {
+  const database = createDatabase<LoadTables>(loadConnection({ AGENTX_LOAD_DB_PASSWORD: password }), testLogger());
   try {
-    const { agents } = readSeeded();
-    const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} });
-    return await withFreezeProbe(
-      freezeProbeAfterMs(false),
-      () => probeFreeze(database, keyring, agents),
-      () => whileStuck(database, agents, () => measured(NEIGHBOURS_PHASE)),
-    );
+    return await work(database);
   } finally {
     await database.destroy();
   }
 }
+
+/** Phase 5, the stuck organisation's suppliers held locked for it, and an admin's freeze asked near its end. */
+const neighboursPhase = (password: string) =>
+  asApp(password, (database) => {
+    const { agents } = readSeeded();
+    const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} });
+    return withFreezeProbe(
+      freezeProbeAfterMs(false),
+      () => probeFreeze(database, keyring, agents),
+      () => whileStuck(database, agents, () => measured(NEIGHBOURS_PHASE)),
+    );
+  });
 
 async function main(options: LoadOptions): Promise<number> {
   const { keep, apiCpus, delayMs, dbCpus } = options;
@@ -254,12 +259,14 @@ async function main(options: LoadOptions): Promise<number> {
       ...login,
       AGENTX_LOAD_RUN_ID: `local ${at}`,
     });
+    const sizesBefore = await asApp(login.AGENTX_LOAD_DB_PASSWORD, (db) => readGrowthEnd(db, 'before'));
     const first = await measured(1);
     must('The API restarted', 'docker', [...COMPOSE, 'restart', 'api']);
     must('The API back', 'docker', [...COMPOSE, 'up', '--wait', '--no-deps', 'api']);
     must('New keys', process.execPath, [VITEST, 'run', '--config', 'vitest.load.config.ts', 'keys'], login);
     const later = [await measured(2), await measured(3), await measured(4)];
     const { ran: neighbours, probed: freezeProbe } = await neighboursPhase(login.AGENTX_LOAD_DB_PASSWORD);
+    const sizesAfter = await asApp(login.AGENTX_LOAD_DB_PASSWORD, (db) => readGrowthEnd(db, 'after'));
     const all = [first, ...later, neighbours];
     const created = all.reduce((sum, { result }) => sum + result.created, 0);
     console.log('\n== The database after the run');
@@ -300,6 +307,7 @@ async function main(options: LoadOptions): Promise<number> {
       },
       ...(freezeProbe === undefined ? {} : { freezeProbe }),
       statements: all.map(({ statements }) => statements),
+      growth: growthBetween(sizesBefore, sizesAfter),
       logs,
       databaseChecksPassed: verified.code === 0,
       failures,
