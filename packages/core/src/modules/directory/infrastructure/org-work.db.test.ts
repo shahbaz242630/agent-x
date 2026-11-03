@@ -4,7 +4,14 @@
 // are, calling the real function, as the app role: real rows in the real tables are
 // org-work.db.test.ts's in apps/api. Every race is forced with a held transaction.
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createTestDatabase, type TestClient, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  type TestClient,
+  type TestDatabase,
+  testLogger,
+  waitUntilQueued,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { markOrgWork, settleOrgWork } from './org-work.ts';
@@ -15,6 +22,9 @@ let database: TestDatabase;
 let app: Database<DirectoryTables>;
 let next = 0;
 let org: string;
+/** The times a test writes into marks by hand: any will do, the triggers' own come from Postgres. */
+const clock = new FixedClock(new Date('2026-11-03T09:00:00Z'));
+const anHourOn = () => new Date(clock.now().getTime() + 3_600_000);
 
 const clients: TestClient[] = [];
 
@@ -163,7 +173,7 @@ describe('a deferred trigger with WHEN', () => {
 describe('the limits inside COMMIT, a mark held by another session', () => {
   /** A session holding the row a commit's mark needs. */
   async function holdingTheMark(job = 'hand_off'): Promise<TestClient> {
-    await markOrgWork(app, org, job as 'hand_off', new Date());
+    await markOrgWork(app, org, job as 'hand_off', clock.now());
     const holder = await connected('admin');
     await holder.query('begin');
     await holder.query('select 1 from directory.org_work where org_id = $1 and job = $2 for update', [org, job]);
@@ -197,7 +207,7 @@ describe('the limits inside COMMIT, a mark held by another session', () => {
   });
 
   it('transaction_timeout, from Postgres 17, ends the connection, and nothing it wrote is kept', async () => {
-    const [{ version = 0 } = {}] = await admin().query<{ version: number }>(
+    const [{ version } = { version: 0 }] = await admin().query<{ version: number }>(
       `select pg_catalog.current_setting('server_version_num')::integer as version`,
     );
     // No such setting on 16, which we also support: only lock_timeout and the deadlock detector hold there.
@@ -245,7 +255,7 @@ describe('no mark is ever lost', () => {
 
   it('with no later mark and more due, settling moves it there and keeps it', async () => {
     const marks = await aMark();
-    const later = new Date(Date.now() + 3_600_000);
+    const later = anHourOn();
     expect(await settled(marks, later)).toBe(true);
     expect(await marksOf()).toEqual({ [job]: { marks, due_at: later } });
   });
@@ -255,7 +265,7 @@ describe('no mark is ever lost', () => {
     const made = (await marksOf())[job]?.due_at;
     await aMark();
     expect(await settled(marks)).toBe(false);
-    expect(await settled(marks, new Date(Date.now() + 3_600_000))).toBe(false);
+    expect(await settled(marks, anHourOn())).toBe(false);
     const after = (await marksOf())[job];
     expect(after?.marks).toBe(String(BigInt(marks) + 1n));
     expect(after?.due_at).toEqual(made);
@@ -333,7 +343,7 @@ describe('no mark is ever lost', () => {
   });
 
   it('marking by hand makes one, and against one standing moves marks and brings due forward only', async () => {
-    const soon = new Date(Date.now() + 60_000);
+    const soon = new Date(clock.now().getTime() + 60_000);
     await markOrgWork(app, org, job, soon);
     const first = (await marksOf())[job];
     expect(first?.due_at).toEqual(soon);
@@ -359,8 +369,8 @@ describe('two transactions marking two jobs in opposite order', () => {
 
   /** Two sessions holding one job's mark each, so both commits start, then cross as they are let go. */
   async function holding(): Promise<{ handOff: TestClient; check: TestClient }> {
-    await markOrgWork(app, org, 'hand_off', new Date());
-    await markOrgWork(app, org, 'payment_check', new Date());
+    await markOrgWork(app, org, 'hand_off', clock.now());
+    await markOrgWork(app, org, 'payment_check', clock.now());
     const handOff = await connected('admin');
     await handOff.query('begin');
     await handOff.query(`select 1 from directory.org_work where org_id = $1 and job = 'hand_off' for update`, [org]);
@@ -377,7 +387,7 @@ describe('two transactions marking two jobs in opposite order', () => {
     const committed = [one, two].map((client) =>
       client.query('commit').then(
         () => 'kept',
-        (error: { code?: string }) => error.code,
+        (error: unknown) => (error as { code?: string }).code,
       ),
     );
     await waitUntilQueued(admin(), 2);

@@ -350,7 +350,7 @@ describe('0072 once its image is in: each part held at once', () => {
   });
 
   it('its function rewritten is the alarm at once, and put back reads clean', async () => {
-    const [{ source = '' } = {}] = await owner.query<{ source: string }>(
+    const [{ source } = { source: '' }] = await owner.query<{ source: string }>(
       `select p.prosrc as source from pg_catalog.pg_proc p where p.proname = 'mark_org_work'`,
     );
     const replacing = (body: string) => `create or replace function directory.mark_org_work() returns trigger
