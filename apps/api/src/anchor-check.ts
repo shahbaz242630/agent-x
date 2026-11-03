@@ -718,7 +718,8 @@ export function createAnchorCheck({
     const listedNow = new Set(read.listed);
     // From the two lists alone, so one past the cap, with no note kept on it, is seen to have gone too.
     const gone = new Set(read.recorded.filter((orgId) => !listedNow.has(orgId)));
-    const fresh = read.recorded.filter((orgId) => noted(orgId) && listedNow.has(orgId));
+    // One recorded and off the list goes first as gone, whatever its place here.
+    const fresh = read.recorded.filter((orgId) => noted(orgId));
     const past: string[] = [];
     for (const orgId of read.listed) {
       if (seen.has(orgId)) continue;

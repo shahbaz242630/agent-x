@@ -88,6 +88,7 @@ export function createTurns(
   let walked = 0;
   let roundBegins = false;
   let lastShared: Kind = 'pastCap';
+  let repeatsThisRun: ReadonlySet<string> = new Set();
   // Fresh each run. A set's iterator goes on past deletions, without walking what was deleted again.
   let walking: Record<'repeat' | 'slow' | 'quick', Iterator<string, undefined>> = {
     repeat: places.repeat.values(),
@@ -120,7 +121,7 @@ export function createTurns(
       cursor = (at + 1) % pastCap.length;
       pastCapThisRun -= 1;
       walked += 1;
-      if (orgId !== undefined && !places.repeat.has(orgId)) return taken('pastCap', orgId);
+      if (orgId !== undefined && !repeatsThisRun.has(orgId)) return taken('pastCap', orgId);
     }
     return undefined;
   };
@@ -152,6 +153,8 @@ export function createTurns(
         places.slow.delete(orgId);
       }
       again.clear();
+      // A repeat is taken once this run, and gone from its place by the time the cursor reaches it.
+      repeatsThisRun = new Set(places.repeat);
       for (const kind of ['quick', 'slow'] as const) {
         if (places[kind].size > 0) continue;
         const round = listed.filter((orgId) => kindOf(orgId) === kind && !places.repeat.has(orgId));

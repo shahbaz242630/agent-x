@@ -1441,6 +1441,17 @@ describe('third round (4D2e E6 review)', () => {
     expect(said.every((line) => line.organisations === undefined)).toBe(true);
   });
 
+  it('#5 a chain past the cap whose alarm repeats is checked once a run, not again by the cursor', async () => {
+    const { organizations, started } = directory(orgs(3), (orgId) =>
+      orgId === org(2) ? { ok: false, problem: { reason: 'hash', seq: 2n } } : ok(1n),
+    );
+    const { check } = checking(organizations, { lanes: 1, mostOrganisations: 1 });
+    await check.run();
+    started.length = 0;
+    await check.run();
+    expect(started.filter((orgId) => orgId === org(2))).toEqual([org(2)]);
+  });
+
   it('#5 a wind-back on the last chain past the cap is found, with its hold', async () => {
     const all = orgs(4);
     let wound = false;
