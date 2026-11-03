@@ -16,6 +16,8 @@ import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
+import { createDatabase } from './database.ts';
+import { builtMigrationNames, readLedgerMarks } from './ledger-marks.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import {
   applyMigration,
@@ -318,5 +320,88 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
     expect(files[0]).toBe('0001_baseline.sql');
     expect(await run(REPO_MIGRATIONS)).toEqual(files);
     expect(await run(REPO_MIGRATIONS)).toEqual([]);
+    // What an image says it was built with: these same files, by default.
+    expect(await builtMigrationNames()).toEqual(files);
+  });
+
+  describe("the ledger's marks, which the app role reads in place of the ledger (schema-check.ts)", () => {
+    const marks = async () => {
+      const app = createDatabase({ ...database.connection('app'), tls: 'disable', maxConnections: 1 }, testLog());
+      try {
+        return await readLedgerMarks(app);
+      } finally {
+        await app.destroy();
+      }
+    };
+    const testLog = () =>
+      createLogger({
+        service: 'test',
+        config: { environment: 'test', release: 'r-1', log: { level: 'error', eventCapPerMinute: 100 } },
+        destination: { write: () => undefined },
+      });
+
+    it('are none before there is a ledger', async () => {
+      expect(await marks()).toBeUndefined();
+    });
+
+    it('show a ledger never counted as such', async () => {
+      await database
+        .as('owner')
+        .query('create schema migrations; create table migrations.applied (name text primary key, checksum text)');
+      expect(await marks()).toEqual({ rows: -1, liveRows: 0, countedMsAgo: undefined });
+    });
+
+    /** When the ledger was last counted by hand, as the database stamped it. */
+    const stamped = async () => {
+      const [row] = await database
+        .as('owner')
+        .query<{ at: Date | null }>(
+          "select last_analyze as at from pg_catalog.pg_stat_all_tables where schemaname = 'migrations' and relname = 'applied'",
+        );
+      return row?.at ?? undefined;
+    };
+
+    it('count the rows, now and as counted, and stamp when, on every run, so a rerun recounts', async () => {
+      await write('0001_first.sql', 'create schema demo;');
+      await write('0002_second.sql', 'create table demo.two (id int);');
+      await run();
+      expect(await marks()).toEqual({ rows: 2, liveRows: 2, countedMsAgo: expect.any(Number) as unknown });
+      const first = await stamped();
+
+      await run();
+      expect(await marks()).toEqual(expect.objectContaining({ rows: 2, liveRows: 2 }));
+      expect((await stamped())?.getTime()).toBeGreaterThan(first?.getTime() ?? Infinity);
+    });
+
+    it('a count that cannot be made only warns: the files are in, and the run succeeds', async () => {
+      await write('0001_first.sql', 'create schema demo;');
+      await run();
+      const before = await stamped();
+      // ANALYZE's own lock, held: the count's bounded wait runs out.
+      const holder = await database.connect('owner');
+      await holder.query('begin');
+      await holder.query('lock table migrations.applied in share update exclusive mode');
+      try {
+        await write('0002_second.sql', 'create table demo.two (id int);');
+        const applied = await runMigrations({
+          connection: database.connection('owner'),
+          directory: folder,
+          logger: createLogger({
+            service: 'migrate',
+            config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+            destination: capture,
+          }),
+          lockWait: { timeoutMs: 100, pauseMs: 10 },
+        });
+        expect(applied).toEqual(['0002_second.sql']);
+      } finally {
+        await holder.end();
+      }
+      expect(capture.lines().filter((line) => line.level === 'warn')).toEqual([
+        expect.objectContaining({ event: 'db.migration.ledger_not_counted' }),
+      ]);
+      expect(await stamped()).toEqual(before);
+      expect(await tables()).toEqual(['two']);
+    });
   });
 });
