@@ -224,8 +224,8 @@ describe('a payment finished by the bank’s word (E1a; rail map §4)', () => {
     expect(await remittancesOf(w)).toEqual([transaction.id]);
     expect((await movesOf(w, request.id)).filter((action) => action === 'transaction.succeed')).toHaveLength(1);
     expect(lines('payment_check.checked').at(-1)).toMatchObject({ from: 'PROCESSING', to: 'SUCCEEDED' });
-    // The first two runs' checks changed nothing; the run after it settled checked nothing, or there'd be a third.
-    expect(unchangedRuns()).toEqual([1, 1]);
+    // Only the first run's check changed nothing: the second read the bank's new word; the run after it settled checked nothing, or there'd be another.
+    expect(unchangedRuns()).toEqual([1]);
   });
 
   it('finishes one whose answer was lost (.02): UNKNOWN until the bank says credited, then SUCCEEDED and spent', async () => {
@@ -392,7 +392,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
 
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });
     expect(lines('payment_check.checked')).toEqual([]);
-    expect(unchangedRuns()).toEqual([1]);
+    expect(lines('payment_check.run_unchanged')).toEqual([expect.objectContaining({ unchanged: 0, notFound: 1 })]);
   });
 
   it('leaves them as they were while the bank can’t be reached, and says so once a run', async () => {
@@ -1527,6 +1527,40 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     await run;
 
     expect(unchangedRuns()).toEqual([1]);
+  });
+
+  it('keeps the line of a check where the bank moved but our status didn’t; the same word twice has none', async () => {
+    const { w, requests } = await paymentsUnderWay(1);
+    const checks = checksOf(w);
+    await checks.run();
+    const before = lines('payment_check.checked').length;
+    const counted = unchangedRuns().length;
+
+    // The same word again: nothing changed at all.
+    await checks.run();
+    expect(lines('payment_check.checked')).toHaveLength(before);
+    expect(unchangedRuns()).toHaveLength(counted + 1);
+
+    // The bank moved on, under the same status of ours.
+    clock.advanceBy(STEP);
+    await checks.run();
+    expect(await transactionOf(w, requests[0] ?? '')).toMatchObject({
+      status: 'PROCESSING',
+      providerStatus: 'AcceptedSettlementCompleted',
+    });
+    expect(lines('payment_check.checked').slice(before)).toEqual([
+      expect.objectContaining({
+        from: 'PROCESSING',
+        to: 'PROCESSING',
+        newBankStatus: 'AcceptedSettlementCompleted',
+      }),
+    ]);
+    expect(unchangedRuns()).toHaveLength(counted + 1);
+
+    // And that word again: nothing changed at all.
+    await checks.run();
+    expect(lines('payment_check.checked')).toHaveLength(before + 1);
+    expect(unchangedRuns()).toHaveLength(counted + 2);
   });
 
   it('counts the checks that changed nothing once a run; one that moved keeps its line; both name the run', async () => {

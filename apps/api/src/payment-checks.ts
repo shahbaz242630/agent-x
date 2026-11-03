@@ -53,6 +53,11 @@
 // A run never throws: each failure is logged, naming the organisation and
 // transaction, and the run goes on to the next. Its heartbeat is read by
 // /health (ADR-013).
+//
+// A check that changed nothing, neither our status nor the bank's, has no line of
+// its own: a run's `payment_check.run_unchanged` counts them, a bank's not-found
+// apart (4D2e Stage F). The count is a run's, not an exact tally: a check still
+// applying after a run gave up at a stop can miss it, or land in the next run's.
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
@@ -194,6 +199,8 @@ interface Run {
   endedTurns: number;
   /** How many payments the bank's word left as they were: counted once a run, as most are at volume (4D2e Stage F). */
   unchanged: number;
+  /** As `unchanged`, where its word was that it can't find the payment. */
+  notFound: number;
   readonly inRow: Map<string, number>;
   readonly checks: Map<string, Promise<CheckOutcome>>;
   readonly unreadable: Set<string>;
@@ -203,6 +210,7 @@ const newRun = (): Run => ({
   unreached: 0,
   endedTurns: 0,
   unchanged: 0,
+  notFound: 0,
   inRow: new Map(),
   checks: new Map(),
   unreadable: new Set(),
@@ -225,6 +233,8 @@ interface Lap {
 interface Checked {
   readonly from: TransactionStatus;
   readonly to: TransactionStatus;
+  /** The bank's status, where this check is the first to read it; else null. */
+  readonly newBankStatus: string | null;
 }
 
 /** Whether a settled payment's bank state contradicts it: paid and then not, or failed and then paid (rail map §4). */
@@ -480,6 +490,7 @@ export function createPaymentChecks({
       const from = transaction.status;
       /** What the bank's word raised for the organisation's admins (decision 37b), told once it is applied. */
       const alerts: { readonly alert: PaymentAlert; readonly details: Record<string, string> }[] = [];
+      let newBankStatus: string | null = null;
 
       /** The status it moved to, or null where its machine refused the move (its facts still kept). */
       const move = async (event: TransactionEvent, facts: ProviderFacts, via: string) => {
@@ -510,6 +521,7 @@ export function createPaymentChecks({
         const state = paymentStateOf(found);
         // Said once, as the bank first says it: a check that finds it as it was says nothing more.
         const newly = found.providerStatus !== transaction.providerStatus;
+        if (newly) newBankStatus = found.providerStatus;
         if (isSettled(from)) {
           await noteTransactionFacts(tx, states, key, facts, { actor: ACTOR, details: { via: 'bank_check' } });
           if (newly && contradicts(from, state)) {
@@ -550,7 +562,7 @@ export function createPaymentChecks({
       for (const { alert, details } of alerts) {
         await alertAdmins(tx, { keys, ids, outbox }, { orgId, transactionId: listed.id, alert, details });
       }
-      return { from, to };
+      return { from, to, newBankStatus };
     });
 
   /** One payment checked with the bank, its outcome logged. */
@@ -562,8 +574,9 @@ export function createPaymentChecks({
     if (gaveUpWaiting) return 'unreached';
     try {
       const checked = await databaseGate.run(orgId, () => applied(orgId, listed, word, log));
-      if (checked.from === checked.to) run.unchanged += 1;
-      else log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
+      if (checked.from === checked.to && checked.newBankStatus === null) {
+        run[word.kind === 'not_found' ? 'notFound' : 'unchanged'] += 1;
+      } else log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
       return 'checked';
     } catch (error) {
       log.error('payment_check.failed', { transactionId: listed.id, err: error });
@@ -697,7 +710,9 @@ export function createPaymentChecks({
       );
       gaveUpWaiting = finished === undefined;
       beatNow();
-      if (run.unchanged > 0) logger.info('payment_check.run_unchanged', { unchanged: run.unchanged });
+      if (run.unchanged + run.notFound > 0) {
+        logger.info('payment_check.run_unchanged', { unchanged: run.unchanged, notFound: run.notFound });
+      }
       // Once a run, not once a payment: the bank down is one thing to say.
       if (run.unreached > 0) {
         logger.warn('payment_check.bank_unavailable', { unreached: run.unreached, stopped: run.endedTurns > 0 });
