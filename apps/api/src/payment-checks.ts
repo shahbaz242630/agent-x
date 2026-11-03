@@ -53,6 +53,16 @@
 // A run never throws: each failure is logged, naming the organisation and
 // transaction, and the run goes on to the next. Its heartbeat is read by
 // /health (ADR-013).
+//
+// A check that changed nothing, neither our status nor the bank's, has no line of
+// its own: a run's `payment_check.run_unchanged` counts them, a bank's not-found
+// apart (4D2e Stage F). The count is a run's, not an exact tally: a check still
+// applying after a run gave up at a stop can miss it, or land in the next run's.
+// A not-found on a payment the bank has spoken of keeps its line, its word having
+// changed; one handed off past UNKNOWN_AFTER_MS is said at warn on each check that
+// finds it so, the payment staying waiting, and its admins are emailed once
+// (`bank_lost`, partner S170): following it up is the user's with their bank,
+// decision 38.
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
@@ -84,12 +94,13 @@ import {
   noteTransactionFacts,
   type ProviderFacts,
   TRANSACTIONS,
+  transactionDueNow,
   type TransactionEvent,
   type TransactionsTables,
   type TransactionStatus,
 } from '@agentx/core/modules/transactions';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database } from '@agentx/platform/db';
+import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -101,6 +112,7 @@ import {
   PartnerTimedOut,
   RUN_BUDGET_MS,
   STOP_WAIT_MS,
+  UNKNOWN_AFTER_MS,
   withinTime,
 } from './handoff.ts';
 import { alertAdmins, type PaymentAlert } from './payment-alerts.ts';
@@ -137,6 +149,10 @@ const STILL_UNKNOWN_MS = DAY_MS;
 
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
+
+/** When the checks next have work in an organisation, not run: now if a payment is under way. */
+export const paymentCheckDue = (tx: DatabaseTransaction<TransactionsTables>, orgId: string) =>
+  transactionDueNow(tx, orgId, UNDER_WAY);
 
 /**
  * The settled ones still watched for PAID_WATCH_MS from their last move: paid,
@@ -192,10 +208,24 @@ interface Run {
   unreached: number;
   /** How many organisations' turns ended on UNREACHED_IN_A_ROW. */
   endedTurns: number;
+  /** How many payments the bank's word left as they were: counted once a run, as most are at volume (4D2e Stage F). */
+  unchanged: number;
+  /** As `unchanged`, where its word was that it can't find the payment. */
+  notFound: number;
   readonly inRow: Map<string, number>;
   readonly checks: Map<string, Promise<CheckOutcome>>;
   readonly unreadable: Set<string>;
 }
+
+const newRun = (): Run => ({
+  unreached: 0,
+  endedTurns: 0,
+  unchanged: 0,
+  notFound: 0,
+  inRow: new Map(),
+  checks: new Map(),
+  unreadable: new Set(),
+});
 
 /** One of the sweeps that reach every payment of its kind, over as many runs as they take. */
 interface Lap {
@@ -214,7 +244,19 @@ interface Lap {
 interface Checked {
   readonly from: TransactionStatus;
   readonly to: TransactionStatus;
+  /** The bank's status, where this check is the first to read it; else null. */
+  readonly newBankStatus: string | null;
+  /** The bank's last status, where it now says it can't find the payment; else null. */
+  readonly bankLost: string | null;
 }
+
+/** Whether a check left all as it was, so its count says enough. */
+const nothingNew = ({ from, to, newBankStatus, bankLost }: Checked): boolean =>
+  from === to && newBankStatus === null && bankLost === null;
+
+/** Whether the bank not finding this one by now is worth saying: handed to it, and past when its answer was due. */
+const lostTooLong = (status: TransactionStatus, createdAt: Date, now: Date): boolean =>
+  (status === 'SUBMITTED' || status === 'PROCESSING') && now.getTime() - createdAt.getTime() > UNKNOWN_AFTER_MS;
 
 /** Whether a settled payment's bank state contradicts it: paid and then not, or failed and then paid (rail map §4). */
 const contradicts = (status: TransactionStatus, state: PaymentState): boolean =>
@@ -285,7 +327,7 @@ export function createPaymentChecks({
   // A quarter of the calls the messages': enough to go on, never all of them.
   const nudgeSlots = Math.max(1, Math.floor(limits.total / 4));
   // The run under way's, as the lanes' work needs them; runs never overlap.
-  let run: Run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
+  let run = newRun();
   let spent: () => boolean = () => false;
   let gaveUpWaiting = false;
   const beatNow = (): void => {
@@ -469,6 +511,8 @@ export function createPaymentChecks({
       const from = transaction.status;
       /** What the bank's word raised for the organisation's admins (decision 37b), told once it is applied. */
       const alerts: { readonly alert: PaymentAlert; readonly details: Record<string, string> }[] = [];
+      let newBankStatus: string | null = null;
+      let bankLost: string | null = null;
 
       /** The status it moved to, or null where its machine refused the move (its facts still kept). */
       const move = async (event: TransactionEvent, facts: ProviderFacts, via: string) => {
@@ -481,17 +525,30 @@ export function createPaymentChecks({
         return moved.outcome === 'moved' ? moved.to : null;
       };
 
+      /** Not found proves nothing: left as it is, said where it has gone on too long. */
+      const notFound = (): TransactionStatus => {
+        bankLost = transaction.providerStatus;
+        if (lostTooLong(from, transaction.createdAt, clock.now())) {
+          log.warn('payment_check.not_found_long', { transactionId: listed.id });
+          // Its admins told once a payment (`alertAdmins`), to take it to their bank (partner S170).
+          alerts.push({ alert: 'bank_lost', details: { bank: transaction.providerStatus ?? 'none' } });
+        }
+        return from;
+      };
+
+      /** Never success on an answer that can't be read (SEC-PTR-09): UNKNOWN, its money held. */
+      const unreadable = async (): Promise<TransactionStatus> => {
+        if (word.kind === 'found') {
+          log.error('payment_check.unreadable', { transactionId: listed.id, why: 'not_this_payment' });
+        }
+        return (await move('lose_track', NO_FACTS, 'bank_unreadable')) ?? from;
+      };
+
       /** Where the bank's word takes it. */
       const movedBy = async (): Promise<TransactionStatus> => {
-        if (word.kind === 'not_found') return from;
+        if (word.kind === 'not_found') return notFound();
         const found = word.kind === 'found' && answerAbout(word.execution, orgId, locked) ? word.execution : undefined;
-        if (found === undefined) {
-          if (word.kind === 'found') {
-            log.error('payment_check.unreadable', { transactionId: listed.id, why: 'not_this_payment' });
-          }
-          // Never success on an answer that can't be read (SEC-PTR-09): UNKNOWN, its money held.
-          return (await move('lose_track', NO_FACTS, 'bank_unreadable')) ?? from;
-        }
+        if (found === undefined) return unreadable();
         // Older than the word kept (another check's newer answer won the lock): already read, nothing new.
         if (transaction.providerChangedAt !== null && found.statusChangedAt < transaction.providerChangedAt)
           return from;
@@ -499,6 +556,7 @@ export function createPaymentChecks({
         const state = paymentStateOf(found);
         // Said once, as the bank first says it: a check that finds it as it was says nothing more.
         const newly = found.providerStatus !== transaction.providerStatus;
+        if (newly) newBankStatus = found.providerStatus;
         if (isSettled(from)) {
           await noteTransactionFacts(tx, states, key, facts, { actor: ACTOR, details: { via: 'bank_check' } });
           if (newly && contradicts(from, state)) {
@@ -539,7 +597,7 @@ export function createPaymentChecks({
       for (const { alert, details } of alerts) {
         await alertAdmins(tx, { keys, ids, outbox }, { orgId, transactionId: listed.id, alert, details });
       }
-      return { from, to };
+      return { from, to, newBankStatus, bankLost };
     });
 
   /** One payment checked with the bank, its outcome logged. */
@@ -551,7 +609,9 @@ export function createPaymentChecks({
     if (gaveUpWaiting) return 'unreached';
     try {
       const checked = await databaseGate.run(orgId, () => applied(orgId, listed, word, log));
-      log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
+      if (nothingNew(checked)) {
+        run[word.kind === 'not_found' ? 'notFound' : 'unchanged'] += 1;
+      } else log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
       return 'checked';
     } catch (error) {
       log.error('payment_check.failed', { transactionId: listed.id, err: error });
@@ -674,7 +734,7 @@ export function createPaymentChecks({
         lap.startedAt = clock.now().getTime();
         lap.said = false;
       }
-      run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
+      run = newRun();
       spent = partOfBudget(1, signal);
       gaveUpWaiting = false;
       // Side by side: a hung lookup under a message must never spend the regular turns' budget.
@@ -685,6 +745,9 @@ export function createPaymentChecks({
       );
       gaveUpWaiting = finished === undefined;
       beatNow();
+      if (run.unchanged + run.notFound > 0) {
+        logger.info('payment_check.run_unchanged', { unchanged: run.unchanged, notFound: run.notFound });
+      }
       // Once a run, not once a payment: the bank down is one thing to say.
       if (run.unreached > 0) {
         logger.warn('payment_check.bank_unavailable', { unreached: run.unreached, stopped: run.endedTurns > 0 });

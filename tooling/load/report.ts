@@ -6,6 +6,7 @@
 import type { FreezeProbed } from './freeze-probe.ts';
 import type { DecisionParts, LogSummary, NeighbourKind, Percentiles } from './logs.ts';
 import { type LoadSite, NEIGHBOURS_PHASE, POLICY_P95_MS, STAGING_API_CPUS } from './plan.ts';
+import { growthSection, type TableGrowth } from './table-growth.ts';
 
 /** One phase as k6 sums it up (money-paths.k6.js, handleSummary). */
 export interface PhaseResult {
@@ -27,6 +28,8 @@ export interface PhaseResult {
   /** Phase 5's: when it ran, which lines of the API's log are its trouble's. */
   readonly startedAt?: string;
   readonly endedAt?: string;
+  /** How long k6 sent this phase's traffic: the run's rate is worked from it. */
+  readonly durationMs?: number;
 }
 
 /** One kind of organisation's requests in phase 5, as k6 saw them. */
@@ -72,6 +75,8 @@ export interface RunResult {
   readonly freezeProbe?: FreezeProbed;
   /** On the laptop: the app's round trips over each phase (pg_stat_statements, less statements sent in another's trip). */
   readonly statements?: readonly PhaseStatements[];
+  /** Each table's size at the run's two ends (4D2e F12). */
+  readonly growth?: TableGrowth;
   readonly logs: LogSummary;
   readonly databaseChecksPassed: boolean;
   /** Every check that failed, in plain words: none on a clean run. */
@@ -364,6 +369,7 @@ export function renderReport(run: RunResult): string {
     `Allowed at once: ${String(run.logs.allowed)} of the ${String(decisions.count)} steady decisions; the rest wait for a person, or are denied. Hand-offs are paused, so what follows an allowed request isn't timed.`,
     ...crowdSection(run),
     ...neighbourSection(run),
+    ...growthSection(run.growth, run.phases),
     '',
     '## Checks',
     '',

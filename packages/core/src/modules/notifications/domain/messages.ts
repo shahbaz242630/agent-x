@@ -466,6 +466,13 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       `A payment from one of your organisations has had no final answer from the bank for over a day. Its amount stays held against your limits. ${KEEPS_CHECKING}`,
     check: WITH_YOUR_BANK,
   },
+  // 0071, partner S170: handed to the bank, and still not found by it.
+  payment_bank_lost: {
+    subject: () => "Agent X: the bank can't find a payment",
+    firstLine: () =>
+      `The bank says it can't find a payment from one of your organisations that was handed to it. Its amount stays held against your limits. ${KEEPS_CHECKING}`,
+    check: WITH_YOUR_BANK,
+  },
 };
 
 const NEWLINE = '\n';

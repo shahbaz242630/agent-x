@@ -77,7 +77,10 @@ interface RequestFacts {
 /** A request of a verified member or agent of one organisation. */
 export interface OrganisationRequest extends RequestFacts {
   readonly orgId: string;
-  readonly actor: { readonly type: 'user' | 'agent'; readonly id: string };
+  /** An agent's row names the key it came with: its request line may be sampled, and this row never is (Stage F, decision 2). */
+  readonly actor:
+    | { readonly type: 'user'; readonly id: string }
+    | { readonly type: 'agent'; readonly id: string; readonly keyId: string };
 }
 
 /** A signed-in person's request naming no organisation they are verified in. */
@@ -125,6 +128,13 @@ function problemWith(facts: RequestFacts): string | undefined {
   return clueProblem(facts.client);
 }
 
+/** Why a row's actor can't be written, if it can't. */
+function actorProblem(actor: OrganisationRequest['actor']): string | undefined {
+  if (!['user', 'agent'].includes(actor.type) || !UUID.test(actor.id))
+    return 'its actor is not a person or an agent by UUID';
+  return actor.type === 'agent' && !UUID.test(actor.keyId) ? "its agent's key is not a UUID" : undefined;
+}
+
 /** The columns both tables share, from facts already checked. */
 const columnsOf = (id: string, facts: RequestFacts) => ({
   id,
@@ -153,9 +163,7 @@ export function createActivityLog({ ids }: { readonly ids: IdGenerator }): Activ
       const problem =
         problemWith(request) ??
         (UUID.test(request.orgId) ? undefined : 'its organisation is not a UUID') ??
-        (['user', 'agent'].includes(request.actor.type) && UUID.test(request.actor.id)
-          ? undefined
-          : 'its actor is not a person or an agent by UUID');
+        actorProblem(request.actor);
       if (problem !== undefined) refuse(problem);
       await withTenant(
         db,
@@ -168,6 +176,7 @@ export function createActivityLog({ ids }: { readonly ids: IdGenerator }): Activ
               org_id: request.orgId.toLowerCase(),
               actor_type: request.actor.type,
               actor_id: request.actor.id.toLowerCase(),
+              agent_key_id: request.actor.type === 'agent' ? request.actor.keyId.toLowerCase() : null,
             })
             .execute();
         },

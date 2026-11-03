@@ -29,6 +29,8 @@ interface RequestsTable extends RequestColumns {
   org_id: string;
   actor_type: string;
   actor_id: string;
+  /** The key an agent's request came with (0070); null on a person's row and on an agent's written before 0070. */
+  agent_key_id: string | null;
 }
 
 interface PersonRequestsTable extends RequestColumns {

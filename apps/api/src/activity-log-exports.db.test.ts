@@ -40,6 +40,7 @@ let app: Database<MandateWorldTables & ActivityTables>;
 
 const ids = new SequentialIds(0xa15e_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000a15e0';
+const AGENT_KEY = '0199a0f0-0000-7000-8000-0000000a15e9';
 const EVER = { from: new Date('2000-01-01T00:00:00Z'), to: new Date('2100-01-01T00:00:00Z') };
 const recorder = createActivityRecorder({ ids });
 const trail = createAuditTrail({ keys, ids });
@@ -154,7 +155,7 @@ describe('downloading the activity log (L5, decision 26)', () => {
   it('records the download on the audit log first, then gives its requests newest first as NDJSON, each place credited', async () => {
     const w = await world();
     await requested(w, '2026-10-19T09:00:00.000Z');
-    await requested(w, '2026-10-19T10:00:00.000Z', { by: { type: 'agent', id: w.agent } });
+    await requested(w, '2026-10-19T10:00:00.000Z', { by: { type: 'agent', id: w.agent, keyId: AGENT_KEY } });
 
     const file = fileOf(await exported(w, asked('ndjson')));
     const lines = file.content
@@ -177,7 +178,10 @@ describe('downloading the activity log (L5, decision 26)', () => {
         timeZone: { name: 'Asia/Dubai', from: 'organisation' },
       },
     });
-    expect(lines[0]).toMatchObject({ actor: { type: 'agent', id: w.agent, name: 'Purchasing agent' } });
+    expect(lines[0]).toMatchObject({
+      actor: { type: 'agent', id: w.agent, name: 'Purchasing agent' },
+      agentKeyId: AGENT_KEY,
+    });
 
     const recorded = await withTenant(app, w.org, (tx) => trail.recordedEvent(tx, w.org, { eventId: file.id }));
     expect(recorded).toMatchObject({
@@ -201,7 +205,7 @@ describe('downloading the activity log (L5, decision 26)', () => {
 
     expect(file).toMatchObject({ contentType: 'text/csv', requests: 1 });
     expect(header).toBe(
-      '"id","recordedAt","localTime","actorType","actorId","actorName","actorEmail","actorNameFrom","method","route","pathIds","status","reason","correlationId","durationMs","sealed","ip","approximateCountry","approximateCity","placeBy","timeZone","timeZoneFrom"',
+      '"id","recordedAt","localTime","actorType","actorId","actorName","actorEmail","actorNameFrom","agentKeyId","method","route","pathIds","status","reason","correlationId","durationMs","sealed","ip","approximateCountry","approximateCity","placeBy","timeZone","timeZoneFrom"',
     );
     expect(row).toContain(
       `"GET","/v1/agents/:id","${w.agent}","200","","${CORRELATION}","7","false","94.200.1.7","AE","'=HYPERLINK(""x"")","IP Geolocation by DB-IP (https://db-ip.com)","Asia/Dubai","organisation"`,
@@ -221,7 +225,7 @@ describe('downloading the activity log (L5, decision 26)', () => {
   it('gives one person’s or agent’s requests alone, the actor named in the record', async () => {
     const w = await world();
     await requested(w, '2026-10-19T09:00:00.000Z');
-    await requested(w, '2026-10-19T10:00:00.000Z', { by: { type: 'agent', id: w.agent } });
+    await requested(w, '2026-10-19T10:00:00.000Z', { by: { type: 'agent', id: w.agent, keyId: AGENT_KEY } });
 
     const file = fileOf(await exported(w, asked('ndjson', { type: 'agent', id: w.agent })));
     expect(file.requests).toBe(1);

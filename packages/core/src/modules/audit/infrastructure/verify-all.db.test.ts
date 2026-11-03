@@ -56,7 +56,7 @@ const KEYS = {
   fields: [{ column: 'label', type: 'text' }],
 } as const satisfies SignedStateTable;
 
-/** A stand-in for a table whose rows only grow (spend requests, Phase 2 D1): checked in its LIVE rows alone. */
+/** A stand-in for a table whose rows only grow (spend requests, Phase 2 D1): checked in its LIVE rows and its newest. */
 const REQUESTS = {
   table: 'probe.requests',
   subject: 'spend_request',
@@ -368,6 +368,140 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     expect(await verifyAll([KEYS], 2)).toEqual({ outcome: 'verified', objects: 2 });
   });
 
+  describe('paged, as clearing reads (4D2e, partner S170: no fixed ceiling)', () => {
+    /** verifyAll reading each table that doesn't grow whole, `limit` a page, with each table's count it told. */
+    const verifyPaged = async (tables: readonly CheckedTable[], limit: number) => {
+      const counts: [string, number][] = [];
+      const counted = (subjectType: string, objects: number) => {
+        counts.push([subjectType, objects]);
+      };
+      const check = await withTenant(app, org, (tx) => states.verifyAll(tx, org, tables, limit, { counted }));
+      return { check, counts };
+    };
+
+    it('checks every object past the limit, a page at a time, and counts each table', async () => {
+      await newRow(AGENTS);
+      for (let row = 0; row < 3; row += 1) await newRow(KEYS);
+
+      expect(await verifyPaged([AGENTS, KEYS], 2)).toEqual({
+        check: { outcome: 'verified', objects: 4 },
+        counts: [
+          ['agent', 1],
+          ['agent_key', 3],
+        ],
+      });
+      expect((await verifyPaged([AGENTS, KEYS], 1)).check).toEqual({ outcome: 'verified', objects: 4 });
+    });
+
+    it('lists the objects the log alone holds on every page: each row deleted is named', async () => {
+      const made = [await newRow(KEYS), await newRow(KEYS), await newRow(KEYS)];
+      for (const id of made) await agentKeys.deleteRow(id);
+
+      expect(await verifyPaged([KEYS], 2)).toEqual({
+        check: { outcome: 'tampered', findings: made.map((id) => finding('agent_key', id, 'deleted')) },
+        counts: [['agent_key', 3]],
+      });
+    });
+
+    it('names a row tampered with on any page, in ID order', async () => {
+      const made: string[] = [];
+      for (let row = 0; row < 5; row += 1) made.push(await newRow(AGENTS));
+      const [onFirst, , onSecond, , onThird] = made as [string, string, string, string, string];
+      await agents.setColumn(onFirst, 'label', 'REVOKED');
+      await agents.setColumn(onSecond, 'label', 'REVOKED');
+      await agents.setColumn(onThird, 'label', 'REVOKED');
+
+      expect(await verifyPaged([AGENTS], 2)).toEqual({
+        check: {
+          outcome: 'tampered',
+          findings: [
+            finding('agent', onFirst, 'seal'),
+            finding('agent', onSecond, 'seal'),
+            finding('agent', onThird, 'seal'),
+          ],
+        },
+        counts: [['agent', 5]],
+      });
+    });
+
+    it('names a row tampered with on the last page alone', async () => {
+      const made: string[] = [];
+      for (let row = 0; row < 3; row += 1) made.push(await newRow(AGENTS));
+      const last = made.at(-1) ?? '';
+      await agents.setColumn(last, 'label', 'REVOKED');
+
+      expect((await verifyPaged([AGENTS], 2)).check).toEqual({
+        outcome: 'tampered',
+        findings: [finding('agent', last, 'seal')],
+      });
+    });
+
+    it('counts no growing table: its count is not its whole', async () => {
+      await newRequest('LIVE');
+      await newRow(AGENTS);
+
+      expect(await verifyPaged([AGENTS, REQUESTS], 1)).toEqual({
+        check: { outcome: 'verified', objects: 2 },
+        counts: [['agent', 1]],
+      });
+    });
+
+    it('sends a few more statements for each page, none for more rows within one', async () => {
+      const counted = () =>
+        withTenant(app, org, (tx) =>
+          statementsSent(tx, (each) => states.verifyAll(each, org, [AGENTS], 2, { counted: () => undefined })),
+        );
+      /** Adds rows until there are `rows`, and counts a check's statements. */
+      const at = async (rows: number) => {
+        while ((await withTenant(app, org, (tx) => signedRowIds(tx, AGENTS, org, 10))).length < rows) {
+          await newRow(AGENTS);
+        }
+        const { result, sent } = await counted();
+        expect(result).toEqual({ outcome: 'verified', objects: rows });
+        return sent;
+      };
+      const [two, three, four, six] = [await at(2), await at(3), await at(4), await at(6)];
+
+      // Two rows are one page of two; three and four, two pages; six, three.
+      expect(three).toBeGreaterThan(two);
+      expect(four).toBe(three);
+      expect(six - four).toBe(three - two);
+    });
+
+    it('holds a row on a later page locked for a decision to the end of its transaction', async () => {
+      await newRow(AGENTS);
+      const later = await newRow(AGENTS);
+      let release = (): void => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let checked = (): void => undefined;
+      const done = new Promise<void>((resolve) => {
+        checked = resolve;
+      });
+      const open = withTenant(app, org, async (tx) => {
+        expect(await states.verifyAll(tx, org, [AGENTS], 1, { counted: () => undefined })).toEqual({
+          outcome: 'verified',
+          objects: 2,
+        });
+        checked();
+        await held;
+      });
+      await done;
+      try {
+        await expect(
+          withTenant(app, org, async (tx) => {
+            await sql`set local lock_timeout = '200ms'`.execute(tx);
+            return readSignedRow(tx, AGENTS, { orgId: org, id: later }, 'change');
+          }),
+        ).rejects.toThrow('lock timeout');
+      } finally {
+        release();
+        await open;
+      }
+    });
+  });
+
   it('reads a table in the same few statements however many objects it holds: no per-row loop', async () => {
     const counted = () =>
       withTenant(app, org, (tx) => statementsSent(tx, (each) => states.verifyAll(each, org, [AGENTS, KEYS], 100)));
@@ -433,57 +567,135 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     }
   });
 
-  it('checks a growing table in its live rows alone, so its ended ones never count to the limit', async () => {
+  /** Runs `work` as the database's owner on the requests, inside the organisation. */
+  const onRequests = async (work: (requests: OwnerTamper) => Promise<unknown>): Promise<void> => {
+    const requests = await tamperAsOwner(database, REQUESTS, org);
+    try {
+      await work(requests);
+    } finally {
+      await requests.end();
+    }
+  };
+
+  it('checks a growing table in its newest rows up to the limit and every live one, so its older ended ones never count (4D2e Stage F)', async () => {
+    await newRequest('ENDED');
     await newRequest('LIVE');
     await newRequest('ENDED');
+
+    // The newest two, the live one among them read once; the oldest, ended, is the history batches'.
+    expect(await verifyAll([REQUESTS], 2)).toEqual({ outcome: 'verified', objects: 2 });
+    expect(await verifyAll([REQUESTS], 3)).toEqual({ outcome: 'verified', objects: 3 });
+  });
+
+  it('checks every live row older than the newest, however many, a page of the limit at a time: never too_many', async () => {
+    for (let made = 0; made < 3; made += 1) await newRequest('LIVE');
     await newRequest('ENDED');
+    await newRequest('ENDED');
+
+    expect(await verifyAll([REQUESTS], 2)).toEqual({ outcome: 'verified', objects: 5 });
+    expect(await verifyAll([REQUESTS], 1)).toEqual({ outcome: 'verified', objects: 4 });
+  });
+
+  it('names what it finds in ID order, the older live rows before the newest, across pages', async () => {
+    const first = await newRequest('ENDED');
+    await newRequest('LIVE');
+    const third = await newRequest('ENDED');
+    await newRequest('ENDED');
+    const newest = await newRequest('ENDED');
+    await onRequests(async (requests) => {
+      // Moved back to live, so listed: one on the first page of the older live rows, one on the second.
+      await requests.setColumn(first, 'status', 'LIVE');
+      await requests.setColumn(third, 'status', 'LIVE');
+      await requests.setColumn(newest, 'status', 'GONE');
+    });
+
+    expect(await verifyAll([REQUESTS], 2)).toEqual({
+      outcome: 'tampered',
+      findings: [
+        finding('spend_request', first, 'seal'),
+        finding('spend_request', third, 'seal'),
+        finding('spend_request', newest, 'seal'),
+      ],
+    });
+  });
+
+  it('names an ended row among the newest changed past the app, whatever its status', async () => {
+    const ended = await newRequest('ENDED');
+    await onRequests((requests) => requests.setColumn(ended, 'status', 'GONE'));
+
+    expect(await verifyAll([REQUESTS])).toEqual({
+      outcome: 'tampered',
+      findings: [finding('spend_request', ended, 'seal')],
+    });
+  });
+
+  it('names an older ended row moved back to a live status, since it is then listed', async () => {
+    const ended = await newRequest('ENDED');
+    await newRequest('ENDED');
+    await onRequests((requests) => requests.setColumn(ended, 'status', 'LIVE'));
+
+    expect(await verifyAll([REQUESTS], 1)).toEqual({
+      outcome: 'tampered',
+      findings: [finding('spend_request', ended, 'seal')],
+    });
+  });
+
+  it('leaves an older ended row to the history batches and where it is read again: changed while ended, not judged here', async () => {
+    const ended = await newRequest('ENDED');
+    await newRequest('ENDED');
+    await onRequests((requests) => requests.setColumn(ended, 'status', 'GONE'));
+
+    expect(await verifyAll([REQUESTS], 1)).toEqual({ outcome: 'verified', objects: 1 });
+    const read = await withTenant(app, org, (tx) =>
+      states.verifiedState(tx, REQUESTS, { orgId: org, id: ended }, 'share'),
+    );
+    expect(read).toEqual({ outcome: 'tampered', sign: 'seal' });
+  });
+
+  it('leaves an older live row moved to an end, or deleted, to the clearing’s other checks: not judged here (Phase 2 D1b)', async () => {
+    const moved = await newRequest('LIVE');
+    const deleted = await newRequest('LIVE');
+    await newRequest('ENDED');
+    await onRequests(async (requests) => {
+      await requests.setColumn(moved, 'status', 'ENDED');
+      await requests.deleteRow(deleted);
+    });
 
     expect(await verifyAll([REQUESTS], 1)).toEqual({ outcome: 'verified', objects: 1 });
   });
 
-  it('names an ended row moved back to a live status, since it is then listed', async () => {
-    const ended = await newRequest('ENDED');
-    const requests = await tamperAsOwner(database, REQUESTS, org);
-    try {
-      await requests.setColumn(ended, 'status', 'LIVE');
+  it('reads the older live rows only past the newest: no more statements for a growing table that fits the limit', async () => {
+    const counted = () =>
+      withTenant(app, org, (tx) => statementsSent(tx, (each) => states.verifyAll(each, org, [REQUESTS], 2)));
+    await newRequest('ENDED');
+    const one = await counted();
+    await newRequest('ENDED');
+    const full = await counted();
+    await newRequest('LIVE');
+    const past = await counted();
 
-      expect(await verifyAll([REQUESTS])).toEqual({
-        outcome: 'tampered',
-        findings: [finding('spend_request', ended, 'seal')],
-      });
-    } finally {
-      await requests.end();
-    }
+    expect(one.result).toEqual({ outcome: 'verified', objects: 1 });
+    expect(full.result).toEqual({ outcome: 'verified', objects: 2 });
+    expect(past.result).toEqual({ outcome: 'verified', objects: 2 });
+    expect(full.sent).toBe(one.sent);
+    expect(past.sent).toBeGreaterThan(full.sent);
   });
 
-  it('leaves an ended row to be verified where it is read again: changed while ended, it is not judged here', async () => {
-    const ended = await newRequest('ENDED');
-    const requests = await tamperAsOwner(database, REQUESTS, org);
-    try {
-      await requests.setColumn(ended, 'status', 'GONE');
+  it('stops paging the older live rows once a page reaches the newest: one page for one older live row', async () => {
+    const counted = () =>
+      withTenant(app, org, (tx) => statementsSent(tx, (each) => states.verifyAll(each, org, [REQUESTS], 2)));
+    await newRequest('LIVE');
+    await newRequest('ENDED');
+    await newRequest('ENDED');
+    const alone = await counted();
+    // Two live rows newer still: the page holds three, two of them the newest's, and is the last.
+    await newRequest('LIVE');
+    await newRequest('LIVE');
+    const crossing = await counted();
 
-      expect(await verifyAll([REQUESTS])).toEqual({ outcome: 'verified', objects: 0 });
-      const read = await withTenant(app, org, (tx) =>
-        states.verifiedState(tx, REQUESTS, { orgId: org, id: ended }, 'share'),
-      );
-      expect(read).toEqual({ outcome: 'tampered', sign: 'seal' });
-    } finally {
-      await requests.end();
-    }
-  });
-
-  it('leaves a live row moved to an end, or deleted, to the clearing’s other checks: not judged here (Phase 2 D1b)', async () => {
-    const moved = await newRequest('LIVE');
-    const deleted = await newRequest('LIVE');
-    const requests = await tamperAsOwner(database, REQUESTS, org);
-    try {
-      await requests.setColumn(moved, 'status', 'ENDED');
-      await requests.deleteRow(deleted);
-
-      expect(await verifyAll([REQUESTS])).toEqual({ outcome: 'verified', objects: 0 });
-    } finally {
-      await requests.end();
-    }
+    expect(alone.result).toEqual({ outcome: 'verified', objects: 3 });
+    expect(crossing.result).toEqual({ outcome: 'verified', objects: 3 });
+    expect(crossing.sent).toBe(alone.sent);
   });
 
   it("refuses the integrity hold's own subject type, whose state has no row", async () => {

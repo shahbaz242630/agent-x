@@ -165,6 +165,8 @@ const SETTINGS = {
     }),
     default: String(DEFAULT_LOG.eventCapPerMinute),
   },
+  // 4D2e Stage F: 1 keeps every line of success; a failure, refusal or sign-in is always kept, whatever this says.
+  AGENTX_LOG_SUCCESS_SAMPLE_ONE_IN: { schema: wholeNumber({ min: 1, max: 10_000 }), default: '1' },
   AGENTX_HTTP_HOST: { schema: listenAddress, default: '127.0.0.1' },
   AGENTX_HTTP_PORT: { schema: wholeNumber({ min: 0, max: 65_535 }), default: '8080' },
   AGENTX_PUBLIC_ORIGIN: { schema: publicOrigin.optional() },
@@ -381,6 +383,7 @@ const COMMON: readonly SettingName[] = [
   'AGENTX_RELEASE',
   'AGENTX_LOG_LEVEL',
   'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
+  'AGENTX_LOG_SUCCESS_SAMPLE_ONE_IN',
 ];
 
 /** Where the database is and how the connection is protected. */

@@ -34,6 +34,7 @@ import type { FreezeProbed } from '../../tooling/load/freeze-probe.ts';
 import { apartOrgsOf, type LogSummary, logFailures, summariseLogs, troubleWindowOf } from '../../tooling/load/logs.ts';
 import { LOAD_GATE, orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
+import { gatheredEnd, growthBetween } from '../../tooling/load/table-growth.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
 import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
 import {
@@ -489,7 +490,7 @@ async function phaseOne(
     throw new Error(`Phase 1 didn't finish (load-first ended ${endedAs(first.run, first.printed)}). ${next}`);
   }
   if (first.putBack !== undefined) throw new Error(`${first.putBack} ${next}`);
-  return { run: first.run, agents, phase };
+  return { run: first.run, agents, phase, printed: first.printed };
 }
 
 type Line = Readonly<Record<string, unknown>> | undefined;
@@ -562,6 +563,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
     database,
     smoke,
     phases,
+    growth: growthBetween(gatheredEnd(first.printed, 'before'), gatheredEnd(second.printed, 'after')),
     logs,
     gate: LOAD_GATE,
     ...(freezeProbe === undefined ? {} : { freezeProbe }),

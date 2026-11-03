@@ -200,27 +200,44 @@ export type PageCheck = StateCheck | { readonly outcome: 'backlog' };
 
 /**
  * A table verifyAll checks: all of it, or, for one whose rows only grow (a
- * spend request's, Phase 2 D1), its rows in `liveStatuses` alone: those that
- * can still act. One moved back to a live status is listed, so checked; an
- * ended one, or a live one moved to an end or deleted, is not judged here:
- * clearing reads the record its hold names, the whole history is checked in
- * batches before a clearing is confirmed (Phase 2 D1c), and claims and
- * reservations are reconciled with the log (E1).
+ * spend request's, Phase 2 D1; a payment's), its rows in `liveStatuses`,
+ * those that can still act, and its newest rows up to the limit whatever
+ * their status (4D2e Stage F, decision 5), so a long history never fails it.
+ * One moved back to a live status is listed, so checked; an older ended one,
+ * or a live one moved to an end or deleted, is not judged here: clearing reads
+ * the record its hold names, the whole history is checked in batches before a
+ * clearing is confirmed (Phase 2 D1c), and claims and reservations are
+ * reconciled with the log (E1).
  */
 export interface CheckedTable extends SignedStateTable {
   readonly liveStatuses?: readonly string[];
 }
 
 /**
- * Every object of the tables checked (verifyAll; a growing table's live rows):
- * all verified, with how many there were; some tampered with, each finding
- * named (every alarm is already raised); or more objects in one table than the
- * limit, with none judged.
+ * Every object of the tables checked (verifyAll; a growing table's as CheckedTable says):
+ * all verified, with how many there were; or some tampered with, each finding
+ * named (every alarm is already raised).
  */
-export type OrganisationCheck =
+type WholeCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
-  | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] }
-  | { readonly outcome: 'too_many'; readonly subjectType: string };
+  | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] };
+
+/**
+ * A WholeCheck, or, read without paging, more objects in one table that
+ * doesn't grow than the limit, with none judged: a list its caller then
+ * reads whole (contactsOf, resetsOf), so one page is all it can hold.
+ */
+export type OrganisationCheck = WholeCheck | { readonly outcome: 'too_many'; readonly subjectType: string };
+
+/**
+ * verifyAll told to read every table that doesn't grow whole, `limit` objects
+ * a page, however many (clearing a hold, 4D2e: no fixed ceiling, partner
+ * S170), each such table's count handed to `counted`, so its caller can say
+ * when one is filling.
+ */
+interface PagedCheck {
+  readonly counted: (subjectType: string, objects: number) => void;
+}
 
 /**
  * One batch of a growing table's whole history (checkHistoryBatch): its
@@ -455,9 +472,18 @@ export interface SignedStates {
    * `deleted` too (its seals stripped as well), with its alarm. Table by
    * table in the order given, which must be the lock order's (ADR-006 §6),
    * and by ID within each. Past `limit` rows, or objects in the log, in one
-   * table: `too_many`, with nothing more judged. A table with `liveStatuses`
-   * is checked in its live rows alone (CheckedTable).
+   * table: `too_many`, with nothing more judged; or, `paged`, every object
+   * of it, `limit` a page (PagedCheck). A table with `liveStatuses` is checked
+   * in every live row and its newest `limit` rows, however many it holds:
+   * never `too_many` (CheckedTable).
    */
+  verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+    paged: PagedCheck,
+  ): Promise<WholeCheck>;
   verifyAll(
     tx: AuditTransaction,
     orgId: string,
@@ -1537,6 +1563,115 @@ export function createSignedStates({
     return Object.freeze({ ids, next: next.length > size ? (ids.at(-1) ?? null) : null });
   };
 
+  /**
+   * A growing table as verifyAll checks it (4D2e Stage F, decision 5): its
+   * newest `window` rows whatever their status, and every live row older than
+   * those, a page of `window` at a time, so no count of either fails it;
+   * judged in ID order. Its older ended rows are the history batches' (Phase 2
+   * D1c), which clearing waits for, as it always has for ended spend requests.
+   */
+  const growingJudged = async (
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    live: readonly string[],
+    window: number,
+  ): Promise<{ readonly findings: readonly TamperFinding[]; readonly objects: number }> => {
+    const listed = await signedRowIds(tx, table, orgId, window, null, null, 'newest');
+    const newest = listed.slice(0, window).reverse();
+    const findings: TamperFinding[] = [];
+    let older = 0;
+    const oldestInWindow = newest[0];
+    // One more listed than the window: rows older than it, whose live ones are read here too.
+    if (oldestInWindow !== undefined && listed.length > window) {
+      let after: string | null = null;
+      for (let more = true; more;) {
+        const page: readonly string[] = await signedRowIds(tx, table, orgId, window, after, live);
+        // Lower-case UUID text sorts as Postgres sorts the uuids: those from the window on are judged with it.
+        const before = page.slice(0, window).filter((id) => id < oldestInWindow);
+        findings.push(...(await judged(tx, orgId, table, before)));
+        older += before.length;
+        more = page.length > window && before.length === window;
+        after = before.at(-1) ?? null;
+      }
+    }
+    findings.push(...(await judged(tx, orgId, table, newest)));
+    return { findings, objects: older + newest.length };
+  };
+
+  /**
+   * A table that doesn't grow as verifyAll checks it: every object, its rows'
+   * and the log's (objectIdsOf), a page of `page` at a time by ID, each page
+   * judged before the next is listed, so a few statements a page and one
+   * page's ID list at once (the lock-order map still keeps an entry for every
+   * row judged, fine at tens of thousands). Not `paging`, a second page answers undefined,
+   * with nothing judged: the caller's list holds one page alone.
+   */
+  const everyJudged = async (
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    page: number,
+    paging: boolean,
+  ): Promise<{ readonly findings: readonly TamperFinding[]; readonly objects: number } | undefined> => {
+    const findings: TamperFinding[] = [];
+    let objects = 0;
+    let after: string | null = null;
+    do {
+      // Typed here: `after` is set from it, a loop TypeScript can't infer through.
+      const listed: { readonly ids: readonly string[]; readonly next: string | null } = await objectIdsOf(
+        tx,
+        orgId,
+        table,
+        after,
+        page,
+      );
+      if (listed.next !== null && !paging) return undefined;
+      findings.push(...(await judged(tx, orgId, table, listed.ids)));
+      objects += listed.ids.length;
+      after = listed.next;
+    } while (after !== null);
+    return { findings, objects };
+  };
+
+  function verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+    paged: PagedCheck,
+  ): Promise<WholeCheck>;
+  function verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+  ): Promise<OrganisationCheck>;
+  async function verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+    paged?: PagedCheck,
+  ): Promise<OrganisationCheck> {
+    const findings: TamperFinding[] = [];
+    let objects = 0;
+    for (const table of tables) {
+      notTheHold(table);
+      const checked =
+        table.liveStatuses === undefined
+          ? await everyJudged(tx, orgId, table, limit, paged !== undefined)
+          : await growingJudged(tx, orgId, table, table.liveStatuses, limit);
+      if (checked === undefined) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
+      if (table.liveStatuses === undefined) paged?.counted(table.subject, checked.objects);
+      findings.push(...checked.findings);
+      objects += checked.objects;
+    }
+    if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
+    verifiedWhole.set(tx, (verifiedWhole.get(tx) ?? new Set<string>()).add(orgId.toLowerCase()));
+    return Object.freeze({ outcome: 'verified', objects });
+  }
+
   return Object.freeze({
     verifiedState,
     gather,
@@ -1553,29 +1688,7 @@ export function createSignedStates({
       alarm(subjectType, key, 'moved_back');
     },
 
-    async verifyAll(
-      tx: AuditTransaction,
-      orgId: string,
-      tables: readonly CheckedTable[],
-      limit: number,
-    ): Promise<OrganisationCheck> {
-      const findings: TamperFinding[] = [];
-      let objects = 0;
-      for (const table of tables) {
-        notTheHold(table);
-        const live = table.liveStatuses ?? null;
-        const rowIds = await signedRowIds(tx, table, orgId, limit, null, live);
-        // A growing table's log lists every object it ever had, ended ones too.
-        const loggedIds = live === null ? await trail.subjectIds(tx, orgId, table.subject, limit) : [];
-        const every = [...new Set([...rowIds, ...loggedIds])].sort();
-        if (every.length > limit) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
-        findings.push(...(await judged(tx, orgId, table, every)));
-        objects += every.length;
-      }
-      if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
-      verifiedWhole.set(tx, (verifiedWhole.get(tx) ?? new Set<string>()).add(orgId.toLowerCase()));
-      return Object.freeze({ outcome: 'verified', objects });
-    },
+    verifyAll,
 
     async checkHistoryBatch(
       tx: AuditTransaction,

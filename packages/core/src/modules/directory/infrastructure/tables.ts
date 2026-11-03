@@ -1,9 +1,12 @@
-/** The directory schema's tables (db/migrations/0007_directory.sql, 0015_memberships.sql, 0016_invitations.sql, 0027_agents.sql), as Kysely sees them. */
+import type { Generated } from 'kysely';
+
+/** The directory schema's tables (db/migrations/0007_directory.sql, 0015_memberships.sql, 0016_invitations.sql, 0027_agents.sql, 0072_org_work.sql), as Kysely sees them. */
 export interface DirectoryTables {
   'directory.orgs': OrgsTable;
   'directory.members': MembersTable;
   'directory.invites': InvitesTable;
   'directory.agent_keys': AgentKeysTable;
+  'directory.org_work': OrgWorkTable;
 }
 
 interface OrgsTable {
@@ -25,4 +28,11 @@ interface InvitesTable {
 interface AgentKeysTable {
   key_id: string;
   org_id: string;
+}
+
+interface OrgWorkTable {
+  org_id: string;
+  job: 'hand_off' | 'hand_off_sweep' | 'payment_check';
+  due_at: Date;
+  marks: Generated<string>;
 }

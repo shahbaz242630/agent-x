@@ -50,7 +50,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
   readonly fixedAtCreation?: readonly string[];
   /**
    * Its rows only grow (a spend request's): clearing the integrity hold checks
-   * those in these statuses alone, the ones that can still act (CheckedTable).
+   * those in these statuses, the ones that can still act, and its newest, the
+   * rest by the history batches (CheckedTable).
    */
   readonly liveStatuses?: readonly string[];
   /**
@@ -78,7 +79,7 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * instruction and transaction (10, Phase 4 B3), then an admin's proposal to
  * mark the transaction failed (10, after it: 0066, gate H10). Clearing the
  * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
- * table with `liveStatuses`, its live rows), so a new table goes in at its
+ * table with `liveStatuses`, its live and newest rows), so a new table goes in at its
  * level.
  */
 export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
