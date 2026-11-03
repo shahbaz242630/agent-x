@@ -537,6 +537,7 @@ describe('a notice’s email (B5-1b)', () => {
         'Agent X: a payment still has no final answer',
         'no final answer from the bank for over a day',
       ],
+      ['payment_bank_lost', "Agent X: the bank can't find a payment", "says it can't find a payment"],
     ] as const)(
       'tells every admin, by the payment’s ID, of a %s payment to follow up with their own bank (0065, decisions 37b, 38)',
       (kind, subject, line) => {

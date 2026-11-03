@@ -184,7 +184,12 @@ export function handoffWorld({
             .select('kind')
             .where('org_id', '=', w.org)
             .where('about_id', '=', transactionId)
-            .where('kind', 'in', ['payment_contradicted', 'payment_unproven', 'payment_still_unknown'])
+            .where('kind', 'in', [
+              'payment_contradicted',
+              'payment_unproven',
+              'payment_still_unknown',
+              'payment_bank_lost',
+            ])
             .orderBy('created_at')
             .orderBy('id')
             .execute(),

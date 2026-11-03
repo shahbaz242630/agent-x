@@ -415,7 +415,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(lines('payment_check.not_found_long')).toEqual([]);
   });
 
-  it('says each check that the bank still can’t find one under way past its time, naming it; the payment stays waiting', async () => {
+  it('says each check that the bank still can’t find one under way past its time, naming it; the payment stays waiting, its admins told once (S170)', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await handoffOf(w).run();
@@ -425,6 +425,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     clock.advanceBy(UNKNOWN_AFTER_MS - STEP);
     await checksOf(w, notFound).run();
     expect(lines('payment_check.not_found_long')).toEqual([]);
+    expect(await alertsOf(w, id)).toEqual({ kept: [], emailed: [] });
 
     clock.advanceBy(2 * STEP);
     await checksOf(w, notFound).run();
@@ -433,13 +434,24 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(lines('payment_check.not_found_long')).toEqual([said, said]);
     expect(lines('payment_check.not_found_long')[0]?.says).toEqual(expect.stringContaining('waiting'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });
+    // Two checks, each its own copy as a restart makes: one entry kept, one email (partner S170).
+    const toldOnce = {
+      kept: [{ action: 'payment.bank_lost', details: { bank: 'Pending' } }],
+      emailed: ['payment_bank_lost'],
+    };
+    expect(await alertsOf(w, id)).toEqual(toldOnce);
 
     // Found again, nothing more to say.
     await checksOf(w).run();
     expect(lines('payment_check.not_found_long')).toHaveLength(2);
+    expect(await alertsOf(w, id)).toEqual(toldOnce);
   });
 
-  it('says it of one still SUBMITTED past its time too', async () => {
+  // Null: handed over with no word from the bank yet, still named in its admins' audit entry.
+  it.each([
+    ['Pending', 'Pending'],
+    [null, 'none'],
+  ])('says it of one still SUBMITTED past its time too (bank status %s)', async (providerStatus, bank) => {
     const { w, acting } = await ready();
     // .01 fils: the fake declines it, too late, so it stays where the bank's earlier word left it.
     const request = await ask(acting, w, { amount: ALLOWED(1n) });
@@ -455,7 +467,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
             states,
             key,
             'submitted',
-            { providerStatus: 'Pending', paymentInstructionRef: null, rejectCode: null, providerChangedAt: null },
+            { providerStatus, paymentInstructionRef: null, rejectCode: null, providerChangedAt: null },
             { actor: { type: 'system', id: 'test' }, details: {} },
           );
           if (moved.outcome !== 'moved') throw new Error(`not moved: ${moved.outcome}`);
@@ -478,6 +490,14 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
       expect.objectContaining({ level: 'warn', orgId: w.org, transactionId: id }),
     ]);
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUBMITTED' });
+    // Beside the late refusal the hand-off read after the bank's word (decision 37b).
+    expect(await alertsOf(w, id)).toEqual({
+      kept: [
+        { action: 'payment.contradicted', details: { refused: 'AANI.AM04', status: 'SUBMITTED' } },
+        { action: 'payment.bank_lost', details: { bank } },
+      ],
+      emailed: ['payment_contradicted', 'payment_bank_lost'],
+    });
   });
 
   it('leaves them as they were while the bank can’t be reached, and says so once a run', async () => {
