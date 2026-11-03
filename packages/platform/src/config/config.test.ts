@@ -25,6 +25,8 @@ const KEYS_DIR = '/mnt/secrets';
 const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
 const MINIMAL: Env = {
   AGENTX_ENV: 'production',
+  // Runs no job, so needs no anchors' store: the settings under test here are others.
+  AGENTX_ROLE: 'web',
   AGENTX_PARTNER_MODE: 'live',
   AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: RELEASE,
@@ -78,8 +80,15 @@ function problemsWith(env: Env, built: PartnerDeclaration | null = BUILT): reado
 }
 
 describe('config: which side of the work a process does (4D2e D)', () => {
+  // In staging, where a process with jobs starts with no anchors store.
+  const STAGING_ANY_ROLE: Env = { ...MINIMAL, AGENTX_ENV: 'staging', ...partnerFor('staging') };
+
   it.each(['all', 'web', 'jobs'] as const)('takes %s', (role) => {
-    expect(loadConfig({ ...MINIMAL, AGENTX_ROLE: role }).role).toBe(role);
+    expect(loadConfig({ ...STAGING_ANY_ROLE, AGENTX_ROLE: role }).role).toBe(role);
+  });
+
+  it('is `all` where none is named', () => {
+    expect(loadConfig({ ...STAGING_ANY_ROLE, AGENTX_ROLE: undefined }).role).toBe('all');
   });
 
   it('refuses any other, naming the ones it takes', () => {
@@ -93,7 +102,7 @@ describe('config: a correct config loads', () => {
   it('needs only the environment, the release, the public origin and where the keys are, and fills in the defaults', () => {
     expect(loadConfig(MINIMAL)).toEqual({
       environment: 'production',
-      role: 'all',
+      role: 'web',
       release: RELEASE,
       log: { level: 'info', eventCapPerMinute: 600 },
       logSuccessSampleOneIn: 1,
@@ -115,7 +124,7 @@ describe('config: a correct config loads', () => {
       sessions: { idleSeconds: 1800, absoluteSeconds: 43_200 },
       securityEvents: { retentionDays: 90 },
       payees: { coolingOffHours: 24 },
-      audit: { anchorSeconds: 300, anchorEpoch: 1 },
+      audit: { anchorSeconds: 300, anchorEpoch: 1, anchorLanes: 4, mostOrganisations: 100_000 },
       anchorStore: { directory: null, container: null },
       activityDownloads: { directory: null, container: null },
       keys: { directory: KEYS_DIR, current: {} },
@@ -152,7 +161,9 @@ describe('config: a correct config loads', () => {
       AGENTX_SECURITY_EVENT_RETENTION_DAYS: '180',
       AGENTX_PARTNER_MODE: 'fake',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
-      AGENTX_AUDIT_ANCHOR_SECONDS: '600',
+      AGENTX_AUDIT_ANCHOR_SECONDS: '120',
+      AGENTX_AUDIT_ANCHOR_LANES: '6',
+      AGENTX_AUDIT_MOST_ORGANISATIONS: '200000',
       AGENTX_DB_HOST: '10.0.0.5',
       AGENTX_DB_PORT: '6432',
       AGENTX_DB_NAME: 'agentx_uae',
@@ -205,7 +216,7 @@ describe('config: a correct config loads', () => {
       securityEvents: { retentionDays: 180 },
       partner: { mode: 'fake' },
       payees: { coolingOffHours: 48 },
-      audit: { anchorSeconds: 600, anchorEpoch: 1 },
+      audit: { anchorSeconds: 120, anchorEpoch: 1, anchorLanes: 6, mostOrganisations: 200_000 },
       anchorStore: { directory: null, container: null },
       activityDownloads: { directory: null, container: null },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
@@ -270,6 +281,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
     'AGENTX_PAYEE_COOLING_OFF_HOURS',
     'AGENTX_AUDIT_ANCHOR_SECONDS',
+    'AGENTX_AUDIT_ANCHOR_LANES',
+    'AGENTX_AUDIT_MOST_ORGANISATIONS',
     'AGENTX_ANCHOR_EPOCH',
     'AGENTX_KEYS_DIR',
     'AGENTX_KEYS_CURRENT',
@@ -353,20 +366,26 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
   describe('the audit anchor check, every 1 to 60 minutes (ADR-012 §2)', () => {
     it.each([
       ['60', 60],
-      ['3600', 3600],
+      ['359', 359],
     ])('accepts %s seconds', (seconds, expected) => {
       expect(loadConfig({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: seconds }).audit.anchorSeconds).toBe(expected);
     });
 
     it('refuses more often than once a minute', () => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_LANES: '0' })).toEqual([
+        'AGENTX_AUDIT_ANCHOR_LANES: must be at least 1',
+      ]);
+      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_LANES: '65' })).toEqual([
+        'AGENTX_AUDIT_ANCHOR_LANES: must be at most 64',
+      ]);
       expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: '59' })).toEqual([
         'AGENTX_AUDIT_ANCHOR_SECONDS: must be at least 60 seconds (more often only repeats the whole check of every chain)',
       ]);
     });
 
     it('refuses less often than once an hour, which would leave a rollback unseen for longer', () => {
-      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: '3601' })).toEqual([
-        'AGENTX_AUDIT_ANCHOR_SECONDS: must be at most 3600 seconds',
+      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: '360' })).toEqual([
+        'AGENTX_AUDIT_ANCHOR_SECONDS: must be at most 359 seconds',
       ]);
     });
   });
@@ -511,6 +530,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       expect.stringMatching(/^AGENTX_PUBLIC_ORIGIN: is required in production/),
       expect.stringMatching(/^AGENTX_TRUSTED_PROXIES: is required in production/),
       expect.stringMatching(/^AGENTX_PARTNER_MODE: is required in production/),
+      expect.stringMatching(/^AGENTX_AUDIT_ANCHORS_URL: is required in production/),
     ]);
   });
 
@@ -1681,6 +1701,44 @@ describe('4D2e E3 where the chains’ anchors are kept', () => {
     expect(problemsWith({ ...WITH_CONTAINER, ...change })).toEqual([problem]);
   });
 
+  describe('a production that names none', () => {
+    it('refuses to start where its jobs run, as memory alone forgets every anchor at a restart', () => {
+      const refusal =
+        'AGENTX_AUDIT_ANCHORS_URL: is required in production where the jobs run; without it a restart forgets every anchor';
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: undefined })).toEqual([refusal]);
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: 'jobs' })).toEqual([refusal]);
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: 'all' })).toEqual([refusal]);
+    });
+
+    it('says only the one problem where another setting explains it', () => {
+      const JOBS = { ...MINIMAL, AGENTX_ROLE: 'all' };
+      expect(problemsWith({ ...JOBS, AGENTX_AUDIT_ANCHORS_DIR: '/tmp/a' })).toEqual([
+        "AGENTX_AUDIT_ANCHORS_DIR: is allowed only in development and test; production keeps the chains' anchors in their write-once container",
+      ]);
+      expect(problemsWith({ ...JOBS, AGENTX_AUDIT_ANCHORS_URL: 'not a url' })).toEqual([
+        expect.stringMatching(/^AGENTX_AUDIT_ANCHORS_URL: (?!is required)/),
+      ]);
+      expect(problemsWith({ ...MINIMAL, AGENTX_ROLE: 'worker' })).toEqual([
+        'AGENTX_ROLE: must be one of: all, web, jobs',
+      ]);
+    });
+
+    it('starts where its jobs run with the store named', () => {
+      expect(loadConfig({ ...WITH_CONTAINER, AGENTX_ROLE: 'all' }).anchorStore.container?.url).toBe(CONTAINER);
+    });
+
+    it('starts as `web`, which runs no job', () => {
+      expect(loadConfig(MINIMAL).anchorStore).toEqual({ directory: null, container: null });
+    });
+
+    it('staging starts, as code can reach it before the hand deploy that names the store: it says so instead', () => {
+      expect(loadConfig({ ...MINIMAL, AGENTX_ENV: 'staging', ...partnerFor('staging') }).anchorStore).toEqual({
+        directory: null,
+        container: null,
+      });
+    });
+  });
+
   it('reads the epoch, from 1, a whole number', () => {
     expect(loadConfig({ ...MINIMAL, AGENTX_ANCHOR_EPOCH: '3' }).audit.anchorEpoch).toBe(3);
     expect(problemsWith({ ...MINIMAL, AGENTX_ANCHOR_EPOCH: '0' })).toEqual([
@@ -1694,7 +1752,7 @@ describe('4D2e E3 where the chains’ anchors are kept', () => {
   it('keeps the store and the epoch in the fingerprint, never Azure’s header', () => {
     const settings = fingerprintedSettings(loadConfig({ ...WITH_CONTAINER, AGENTX_ANCHOR_EPOCH: '2' }));
 
-    expect(settings.audit).toEqual({ anchorSeconds: 300, anchorEpoch: 2 });
+    expect(settings.audit).toEqual({ anchorSeconds: 300, anchorEpoch: 2, anchorLanes: 4, mostOrganisations: 100_000 });
     expect(settings.anchorStore).toEqual({
       directory: null,
       container: { url: CONTAINER, clientId: CLIENT_ID, identityEndpoint: 'http://localhost:42356/msi/token' },

@@ -61,6 +61,9 @@ describe(`the directory's list of organisations (Postgres ${server.version})`, (
     await withTenant(app, first, (tx) => registerOrganization(tx, first));
 
     const all = await listedOrganizations(app);
+    // In pages: at the page's edge, and past it, the same.
+    expect(await listedOrganizations(app, 1)).toEqual(all);
+    expect(await listedOrganizations(app, all.length)).toEqual(all);
     expect(all.filter((id) => id === first || id === second)).toEqual([first, second]);
     expect(all).toEqual([...all].sort());
   });

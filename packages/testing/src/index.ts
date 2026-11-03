@@ -35,6 +35,7 @@ export {
   type TestSession,
 } from './db/test-database.ts';
 export type { TestLogin, TestPostgresServer } from './db/test-server.ts';
+export { createFakeWriteOnceStore, type FakeWriteOnceStore } from './fake-write-once.ts';
 export { SequentialIds } from './ids.ts';
 export { type TestKeys, writeTestKeys } from './keys.ts';
 export { findLeaks, type Leak, LogCapture, SENSITIVE_SAMPLES } from './log-scan.ts';

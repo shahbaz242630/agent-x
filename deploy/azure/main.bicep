@@ -276,6 +276,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
     platformFullAlertName: 'alert-agentx-${short}-platform-full'
+    anchorStoreAlertName: 'alert-agentx-${short}-anchor-store'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [
@@ -284,7 +285,8 @@ module appsEnvironment 'modules/environment.bicep' = {
   ]
 }
 
-// The write-once store for our team's audit exports (ADR-005 §6, E10c). Its
+// The write-once store for our team's audit exports (ADR-005 §6, E10c) and the
+// audit chains' anchors (4D2e E, PL-58). Its
 // names are written in modules/evidence.bicep, not in names.bicep, so a change
 // to them asks for no secrets or certificates deploy.
 module evidence 'modules/evidence.bicep' = {
@@ -297,11 +299,13 @@ module evidence 'modules/evidence.bicep' = {
     workspaceId: ids.workspace
     writerIdentityName: identityName(environment, 'operator')
     writerRoleName: 'Agent X evidence writer (${environment} ${nameSuffix})'
+    anchorKeeperIdentityName: identityName(environment, 'api')
+    anchorRoleName: 'Agent X audit anchors (${environment} ${nameSuffix})'
     retentionDays: evidenceRetentionDays
     immutability: evidenceImmutability
     redundancy: evidenceRedundancy
   }
-  // The subnet's Storage endpoint, the workspace and the operator's identity must exist first.
+  // The subnet's Storage endpoint, the workspace and the operator's and the API's identities must exist first.
   dependsOn: [
     network
     monitoring

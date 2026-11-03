@@ -41,7 +41,7 @@ describe('SEC-TEN-07 the string-built SQL rule is turned off in product code onl
     expect(counted).toEqual({
       'packages/platform/src/db/migrate.ts': 1,
       'packages/platform/src/db/server-setup.ts': 4,
-      'packages/platform/src/db/tenant.ts': 3,
+      'packages/platform/src/db/tenant.ts': 2,
     });
   });
 });

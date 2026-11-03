@@ -6,7 +6,10 @@
 // (Stopping on a signal is tested in-process: Windows can't send one a process
 // can catch.)
 import { type ChildProcess, spawn } from 'node:child_process';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { gunzipSync } from 'node:zlib';
 
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
@@ -48,6 +51,7 @@ interface Line {
   ports?: number[];
   configHash?: string;
   status?: number;
+  chains?: number;
 }
 
 let database: TestDatabase;
@@ -168,6 +172,45 @@ describe(`the API process (Postgres ${server.version})`, () => {
     } finally {
       jobs.kill();
       await new Promise((resolve) => jobs.once('exit', resolve));
+    }
+  }, 60_000);
+
+  it('PL-58: on plain Node the anchors reach their store, signed lines in a gzipped file', async () => {
+    // A database of its own, so this process has the jobs there at once. A restart reading them is
+    // proven in anchor-check-store.test.ts and handoff.db.test.ts: killed here, a lease would hold a second start back.
+    const own = await createTestDatabase(server, { schema: 'migrated' });
+    const folder = mkdtempSync(path.join(tmpdir(), 'agentx-anchors-'));
+    const said: Line[] = [];
+    const jobs = spawn(process.execPath, [MAIN], {
+      env: { ...childEnv(own), AGENTX_ROLE: 'jobs', AGENTX_AUDIT_ANCHORS_DIR: folder },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    jobs.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      for (const line of chunk.split('\n')) if (line.startsWith('{')) said.push(JSON.parse(line) as Line);
+    });
+    try {
+      await vi.waitFor(
+        () => {
+          expect(said.map((line) => line.event)).toContain('audit.anchors_written');
+        },
+        { timeout: 30_000, interval: 100 },
+      );
+      expect(said.find((line) => line.event === 'audit.anchors_read')?.chains).toBe(0);
+      const files = readdirSync(path.join(folder, 'e1', 'snapshots'));
+      expect(files).toHaveLength(1);
+      const text = gunzipSync(readFileSync(path.join(folder, 'e1', 'snapshots', String(files[0])))).toString('utf8');
+      expect(
+        text.split('\n').map((line) => {
+          if (line === '') return 'end';
+          const { chain, k } = JSON.parse(line) as { chain?: string; k: string };
+          return chain ?? k;
+        }),
+      ).toEqual(['platform', 'c', 'end']);
+    } finally {
+      jobs.kill();
+      await new Promise((resolve) => jobs.once('exit', resolve));
+      await own.drop();
+      rmSync(folder, { recursive: true, force: true });
     }
   }, 60_000);
 

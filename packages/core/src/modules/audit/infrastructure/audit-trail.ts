@@ -81,9 +81,10 @@ import {
   type AnswersOf,
   assertTenant,
   type GatheredRead,
+  timedLock,
+  JOB_ANSWER_WITHIN_MS,
   sendTogether,
   type SentTogether,
-  timedLock,
   withTenant,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -1283,7 +1284,10 @@ export function createAuditTrail({
     },
 
     verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
-      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), { limited: true });
+      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), {
+        limited: true,
+        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+      });
     },
 
     async checkFromAnchor(

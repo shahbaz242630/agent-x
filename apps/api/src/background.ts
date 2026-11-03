@@ -18,6 +18,9 @@ export const LEASE_RETRY_AFTER_MS = 5_000;
 /** The run was stopped while a step was under way. */
 export class Stopped extends Error {}
 
+/** A step went past its deadline; nothing cancels it, so it may still be under way. */
+export class PastDeadline extends Error {}
+
 /** The step, or a rejection once the deadline passes or the run is stopped, whichever comes first. */
 export async function withinDeadline<T>(
   checking: Promise<T>,
@@ -26,7 +29,7 @@ export async function withinDeadline<T>(
 ): Promise<T> {
   const { promise: cut, reject: cutOff } = Promise.withResolvers<never>();
   const timer = setTimeout(() => {
-    cutOff(new Error(`the check did not finish within ${String(deadlineMs)} ms`));
+    cutOff(new PastDeadline(`the check did not finish within ${String(deadlineMs)} ms`));
   }, deadlineMs);
   const stop = (): void => {
     cutOff(new Stopped('the check was stopped'));
@@ -34,6 +37,8 @@ export async function withinDeadline<T>(
   // A signal already aborted never fires its event.
   if (signal?.aborted === true) stop();
   signal?.addEventListener('abort', stop, { once: true });
+  // A signal already stopped never fires: the step would hold its caller to the whole deadline.
+  if (signal?.aborted === true) stop();
   try {
     return await Promise.race([checking, cut]);
   } finally {

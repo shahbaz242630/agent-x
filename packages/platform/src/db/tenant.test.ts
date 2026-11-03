@@ -29,10 +29,16 @@ const ORG = '0199a000-0000-7000-8000-00000000000a';
 const CHECK =
   "select pg_catalog.current_setting('app.org_id', true) as org_id, pg_catalog.current_setting('search_path', true) as search_path";
 
+/** What pg's `query` is given: text, or a statement with its values and limit, as the driver now sends every trip. */
+type Asked = string | { readonly text: string; readonly query_timeout?: number };
+const textOf = (asked: Asked): string => (typeof asked === 'string' ? asked : asked.text);
+
 interface Stand {
   readonly client: pg.PoolClient;
   /** Each round trip's text, in order. */
   readonly sent: string[];
+  /** Each round trip's limit on its answer, in order. */
+  readonly limits: (number | undefined)[];
   readonly released: unknown[];
 }
 
@@ -51,9 +57,12 @@ function connection(
   }: { searchPath?: string | null; setBack?: string; commitRefusal?: Error } = {},
 ): Stand {
   const sent: string[] = [];
+  const limits: (number | undefined)[] = [];
   const released: unknown[] = [];
   const state = { org_id: tenant, search_path: searchPath };
-  const query = (text: string): Promise<unknown> => {
+  const query = (asked: string | { readonly text: string; readonly query_timeout?: number }): Promise<unknown> => {
+    const text = typeof asked === 'string' ? asked : asked.text;
+    limits.push(typeof asked === 'string' ? undefined : asked.query_timeout);
     sent.push(text);
     if (tenant instanceof Error) return Promise.reject(tenant);
     if (text === CHECK) return Promise.resolve({ command: 'SELECT', rows: [state] });
@@ -81,7 +90,7 @@ function connection(
       released.push(how);
     },
   };
-  return { client: client as unknown as pg.PoolClient, sent, released };
+  return { client: client as unknown as pg.PoolClient, sent, limits, released };
 }
 
 /** A stand-in pool that hands out the given connections in turn. */
@@ -309,15 +318,64 @@ const elsewhere = (seen: string[] = []): Kysely<unknown> =>
     },
   });
 
+describe('a limit on an answer, for a connection dead without a word (4D2e E6)', () => {
+  it('reaches every trip of a transaction opened with one: the start, the statements and the commit', async () => {
+    const clean = connection(null);
+    await withTenant(databaseOf(3, logger(), clean), ORG, (tx) => one(tx), { limited: true, answeredWithinMs: 5000 });
+    expect(clean.limits).toEqual([5000, 5000, 5000]);
+  });
+
+  it('reaches a limited transaction with no organisation too', async () => {
+    const clean = connection(null);
+    await limitedTransaction(databaseOf(3, logger(), clean), (tx) => one(tx), { answeredWithinMs: 5000 });
+    expect(clean.limits).toEqual([5000, 5000, 5000]);
+  });
+
+  it('reaches the rollback of one that fails on its own', async () => {
+    const clean = connection(null);
+    await expect(
+      withTenant(
+        databaseOf(3, logger(), clean),
+        ORG,
+        async (tx) => {
+          await one(tx);
+          throw new Error('the work failed');
+        },
+        { limited: true, answeredWithinMs: 5000 },
+      ),
+    ).rejects.toThrow('the work failed');
+    expect(clean.limits).toEqual([5000, 5000, 5000]);
+    expect(clean.sent.at(-1)).toBe('rollback');
+  });
+
+  it('changes nothing for a transaction opened without one, as every request is', async () => {
+    const clean = connection(null);
+    await withTenant(databaseOf(3, logger(), clean), ORG, (tx) => one(tx));
+    expect(clean.limits).toEqual([undefined, undefined, undefined]);
+    const limited = connection(null);
+    await limitedTransaction(databaseOf(3, logger(), limited), (tx) => one(tx));
+    expect(limited.limits).toEqual([undefined, undefined, undefined]);
+  });
+
+  it('closes the connection whose commit went unanswered, not gives it back', async () => {
+    const clean = connection(null, { commitRefusal: new Error('Query read timeout') });
+    await expect(
+      withTenant(databaseOf(3, logger(), clean), ORG, (tx) => one(tx), { limited: true, answeredWithinMs: 5000 }),
+    ).rejects.toThrow('Query read timeout');
+    expect(clean.released).toEqual([true]);
+    expect(clean.sent.at(-1)).not.toBe('rollback');
+  });
+});
+
 describe('a read alone on one trip (4D2e C5)', () => {
   const READ = 'select 1 as answer';
   const reading = (db: Kysely<unknown>) => readAloneOnOneTrip(db, sql`select 1 as answer`);
 
   /** The stand-in, its statements `fails` picks refused with `error`. */
   const failingAt = (stand: Stand, fails: (text: string) => boolean, error: Error): Stand => {
-    const { query } = stand.client as unknown as { query: (text: string) => Promise<unknown> };
-    (stand.client as unknown as { query: unknown }).query = (text: string) =>
-      fails(text) ? Promise.reject(error) : query(text);
+    const { query } = stand.client as unknown as { query: (asked: Asked) => Promise<unknown> };
+    (stand.client as unknown as { query: unknown }).query = (asked: Asked) =>
+      fails(textOf(asked)) ? Promise.reject(error) : query(asked);
     return stand;
   };
 
@@ -325,7 +383,8 @@ describe('a read alone on one trip (4D2e C5)', () => {
     const sent: string[] = [];
     const answer = Promise.withResolvers<undefined>();
     const client = {
-      query: async (text: string) => {
+      query: async (asked: Asked) => {
+        const text = textOf(asked);
         sent.push(text);
         await answer.promise;
         return text.includes('; ')
@@ -334,7 +393,7 @@ describe('a read alone on one trip (4D2e C5)', () => {
       },
       release: () => undefined,
     };
-    const stand = { client: client as unknown as pg.PoolClient, sent, released: [] };
+    const stand = { client: client as unknown as pg.PoolClient, sent, limits: [], released: [] };
 
     const answered = reading(databaseOf(1, logger(), stand));
     // Nothing has been answered, and all three have gone.

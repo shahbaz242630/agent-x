@@ -200,8 +200,69 @@ export const PLAIN_WORDS = {
   },
   'audit.anchor_check_failed': {
     happened: 'The regular tamper check of the audit history could not finish, usually as the database was slow.',
-    broke: 'One audit history went unchecked this time, or all of them if the list could not be read.',
+    broke: 'Some audit histories went unchecked this time; the line says how many. Those on the last list are tried.',
     next: 'It is tried again at the next check. Three misses in a row raise the integrity alarm.',
+  },
+  'audit.anchor_check_unfinished': {
+    happened: 'The tamper check of the audit history ran out of time before reaching every organisation.',
+    broke: 'Nothing yet: the next check goes on from where this one stopped.',
+    next: 'Nothing if it is rare. If it stays, see whether the database is slow.',
+  },
+  'audit.anchor_check_behind': {
+    happened: 'Tamper checks are working, but some organisations waited too long for their turn.',
+    broke: 'Those audit histories are checked late, so a change goes unseen for longer. Nobody is held.',
+    next: 'Add capacity: more check lanes with a bigger database pool, or more CPU for long histories.',
+  },
+  'audit.anchor_check_over_size': {
+    happened: 'More organisations are listed than the tamper check is set to keep notes on.',
+    broke: 'Nothing: all are still checked, those past the number in turn from a place in the list, more slowly.',
+    next: 'Raise the number it keeps notes on, if there is memory for it, and restart.',
+  },
+  'audit.anchor_store_near_memory': {
+    happened: 'The file of audit anchors just written is nearly too large for a process of this size to read back.',
+    broke: 'Nothing yet. A restart with a little more could make payments wait for every organisation.',
+    next: 'Give the process more memory before its next restart.',
+  },
+  'audit.anchor_store_beyond_memory': {
+    happened: 'The store of audit anchors holds a sound file too large for this process to take into memory.',
+    broke: 'After a start, payments wait for every organisation, as their anchors could not be read. Nobody is held.',
+    next: 'Give the process more memory, then restart it. Nothing has been tampered with.',
+  },
+  'audit.anchor_store_foreign': {
+    happened: 'The store that keeps the audit anchors holds files the app would never have named.',
+    broke: 'Nothing: those files were left unread and the check went on without them.',
+    next: 'Find out who added them from the store logs. Only the API should be able to add files there.',
+  },
+  'audit.anchor_store_not_set': {
+    happened: 'This API was started with no store named for the audit anchors.',
+    broke: 'Anchors are in memory alone: a restart forgets them, and a history wound back meanwhile goes unseen.',
+    next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_ANCHORS_URL: playbook section H.',
+  },
+  'audit.anchor_store_read_failed': {
+    happened:
+      'A regular read of the store that keeps the audit anchors failed, after it had been read fine since the start.',
+    broke: 'Nothing yet: the tamper check went on with the anchors already in memory.',
+    next: 'It is tried again at the next check. If it keeps repeating, look at the store on Azure.',
+  },
+  'audit.anchor_store_read_failing': {
+    happened: 'For some time the API has not been able to read the store that keeps the audit anchors.',
+    broke: 'Nothing yet, payments go on from memory. But the next restart would make every organisation wait.',
+    next: 'Look at the store on Azure before the next restart or release: playbook section H.',
+  },
+  'audit.anchor_store_unreadable': {
+    happened: 'After a start, the API could not read the store of audit anchors, or a key to check them was missing.',
+    broke: 'Payments wait for every organisation, with nothing to compare them with. Agent decisions go on.',
+    next: 'Tried again at each check; payments resume alone. Look at the store and the key: playbook section H.',
+  },
+  'audit.anchor_store_unwritable': {
+    happened: 'For some time the API has not been able to write to the store that keeps the audit anchors.',
+    broke: 'Payments go on and nobody is held. New anchors are in memory alone, so a restart would forget them.',
+    next: 'Look at the store on Azure before the next restart or release: playbook section H.',
+  },
+  'audit.anchor_store_write_failed': {
+    happened: 'Writing the latest audit anchors to their store failed or ran out of time.',
+    broke: 'Nothing yet: they stay in memory and payments go on.',
+    next: 'It is tried again at the next check. If this was at a stop, the next start reads the last ones written.',
   },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',

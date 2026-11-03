@@ -62,6 +62,7 @@ export type RuleId =
   | 'holdings-check-alert'
   | 'handoff-queue-alert'
   | 'platform-full-alert'
+  | 'anchor-store-alert'
   | 'integrity-runs-alert'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
@@ -302,6 +303,13 @@ const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_
 
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
+
+/**
+ * The anchors' store can't be read after a start, has gone long unread or unwritten, or was never named (4D2e E, PL-58);
+ * a file too large for this process, the check behind on its turns, or past the organisations it notes (E6): capacity, never tamper.
+ */
+const ANCHOR_STORE_LINES =
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
 
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
 const PLATFORM_FULL_LINES =
@@ -714,8 +722,21 @@ const isCopiedKey = (snapshot: Snapshot, secret: PredictedResource, value: unkno
 /** The audit exports' role's one data action: Put Blob of a file not there yet (Microsoft), never overwrite or read. */
 const EVIDENCE_WRITE = 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action';
 
-/** The one container the audit exports go to (modules/evidence.bicep). */
+/** The two containers of the write-once store (modules/evidence.bicep): the audit exports', the chains' anchors' (4D2e E, PL-58). */
 const EVIDENCE_CONTAINER = 'audit-exports';
+const ANCHOR_CONTAINER = 'audit-anchors';
+
+/**
+ * The anchors' role's two data actions: Put Blob of a file not there yet, and
+ * Get Blob with List Blobs, which a restart needs. Never overwrite or delete.
+ */
+const ANCHOR_ACTIONS = [
+  EVIDENCE_WRITE,
+  'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read',
+] as const;
+
+/** The anchors' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
+const anchorRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors');
 
 /** The audit exports' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-writer');
@@ -1020,7 +1041,7 @@ const required: Check = (snapshot, _expected, add) => {
     // The audit exports' store and the activity downloads', each with its own blob service and container.
     ["Storage accounts, the audit exports' and the activity downloads'", TYPES.storage, 2, 2],
     ['blob services, one in each Storage account', TYPES.blobService, 2, 2],
-    ['containers, one in each Storage account', TYPES.container, 2, 2],
+    ['containers: the write-once store two, the activity downloads one', TYPES.container, 3, 3],
   ];
   for (const [what, type, least, most] of counts) {
     const found = ofType(snapshot, type).length;
@@ -1824,15 +1845,18 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
 
 /**
  * The write-once store for our team's audit exports (ADR-005 §6, E10c;
- * decisions 27 and 28): one account, named as modules/evidence.bicep names
- * it and as `evidenceAccountProblems` says, with versioning on its one blob
- * service and one private container; no other Storage resource (a lifecycle
- * rule, a file share, a local user) but the activity downloads' store's,
- * which is `activity-downloads`'s; the apps subnet keeps the service endpoint
- * its network rule needs. Its one custom role allows adding a new file and
- * nothing else, assignable in the resource group alone, and is given once, on
- * the container, to the operator's identity, whose job alone is told where
- * the store is (`storeSettingsProblems`). Its logs are `resource-logs`'s.
+ * decisions 27 and 28) and the chains' anchors (4D2e E, PL-58): one account,
+ * named as modules/evidence.bicep names it and as `evidenceAccountProblems`
+ * says, with versioning on its one blob service and two private containers; no
+ * other Storage resource (a lifecycle rule, a file share, a local user) but the
+ * activity downloads' store's, which is `activity-downloads`'s; the apps subnet
+ * keeps the service endpoint its network rule needs. Each container has one
+ * custom role, assignable in the resource group alone, given once on that
+ * container alone: the exports' adds a new file and nothing else, to the
+ * operator's identity, whose job alone is told where they go; the anchors' adds
+ * a new file and reads, to the API's, which alone is told where they are
+ * (`storeSettingsProblems`). Neither can overwrite or delete. The account's
+ * immutability covers both. Its logs are `resource-logs`'s.
  */
 const evidenceStore: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
@@ -1872,7 +1896,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     {
       name: evidenceRoleName(groupOf(snapshot)),
       dataActions: [EVIDENCE_WRITE],
-      containers: ofType(snapshot, TYPES.container).filter((container) => !inDownloadsStore(snapshot, container)),
+      containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
       workload: 'operator',
       called: "the audit exports' role",
       on: 'the export container',
@@ -1894,10 +1918,43 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     writers,
     problem,
   );
+  const keepers = storeRoleProblems(
+    snapshot,
+    {
+      name: anchorRoleName(groupOf(snapshot)),
+      dataActions: ANCHOR_ACTIONS,
+      containers: containersNamed(snapshot, ANCHOR_CONTAINER),
+      workload: 'api',
+      called: "the anchors' role",
+      on: 'the anchors container',
+    },
+    problem,
+  );
+  storeSettingsProblems(
+    snapshot,
+    {
+      prefix: ANCHOR_SETTING_PREFIX,
+      url: 'AGENTX_AUDIT_ANCHORS_URL',
+      clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+      accounts,
+      container: ANCHOR_CONTAINER,
+      holds: (workload) => workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api',
+      holder: "the API keeps the chains' anchors",
+      store: 'store',
+    },
+    keepers,
+    problem,
+  );
 };
 
+/** One of the write-once store's containers, by its name: a role is given on it alone. */
+const containersNamed = (snapshot: Snapshot, name: string): readonly PredictedResource[] =>
+  ofType(snapshot, TYPES.container).filter(
+    (container) => !inDownloadsStore(snapshot, container) && container.id.endsWith(`/containers/${name}`),
+  );
+
 /**
- * The store's blob service, its container and no other Storage resource, a
+ * The store's blob service, its two containers and no other Storage resource, a
  * part of `evidence-store`: every one but the activity downloads' store's.
  */
 function evidencePartsProblems(
@@ -1915,18 +1972,19 @@ function evidencePartsProblems(
       problem(service.name, 'must keep versions: version-level immutability keeps every one');
     }
   }
+  const wanted = [EVIDENCE_CONTAINER, ANCHOR_CONTAINER];
   for (const container of ofType(snapshot, TYPES.container).filter(ours)) {
     if (
-      !blobServices.some((service) => container.id === `${service.id}/containers/${EVIDENCE_CONTAINER}`) ||
+      !blobServices.some((service) => wanted.some((name) => container.id === `${service.id}/containers/${name}`)) ||
       at(container.properties, 'publicAccess') !== 'None'
     ) {
-      problem(container.name, `must be ${EVIDENCE_CONTAINER} in this deployment's store, with no public access`);
+      problem(container.name, `must be ${wanted.join(' or ')} in this deployment's store, with no public access`);
     }
   }
   const known: readonly string[] = [TYPES.storage, TYPES.blobService, TYPES.container];
   for (const resource of snapshot.predictedResources.filter(ours)) {
     if (resource.type.toLowerCase().startsWith('microsoft.storage/') && !known.includes(resource.type)) {
-      problem(resource.name, `is a ${resource.type}: the store holds one container and nothing else`);
+      problem(resource.name, `is a ${resource.type}: the store holds its two containers and nothing else`);
     }
   }
 }
@@ -2002,6 +2060,9 @@ function storeRoleProblems(
 
 /** How the operator's job is told where to write an audit export (apps.bicep `evidenceSettings`). */
 const EVIDENCE_SETTING_PREFIX = 'AGENTX_EVIDENCE_';
+
+/** How the API is told where to keep the chains' anchors (apps.bicep `anchorStoreSettings`). */
+const ANCHOR_SETTING_PREFIX = 'AGENTX_AUDIT_ANCHORS_';
 
 /** How the API is told where to keep the activity downloads (apps.bicep `activityDownloadsSettings`). */
 const DOWNLOADS_SETTING_PREFIX = 'AGENTX_ACTIVITY_DOWNLOADS_';
@@ -2798,6 +2859,30 @@ const platformFullAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on the anchors' store unreadable after a start, long unread or unwritten, or never named (4D2e E, PL-58). */
+const anchorStoreAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [ANCHOR_STORE_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'anchor-store-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any audit.anchor_store_unreadable, audit.anchor_store_unwritable, audit.anchor_store_read_failing or audit.anchor_store_not_set line, watching every window and firing on the first",
+      });
+    }
+  }
+};
+
 /**
  * An enabled alert on the workspace fires on any run of the integrity jobs
  * skipped whole (Phase 2 E2c; request expiry, D7), or of the activity log's
@@ -3004,8 +3089,8 @@ const ACCESS_TYPE = /authorization|roleassignment|roledefinition/i;
 
 /**
  * Who reads what (ADR-002 Amendment G2c). Every role assignment in the
- * deployment but CI's role's (`release-access`), the audit exports'
- * (`evidence-store`) and the activity downloads' (`activity-downloads`)
+ * deployment but CI's role's (`release-access`), the audit exports' and the
+ * anchors' (`evidence-store`) and the activity downloads' (`activity-downloads`)
  * gives Key Vault Secrets User on
  * one secret it writes, to an identity it creates, named a service principal:
  * no other role, and nothing at the vault, the resource group or the
@@ -3031,10 +3116,11 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const release = releaseRoleId(snapshot);
   const evidence = customRoleId(groupOf(snapshot), evidenceRoleName(groupOf(snapshot)));
   const downloads = customRoleId(groupOf(snapshot), downloadsRoleName(groupOf(snapshot)));
+  const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
-    if (role === release || role === evidence || role === downloads) continue;
+    if (role === release || role === evidence || role === downloads || role === keptAnchors) continue;
     const secret = secrets.get(scopeOf(assignment));
     const identity = principalOf(snapshot, assignment);
     if (
@@ -3131,7 +3217,11 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
 function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, message: string) => void): void {
   const groups = ofType(snapshot, TYPES.group).map((group) => group.id);
   // The stores' roles are `evidence-store`'s and `activity-downloads`'s, which hold each to its data actions.
-  const stores = new Set([evidenceRoleName(groupOf(snapshot)), downloadsRoleName(groupOf(snapshot))]);
+  const stores = new Set([
+    evidenceRoleName(groupOf(snapshot)),
+    anchorRoleName(groupOf(snapshot)),
+    downloadsRoleName(groupOf(snapshot)),
+  ]);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));
   const roleName = releaseRoleName(groupOf(snapshot));
   for (const role of roles) {
@@ -3886,6 +3976,7 @@ const CHECKS: readonly Check[] = [
   holdingsCheckAlert,
   handoffQueueAlert,
   platformFullAlert,
+  anchorStoreAlert,
   integrityRunsAlert,
   agentCancelsAlert,
   agentCancelCapAlert,
