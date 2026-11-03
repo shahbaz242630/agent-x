@@ -242,7 +242,7 @@ export interface WrittenTrigger {
 const MARK_FUNCTION = 'directory.mark_org_work';
 const MARK_BODY = '6cae37308679fd17975fca6e78aa25f031395080196fb037e0d947ae2b868229';
 
-/** Which organisation has which job waiting (0070, 4D2e D6): deferred, so each fires inside COMMIT. */
+/** Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. */
 const markTrigger = (table: string, name: string, condition: string, job: string, wait: string): WrittenTrigger => ({
   table,
   name,

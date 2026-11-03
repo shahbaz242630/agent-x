@@ -233,7 +233,7 @@ END $$`,
     await owner.query('drop function if exists directory.mark_org_work() cascade');
   });
 
-  it('knows the marks exactly, by default: the image that must reach a release before 0070 runs', async () => {
+  it('knows the marks exactly, by default: the image that must reach a release before 0072 runs', async () => {
     // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
     for (const statement of MIGRATION) await owner.query(statement);
     expect(await liveSchemaDrift(app, ROLES)).toEqual({
