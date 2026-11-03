@@ -470,7 +470,7 @@ function written(tenant: string): string {
 }
 
 /** A trip with the app's own limit on its answer. The types leave out pg's `query_timeout`, on a statement or a connection alike. */
-const underLimit = (text: string, values: unknown[] | undefined, within: number): pg.QueryConfig =>
+const underLimit = (text: string, values: unknown[] | undefined, within: number | undefined): pg.QueryConfig =>
   ({ text, values, query_timeout: within }) as pg.QueryConfig;
 
 /** A transaction's start, as Kysely's own driver writes it. */
@@ -494,14 +494,10 @@ function startSent(
   answeredWithinMs?: number,
 ): Promise<pg.QueryResult[]> {
   const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : [startSettings(asked)])];
-  if (answeredWithinMs !== undefined) {
-    // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked before the transaction opens.
-    return client.query(underLimit(statements.join('; '), undefined, answeredWithinMs)) as unknown as Promise<
-      pg.QueryResult[]
-    >;
-  }
   // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
-  return client.query(statements.join('; ')) as unknown as Promise<pg.QueryResult[]>;
+  return client.query(underLimit(statements.join('; '), undefined, answeredWithinMs)) as unknown as Promise<
+    pg.QueryResult[]
+  >;
 }
 
 /** What a query answered, as Kysely's own driver gives it back. */
@@ -671,12 +667,10 @@ class CheckedConnection implements DatabaseConnection {
   #trip(text: string, values?: unknown[]): Promise<pg.QueryResult> {
     const client = this.#taken();
     const within = this.#answeredWithinMs;
-    if (within === undefined) {
-      // eslint-disable-next-line agentx/no-string-built-sql -- fixed text, or Kysely's compiled query with its values bound as parameters: what Kysely's own driver sends.
-      return values === undefined ? client.query(text) : client.query(text, values);
-    }
-    // eslint-disable-next-line agentx/no-string-built-sql -- as above, the same text with its limit.
-    return client.query(underLimit(text, values, within)).catch((error: unknown) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- fixed text, or Kysely's compiled query with its values bound as parameters: what Kysely's own driver sends, with the opening's limit where it has one.
+    const answer = client.query(underLimit(text, values, within));
+    if (within === undefined) return answer;
+    return answer.catch((error: unknown) => {
       this.#broken = true;
       throw error;
     });

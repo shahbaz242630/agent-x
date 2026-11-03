@@ -29,6 +29,10 @@ const ORG = '0199a000-0000-7000-8000-00000000000a';
 const CHECK =
   "select pg_catalog.current_setting('app.org_id', true) as org_id, pg_catalog.current_setting('search_path', true) as search_path";
 
+/** What pg's `query` is given: text, or a statement with its values and limit, as the driver now sends every trip. */
+type Asked = string | { readonly text: string; readonly query_timeout?: number };
+const textOf = (asked: Asked): string => (typeof asked === 'string' ? asked : asked.text);
+
 interface Stand {
   readonly client: pg.PoolClient;
   /** Each round trip's text, in order. */
@@ -369,9 +373,9 @@ describe('a read alone on one trip (4D2e C5)', () => {
 
   /** The stand-in, its statements `fails` picks refused with `error`. */
   const failingAt = (stand: Stand, fails: (text: string) => boolean, error: Error): Stand => {
-    const { query } = stand.client as unknown as { query: (text: string) => Promise<unknown> };
-    (stand.client as unknown as { query: unknown }).query = (text: string) =>
-      fails(text) ? Promise.reject(error) : query(text);
+    const { query } = stand.client as unknown as { query: (asked: Asked) => Promise<unknown> };
+    (stand.client as unknown as { query: unknown }).query = (asked: Asked) =>
+      fails(textOf(asked)) ? Promise.reject(error) : query(asked);
     return stand;
   };
 
@@ -379,7 +383,8 @@ describe('a read alone on one trip (4D2e C5)', () => {
     const sent: string[] = [];
     const answer = Promise.withResolvers<undefined>();
     const client = {
-      query: async (text: string) => {
+      query: async (asked: Asked) => {
+        const text = textOf(asked);
         sent.push(text);
         await answer.promise;
         return text.includes('; ')
