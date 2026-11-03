@@ -3,8 +3,8 @@
  * (tooling/load/Dockerfile) inside staging's network, as the app's own role
  * with the app's keys, the way the laptop's run (run.ts) does each step:
  *
- *   node tooling/load/job.ts first     the hand-off pause read, the seed, k6's phase 1
- *   node tooling/load/job.ts second    new keys, k6's phases 2 to 5, the database checks, the clean-up
+ *   node tooling/load/job.ts first     the hand-off pause read, the seed, the tables' sizes, k6's phase 1
+ *   node tooling/load/job.ts second    new keys, k6's phases 2 to 5, the tables' sizes, the database checks, the clean-up
  *   node tooling/load/job.ts cleanup   the clean-up alone, for a run that stopped half-way
  *
  * Between the two, deploy/azure/load.ts restarts the API, as the laptop's run
@@ -49,6 +49,7 @@ import {
 import type { PhaseResult } from './report.ts';
 import { rekeyed, seedRun } from './seed.ts';
 import { whileStuck } from './stuck.ts';
+import { readGrowthEnd } from './table-growth.ts';
 
 export type LoadTables = MandateWorldTables & PlatformControlsTables;
 
@@ -111,6 +112,7 @@ export async function firstJob(steps: JobSteps, runId: string): Promise<number> 
     },
   });
   steps.print({ event: 'load.seeded', runId, agents: seeded.agents.length });
+  steps.print({ event: 'load.table_sizes', ...(await readGrowthEnd(steps.database, 'before')) });
   return (await steps.k6(1, seeded)).finished ? 0 : 1;
 }
 
@@ -218,6 +220,7 @@ async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], create
     finished = phase.finished;
     if (!finished) break;
   }
+  steps.print({ event: 'load.table_sizes', ...(await readGrowthEnd(steps.database, 'after')) });
   const stillPaused = await handoffsPaused(steps, 'after the phases');
   const checks = [];
   for (const check of LOAD_CHECKS) {

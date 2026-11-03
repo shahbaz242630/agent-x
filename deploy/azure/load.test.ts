@@ -48,10 +48,18 @@ const seededLine = (agent: Readonly<Record<string, unknown>>) => ({ event: 'load
 /** What a job prints for the request it was started with: its lines, and how its run ends. */
 type Behaviour = (request: Readonly<Record<string, string>>) => { status: string; lines: unknown[] };
 
+/** A job's table sizes, the audit log's rows alone (F12). */
+const auditSized = (rows: number) => ({ tables: { 'audit.events': { rows, indexes: 0, longValues: 0 } }, indexes: {} });
+
 const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
   'load-first': () => ({
     status: 'Succeeded',
-    lines: [seededLine(AMPLE), seededLine(CAPPED), summary(1, 2)],
+    lines: [
+      seededLine(AMPLE),
+      seededLine(CAPPED),
+      { event: 'load.table_sizes', stage: 'before', sizes: auditSized(8192) },
+      summary(1, 2),
+    ],
   }),
   'load-second': () => ({
     status: 'Succeeded',
@@ -66,6 +74,7 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
           ['calm', 'busy', 'stuck'].map((kind) => [kind, { requests: 1, serverErrors: 0, rateLimited: 0, p95Ms: 1 }]),
         ),
       },
+      { event: 'load.table_sizes', stage: 'after', sizes: auditSized(8192 + 1024 ** 2) },
       { event: 'load.checked', created: 6, finished: true, checks: [{ name: 'recorded', problems: [] }] },
       { event: 'load.cleaned', organizations: 2, problems: [] },
     ],
@@ -447,6 +456,8 @@ describe('a run', () => {
       "An admin's freeze of the stuck organisation, asked near the phase's end: frozen, after 41 ms.",
     );
     expect(report).toContain('the database Standard_B1ms (Burstable)');
+    // The tables' sizes from the two jobs' own lines (F12): 1 MB over the 6 new requests.
+    expect(report).toContain('| audit.events | 0.0 | 1.0 | 1.0 | 1.0 / 0.0 / 0.0 | 174763 |');
     // Cleaned up, so no run is left open.
     expect(existsSync(done.steps.stateFile)).toBe(false);
   });

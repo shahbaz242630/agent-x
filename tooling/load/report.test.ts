@@ -365,6 +365,130 @@ describe('the report', () => {
     expect(none).toContain("less those sent in another's trip): phase 2 2.0.\n");
   });
 
+  describe('how much the tables grew (4D2e F12)', () => {
+    const MB = 1024 ** 2;
+    const timed = [phase(1, { durationMs: 100_000 }), phase(2, { durationMs: 100_000 })];
+    const rowsOnly = (sizes: Record<string, number>) =>
+      Object.fromEntries(Object.entries(sizes).map(([table, rows]) => [table, { rows, indexes: 0, longValues: 0 }]));
+    const plain = {
+      'access.requests': 12 * MB,
+      'spend_requests.requests': 10 * MB,
+      't.a': 8 * MB,
+      't.b': 7 * MB,
+      't.c': 6 * MB,
+      't.d': 5 * MB,
+      't.e': 4 * MB,
+      't.f': 3 * MB,
+      't.g': 2 * MB,
+      // Shrank, by a sweep: in the total, last.
+      'idempotency.keys': MB,
+    };
+    const after = {
+      tables: {
+        ...rowsOnly({ ...plain, 'new.table': 3 * MB }),
+        'audit.events': { rows: 20 * MB, indexes: 18 * MB, longValues: 2 * MB },
+      },
+      indexes: {
+        'audit.events_by_action': { table: 'audit.events', bytes: 9 * MB, scans: 10 },
+        'audit.events_pkey': { table: 'audit.events', bytes: 9 * MB, scans: 6400 },
+        // Made during the run, as its table was: all its bytes and scans are the run's.
+        'new.table_pkey': { table: 'new.table', bytes: MB, scans: 2 },
+        // A table past the eight named: its indexes aren't listed.
+        't.e_pkey': { table: 't.e', bytes: MB, scans: 1 },
+      },
+    };
+    const before = {
+      tables: {
+        ...rowsOnly({ ...plain, 't.a': 0, 'idempotency.keys': 2 * MB }),
+        'audit.events': { rows: 10 * MB, indexes: 8 * MB, longValues: 2 * MB },
+      },
+      indexes: {
+        'audit.events_by_action': { table: 'audit.events', bytes: 3 * MB, scans: 10 },
+        'audit.events_pkey': { table: 'audit.events', bytes: 5 * MB, scans: 100 },
+        't.e_pkey': { table: 't.e', bytes: MB, scans: 1 },
+      },
+    };
+    // 6300 new requests: 3150 in each of the two phases.
+    const text = renderReport({ ...clean, phases: timed, growth: { before, after } });
+    const onlyRows = (sizes: Record<string, number>) => ({ tables: rowsOnly(sizes), indexes: {} });
+
+    it('names the tables that grew most, their parts, and a whole total, per new request', () => {
+      expect(text).toContain('## How much the tables grew');
+      expect(text).toContain(
+        '| Table | Before, MB | After, MB | Grew, MB | Rows / indexes / long values grew, MB | Bytes a new request |',
+      );
+      expect(text).toContain(
+        [
+          '| audit.events | 20.0 | 40.0 | 20.0 | 10.0 / 10.0 / 0.0 | 3329 |',
+          '| t.a | 0.0 | 8.0 | 8.0 | 8.0 / 0.0 / 0.0 | 1332 |',
+          '| new.table | 0.0 | 3.0 | 3.0 | 3.0 / 0.0 / 0.0 | 499 |',
+        ].join('\n'),
+      );
+      // The 4 past the top eight, the shrunk one among them: 1 MB down.
+      expect(text).toContain('| The other 4 tables | 11.0 | 10.0 | -1.0 | -1.0 / 0.0 / 0.0 | -166 |');
+      // 20 + 8 + 3 up, 1 down: 30 MB, 5 KB a request.
+      expect(text).toContain('| **All tables** | 71.0 | 101.0 | 30.0 | 20.0 / 10.0 / 0.0 | 4993 |');
+      expect(text).toContain("Hand-offs are paused, so what a paid payment adds isn't in them.");
+    });
+
+    it('lists the named tables’ indexes, the biggest growth first, with the scans the run made', () => {
+      expect(text).toContain(
+        [
+          '| Index | Grew, MB | Bytes a new request | Scans in the run |',
+          '| --- | --- | --- | --- |',
+          '| audit.events_by_action | 6.0 | 999 | 0 |',
+          '| audit.events_pkey | 4.0 | 666 | 6300 |',
+          '| new.table_pkey | 1.0 | 166 | 2 |',
+          '',
+        ].join('\n'),
+      );
+      expect(text).not.toContain('t.e_pkey');
+    });
+
+    it('projects a day at the run’s own rate, and one a second all day', () => {
+      // 30 MB over 200 s of traffic: 12.66 GB a day; 31.5 new requests a second.
+      expect(text).toContain(
+        "A day at the run's rate, 31.5 new requests a second over 200 s of traffic: 12.66 GB. Each new request a second, kept up all day, would add 0.40 GB a day.",
+      );
+    });
+
+    it('says the rate wasn’t measured when a phase doesn’t say how long it ran', () => {
+      const untimed = renderReport({
+        ...clean,
+        phases: [phase(1), phase(2, { durationMs: 5 })],
+        growth: { before: onlyRows({}), after: onlyRows({ 't.a': MB }) },
+      });
+      expect(untimed).toContain("A day at the run's rate: not measured, a phase didn't say how long it ran.");
+      expect(untimed).toContain('Each new request a second, kept up all day');
+    });
+
+    it('names every table when there are eight or fewer, with no row for the rest', () => {
+      const few = renderReport({
+        ...clean,
+        phases: timed,
+        growth: { before: onlyRows({}), after: onlyRows({ 't.a': MB }) },
+      });
+      expect(few).toContain('| t.a | 0.0 | 1.0 | 1.0 |');
+      expect(few).not.toContain('The other');
+    });
+
+    it('says no bytes a request with no new request', () => {
+      const none = renderReport({
+        ...clean,
+        phases: [phase(1, { created: 0 })],
+        growth: { before: onlyRows({}), after: onlyRows({ 't.a': MB }) },
+      });
+      expect(none).toContain('No new request, so no bytes a request: 1.0 MB in all.');
+    });
+
+    it('says not measured, and why, never a figure it doesn’t have', () => {
+      expect(renderReport(clean)).toContain(['## How much the tables grew', '', 'Not measured.', ''].join('\n'));
+      expect(renderReport({ ...clean, growth: { problem: 'The before reading said nothing' } })).toContain(
+        'Not measured. The before reading said nothing.',
+      );
+    });
+  });
+
   it('lists what failed', () => {
     const report = renderReport({ ...clean, databaseChecksPassed: false, failures: ['One.', 'Two.'] });
     expect(report).toContain('**Failed: 2 check(s).**');
