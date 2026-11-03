@@ -158,5 +158,6 @@ export async function settleOrgWorkPage(
       select ((select pg_catalog.count(*) from gone) + (select pg_catalog.count(*) from moved))::integer as settled
     `.execute(tx),
   );
-  return rows[0]?.settled ?? 0;
+  // One row always: its count.
+  return rows.reduce((sum, { settled }) => sum + settled, 0);
 }
