@@ -6,13 +6,16 @@
 // and the newest OBJECTS_CHECKED; the older ended ones are the history job's,
 // which the confirm waits for. So no count of payments stops a hold clearing,
 // and a paid payment tampered with past the newest is still found, by the
-// history job, and holds the organisation again.
+// history job, and holds the organisation again. A table that doesn't grow,
+// past OBJECTS_CHECKED registered contacts, is checked whole, a page at a time
+// (partner S170: no fixed ceiling), one tampered with on its second page found.
 //
 // The product's authority tables, with a stand-in for the transactions table
 // (its status sealed, its live statuses the product's own), as the table's
-// foreign keys would need a spend request and instruction for each payment.
-// The payments are signed through the audit module's own signed states, a
-// thousand to a transaction; three organisations are made at once, as their
+// foreign keys would need a spend request and instruction for each payment,
+// and one for the registered contacts, whose addresses are sealed apart.
+// The rows are signed through the audit module's own signed states, a
+// thousand to a transaction; the organisations are made at once, as their
 // chains are apart. The database's owner is the attacker.
 import { createHash } from 'node:crypto';
 
@@ -30,6 +33,8 @@ import {
   INVESTIGATE_OPERATION,
   MEMBERSHIPS,
   OBJECTS_CHECKED,
+  RECORDS_FILLING,
+  REGISTERED_CONTACTS,
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
@@ -66,14 +71,26 @@ const PAYMENTS = {
   liveStatuses: TRANSACTIONS.liveStatuses,
 } as const satisfies CheckedTable;
 
-/** The product's authority tables, in their order, the stand-in in the transactions table's place. */
-const TABLES: readonly CheckedTable[] = AUTHORITY_TABLES.map((table) => (table === TRANSACTIONS ? PAYMENTS : table));
+/** The stand-in for the registered contacts, a table that doesn't grow: a status sealed. */
+const CONTACTS = {
+  table: 'probe.contacts',
+  subject: REGISTERED_CONTACTS.subject,
+  fields: [{ column: 'status', type: 'text' }],
+} as const satisfies CheckedTable;
+
+/** The product's authority tables, in their order, the stand-ins in the transactions' and contacts' places. */
+const TABLES: readonly CheckedTable[] = AUTHORITY_TABLES.map((table) => {
+  if (table === TRANSACTIONS) return PAYMENTS;
+  return table === REGISTERED_CONTACTS ? CONTACTS : table;
+});
 
 /** Paid payments, one past what clearing reads of the newest; and one unsettled payment, older than all of them. */
 const PAID = OBJECTS_CHECKED + 1;
+/** Contacts, one past a page of what clearing reads, so the newest is on the second page. */
+const CONTACTS_HELD = OBJECTS_CHECKED + 1;
 /** The history job's runs to check them all: a run checks HOLD_HISTORY_BATCHES_A_RUN batches an organisation. */
 const RUNS = Math.ceil((PAID + 1) / (HOLD_HISTORY_BATCH * HOLD_HISTORY_BATCHES_A_RUN));
-/** Payments signed in one transaction while making them. */
+/** Rows signed in one transaction while making them. */
 const SIGNED_A_TRANSACTION = 1000;
 
 const TENANT_POLICY =
@@ -82,18 +99,25 @@ const TENANT_POLICY =
 const FIXTURE = [
   'create schema probe',
   'grant usage on schema probe to agentx_app',
-  'create table probe.payments (org_id uuid not null, id uuid not null, status text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))',
-  'alter table probe.payments enable row level security',
-  'alter table probe.payments force row level security',
-  `create policy tenant_isolation on probe.payments ${TENANT_POLICY}`,
-  'grant select, insert on probe.payments to agentx_app',
-  'grant update (status, state_version, state_event_id) on probe.payments to agentx_app',
+  ...['payments', 'contacts'].flatMap((name) => [
+    `create table probe.${name} (org_id uuid not null, id uuid not null, status text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))`,
+    `alter table probe.${name} enable row level security`,
+    `alter table probe.${name} force row level security`,
+    `create policy tenant_isolation on probe.${name} ${TENANT_POLICY}`,
+    `grant select, insert on probe.${name} to agentx_app`,
+    `grant update (status, state_version, state_event_id) on probe.${name} to agentx_app`,
+  ]),
 ];
 
-type Tables = UseCaseTables &
-  OrganizationsTables & {
-    'probe.payments': { org_id: string; id: string; status: string; state_version?: number; state_event_id?: string };
-  };
+interface ProbeRow {
+  org_id: string;
+  id: string;
+  status: string;
+  state_version?: number;
+  state_event_id?: string;
+}
+
+type Tables = UseCaseTables & OrganizationsTables & { 'probe.payments': ProbeRow; 'probe.contacts': ProbeRow };
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -112,12 +136,13 @@ const capture = new LogCapture();
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
 
-/** An organisation as the tests use it: its admin, its one unsettled payment and its paid ones, oldest first. */
+/** An organisation as the tests use it: its admin, its one unsettled payment, its paid ones and its contacts, oldest first. */
 interface World {
   readonly org: string;
   readonly admin: ClearingAdmin;
   readonly unsettled: string;
   readonly paid: readonly string[];
+  readonly contacts: readonly string[];
   /** Another member's membership, read tampered with and put back: what the hold names. */
   readonly heldFor: string;
 }
@@ -143,24 +168,29 @@ async function member(org: string, role: 'admin' | 'viewer'): Promise<ClearingAd
   return { orgId: org, userId, sessionId, membershipId };
 }
 
-/** Payments in this status, each signed through the signed states as a module records a new row: their IDs, in order. */
-async function payments(org: string, count: number, status: string): Promise<string[]> {
+/** Rows of a stand-in in this status, each signed through the signed states as a module records a new row: their IDs, in order. */
+async function signedRows(
+  table: typeof PAYMENTS | typeof CONTACTS,
+  org: string,
+  count: number,
+  status: string,
+): Promise<string[]> {
   const made = Array.from({ length: count }, () => ids.next());
   for (let start = 0; start < made.length; start += SIGNED_A_TRANSACTION) {
     const some = made.slice(start, start + SIGNED_A_TRANSACTION);
     await withSignedStates(app, org, services(), async (tx, states) => {
       await tx
-        .insertInto('probe.payments')
+        .insertInto(table.table)
         .values(some.map((id) => ({ org_id: org, id, status })))
         .execute();
       for (const id of some) {
         await states.record(
           tx,
-          PAYMENTS,
+          table,
           { orgId: org, id },
           'new',
           { status },
-          { actor: OPERATOR, action: 'transaction.opened', details: {} },
+          { actor: OPERATOR, action: `${table.subject}.opened`, details: {} },
         );
       }
     });
@@ -182,15 +212,19 @@ async function asOwner(
   }
 }
 
-/** An organisation with its admin, an unsettled payment and PAID paid ones, held for another member's role changed and put back. */
-async function world(): Promise<World> {
+/**
+ * An organisation with its admin, an unsettled payment, `paid` paid ones and `contacts` contacts, held for another
+ * member's role changed and put back.
+ */
+async function world(paidCount: number, contactCount: number): Promise<World> {
   const org = ids.next();
   await withSignedStates(app, org, services(), (tx, states) =>
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
   const admin = await member(org, 'admin');
-  const [unsettled] = await payments(org, 1, 'SUBMITTED');
-  const paid = await payments(org, PAID, 'SUCCEEDED');
+  const [unsettled] = await signedRows(PAYMENTS, org, 1, 'SUBMITTED');
+  const paid = await signedRows(PAYMENTS, org, paidCount, 'SUCCEEDED');
+  const contacts = await signedRows(CONTACTS, org, contactCount, 'ACTIVE');
   const { membershipId: heldFor } = await member(org, 'viewer');
   await asOwner(org, MEMBERSHIPS, async (owner) => {
     const saved = await owner.saveRow(heldFor);
@@ -200,7 +234,7 @@ async function world(): Promise<World> {
     );
     await owner.restoreRow(saved);
   });
-  return { org, admin, unsettled: unsettled ?? '', paid, heldFor };
+  return { org, admin, unsettled: unsettled ?? '', paid, contacts, heldFor };
 }
 
 const keyed = (who: ClearingAdmin, operation: string, key: string, payload: string): IdempotentRequest => ({
@@ -286,7 +320,7 @@ const jobLines = ({ org }: World, event: string) =>
 const hold = ({ org }: World) =>
   withSignedStates(app, org, services(), (tx, states) => states.integrityHold(tx, org, 'none'));
 
-let worlds: { clears: World; heldAgain: World; unsettled: World };
+let worlds: { clears: World; heldAgain: World; unsettled: World; contacts: World };
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -295,9 +329,14 @@ beforeAll(async () => {
     await database.as('owner').query(statement);
   }
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
-  // Each organisation's chain is its own, so the three are made at once.
-  const [clears, heldAgain, unsettled] = await Promise.all([world(), world(), world()]);
-  worlds = { clears, heldAgain, unsettled };
+  // Each organisation's chain is its own, so they are made at once.
+  const [clears, heldAgain, unsettled, contacts] = await Promise.all([
+    world(PAID, 0),
+    world(PAID, 0),
+    world(PAID, 0),
+    world(0, CONTACTS_HELD),
+  ]);
+  worlds = { clears, heldAgain, unsettled, contacts };
 }, 600_000);
 
 afterAll(async () => {
@@ -305,7 +344,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe(`clearing the integrity hold past 10,000 paid payments (4D2e Stage F, Postgres ${server.version})`, () => {
+describe(`clearing the integrity hold past 10,000 payments or contacts (4D2e Stage F, Postgres ${server.version})`, () => {
   it('a hold clears past 10,000 paid payments', async () => {
     const w = worlds.clears;
     const asked = await askedToClear(w);
@@ -318,6 +357,42 @@ describe(`clearing the integrity hold past 10,000 paid payments (4D2e Stage F, P
     expect(jobLines(w, 'hold_history.checked')).toEqual([expect.objectContaining({ objects: PAID + 1 })]);
 
     expect(await confirm(w, asked)).toMatchObject({ outcome: 'cleared', hold: { outcome: 'clear', version: 3 } });
+    // A growing table's rows are no table filling: no line, past the level though they are.
+    expect(PAID).toBeGreaterThan(RECORDS_FILLING);
+    expect(jobLines(w, 'identity.records_filling')).toEqual([]);
+  }, 300_000);
+
+  it('checks every contact past 10,000, a page at a time: one tampered with on the second page refuses it; put back, it clears, saying the table fills', async () => {
+    const w = worlds.contacts;
+    const newest = w.contacts.at(-1) ?? '';
+    const asked = await askedToClear(w);
+    await historyJob(w, 1);
+    let restore = (): Promise<void> => Promise.resolve();
+    await asOwner(w.org, CONTACTS, async (owner) => {
+      const saved = await owner.saveRow(newest);
+      await owner.setColumn(newest, 'status', 'REMOVED');
+      restore = () => asOwner(w.org, CONTACTS, (again) => again.restoreRow(saved));
+    });
+
+    expect(await confirm(w, asked)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(await hold(w)).toMatchObject({ outcome: 'held', version: 2 });
+    expect(
+      capture
+        .lines()
+        .filter(({ event, objectId }) => event === 'audit.integrity_failed' && objectId === newest)
+        .map(({ reason }) => reason),
+    ).toEqual(['seal']);
+
+    await restore();
+    expect(await confirm(w, asked)).toMatchObject({ outcome: 'cleared' });
+    // Each confirm counted every contact, the refused one too: past the level watched, each said so.
+    const filling = expect.objectContaining({
+      level: 'warn',
+      records: CONTACTS.subject,
+      held: CONTACTS_HELD,
+      during: 'hold_clearing',
+    });
+    expect(jobLines(w, 'identity.records_filling')).toEqual([filling, filling]);
   }, 300_000);
 
   it('a tampered paid payment is found by the history batch and held again', async () => {

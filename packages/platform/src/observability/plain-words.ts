@@ -716,9 +716,10 @@ export const PLAIN_WORDS = {
   },
   'identity.records_filling': {
     happened:
-      "An organisation's stored registered contacts or sign-in factor resets passed half of what the app can read.",
-    broke: 'Nothing is affected yet; if they keep growing, that list will stop working for the organisation.',
-    next: 'Find out why the organisation has so many, and tell the developer before the limit is reached.',
+      "An organisation's stored registered contacts or sign-in factor resets passed half of what the app can read; or, while clearing a security hold, one kind of its records (the line's `records`) passed 8,000.",
+    broke:
+      'Nothing yet. A contacts or resets list stops working if they keep growing. A hold clearing still checks every record, only more slowly.',
+    next: 'Find out why the organisation has so many and tell the developer: before the list limit, or if clearings get slow.',
   },
   'identity.session_sweep_failed': {
     happened: 'The hourly clean-up of ended sign-in sessions failed.',
