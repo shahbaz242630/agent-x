@@ -2032,6 +2032,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(CAP_ALERT, borrowed))).toContain('alert-counts-only');
   });
 
+  it('alert-window: a look-back Azure refuses at deploy (S171: 20 minutes)', () => {
+    const windowOf = (size: string) => (alert: Mutable) => (inside(alert, 'properties').windowSize = size);
+    for (const size of ['PT20M', 'PT25M', 'PT90M', 'PT1D', 'P3D']) {
+      expect(brokenRules(changed(CAP_ALERT, windowOf(size)))).toContain('alert-window');
+    }
+    for (const size of ['PT5M', 'PT45M', 'PT1H', 'PT12H', 'P1D', 'P2D']) {
+      expect(brokenRules(changed(CAP_ALERT, windowOf(size)))).not.toContain('alert-window');
+    }
+  });
+
   it("alert-runbook: no runbook, or a SEV its severity doesn't match", () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).description = 'Something happened.')))).toEqual(

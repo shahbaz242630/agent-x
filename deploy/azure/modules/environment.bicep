@@ -644,12 +644,13 @@ resource anchorStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
   kind: 'LogAlert'
   properties: {
     displayName: 'Audit: the anchor check has stopped'
-    description: 'SEV-1. No audit chain check has finished for 20 minutes (no audit.anchor_check_done): the jobs have stopped, so tampering would go unseen. Runbook: Incident-Response-Playbook.md section R.'
+    description: 'SEV-1. No audit chain check has finished for 30 minutes (no audit.anchor_check_done): the jobs have stopped, so tampering would go unseen. Runbook: Incident-Response-Playbook.md section R.'
     severity: 1
     enabled: alwaysOn
     scopes: [workspaceId]
     evaluationFrequency: 'PT10M'
-    windowSize: 'PT20M'
+    // Azure takes only its own window lengths (5, 10, 15, 30, 45 minutes, then hours): 20 was refused (S171).
+    windowSize: 'PT30M'
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
