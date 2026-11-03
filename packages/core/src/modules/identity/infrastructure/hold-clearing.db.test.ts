@@ -25,7 +25,7 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
-import { type AuditTables, createAuditTrail, withSignedStates } from '../../audit/index.ts';
+import { type AuditTables, createAuditTrail, pollHoldsWaiting, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
@@ -215,6 +215,40 @@ beforeEach(async () => {
   );
   admin = await member(org, 'admin');
 });
+
+/** Refused and still HELD while the check given what the hold names says not whole; then cleared. */
+async function refusedUntilWhole(id: string, investigationId: string, challengeId: string): Promise<void> {
+  const asked: string[] = [];
+  let whole = false;
+  const withTheirs = createHoldClearings({
+    database: app,
+    keys,
+    ids,
+    challenges: challenges(),
+    logger: testLogger(),
+    authorityTables: AUTHORITY_TABLES,
+    namedRecordChecks: {
+      [MEMBERSHIPS.subject]: (_tx, _states, orgId, objectId) => {
+        asked.push(`${orgId} ${objectId}`);
+        return Promise.resolve(whole);
+      },
+    },
+  });
+  const confirmTheirs = () =>
+    withTheirs.confirm(
+      admin,
+      keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
+      investigationId,
+      challengeId,
+      CORRELATION,
+    );
+
+  expect(await confirmTheirs()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+  expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+  whole = true;
+  expect(await confirmTheirs()).toMatchObject({ outcome: 'cleared' });
+  expect(asked).toEqual([`${org} ${id}`, `${org} ${id}`]);
+}
 
 describe(`clearing the integrity hold as its admin (Postgres ${server.version})`, () => {
   it('asks, signs in again, and clears: the hold CLEAR, one version on', async () => {
@@ -524,24 +558,55 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     const row = await holdThenRepair();
     const investigationId = await investigate();
     const challengeId = await steppedUp(investigationId);
-    const asked: string[] = [];
-    let whole = false;
-    const withTheirs = createHoldClearings({
-      database: app,
-      keys,
-      ids,
-      challenges: challenges(),
-      logger: testLogger(),
-      authorityTables: AUTHORITY_TABLES,
-      namedRecordChecks: {
-        [MEMBERSHIPS.subject]: (_tx, _states, orgId, objectId) => {
-          asked.push(`${orgId} ${objectId}`);
-          return Promise.resolve(whole);
-        },
-      },
-    });
-    const confirmTheirs = () =>
-      withTheirs.confirm(
+    await refusedUntilWhole(row.id, investigationId, challengeId);
+  });
+
+  it('a hold recorded from a row, by a process that never saw the finding: the same check, and it stays held (D5)', async () => {
+    const { membershipId: id } = await member(org, 'viewer');
+    await database
+      .as('app')
+      .query(
+        "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'holding')",
+        [org, MEMBERSHIPS.subject, id],
+      );
+    await pollHoldsWaiting(app, services());
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+
+    await refusedUntilWhole(id, investigationId, challengeId);
+  });
+
+  describe('a hold naming a record with no row (D5)', () => {
+    /** A hold as a forged row sets it: naming this, and nothing else tampered with. */
+    const holdFromRow = async (subjectType: string, objectId: string) => {
+      await database
+        .as('app')
+        .query(
+          "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'seal')",
+          [org, subjectType, objectId],
+        );
+      await pollHoldsWaiting(app, services());
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    };
+    let linesBefore = 0;
+    const nothingToRepair = () =>
+      capture
+        .lines()
+        .slice(linesBefore)
+        .filter(({ event }) => event === 'integrity_hold.named_record_never_signed');
+    /** Memberships checked as a growing table is, in a status none has: only the check of what the hold names reads them. */
+    const confirmLiveOnly = (investigationId: string, challengeId: string) =>
+      createHoldClearings({
+        database: app,
+        keys,
+        ids,
+        challenges: challenges(),
+        logger: testLogger(capture),
+        authorityTables: AUTHORITY_TABLES.map((table) =>
+          table === MEMBERSHIPS ? { ...table, liveStatuses: ['DEACTIVATED'] } : table,
+        ),
+      }).confirm(
         admin,
         keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
         investigationId,
@@ -549,11 +614,260 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
         CORRELATION,
       );
 
-    expect(await confirmTheirs()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
-    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
-    whole = true;
-    expect(await confirmTheirs()).toMatchObject({ outcome: 'cleared' });
-    expect(asked).toEqual([`${org} ${row.id}`, `${org} ${row.id}`]);
+    beforeEach(() => {
+      linesBefore = capture.lines().length;
+    });
+
+    it('a record that never existed has nothing to repair: cleared by the real steps, and said', async () => {
+      const never = ids.next();
+      await holdFromRow(MEMBERSHIPS.subject, never);
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirm(investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+
+      expect(await hold()).toMatchObject({ outcome: 'clear', version: 3 });
+      expect(nothingToRepair()).toEqual([
+        expect.objectContaining({
+          level: 'warn',
+          orgId: org,
+          correlationId: CORRELATION,
+          subjectType: MEMBERSHIPS.subject,
+          objectId: never,
+        }),
+      ]);
+    });
+
+    it('another organisation’s record reads as none of this one’s: the same way out', async () => {
+      const neighbour = ids.next();
+      await withSignedStates(app, neighbour, services(), (tx, states) =>
+        createOrganization(tx, states, { id: neighbour, name: 'Next Door LLC', actor: OPERATOR }),
+      );
+      const { membershipId } = await member(neighbour, 'viewer');
+      await holdFromRow(MEMBERSHIPS.subject, membershipId);
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirm(investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+      expect(nothingToRepair()).toHaveLength(1);
+    });
+
+    it('a subject no table holds has nothing to read: cleared, with no line, as for the chain', async () => {
+      await holdFromRow('no_such_subject', ids.next());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirm(investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+      expect(nothingToRepair()).toEqual([]);
+    });
+
+    it('a clear that commits says cleared, though another record waits here to be the next hold, which it then is', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      const next = ids.next();
+      await database
+        .as('app')
+        .query(
+          "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'seal')",
+          [org, MEMBERSHIPS.subject, next],
+        );
+      await pollHoldsWaiting(app, services());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirm(investigationId, challengeId)).toMatchObject({
+        outcome: 'cleared',
+        hold: { outcome: 'clear', version: 3 },
+      });
+
+      // The next hold stands by its own row: set by that same read's end, with no wait.
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
+    });
+
+    it('a replay reading the next hold leaves what rests behind it at rest', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      for (const next of [ids.next(), ids.next()]) {
+        await database
+          .as('app')
+          .query(
+            "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'seal')",
+            [org, MEMBERSHIPS.subject, next],
+          );
+      }
+      await pollHoldsWaiting(app, services());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+      await confirm(investigationId, challengeId);
+      // One set as the clear's read ended; the other tried now, and resting behind it.
+      await pollHoldsWaiting(app, services());
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
+      const seen = capture.lines().length;
+      const locker = await database.connect('admin');
+      await locker.query('begin');
+      await locker.query('select seq from audit.heads where org_id = $1 for no key update', [org]);
+      try {
+        // Asked again: answered, with no try of what rests, which would wait out the head's lock.
+        expect(await within(3_000, confirm(investigationId, challengeId), 'the replay')).toMatchObject({
+          outcome: 'cleared',
+        });
+      } finally {
+        await locker.query('rollback');
+        await locker.end();
+      }
+      expect(
+        capture
+          .lines()
+          .slice(seen)
+          .filter(({ reason }) => reason === 'not_recorded'),
+      ).toEqual([]);
+    });
+
+    it('a clear whose commit fails says nothing of a record never signed', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+      const owner = database.as('owner');
+      await owner.query(
+        "create function audit.refuse_at_commit() returns trigger language plpgsql as $$ begin raise exception 'refused at commit'; end $$",
+      );
+      await owner.query(
+        'create constraint trigger refuse_at_commit after update on audit.heads deferrable initially deferred for each row execute function audit.refuse_at_commit()',
+      );
+      try {
+        await expect(confirm(investigationId, challengeId)).rejects.toThrow();
+      } finally {
+        await owner.query('drop trigger refuse_at_commit on audit.heads');
+        await owner.query('drop function audit.refuse_at_commit()');
+      }
+
+      expect(nothingToRepair()).toEqual([]);
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    });
+
+    it('the way out skips nothing else: no step-up, no history check, and it stays held, with nothing said', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      const investigationId = await investigate();
+      const answer = await ask(investigationId);
+      if (answer.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(answer)}`);
+
+      // Never signed in again.
+      expect(await confirm(investigationId, answer.stepUpChallengeId)).toEqual({
+        outcome: 'refused',
+        status: 403,
+        code: 'STEP_UP_FAILED',
+      });
+      // Signed in again, the whole history unchecked.
+      await stepUp(admin, answer.stepUpChallengeId);
+      expect(await confirm(investigationId, answer.stepUpChallengeId)).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'HISTORY_UNCHECKED',
+      });
+
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      expect(nothingToRepair()).toEqual([]);
+    });
+
+    it('asked with no investigation of the hold: refused, and no step-up to spend', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+
+      expect(await ask(ids.next())).toEqual({ outcome: 'refused', status: 409, code: 'NO_INVESTIGATION' });
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    });
+
+    it('a signed record deleted past the app: refused, as a whole check finds it', async () => {
+      const { membershipId: id } = await member(org, 'viewer');
+      await holdFromRow(MEMBERSHIPS.subject, id);
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+      await asOwner((owner) => owner.deleteRow(id));
+
+      expect(await confirm(investigationId, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      expect(nothingToRepair()).toEqual([]);
+    });
+
+    it('a signed record deleted past the app that no whole check lists: refused by the check of what the hold names', async () => {
+      const { membershipId: id } = await member(org, 'viewer');
+      await holdFromRow(MEMBERSHIPS.subject, id);
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+      await asOwner((owner) => owner.deleteRow(id));
+
+      expect(await confirmLiveOnly(investigationId, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      expect(nothingToRepair()).toEqual([]);
+    });
+
+    it('a record with history but no seal and no row: refused, as any history means it once was', async () => {
+      const never = ids.next();
+      await holdFromRow(MEMBERSHIPS.subject, never);
+      await withSignedStates(app, org, services(), (tx) =>
+        createAuditTrail({ keys, ids }).record(tx, org, {
+          actor: OPERATOR,
+          action: 'membership.noted',
+          subject: { type: MEMBERSHIPS.subject, id: never, version: 1 },
+          details: {},
+        }),
+      );
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirmLiveOnly(investigationId, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      expect(nothingToRepair()).toEqual([]);
+    });
+
+    it('a row there with nothing signed is no record that never was: refused', async () => {
+      const id = ids.next();
+      const user = await userForSubject(
+        app,
+        { issuer: 'https://auth.example.test', subject: `planted-${id}` },
+        { ids, clock },
+      );
+      await asOwner(async (owner) => {
+        await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+          user,
+          org,
+          id,
+        ]);
+        await owner.query(
+          "insert into identity.memberships (org_id, id, user_id, role, status, joined_at) values ($1, $2, $3, 'viewer', 'ACTIVE', now())",
+          [org, id, user],
+        );
+      });
+      await holdFromRow(MEMBERSHIPS.subject, id);
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirmLiveOnly(investigationId, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      expect(nothingToRepair()).toEqual([]);
+    });
+
+    it('the same with no history at all, read only by the check of what the hold names: cleared', async () => {
+      await holdFromRow(MEMBERSHIPS.subject, ids.next());
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+
+      expect(await confirmLiveOnly(investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+      expect(nothingToRepair()).toHaveLength(1);
+    });
   });
 
   it('fails rather than judge part of a table past the objects it checks, leaving it HELD', async () => {

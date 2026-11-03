@@ -8,6 +8,7 @@
   "audit.events",
   "audit.heads",
   "directory.agent_keys",
+  "directory.holds_waiting",
   "directory.instructions",
   "directory.invites",
   "directory.members",
