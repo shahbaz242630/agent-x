@@ -2,12 +2,14 @@
 // gate; partner decision 37b, S143): the bank went back on its word about a
 // settled payment, or refused one after its word was read (`contradicted`);
 // rejected one with no proof the money stayed (`rejected_unproven`); or left
-// one unresolved past a day (`still_unknown`). Each is kept in the
-// organisation's audit log and every admin is emailed (0065), in the caller's
-// transaction: the one that read the bank's word, so the alert commits with
-// it. About the payment's transaction by a subject of its own, never its
-// signed state. A payment unresolved past a day is told once; the others are
-// told as the bank first says them, by their callers.
+// one unresolved past a day (`still_unknown`); or says it can't find one
+// handed to it, past UNKNOWN_AFTER_MS (`bank_lost`, 0071, partner S170). Each
+// is kept in the organisation's audit log and every admin is emailed (0065,
+// 0071), in the caller's transaction: the one that read the bank's word, so
+// the alert commits with it. About the payment's transaction by a subject of
+// its own, never its signed state. The last two are said on every check while they last, so each
+// is told once a payment; the others are told as the bank first says them, by
+// their callers.
 import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
 import type { NoticeKind, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
@@ -17,14 +19,18 @@ import type { KeyProvider } from '@agentx/platform/keys';
 export type PaymentAlertTables = AuditTables & NotificationsTables;
 
 /** What the bank left unclear about the payment (its admins follow it up with their bank, decision 38). */
-export type PaymentAlert = 'contradicted' | 'rejected_unproven' | 'still_unknown';
+export type PaymentAlert = 'contradicted' | 'rejected_unproven' | 'still_unknown' | 'bank_lost';
 
 /** The email each alert sends its admins. */
 const KIND_OF = {
   contradicted: 'payment_contradicted',
   rejected_unproven: 'payment_unproven',
   still_unknown: 'payment_still_unknown',
+  bank_lost: 'payment_bank_lost',
 } as const satisfies Record<PaymentAlert, NoticeKind>;
+
+/** The alerts a check raises again each time it runs: told once a payment, by the audit entry they leave. */
+const ONCE_A_PAYMENT: ReadonlySet<PaymentAlert> = new Set(['still_unknown', 'bank_lost']);
 
 /** The alert's own subject: the payment's transaction, never its signed state. */
 const SUBJECT_TYPE = 'payment_alert';
@@ -34,7 +40,7 @@ const ACTOR = { type: 'system', id: 'api' } as const;
 
 /**
  * Keeps the alert in the organisation's audit log and queues its email to
- * every admin, in `tx`; `still_unknown` once a payment (false if told before).
+ * every admin, in `tx`; `still_unknown` and `bank_lost` once a payment (false if told before).
  */
 export async function alertAdmins(
   tx: DatabaseTransaction<PaymentAlertTables>,
@@ -52,7 +58,7 @@ export async function alertAdmins(
   },
 ): Promise<boolean> {
   const action = `payment.${alert}`;
-  if (alert === 'still_unknown') {
+  if (ONCE_A_PAYMENT.has(alert)) {
     const told = await tx
       .selectFrom('audit.events')
       .select('seq')
