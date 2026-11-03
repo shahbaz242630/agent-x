@@ -166,6 +166,27 @@ describe('where each mark comes from', () => {
     expect(Math.abs(apart)).toBeLessThan(30_000);
   });
 
+  it('a payment UNKNOWN still marks its checks, not its sweep: a write on it marks the checks alone', async () => {
+    const { w, acting } = await ready();
+    // `.02`: the answer lost, so the hand-off's Tx B leaves it UNKNOWN.
+    const request = await ask(acting, w, { amount: ALLOWED(2n) });
+    await handoffOf(w).run();
+    const { id, status } = await transactionOfRequest(request.id);
+    expect(status).toBe('UNKNOWN');
+    await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      noteTransactionFacts(
+        tx,
+        states,
+        { orgId: w.org, id },
+        { providerStatus: 'NotedForTheTest', paymentInstructionRef: null, rejectCode: null, providerChangedAt: null },
+        { actor: { type: 'system', id: 'api' }, details: {} },
+      ),
+    );
+    expect((await transactionOfRequest(request.id)).status).toBe('UNKNOWN');
+    expect(await jobsMarked(w)).toEqual(['payment_check']);
+  });
+
   it('a payment finished makes no mark of its own: nothing but what is due is marked', async () => {
     const { w, acting } = await ready();
     // `.01`: the fake declines it, with its proof, so the hand-off's Tx B settles it FAILED.
