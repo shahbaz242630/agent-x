@@ -614,6 +614,10 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN', providerStatus: 'Pending' });
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
     expect(lines('payment_check.unreadable')).toHaveLength(1);
+    // Our status moved on no new word of the bank's: the move alone keeps the line.
+    expect(lines('payment_check.checked')).toEqual([
+      expect.objectContaining({ from: 'PROCESSING', to: 'UNKNOWN', newBankStatus: null }),
+    ]);
     expect(await remittancesOf(w)).toEqual([]);
   });
 
