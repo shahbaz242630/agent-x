@@ -15,12 +15,27 @@
 // any such drift was seen, never which, so rotating plants gain nothing, and every
 // other problem is the alarm in the same run. The cost: one planted CHECK, function
 // or table, seen by one run and gone by the next, stays one warning line a process.
-// A restart forgets the sighting, and meets the start check, which waits for nothing.
+// A restart forgets the sighting, and meets the start check.
 //
 // **At start it refuses to start.** A database whose walls have been rewritten
 // must not be served from, the same way A2b-2 refuses to start on a broken
 // platform chain. Nothing is lost by refusing: the in-memory anchor store is
 // empty at start anyway.
+//
+// **Release-shaped drift alone, at start, during a release, is a warning (staging,
+// 3 Nov).** The image before a release, restarting after the release migrated,
+// refused, rightly, and raised the tamper alarm four times for nothing. It still
+// refuses, but warns instead when the ledger's marks (ledger-marks.ts) show more
+// migrations than this image has, both as last counted and as held now, counted
+// by the migration job within RELEASE_START_WAIT_MS by the database's clock.
+// Anything else is the alarm as before: other drift beside it, marks that show no
+// newer migration, are older than that, or can't be read. So a stuck release, or a
+// plant riding one, pages within the half hour. A plant with no release can still
+// get the warning: add a ledger row, count it, then delete it in a session that
+// stays busy, since Postgres sends a session's live count only when it goes idle,
+// so the count held now lags as long as that session runs (unbounded). The
+// backstop is not the forged row but the owner's login, which raises its own
+// alert, and the re-stamp needed every half hour.
 //
 // **During a run it raises the alarm and keeps going.** Stopping a running API
 // would empty that anchor store, which is exactly what someone tampering would
@@ -42,7 +57,13 @@
 // start earlier, as whileServerFull says: nothing is served, and the error line
 // raises its own alert. A connection limit set on the database or a role answers
 // the same way, so the guard names that as drift (schema-guard.ts).
-import { type Database, liveSchemaDrift, type SchemaProblem } from '@agentx/platform/db';
+import {
+  builtMigrationNames,
+  type Database,
+  liveSchemaDrift,
+  readLedgerMarks,
+  type SchemaProblem,
+} from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
 import { AUTHORITY_TABLES } from './authority-tables.ts';
@@ -69,6 +90,14 @@ export interface SchemaCheckOptions<Schema = unknown> {
   /** Ends the check at once when the process is stopping. */
   readonly signal?: AbortSignal | undefined;
 }
+
+/**
+ * How long after the migration job counted a newer migration the image before it
+ * refuses a start on that release's drift with a warning, not the alarm: longer than
+ * a release takes from its migration to its new image serving, short enough that a
+ * stuck release, or a plant riding one, pages within the half hour.
+ */
+export const RELEASE_START_WAIT_MS = 30 * 60_000;
 
 /** Postgres's answer when every connection is in use (`too_many_connections`). */
 const TOO_MANY_CONNECTIONS = '53300';
@@ -194,10 +223,11 @@ async function checkSchema<Schema>({
   }
 }
 
-/** How long a start keeps asking a full server, and how often: the defaults but in tests. */
+/** How long a start keeps asking a full server, and how often, and waits out a release: the defaults but in tests. */
 interface FullServerWait {
   readonly limitMs?: number;
   readonly retryMs?: number;
+  readonly releaseWaitMs?: number;
 }
 
 /** Resolves after `ms`, or at once when the process stops: the check after it then says so. */
@@ -251,7 +281,11 @@ export async function whileServerFull<T>(
  */
 export async function schemaSoundAtStart<Schema>(
   options: SchemaCheckOptions<Schema>,
-  { limitMs = FULL_SERVER_START_MS, retryMs = FULL_SERVER_RETRY_MS }: FullServerWait = {},
+  {
+    limitMs = FULL_SERVER_START_MS,
+    retryMs = FULL_SERVER_RETRY_MS,
+    releaseWaitMs = RELEASE_START_WAIT_MS,
+  }: FullServerWait = {},
 ): Promise<boolean> {
   const started = performance.now();
   let outcome = await checkSchema(options);
@@ -266,9 +300,61 @@ export async function schemaSoundAtStart<Schema>(
   }
   // Stopped while starting: the process isn't going on either way, and a stop is no alarm.
   if (outcome.kind === 'stopped') return false;
-  if (outcome.kind === 'drift') raiseDriftAlarm(options.logger, 'start', [...outcome.atOnce, ...outcome.releaseShaped]);
+  if (outcome.kind === 'drift') await driftAtStart(options, outcome, releaseWaitMs);
   else raiseUnreadableAlarm(options.logger, 'start', outcome.error);
   return false;
+}
+
+/** Drift at start, which refuses it either way: a warning when it is exactly a release under way, else the alarm. */
+async function driftAtStart<Schema>(
+  options: SchemaCheckOptions<Schema>,
+  { atOnce, releaseShaped }: Extract<SchemaCheckOutcome, { kind: 'drift' }>,
+  releaseWaitMs: number,
+): Promise<void> {
+  const release = atOnce.length === 0 ? await releaseUnderWay(options, releaseWaitMs) : undefined;
+  if (release === 'stopped') return;
+  if (release === undefined) raiseDriftAlarm(options.logger, 'start', [...atOnce, ...releaseShaped]);
+  else options.logger.warn('db.schema_start_waits_release', { problems: releaseShaped.toSorted(), ...release });
+}
+
+/** What the ledger's marks say of a release under way. Counts and times only: nothing read can carry text. */
+interface ReleaseUnderWay {
+  /** The ledger's rows when the migration job last counted them, and now. */
+  readonly ledgerMigrations: number;
+  readonly ledgerMigrationsNow: number;
+  /** This image's migrations, and its newest. */
+  readonly builtMigrations: number;
+  readonly newestBuilt: string | undefined;
+  readonly countedMsAgo: number;
+}
+
+/**
+ * A migration newer than this image's, counted within RELEASE_START_WAIT_MS, or
+ * undefined when the marks show none or can't be read, which is the alarm.
+ */
+async function releaseUnderWay<Schema>(
+  { database, deadlineMs = SCHEMA_CHECK_DEADLINE_MS, signal }: SchemaCheckOptions<Schema>,
+  releaseWaitMs: number,
+): Promise<ReleaseUnderWay | 'stopped' | undefined> {
+  try {
+    const reading = Promise.all([readLedgerMarks(database), builtMigrationNames()]);
+    // Handled here too, so a read that finishes after its deadline never goes unhandled.
+    void reading.catch(() => undefined);
+    const [marks, built] = await withinDeadline(reading, deadlineMs, signal);
+    // The age is the database's own (ADR-006 keeps database time for database stamps): one clock, no skew.
+    if (marks?.countedMsAgo === undefined || marks.countedMsAgo >= releaseWaitMs) return undefined;
+    // Both counts: a row added, counted and deleted leaves the last count high, but not the live one.
+    if (marks.rows <= built.length || marks.liveRows <= built.length) return undefined;
+    return {
+      ledgerMigrations: marks.rows,
+      ledgerMigrationsNow: marks.liveRows,
+      builtMigrations: built.length,
+      newestBuilt: built.at(-1),
+      countedMsAgo: marks.countedMsAgo,
+    };
+  } catch (error) {
+    return error instanceof Stopped ? 'stopped' : undefined;
+  }
 }
 
 /**

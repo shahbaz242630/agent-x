@@ -296,6 +296,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing changed yet: that update was undone and is tried again after a short pause, up to 5 tries.',
     next: 'Nothing to do. If all 5 tries fail, the job stops: run it again at a quieter time.',
   },
+  'db.migration.ledger_not_counted': {
+    happened: 'The database update job applied its changes but could not count its list of applied changes.',
+    broke: 'Nothing: the changes are in. An older copy starting during this release raises the integrity alarm.',
+    next: 'Nothing, unless that alarm came: then check the release finished, and run the job again.',
+  },
   'db.migration.rollback_failed': {
     happened: 'A database update failed, and undoing it failed too.',
     broke: 'The connection is likely lost; closing it undoes the update anyway, so nothing half-done is kept.',
@@ -351,6 +356,11 @@ export const PLAIN_WORDS = {
     happened: 'The routine security check found a database rule this copy of Agent X was not built with.',
     broke: 'Nothing yet: if any later check finds such a rule, it becomes the integrity alarm.',
     next: 'Nothing to do during a release. With no release running, treat it as possible tampering.',
+  },
+  'db.schema_start_waits_release': {
+    happened: "An older copy of Agent X tried to start during a release and found the release's new database rules.",
+    broke: "Nothing yet: that copy did not start; the release's new copy should be serving shortly.",
+    next: 'Nothing to do now. If this repeats past 30 minutes, the integrity alarm is raised.',
   },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',
