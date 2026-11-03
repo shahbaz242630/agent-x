@@ -247,6 +247,7 @@ export function handleSummary(data) {
     asksMs: { p50: asks.med, p95: asks['p(95)'], p99: asks['p(99)'], max: asks.max },
     spikeMs: PHASE === '2' && spike !== undefined ? { p50: spike.med, p95: spike['p(95)'], max: spike.max } : null,
     thresholds,
+    durationMs: state.testRunDurationMs,
     ...(NEIGHBOURS
       ? {
           neighbours: Object.fromEntries(NEIGHBOUR_KINDS.map((kind) => [kind, neighbour(metrics, kind)])),

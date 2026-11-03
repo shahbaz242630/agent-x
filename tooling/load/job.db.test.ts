@@ -24,6 +24,7 @@ import {
 } from './job.ts';
 import { type LoadPhase, orgsOf, type Seeded, SEEDED_AGENTS } from './plan.ts';
 import type { PhaseResult } from './report.ts';
+import { gatheredEnd, printedEnd, readGrowthEnd } from './table-growth.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -157,6 +158,19 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       });
       expect(JSON.stringify(run.first.printed)).not.toMatch(/"key"/);
       expect(run.keys.every((key) => key.length > 20)).toBe(true);
+      // Read before phase 1's traffic and after the seed, so the seed's own rows aren't growth (F12).
+      const events = run.first.printed.map(({ event }) => event);
+      expect(events.indexOf('load.table_size')).toBe(events.indexOf('load.seeded') + 1);
+      expect(gatheredEnd(run.first.printed, 'before')).toMatchObject({
+        sizes: { indexes: { 'audit.events_by_action': { table: 'audit.events' } } },
+      });
+      // A line a table, each well under the 16 KiB past which Azure's log splits a line, and the whole map back from them.
+      expect(Math.max(...run.first.printed.map((line) => Buffer.byteLength(JSON.stringify(line))))).toBeLessThan(
+        16 * 1024,
+      );
+      const read = await readGrowthEnd(app, 'before');
+      expect(read).toHaveProperty('sizes');
+      expect(gatheredEnd(printedEnd(read), 'before')).toEqual({ sizes: 'sizes' in read ? read.sizes : undefined });
 
       const second = stepsWith(() => ({ finished: true, result: { ...NO_REQUESTS, phase: 2 } }));
       // No traffic stands in here, and the checks refuse to pass a run with none (the laptop's run holds them with it).
@@ -164,6 +178,10 @@ describe('the load run on Azure, its jobs (D2c, PL-38)', () => {
       expect(second.k6Calls.map(({ phase }) => phase)).toEqual([2, 3, 4, 5]);
       const secondKeys = second.k6Calls[0]?.seeded.agents.map(({ key }) => key) ?? [];
       expect(secondKeys.filter((key, n) => key === run.keys[n] || key.length <= 20)).toEqual([]);
+      // Read after the last phase and before the clean-up, whose own rows aren't the run's growth (F12).
+      const printedInOrder = second.printed.map(({ event }) => event);
+      expect(printedInOrder.lastIndexOf('load.table_sizes')).toBeLessThan(printedInOrder.indexOf('load.cleaned'));
+      expect(gatheredEnd(second.printed, 'after')).toMatchObject({ sizes: { tables: { 'audit.events': {} } } });
       const checked = second.lineOf('load.checked');
       expect(checked).toMatchObject({ created: 0, finished: true });
       const checks = checked?.checks as { name: string; problems: string[] }[];
