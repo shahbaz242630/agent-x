@@ -18,11 +18,11 @@
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { markFailed } from '@agentx/core/modules/outcomes';
+import { lockHoldingsOf, markFailed, settleHoldings } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { type ExecutionLookup, type FakeRail, RailUnavailable } from '@agentx/core/modules/providers';
 import { createProviderEvents } from '@agentx/core/modules/provider-events';
-import { TRANSACTIONS } from '@agentx/core/modules/transactions';
+import { moveTransaction, TRANSACTIONS, transactionOf as lockedTransaction } from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -398,11 +398,12 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     expect(lines('payment_check.not_found_long')).toEqual([]);
   });
 
-  it('counts a young payment the bank has never spoken of and can’t find: it has no line of its own', async () => {
+  it('counts an UNKNOWN payment the bank has never spoken of and can’t find: its status, not its age, keeps it from the warn', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED(2n) });
     await handoffOf(w).run();
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN', providerStatus: null });
+    clock.advanceBy(UNKNOWN_AFTER_MS + STEP);
 
     await checksOf(
       w,
@@ -436,6 +437,47 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     // Found again, nothing more to say.
     await checksOf(w).run();
     expect(lines('payment_check.not_found_long')).toHaveLength(2);
+  });
+
+  it('says it of one still SUBMITTED past its time too', async () => {
+    const { w, acting } = await ready();
+    // .01 fils: the fake declines it, too late, so it stays where the bank's earlier word left it.
+    const request = await ask(acting, w, { amount: ALLOWED(1n) });
+    const rail: FakeRail = {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        const key = { orgId: w.org, id: (await transactionOf(w, request.id)).id };
+        await withSignedStates(app, w.org, { keys, ids, logger: testLogger() }, async (tx, states) => {
+          await lockedTransaction(tx, states, key, 'change');
+          await lockHoldingsOf(tx, request.id);
+          const moved = await moveTransaction(
+            tx,
+            states,
+            key,
+            'submitted',
+            { providerStatus: 'Pending', paymentInstructionRef: null, rejectCode: null, providerChangedAt: null },
+            { actor: { type: 'system', id: 'test' }, details: {} },
+          );
+          if (moved.outcome !== 'moved') throw new Error(`not moved: ${moved.outcome}`);
+          await settleHoldings(tx, { requestId: request.id, status: moved.to, at: clock.now() });
+        });
+        return w.rail.submitApprovedIntent(intent);
+      },
+    };
+    await handoffOf(w, rail).run();
+    const { id } = await transactionOf(w, request.id);
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUBMITTED' });
+    clock.advanceBy(UNKNOWN_AFTER_MS + STEP);
+
+    await checksOf(
+      w,
+      answering(w, () => ({ kind: 'not_found' })),
+    ).run();
+
+    expect(lines('payment_check.not_found_long')).toEqual([
+      expect.objectContaining({ level: 'warn', orgId: w.org, transactionId: id }),
+    ]);
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUBMITTED' });
   });
 
   it('leaves them as they were while the bank can’t be reached, and says so once a run', async () => {
