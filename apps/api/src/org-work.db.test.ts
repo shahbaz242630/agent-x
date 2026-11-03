@@ -21,11 +21,12 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHandoff } from './handoff.ts';
+import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { keys, type World } from './mandate-world.helper.test.ts';
 import { createOrgWorkRediscovery } from './org-work.ts';
+import { createRailHealth } from './rail-health.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
 
@@ -64,6 +65,8 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
     ids,
     clock,
     logger: testLogger(capture),
+    health: createRailHealth({ clock, logger: testLogger(capture) }),
+    databaseGate: handoffDatabaseGate(6),
   });
 
 const rediscoveryOf = (...orgs: readonly string[]) =>
