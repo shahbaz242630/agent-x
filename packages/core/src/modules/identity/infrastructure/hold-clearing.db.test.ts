@@ -35,6 +35,7 @@ import {
   type ClearingAdmin,
   createHoldClearings,
   type HoldClearings,
+  RECORDS_FILLING,
 } from './hold-clearing.ts';
 import { createHoldInvestigations, INVESTIGATE_OPERATION } from './hold-investigations.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
@@ -873,30 +874,75 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     });
   });
 
-  it('fails rather than judge part of a table past the objects it checks, leaving it HELD', async () => {
-    await holdThenRepair();
-    const investigationId = await investigate();
-    const challengeId = await steppedUp(investigationId);
-    const few = createHoldClearings({
-      database: app,
-      keys,
-      ids,
-      challenges: challenges(),
-      logger: testLogger(),
-      authorityTables: AUTHORITY_TABLES,
-      objectsChecked: 1,
-    });
-
-    await expect(
-      few.confirm(
+  describe('a table that doesn’t grow past the objects a page holds (4D2e, partner S170: no fixed ceiling)', () => {
+    /** The admin's confirm through clearings with a page of one object and this warning level. */
+    const confirmPaged = (recordsFilling: number, investigationId: string, challengeId: string) =>
+      createHoldClearings({
+        database: app,
+        keys,
+        ids,
+        challenges: challenges(),
+        logger: testLogger(capture),
+        authorityTables: AUTHORITY_TABLES,
+        objectsChecked: 1,
+        recordsFilling,
+      }).confirm(
         admin,
         keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
         investigationId,
         challengeId,
         CORRELATION,
-      ),
-    ).rejects.toThrow('more membership records than clearing checks');
-    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      );
+    const filling = (since: number) =>
+      capture
+        .lines()
+        .slice(since)
+        .filter(({ event }) => event === 'identity.records_filling');
+
+    it('checks every object a page at a time and clears, warning only past the level watched', async () => {
+      await holdThenRepair();
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId, admin, false);
+      const before = capture.lines().length;
+
+      // Two memberships, at the level: no line. Refused for the history after the check, so the same step-up goes again.
+      expect(await confirmPaged(2, investigationId, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'HISTORY_UNCHECKED',
+      });
+      expect(filling(before)).toEqual([]);
+
+      await historyChecked(investigationId);
+      expect(await confirmPaged(1, investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+      expect(filling(before)).toEqual([
+        expect.objectContaining({
+          level: 'warn',
+          records: MEMBERSHIPS.subject,
+          held: 2,
+          during: 'hold_clearing',
+          orgId: org,
+          correlationId: CORRELATION,
+        }),
+      ]);
+    });
+
+    it('refuses a record tampered with on a later page, as INTEGRITY_FAILED, leaving it HELD', async () => {
+      // The viewer's membership is made after the admin's, so it is on the second page of one.
+      const row = await holdThenRepair();
+      const investigationId = await investigate();
+      const challengeId = await steppedUp(investigationId);
+      await row.tamper();
+
+      expect(await confirmPaged(RECORDS_FILLING, investigationId, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+      await row.restore();
+      expect(await confirmPaged(RECORDS_FILLING, investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+    });
   });
 
   it('refuses as HOLD_CHANGED a hold cleared while the clearing waited at the chain head, which it takes last', async () => {

@@ -215,14 +215,29 @@ export interface CheckedTable extends SignedStateTable {
 
 /**
  * Every object of the tables checked (verifyAll; a growing table's as CheckedTable says):
- * all verified, with how many there were; some tampered with, each finding
- * named (every alarm is already raised); or more objects in one table that
- * doesn't grow than the limit, with none judged.
+ * all verified, with how many there were; or some tampered with, each finding
+ * named (every alarm is already raised).
  */
-export type OrganisationCheck =
+type WholeCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
-  | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] }
-  | { readonly outcome: 'too_many'; readonly subjectType: string };
+  | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] };
+
+/**
+ * A WholeCheck, or, read without paging, more objects in one table that
+ * doesn't grow than the limit, with none judged: a list its caller then
+ * reads whole (contactsOf, resetsOf), so one page is all it can hold.
+ */
+export type OrganisationCheck = WholeCheck | { readonly outcome: 'too_many'; readonly subjectType: string };
+
+/**
+ * verifyAll told to read every table that doesn't grow whole, `limit` objects
+ * a page, however many (clearing a hold, 4D2e: no fixed ceiling, partner
+ * S170), each such table's count handed to `counted`, so its caller can say
+ * when one is filling.
+ */
+interface PagedCheck {
+  readonly counted: (subjectType: string, objects: number) => void;
+}
 
 /**
  * One batch of a growing table's whole history (checkHistoryBatch): its
@@ -457,10 +472,18 @@ export interface SignedStates {
    * `deleted` too (its seals stripped as well), with its alarm. Table by
    * table in the order given, which must be the lock order's (ADR-006 §6),
    * and by ID within each. Past `limit` rows, or objects in the log, in one
-   * table: `too_many`, with nothing more judged. A table with `liveStatuses`
-   * is checked in every live row and its newest `limit` rows, however many it
-   * holds: never `too_many` (CheckedTable).
+   * table: `too_many`, with nothing more judged; or, `paged`, every object
+   * of it, `limit` a page (PagedCheck). A table with `liveStatuses` is checked
+   * in every live row and its newest `limit` rows, however many it holds:
+   * never `too_many` (CheckedTable).
    */
+  verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+    paged: PagedCheck,
+  ): Promise<WholeCheck>;
   verifyAll(
     tx: AuditTransaction,
     orgId: string,
@@ -1576,6 +1599,79 @@ export function createSignedStates({
     return { findings, objects: older + newest.length };
   };
 
+  /**
+   * A table that doesn't grow as verifyAll checks it: every object, its rows'
+   * and the log's (objectIdsOf), a page of `page` at a time by ID, each page
+   * judged before the next is listed, so a few statements a page and one
+   * page's ID list at once (the lock-order map still keeps an entry for every
+   * row judged, fine at tens of thousands). Not `paging`, a second page answers undefined,
+   * with nothing judged: the caller's list holds one page alone.
+   */
+  const everyJudged = async (
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    page: number,
+    paging: boolean,
+  ): Promise<{ readonly findings: readonly TamperFinding[]; readonly objects: number } | undefined> => {
+    const findings: TamperFinding[] = [];
+    let objects = 0;
+    let after: string | null = null;
+    do {
+      // Typed here: `after` is set from it, a loop TypeScript can't infer through.
+      const listed: { readonly ids: readonly string[]; readonly next: string | null } = await objectIdsOf(
+        tx,
+        orgId,
+        table,
+        after,
+        page,
+      );
+      if (listed.next !== null && !paging) return undefined;
+      findings.push(...(await judged(tx, orgId, table, listed.ids)));
+      objects += listed.ids.length;
+      after = listed.next;
+    } while (after !== null);
+    return { findings, objects };
+  };
+
+  function verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+    paged: PagedCheck,
+  ): Promise<WholeCheck>;
+  function verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+  ): Promise<OrganisationCheck>;
+  async function verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly CheckedTable[],
+    limit: number,
+    paged?: PagedCheck,
+  ): Promise<OrganisationCheck> {
+    const findings: TamperFinding[] = [];
+    let objects = 0;
+    for (const table of tables) {
+      notTheHold(table);
+      const checked =
+        table.liveStatuses === undefined
+          ? await everyJudged(tx, orgId, table, limit, paged !== undefined)
+          : await growingJudged(tx, orgId, table, table.liveStatuses, limit);
+      if (checked === undefined) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
+      if (table.liveStatuses === undefined) paged?.counted(table.subject, checked.objects);
+      findings.push(...checked.findings);
+      objects += checked.objects;
+    }
+    if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
+    verifiedWhole.set(tx, (verifiedWhole.get(tx) ?? new Set<string>()).add(orgId.toLowerCase()));
+    return Object.freeze({ outcome: 'verified', objects });
+  }
+
   return Object.freeze({
     verifiedState,
     gather,
@@ -1592,33 +1688,7 @@ export function createSignedStates({
       alarm(subjectType, key, 'moved_back');
     },
 
-    async verifyAll(
-      tx: AuditTransaction,
-      orgId: string,
-      tables: readonly CheckedTable[],
-      limit: number,
-    ): Promise<OrganisationCheck> {
-      const findings: TamperFinding[] = [];
-      let objects = 0;
-      for (const table of tables) {
-        notTheHold(table);
-        if (table.liveStatuses !== undefined) {
-          const growing = await growingJudged(tx, orgId, table, table.liveStatuses, limit);
-          findings.push(...growing.findings);
-          objects += growing.objects;
-          continue;
-        }
-        const rowIds = await signedRowIds(tx, table, orgId, limit);
-        const loggedIds = await trail.subjectIds(tx, orgId, table.subject, limit);
-        const every = [...new Set([...rowIds, ...loggedIds])].sort();
-        if (every.length > limit) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
-        findings.push(...(await judged(tx, orgId, table, every)));
-        objects += every.length;
-      }
-      if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
-      verifiedWhole.set(tx, (verifiedWhole.get(tx) ?? new Set<string>()).add(orgId.toLowerCase()));
-      return Object.freeze({ outcome: 'verified', objects });
-    },
+    verifyAll,
 
     async checkHistoryBatch(
       tx: AuditTransaction,
