@@ -208,13 +208,33 @@ export async function runMigrations(options: MigrationOptions): Promise<string[]
       await applyWithLockRetries(client, migration, options.logger, lockWait);
       options.logger.info('db.migration.applied', { migration: migration.name, checksum: migration.checksum });
     }
-    // Counts the ledger's rows into the catalogue and stamps when, the marks the image
-    // before this release reads at its start, as it may not read the ledger (ledger-marks.ts).
-    if (pending.length > 0) await client.query('analyze migrations.applied');
+    await countLedger(client, options.logger, lockWait.timeoutMs);
     options.logger.info('db.migrations.done', { applied: pending.length, total: files.length });
     return pending.map((migration) => migration.name);
   } finally {
     await client.end();
+  }
+}
+
+/**
+ * Counts the ledger's rows into the catalogue and stamps when: the marks the image before
+ * this release reads at its start, as it may not read the ledger (ledger-marks.ts). Every
+ * run, so a rerun recounts. A failure only warns: the files did apply, and an uncounted
+ * ledger only makes that image's start raise the alarm rather than wait.
+ */
+async function countLedger(client: pg.Client, logger: Logger, lockTimeoutMs: number): Promise<void> {
+  try {
+    // The run's own ledger rows into the statistics first, so the count below isn't raised by them after it.
+    await client.query('select pg_catalog.pg_stat_force_next_flush()');
+    // In a transaction of its own, so its lock wait is bounded as a file's is.
+    await client.query('begin');
+    // eslint-disable-next-line agentx/tenant-setting-only-in-with-tenant -- Transaction-local lock_timeout on the runner's own unpooled client, as applyMigration's.
+    await client.query("select pg_catalog.set_config('lock_timeout', $1, true)", [`${lockTimeoutMs}ms`]);
+    await client.query('analyze migrations.applied');
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch(() => undefined);
+    logger.warn('db.migration.ledger_not_counted', { err: error });
   }
 }
 

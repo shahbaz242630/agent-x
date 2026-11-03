@@ -25,13 +25,14 @@
 // **Release-shaped drift alone, at start, during a release, is a warning (staging,
 // 3 Nov).** The image before a release, restarting after the release migrated,
 // refused, rightly, and raised the tamper alarm four times for nothing. It still
-// refuses, but warns instead when the ledger's marks (ledger-marks.ts) show a
-// migration newer than any this image has, counted by the migration job within
-// RELEASE_START_WAIT_MS. Anything else is the alarm as before: other drift beside
-// it, marks that show no newer migration, are older than that, or can't be read.
-// So a stuck release, or a plant riding one, pages within the half hour, and a
-// plant with no release needs a forged ledger row as well, which stops the next
-// migration job, and the owner's login to make one raises its own alert.
+// refuses, but warns instead when the ledger's marks (ledger-marks.ts) show more
+// migrations than this image has, both as last counted and as held now, counted
+// by the migration job within RELEASE_START_WAIT_MS by the database's clock.
+// Anything else is the alarm as before: other drift beside it, marks that show no
+// newer migration, are older than that, or can't be read. So a stuck release, or a
+// plant riding one, pages within the half hour. A plant with no release must keep
+// a forged row in the ledger, which stops the next migration job, and re-stamp the
+// count every half hour; each needs the owner's login, which raises its own alert.
 //
 // **During a run it raises the alarm and keeps going.** Stopping a running API
 // would empty that anchor store, which is exactly what someone tampering would
@@ -63,7 +64,6 @@ import {
 import type { Logger } from '@agentx/platform/observability';
 
 import { AUTHORITY_TABLES } from './authority-tables.ts';
-import type { Clock } from './shared-kernel/index.ts';
 
 /**
  * The role that owns the database and everything the migrations make, fixed by
@@ -86,11 +86,6 @@ export interface SchemaCheckOptions<Schema = unknown> {
   readonly deadlineMs?: number | undefined;
   /** Ends the check at once when the process is stopping. */
   readonly signal?: AbortSignal | undefined;
-}
-
-/** The check at start: it also reads the time, to judge whether a release is under way. */
-export interface StartCheckOptions<Schema = unknown> extends SchemaCheckOptions<Schema> {
-  readonly clock: Clock;
 }
 
 /**
@@ -225,10 +220,11 @@ async function checkSchema<Schema>({
   }
 }
 
-/** How long a start keeps asking a full server, and how often: the defaults but in tests. */
+/** How long a start keeps asking a full server, and how often, and waits out a release: the defaults but in tests. */
 interface FullServerWait {
   readonly limitMs?: number;
   readonly retryMs?: number;
+  readonly releaseWaitMs?: number;
 }
 
 /** Resolves after `ms`, or at once when the process stops: the check after it then says so. */
@@ -281,8 +277,12 @@ export async function whileServerFull<T>(
  * was stopped needs no line.
  */
 export async function schemaSoundAtStart<Schema>(
-  options: StartCheckOptions<Schema>,
-  { limitMs = FULL_SERVER_START_MS, retryMs = FULL_SERVER_RETRY_MS }: FullServerWait = {},
+  options: SchemaCheckOptions<Schema>,
+  {
+    limitMs = FULL_SERVER_START_MS,
+    retryMs = FULL_SERVER_RETRY_MS,
+    releaseWaitMs = RELEASE_START_WAIT_MS,
+  }: FullServerWait = {},
 ): Promise<boolean> {
   const started = performance.now();
   let outcome = await checkSchema(options);
@@ -297,17 +297,18 @@ export async function schemaSoundAtStart<Schema>(
   }
   // Stopped while starting: the process isn't going on either way, and a stop is no alarm.
   if (outcome.kind === 'stopped') return false;
-  if (outcome.kind === 'drift') await driftAtStart(options, outcome);
+  if (outcome.kind === 'drift') await driftAtStart(options, outcome, releaseWaitMs);
   else raiseUnreadableAlarm(options.logger, 'start', outcome.error);
   return false;
 }
 
 /** Drift at start, which refuses it either way: a warning when it is exactly a release under way, else the alarm. */
 async function driftAtStart<Schema>(
-  options: StartCheckOptions<Schema>,
+  options: SchemaCheckOptions<Schema>,
   { atOnce, releaseShaped }: Extract<SchemaCheckOutcome, { kind: 'drift' }>,
+  releaseWaitMs: number,
 ): Promise<void> {
-  const release = atOnce.length === 0 ? await releaseUnderWay(options) : undefined;
+  const release = atOnce.length === 0 ? await releaseUnderWay(options, releaseWaitMs) : undefined;
   if (release === 'stopped') return;
   if (release === undefined) raiseDriftAlarm(options.logger, 'start', [...atOnce, ...releaseShaped]);
   else options.logger.warn('db.schema_start_waits_release', { problems: releaseShaped.toSorted(), ...release });
@@ -315,8 +316,9 @@ async function driftAtStart<Schema>(
 
 /** What the ledger's marks say of a release under way. Counts and times only: nothing read can carry text. */
 interface ReleaseUnderWay {
-  /** The ledger's rows when the migration job last counted them. */
+  /** The ledger's rows when the migration job last counted them, and now. */
   readonly ledgerMigrations: number;
+  readonly ledgerMigrationsNow: number;
   /** This image's migrations, and its newest. */
   readonly builtMigrations: number;
   readonly newestBuilt: string | undefined;
@@ -327,22 +329,26 @@ interface ReleaseUnderWay {
  * A migration newer than this image's, counted within RELEASE_START_WAIT_MS, or
  * undefined when the marks show none or can't be read, which is the alarm.
  */
-async function releaseUnderWay<Schema>({
-  database,
-  clock,
-  deadlineMs = SCHEMA_CHECK_DEADLINE_MS,
-  signal,
-}: StartCheckOptions<Schema>): Promise<ReleaseUnderWay | 'stopped' | undefined> {
+async function releaseUnderWay<Schema>(
+  { database, deadlineMs = SCHEMA_CHECK_DEADLINE_MS, signal }: SchemaCheckOptions<Schema>,
+  releaseWaitMs: number,
+): Promise<ReleaseUnderWay | 'stopped' | undefined> {
   try {
     const reading = Promise.all([readLedgerMarks(database), builtMigrationNames()]);
     // Handled here too, so a read that finishes after its deadline never goes unhandled.
     void reading.catch(() => undefined);
     const [marks, built] = await withinDeadline(reading, deadlineMs, signal);
-    if (marks?.countedAt === undefined || marks.rows <= built.length) return undefined;
-    // A stamp ahead of this clock is the server's clock ahead: the server writes it, so no one can stamp a later time.
-    const countedMsAgo = clock.now().getTime() - marks.countedAt.getTime();
-    if (countedMsAgo >= RELEASE_START_WAIT_MS) return undefined;
-    return { ledgerMigrations: marks.rows, builtMigrations: built.length, newestBuilt: built.at(-1), countedMsAgo };
+    // The age is the database's own (ADR-006 keeps database time for database stamps): one clock, no skew.
+    if (marks?.countedMsAgo === undefined || marks.countedMsAgo >= releaseWaitMs) return undefined;
+    // Both counts: a row added, counted and deleted leaves the last count high, but not the live one.
+    if (marks.rows <= built.length || marks.liveRows <= built.length) return undefined;
+    return {
+      ledgerMigrations: marks.rows,
+      ledgerMigrationsNow: marks.liveRows,
+      builtMigrations: built.length,
+      newestBuilt: built.at(-1),
+      countedMsAgo: marks.countedMsAgo,
+    };
   } catch (error) {
     return error instanceof Stopped ? 'stopped' : undefined;
   }

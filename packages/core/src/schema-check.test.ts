@@ -12,7 +12,8 @@ const guard = vi.hoisted(() => ({
   /** What the check asked the guard to hold, each time. */
   asked: [] as unknown[],
   /** The migration ledger's marks (ledger-marks.ts), and this image's migrations. */
-  marks: (): Promise<{ rows: number; countedAt: Date | undefined } | undefined> => Promise.resolve(undefined),
+  marks: (): Promise<{ rows: number; liveRows: number; countedMsAgo: number | undefined } | undefined> =>
+    Promise.resolve(undefined),
   built: (): Promise<string[]> => Promise.resolve([]),
   /** How many times the marks were read. */
   marksRead: 0,
@@ -58,14 +59,10 @@ function logger(): { capture: LogCapture; logger: ReturnType<typeof testLogger> 
   };
 }
 
-/** The time the start checks read: the ledger's marks below are counted relative to it. */
-const NOW = new Date('2026-11-03T09:14:00Z');
-
 const options = (log: ReturnType<typeof logger>) => ({
   database: {} as never,
   appRole: 'agentx_app',
   logger: log.logger,
-  clock: { now: () => NOW },
 });
 
 // A spend request's columns fixed when it is made (0039): all but its status.
@@ -504,13 +501,16 @@ describe('release-shaped drift at start, while a release is under way (staging, 
   const OTHER = 'PUBLIC may SELECT on audit.events';
   const BUILT = ['0001_a.sql', '0002_b.sql'];
   const { RELEASE_START_WAIT_MS } = schemaCheck;
-  /** The ledger's marks: one migration more than this image's, counted `msAgo` before the clock's now. */
-  const counted = (msAgo: number, rows = BUILT.length + 1) => {
-    guard.marks = () => Promise.resolve({ rows, countedAt: new Date(NOW.getTime() - msAgo) });
+  /** The ledger's marks: one migration more than this image's, both counted and now, counted `msAgo` ago. */
+  const counted = (msAgo: number, rows = BUILT.length + 1, liveRows = rows) => {
+    guard.marks = () => Promise.resolve({ rows, liveRows, countedMsAgo: msAgo });
   };
-  const start = async (extra: { signal?: AbortSignal; deadlineMs?: number } = {}) => {
+  const start = async (extra: { signal?: AbortSignal; deadlineMs?: number } = {}, releaseWaitMs?: number) => {
     const log = logger();
-    const sound = await schemaSoundAtStart({ ...options(log), ...extra });
+    const sound = await schemaSoundAtStart(
+      { ...options(log), ...extra },
+      releaseWaitMs === undefined ? {} : { releaseWaitMs },
+    );
     return { sound, lines: log.capture.lines() };
   };
 
@@ -529,6 +529,7 @@ describe('release-shaped drift at start, while a release is under way (staging, 
         event: 'db.schema_start_waits_release',
         problems: [NEW_TABLE, COMING],
         ledgerMigrations: 3,
+        ledgerMigrationsNow: 3,
         builtMigrations: 2,
         newestBuilt: '0002_b.sql',
         countedMsAgo: 60_000,
@@ -539,7 +540,6 @@ describe('release-shaped drift at start, while a release is under way (staging, 
   it.each([
     ['just counted', 0],
     ['a moment before the window ends', RELEASE_START_WAIT_MS - 1],
-    ['stamped ahead of this clock', -5_000],
   ])('waits when %s', async (_, msAgo) => {
     counted(msAgo);
     expect((await start()).lines.map(({ event }) => event)).toEqual(['db.schema_start_waits_release']);
@@ -566,6 +566,18 @@ describe('release-shaped drift at start, while a release is under way (staging, 
       },
     ],
     [
+      'a row was added, counted and deleted again: the last count is high, the live one is not',
+      () => {
+        counted(0, BUILT.length + 1, BUILT.length);
+      },
+    ],
+    [
+      'the live count is high but the last count is not',
+      () => {
+        counted(0, BUILT.length, BUILT.length + 1);
+      },
+    ],
+    [
       'the ledger was never counted',
       () => {
         counted(0, -1);
@@ -574,7 +586,7 @@ describe('release-shaped drift at start, while a release is under way (staging, 
     [
       'the ledger has no stamp',
       () => {
-        guard.marks = () => Promise.resolve({ rows: 3, countedAt: undefined });
+        guard.marks = () => Promise.resolve({ rows: 3, liveRows: 3, countedMsAgo: undefined });
       },
     ],
     [
@@ -617,6 +629,12 @@ describe('release-shaped drift at start, while a release is under way (staging, 
     const { sound, lines } = await start({ signal: stopping.signal });
     expect(sound).toBe(false);
     expect(lines).toEqual([]);
+  });
+
+  it('takes a shorter window where it is given one, as tests do', async () => {
+    counted(1_000);
+    expect((await start({}, 1_000)).lines.map(({ event }) => event)).toEqual(['audit.integrity_failed']);
+    expect((await start({}, 1_001)).lines.map(({ event }) => event)).toEqual(['db.schema_start_waits_release']);
   });
 
   it('waits half an hour, as the plain words for its warning say', () => {

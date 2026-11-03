@@ -9,11 +9,14 @@
 //
 // - pg_class.reltuples: the rows the ledger held when last counted. A catalogue
 //   column, so it outlives a restart; on a table this small ANALYZE counts every row.
+// - pg_stat_all_tables.n_live_tup: the rows it holds now, kept up as each change
+//   commits. A row added, counted and deleted again leaves reltuples one too high,
+//   but not this.
 // - pg_stat_all_tables.last_analyze: when an ANALYZE by hand last counted them.
 //   Autovacuum's own counts stamp a different column, so only a role allowed to
-//   maintain the table stamps this one: the migration job does, after applying a file.
+//   maintain the table stamps this one: the migration job does, on every run.
 //
-// Either can be missing (a new database, a reset of the server's statistics): that
+// Any can be missing (a new database, a reset of the server's statistics): that
 // is no evidence of a release, and the check raises its alarm as before.
 import { fileURLToPath } from 'node:url';
 
@@ -27,27 +30,35 @@ const BUILT_MIGRATIONS = fileURLToPath(new URL('../../../../db/migrations', impo
 export interface LedgerMarks {
   /** How many rows the ledger held when last counted; -1 when never counted. */
   readonly rows: number;
-  /** When it was last counted by hand, as the migration job does after applying a file. */
-  readonly countedAt: Date | undefined;
+  /** How many it holds now, by the server's statistics; 0 when it has none. */
+  readonly liveRows: number;
+  /** How long ago it was last counted by hand, by the database's own clock; undefined when never. */
+  readonly countedMsAgo: number | undefined;
 }
 
 interface LedgerMarksRow {
   readonly rows: number;
-  readonly counted_at: Date | null;
+  readonly live_rows: number;
+  readonly counted_ms_ago: number | null;
 }
 
 /** The ledger's marks, or undefined when the database has no ledger at all. */
 export async function readLedgerMarks<Schema>(db: Kysely<Schema>): Promise<LedgerMarks | undefined> {
-  // By name through pg_namespace: a cast to regclass would need a right on the schema.
+  // By name through pg_namespace: a cast to regclass would need a right on the schema. The age is
+  // taken on the database's clock, the one that wrote the stamp, so no skew between two clocks stretches it.
   const { rows } = await sql<LedgerMarksRow>`
-    select c.reltuples::pg_catalog.float8 as rows, s.last_analyze as counted_at
+    select c.reltuples::pg_catalog.float8 as rows,
+           coalesce(s.n_live_tup, 0)::pg_catalog.float8 as live_rows,
+           (extract(epoch from pg_catalog.now() - s.last_analyze) * 1000)::pg_catalog.float8 as counted_ms_ago
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     left join pg_catalog.pg_stat_all_tables s on s.relid = c.oid
     where n.nspname = 'migrations' and c.relname = 'applied' and c.relkind = 'r'
   `.execute(db);
   const [row] = rows;
-  return row === undefined ? undefined : { rows: row.rows, countedAt: row.counted_at ?? undefined };
+  return row === undefined
+    ? undefined
+    : { rows: row.rows, liveRows: row.live_rows, countedMsAgo: row.counted_ms_ago ?? undefined };
 }
 
 /** The names of the migrations this image was built with, in order. */
