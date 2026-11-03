@@ -1027,6 +1027,19 @@ export function createHandoff({
     }
   };
 
+  /** The sweep over its own organisations; false where its list couldn't be read, or a stop cut it short. */
+  const sweptAll = async (signal: AbortSignal | undefined): Promise<boolean> => {
+    const swept = await listed(sweepList);
+    if (swept === undefined) return false;
+    sweptAt = clock.now().getTime();
+    for (const orgId of swept) {
+      // Stopped between organisations too, so the process stops promptly however many there are.
+      if (signal?.aborted === true) return false;
+      await sweepIn(orgId, logger.child({ orgId }));
+    }
+    return true;
+  };
+
   return {
     async run(signal) {
       const sweeping = clock.now().getTime() - sweptAt >= SWEEP_EVERY_MS;
@@ -1041,17 +1054,8 @@ export function createHandoff({
         await handOffLanes(orgs, signal);
         // A pause that couldn't be read says nothing of the run being alive; one read whole does, as a list read does.
       } else if (held === 'pause_unread' && !sweeping) return;
-      if (sweeping) {
-        const swept = await listed(sweepList);
-        if (swept === undefined) return;
-        sweptAt = clock.now().getTime();
-        // A pass of its own, once the hand-offs have ended, so it never waits behind a lane or holds one up.
-        for (const orgId of swept) {
-          // Stopped between organisations too, so the process stops promptly however many there are.
-          if (signal?.aborted === true) return;
-          await sweepIn(orgId, logger.child({ orgId }));
-        }
-      }
+      // A pass of its own, once the hand-offs have ended, so it never waits behind a lane or holds one up.
+      if (sweeping && !(await sweptAll(signal))) return;
       beatNow();
     },
     beating: () => clock.now().getTime() - beat <= HEARTBEAT_STALE_MS,
