@@ -429,7 +429,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     clock.advanceBy(2 * STEP);
     await checksOf(w, notFound).run();
     await checksOf(w, notFound).run();
-    const said = expect.objectContaining({ level: 'warn', orgId: w.org, transactionId: id });
+    const said: unknown = expect.objectContaining({ level: 'warn', orgId: w.org, transactionId: id });
     expect(lines('payment_check.not_found_long')).toEqual([said, said]);
     expect(lines('payment_check.not_found_long')[0]?.says).toEqual(expect.stringContaining('waiting'));
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });

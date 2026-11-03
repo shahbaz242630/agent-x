@@ -519,23 +519,28 @@ export function createPaymentChecks({
         return moved.outcome === 'moved' ? moved.to : null;
       };
 
+      /** Not found proves nothing: left as it is, said where it has gone on too long. */
+      const notFound = (): TransactionStatus => {
+        bankLost = transaction.providerStatus;
+        if (lostTooLong(from, transaction.createdAt, clock.now())) {
+          log.warn('payment_check.not_found_long', { transactionId: listed.id });
+        }
+        return from;
+      };
+
+      /** Never success on an answer that can't be read (SEC-PTR-09): UNKNOWN, its money held. */
+      const unreadable = async (): Promise<TransactionStatus> => {
+        if (word.kind === 'found') {
+          log.error('payment_check.unreadable', { transactionId: listed.id, why: 'not_this_payment' });
+        }
+        return (await move('lose_track', NO_FACTS, 'bank_unreadable')) ?? from;
+      };
+
       /** Where the bank's word takes it. */
       const movedBy = async (): Promise<TransactionStatus> => {
-        if (word.kind === 'not_found') {
-          bankLost = transaction.providerStatus;
-          if (lostTooLong(from, transaction.createdAt, clock.now())) {
-            log.warn('payment_check.not_found_long', { transactionId: listed.id });
-          }
-          return from;
-        }
+        if (word.kind === 'not_found') return notFound();
         const found = word.kind === 'found' && answerAbout(word.execution, orgId, locked) ? word.execution : undefined;
-        if (found === undefined) {
-          if (word.kind === 'found') {
-            log.error('payment_check.unreadable', { transactionId: listed.id, why: 'not_this_payment' });
-          }
-          // Never success on an answer that can't be read (SEC-PTR-09): UNKNOWN, its money held.
-          return (await move('lose_track', NO_FACTS, 'bank_unreadable')) ?? from;
-        }
+        if (found === undefined) return unreadable();
         // Older than the word kept (another check's newer answer won the lock): already read, nothing new.
         if (transaction.providerChangedAt !== null && found.statusChangedAt < transaction.providerChangedAt)
           return from;
