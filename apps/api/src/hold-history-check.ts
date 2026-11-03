@@ -1,7 +1,8 @@
 // The whole history checked while an integrity hold stands (ADR-012 §2;
 // Phase 2 D1c, partner decision 7): the API's job, on a timer of its own.
-// Clearing a hold checks a growing table (a spend request's) in the rows that
-// can still act, so it stays bounded however long the history; before the
+// Clearing a hold checks a growing table (a spend request's, a payment's) in
+// the rows that can still act and its newest 10,000 (4D2e Stage F, decision
+// 5), so no length of history stops it; before the
 // admin's confirm is let through, this job checks every object of each such
 // table, ended ones and ones the log holds but whose row is gone included, a
 // batch at a time, each batch in a transaction of its own, and records that

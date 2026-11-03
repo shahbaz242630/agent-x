@@ -14,8 +14,9 @@
 //    authority object of the organisation verified against the log, in the
 //    lock order (ADR-006 §6: the organisation, then its invitations and
 //    memberships), so a hold is never cleared over a record still tampered
-//    with (a table whose rows only grow, spend requests, in the rows that can
-//    still act, so clearing stays bounded however long the history, and the
+//    with (a table whose rows only grow, spend requests and payments, in the
+//    rows that can still act and its newest 10,000, so no length of history
+//    stops a clearing (4D2e Stage F, decision 5), and the
 //    record the hold names, whatever its status, though one with no row and no
 //    history here has nothing to repair (4D2e D5; the line
 //    `integrity_hold.named_record_never_signed` says so); the whole history, ended rows
@@ -63,7 +64,10 @@ export const CLEAR_OPERATION = 'integrity-hold.clear';
 /** Clearing, once stepped up. */
 export const CLEAR_CONFIRM_OPERATION = 'integrity-hold.clear.confirm';
 
-/** The most authority objects of one table the check before clearing reads (verifyAll's limit), unless given. */
+/**
+ * verifyAll's limit, unless given: the most objects of a table that doesn't grow the check before clearing reads, and
+ * the newest rows of a growing one it reads beside its live ones, its older ones left to the history batches.
+ */
 const OBJECTS_CHECKED = 10_000;
 
 /** Who is clearing: the signed-in admin, in the organisation the access hook verified, and their session. */
@@ -154,7 +158,7 @@ export function createHoldClearings<Theirs extends object = object>({
   readonly authorityTables: readonly CheckedTable[];
   /** By the subject a hold names: what else must be whole before it clears. */
   readonly namedRecordChecks?: Readonly<Record<string, NamedRecordCheck<Theirs>>>;
-  /** The most objects of one table checked before clearing; past it, the clearing fails rather than judge part. */
+  /** verifyAll's limit (OBJECTS_CHECKED): past it in a table that doesn't grow, the clearing fails rather than judge part. */
   readonly objectsChecked?: number;
 }): HoldClearings {
   if (authorityTables.length === 0) throw new RangeError('Clearing checks every authority table first');
