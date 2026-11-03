@@ -673,7 +673,13 @@ export function createAnchorCheck({
   const roomOrEnd = (signal: AbortSignal): Promise<void> =>
     new Promise((resolve) => {
       waitingForRoom.add(resolve);
-      signal.addEventListener('abort', () => resolve(), { once: true });
+      signal.addEventListener(
+        'abort',
+        () => {
+          resolve();
+        },
+        { once: true },
+      );
     });
 
   /**
@@ -700,28 +706,24 @@ export function createAnchorCheck({
     return outcomes;
   };
 
+  /** Whether this one, new to the check, takes a note: while the cap has room. */
+  const noted = (orgId: string): boolean => {
+    if (seen.has(orgId) || seen.size >= mostOrganisations) return false;
+    remember(orgId);
+    return true;
+  };
+
   /** A list read whole: those noted and new as far as the cap allows, the rest by the cursor, with one line to say so. */
   const adopted = (read: { readonly listed: readonly string[]; readonly recorded: readonly string[] }) => {
-    const fresh: string[] = [];
-    const past: string[] = [];
     const listedNow = new Set(read.listed);
-    const gone = new Set<string>();
-    for (const orgId of read.recorded) {
-      // From the two lists alone, so one past the cap, with no note kept on it, is seen to have gone too.
-      if (!listedNow.has(orgId)) gone.add(orgId);
-      if (!seen.has(orgId) && seen.size < mostOrganisations) {
-        remember(orgId);
-        if (listedNow.has(orgId)) fresh.push(orgId);
-      }
-    }
+    // From the two lists alone, so one past the cap, with no note kept on it, is seen to have gone too.
+    const gone = new Set(read.recorded.filter((orgId) => !listedNow.has(orgId)));
+    const fresh = read.recorded.filter((orgId) => noted(orgId) && listedNow.has(orgId));
+    const past: string[] = [];
     for (const orgId of read.listed) {
       if (seen.has(orgId)) continue;
-      if (seen.size < mostOrganisations) {
-        remember(orgId);
-        fresh.push(orgId);
-      } else {
-        past.push(orgId);
-      }
+      if (noted(orgId)) fresh.push(orgId);
+      else past.push(orgId);
     }
     if (past.length > 0) {
       logger.error('audit.anchor_check_over_size', {

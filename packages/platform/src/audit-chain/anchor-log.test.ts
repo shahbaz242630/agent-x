@@ -120,6 +120,21 @@ async function started(fake?: FakeWriteOnceStore) {
   return made;
 }
 
+/** A log over the store with this much of a file it can hold, and what it says. */
+const limited = (fake: FakeWriteOnceStore, mostFileBytes: number) => {
+  const capture = new LogCapture();
+  const log = createAnchorLog({
+    store: fake.store,
+    keys,
+    logger: testLogger(capture),
+    now: () => LATER,
+    epoch: 1,
+    alertAfterMs: 1000,
+    mostFileBytes,
+  });
+  return { log, capture };
+};
+
 const failing = (): Promise<never> => Promise.reject(new Error('the store is away'));
 
 const files = (fake: FakeWriteOnceStore, kind: 'deltas' | 'snapshots') =>
@@ -1006,20 +1021,6 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     });
 
     describe('a file past what this process can hold', () => {
-      const limited = (fake: FakeWriteOnceStore, mostFileBytes: number) => {
-        const capture = new LogCapture();
-        const log = createAnchorLog({
-          store: fake.store,
-          keys,
-          logger: testLogger(capture),
-          now: () => LATER,
-          epoch: 1,
-          alertAfterMs: 1000,
-          mostFileBytes,
-        });
-        return { log, capture };
-      };
-
       it('signed and sound is capacity, with the true reason: never `file`, and payments wait', async () => {
         const fake = createFakeWriteOnceStore();
         const name = nameOf('snapshots', 0);
@@ -1165,19 +1166,6 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         kind: 'organisation',
         orgId: `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}`,
       });
-      const logUnder = (fake: FakeWriteOnceStore, mostFileBytes: number) => {
-        const capture = new LogCapture();
-        const log = createAnchorLog({
-          store: fake.store,
-          keys,
-          logger: testLogger(capture),
-          now: () => LATER,
-          epoch: 1,
-          alertAfterMs: 1000,
-          mostFileBytes,
-        });
-        return { log, capture };
-      };
       /** A delta with no closing line: spoiled, its lines still counted as signed. */
       const spoiled = (fake: FakeWriteOnceStore, minutes: number, from: number, count: number): void => {
         const lines = Array.from({ length: count }, (_, index) => lineOf(anchorAt(chain(from + index), 1n)));
@@ -1189,7 +1177,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         spoiled(fake, 1, 0, 40);
         spoiled(fake, 2, 100, 40);
         const size = 40 * lineOf(anchorAt(chain(0), 1n)).length + 4096;
-        const { log, capture } = logUnder(fake, size);
+        const { log, capture } = limited(fake, size);
         await log.read();
         expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toHaveLength(1);
         expect(log.state()).toBe('unreadable');
@@ -1200,7 +1188,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         const fake = createFakeWriteOnceStore();
         for (let minutes = 1; minutes <= 5; minutes += 1) spoiled(fake, minutes, 0, 40);
         const size = 40 * lineOf(anchorAt(chain(0), 1n)).length + 4096;
-        const { log, capture } = logUnder(fake, size);
+        const { log, capture } = limited(fake, size);
         await log.read();
         expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([]);
         expect(log.organisations()).toHaveLength(40);
@@ -1211,7 +1199,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const holding = async (fake: FakeWriteOnceStore, mostFileBytes: number, count: number) => {
         const first = Array.from({ length: count }, (_, index) => anchorAt(chain(index), 1n));
         fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), ...first));
-        const held = logUnder(fake, mostFileBytes);
+        const held = limited(fake, mostFileBytes);
         await held.log.read();
         expect(held.log.state()).toBe('read');
         return held;
@@ -1267,7 +1255,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(length).toBeLessThan(KEPT_LINE);
         // Within the file's own limit in bytes, past the budget in lines; a spoiled file, whose closing is never reached.
         spoiled(fake, 1, 0, 40);
-        const { log, capture } = logUnder(fake, 41 * length);
+        const { log, capture } = limited(fake, 41 * length);
         await log.read();
         expect(beyond(capture)).toHaveLength(1);
         expect(capture.lines().filter((line) => line.reason === 'unclosed')).toEqual([]);
@@ -1277,7 +1265,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       it('near_memory speaks before the budget refuses: at 80% of it, in the same chains', async () => {
         const fake = createFakeWriteOnceStore();
         const mostFileBytes = 25 * KEPT_LINE;
-        const { log, capture } = logUnder(fake, mostFileBytes);
+        const { log, capture } = limited(fake, mostFileBytes);
         await log.read();
         // 21 of 25: past 80%, and under the budget, by the same count a read would make.
         for (let index = 0; index < 21; index += 1) log.keep(anchorAt(chain(index), 1n, LATER));
@@ -1318,7 +1306,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         fake.files.set(snapshot, fileOf(snapshot, anchorAt(chain(0), 7n), anchorAt(chain(50), 1n)));
         const delta = nameOf('deltas', 61);
         fake.files.set(delta, fileOf(delta, anchorAt(chain(1), 7n)));
-        const real = fake.real.get;
+        const real = (name: string) => fake.real.get(name);
         fake.instead.get = (name) => (name === delta ? Promise.reject(new Error('the store is away')) : real(name));
         await log.read();
         expect(log.state()).toBe('read');
@@ -1371,7 +1359,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         fake.files.set(delta, fileOf(delta, other));
         const failed = nameOf('deltas', 4);
         fake.files.set(failed, fileOf(failed, anchorAt(chain(1), 1n)));
-        const real = fake.real.get;
+        const real = (name: string) => fake.real.get(name);
         fake.instead.get = (name) => (name === failed ? Promise.reject(new Error('the store is away')) : real(name));
         await log.read();
         expect(log.latest(chain(0))).toBe(held);

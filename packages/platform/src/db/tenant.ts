@@ -495,6 +495,7 @@ function startSent(
 ): Promise<pg.QueryResult[]> {
   const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : [startSettings(asked)])];
   if (answeredWithinMs !== undefined) {
+    // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked before the transaction opens.
     return client.query(underLimit(statements.join('; '), undefined, answeredWithinMs)) as unknown as Promise<
       pg.QueryResult[]
     >;
@@ -630,7 +631,6 @@ class CheckedConnection implements DatabaseConnection {
       return;
     }
     try {
-      // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
       await timedTrip(() => this.#trip(`${stillTenant(tenant)}; commit`), 'commit');
     } catch (error) {
       // Changed and put back in between is not seen here; row security still walls each statement to the setting it ran under.
@@ -675,6 +675,7 @@ class CheckedConnection implements DatabaseConnection {
       // eslint-disable-next-line agentx/no-string-built-sql -- fixed text, or Kysely's compiled query with its values bound as parameters: what Kysely's own driver sends.
       return values === undefined ? client.query(text) : client.query(text, values);
     }
+    // eslint-disable-next-line agentx/no-string-built-sql -- as above, the same text with its limit.
     return client.query(underLimit(text, values, within)).catch((error: unknown) => {
       this.#broken = true;
       throw error;

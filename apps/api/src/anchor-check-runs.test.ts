@@ -747,6 +747,21 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
   });
 });
 
+/** A check that notes each chain it reaches, and stops the API after two, as a release would. */
+function stoppedAfterTwo(
+  organizations: OrganisationChains,
+  turnsSeen: Set<string>,
+  stopping: AbortController,
+): OrganisationChains['verify'] {
+  let turnsThisLife = 0;
+  return (orgId, anchor) => {
+    turnsSeen.add(orgId);
+    turnsThisLife += 1;
+    if (turnsThisLife === 2) stopping.abort();
+    return organizations.verify(orgId, anchor);
+  };
+}
+
 /** The anchors' store, fake, over this clock. */
 function logOver(clock: FixedClock) {
   const capture = new LogCapture();
@@ -979,15 +994,8 @@ describe('second round (4D2e E6 review): any number of organisations may slow it
         alertAfterMs: 120_000,
       });
       const stopping = new AbortController();
-      let turnsThisLife = 0;
       const { organizations } = directory(all);
-      const verify: OrganisationChains['verify'] = (orgId, anchor) => {
-        turnsSeen.add(orgId);
-        turnsThisLife += 1;
-        // The API is stopped, as a release would, after two chains' checks of the round.
-        if (turnsThisLife === 2) stopping.abort();
-        return organizations.verify(orgId, anchor);
-      };
+      const verify = stoppedAfterTwo(organizations, turnsSeen, stopping);
       const { check } = checking({ ...organizations, verify }, { lanes: 1, durable, clock });
       await check.run(stopping.signal);
       await check.finish();
@@ -1351,14 +1359,8 @@ describe('third round (4D2e E6 review)', () => {
     const turnsSeen = new Set<string>();
     for (let life = 0; life < 300 && turnsSeen.size < all.length; life += 1) {
       const stopping = new AbortController();
-      let turnsThisLife = 0;
       const { organizations } = directory(all);
-      const verify: OrganisationChains['verify'] = (orgId, anchor) => {
-        turnsSeen.add(orgId);
-        turnsThisLife += 1;
-        if (turnsThisLife === 2) stopping.abort();
-        return organizations.verify(orgId, anchor);
-      };
+      const verify = stoppedAfterTwo(organizations, turnsSeen, stopping);
       const { check } = checking(
         { ...organizations, verify },
         { lanes: 1, mostOrganisations: 1, pastCapStart: startAnywhere },

@@ -644,7 +644,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       return gzipSync(`${[...lines, closing].map((line) => JSON.stringify(line)).join('\n')}\n`);
     };
     const lineFrom = (signing: typeof keys, seq: bigint, fill: number, at = AT) => {
-      const anchor = signAnchor(signing, CHAIN, ok(seq, fill) as Extract<ChainReport, { ok: true }>, at, 1);
+      const anchor = signAnchor(signing, CHAIN, ok(seq, fill), at, 1);
       return {
         k: 'a',
         chain: anchor.chain,

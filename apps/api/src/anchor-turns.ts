@@ -26,14 +26,15 @@ export const SLOW_AFTER_MS = 30_000;
 export const lanesWithin = (asked: number, poolMax: number): number =>
   Math.min(asked, Math.max(1, Math.floor(poolMax / 2)));
 
+/** Far more places than chains: two chains drawing one place only keep their order. */
+const MOST_PLACES = 2 ** 47;
+
 /** A new order each time, so with no store to go by, restarts can't keep the same tail unreached. */
 export function shuffledAfresh(orgIds: readonly string[]): string[] {
-  const shuffled = [...orgIds];
-  for (let last = shuffled.length - 1; last > 0; last -= 1) {
-    const other = randomInt(last + 1);
-    [shuffled[last], shuffled[other]] = [shuffled[other] as string, shuffled[last] as string];
-  }
-  return shuffled;
+  return orgIds
+    .map((orgId) => ({ orgId, place: randomInt(MOST_PLACES) }))
+    .sort((one, other) => one.place - other.place)
+    .map(({ orgId }) => orgId);
 }
 
 /** Where in those past the cap a process starts: anywhere (`count` above zero). */
@@ -115,11 +116,11 @@ export function createTurns(
   const takePastCap = (): string | undefined => {
     while (pastCapThisRun > 0) {
       const at = cursor ?? 0;
-      const orgId = pastCap[at] as string;
+      const orgId = pastCap[at];
       cursor = (at + 1) % pastCap.length;
       pastCapThisRun -= 1;
       walked += 1;
-      if (!places.repeat.has(orgId)) return taken('pastCap', orgId);
+      if (orgId !== undefined && !places.repeat.has(orgId)) return taken('pastCap', orgId);
     }
     return undefined;
   };

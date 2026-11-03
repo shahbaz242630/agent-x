@@ -42,14 +42,11 @@ export async function listedOrganizations(
     const after = listed.at(-1);
     const rows = await readAlone(
       db,
-      (tx) =>
-        tx
-          .selectFrom('directory.orgs')
-          .select('org_id')
-          .$if(after !== undefined, (query) => query.where('org_id', '>', after as string))
-          .orderBy('org_id')
-          .limit(page)
-          .execute(),
+      (tx) => {
+        const all = tx.selectFrom('directory.orgs').select('org_id');
+        const rest = after === undefined ? all : all.where('org_id', '>', after);
+        return rest.orderBy('org_id').limit(page).execute();
+      },
       answeredWithinMs,
     );
     for (const row of rows) listed.push(row.org_id);
