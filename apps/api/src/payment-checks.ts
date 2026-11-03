@@ -60,8 +60,9 @@
 // applying after a run gave up at a stop can miss it, or land in the next run's.
 // A not-found on a payment the bank has spoken of keeps its line, its word having
 // changed; one handed off past UNKNOWN_AFTER_MS is said at warn on each check that
-// finds it so, the payment staying waiting (following it up is the user's with
-// their bank, decision 38).
+// finds it so, the payment staying waiting, and its admins are emailed once
+// (`bank_lost`, partner S170): following it up is the user's with their bank,
+// decision 38.
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
@@ -529,6 +530,8 @@ export function createPaymentChecks({
         bankLost = transaction.providerStatus;
         if (lostTooLong(from, transaction.createdAt, clock.now())) {
           log.warn('payment_check.not_found_long', { transactionId: listed.id });
+          // Its admins told once a payment (`alertAdmins`), to take it to their bank (partner S170).
+          alerts.push({ alert: 'bank_lost', details: { bank: transaction.providerStatus ?? 'none' } });
         }
         return from;
       };

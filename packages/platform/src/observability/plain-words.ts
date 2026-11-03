@@ -591,7 +591,7 @@ export const PLAIN_WORDS = {
   'payment_check.not_found_long': {
     happened: 'The bank still cannot find a payment handed to it more than 10 minutes ago.',
     broke: 'The payment stays waiting, its money held; nothing is sent again.',
-    next: 'The regular checks go on. Following the payment up is for the organisation, with its bank.',
+    next: "The regular checks go on. The organisation's admins are emailed once to follow it up with their bank.",
   },
   'payment_check.still_unknown': {
     happened: 'A payment has been unknown for more than a day.',
