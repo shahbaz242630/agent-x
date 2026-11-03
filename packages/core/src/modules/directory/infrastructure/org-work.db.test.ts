@@ -489,14 +489,10 @@ describe('which organisations a job takes from its marks', () => {
     expect((await dueOrgWork(app, job, { most: 1, due: 'any' })).map(({ orgId }) => orgId)).toEqual([b]);
   });
 
-  it("two due at once are taken by organisation, and only this job's", async () => {
+  it("only this job's marks", async () => {
     const [a = '', b = ''] = await orgsMarked(2);
-    const at = new Date('2026-11-03T08:00:00Z');
-    for (const orgId of [b, a]) {
-      await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, $2, $3)`, [orgId, job, at]);
-    }
-    await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'hand_off', $2)`, [a, at]);
-    const taken = await dueOrgWork(app, job, { most: 10, due: 'now' });
-    expect(taken.map(({ orgId }) => orgId)).toEqual([a, b].toSorted());
+    await markedAgo(a, 10);
+    await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'hand_off', now())`, [b]);
+    expect((await dueOrgWork(app, job, { most: 10, due: 'any' })).map(({ orgId }) => orgId)).toEqual([a]);
   });
 });

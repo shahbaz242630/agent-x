@@ -75,7 +75,6 @@ export function dueOrgWork(
       .where('job', '=', job)
       .where((where) => (due === 'now' ? where('due_at', '<=', sql<Date>`pg_catalog.now()`) : where.lit(true)))
       .orderBy('due_at')
-      .orderBy('org_id')
       .limit(most)
       .execute(),
   );
