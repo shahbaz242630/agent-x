@@ -1558,7 +1558,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       expect(lines('payment_check.lap_behind')).toEqual([expect.objectContaining({ sweep: 'unknown', level: 'warn' })]);
     });
 
-    it('keeps a lap going past its 30th run, unrestarted: said once however long', async () => {
+    it('keeps a turn cut short going past its next time, unrestarted: said once however long', async () => {
       const { w } = await oldPayments(1);
       // No budget: it goes nowhere, run after run.
       const job = checksOver([w], w.rail, breaker(), { runBudgetMs: 0 });
@@ -1569,6 +1569,12 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       expect(lines('payment_check.lap_behind').filter(({ sweep }) => sweep === 'unknown')).toHaveLength(1);
 
       // Its 31st run, when another would begin, and one more: a restart would have it said again.
+      await job.run();
+      clock.advanceBy(31 * 60_000);
+      await job.run();
+      expect(lines('payment_check.lap_behind').filter(({ sweep }) => sweep === 'unknown')).toHaveLength(1);
+
+      // Past an hour behind, still taken each run, its time is kept: forgetting it would say it again.
       await job.run();
       clock.advanceBy(31 * 60_000);
       await job.run();
