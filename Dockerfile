@@ -45,7 +45,7 @@ COPY apps/console apps/console
 RUN pnpm --filter "@agentx/console" run build
 
 # The activity log's place file (Phase 3 L4, client-clues.ts): DB-IP's IP to
-# City Lite, October 2026, unchanged. IP Geolocation by DB-IP
+# City Lite, November 2026, unchanged. IP Geolocation by DB-IP
 # (https://db-ip.com), licensed under CC BY 4.0. DB-IP keeps only its latest
 # two months, so this is our copy of theirs, published as a data release of
 # this repository; the build takes it only with the SHA-256 of DB-IP's own
@@ -53,8 +53,8 @@ RUN pnpm --filter "@agentx/console" run build
 # new month's file and opens a PR moving this pin (tooling/places/pin.ts).
 FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS places
 
-ADD --checksum=sha256:c839d407f85a1e0bddba354cef16b2c398182d1c34ed8d985555dce134b36b14 \
-  https://github.com/shahbaz242630/agent-x/releases/download/geoip-dbip-city-lite-2026-10/dbip-city-lite-2026-10.mmdb.gz \
+ADD --checksum=sha256:b69c625515f636ac92112b71df26bb92a5748f648c79bad124ecd9ba1c97bf4a \
+  https://github.com/shahbaz242630/agent-x/releases/download/geoip-dbip-city-lite-2026-11/dbip-city-lite-2026-11.mmdb.gz \
   /places/dbip-city-lite.mmdb.gz
 # Read-only to all: a download is root's alone (0600), and the API runs as node.
 RUN gzip --decompress /places/dbip-city-lite.mmdb.gz && chmod 0444 /places/dbip-city-lite.mmdb
