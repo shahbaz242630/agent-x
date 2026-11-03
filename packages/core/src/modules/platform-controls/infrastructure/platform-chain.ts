@@ -32,7 +32,7 @@ import {
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { limitedTransaction, limitStatements } from '@agentx/platform/db';
+import { JOB_ANSWER_WITHIN_MS, limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
@@ -83,7 +83,7 @@ export interface PlatformChain {
    * changed, added or deleted. Details that aren't an object with an `orgId`
    * text give nothing.
    */
-  createdOrganizations(db: Kysely<PlatformControlsTables>): Promise<string[]>;
+  createdOrganizations(db: Kysely<PlatformControlsTables>, page?: number, answeredWithinMs?: number): Promise<string[]>;
   /**
    * The chain checked from its last anchor (verifyFromAnchor, 4D2e E): at most
    * `most` events past it, in a limited transaction of its own.
@@ -131,6 +131,9 @@ function orgIdIn(details: unknown): string | undefined {
 }
 
 const CHAIN: Chain = { kind: 'platform' };
+
+/** How many of those events one statement reads. */
+const CREATED_PAGE = 10_000;
 
 const isText = (value: unknown): value is string => typeof value === 'string';
 
@@ -326,30 +329,42 @@ export function createPlatformChain({
     },
 
     verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport> {
-      return db
-        .transaction()
-        .setIsolationLevel('read committed')
-        .execute(async (tx) => {
-          // Each statement, waits for locks included, so the pool can be closed soon after a stop.
-          await limitStatements(tx);
-          return verifyChain(keys, CHAIN, readerFor(tx), anchor);
-        });
+      // Each statement limited, waits for locks included, so the pool can be closed soon after a stop.
+      return limitedTransaction(db, (tx) => verifyChain(keys, CHAIN, readerFor(tx), anchor), {
+        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+      });
     },
 
-    createdOrganizations(db: Kysely<PlatformControlsTables>): Promise<string[]> {
-      return db
-        .transaction()
-        .setIsolationLevel('read committed')
-        .execute(async (tx) => {
-          await limitStatements(tx);
-          const rows = await tx
-            .selectFrom('platform_controls.audit_events')
-            .select('details')
-            .where('action', '=', ORGANIZATION_CREATED)
-            .orderBy('seq')
-            .execute();
-          return rows.map((row) => orgIdIn(row.details)).filter((id) => id !== undefined);
-        });
+    async createdOrganizations(
+      db: Kysely<PlatformControlsTables>,
+      page = CREATED_PAGE,
+      answeredWithinMs?: number,
+    ): Promise<string[]> {
+      const created: string[] = [];
+      let after = 0n;
+      // In pages, each a statement within its limit, so no number of organisations can make the read fail whole.
+      for (;;) {
+        const rows = await limitedTransaction(
+          db,
+          (tx) =>
+            tx
+              .selectFrom('platform_controls.audit_events')
+              .select(['seq', 'details'])
+              .where('action', '=', ORGANIZATION_CREATED)
+              .where('seq', '>', after)
+              .orderBy('seq')
+              .limit(page)
+              .execute(),
+          answeredWithinMs === undefined ? {} : { answeredWithinMs },
+        );
+        for (const row of rows) {
+          const id = orgIdIn(row.details);
+          if (id !== undefined) created.push(id);
+        }
+        const last = rows.at(-1);
+        if (last === undefined || rows.length < page) return created;
+        after = last.seq;
+      }
     },
 
     checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep> {

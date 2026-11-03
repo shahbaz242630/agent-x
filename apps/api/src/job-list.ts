@@ -24,14 +24,16 @@ import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createMemoryAnchorStore } from '@agentx/platform/audit-chain';
-import { sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
+import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 
 import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
 import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
-import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
+import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
+import { anchorLogOf } from './anchor-store.ts';
+import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
@@ -57,9 +59,9 @@ import { createWaitingRequests } from './waiting-requests.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
 
 /**
- * How long the anchor check of one chain may take before it counts as not
- * completed (anchor-check.ts). Each of its statements has 10 seconds at most
- * (verifyAlone); this bounds the whole check, whatever the database does.
+ * How long the anchor check of one chain may hold its lane before it counts as
+ * not completed (anchor-check.ts). Each of its statements has 10 seconds at most
+ * (verifyAlone), and it may go on past this, its result still compared.
  */
 const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
@@ -166,26 +168,35 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const list = () => listedOrganizations(database);
   const organisationJob = { list, database, keys, ids: uuidV7Ids, logger };
   const clocked = { ...organisationJob, clock: systemClock };
-  // The audit chains' last anchors, in this process's memory (ADR-012 §2): the anchor check keeps them, Tx A reads them.
-  const anchorStore = createMemoryAnchorStore();
+  // Three missed checks in a row are the alarm, not just a warning.
+  const staleAfterMs = config.audit.anchorSeconds * 3 * 1000;
+  // The audit chains' last anchors (ADR-012 §2): the anchor check keeps them, Tx A reads them from memory. Durable where
+  // the config names a store (PL-58). The check's first run reads it, and where a lease decides who runs the jobs, that
+  // run waits for the lease: a copy that doesn't lead reads nothing, and one that comes to lead reads it then.
+  const anchorLog = anchorLogOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs });
+  const anchorStore = anchorLog ?? createMemoryAnchorStore();
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
     chains: [{ chain: { kind: 'platform' }, verify: (anchor) => platform.verifyAlone(database, anchor) }],
     organizations: {
-      list,
-      recorded: () => platform.createdOrganizations(database),
+      list: () => listedOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
+      recorded: () => platform.createdOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
       verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
       // The run's own logger: the hold's lines name the organisation themselves.
-      hold: (orgId, failure) => holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure),
+      hold: (orgId, failure) =>
+        holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure, JOB_ANSWER_WITHIN_MS),
     },
     keys,
     clock: systemClock,
     logger,
-    // Three missed checks in a row are the alarm, not just a warning.
-    staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
+    staleAfterMs,
+    reachWithinMs: reachWithin(config.audit.anchorSeconds * 1000),
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+    lanes: lanesWithin(config.audit.anchorLanes, config.db.poolMax),
+    mostOrganisations: config.audit.mostOrganisations,
     anchors: anchorStore,
+    ...(anchorLog === undefined ? {} : { durable: anchorLog }),
   });
   // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
   // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.
@@ -239,7 +250,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       config.audit.anchorSeconds * 1000,
       QUICK_MS,
     ),
-    job('anchor_check', anchors, config.audit.anchorSeconds * 1000, HOUR_MS, undefined, scheduleAnchorCheck),
+    job('anchor_check', anchors, config.audit.anchorSeconds * 1000, HOUR_MS, undefined, (work, everyMs) =>
+      scheduleAnchorCheck(work, everyMs, () => anchors.finish()),
+    ),
     // On a timer of its own (B1e-3): a long sweep must never hold up the anchor
     // check. The two share the pool, and both start at once: each statement is
     // bounded, and a pool at its limit queues rather than refuses. Nothing orders

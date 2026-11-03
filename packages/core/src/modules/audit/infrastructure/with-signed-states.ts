@@ -273,7 +273,10 @@ async function setHold(
   held: string,
   found: Found,
   { keys, ids, logger, correlationId }: SignedStatesServices,
-  rowMustStand = false,
+  {
+    rowMustStand = false,
+    answeredWithinMs,
+  }: { readonly rowMustStand?: boolean; readonly answeredWithinMs?: number | undefined } = {},
 ): Promise<HoldOutcome> {
   const { finding, count } = found;
   const log = logger.child({ orgId: held });
@@ -306,7 +309,7 @@ async function setHold(
         return recorded;
       },
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.
-      { limited: true, unshared: true },
+      { limited: true, unshared: true, ...(answeredWithinMs === undefined ? {} : { answeredWithinMs }) },
     );
     if (outcome === 'named_elsewhere') {
       keepEntry(held, { ...found, inTable: true, raised: true, pollsToWait: POLLS_NAMED_ELSEWHERE_WAITS });
@@ -450,7 +453,7 @@ async function triedInTurn(
     lastTried = held;
     const outcome = gone
       ? await goneFromTable(db, held, found, services)
-      : await setHold(db, held, found, services, found.fromRow === true);
+      : await setHold(db, held, found, services, { rowMustStand: found.fromRow === true });
     if (outcome === 'failed') ended.add(held);
   }
 }
@@ -529,6 +532,7 @@ export async function holdOrganisation(
   orgId: string,
   services: SignedStatesServices,
   failure: string | undefined,
+  answeredWithinMs?: number,
 ): Promise<void> {
   const held = orgId.toLowerCase();
   const waiting = dueWaiting(held);
@@ -540,9 +544,9 @@ export async function holdOrganisation(
       sign: 'chain',
       chainFailure: failure,
     };
-    await setHold(db, held, { finding, count: 1 }, services);
+    await setHold(db, held, { finding, count: 1 }, services, { answeredWithinMs });
   } else if (waiting !== undefined && !recording.has(held)) {
-    await setHold(db, held, waiting, services);
+    await setHold(db, held, waiting, services, { answeredWithinMs });
   }
 }
 

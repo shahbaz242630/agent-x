@@ -21,6 +21,9 @@ export async function registerOrganization(tx: Transaction<DirectoryTables>, org
   await tx.insertInto('directory.orgs').values({ org_id: orgId }).execute();
 }
 
+/** How many IDs one statement reads: well within its 10 seconds on the table's key. */
+const LIST_PAGE = 50_000;
+
 /**
  * Every organisation the directory lists, by ID in lower case as Postgres
  * prints a uuid, in order: for work across organisations, which then works
@@ -28,9 +31,25 @@ export async function registerOrganization(tx: Transaction<DirectoryTables>, org
  * transaction, each statement limited to 10 seconds, so a hung read gives
  * its connection back.
  */
-export function listedOrganizations(db: Kysely<DirectoryTables>): Promise<string[]> {
-  return readAlone(db, async (tx) => {
-    const rows = await tx.selectFrom('directory.orgs').select('org_id').orderBy('org_id').execute();
-    return rows.map((row) => row.org_id);
-  });
+export async function listedOrganizations(
+  db: Kysely<DirectoryTables>,
+  page = LIST_PAGE,
+  answeredWithinMs?: number,
+): Promise<string[]> {
+  const listed: string[] = [];
+  // In pages, each a statement within its limit, so no number of organisations can make the read fail whole.
+  for (;;) {
+    const after = listed.at(-1);
+    const rows = await readAlone(
+      db,
+      (tx) => {
+        const all = tx.selectFrom('directory.orgs').select('org_id');
+        const rest = after === undefined ? all : all.where('org_id', '>', after);
+        return rest.orderBy('org_id').limit(page).execute();
+      },
+      answeredWithinMs,
+    );
+    for (const row of rows) listed.push(row.org_id);
+    if (rows.length < page) return listed;
+  }
 }

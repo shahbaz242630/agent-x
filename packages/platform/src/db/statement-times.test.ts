@@ -126,7 +126,9 @@ describe('the checked driver under timing', () => {
   /** A pool of one stand-in connection that answers a transaction's start, its statements and its commit. */
   function database() {
     const client = {
-      query: (text: string) => {
+      // Text, or a statement with its values and limit, as the checked driver sends every trip.
+      query: (asked: string | { readonly text: string }) => {
+        const text = typeof asked === 'string' ? asked : asked.text;
         const answer = (rows: readonly unknown[]) => ({ rows, rowCount: rows.length, command: 'SELECT' });
         const state = answer([{ org_id: '', search_path: PINNED_SEARCH_PATH_VALUE }]);
         // A transaction's start answers each of its statements in turn; its commit's read-back needs no rows.

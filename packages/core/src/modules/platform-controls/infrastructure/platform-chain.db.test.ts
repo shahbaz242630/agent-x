@@ -274,6 +274,9 @@ describe('the organisations it records as created, for the anchor check (B1d-2)'
     await record(started(1), created(ORGS[1] ?? ''), noted, started(2), created(ORGS[0] ?? ''));
 
     expect(await chain.createdOrganizations(app)).toEqual([ORGS[1], ORGS[0]]);
+    // In pages: at the page's edge, and past it, the same.
+    expect(await chain.createdOrganizations(app, 1)).toEqual([ORGS[1], ORGS[0]]);
+    expect(await chain.createdOrganizations(app, 2)).toEqual([ORGS[1], ORGS[0]]);
   });
 
   it('gives nothing for details planted without an orgId text, which the chain check names', async () => {

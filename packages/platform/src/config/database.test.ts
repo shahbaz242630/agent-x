@@ -28,6 +28,8 @@ const partnerFor = (environment: string): Env =>
 
 const APP: Env = {
   AGENTX_ENV: 'production',
+  // Runs no job, so needs no anchors' store.
+  AGENTX_ROLE: 'web',
   AGENTX_PARTNER_MODE: 'live',
   AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
   AGENTX_RELEASE: 'r-1',
