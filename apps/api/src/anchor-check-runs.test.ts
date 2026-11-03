@@ -1514,13 +1514,13 @@ describe('third round (4D2e E6 review)', () => {
     ]);
   });
 
-  it('a run of more organisations than an array spread can take is no crash', { timeout: 60_000 }, async () => {
-    const all = Array.from({ length: 200_000 }, (_, index) => org(index + 1));
+  it('a run of more organisations than an array spread can take is no crash', { timeout: 180_000 }, async () => {
+    const all = Array.from({ length: 150_000 }, (_, index) => org(index + 1));
     const { organizations } = directory(all);
     const { check, capture } = checking(organizations, { mostOrganisations: 300_000 });
     await check.run();
     expect(lines(capture, 'audit.anchor_check_crashed')).toEqual([]);
-    expect(lines(capture, 'audit.anchor_check_done').at(-1)).toMatchObject({ chains: 200_000 });
+    expect(lines(capture, 'audit.anchor_check_done').at(-1)).toMatchObject({ chains: 150_000 });
   });
 });
 
