@@ -31,7 +31,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { handOffDue, handOffSweepDue } from './handoff.ts';
 import { paymentCheckDue } from './payment-checks.ts';
 
-/** How often every organisation's marks are looked over: about 8 trips a second at 10,000 organisations. */
+/** How often every organisation's marks are looked over: a serial burst, one organisation after another. */
 export const ORG_WORK_REDISCOVERY_EVERY_MS = HOUR_MS;
 
 /** How far past what is due a mark may read before it counts as late: a mark's time and its row's differ by a transaction. */
@@ -128,7 +128,7 @@ export function createOrgWorkRediscovery({
       }
       const counts = { organisations: 0, unmarked: 0, late: 0, cleared: 0, failed: 0 };
       for (const orgId of orgs) {
-        // Stopped between organisations, so the process stops promptly however many there are.
+        // Stopped between organisations, so a stopped run says no count: the switch counts finished runs only.
         if (signal?.aborted === true) return;
         const log = logger.child({ orgId });
         counts.organisations += 1;
