@@ -49,7 +49,7 @@ import {
 import type { PhaseResult } from './report.ts';
 import { rekeyed, seedRun } from './seed.ts';
 import { whileStuck } from './stuck.ts';
-import { readGrowthEnd } from './table-growth.ts';
+import { printedEnd, readGrowthEnd } from './table-growth.ts';
 
 export type LoadTables = MandateWorldTables & PlatformControlsTables;
 
@@ -112,7 +112,7 @@ export async function firstJob(steps: JobSteps, runId: string): Promise<number> 
     },
   });
   steps.print({ event: 'load.seeded', runId, agents: seeded.agents.length });
-  steps.print({ event: 'load.table_sizes', ...(await readGrowthEnd(steps.database, 'before')) });
+  for (const line of printedEnd(await readGrowthEnd(steps.database, 'before'))) steps.print(line);
   return (await steps.k6(1, seeded)).finished ? 0 : 1;
 }
 
@@ -220,7 +220,7 @@ async function phaseTwo(steps: JobSteps, agents: readonly PrintedAgent[], create
     finished = phase.finished;
     if (!finished) break;
   }
-  steps.print({ event: 'load.table_sizes', ...(await readGrowthEnd(steps.database, 'after')) });
+  for (const line of printedEnd(await readGrowthEnd(steps.database, 'after'))) steps.print(line);
   const stillPaused = await handoffsPaused(steps, 'after the phases');
   const checks = [];
   for (const check of LOAD_CHECKS) {

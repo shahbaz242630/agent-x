@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { growthBetween, readGrowthEnd } from './table-growth.ts';
+import { gatheredEnd, growthBetween, printedEnd, readGrowthEnd } from './table-growth.ts';
 
 const SIZES = {
   tables: { 't.a': { rows: 8192, indexes: 16_384, longValues: 0 } },
@@ -35,6 +35,61 @@ describe('the growth between a run’s two ends (4D2e F12)', () => {
     for (const sizes of unusable) {
       expect(growthBetween(reading(sizes), reading())).toEqual({ problem: 'The before reading said nothing' });
     }
+  });
+
+  describe('as a job prints an end, a line a table, and gathers it back', () => {
+    const TWO = {
+      tables: { ...SIZES.tables, 't.b': { rows: 1, indexes: 0, longValues: 0 } },
+      indexes: SIZES.indexes,
+    };
+    const printed = printedEnd({ stage: 'before', sizes: TWO });
+
+    it('prints each table with its own indexes, then their count, and gathers the same map back', () => {
+      expect(printed).toEqual([
+        {
+          event: 'load.table_size',
+          stage: 'before',
+          table: 't.a',
+          size: TWO.tables['t.a'],
+          indexes: { 't.a_pkey': { bytes: 16_384, scans: 3 } },
+        },
+        { event: 'load.table_size', stage: 'before', table: 't.b', size: TWO.tables['t.b'], indexes: {} },
+        { event: 'load.table_sizes', stage: 'before', tables: 2 },
+      ]);
+      // The other end's lines among them are left alone.
+      const both = [...printedEnd({ stage: 'after', sizes: SIZES }), ...printed];
+      expect(growthBetween(gatheredEnd(both, 'before'), gatheredEnd(both, 'after'))).toEqual({
+        before: TWO,
+        after: SIZES,
+      });
+    });
+
+    it('says a lost line, a read that failed, and an end never printed', () => {
+      expect(gatheredEnd(printed.slice(1), 'before')).toEqual({ problem: "1 of its 2 tables' lines arrived" });
+      const failed = printedEnd({ stage: 'after', problem: 'refused' });
+      expect(growthBetween(gatheredEnd(printed, 'before'), gatheredEnd(failed, 'after'))).toEqual({
+        problem: 'The after reading: refused',
+      });
+      expect(gatheredEnd(printed, 'after')).toBeUndefined();
+    });
+
+    it('says nothing of an end with a line not of its shape', () => {
+      const closing = { event: 'load.table_sizes', stage: 'before', tables: 1 };
+      const line = (change: Record<string, unknown>) => [
+        { event: 'load.table_size', stage: 'before', ...change },
+        closing,
+      ];
+      const size = SIZES.tables['t.a'];
+      for (const lines of [
+        line({ table: 7, size, indexes: {} }),
+        line({ table: 't.a', size, indexes: null }),
+        line({ table: 't.a', size, indexes: { 't.a_pkey': 'big' } }),
+      ]) {
+        expect(growthBetween(gatheredEnd(lines, 'before'), reading())).toEqual({
+          problem: 'The before reading said nothing',
+        });
+      }
+    });
   });
 
   it('says a read that failed, and why, rather than stop the run', async () => {

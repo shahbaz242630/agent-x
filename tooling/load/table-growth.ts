@@ -61,7 +61,55 @@ function isSizes(value: unknown): value is TableSizes {
   );
 }
 
-/** What one end says, as a job's printed line or a read in hand: its sizes, or its problem. */
+type Line = Readonly<Record<string, unknown>>;
+
+/**
+ * One end as a job prints it: a line a table, its own indexes with it, since
+ * Azure's log splits a line past 16 KiB and the whole map is past it; then a
+ * line with the count, so a line lost on the way is found, never a short map.
+ */
+export function printedEnd(end: GrowthEnd): ({ readonly event: string } & Line)[] {
+  const { stage } = end;
+  if ('problem' in end) return [{ event: 'load.table_sizes', stage, problem: end.problem }];
+  const { tables, indexes } = end.sizes;
+  const indexesOf = (table: string) =>
+    Object.fromEntries(
+      Object.entries(indexes)
+        .filter(([, use]) => use.table === table)
+        .map(([name, { bytes, scans }]) => [name, { bytes, scans }]),
+    );
+  return [
+    ...Object.entries(tables).map(([table, size]) => ({
+      event: 'load.table_size',
+      stage,
+      table,
+      size,
+      indexes: indexesOf(table),
+    })),
+    { event: 'load.table_sizes', stage, tables: Object.keys(tables).length },
+  ];
+}
+
+/** One end gathered back from a job's printed lines, as growthBetween takes it; none when the job printed none. */
+export function gatheredEnd(printed: readonly Line[], stage: GrowthStage): Line | undefined {
+  const closing = printed.find((line) => line.event === 'load.table_sizes' && line.stage === stage);
+  if (closing === undefined || typeof closing.problem === 'string') return closing;
+  const lines = printed.filter((line) => line.event === 'load.table_size' && line.stage === stage);
+  if (lines.length !== closing.tables) {
+    return { problem: `${String(lines.length)} of its ${String(closing.tables)} tables' lines arrived` };
+  }
+  const tables: Record<string, unknown> = {};
+  const indexes: Record<string, unknown> = {};
+  for (const { table, size, indexes: own } of lines) {
+    // A line not of this shape leaves the map unusable, so the end says nothing (isSizes).
+    if (typeof table !== 'string' || !isRecord(own)) return {};
+    tables[table] = size;
+    for (const [name, use] of Object.entries(own)) indexes[name] = isRecord(use) ? { table, ...use } : use;
+  }
+  return { sizes: { tables, indexes } };
+}
+
+/** What one end says, as gathered from a job's lines or a read in hand: its sizes, or its problem. */
 function endOf(end: Readonly<Record<string, unknown>> | undefined, which: GrowthStage) {
   if (typeof end?.problem === 'string') return { problem: `The ${which} reading: ${end.problem}` };
   return isSizes(end?.sizes) ? { sizes: end.sizes } : { problem: `The ${which} reading said nothing` };

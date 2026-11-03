@@ -34,7 +34,7 @@ import type { FreezeProbed } from '../../tooling/load/freeze-probe.ts';
 import { apartOrgsOf, type LogSummary, logFailures, summariseLogs, troubleWindowOf } from '../../tooling/load/logs.ts';
 import { LOAD_GATE, orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
-import { growthBetween } from '../../tooling/load/table-growth.ts';
+import { gatheredEnd, growthBetween } from '../../tooling/load/table-growth.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
 import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
 import {
@@ -563,7 +563,7 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
     database,
     smoke,
     phases,
-    growth: growthBetween(lineOf(first.printed, 'load.table_sizes'), lineOf(second.printed, 'load.table_sizes')),
+    growth: growthBetween(gatheredEnd(first.printed, 'before'), gatheredEnd(second.printed, 'after')),
     logs,
     gate: LOAD_GATE,
     ...(freezeProbe === undefined ? {} : { freezeProbe }),

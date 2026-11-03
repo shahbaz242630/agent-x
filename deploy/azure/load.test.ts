@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Az, AzResult } from './deploy.ts';
 import { jobName, LOAD_JOBS, type LoadJob, type LogLine } from './jobs.ts';
 import { load, type LoadSteps, NO_REQUEST, parseArguments, printedLines } from './load.ts';
+import { printedEnd } from '../../tooling/load/table-growth.ts';
 
 const SUBSCRIPTION = '6f1e2d3c-4b5a-4978-8a6b-5c4d3e2f1a0b';
 const WORKSPACE_ID = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
@@ -57,7 +58,7 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
     lines: [
       seededLine(AMPLE),
       seededLine(CAPPED),
-      { event: 'load.table_sizes', stage: 'before', sizes: auditSized(8192) },
+      ...printedEnd({ stage: 'before', sizes: auditSized(8192) }),
       summary(1, 2),
     ],
   }),
@@ -74,7 +75,7 @@ const DEFAULTS: Readonly<Record<LoadJob, Behaviour>> = {
           ['calm', 'busy', 'stuck'].map((kind) => [kind, { requests: 1, serverErrors: 0, rateLimited: 0, p95Ms: 1 }]),
         ),
       },
-      { event: 'load.table_sizes', stage: 'after', sizes: auditSized(8192 + 1024 ** 2) },
+      ...printedEnd({ stage: 'after', sizes: auditSized(8192 + 1024 ** 2) }),
       { event: 'load.checked', created: 6, finished: true, checks: [{ name: 'recorded', problems: [] }] },
       { event: 'load.cleaned', organizations: 2, problems: [] },
     ],
