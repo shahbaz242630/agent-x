@@ -594,19 +594,14 @@ export function createAnchorLog({
       kv: keyVersion,
       sig: signature.toString('base64'),
     });
-    let lineBytes = closing.length;
     const bytes = await gzippedLines(
       (function* lined() {
-        for (const line of lines) {
-          const text = lineOf(line);
-          lineBytes += text.length + 1;
-          yield `${text}\n`;
-        }
+        for (const line of lines) yield `${lineOf(line)}\n`;
         yield `${closing}\n`;
       })(),
     );
-    // In the budget's own count as well as the file's: said before a read of this many would be refused.
-    const size = Math.max(lineBytes, anchors.size * KEPT_LINE_BYTES);
+    // In the budget's own count, so it is said before a read of this many would be refused.
+    const size = anchors.size * KEPT_LINE_BYTES;
     if (size > mostFileBytes * NEAR_MEMORY) {
       logger.error('audit.anchor_store_near_memory', { kind, bytes: size, mostBytes: mostFileBytes });
     }

@@ -1060,6 +1060,58 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(log.latest(CHAIN)).toBeUndefined();
       });
 
+      it('a forged last line, with a sound closing, past it is `file`, not capacity', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('deltas', 0);
+        const forged = lineOf(anchorAt(OTHER, 4n)).replace('"seq":"4"', '"seq":"5"');
+        fake.files.set(name, fileOf(name, anchorAt(CHAIN, 3n), forged));
+        const { log, capture } = limited(fake, 200);
+        await log.read();
+        expect(capture.lines().filter((line) => line.reason === 'file')).toHaveLength(1);
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([]);
+        expect(log.state()).not.toBe('unread');
+      });
+
+      it('a forged line past it ends the read: nothing after it is checked', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('deltas', 0);
+        const forged = lineOf(anchorAt(OTHER, 4n)).replace('"seq":"4"', '"seq":"5"');
+        const after = Array.from({ length: 10 }, () => lineOf(anchorAt(OTHER, 6n)));
+        fake.files.set(name, gzippedLines([forged, ...after]));
+        let checked = 0;
+        const counting: typeof keys = {
+          ...keys,
+          verifySignature: (...asked) => {
+            checked += 1;
+            return keys.verifySignature(...asked);
+          },
+        };
+        const log = createAnchorLog({
+          store: fake.store,
+          keys: counting,
+          logger: testLogger(new LogCapture()),
+          now: () => LATER,
+          epoch: 1,
+          alertAfterMs: 1000,
+          mostFileBytes: 200,
+        });
+        await log.read();
+        // The forged one, and at most the next, before the read stops.
+        expect(checked).toBeLessThanOrEqual(2);
+      });
+
+      it('an empty line in an otherwise sound file past it is `file`: no honest file has one', async () => {
+        const fake = createFakeWriteOnceStore();
+        const name = nameOf('deltas', 0);
+        const sound = gunzipSync(fileOf(name, anchorAt(CHAIN, 3n), anchorAt(OTHER, 4n))).toString('utf8');
+        const [first, ...rest] = sound.split('\n');
+        fake.files.set(name, gzipSync(`${first ?? ''}\n\n${rest.join('\n')}`));
+        const { capture, log } = limited(fake, 200);
+        await log.read();
+        expect(capture.lines().filter((line) => line.reason === 'file')).toHaveLength(1);
+        expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([]);
+      });
+
       it('with no closing line past it is `file`', async () => {
         const fake = createFakeWriteOnceStore();
         const name = nameOf('deltas', 0);
@@ -1306,6 +1358,23 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         await log.read();
         expect(capture.lines().filter((line) => line.reason === 'fork')).toHaveLength(1);
         expect(log.latest(chain(0))?.at).toEqual(START);
+      });
+
+      it('another hash at the place held changes nothing, and says nothing, until the read is whole', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, capture } = await holding(fake, 40 * KEPT_LINE, 20);
+        const held = log.latest(chain(0));
+        const delta = nameOf('deltas', 5);
+        // Older than what is held, so a fork would take it, were this read to settle one.
+        const other = anchorAt(chain(0), 1n, new Date(START.getTime() - MINUTE), 9);
+        fake.files.set(delta, fileOf(delta, other));
+        const failed = nameOf('deltas', 4);
+        fake.files.set(failed, fileOf(failed, anchorAt(chain(1), 1n)));
+        const real = fake.real.get;
+        fake.instead.get = (name) => (name === failed ? Promise.reject(new Error('the store is away')) : real(name));
+        await log.read();
+        expect(log.latest(chain(0))).toBe(held);
+        expect(capture.lines().filter((line) => line.reason === 'fork')).toEqual([]);
       });
 
       it('a fork between two files is still the alarm while reading, the older kept', async () => {

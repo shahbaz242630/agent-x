@@ -1280,7 +1280,7 @@ describe('third round (4D2e E6 review)', () => {
 
   it('#3 a check landing between runs counts as a turn completed', async () => {
     vi.useFakeTimers();
-    const all = orgs(3);
+    const all = orgs(4);
     const { organizations, release } = directory(all, () => undefined);
     const { check, capture, clock } = checking(organizations, { lanes: 3, runWithinMs: 1000 });
     const first = check.run();
@@ -1288,7 +1288,7 @@ describe('third round (4D2e E6 review)', () => {
     await vi.advanceTimersByTimeAsync(1000);
     await first;
     clock.advanceBy(REACH_MS - 1);
-    // Two land between the runs; the third goes on, so the next run has no turn to complete, and it is the late one.
+    // Two land between the runs. The next run completes no turn; org 4, never reached, is the late one.
     release(org(1));
     release(org(2));
     await settled();
@@ -1299,6 +1299,7 @@ describe('third round (4D2e E6 review)', () => {
     await second;
     expect(unreached(capture)).toEqual([]);
     release(org(3));
+    release(org(4));
   });
 
   it('#3 wedged lanes raise the alarm at the bound, however many hand-offs land', async () => {
@@ -1701,6 +1702,41 @@ describe('fourth round (4D2e E6 review)', () => {
     expect(turns.pastCapStarts()).toBe(true);
     expect(asked).toEqual([2, 3]);
     expect(turns.next()).toBe(org(2));
+  });
+
+  it('slow chains and those past the cap take turn about at the one seat they share', () => {
+    const turns = createTurns(
+      2,
+      (orgIds) => orgIds,
+      () => 0,
+    );
+    const slow = orgs(2);
+    for (const orgId of slow) turns.after(orgId, { ms: SLOW_AFTER_MS, again: false });
+    turns.begin(slow, [], [], [org(50)]);
+    expect(turns.next()).toBe(org(1));
+    turns.ended(org(1));
+    expect(turns.next()).toBe(org(50));
+    turns.ended(org(50));
+    expect(turns.next()).toBe(org(2));
+  });
+
+  it('past the cap, with no note of its last check, two failed turns running are the alarm, one is not', async () => {
+    const { organizations } = directory(orgs(2));
+    let down = false;
+    const verify: OrganisationChains['verify'] = (orgId, anchor) =>
+      down && orgId === org(2)
+        ? Promise.reject(new Error('connect ECONNREFUSED'))
+        : organizations.verify(orgId, anchor);
+    const { check, capture, clock } = checking({ ...organizations, verify }, { lanes: 2, mostOrganisations: 1 });
+    clock.advanceBy(STALE_MS);
+    await check.run();
+    down = true;
+    await check.run();
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([]);
+    await check.run();
+    expect(lines(capture, 'audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'unchecked', firstFew: [org(2)] }),
+    ]);
   });
 
   it('#6 a run cut off in the middle, then full runs, ends the round: the lateness clock goes back', () => {
