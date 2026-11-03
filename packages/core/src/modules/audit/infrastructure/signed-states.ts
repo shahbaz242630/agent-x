@@ -1603,7 +1603,8 @@ export function createSignedStates({
    * A table that doesn't grow as verifyAll checks it: every object, its rows'
    * and the log's (objectIdsOf), a page of `page` at a time by ID, each page
    * judged before the next is listed, so a few statements a page and one
-   * page's IDs held at once. Not `paging`, a second page answers undefined,
+   * page's ID list at once (the lock-order map still keeps an entry for every
+   * row judged, fine at tens of thousands). Not `paging`, a second page answers undefined,
    * with nothing judged: the caller's list holds one page alone.
    */
   const everyJudged = async (
