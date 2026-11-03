@@ -1093,7 +1093,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
           now: () => LATER,
           epoch: 1,
           alertAfterMs: 1000,
-          mostFileBytes: 200,
+          // Past it, and short of the eight times that would stop the read anyway: the forged line is what must.
+          mostFileBytes: 1000,
         });
         await log.read();
         // The forged one, and at most the next, before the read stops.
