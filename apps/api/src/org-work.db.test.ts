@@ -165,9 +165,31 @@ describe('where each mark comes from', () => {
     const { w, acting } = await ready();
     // `.01`: the fake declines it, with its proof, so the hand-off's Tx B settles it FAILED.
     const request = await ask(acting, w, { amount: ALLOWED(1n) });
-    await handoffOf(w).run();
+    // Read between the two transactions: the partner has answered, and Tx B can't start until this returns.
+    let beforeTxB: Awaited<ReturnType<typeof marksOf>> = {};
+    let statusBeforeTxB = '';
+    await handoffOf(w, {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        const answer = await w.rail.submitApprovedIntent(intent);
+        beforeTxB = await marksOf(w);
+        statusBeforeTxB = (await transactionOfRequest(request.id)).status;
+        return answer;
+      },
+    }).run();
+    expect(statusBeforeTxB).toBe('SUBMISSION_PENDING');
     expect((await transactionOfRequest(request.id)).status).toBe('FAILED');
+    // Tx B made no mark and brought none forward: the same jobs, the same due times. Its counts moved by its note of
+    // the bank's refusal alone, written while the payment was still under way (a note is 2 row writes, each marking,
+    // as every write on a payment under way does); its move to FAILED marked nothing.
+    expect(Object.keys(beforeTxB).toSorted()).toEqual(JOBS);
     const before = await marksOf(w);
+    const moved = (job: string) => BigInt(before[job]?.marks ?? '0') - BigInt(beforeTxB[job]?.marks ?? '0');
+    expect(JOBS.map((job) => [job, before[job]?.due_at, moved(job)])).toEqual([
+      ['hand_off', beforeTxB.hand_off?.due_at, 0n],
+      ['hand_off_sweep', beforeTxB.hand_off_sweep?.due_at, 2n],
+      ['payment_check', beforeTxB.payment_check?.due_at, 2n],
+    ]);
     await rediscoveryOf(w.org).run();
     expect(await jobsMarked(w)).toEqual([]);
     expect(Object.keys(before).toSorted()).toEqual(JOBS);
