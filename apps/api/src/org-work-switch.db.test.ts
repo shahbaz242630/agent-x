@@ -508,7 +508,10 @@ describe('a mark row held only for a moment, and never lost', () => {
       expect(await waitUntilQueued(admin(), most)).toHaveLength(most);
       // No more than that: the other reads, of both jobs, wait their turn outside the database.
       const [{ waiting } = { waiting: 0 }] = await admin().query<{ waiting: number }>(
-        `select pg_catalog.count(*)::integer as waiting from pg_catalog.pg_locks where not granted`,
+        // This test's database alone: other test files wait on locks in their own databases on the same server.
+        `select pg_catalog.count(distinct l.pid)::integer as waiting from pg_catalog.pg_locks l
+           join pg_catalog.pg_stat_activity a on a.pid = l.pid
+          where not l.granted and a.datname = pg_catalog.current_database()`,
       );
       expect(waiting).toBe(most);
       held = false;
