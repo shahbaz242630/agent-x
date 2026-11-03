@@ -192,10 +192,21 @@ interface Run {
   unreached: number;
   /** How many organisations' turns ended on UNREACHED_IN_A_ROW. */
   endedTurns: number;
+  /** How many payments the bank's word left as they were: counted once a run, as most are at volume (4D2e Stage F). */
+  unchanged: number;
   readonly inRow: Map<string, number>;
   readonly checks: Map<string, Promise<CheckOutcome>>;
   readonly unreadable: Set<string>;
 }
+
+const newRun = (): Run => ({
+  unreached: 0,
+  endedTurns: 0,
+  unchanged: 0,
+  inRow: new Map(),
+  checks: new Map(),
+  unreadable: new Set(),
+});
 
 /** One of the sweeps that reach every payment of its kind, over as many runs as they take. */
 interface Lap {
@@ -285,7 +296,7 @@ export function createPaymentChecks({
   // A quarter of the calls the messages': enough to go on, never all of them.
   const nudgeSlots = Math.max(1, Math.floor(limits.total / 4));
   // The run under way's, as the lanes' work needs them; runs never overlap.
-  let run: Run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
+  let run = newRun();
   let spent: () => boolean = () => false;
   let gaveUpWaiting = false;
   const beatNow = (): void => {
@@ -551,7 +562,8 @@ export function createPaymentChecks({
     if (gaveUpWaiting) return 'unreached';
     try {
       const checked = await databaseGate.run(orgId, () => applied(orgId, listed, word, log));
-      log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
+      if (checked.from === checked.to) run.unchanged += 1;
+      else log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
       return 'checked';
     } catch (error) {
       log.error('payment_check.failed', { transactionId: listed.id, err: error });
@@ -674,7 +686,7 @@ export function createPaymentChecks({
         lap.startedAt = clock.now().getTime();
         lap.said = false;
       }
-      run = { unreached: 0, endedTurns: 0, inRow: new Map(), checks: new Map(), unreadable: new Set() };
+      run = newRun();
       spent = partOfBudget(1, signal);
       gaveUpWaiting = false;
       // Side by side: a hung lookup under a message must never spend the regular turns' budget.
@@ -685,6 +697,7 @@ export function createPaymentChecks({
       );
       gaveUpWaiting = finished === undefined;
       beatNow();
+      if (run.unchanged > 0) logger.info('payment_check.run_unchanged', { unchanged: run.unchanged });
       // Once a run, not once a payment: the bank down is one thing to say.
       if (run.unreached > 0) {
         logger.warn('payment_check.bank_unavailable', { unreached: run.unreached, stopped: run.endedTurns > 0 });
