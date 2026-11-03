@@ -86,6 +86,7 @@ import {
   type LatestSignedState,
   type LatestWithRow,
   lockChainHead,
+  lockChainHeadSeeingWaiting,
   type ReadEvent,
   type RecordedAuditEvent,
   type RecordedEventCheck,
@@ -120,18 +121,28 @@ import {
  *   statement began, and the row reads sound again now, so nothing is left in
  *   the row or the log to find: whoever clears the hold will see it verify
  */
-export type TamperSign =
-  | 'row'
-  | 'deleted'
-  | 'unsigned'
-  | 'log'
-  | 'pointer'
-  | 'version'
-  | 'seal'
-  | 'status'
-  | 'chain'
-  | 'holding'
-  | 'moved_back';
+export type TamperSign = (typeof TAMPER_SIGNS)[number];
+
+const TAMPER_SIGNS = [
+  'row',
+  'deleted',
+  'unsigned',
+  'log',
+  'pointer',
+  'version',
+  'seal',
+  'status',
+  'chain',
+  'holding',
+  'moved_back',
+] as const;
+
+/**
+ * The sign a row of the holds waiting names (0069). One naming no sign wasn't
+ * written by the app, which is itself a row not as the app writes it: still a
+ * hold, as a row only ever adds caution.
+ */
+export const signOfWaiting = (reason: string): TamperSign => TAMPER_SIGNS.find((sign) => sign === reason) ?? 'row';
 
 /** A tamper sign, as the alarm names it: the organisation and the object's type and ID (IDs in lower case), and the sign. */
 export interface TamperFinding {
@@ -557,8 +568,9 @@ export interface SignedStates {
    * comes last of all (ADR-006 §6): every row is locked before this read,
    * and a row this transaction hasn't read through verifiedState yet is
    * refused after it (`lock_order`). A hold this
-   * process found but couldn't record yet reads as `tampered` with the sign
-   * that found it, until it is recorded.
+   * process found or polled but couldn't record yet reads as `tampered` with
+   * the sign that found it, until it is recorded; so, with `lock: 'head'`, does
+   * one any process left waiting (0069), read under that lock on the same trip.
    */
   integrityHold(tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck>;
   /**
@@ -583,8 +595,9 @@ export interface SignedStates {
   /**
    * The hold for showing, from its newest signed event and that event itself,
    * read as integrityHold reads it with no lock: nothing is decided on it.
+   * `asSigned`: what the log holds alone, with nothing waiting here counted: what a clear just committed answers.
    */
-  holdRecord(tx: AuditTransaction, orgId: string): Promise<HoldRecord>;
+  holdRecord(tx: AuditTransaction, orgId: string, as?: 'asSigned'): Promise<HoldRecord>;
   /**
    * Records an investigation of the organisation's hold (B3+-2b), by a person
    * (a user, never the app or an agent), only while the hold is a verified
@@ -682,13 +695,16 @@ export interface HoldingSignedStates extends SignedStates {
   /**
    * Puts the finding's organisation on hold, in this transaction (withTenant's
    * for it): HELD, recorded as its newest signed state, unless a verified
-   * HELD is already there (`already`). Over a hold that can't be verified the
+   * HELD is already there: `already` if it names this finding's record, else
+   * `named_elsewhere`, as clearing checks only what a hold names. Over a hold that can't be verified the
    * event is added all the same, so the hold can be set whatever has been
    * tampered with, as long as the chain takes new events. Locks the chain head
    * first, so two can't both start from the same state; the transaction takes
    * no other lock.
    */
-  hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'>;
+  hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already' | 'named_elsewhere'>;
+  /** Whether the hold is a verified HELD naming this finding's record, as `hold` would answer `already`. Takes no lock. */
+  holdNames(tx: AuditTransaction, finding: TamperFinding): Promise<boolean>;
 }
 
 type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
@@ -788,7 +804,10 @@ export function createSignedStates({
   readonly trail: AuditTrail;
   readonly logger: Logger;
   readonly onTamper: (finding: TamperFinding) => void;
-  /** The finding of a hold this process couldn't record yet for the organisation, if one is waiting. */
+  /**
+   * The finding of a hold this process couldn't record yet for the organisation, if one is waiting. Asked only when
+   * the hold reads verified CLEAR, which tells it any hold it was waiting behind has moved.
+   */
   readonly unrecorded: (orgId: string) => TamperFinding | undefined;
 }): HoldingSignedStates {
   const statuses = createStatusChanger({ logger });
@@ -1396,15 +1415,31 @@ export function createSignedStates({
   };
 
   const integrityHold = async (tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck> => {
+    let inTable: string | undefined;
     if (lock === 'head') {
-      await lockChainHead(tx, orgId);
+      inTable = await lockChainHeadSeeingWaiting(tx, orgId);
       headLocked.add(tx);
     }
     const { check } = await readHold(tx, orgId);
-    const waiting = unrecorded(orgId);
-    if (check.outcome !== 'clear' || waiting === undefined) return check;
+    if (check.outcome !== 'clear') return check;
+    const sign = unrecorded(orgId)?.sign ?? (inTable === undefined ? undefined : signOfWaiting(inTable));
+    if (sign === undefined) return check;
     // Found, but not recorded yet (withSignedStates tries again once this transaction ends): denied meanwhile.
-    return Object.freeze({ outcome: 'tampered', sign: waiting.sign });
+    return Object.freeze({ outcome: 'tampered', sign });
+  };
+
+  /** Whether the HELD state this event recorded names the finding's record. */
+  const heldStateNames = async (tx: AuditTransaction, eventId: string, finding: TamperFinding): Promise<boolean> => {
+    const event = await trail.recordedEvent(tx, finding.orgId, { eventId });
+    const details = event.kind === 'recorded' ? event.event.details : undefined;
+    return details?.foundOn === finding.subjectType && details.objectId === finding.objectId;
+  };
+
+  /** The hold as the log holds it. Read clear, what rested behind a hold is told, though its answer isn't used. */
+  const holdAsSigned = async (tx: AuditTransaction, orgId: string): Promise<HoldCheck> => {
+    const { check } = await readHold(tx, orgId);
+    if (check.outcome === 'clear') unrecorded(orgId);
+    return check;
   };
 
   const holdInvestigation = async (tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck> => {
@@ -1740,8 +1775,8 @@ export function createSignedStates({
       });
     },
 
-    async holdRecord(tx: AuditTransaction, orgId: string): Promise<HoldRecord> {
-      const check = await integrityHold(tx, orgId, 'none');
+    async holdRecord(tx: AuditTransaction, orgId: string, as?: 'asSigned'): Promise<HoldRecord> {
+      const check = as === undefined ? await integrityHold(tx, orgId, 'none') : await holdAsSigned(tx, orgId);
       if (check.outcome === 'tampered') return check;
       const found = await trail.recordedEvent(tx, orgId, { eventId: check.eventId });
       // The newest signed event was just read whole: gone or broken now is tampering in between.
@@ -1835,11 +1870,22 @@ export function createSignedStates({
       return Object.freeze({ outcome: 'cleared', version: recorded.version, eventId: recorded.eventId });
     },
 
-    async hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'> {
+    async holdNames(tx: AuditTransaction, finding: TamperFinding): Promise<boolean> {
+      const { check } = await readHold(tx, finding.orgId);
+      return check.outcome === 'held' && (await heldStateNames(tx, check.eventId, finding));
+    },
+
+    async hold(
+      tx: AuditTransaction,
+      finding: TamperFinding,
+      findings: number,
+    ): Promise<'set' | 'already' | 'named_elsewhere'> {
       const { orgId } = finding;
       await lockChainHead(tx, orgId);
       const { check, version } = await readHold(tx, orgId);
-      if (check.outcome === 'held') return 'already';
+      if (check.outcome === 'held') {
+        return (await heldStateNames(tx, check.eventId, finding)) ? 'already' : 'named_elsewhere';
+      }
       await recordHold(tx, orgId, version + 1, 'HELD', {
         actor: HOLDER,
         action: 'integrity_hold.set',

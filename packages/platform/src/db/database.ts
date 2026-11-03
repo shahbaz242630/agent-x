@@ -5,7 +5,7 @@
 import { Kysely, sql, type Transaction } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
-import type { Logger } from '../observability/index.ts';
+import { asNoWork, type Logger } from '../observability/index.ts';
 import { PINNED_SEARCH_PATH } from './search-path.ts';
 import { refuseTenantPreset, tenantCheckedDialect } from './tenant.ts';
 
@@ -164,10 +164,13 @@ export function createDatabase<Schema = unknown>(options: DatabaseConnectionOpti
   // the connection.
   pool.on('connect', (client) => {
     client.on('error', (error) => {
-      // Our own code left a transaction open: no fault of the database's, so an error of its own (S168 review).
-      if ((error as { code?: unknown }).code === IDLE_IN_TRANSACTION_ENDED)
-        logger.error('db.transaction_left_open', {});
-      else logger.warn('db.connection_lost', { err: error });
+      // A connection outlives the request or run that opened it, so its loss is no one's work (logger.ts).
+      asNoWork(() => {
+        // Our own code left a transaction open: no fault of the database's, so an error of its own (S168 review).
+        if ((error as { code?: unknown }).code === IDLE_IN_TRANSACTION_ENDED)
+          logger.error('db.transaction_left_open', {});
+        else logger.warn('db.connection_lost', { err: error });
+      });
     });
   });
   // pg-pool also passes an idle connection's error on to the pool, which must

@@ -1014,8 +1014,21 @@ export function signedEvent(event: AuditEvent): AuditEvent {
  * recordHoldEvent.
  */
 export async function lockChainHead(tx: AuditTransaction, orgId: string): Promise<void> {
-  const chain = chainOf(orgId);
-  await tx.selectFrom('audit.heads').select('seq').where('org_id', '=', chain.orgId).forNoKeyUpdate().execute();
+  await headLocking(tx, orgId).execute();
+}
+
+const headLocking = (tx: AuditTransaction, orgId: string) =>
+  tx.selectFrom('audit.heads').select('seq').where('org_id', '=', chainOf(orgId).orgId).forNoKeyUpdate();
+
+/**
+ * lockChainHead, with how a hold waits for the organisation read behind it on
+ * the same trip (4D2e D5): each its own statement, so the row is read on a
+ * snapshot taken once the lock is held, and one left while it was waited for is seen.
+ */
+export async function lockChainHeadSeeingWaiting(tx: AuditTransaction, orgId: string): Promise<string | undefined> {
+  const waiting = tx.selectFrom('directory.holds_waiting').select('reason').where('org_id', '=', orgId).limit(1);
+  const [, found] = await sendTogether(tx, [headLocking(tx, orgId), waiting]);
+  return (found.rows[0] as { readonly reason: string } | undefined)?.reason;
 }
 
 /**

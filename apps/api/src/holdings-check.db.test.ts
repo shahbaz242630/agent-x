@@ -7,7 +7,18 @@
 // request, and puts the organisation on hold: a reservation released,
 // lowered or deleted, a claim deleted or released. (A claim moved to another
 // order or supplier is refused even then, by 0039's `for_its_request` key.)
-import { createAuditTrail, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
+import { createHash } from 'node:crypto';
+
+import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
+import { createAuditTrail, pollHoldsWaiting, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
+import {
+  CLEAR_CONFIRM_OPERATION,
+  CLEAR_OPERATION,
+  createHoldClearings,
+  createHoldInvestigations,
+  createStepUpChallenges,
+  INVESTIGATE_OPERATION,
+} from '@agentx/core/modules/identity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import {
@@ -420,6 +431,121 @@ describe('the holdings check (E1)', () => {
     // The mismatch is alarmed: the organisation held, naming the request.
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
     expect(await whole(ids.next())).toBe(false);
+  });
+
+  it('a hold recorded from a row names the request as one found directly, so its mismatch still stops the clearing (D5)', async () => {
+    const { w, acting } = await ready();
+    const held = await requests(acting, w);
+    await pastTheApp(w, (owner) =>
+      owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [held.allowed]),
+    );
+    await database
+      .as('app')
+      .query(
+        "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'holding')",
+        [w.org, SPEND_REQUESTS.subject, held.allowed],
+      );
+
+    await pollHoldsWaiting(app, quiet());
+
+    const [event] = await database
+      .as('admin')
+      .query<{ details: string }>(
+        "select details from audit.events where org_id = $1 and action = 'integrity_hold.set'",
+        [w.org],
+      );
+    const { foundOn, objectId } = JSON.parse(event?.details ?? '{}') as { foundOn?: string; objectId?: string };
+    expect(foundOn).toBe(SPEND_REQUESTS.subject);
+    // What clearing asks of what the hold names: not whole, so the clearing is refused.
+    expect(
+      await withSignedStates(app, w.org, quiet(), (tx, states) =>
+        holdingsRecordChecks<DatabaseTransaction<Tables>>(keys, paymentHoldsOf)[SPEND_REQUESTS.subject](
+          tx,
+          states,
+          w.org,
+          objectId ?? '',
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('a real mismatch stops the clearing of a hold recorded from a row, until the claim is put back (D5)', async () => {
+    const { w, acting } = await ready();
+    const { allowed } = await requests(acting, w);
+    const setReleased = (released: boolean) =>
+      pastTheApp(w, (owner) =>
+        owner.query(
+          'update spend_requests.order_claims set released_at = case when $2::boolean then now() end where request_id = $1',
+          [allowed, released],
+        ),
+      );
+    await setReleased(true);
+    await database
+      .as('app')
+      .query(
+        "insert into directory.holds_waiting (org_id, subject_type, object_id, reason) values ($1, $2, $3, 'holding')",
+        [w.org, SPEND_REQUESTS.subject, allowed],
+      );
+    await pollHoldsWaiting(app, quiet());
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+
+    const keyed = (operation: string, key: string, payload: string) => ({
+      orgId: w.org,
+      client: { kind: 'user' as const, id: w.admin.userId },
+      operation,
+      key,
+      payload,
+    });
+    const finding = { conclusion: 'CAUSE_REMOVED', reference: 'INC-000001' } as const;
+    const written = await createHoldInvestigations({ database: app, keys, ids, logger: testLogger() }).record(
+      w.admin,
+      keyed(INVESTIGATE_OPERATION, 'investigate-1', JSON.stringify(finding)),
+      finding,
+      CORRELATION,
+    );
+    if (written.outcome !== 'written') throw new Error(`not recorded: ${JSON.stringify(written)}`);
+    const investigationId = written.investigation.id;
+    const challenges = createStepUpChallenges({ ids, clock });
+    // As start-web.ts builds it: the real check on what the hold names.
+    const clearings = createHoldClearings({
+      database: app,
+      keys,
+      ids,
+      challenges,
+      logger: testLogger(),
+      authorityTables: AUTHORITY_TABLES,
+      namedRecordChecks: holdingsRecordChecks<DatabaseTransaction<Tables>>(keys, paymentHoldsOf),
+    });
+    const asked = await clearings.ask(
+      w.admin,
+      keyed(CLEAR_OPERATION, 'ask-1', investigationId),
+      investigationId,
+      CORRELATION,
+    );
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    await challenges.recordEvidence(app, asked.stepUpChallengeId, w.admin.sessionId, {
+      authTime: clock.now(),
+      amr: ['pwd', 'user', 'mfa'],
+      idpSessionId: 'V1_2',
+      idTokenHash: createHash('sha256').update('an ID token').digest(),
+    });
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.recordHistoryChecked(tx, w.org, investigationId, 0),
+    );
+    const confirm = () =>
+      clearings.confirm(
+        w.admin,
+        keyed(CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${asked.stepUpChallengeId}`),
+        investigationId,
+        asked.stepUpChallengeId,
+        CORRELATION,
+      );
+
+    expect(await confirm()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+
+    await setReleased(false);
+    expect(await confirm()).toMatchObject({ outcome: 'cleared' });
   });
 
   it('passes requests on a payee key as their decisions sealed it (E1b)', async () => {

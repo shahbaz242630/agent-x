@@ -41,7 +41,7 @@ import type { FakeBank } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import { asAgentTraffic, isLockWaitRunOut } from '@agentx/platform/db';
-import type { Logger } from '@agentx/platform/observability';
+import { type Logger, withLogContext } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
@@ -333,6 +333,16 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   if (options.consoleFiles !== undefined) putConsoleInFront(app.server, options.consoleFiles);
+  // Every line of a request carries its ID, whichever logger writes it (logger.ts); before anything that could write
+  // one. Once is enough, a body arriving late included: Fastify's parser goes back into the scope it was entered from
+  // (an AsyncResource), which api-sockets.test.ts holds to account on a real socket, an upgrade being what could change it.
+  const inRequestScope = (request: FastifyRequest, _reply: FastifyReply, done: () => void): void => {
+    withLogContext({ correlationId: request.id }, done);
+  };
+  app.addHook('onRequest', inRequestScope);
+  // Again for the work after the answer (the activity row): when pipelined answers queue on a connection, Node finishes
+  // one from inside the one before, so its hooks would run as that other request's. api-sockets.test.ts proves it.
+  app.addHook('onResponse', inRequestScope);
   // First, so no route escapes it.
   await registerContract(app);
   await registerRateLimit(app, config.http.rateLimitPerMinute, trust);

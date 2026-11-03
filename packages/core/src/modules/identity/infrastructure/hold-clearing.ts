@@ -16,7 +16,9 @@
 //    memberships), so a hold is never cleared over a record still tampered
 //    with (a table whose rows only grow, spend requests, in the rows that can
 //    still act, so clearing stays bounded however long the history, and the
-//    record the hold names, whatever its status; the whole history, ended rows
+//    record the hold names, whatever its status, though one with no row and no
+//    history here has nothing to repair (4D2e D5; the line
+//    `integrity_hold.named_record_never_signed` says so); the whole history, ended rows
 //    too, checked in batches by the API's job after this investigation, D1c); then the organisation's whole audit chain checked (the S68 audit:
 //    every link, hash, MAC and its head), so a hold set for a chain found
 //    broken, an event deleted, say, is never cleared while it stays broken:
@@ -25,6 +27,13 @@
 //    the hash; the challenge consumed only for this session, action and hash;
 //    then the audit module clears it, reading the hold with the chain head's
 //    lock, last of all, and refusing a hold set or cleared since.
+//
+// What that way out rests on, and its limits. `verify` runs here with no anchor, and
+// anchors are held in memory alone until 4D2e E5, so a chain wound back to before a
+// record, with that record's row deleted, reads as never signed; a hold naming the
+// chain clears the same way, so this adds no new power. Findings of this process's own
+// can reach it too: `row` on a creation that rolled back, or a planted `unsigned` row
+// later deleted. That is acceptable, as nothing was ever authorised from such a row.
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
@@ -103,6 +112,12 @@ class ClearingRefused extends Refusal {
 
 type Tables = IdentityTables & DirectoryTables & AuditTables;
 
+/** The record a hold named that has no row and no history here. */
+interface NeverSigned {
+  readonly subjectType: string;
+  readonly objectId: string;
+}
+
 /**
  * What the hold names, checked beyond its signed state, in the clearing's
  * transaction: whole or not. A spend request's reservation and order claim
@@ -158,20 +173,31 @@ export function createHoldClearings<Theirs extends object = object>({
    * The record the hold was set for, verified whatever its status: a growing
    * table is checked above in its live rows alone, so an ended request the
    * hold names is read here. Locked last of the rows (a request's level, 8).
+   * What it gives back, the record, has no row and never had any history in
+   * this organisation's chain: nothing to repair (a forged row of the holds
+   * waiting, 0069, or a row being created that rolled back), and no reason to
+   * keep a hold for good. A row missing with any history refuses (`deleted`
+   * when signed).
    */
   const namedRecordWhole = async (
     tx: MembershipsTransaction,
     states: SignedStates,
     orgId: string,
     holdEventId: string,
-  ): Promise<void> => {
+  ): Promise<NeverSigned | undefined> => {
     const found = await trail.recordedEvent(tx, orgId, { eventId: holdEventId });
     if (found.kind !== 'recorded') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
     const { foundOn, objectId } = found.event.details;
     const table = authorityTables.find(({ subject }) => subject === foundOn);
     // The chain, or a subject no table holds: checked above, or nothing to read.
-    if (table === undefined || typeof objectId !== 'string') return;
+    if (table === undefined || typeof objectId !== 'string') return undefined;
     const check = await states.verifiedState(tx, table, { orgId, id: objectId }, 'share');
+    if (check.outcome === 'missing') {
+      // No signed state, so also none whose row is gone. Any event at all about it means it once was (a seal lost).
+      const history = await trail.recordedEvent(tx, orgId, { onlyAbout: { type: table.subject, id: objectId } });
+      if (history.kind !== 'none') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
+      return { subjectType: table.subject, objectId };
+    }
     if (check.outcome !== 'verified') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
     const theirs = namedRecordChecks[table.subject];
     // Opened on `database`, which holds their tables too.
@@ -179,6 +205,7 @@ export function createHoldClearings<Theirs extends object = object>({
     if (theirs !== undefined && !(await theirs(wider, states, orgId, objectId))) {
       throw new ClearingRefused(503, 'INTEGRITY_FAILED');
     }
+    return undefined;
   };
 
   /**
@@ -246,6 +273,7 @@ export function createHoldClearings<Theirs extends object = object>({
     },
 
     async confirm(admin, idempotent, investigationId, stepUpChallengeId, correlationId) {
+      let neverSigned: NeverSigned | undefined;
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, admin.sessionId);
         const whole = await states.verifyAll(tx, admin.orgId, authorityTables, objectsChecked);
@@ -262,7 +290,7 @@ export function createHoldClearings<Theirs extends object = object>({
         }
         await activeAdminId(tx, states, admin, ClearingRefused);
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
-        await namedRecordWhole(tx, states, admin.orgId, holdEventId);
+        neverSigned = await namedRecordWhole(tx, states, admin.orgId, holdEventId);
         const consumed = await challenges.consume(
           tx,
           held,
@@ -291,12 +319,19 @@ export function createHoldClearings<Theirs extends object = object>({
         return { status: 200, resourceId: cleared.eventId };
       });
       if (isUnwritten(done)) return done;
+      // Past the commit, so never of a clear that didn't happen; none on a replay, whose first answer said it.
+      if (neverSigned !== undefined) {
+        logger
+          .child({ correlationId, orgId: admin.orgId.toLowerCase() })
+          .warn('integrity_hold.named_record_never_signed', { ...neverSigned });
+      }
       // Answered from the hold as it now stands, on a replay too.
       const read = await withSignedStates(
         ours,
         admin.orgId,
         { keys, ids, logger: logger.child({ correlationId }), correlationId },
-        (tx, states) => states.holdRecord(tx, admin.orgId),
+        // As signed: a clear that committed says so, though the next record waits here to be the next hold.
+        (tx, states) => states.holdRecord(tx, admin.orgId, 'asSigned'),
       );
       if (read.outcome === 'tampered') return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
       return { outcome: 'cleared', hold: read };

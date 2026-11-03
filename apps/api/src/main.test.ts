@@ -6,7 +6,7 @@ import path from 'node:path';
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
 import { PURPOSES } from '@agentx/platform/keys';
-import type { Output } from '@agentx/platform/observability';
+import { type Output, withLogContext } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, writeTestKeys } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -360,16 +360,47 @@ afterEach(() => {
   for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true });
 });
 
+/** Every process a test made, to be stopped when it ends. */
+const hosts: FakeProcess[] = [];
+
 class FakeProcess extends EventEmitter implements ApiProcess {
+  stopAsked = false;
   readonly written: string[] = [];
   readonly stdout: Output = { write: (chunk) => this.written.push(String(chunk)) > 0 };
   readonly stderr: Output = { write: (chunk) => this.written.push(String(chunk)) > 0 };
   readonly exits: number[] = [];
   exitCode: number | string | null | undefined = undefined;
 
+  constructor() {
+    super();
+    hosts.push(this);
+  }
+
+  override emit(event: string | symbol, ...args: unknown[]): boolean {
+    if (event === 'SIGTERM' || event === 'SIGINT') this.stopAsked = true;
+    return super.emit(event, ...args);
+  }
+
   exit(code: number): void {
     this.exits.push(code);
   }
+}
+
+/**
+ * Stops a process as production does, so its timers end with its test: a leadership left running would renew onto
+ * `fake.steps`, which the whole file shares. One whose stop was already asked for only needs it finished; one that
+ * refused to start never listened for a signal, and a crash's exit, a fake one here, stopped nothing.
+ */
+async function stopProcess(host: FakeProcess): Promise<void> {
+  if (host.listenerCount('SIGTERM') === 0) return;
+  const exitsBefore = host.stopAsked ? 0 : host.exits.length;
+  host.emit('SIGTERM', 'SIGTERM');
+  await vi.waitFor(
+    () => {
+      expect(host.exits.length).toBeGreaterThan(exitsBefore);
+    },
+    { timeout: 10_000 },
+  );
 }
 
 const servers: FastifyInstance[] = [];
@@ -409,6 +440,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  await Promise.all(hosts.splice(0).map(stopProcess));
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
@@ -434,6 +466,7 @@ async function start(env: Readonly<Record<string, string>> = ENV) {
 const EACH_PROCESS: [string, number][] = [
   ['recorder', 60_000],
   ['round_trips', 15_000],
+  ['holds_waiting', 5_000],
   ['pulse', 60_000],
 ];
 
@@ -1049,6 +1082,13 @@ describe('4D2e D: the first try at the lease', () => {
     expect(fake.steps).not.toContain('lease taken');
   });
 
+  it('4D2e Stage F the first zone pass, before listening and off the timer, is a run: its lines say so', async () => {
+    const { capture } = await start();
+    const passLines = capture.lines().filter((line) => String(line.event).startsWith('agent_zones.'));
+    expect(passLines.map((line) => line.event)).not.toEqual([]);
+    for (const line of passLines) expect(line.runId).toEqual(expect.any(String));
+  });
+
   it('a stop while it goes unanswered is a clean stop: exit 0, nothing started, nothing listening', async () => {
     lease.take = () => new Promise(() => undefined);
     const serversBefore = built.length;
@@ -1358,5 +1398,52 @@ describe('the API logs a crash before it exits', () => {
         err: expect.objectContaining({ type: 'TypeError', message: 'bad state for [email]' }) as unknown,
       }),
     );
+  });
+
+  it.each([
+    [
+      'a throw in a timer',
+      'uncaughtException',
+      () => {
+        setTimeout(() => {
+          throw new TypeError('bad state');
+        }, 0);
+      },
+    ],
+    [
+      'a rejection no one handles',
+      'unhandledRejection',
+      () => {
+        void Promise.reject(new TypeError('bad state'));
+      },
+    ],
+  ])('4D2e Stage F names the work, without claiming it, on %s made inside it', async (_how, origin, fail) => {
+    const { host, capture } = await start();
+    // The real process's event, as Node raises it in the failure's own context, not the runner's: it would fail the test.
+    const kinds = ['uncaughtException', 'unhandledRejection'] as const;
+    const runners = kinds.map((kind) => [kind, process.listeners(kind as 'uncaughtException')] as const);
+    for (const kind of kinds) process.removeAllListeners(kind);
+    const raised = new Promise<void>((resolve) => {
+      process.once('uncaughtException', (error, from) => {
+        host.emit('uncaughtException', error, from);
+        resolve();
+      });
+    });
+    try {
+      withLogContext({ correlationId: 'the-work', runId: 'its-run' }, fail);
+      await raised;
+    } finally {
+      for (const [kind, listeners] of runners) for (const listener of listeners) process.on(kind, listener);
+    }
+    const crashed = capture.lines().find((line) => line.event === 'api.crashed');
+    expect(crashed).toMatchObject({ origin, workAtCrash: { correlationId: 'the-work', runId: 'its-run' } });
+    expect(crashed).not.toHaveProperty('correlationId');
+    expect(crashed).not.toHaveProperty('runId');
+  });
+
+  it('4D2e Stage F has no work to name on a crash outside any', async () => {
+    const { host, capture } = await start();
+    host.emit('uncaughtException', new TypeError('bad state'), 'uncaughtException');
+    expect(capture.lines().find((line) => line.event === 'api.crashed')).not.toHaveProperty('workAtCrash');
   });
 });

@@ -264,6 +264,27 @@ export const PLAIN_WORDS = {
     broke: 'Whatever met it was refused or stopped, and an organisation found tampered with is put on hold.',
     next: 'Treat it as a possible break-in and follow the incident runbook straight away.',
   },
+  'audit.hold_not_kept': {
+    happened: 'A security hold that could not be recorded could not be written to the waiting list either.',
+    broke: 'Only the process that found it knows of it, and a restart would forget it.',
+    next: 'Check the database first. The process keeps trying both, and the tamper alarm before this line still stands.',
+  },
+  'audit.holds_waiting_past_limit': {
+    happened: 'The list of security holds waiting is longer than honest work would leave.',
+    broke: 'At its read limit a process reads only part. Payments read the list themselves.',
+    next: 'Treat it as tampering: find who can write to the database, delete the forged rows, then clear any hold once the row-gone alarms stop.',
+  },
+  'audit.holds_waiting_past_memory': {
+    happened: 'A process left some of the list of security holds waiting out of its memory, at its limit.',
+    broke: 'Nothing passes: they stay on the list, which payments read.',
+    next: 'Treat it as tampering: find who can write to the database, delete the forged rows, then clear any hold once the row-gone alarms stop.',
+  },
+  'audit.holds_waiting_unread': {
+    happened: 'A process could not read the list of security holds waiting to be recorded.',
+    broke:
+      'It learns of a hold left by another process a little later. Payments still read the list themselves, so none goes through on this.',
+    next: 'Nothing if it passes; it tries again in 5 seconds. If it repeats, check the database.',
+  },
   'audit.integrity_hold_set': {
     happened: 'An organisation was put on its security hold because something of its was found tampered with.',
     broke: 'Its payments are not passed to the payment partner until an admin of the organisation clears the hold.',
@@ -779,6 +800,11 @@ export const PLAIN_WORDS = {
     happened: "An admin tried to clear the organisation's security hold, but its audit trail is still broken.",
     broke: 'The clearing was refused, so the hold stays on.',
     next: "A broken audit trail needs an operator's restore, not an admin's button: follow the incident runbook.",
+  },
+  'integrity_hold.named_record_never_signed': {
+    happened: "A security hold was cleared that names a record this organisation's chain never signed.",
+    broke: 'Nothing: the record has no row and no history, so there was nothing to repair.',
+    next: 'Read the tamper alarm from when the hold was set: it may have come from a forged row.',
   },
   'log.invalid_event': {
     happened: 'Part of the app wrote a log line with a badly formed name.',

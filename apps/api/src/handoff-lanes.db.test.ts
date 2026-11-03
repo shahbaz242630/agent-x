@@ -24,6 +24,7 @@ import {
 import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import type { Gate } from './fair-lanes.ts';
 import { createHandoff, HEARTBEAT_STALE_MS, QUEUE_STALE_MS, handoffDatabaseGate } from './handoff.ts';
 import { handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
@@ -412,6 +413,30 @@ const lockWaits = async () => {
 
 const settleTicks = () => new Promise((resolve) => setTimeout(resolve, 200));
 
+/**
+ * The gate, with each organisation's Tx A (its call after its page's read) joining in the order listed. A read that
+ * opens a new connection finishes after those behind it, and its Tx A then queues behind theirs; held rows would then
+ * fill the gate until their statements time out, and the test would be about something else.
+ */
+function gateInOrder(order: readonly string[], gate: Gate) {
+  const read = new Set<string>();
+  const joined = new Map(order.map((org) => [org, Promise.withResolvers<undefined>()]));
+  const inOrderGate: Gate = {
+    async run(key, work, ahead = false) {
+      if (ahead || !read.has(key)) {
+        read.add(key);
+        return gate.run(key, work, ahead);
+      }
+      await joined.get(order[order.indexOf(key) - 1] ?? '')?.promise;
+      // The real gate queues it before this returns, so the next is always behind it.
+      const going = gate.run(key, work);
+      joined.get(key)?.resolve(undefined);
+      return going;
+    },
+  };
+  return { gate: inOrderGate, allJoined: joined.get(order.at(-1) ?? '')?.promise };
+}
+
 describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () => {
   it('two Tx As in one organisation make one instruction each', async () => {
     const { w, requests } = await worldWith(2);
@@ -765,16 +790,23 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
     const [first, second, third, fourth, fifth, sixth] = worlds;
     if (!first || !second || !third || !fourth || !fifth || !sixth) throw new Error('no worlds');
     // The third's and fourth's rows held: their Tx As fill the gate, waiting. The fifth's and sixth's held too, and queued
-    // behind them. Each gets to its Tx A in the order listed, the first two already at the bank.
+    // behind them. Each joins the gate in the order listed, the first two already at the bank.
     const held = await Promise.all(
       [third, fourth, fifth, sixth].map(({ w, requests }) => rowHeld(w, requests[0] ?? '')),
     );
     const allWorlds = worlds.map(({ w }) => w);
     const hanging = railHanging(allWorlds);
-    const run = handoffOver(allWorlds, hanging.rail, { limits: { total: 6, perOrganisation: 1 } }).run();
+    const inOrder = gateInOrder(
+      allWorlds.map(({ org }) => org),
+      handoffDatabaseGate(6),
+    );
+    const run = handoffOver(allWorlds, hanging.rail, {
+      limits: { total: 6, perOrganisation: 1 },
+      databaseGate: inOrder.gate,
+    }).run();
     await expect.poll(() => hanging.calls.length, { timeout: 20_000 }).toBe(2);
     await waitUntilQueued(database.as('admin'), 2);
-    await settleTicks();
+    await inOrder.allJoined;
 
     // The first two's answers come, after the fifth and sixth at the gate. Their Tx Bs join the queue.
     hanging.calls[0]?.answer();
