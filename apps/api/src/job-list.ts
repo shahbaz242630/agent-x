@@ -37,7 +37,7 @@ import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
-import { createHandoff, HANDOFF_EVERY_MS, handoffDatabaseGate } from './handoff.ts';
+import { createHandoff, HANDOFF_EVERY_MS, handOffDue, handoffDatabaseGate, handOffSweepDue } from './handoff.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
 import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
@@ -46,8 +46,13 @@ import { CARRY_REST_EVERY_MS, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
-import { createOrgWorkRediscovery, ORG_WORK_REDISCOVERY_EVERY_MS } from './org-work.ts';
-import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
+import {
+  createOrgWorkRediscovery,
+  markedOrganisations,
+  ORG_WORK_REDISCOVERY_EVERY_MS,
+  withOrgWork,
+} from './org-work.ts';
+import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
@@ -207,18 +212,41 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   };
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
+  // Each visits only the organisations its marks say have work, and settles them after (4D2e D7).
+  const handOffMarks = markedOrganisations({ job: 'hand_off', nextDue: handOffDue, database, logger });
+  const sweepMarks = markedOrganisations({ job: 'hand_off_sweep', nextDue: handOffSweepDue, database, logger });
   const handoff =
     railWork &&
-    createHandoff({
-      ...clocked,
-      ...railWork,
-      outbox,
-      // The anchor check starts before the hand-off's first run: this list's order.
-      anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
-    });
+    withOrgWork(
+      [handOffMarks, sweepMarks],
+      createHandoff({
+        ...clocked,
+        ...railWork,
+        list: handOffMarks.list,
+        sweepList: sweepMarks.list,
+        outbox,
+        // The anchor check starts before the hand-off's first run: this list's order.
+        anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
+      }),
+    );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
-  // the payments the partner's messages name first (E1b).
-  const paymentChecks = railWork && createPaymentChecks({ ...clocked, ...railWork, outbox, events: providerEvents });
+  // the payments the partner's messages name first (E1b). Its watch's laps take every mark, the paid ones' a week on.
+  const checks = { job: 'payment_check', nextDue: paymentCheckDue, database, logger } as const;
+  const checkMarks = markedOrganisations(checks);
+  const watchMarks = markedOrganisations({ ...checks, due: 'any' });
+  const paymentChecks =
+    railWork &&
+    withOrgWork(
+      [checkMarks, watchMarks],
+      createPaymentChecks({
+        ...clocked,
+        ...railWork,
+        list: checkMarks.list,
+        watchList: watchMarks.list,
+        outbox,
+        events: providerEvents,
+      }),
+    );
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).

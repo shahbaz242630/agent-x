@@ -1177,8 +1177,9 @@ describe('approved requests left standing, said for the queue-age alert (gate H8
     // First, one waiting for its supplier's payee (a reason the run knows); then one whose Tx A fails every run.
     const waiting = await ask(acting, w, { amount: ALLOWED(), supplierId: w.suppliers[1] ?? '' });
     const stuck = await ask(acting, w, { amount: ALLOWED() });
-    // A run's transactions: the pause (1), the approved requests (2), each one's Tx A (3, 4), then the stale count.
-    const failing = failingInEachRun(4);
+    // A run's transactions from its list (the pause read before it): the approved requests (1), each one's Tx A (2, 3),
+    // then the stale count.
+    const failing = failingInEachRun(3);
     const job = createHandoff({
       list: () => {
         failing.run.opened = 0;

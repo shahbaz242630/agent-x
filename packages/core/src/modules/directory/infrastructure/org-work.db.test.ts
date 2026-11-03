@@ -14,7 +14,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { markOrgWork, settleOrgWork } from './org-work.ts';
+import { dueOrgWork, markOrgWork, settleOrgWork } from './org-work.ts';
 import type { DirectoryTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -446,5 +446,57 @@ describe('two transactions marking two jobs in opposite order', () => {
     await committing;
     expect(await admin().query('select 1 from audit.marked_rows where org_id = $1', [org])).toHaveLength(2);
     expect(Object.keys(await marksOf()).toSorted()).toEqual(['hand_off', 'payment_check']);
+  });
+});
+
+describe('which organisations a job takes from its marks', () => {
+  // A job no other test here marks, so what comes back is this test's alone.
+  const job = 'hand_off_sweep';
+  const orgsMarked = async (count: number): Promise<string[]> => {
+    await admin().query(`delete from directory.org_work where job = $1`, [job]);
+    const orgs: string[] = [];
+    for (let at = 0; at < count; at += 1) {
+      next += 1;
+      orgs.push(`0199a0f0-0000-7000-8000-${String(next).padStart(12, '0')}`);
+    }
+    await admin().query('insert into directory.orgs (org_id) select unnest($1::uuid[])', [orgs]);
+    return orgs;
+  };
+  /** Marks each organisation due `ago` seconds before now (negative: ahead), on Postgres's clock. */
+  const markedAgo = (orgId: string, ago: number) =>
+    admin().query(
+      `insert into directory.org_work (org_id, job, due_at) values ($1, $2, now() - make_interval(secs => $3))`,
+      [orgId, job, ago],
+    );
+
+  it('those due by now, due longest first, at most as many as asked, each with its marks as read', async () => {
+    const [a = '', b = '', c = '', d = ''] = await orgsMarked(4);
+    await markedAgo(a, 10);
+    await markedAgo(b, 30);
+    await markedAgo(c, 20);
+    await markedAgo(d, -60);
+    const all = await dueOrgWork(app, job, { most: 10, due: 'now' });
+    expect(all.map(({ orgId }) => orgId)).toEqual([b, c, a]);
+    expect(all[0]?.marks).toBe((await marksOf(b))[job]?.marks);
+    expect((await dueOrgWork(app, job, { most: 2, due: 'now' })).map(({ orgId }) => orgId)).toEqual([b, c]);
+  });
+
+  it('every mark, due or not yet, with `any`, the same order and limit', async () => {
+    const [a = '', b = ''] = await orgsMarked(2);
+    await markedAgo(a, -60);
+    await markedAgo(b, 5);
+    expect((await dueOrgWork(app, job, { most: 10, due: 'any' })).map(({ orgId }) => orgId)).toEqual([b, a]);
+    expect((await dueOrgWork(app, job, { most: 1, due: 'any' })).map(({ orgId }) => orgId)).toEqual([b]);
+  });
+
+  it("two due at once are taken by organisation, and only this job's", async () => {
+    const [a = '', b = ''] = await orgsMarked(2);
+    const at = new Date('2026-11-03T08:00:00Z');
+    for (const orgId of [b, a]) {
+      await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, $2, $3)`, [orgId, job, at]);
+    }
+    await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'hand_off', $2)`, [a, at]);
+    const taken = await dueOrgWork(app, job, { most: 10, due: 'now' });
+    expect(taken.map(({ orgId }) => orgId)).toEqual([a, b].toSorted());
   });
 });

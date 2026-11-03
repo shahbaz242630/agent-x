@@ -63,7 +63,7 @@
 // finds it so, the payment staying waiting, and its admins are emailed once
 // (`bank_lost`, partner S170): following it up is the user's with their bank,
 // decision 38.
-import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
+import { type AuditTables, type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import {
@@ -150,15 +150,55 @@ const STILL_UNKNOWN_MS = DAY_MS;
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
 
-/** When the checks next have work in an organisation, not run: now if a payment is under way. */
-export const paymentCheckDue = (tx: DatabaseTransaction<TransactionsTables>, orgId: string) =>
-  transactionDueNow(tx, orgId, UNDER_WAY);
-
 /**
  * The settled ones still watched for PAID_WATCH_MS from their last move: paid,
  * or failed (two admins' mark among them, H10: a week from the mark, gate H3).
  */
 const WATCHED = ['SUCCEEDED', 'FAILED'] as const;
+
+/** How long a watch lasts, as Postgres reads an interval (its type from date_add's and date_subtract's, Postgres 16 on). */
+const PAID_WATCH = `${String(PAID_WATCH_MS / 1000)} seconds`;
+
+type DueTx = DatabaseTransaction<TransactionsTables & AuditTables>;
+
+/**
+ * Whether the organisation has a payment paid or failed whose last move was within PAID_WATCH_MS, on Postgres's clock:
+ * from that week's events, each to the payment whose newest it is (0048's index, then the key), so the read is a week's
+ * events, never every payment the organisation has made.
+ */
+const watchedIn = (tx: DueTx, orgId: string) =>
+  tx
+    .selectFrom('audit.events as e')
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- whether one stands alone, for choosing when to look
+    .innerJoin(`${TRANSACTIONS.table} as t`, (join) =>
+      join.onRef('t.org_id', '=', 'e.org_id').onRef('t.id', '=', 'e.subject_id').onRef('t.state_event_id', '=', 'e.id'),
+    )
+    .select('t.id')
+    .where('e.org_id', '=', orgId)
+    .where((eb) =>
+      eb('e.recorded_at', '>=', eb.fn<Date>('pg_catalog.date_subtract', [eb.fn('pg_catalog.now'), eb.val(PAID_WATCH)])),
+    )
+    .where('e.subject_type', '=', TRANSACTIONS.subject)
+    .where('t.status', 'in', WATCHED);
+
+/**
+ * When the checks next have work in an organisation, not run: now if a payment is under way; a watch's length on if
+ * one is only watched, as its laps take every mark, due or not (4D2e D7), and the regular runs none; null if neither.
+ * Every payment watched was born under way and marked then, so its mark stands from there for as long as this says.
+ */
+export const paymentCheckDue = (tx: DueTx, orgId: string) =>
+  tx.selectNoFrom((eb) => {
+    const now = eb.fn<Date>('pg_catalog.now');
+    return eb
+      .case()
+      .when(eb.exists(transactionDueNow(tx, orgId, UNDER_WAY)))
+      .then(now)
+      .when(eb.exists(watchedIn(tx, orgId)))
+      .then(eb.fn<Date>('pg_catalog.date_add', [now, eb.val(PAID_WATCH)]))
+      .else(null)
+      .end()
+      .as('due');
+  });
 
 /** How many of the partner's messages a run takes, oldest first: the rest wait for the next. */
 const NUDGES_A_RUN = 100;
@@ -234,6 +274,8 @@ interface Lap {
   readonly share: number;
   /** How long it may take before it is said. */
   readonly outlastsMs: number;
+  /** Its organisations as it begins, where not the run's own (those under way): the watch's take the paid ones too. */
+  readonly begins?: () => Promise<readonly string[]>;
   /** The organisations yet to have their turn: empty between laps. */
   left: readonly string[];
   startedAt: number;
@@ -273,6 +315,7 @@ export interface PaymentChecks {
 
 export function createPaymentChecks({
   list,
+  watchList,
   database,
   rail,
   outbox,
@@ -289,8 +332,10 @@ export function createPaymentChecks({
   runBudgetMs = RUN_BUDGET_MS,
   stopWaitMs = STOP_WAIT_MS,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those marked due (org-work.ts), which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
+  /** Those the watch's lap takes as it begins, read only then: every one marked, due or not; the run's own unless given. */
+  readonly watchList?: () => Promise<readonly string[]>;
   readonly database: Database<CheckTables>;
   readonly rail: FinancialRailAdapter;
   /** Where a payment that SUCCEEDED queues its supplier's remittance email (`settlePayment`). */
@@ -673,8 +718,15 @@ export function createPaymentChecks({
   const everyRunLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(FRESH_MS), watchPaid: false }));
   const daysLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(DAY_MS), watchPaid: false }));
 
-  const lapOf = (sweep: string, due: Due, share: number, outlastsMs: number): Lap => ({
+  const lapOf = (
+    sweep: string,
+    due: Due,
+    share: number,
+    outlastsMs: number,
+    begins?: () => Promise<readonly string[]>,
+  ): Lap => ({
     sweep,
+    ...(begins === undefined ? {} : { begins }),
     lanes: lanesOf(() => due),
     share,
     outlastsMs,
@@ -690,6 +742,7 @@ export function createPaymentChecks({
       { statuses: UNDER_WAY.filter((status) => status !== 'UNKNOWN'), since: undefined, watchPaid: true },
       WATCH_LAP_SHARE,
       PAID_WATCH_MS,
+      watchList,
     ),
   ];
 
@@ -716,6 +769,17 @@ export function createPaymentChecks({
     for (const lap of laps) await lapPart(lap, signal);
   };
 
+  /** A lap's organisations as it begins: its own read's, or the run's; one that can't be read is said, and waits a lap. */
+  const lapBegun = async ({ begins }: Lap, orgs: readonly string[]): Promise<readonly string[] | undefined> => {
+    if (begins === undefined) return orgs;
+    try {
+      return await begins();
+    } catch (error) {
+      logger.error('payment_check.run_failed', { err: error });
+      return undefined;
+    }
+  };
+
   return {
     async run(signal) {
       let orgs: readonly string[];
@@ -730,7 +794,9 @@ export function createPaymentChecks({
       runs += 1;
       // The first run after a start is among these, so none waits half an hour for a restart. One still going keeps on.
       for (const lap of n % ALL_EVERY === 0 ? laps.filter(({ left }) => left.length === 0) : []) {
-        lap.left = orgs;
+        const begun = await lapBegun(lap, orgs);
+        if (begun === undefined) continue;
+        lap.left = begun;
         lap.startedAt = clock.now().getTime();
         lap.said = false;
       }
