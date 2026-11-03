@@ -645,6 +645,42 @@ describe('ADR-011 §7 one line per request: route pattern, status and duration o
     ]);
   });
 
+  it('Stage F: sampling takes only an answered line: every warning and error stays, and each line kept names its request', async () => {
+    const linesWith = async (logSample?: LogSample) => {
+      const { app, lines } = await setup({ ...(logSample && { logSample }), says: ['handoff.sent'] });
+      for (const url of ['/test/says', '/nothing-here', '/test/fail', '/test/lock-wait', '/test/pool-wait']) {
+        await app.inject(url);
+      }
+      const written = lines();
+      await app.close();
+      return written;
+    };
+    const brief = ({ level, event, status, correlationId }: Record<string, unknown>) => ({
+      level,
+      event,
+      status,
+      correlationId,
+    });
+
+    const every = await linesWith();
+    const sampled = await linesWith({ oneIn: 20, keeps: () => false });
+
+    expect(every.filter(({ level }) => level === 'warn' || level === 'error').length).toBeGreaterThan(0);
+    expect(sampled.map(brief)).toEqual(
+      every.map(brief).filter(({ event, status }) => !(event === REQUEST_COMPLETED && status === 200)),
+    );
+    for (const line of sampled) expect(line.correlationId).toEqual(expect.any(String));
+
+    // One in the sample: its own line says so, and names the same request as the work it did.
+    const inSample = await linesWith({ oneIn: 20, keeps: () => true });
+    const work = inSample.find(({ event }) => event === 'handoff.sent');
+    expect(work?.correlationId).toEqual(expect.any(String));
+    expect(inSample.find(({ event, status }) => event === REQUEST_COMPLETED && status === 200)).toMatchObject({
+      sampleOf: 20,
+      correlationId: work?.correlationId,
+    });
+  });
+
   it("writes no other line for an ordinary request (Fastify's own request lines are replaced)", async () => {
     const { app, lines } = await setup();
     await app.inject('/health');

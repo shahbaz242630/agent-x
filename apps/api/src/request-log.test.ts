@@ -147,7 +147,9 @@ describe('4D2e Stage F the request log, sampled', () => {
   it.each([[200], [304]])('writes a %i in the sample, saying how many it stands for', (status) => {
     const { log, request, reply, lines } = setup(status, '/v1/agent', null, IN_THE_SAMPLE);
     log.requestCompleted(null, request, reply);
-    expect(lines()).toEqual([expect.objectContaining({ event: REQUEST_COMPLETED, status, sampleOf: 20 })]);
+    expect(lines()).toEqual([
+      expect.objectContaining({ event: REQUEST_COMPLETED, status, sampleOf: 20, correlationId: 'c-1' }),
+    ]);
   });
 
   it.each([[400], [401], [403], [404], [409], [422], [429], [500], [503]])(
@@ -156,7 +158,7 @@ describe('4D2e Stage F the request log, sampled', () => {
       const { log, request, reply, lines } = setup(status, '/v1/agent', null, NOTHING);
       log.requestCompleted(null, request, reply);
       expect(lines()).toHaveLength(1);
-      expect(lines()[0]).toMatchObject({ status });
+      expect(lines()[0]).toMatchObject({ status, correlationId: 'c-1' });
       expect(lines()[0]).not.toHaveProperty('sampleOf');
     },
   );
@@ -164,13 +166,13 @@ describe('4D2e Stage F the request log, sampled', () => {
   it('a failure is never sampled: an answer that failed on its way out, though its status said 200', () => {
     const { log, request, reply, lines } = setup(200, '/v1/agent', null, NOTHING);
     log.requestCompleted(new Error('socket hang up'), request, reply);
-    expect(lines()).toEqual([expect.objectContaining({ level: 'warn', status: 200 })]);
+    expect(lines()).toEqual([expect.objectContaining({ level: 'warn', status: 200, correlationId: 'c-1' })]);
   });
 
   it('a failure is never sampled: a request cut off', () => {
     const { requestLines, request, lines } = setup(200, '/v1/agent', null, NOTHING);
     requestLines.aborted(request);
-    expect(lines()).toEqual([expect.objectContaining({ event: REQUEST_ABORTED })]);
+    expect(lines()).toEqual([expect.objectContaining({ event: REQUEST_ABORTED, correlationId: 'c-1' })]);
   });
 
   it.each([['/v1/auth/sign-in'], ['/v1/auth/callback'], ['/v1/auth/step-up'], ['/v1/auth/sign-out']])(
