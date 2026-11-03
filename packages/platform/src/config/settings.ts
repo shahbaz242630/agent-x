@@ -304,7 +304,7 @@ const SETTINGS = {
   // seen, so the window is kept short.
   AGENTX_AUDIT_ANCHOR_SECONDS: {
     schema: wholeNumber({
-      // 6 minutes or more, with a run's 4, its last write's 1 and lines 9 late, passes the 20 of the dead-man alert (D3).
+      // Under 6 minutes keeps a run's 4, its last write's 1 and lines 9 late well inside the 30 of the dead-man alert (D3).
       min: 60,
       max: 359,
       unit: 'seconds',

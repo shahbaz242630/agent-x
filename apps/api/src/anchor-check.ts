@@ -27,7 +27,7 @@
 // otherwise keep one chain from ever being compared. Past it, `unchecked`, no hold. A run stops at four minutes, ends with its
 // line whatever is under way, and the next goes on from where it stopped. So the
 // check's line comes at most every 10 minutes at the default interval: 5 between runs,
-// 4 of run, 1 for the last write. With lines up to 9 minutes late, the 20 minutes the
+// 4 of run, 1 for the last write. With lines up to 9 minutes late, the 30 minutes the
 // outside's dead-man rule allows hold (D3), and the setting refuses an interval that
 // wouldn't.
 //

@@ -41,6 +41,7 @@ export type RuleId =
   | 'workspace'
   | 'log-quota-alerts'
   | 'alert-counts-only'
+  | 'alert-window'
   | 'alert-runbook'
   | 'alert-delivery'
   | 'resource-logs'
@@ -2333,7 +2334,7 @@ const workspaceAndQuota: Check = (snapshot, _expected, add) => {
  * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
  */
 const DEAD_MEN = [
-  { event: 'audit.anchor_check_done', windowSize: 'PT20M', severity: 1, autoMitigate: false },
+  { event: 'audit.anchor_check_done', windowSize: 'PT30M', severity: 1, autoMitigate: false },
   { event: 'jobs.pulse', windowSize: 'PT15M', severity: 2, autoMitigate: true },
 ] as const;
 
@@ -2377,8 +2378,26 @@ const deadManAlerts: Check = (snapshot, expected, add) => {
   }
 };
 
+/** The look-back windows Azure accepts on a log alert; any other is refused only at deploy, after the what-if (S171). */
+const ALERT_WINDOWS = new Set(
+  [5, 10, 15, 30, 45, 60, 120, 180, 240, 300, 360, 720, 1440, 2880].map((minutes) =>
+    minutes < 60
+      ? `PT${String(minutes)}M`
+      : minutes < 1440
+        ? `PT${String(minutes / 60)}H`
+        : `P${String(minutes / 1440)}D`,
+  ),
+);
+
 const alertRules: Check = (snapshot, expected, add) => {
   for (const alert of ofType(snapshot, TYPES.alert)) {
+    if (!ALERT_WINDOWS.has(String(at(alert.properties, 'windowSize')))) {
+      add({
+        rule: 'alert-window',
+        resource: alert.name,
+        message: `its windowSize must be one Azure accepts (${[...ALERT_WINDOWS].join(', ')}): Azure refuses any other only when the deploy runs`,
+      });
+    }
     const criteria = list(at(alert.properties, 'criteria', 'allOf'));
     const countsOnly =
       alert.kind === 'LogAlert' &&
