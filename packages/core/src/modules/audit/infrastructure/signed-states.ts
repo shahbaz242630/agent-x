@@ -218,7 +218,7 @@ export interface CheckedTable extends SignedStateTable {
  * all verified, with how many there were; or some tampered with, each finding
  * named (every alarm is already raised).
  */
-export type WholeCheck =
+type WholeCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
   | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] };
 
@@ -235,7 +235,7 @@ export type OrganisationCheck = WholeCheck | { readonly outcome: 'too_many'; rea
  * S170), each such table's count handed to `counted`, so its caller can say
  * when one is filling.
  */
-export interface PagedCheck {
+interface PagedCheck {
   readonly counted: (subjectType: string, objects: number) => void;
 }
 
