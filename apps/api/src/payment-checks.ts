@@ -94,12 +94,13 @@ import {
   noteTransactionFacts,
   type ProviderFacts,
   TRANSACTIONS,
+  transactionDueNow,
   type TransactionEvent,
   type TransactionsTables,
   type TransactionStatus,
 } from '@agentx/core/modules/transactions';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database } from '@agentx/platform/db';
+import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -148,6 +149,10 @@ const STILL_UNKNOWN_MS = DAY_MS;
 
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
+
+/** When the checks next have work in an organisation, not run: now if a payment is under way. */
+export const paymentCheckDue = (tx: DatabaseTransaction<TransactionsTables>, orgId: string) =>
+  transactionDueNow(tx, orgId, UNDER_WAY);
 
 /**
  * The settled ones still watched for PAID_WATCH_MS from their last move: paid,

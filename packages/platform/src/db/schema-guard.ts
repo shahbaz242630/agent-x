@@ -251,11 +251,8 @@ const markTrigger = (table: string, name: string, condition: string, job: string
   body: MARK_BODY,
 });
 
-/**
- * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
- * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+/** The marks' triggers (0072): on the tables they name, and each as written. */
+export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
   markTrigger(
     'spend_requests.requests',
     'marks_hand_off',
@@ -278,6 +275,13 @@ const COMING_TRIGGERS: readonly WrittenTrigger[] = [
     '0 seconds',
   ),
 ];
+
+/**
+ * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
+ * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
+ * None now.
+ */
+const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
@@ -455,6 +459,15 @@ export interface SchemaGuardOptions {
   readonly fixedAtCreation?: Readonly<Record<string, readonly string[]>>;
   /** The triggers a coming migration adds to a table already built. Defaults to the product's own. */
   readonly comingTriggers?: readonly WrittenTrigger[];
+  /**
+   * What this image was built knowing: its triggers, tables and CHECKs. Defaults to the product's own; a test names
+   * another to read a database as the image before a release would.
+   */
+  readonly built?: {
+    readonly triggers: readonly WrittenTrigger[];
+    readonly tables: readonly string[];
+    readonly checks: readonly Omit<CheckConstraint, 'validated'>[];
+  };
 }
 
 /**
@@ -1322,7 +1335,13 @@ function unknownFunctionProblems(
  * switched-off guard is drift too — Postgres keeps the row and stops running
  * it, which is tampering that leaves no trace in the table.
  */
-function triggerProblems(trigger: TriggerRow, fixedCalls: ReadonlyMap<string, string>): SchemaProblem[] {
+function triggerProblems(
+  trigger: TriggerRow,
+  fixedCalls: ReadonlyMap<string, string>,
+  writtenTriggers: readonly WrittenTrigger[],
+): SchemaProblem[] {
+  const written = writtenTriggers.find((one) => one.table === trigger.table && one.name === trigger.name);
+  if (written !== undefined) return writtenTriggerProblems(trigger, written);
   const own = TABLE_GUARDS.find(
     (guard) => guard.table === trigger.table && guard.name === trigger.name && guard.function === trigger.function,
   );
@@ -1345,6 +1364,14 @@ function narrowedProblems(trigger: TriggerRow, name: string): SchemaProblem[] {
   if (trigger.on_columns) problems.push(`${trigger.table}'s ${name} fires on some columns only`);
   if (trigger.conditional) problems.push(`${trigger.table}'s ${name} fires only when a condition holds`);
   return problems;
+}
+
+/** A trigger held to the whole of how its migration wrote it, and firing. */
+function writtenTriggerProblems(trigger: TriggerRow, { name, definition }: WrittenTrigger): SchemaProblem[] {
+  return [
+    ...(trigger.definition === definition ? [] : [`${trigger.table}'s ${name} is not the trigger its migration wrote`]),
+    ...(trigger.enabled === 'O' ? [] : [`${trigger.table}'s ${name} is switched off`]),
+  ];
 }
 
 /** The made-once guard, still as 0032 wrote it and firing. */
@@ -1693,6 +1720,11 @@ export async function liveSchemaDrift<Schema>(
     madeOnceTables = [],
     fixedAtCreation = {},
     comingTriggers = COMING_TRIGGERS,
+    built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks } = {
+      triggers: MARK_TRIGGERS,
+      tables: BUILT_TABLES,
+      checks: BUILT_CHECKS,
+    },
   }: SchemaGuardOptions,
 ): Promise<SchemaDrift> {
   // One after another on one connection: this check must not be what fills a full server (run day 5, S168 review).
@@ -1756,17 +1788,20 @@ export async function liveSchemaDrift<Schema>(
   );
 
   // A table a release may just have made. Only a plain table of the owner's: the rest stays the alarm at once.
-  const built = new Set(BUILT_TABLES);
+  const namedAsBuilt = new Set(builtTables);
   const newTables = allRelations.filter(
-    (one) => !built.has(one.name) && one.kind === 'r' && !one.inherits && one.owner === ownerRole,
+    (one) => !namedAsBuilt.has(one.name) && one.kind === 'r' && !one.inherits && one.owner === ownerRole,
   );
   const isNew = new Set(newTables.map(({ name }) => name));
-  const gone = BUILT_TABLES.filter((name) => !known.has(name));
+  const gone = builtTables.filter((name) => !known.has(name));
   // A coming trigger only when exact and firing as written; any other falls to the rules below, the alarm at once.
   const comingDefinitions = new Set(comingTriggers.map(({ definition }) => definition));
   const isComing = ({ definition, enabled }: TriggerRow): boolean =>
     comingDefinitions.has(definition) && enabled === 'O';
-  const bodies = new Map([...GUARD_BODIES, ...comingTriggers.map((one) => [one.function, one.body] as const)]);
+  const bodies = new Map([
+    ...GUARD_BODIES,
+    ...[...writtenTriggers, ...comingTriggers].map((one) => [one.function, one.body] as const),
+  ]);
   /** What a table's own shape breaks: the same rules, for those that stand and those new. */
   const shapeProblems = (
     tables: readonly RelationRow[],
@@ -1782,7 +1817,7 @@ export async function liveSchemaDrift<Schema>(
     ),
     ...allTriggers
       .filter((one) => ofThese(one.table) && !isComing(one))
-      .flatMap((trigger) => triggerProblems(trigger, fixedCalls)),
+      .flatMap((trigger) => triggerProblems(trigger, fixedCalls, writtenTriggers)),
     ...allIndexes
       .filter((one) => ofThese(one.table))
       .flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
@@ -1812,7 +1847,9 @@ export async function liveSchemaDrift<Schema>(
     ...missingGuardProblems(statusGuardedTables, STATUS_GUARD, allRelations, allTriggers),
     ...missingGuardProblems(madeOnceTables, MADE_ONCE, allRelations, allTriggers),
     ...missingGuardProblems(Object.keys(fixedAtCreation), FIXED, allRelations, allTriggers),
-    ...TABLE_GUARDS.flatMap((guard) => missingGuardProblems([guard.table], guard.name, allRelations, allTriggers)),
+    ...[...TABLE_GUARDS, ...writtenTriggers].flatMap((guard) =>
+      missingGuardProblems([guard.table], guard.name, allRelations, allTriggers),
+    ),
     ...missingPartialProblems(policy.partialUniqueIndexes, allIndexes),
     // Rights: an allow-list, so a privilege nobody thought about is a problem
     // rather than an omission.
@@ -1836,7 +1873,7 @@ export async function liveSchemaDrift<Schema>(
   return {
     atOnce: inOrder(problems),
     releaseShaped: inOrder([
-      ...builtCheckProblems(allChecks, BUILT_CHECKS),
+      ...builtCheckProblems(allChecks, builtChecks),
       ...unknownFunctionProblems(allFunctions, bodies),
       ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),

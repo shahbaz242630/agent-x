@@ -48,6 +48,16 @@ export const PLAIN_WORDS = {
     broke: 'The next copy waits up to a minute more before its jobs begin.',
     next: 'Nothing: it ends by itself. If this repeats, check the database.',
   },
+  'org_work.unmarked': {
+    happened: 'An organisation had work due for a background job with no mark saying so, or a mark saying too late.',
+    broke: 'Nothing yet: every job still visits every organisation. Once jobs use the marks, that work would wait.',
+    next: 'The mark is now right. One after a release is older work; more means a write misses its mark.',
+  },
+  'org_work.rediscovery_failed': {
+    happened: 'The hourly check of which organisations have work could not finish for this organisation, or at all.',
+    broke: 'Nothing yet: every job still visits every organisation. Its marks stay as they were until the next check.',
+    next: 'It runs again within the hour. If this repeats, check the database.',
+  },
   'job.stalled': {
     happened: 'A background job has been running far longer than it ever should.',
     broke: 'While it hangs, that job does none of its work, such as payments, checks or sweeps; the rest go on.',

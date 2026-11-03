@@ -3,9 +3,10 @@
 // operator's command (B1c) checks it at its start, before it writes anything.
 //
 // It holds CHECK constraints to the image's own built-checks.json, and the
-// backup role to reading. A release migrates first, so its new CHECK, function or
-// table is drift to the image before it until the new image is in. That image
-// refuses a start on it, as on any drift.
+// backup role to reading. A release migrates first, so its new CHECK, function,
+// table, or a trigger that image was told is coming (schema-guard.ts), is drift to
+// the image before it until the new image is in. That image refuses a start on it,
+// as on any drift.
 //
 // **On the schedule, the first sighting of that drift in a process's life is a
 // warning, and every later one the alarm**, however many clean runs lie between:
