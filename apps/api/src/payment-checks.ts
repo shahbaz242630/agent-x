@@ -233,6 +233,9 @@ const REGULAR_SHARE = 1 / 2;
 const UNKNOWN_LAP_SHARE = 1 / 3;
 const WATCH_LAP_SHARE = 1 / 6;
 
+/** How early a turn may be taken: half a run, so Postgres's clock running a little ahead never costs a whole period. */
+const DUE_SLACK_MS = PAYMENT_CHECKS_EVERY_MS / 2;
+
 /** How long an organisation's UNKNOWNs may stay due, their turns cut short, before it is said: by then the next is due. */
 const UNKNOWN_BEHIND_MS = LAP_EVERY_MS;
 
@@ -296,6 +299,10 @@ interface Tier {
   readonly behindAfterMs: number | undefined;
   /** When each organisation's next turn is due, by this process's clock: one not here yet is due now. */
   readonly next: Map<string, number>;
+  /** Those whose turn read payments since their last whole one: the turn is theirs to keep to. */
+  readonly seen: Set<string>;
+  /** Those whose last whole turn read payments: their next turn is one their mark must not pass. */
+  readonly busy: Set<string>;
   said: boolean;
 }
 
@@ -333,6 +340,7 @@ export interface PaymentChecks {
 export function createPaymentChecks({
   list,
   unfinished,
+  nextTurn,
   database,
   rail,
   outbox,
@@ -353,6 +361,11 @@ export function createPaymentChecks({
   readonly list: () => Promise<readonly string[]>;
   /** Told each organisation whose turn a run cut short: its mark is left as it stands, so the next run takes it first. */
   readonly unfinished?: (orgId: string) => void;
+  /**
+   * Told, for each organisation it took whole, the soonest of its slower turns now pending: its mark is settled no
+   * later, so a cadence its rows read as longer never pushes a turn already counted past its time.
+   */
+  readonly nextTurn?: (orgId: string, at: Date) => void;
   readonly database: Database<CheckTables>;
   readonly rail: FinancialRailAdapter;
   /** Where a payment that SUCCEEDED queues its supplier's remittance email (`settlePayment`). */
@@ -718,28 +731,38 @@ export function createPaymentChecks({
     return stepOf(orgId, await checkOnce(orgId, listed, logger.child({ orgId })));
   };
 
-  const lanesOf = (dueNow: () => Due): FairLanes =>
+  /** The lanes of a kind of check, noting in `seen` each organisation a read found payments for. */
+  const lanesOf = (dueNow: () => Due, seen: Set<string>): FairLanes =>
     createFairLanes<Listed>({
       total: Math.max(1, limits.total - nudgeSlots),
       limitOf: () => limits.perOrganisation,
       thrown: laneThrown,
       page,
       idOf: ({ id }) => id,
-      read: (orgId, after) => laneRead(orgId, after, dueNow()),
+      read: async (orgId, after) => {
+        const listed = await laneRead(orgId, after, dueNow());
+        if (listed !== null && listed.length > 0) seen.add(orgId);
+        return listed;
+      },
       work: payment,
     });
 
   const since = (ms: number) => new Date(clock.now().getTime() - ms);
   // A place kept for each kind of check, so one cut short goes on where it left off at its next.
 
-  const tierOf = (sweep: string, due: () => Due, everyMs: number, behindAfterMs?: number): Tier => ({
-    sweep,
-    lanes: lanesOf(due),
-    everyMs,
-    behindAfterMs,
-    next: new Map(),
-    said: false,
-  });
+  const tierOf = (sweep: string, due: () => Due, everyMs: number, behindAfterMs?: number): Tier => {
+    const seen = new Set<string>();
+    return {
+      sweep,
+      lanes: lanesOf(due, seen),
+      everyMs,
+      behindAfterMs,
+      next: new Map(),
+      seen,
+      busy: new Set(),
+      said: false,
+    };
+  };
   const fresh = tierOf('fresh', () => ({ statuses: UNDER_WAY, since: since(FRESH_MS), watchPaid: false }), 0);
   const day = tierOf('day', () => ({ statuses: UNDER_WAY, since: since(DAY_MS), watchPaid: false }), DAY_TIER_EVERY_MS);
   // The UNKNOWNs a check of their own, ahead of the watch: at volume the watch may never end its turn, and these must.
@@ -770,11 +793,15 @@ export function createPaymentChecks({
     return () => signal?.aborted === true || clock.now().getTime() >= ends;
   };
 
-  /** The organisations whose turn of the tier is due at `now`; one seen for the first time is due from now. */
+  /**
+   * The organisations whose turn of the tier is due at `now`, within half a run: a mark is listed by Postgres's clock
+   * too, which may run a little ahead of this process's, and a turn found a moment early is still taken, not left a
+   * whole period. One seen for the first time is due from now.
+   */
   const dueIn = (tier: Tier, orgs: readonly string[], now: number): string[] =>
     orgs.filter((orgId) => {
       if (!tier.next.has(orgId)) tier.next.set(orgId, now);
-      return (tier.next.get(orgId) ?? now) <= now;
+      return (tier.next.get(orgId) ?? now) <= now + DUE_SLACK_MS;
     });
 
   /**
@@ -785,7 +812,13 @@ export function createPaymentChecks({
   const turns = async (tier: Tier, orgs: readonly string[], stopped: () => boolean, now: number) => {
     const outcomes = await tier.lanes.run(orgs, stopped);
     const cut = orgs.filter((orgId) => outcomes.get(orgId) === 'cut');
-    for (const orgId of orgs) if (outcomes.get(orgId) !== 'cut') tier.next.set(orgId, now + tier.everyMs);
+    for (const orgId of orgs) {
+      if (outcomes.get(orgId) === 'cut') continue;
+      tier.next.set(orgId, now + tier.everyMs);
+      // Whole: whether it read any payments decides whether its next turn bounds its mark.
+      if (tier.seen.delete(orgId)) tier.busy.add(orgId);
+      else tier.busy.delete(orgId);
+    }
     if (tier.behindAfterMs === undefined) return cut;
     const behindAfterMs = tier.behindAfterMs;
     const behind = cut.filter((orgId) => now - (tier.next.get(orgId) ?? now) >= behindAfterMs).length;
@@ -802,9 +835,21 @@ export function createPaymentChecks({
   const forgetIdle = (orgs: readonly string[], now: number): void => {
     const listed = new Set(orgs);
     for (const tier of [fresh, day, ...slower.map(([each]) => each)]) {
-      for (const [orgId, next] of tier.next)
-        if (!listed.has(orgId) && next < now - 2 * LAP_EVERY_MS) tier.next.delete(orgId);
+      for (const [orgId, next] of tier.next) {
+        if (listed.has(orgId) || next >= now - 2 * LAP_EVERY_MS) continue;
+        tier.next.delete(orgId);
+        tier.seen.delete(orgId);
+        tier.busy.delete(orgId);
+      }
     }
+  };
+
+  /** The soonest of an organisation's pending turns among the kinds whose last whole turn read payments; none where none did. */
+  const soonestTurn = (orgId: string): number | undefined => {
+    const pending = [day, ...slower.map(([each]) => each)]
+      .filter(({ busy }) => busy.has(orgId))
+      .map(({ next }) => next.get(orgId) ?? Number.POSITIVE_INFINITY);
+    return pending.length === 0 ? undefined : Math.min(...pending);
   };
 
   /** The regular turns, a day's for those due theirs; then each slower check due, each with its part of the budget. */
@@ -824,7 +869,12 @@ export function createPaymentChecks({
     ];
     for (const [tier, share] of slower)
       cut.push(...(await turns(tier, dueIn(tier, orgs, now), partOfBudget(share, signal), now)));
-    for (const orgId of new Set(cut)) unfinished?.(orgId);
+    const unfinishedOrgs = new Set(cut);
+    for (const orgId of unfinishedOrgs) unfinished?.(orgId);
+    for (const orgId of orgs) {
+      const soonest = unfinishedOrgs.has(orgId) ? undefined : soonestTurn(orgId);
+      if (soonest !== undefined) nextTurn?.(orgId, new Date(soonest));
+    }
     forgetIdle(orgs, now);
   };
 

@@ -49,6 +49,7 @@ import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import { type Database, type DatabaseTransaction, sendTogether, withTenant } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
+import { createGate } from './fair-lanes.ts';
 import { handOffDue, handOffSweepDue } from './handoff.ts';
 import { paymentCheckDue } from './payment-checks.ts';
 
@@ -79,9 +80,14 @@ export interface MarkedOrganisations {
   readonly list: () => Promise<readonly string[]>;
   /** One the run didn't finish: its mark left as it stands, due since before, so the next run takes it first. */
   keep(orgId: string): void;
+  /** A time the job knows its next turn there is due: the mark is settled no later, whatever its rows say. */
+  dueBy(orgId: string, at: Date): void;
   /** Each one listed since the last settling, its mark settled by what its rows say now; at a stop, none. */
   settle(signal?: AbortSignal): Promise<void>;
 }
+
+/** How many organisations' next due times are read at once, unless the job-list names its own share of the pool. */
+const READS_AT_ONCE = 4;
 
 /** What the organisation's rows say is next due, read in its own withTenant, holding no mark. */
 const nextDueOf = (database: Database<OrgWorkTables>, orgId: string, nextDue: NextDue, now: Date) =>
@@ -102,6 +108,7 @@ export function markedOrganisations({
   logger,
   clock = systemClock,
   most = ORG_WORK_MOST,
+  readsAtOnce = READS_AT_ONCE,
 }: {
   readonly job: OrgWorkJob;
   readonly nextDue: NextDue;
@@ -111,22 +118,43 @@ export function markedOrganisations({
   readonly clock?: Clock;
   /** ORG_WORK_MOST unless a test names fewer. */
   readonly most?: number;
+  /** Reads at once while settling, each a connection of the pool's: job-list.ts gives a share of it. */
+  readonly readsAtOnce?: number;
 }): MarkedOrganisations {
   // Each one's marks as first read since the last settling. A later read can only be newer: settling by the older does
   // nothing where they differ, and the mark stands for another visit.
   let listed = new Map<string, string>();
+  let dueBy = new Map<string, number>();
+  const reads = createGate(readsAtOnce);
 
-  /** A page's next due times, each read alone: one that can't be read is said, and its mark left for another visit. */
-  const pageOf = async (marks: readonly (readonly [string, string])[]): Promise<SettledOrgWork[]> => {
-    const page: SettledOrgWork[] = [];
-    for (const [orgId, read] of marks) {
-      try {
-        page.push({ orgId, marks: read, due: await nextDueOf(database, orgId, nextDue, clock.now()) });
-      } catch (error) {
-        logger.child({ orgId }).error('org_work.settle_failed', { job, err: error });
-      }
-    }
-    return page;
+  /** When the organisation is next due: what its rows say, no later than a time the job gave; nothing, none. */
+  const dueOf = async (orgId: string, given: ReadonlyMap<string, number>): Promise<Date | null> => {
+    const rows = await nextDueOf(database, orgId, nextDue, clock.now());
+    const by = given.get(orgId);
+    return rows === null || by === undefined || rows.getTime() <= by ? rows : new Date(by);
+  };
+
+  /**
+   * A page's next due times, readsAtOnce at a time, each in its own withTenant: one that can't be read is said, and its
+   * mark left for another visit.
+   */
+  const pageOf = async (
+    marks: readonly (readonly [string, string])[],
+    given: ReadonlyMap<string, number>,
+  ): Promise<SettledOrgWork[]> => {
+    const read = await Promise.all(
+      marks.map(([orgId, counted]) =>
+        reads.run(orgId, async (): Promise<SettledOrgWork | undefined> => {
+          try {
+            return { orgId, marks: counted, due: await dueOf(orgId, given) };
+          } catch (error) {
+            logger.child({ orgId }).error('org_work.settle_failed', { job, err: error });
+            return undefined;
+          }
+        }),
+      ),
+    );
+    return read.filter((settled) => settled !== undefined);
   };
 
   return {
@@ -138,14 +166,19 @@ export function markedOrganisations({
     keep: (orgId) => {
       listed.delete(orgId);
     },
+    dueBy: (orgId, at) => {
+      dueBy.set(orgId, Math.min(at.getTime(), dueBy.get(orgId) ?? Number.POSITIVE_INFINITY));
+    },
     async settle(signal) {
       const settling = [...listed];
       listed = new Map();
+      const given = dueBy;
+      dueBy = new Map();
       for (let at = 0; at < settling.length; at += SETTLE_PAGE) {
         // Stopped, the rest stay as they are, and are read again.
         if (signal?.aborted === true) return;
         try {
-          await settleOrgWorkPage(database, job, await pageOf(settling.slice(at, at + SETTLE_PAGE)));
+          await settleOrgWorkPage(database, job, await pageOf(settling.slice(at, at + SETTLE_PAGE), given));
         } catch (error) {
           // Left as they stand: those organisations are only visited again.
           logger.error('org_work.settle_failed', { job, err: error });

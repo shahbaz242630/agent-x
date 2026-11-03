@@ -213,8 +213,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
   // Each visits only the organisations its marks say have work, and settles them after (4D2e D7).
-  const handOffMarks = markedOrganisations({ job: 'hand_off', nextDue: handOffDue, database, logger });
-  const sweepMarks = markedOrganisations({ job: 'hand_off_sweep', nextDue: handOffSweepDue, database, logger });
+  // Their settling's reads at once: a third of the pool, as the hand-off's own transactions at most (handoffDatabaseGate).
+  const marking = { database, logger, readsAtOnce: Math.max(1, Math.floor(config.db.poolMax / 3)) };
+  const handOffMarks = markedOrganisations({ job: 'hand_off', nextDue: handOffDue, ...marking });
+  const sweepMarks = markedOrganisations({ job: 'hand_off_sweep', nextDue: handOffSweepDue, ...marking });
   const handoff =
     railWork &&
     withOrgWork(
@@ -231,7 +233,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
   // the payments the partner's messages name first (E1b). Its marks carry each organisation's own cadence of checks.
-  const checkMarks = markedOrganisations({ job: 'payment_check', nextDue: paymentCheckDue, database, logger });
+  const checkMarks = markedOrganisations({ job: 'payment_check', nextDue: paymentCheckDue, ...marking });
   const paymentChecks =
     railWork &&
     withOrgWork(
@@ -242,6 +244,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         list: checkMarks.list,
         unfinished: (orgId) => {
           checkMarks.keep(orgId);
+        },
+        nextTurn: (orgId, at) => {
+          checkMarks.dueBy(orgId, at);
         },
         outbox,
         events: providerEvents,

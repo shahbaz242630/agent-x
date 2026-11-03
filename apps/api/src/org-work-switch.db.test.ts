@@ -139,6 +139,9 @@ function switchedChecks({
       unfinished: (orgId) => {
         checks.keep(orgId);
       },
+      nextTurn: (orgId, at) => {
+        checks.dueBy(orgId, at);
+      },
       database: app,
       outbox: createOutbox({ ids, clock }),
       rail,
@@ -155,20 +158,36 @@ function switchedChecks({
 }
 
 /** A rail whose lookups find nothing, each noted with its organisation and the test clock's minute. */
-function noting(w: World): { rail: FakeRail; asked: { orgId: string; minute: number }[] } {
-  const asked: { orgId: string; minute: number }[] = [];
+function noting(
+  w: World,
+  { answers = () => false }: { readonly answers?: (instructionId: string) => boolean } = {},
+): { rail: FakeRail; asked: { orgId: string; instructionId: string; minute: number }[] } {
+  const asked: { orgId: string; instructionId: string; minute: number }[] = [];
   const startedAt = clock.now().getTime();
   return {
     asked,
     rail: {
       ...w.rail,
       getExecution: (ref) => {
-        asked.push({ orgId: ref.organizationId, minute: Math.round((clock.now().getTime() - startedAt) / 60_000) });
-        return Promise.resolve({ kind: 'not_found' });
+        asked.push({
+          orgId: ref.organizationId,
+          instructionId: ref.instructionId,
+          minute: Math.round((clock.now().getTime() - startedAt) / 60_000),
+        });
+        // Those `answers` picks, the world's own fake answers, so they move as the bank moves them.
+        return answers(ref.instructionId) ? w.rail.getExecution(ref) : Promise.resolve({ kind: 'not_found' });
       },
     },
   };
 }
+
+/** The minutes one payment was asked about, in order, once each. */
+const minutesOf = (asked: readonly { instructionId: string; minute: number }[], instructionId: string) => [
+  ...new Set(asked.filter((each) => each.instructionId === instructionId).map(({ minute }) => minute)),
+];
+
+/** The gaps between the minutes a payment was asked about. */
+const gapsOf = (minutes: readonly number[]) => minutes.slice(1).map((minute, at) => minute - (minutes[at] ?? 0));
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -449,6 +468,46 @@ describe('a mark row held only for a moment, and never lost', () => {
     expect(await marksOf(w)).toEqual({});
   });
 
+  it('a settle reads as many organisations at once as it is given, each in a transaction of its own', async () => {
+    const orgs: string[] = [];
+    for (let n = 0; n < 3; n += 1) {
+      const { w, acting } = await ready();
+      await ask(acting, w, { amount: ALLOWED() });
+      orgs.push(w.org);
+    }
+    const handOffs = markedOrganisations({
+      job: 'hand_off',
+      nextDue: handOffDue,
+      database: app,
+      logger: testLogger(capture),
+      clock,
+      readsAtOnce: 2,
+    });
+    expect((await handOffs.list()).toSorted()).toEqual(orgs.toSorted());
+    // The requests held: each read waits there, so those under way at once are all seen waiting.
+    const holder = await database.connect('owner');
+    await holder.query('begin');
+    await holder.query('lock table spend_requests.requests in access exclusive mode');
+    const settling = handOffs.settle();
+    let held = true;
+    onTestFinished(async () => {
+      if (held) await holder.query('commit');
+      await settling;
+      await holder.end();
+    });
+    expect(await waitUntilQueued(admin(), 2)).toHaveLength(2);
+    // Two, not three: the third waits its turn outside the database.
+    const [{ waiting } = { waiting: 0 }] = await admin().query<{ waiting: number }>(
+      `select pg_catalog.count(*)::integer as waiting from pg_catalog.pg_locks where not granted`,
+    );
+    expect(waiting).toBe(2);
+    held = false;
+    await holder.query('commit');
+    await settling;
+    // Still due, each is moved to now: none lost on the way.
+    expect((await admin().query(`select 1 from directory.org_work where job = 'hand_off'`)).length).toBe(3);
+  });
+
   it('listed twice before settling, the first read is the one compared: a mark between them stands', async () => {
     const { w } = await ready();
     await markOrgWork(app, w.org, 'hand_off', clock.now());
@@ -589,5 +648,79 @@ describe('the payment checks follow theirs', () => {
     }
     // The busy ones, under 15 minutes old, were asked run after run while they were.
     for (const w of busy) expect(minutesOf(w).length).toBeGreaterThanOrEqual(10);
+  });
+
+  describe('a mark never passes a turn already counted', () => {
+    /** `n` runs of the job, a minute apart. */
+    const minutes = async (job: { run(): Promise<void> }, n: number) => {
+      for (let run = 0; run < n; run += 1) {
+        await job.run();
+        clock.advanceBy(60_000);
+      }
+    };
+
+    it('an old payment asked every 30 minutes though a fresh one came and was paid between', async () => {
+      const { w, acting } = await ready();
+      // The fils choose it stays under way: older than a day by the runs.
+      await ask(acting, w, { amount: SMALL() });
+      await switchedHandoff(w).job.run();
+      clock.advanceBy(2 * 24 * 3_600_000);
+      // The bank answers for all but the first it is asked about: that old one stays under way.
+      const kept: { id?: string } = {};
+      const { rail, asked } = noting(w, { answers: (instructionId) => (kept.id ??= instructionId) !== instructionId });
+      const { job } = switchedChecks({ rail });
+
+      await minutes(job, 10);
+      const old = kept.id;
+      if (old === undefined) throw new Error('not asked');
+      // At minute 10 a fresh one, marked as it is handed off, then paid by the bank's word within a few runs.
+      await ask(acting, w, { amount: ALLOWED() });
+      await switchedHandoff(w).job.run();
+      await minutes(job, 50);
+
+      const times = minutesOf(asked, old);
+      expect(times[0]).toBe(0);
+      expect(times.length).toBeGreaterThanOrEqual(2);
+      for (const gap of gapsOf(times)) expect(gap).toBe(30);
+    });
+
+    it("a payment past its first 15 minutes keeps its day's turns 5 minutes apart", async () => {
+      const { w, acting } = await ready();
+      await ask(acting, w, { amount: SMALL() });
+      await switchedHandoff(w).job.run();
+      // Its first check two minutes on, so its day's turns fall off the 15 minutes' edge.
+      clock.advanceBy(2 * 60_000);
+      const { rail, asked } = noting(w);
+      const { job } = switchedChecks({ rail });
+
+      await minutes(job, 40);
+
+      const [first] = asked;
+      if (first === undefined) throw new Error('not asked');
+      const times = minutesOf(asked, first.instructionId);
+      // Every run while under 15 minutes old (to minute 13), its day's turns at 0, 5, 10: the next is 15, not 13's + 5.
+      const after = times.filter((minute) => minute >= 14);
+      expect(after[0]).toBe(15);
+      expect(after.length).toBeGreaterThanOrEqual(4);
+      for (const gap of gapsOf(after)) expect(gap).toBe(5);
+    });
+
+    it("with Postgres's clock minutes ahead of this process's, no turn slips a period", async () => {
+      // This process three minutes behind Postgres, run after run: each mark is listed early by Postgres's clock.
+      clock = new FixedClock(new Date(Date.now() - 3 * 60_000));
+      const { w, acting } = await ready();
+      await ask(acting, w, { amount: SMALL() });
+      await switchedHandoff(w).job.run();
+      const { rail, asked } = noting(w);
+      const { job } = switchedChecks({ rail });
+
+      await minutes(job, 40);
+
+      const [first] = asked;
+      if (first === undefined) throw new Error('not asked');
+      const after = minutesOf(asked, first.instructionId).filter((minute) => minute >= 15);
+      expect(after.length).toBeGreaterThanOrEqual(4);
+      for (const gap of gapsOf(after)) expect(gap).toBe(5);
+    });
   });
 });
