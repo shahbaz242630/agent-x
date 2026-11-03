@@ -41,6 +41,7 @@ export type RuleId =
   | 'workspace'
   | 'log-quota-alerts'
   | 'alert-counts-only'
+  | 'alert-window'
   | 'alert-runbook'
   | 'alert-delivery'
   | 'resource-logs'
