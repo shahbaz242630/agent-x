@@ -30,9 +30,12 @@
 // by the migration job within RELEASE_START_WAIT_MS by the database's clock.
 // Anything else is the alarm as before: other drift beside it, marks that show no
 // newer migration, are older than that, or can't be read. So a stuck release, or a
-// plant riding one, pages within the half hour. A plant with no release must keep
-// a forged row in the ledger, which stops the next migration job, and re-stamp the
-// count every half hour; each needs the owner's login, which raises its own alert.
+// plant riding one, pages within the half hour. A plant with no release can still
+// get the warning: add a ledger row, count it, then delete it in a session that
+// stays busy, since Postgres sends a session's live count only when it goes idle,
+// so the count held now lags as long as that session runs (unbounded). The
+// backstop is not the forged row but the owner's login, which raises its own
+// alert, and the re-stamp needed every half hour.
 //
 // **During a run it raises the alarm and keeps going.** Stopping a running API
 // would empty that anchor store, which is exactly what someone tampering would

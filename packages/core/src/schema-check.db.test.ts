@@ -143,7 +143,7 @@ describe(`a start during a release: an older image meets the newer one's migrati
 
   /**
    * What the migration job does: a ledger row this image has no file for, its statistics sent, then the count.
-   * A session sends its statistics by itself within a second; sent at once here, so nothing waits.
+   * An idle session sends its statistics after a delay (a busy one only once idle); sent at once here, so nothing waits.
    */
   async function migratedNewer(): Promise<void> {
     await owner.query(
