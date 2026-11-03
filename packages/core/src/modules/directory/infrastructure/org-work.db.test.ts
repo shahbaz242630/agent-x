@@ -485,7 +485,9 @@ describe('which organisations a job takes from its marks', () => {
     const [a = '', b = ''] = await orgsMarked(2);
     await markedAgo(a, -60);
     await markedAgo(b, -600);
-    const ahead = (seconds: number) => new Date(Date.now() + seconds * 1_000);
+    // Counted from Postgres's own clock, which the marks were written by.
+    const [{ now } = { now: new Date(0) }] = await admin().query<{ now: Date }>('select pg_catalog.now() as now');
+    const ahead = (seconds: number) => new Date(now.getTime() + seconds * 1_000);
     expect(await dueOrgWork(app, job, { most: 10, by: new Date(0) })).toEqual([]);
     expect((await dueOrgWork(app, job, { most: 10, by: ahead(120) })).map(({ orgId }) => orgId)).toEqual([a]);
     expect((await dueOrgWork(app, job, { most: 10, by: ahead(1_200) })).map(({ orgId }) => orgId)).toEqual([a, b]);

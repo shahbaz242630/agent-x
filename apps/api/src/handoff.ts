@@ -305,18 +305,19 @@ export async function withinTime<T>(answer: Promise<T>, ms: number): Promise<T> 
 }
 
 /**
- * The gate the hand-off and the bank check share, made once for the process. Refused
- * at start where it would take over a third of the pool: past it, these jobs
- * could keep agents' decisions from their connections.
- */
-/**
  * The gate every job's settling of its marks shares (org-work.ts), made once for the process: with the hand-off's own
- * gate, never past a third of the pool, the share handoffDatabaseGate holds these jobs to. At least one.
+ * gate, a third of the pool (pools of 9 and up; staging runs 10, the load run 20), the share handoffDatabaseGate holds
+ * these jobs to. At least one, so below 9 it is one over: settling must still move.
  */
 export function settleReadsGate(poolMax: number): Gate {
   return createGate(Math.max(1, Math.floor(poolMax / 3) - DATABASE_GATE));
 }
 
+/**
+ * The gate the hand-off and the bank check share, made once for the process. Refused
+ * at start where it would take over a third of the pool: past it, these jobs
+ * could keep agents' decisions from their connections.
+ */
 export function handoffDatabaseGate(poolMax: number): Gate {
   if (DATABASE_GATE > Math.floor(poolMax / 3)) {
     throw new RangeError(`The hand-off's ${String(DATABASE_GATE)} transactions at once need a pool of at least 6`);

@@ -515,7 +515,7 @@ describe('a mark row held only for a moment, and never lost', () => {
       await holder.query('commit');
       await settling;
       // Each still has its approved request: moved to now, none lost on the way.
-      expect((await admin().query(`select 1 from directory.org_work where job = 'hand_off'`)).length).toBe(3);
+      expect(await admin().query(`select 1 from directory.org_work where job = 'hand_off'`)).toHaveLength(3);
     },
   );
 
@@ -789,7 +789,7 @@ describe('the payment checks follow theirs', () => {
       expect(minutesOf(noted.asked, unknown)).toEqual([0, 30]);
       const paid = noted.asked.find(({ instructionId }) => instructionId !== unknown)?.instructionId ?? '';
       // Its watch's turn at 31, at most a run late: not pushed to 60 by the UNKNOWNs' settles.
-      expect(minutesOf(noted.asked, paid).filter((minute) => minute >= 15)[0]).toBeLessThanOrEqual(32);
+      expect(minutesOf(noted.asked, paid).find((minute) => minute >= 15)).toBeLessThanOrEqual(32);
     });
   });
 });

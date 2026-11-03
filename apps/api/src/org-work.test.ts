@@ -70,7 +70,7 @@ describe("the settles' one gate", () => {
     [15, 3],
     [30, 8],
   ])(
-    'with a pool of %i lets %i read at once: a third of the pool less the hand-off’s 2, at least 1',
+    'with a pool of %i lets %i read at once: a third of the pool less the hand-off’s 2, at least 1 (one over below 9)',
     async (pool, most) => {
       const gate = settleReadsGate(pool);
       let inside = 0;
