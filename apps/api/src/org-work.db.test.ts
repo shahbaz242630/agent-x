@@ -7,6 +7,7 @@ import { withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import type { FakeRail } from '@agentx/core/modules/providers';
+import { markOrgWork } from '@agentx/core/modules/directory';
 import { SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { noteTransactionFacts } from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, noStatementTimes, timingStatements } from '@agentx/platform/db';
@@ -371,6 +372,72 @@ describe('the hourly look', () => {
     expect(seen.hand_off_sweep?.due_at).toEqual(new Date(created.getTime() + 10 * 60_000));
     expect(seen.payment_check?.due_at.getTime()).toBeLessThanOrEqual(Date.now());
     expect(lines('org_work.unmarked').map(({ job }) => job as string)).toEqual(['hand_off_sweep', 'payment_check']);
+  });
+
+  describe('a commit landing between its reads, forced', () => {
+    // The look reads the marks, then the requests, then the transactions, then the marks again: each its own statement
+    // on one trip. A session holding the requests' table stops it after its first read of the marks, until let go.
+    async function lookHeldAfterTheFirstRead(w: World) {
+      const holder = await database.connect('owner');
+      await holder.query('begin');
+      await holder.query('lock table spend_requests.requests in access exclusive mode');
+      const looking = rediscoveryOf(w.org).run();
+      await waitUntilQueued(admin(), 1);
+      return {
+        letGo: async () => {
+          await holder.query('commit');
+          await looking;
+          await holder.end();
+        },
+      };
+    }
+
+    it('a payment written meanwhile is read due with its mark in the later read: no miss is said', async () => {
+      const { w, acting } = await ready();
+      // The fils choose it stays under way, so it can still be noted.
+      const request = await ask(acting, w, { amount: SMALL() });
+      await handoffOf(w).run();
+      const { id } = await transactionOfRequest(request.id);
+      await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
+      const look = await lookHeldAfterTheFirstRead(w);
+      // Its row and mark commit together, after the look read no mark and before it reads what is due.
+      await withSignedStates(app, w.org, quiet(), (tx, states) =>
+        noteTransactionFacts(
+          tx,
+          states,
+          { orgId: w.org, id },
+          { providerStatus: 'NotedForTheTest', paymentInstructionRef: null, rejectCode: null, providerChangedAt: null },
+          { actor: { type: 'system', id: 'api' }, details: {} },
+        ),
+      );
+      const marked = await marksOf(w);
+      expect(Object.keys(marked)).toContain('payment_check');
+      await look.letGo();
+      // The earlier read had none; the later one has it, so the look reads no miss, and writes nothing.
+      expect(lines('org_work.unmarked')).toEqual([]);
+      expect(lines('org_work.rediscovered')).toEqual([
+        expect.objectContaining({ organisations: 1, unmarked: 0, late: 0, cleared: 0, failed: 0 }),
+      ]);
+      expect(await marksOf(w)).toEqual(marked);
+    });
+
+    it('a mark made meanwhile on work the look read as done is not cleared; the next look clears it', async () => {
+      const { w } = await ready();
+      await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'payment_check', now())`, [
+        w.org,
+      ]);
+      const look = await lookHeldAfterTheFirstRead(w);
+      // After the look read the mark, and before its reads find nothing due: the mark moves.
+      await markOrgWork(app, w.org, 'payment_check', clock.now());
+      const marked = await marksOf(w);
+      await look.letGo();
+      expect(await marksOf(w)).toEqual(marked);
+      expect(lines('org_work.rediscovered')).toEqual([expect.objectContaining({ cleared: 0, failed: 0 })]);
+
+      await rediscoveryOf(w.org).run();
+      expect(await jobsMarked(w)).toEqual([]);
+      expect(lines('org_work.rediscovered').at(-1)).toEqual(expect.objectContaining({ cleared: 1 }));
+    });
   });
 
   it('a mark saying too late is brought forward and said; one a moment off is left', async () => {
