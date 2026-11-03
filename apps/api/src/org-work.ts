@@ -49,7 +49,7 @@ import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import { type Database, type DatabaseTransaction, sendTogether, withTenant } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
-import { createGate } from './fair-lanes.ts';
+import { createGate, type Gate } from './fair-lanes.ts';
 import { handOffDue, handOffSweepDue } from './handoff.ts';
 import { paymentCheckDue } from './payment-checks.ts';
 
@@ -86,7 +86,7 @@ export interface MarkedOrganisations {
   settle(signal?: AbortSignal): Promise<void>;
 }
 
-/** How many organisations' next due times are read at once, unless the job-list names its own share of the pool. */
+/** How many organisations' next due times are read at once where no gate is given (job-list.ts gives all its jobs one). */
 const READS_AT_ONCE = 4;
 
 /** What the organisation's rows say is next due, read in its own withTenant, holding no mark. */
@@ -108,7 +108,7 @@ export function markedOrganisations({
   logger,
   clock = systemClock,
   most = ORG_WORK_MOST,
-  readsAtOnce = READS_AT_ONCE,
+  reads = createGate(READS_AT_ONCE),
 }: {
   readonly job: OrgWorkJob;
   readonly nextDue: NextDue;
@@ -118,14 +118,13 @@ export function markedOrganisations({
   readonly clock?: Clock;
   /** ORG_WORK_MOST unless a test names fewer. */
   readonly most?: number;
-  /** Reads at once while settling, each a connection of the pool's: job-list.ts gives a share of it. */
-  readonly readsAtOnce?: number;
+  /** The gate its settling's reads go through, each a connection of the pool's: job-list.ts gives every job one gate. */
+  readonly reads?: Gate;
 }): MarkedOrganisations {
   // Each one's marks as first read since the last settling. A later read can only be newer: settling by the older does
   // nothing where they differ, and the mark stands for another visit.
   let listed = new Map<string, string>();
   let dueBy = new Map<string, number>();
-  const reads = createGate(readsAtOnce);
 
   /** When the organisation is next due: what its rows say, no later than a time the job gave; nothing, none. */
   const dueOf = async (orgId: string, given: ReadonlyMap<string, number>): Promise<Date | null> => {
@@ -135,7 +134,7 @@ export function markedOrganisations({
   };
 
   /**
-   * A page's next due times, readsAtOnce at a time, each in its own withTenant: one that can't be read is said, and its
+   * A page's next due times, as many at a time as `reads` lets, each in its own withTenant: one that can't be read is said, and its
    * mark left for another visit.
    */
   const pageOf = async (

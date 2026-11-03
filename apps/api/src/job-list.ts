@@ -37,7 +37,14 @@ import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
-import { createHandoff, HANDOFF_EVERY_MS, handOffDue, handoffDatabaseGate, handOffSweepDue } from './handoff.ts';
+import {
+  createHandoff,
+  HANDOFF_EVERY_MS,
+  handOffDue,
+  handoffDatabaseGate,
+  handOffSweepDue,
+  settleReadsGate,
+} from './handoff.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
 import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
@@ -213,8 +220,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
   // Each visits only the organisations its marks say have work, and settles them after (4D2e D7).
-  // Their settling's reads at once: a third of the pool, as the hand-off's own transactions at most (handoffDatabaseGate).
-  const marking = { database, logger, readsAtOnce: Math.max(1, Math.floor(config.db.poolMax / 3)) };
+  // One gate for every job's settling reads, so they and the hand-off's own transactions stay within a third of the pool.
+  const marking = { database, logger, reads: settleReadsGate(config.db.poolMax) };
   const handOffMarks = markedOrganisations({ job: 'hand_off', nextDue: handOffDue, ...marking });
   const sweepMarks = markedOrganisations({ job: 'hand_off_sweep', nextDue: handOffSweepDue, ...marking });
   const handoff =

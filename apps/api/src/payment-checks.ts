@@ -841,11 +841,16 @@ export function createPaymentChecks({
     }
   };
 
-  /** The soonest of an organisation's pending turns among the kinds whose last whole turn read payments; none where none did. */
+  /**
+   * The soonest of an organisation's pending turns: each slower kind's always, as a mark's own time moves on with
+   * every settle another kind drives and nothing else would hold one due; the day's only where its last whole turn read
+   * payments (once it reads none, the payments it had are past a day or fresh, and fresh ones are visited every run).
+   * At most a visit more each 30 minutes for an organisation with work. None for one never taken.
+   */
   const soonestTurn = (orgId: string): number | undefined => {
-    const pending = [day, ...slower.map(([each]) => each)]
-      .filter(({ busy }) => busy.has(orgId))
-      .map(({ next }) => next.get(orgId) ?? Number.POSITIVE_INFINITY);
+    const pending = [...(day.busy.has(orgId) ? [day] : []), ...slower.map(([each]) => each)]
+      .map(({ next }) => next.get(orgId))
+      .filter((at) => at !== undefined);
     return pending.length === 0 ? undefined : Math.min(...pending);
   };
 

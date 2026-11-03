@@ -19,7 +19,14 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, onTestFinished } from 'vitest';
 
-import { createHandoff, handOffDue, handoffDatabaseGate, handOffSweepDue, HEARTBEAT_STALE_MS } from './handoff.ts';
+import {
+  createHandoff,
+  handOffDue,
+  handoffDatabaseGate,
+  handOffSweepDue,
+  HEARTBEAT_STALE_MS,
+  settleReadsGate,
+} from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, type World } from './mandate-world.helper.test.ts';
@@ -468,45 +475,49 @@ describe('a mark row held only for a moment, and never lost', () => {
     expect(await marksOf(w)).toEqual({});
   });
 
-  it('a settle reads as many organisations at once as it is given, each in a transaction of its own', async () => {
-    const orgs: string[] = [];
-    for (let n = 0; n < 3; n += 1) {
-      const { w, acting } = await ready();
-      await ask(acting, w, { amount: ALLOWED() });
-      orgs.push(w.org);
-    }
-    const handOffs = markedOrganisations({
-      job: 'hand_off',
-      nextDue: handOffDue,
-      database: app,
-      logger: testLogger(capture),
-      clock,
-      readsAtOnce: 2,
-    });
-    expect((await handOffs.list()).toSorted()).toEqual(orgs.toSorted());
-    // The requests held: each read waits there, so those under way at once are all seen waiting.
-    const holder = await database.connect('owner');
-    await holder.query('begin');
-    await holder.query('lock table spend_requests.requests in access exclusive mode');
-    const settling = handOffs.settle();
-    let held = true;
-    onTestFinished(async () => {
-      if (held) await holder.query('commit');
+  it.each([
+    [15, 3],
+    [6, 1],
+  ])(
+    "every job's settling shares one gate: with a pool of %i, the hand-off's 2 and %i read beside them, a third",
+    async (poolMax, most) => {
+      const orgs: string[] = [];
+      for (let n = 0; n < 3; n += 1) {
+        const { w, acting } = await ready();
+        await ask(acting, w, { amount: ALLOWED() });
+        await markOrgWork(app, w.org, 'payment_check', clock.now());
+        orgs.push(w.org);
+      }
+      const reads = settleReadsGate(poolMax);
+      const base = { database: app, logger: testLogger(capture), clock, reads };
+      const handOffs = markedOrganisations({ ...base, job: 'hand_off', nextDue: handOffDue });
+      const checks = markedOrganisations({ ...base, job: 'payment_check', nextDue: paymentCheckDue });
+      expect((await handOffs.list()).toSorted()).toEqual(orgs.toSorted());
+      expect((await checks.list()).toSorted()).toEqual(orgs.toSorted());
+      // The rows both read held: each read waits there, so those under way at once are all seen waiting.
+      const holder = await database.connect('owner');
+      await holder.query('begin');
+      await holder.query('lock table spend_requests.requests, transactions.transactions in access exclusive mode');
+      const settling = Promise.all([handOffs.settle(), checks.settle()]);
+      let held = true;
+      onTestFinished(async () => {
+        if (held) await holder.query('commit');
+        await settling;
+        await holder.end();
+      });
+      expect(await waitUntilQueued(admin(), most)).toHaveLength(most);
+      // No more than that: the other reads, of both jobs, wait their turn outside the database.
+      const [{ waiting } = { waiting: 0 }] = await admin().query<{ waiting: number }>(
+        `select pg_catalog.count(*)::integer as waiting from pg_catalog.pg_locks where not granted`,
+      );
+      expect(waiting).toBe(most);
+      held = false;
+      await holder.query('commit');
       await settling;
-      await holder.end();
-    });
-    expect(await waitUntilQueued(admin(), 2)).toHaveLength(2);
-    // Two, not three: the third waits its turn outside the database.
-    const [{ waiting } = { waiting: 0 }] = await admin().query<{ waiting: number }>(
-      `select pg_catalog.count(*)::integer as waiting from pg_catalog.pg_locks where not granted`,
-    );
-    expect(waiting).toBe(2);
-    held = false;
-    await holder.query('commit');
-    await settling;
-    // Still due, each is moved to now: none lost on the way.
-    expect((await admin().query(`select 1 from directory.org_work where job = 'hand_off'`)).length).toBe(3);
-  });
+      // Each still has its approved request: moved to now, none lost on the way.
+      expect((await admin().query(`select 1 from directory.org_work where job = 'hand_off'`)).length).toBe(3);
+    },
+  );
 
   it('listed twice before settling, the first read is the one compared: a mark between them stands', async () => {
     const { w } = await ready();
@@ -710,21 +721,75 @@ describe('the payment checks follow theirs', () => {
     });
 
     it("with Postgres's clock minutes ahead of this process's, no turn slips a period", async () => {
-      // This process three minutes behind Postgres, run after run: each mark is listed early by Postgres's clock.
-      clock = new FixedClock(new Date(Date.now() - 3 * 60_000));
       const { w, acting } = await ready();
       await ask(acting, w, { amount: SMALL() });
       await switchedHandoff(w).job.run();
+      clock.advanceBy(2 * 60_000);
       const { rail, asked } = noting(w);
       const { job } = switchedChecks({ rail });
+      // Postgres three minutes ahead, as the list reads a mark: each time a settle writes, its time is read back three
+      // minutes sooner, so the list finds it that much early, run after run (this process's clock is the test's).
+      let written: number | undefined;
+      const aheadOfUs = async () => {
+        const due = (await marksOf(w)).payment_check?.due_at.getTime();
+        if (due === undefined || due === written) return;
+        written = due - 3 * 60_000;
+        await admin().query(
+          `update directory.org_work set due_at = due_at - interval '3 minutes' where org_id = $1 and job = 'payment_check'`,
+          [w.org],
+        );
+      };
 
-      await minutes(job, 40);
+      for (let run = 0; run < 40; run += 1) {
+        await job.run();
+        await aheadOfUs();
+        clock.advanceBy(60_000);
+      }
 
       const [first] = asked;
       if (first === undefined) throw new Error('not asked');
-      const after = minutesOf(asked, first.instructionId).filter((minute) => minute >= 15);
+      // Past its first 15 minutes (minute 13), its day's turns at 15, 20, 25...: each listed early, never taken late.
+      const after = minutesOf(asked, first.instructionId).filter((minute) => minute >= 14);
+      expect(after[0]).toBe(15);
       expect(after.length).toBeGreaterThanOrEqual(4);
       for (const gap of gapsOf(after)) expect(gap).toBe(5);
+    });
+
+    it('a slower kind that read nothing still holds the mark to its turn: a payment paid beside an old UNKNOWN', async () => {
+      const { w, acting } = await ready();
+      // The fake's .02: made at the partner, its answer lost; older than a day by the runs.
+      await ask(acting, w, { amount: AED(5_002n) });
+      await switchedHandoff(w).job.run();
+      clock.advanceBy(2 * 24 * 3_600_000);
+      // The bank answers for all but the UNKNOWN; its first answer stops the first run, so the watch's turn is cut.
+      const kept: { id?: string } = {};
+      const stop = new AbortController();
+      const noted = noting(w, { answers: (instructionId) => (kept.id ??= instructionId) !== instructionId });
+      const rail: FakeRail = {
+        ...noted.rail,
+        getExecution: async (ref) => {
+          const answer = await noted.rail.getExecution(ref);
+          if (ref.instructionId === kept.id) stop.abort();
+          return answer;
+        },
+      };
+      const { job } = switchedChecks({ rail });
+
+      await job.run(stop.signal);
+      clock.advanceBy(60_000);
+      // Minute 1: the watch's turn taken whole, reading nothing; its next at 31, the UNKNOWNs' at 30.
+      await minutes(job, 4);
+      // Minute 5: a fresh one, handed off, then paid within a few runs: watched from then on.
+      await ask(acting, w, { amount: ALLOWED() });
+      await switchedHandoff(w).job.run();
+      await minutes(job, 35);
+
+      const unknown = kept.id;
+      if (unknown === undefined) throw new Error('not asked');
+      expect(minutesOf(noted.asked, unknown)).toEqual([0, 30]);
+      const paid = noted.asked.find(({ instructionId }) => instructionId !== unknown)?.instructionId ?? '';
+      // Its watch's turn at 31, at most a run late: not pushed to 60 by the UNKNOWNs' settles.
+      expect(minutesOf(noted.asked, paid).filter((minute) => minute >= 15)[0]).toBeLessThanOrEqual(32);
     });
   });
 });
