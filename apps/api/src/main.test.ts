@@ -134,8 +134,13 @@ vi.mock('./start-record.ts', () => ({
 const anchorChecks = vi.hoisted(() => ({
   intervals: [] as number[],
   staleAfter: [] as number[],
+  reachWithin: [] as (number | undefined)[],
+  lanes: [] as (number | undefined)[],
   deadlines: [] as number[],
   chains: [] as unknown[],
+  durable: [] as unknown[],
+  finishes: [] as (() => Promise<void>)[],
+  finished: 0,
   verifies: [] as ((anchor: unknown) => Promise<unknown>)[],
   /** What main.ts handed to the schedule, so a test can run one tick of it. */
   scheduled: [] as { run(signal?: AbortSignal): Promise<void> }[],
@@ -242,25 +247,41 @@ vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
 });
 
 vi.mock('./anchor-check.ts', () => ({
+  reachWithin: (intervalMs: number) => 7 * intervalMs,
   createAnchorCheck: (options: {
     chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
     staleAfterMs: number;
+    reachWithinMs?: number;
+    lanes?: number;
     deadlineMs: number;
+    durable?: unknown;
   }) => {
     anchorChecks.chains.push(...options.chains.map((one) => one.chain));
     anchorChecks.verifies.push(...options.chains.map((one) => one.verify));
     anchorChecks.staleAfter.push(options.staleAfterMs);
+    anchorChecks.reachWithin.push(options.reachWithinMs);
+    anchorChecks.lanes.push(options.lanes);
     anchorChecks.deadlines.push(options.deadlineMs);
+    anchorChecks.durable.push(options.durable);
     return {
       run: () => {
         anchorChecks.runs += 1;
         fake.steps.push('chains checked');
         return Promise.resolve();
       },
+      finish: () => {
+        anchorChecks.finished += 1;
+        return Promise.resolve();
+      },
     };
   },
-  scheduleAnchorCheck: (check: { run(signal?: AbortSignal): Promise<void> }, intervalMs: number) => {
+  scheduleAnchorCheck: (
+    check: { run(signal?: AbortSignal): Promise<void> },
+    intervalMs: number,
+    finish: () => Promise<void>,
+  ) => {
     anchorChecks.scheduled.push(check);
+    anchorChecks.finishes.push(finish);
     fake.steps.push('anchor check started');
     anchorChecks.intervals.push(intervalMs);
     return {
@@ -390,6 +411,9 @@ beforeEach(() => {
   schemaCheck.sound = (): Promise<boolean> => Promise.resolve(true);
   schemaCheck.scheduledRuns = 0;
   anchorChecks.scheduled.length = 0;
+  anchorChecks.durable.length = 0;
+  anchorChecks.finishes.length = 0;
+  anchorChecks.finished = 0;
   sweeps.options.length = 0;
   sweeps.everyMs.length = 0;
   sweeps.stopped = 0;
@@ -407,6 +431,8 @@ beforeEach(() => {
   startRecord.result = () => Promise.resolve(7n);
   anchorChecks.intervals.length = 0;
   anchorChecks.staleAfter.length = 0;
+  anchorChecks.reachWithin.length = 0;
+  anchorChecks.lanes.length = 0;
   anchorChecks.deadlines.length = 0;
   anchorChecks.chains.length = 0;
   anchorChecks.verifies.length = 0;
@@ -620,13 +646,34 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 
   it('starts the anchor check of the platform chain once it listens, at the configured interval (ADR-012 §2)', async () => {
     await start();
-    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_SECONDS: '600' });
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_SECONDS: '120' });
 
     expect(anchorChecks.chains).toEqual([{ kind: 'platform' }, { kind: 'platform' }]);
-    expect(anchorChecks.intervals).toEqual([300_000, 600_000]);
+    expect(anchorChecks.intervals).toEqual([300_000, 120_000]);
     // Three intervals without a completed check are the alarm.
-    expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
+    expect(anchorChecks.staleAfter).toEqual([900_000, 360_000]);
     expect(anchorChecks.deadlines).toEqual([120_000, 120_000]);
+    // How long a turn may wait goes with the interval.
+    expect(anchorChecks.reachWithin).toEqual([2_100_000, 840_000]);
+  });
+
+  it('gives the anchor check the lanes the setting names, never more than half the pool (4D2e E6)', async () => {
+    await start();
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_LANES: '5' });
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_LANES: '64' });
+    await start({ ...ENV, AGENTX_DB_POOL_MAX: '6' });
+
+    expect(anchorChecks.lanes).toEqual([4, 5, 5, 3]);
+  });
+
+  it("keeps the chains' anchors where the config names, in memory alone otherwise, and writes what moved as the schedule stops (PL-58)", async () => {
+    await start();
+    await start({ ...ENV, AGENTX_AUDIT_ANCHORS_DIR: '/tmp/anchors-not-made' });
+
+    expect(anchorChecks.durable.at(-2)).toBeUndefined();
+    expect(anchorChecks.durable.at(-1)).toEqual(expect.objectContaining({ flush: expect.any(Function) as unknown }));
+    await anchorChecks.finishes.at(-1)?.();
+    expect(anchorChecks.finished).toBe(1);
   });
 
   it("runs Phase 2's and 3's jobs each on a timer of its own, the hold history check over every authority table", async () => {

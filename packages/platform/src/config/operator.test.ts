@@ -307,6 +307,8 @@ describe("SEC-AV-03 the operator's command refuses to start on a bad config", ()
     ['AGENTX_DB_POOL_MAX', 'the app (apps/api)'],
     ['AGENTX_DECISION_GATE_ACTIVE', 'the app (apps/api)'],
     ['AGENTX_AUDIT_ANCHOR_SECONDS', 'the app (apps/api)'],
+    ['AGENTX_AUDIT_ANCHOR_LANES', 'the app (apps/api)'],
+    ['AGENTX_AUDIT_MOST_ORGANISATIONS', 'the app (apps/api)'],
     ['AGENTX_DB_MIGRATION_USER', 'the migration job (apps/migrate)'],
     ['AGENTX_DB_MIGRATION_PASSWORD', 'the migration job (apps/migrate)'],
     ['AGENTX_DB_ADMIN_PASSWORD', 'the database set-up job (apps/db-setup)'],

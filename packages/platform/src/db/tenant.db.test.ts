@@ -729,3 +729,34 @@ describe('APP-02 the app role cannot get round the walls', () => {
     await expect(database.as('app').query(statement)).rejects.toThrow(refusal);
   });
 });
+
+describe(`a statement's answer given up on, for a connection dead without a word (4D2e E6, Postgres ${server.version})`, () => {
+  it('ends the transaction at the limit, and the connection is closed, so its place in the pool comes back', async () => {
+    const small = createDatabase<{ 'probe.none': { id: number } }>(
+      { ...database.connection('app'), maxConnections: 1 },
+      testLogger(),
+    );
+    try {
+      const began = performance.now();
+      await expect(
+        withTenant(small, ORG_A, (tx) => sql`select pg_catalog.pg_sleep(8)`.execute(tx), {
+          limited: true,
+          answeredWithinMs: 200,
+        }),
+      ).rejects.toThrow(/read timeout/i);
+      expect(performance.now() - began).toBeLessThan(4000);
+      const { rows } = await withTenant(small, ORG_A, (tx) => sql<{ one: number }>`select 1 as one`.execute(tx));
+      expect(rows).toEqual([{ one: 1 }]);
+    } finally {
+      await small.destroy();
+    }
+  });
+
+  it('a statement answered in time is as any other, and the transaction commits', async () => {
+    const { rows } = await withTenant(app, ORG_A, (tx) => sql<{ one: number }>`select 1 as one`.execute(tx), {
+      limited: true,
+      answeredWithinMs: 5000,
+    });
+    expect(rows).toEqual([{ one: 1 }]);
+  });
+});

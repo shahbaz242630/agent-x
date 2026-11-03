@@ -1,4 +1,5 @@
 export { type Anchor, type AnchorStore, createMemoryAnchorStore, signAnchor } from './anchor.ts';
+export { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 export {
   type AnchorPoint,
   type Chain,

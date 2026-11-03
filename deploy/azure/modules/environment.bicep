@@ -42,6 +42,11 @@ param agentCancelCapAlertName string
 param dailyWordsAlertName string
 param handoffQueueAlertName string
 param platformFullAlertName string
+param anchorStoppedAlertName string
+param jobsStoppedAlertName string
+@description('Whether something always runs here, so the rules that fire on lines missing can be on.')
+param alwaysOn bool
+param anchorStoreAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -538,6 +543,50 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
   dependsOn: [appLogs]
 }
 
+// The store that keeps the chains' anchors out of reach (4D2e E, PL-58): after
+// a start it can't be read, so every organisation's payments wait; or it has gone
+// unwritten three intervals, so a restart would forget what moved; or unread three
+// intervals, so a restart would make payments wait; or no store was named, so
+// anchors are in memory alone. Any one line tells someone; none is a hold. Stateful,
+// as above.
+resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: anchorStoreAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Anchor store: payments waiting, or anchors not kept'
+    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation; or could not write to it for three check intervals, so a restart would forget them; or could not read it for three, so a restart would make payments wait; or started with no store named, so anchors are in memory alone. Decisions go on and nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
 // An integrity job skipping a whole run (Phase 2 E2c, the partner's catch):
 // the holdings check, the hold-history check, mandate expiry and request
 // expiry (D7), and request voids and the waiting rejections (F1 G8) each read the organisation list first, and when that read
@@ -568,6 +617,89 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
           threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The jobs having stopped altogether, seen from outside (4D2e D, PL-33): a process dead, frozen or never started
+// logs nothing, so nothing inside it can say so. These fire on lines missing, so they need something always on:
+// staging sleeps, and would fire every night. `alwaysOn` switches them on (policy.ts: production always; staging
+// only for a keep-running window). A count of nothing is one row, 0: `count()` with no `by` always answers.
+// The window is well past the lines' 4 to 9 minutes of lateness (S33).
+resource anchorStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: anchorStoppedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Audit: the anchor check has stopped'
+    description: 'SEV-1. No audit chain check has finished for 30 minutes (no audit.anchor_check_done): the jobs have stopped, so tampering would go unseen. Runbook: Incident-Response-Playbook.md section R.'
+    severity: 1
+    enabled: alwaysOn
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT10M'
+    // Azure takes only its own window lengths (5, 10, 15, 30, 45 minutes, then hours): 20 was refused (S171).
+    windowSize: 'PT30M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_check_done" | summarize Done = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Done'
+          operator: 'LessThan'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless, as every SEV-1: each 10 minutes it stays stopped notifies again.
+    autoMitigate: false
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+resource jobsStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: jobsStoppedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Jobs: no pulse'
+    description: 'SEV-2. No process running the background jobs has said it is alive for 15 minutes (no jobs.pulse): it is down, or none holds the lease. Runbook: Incident-Response-Playbook.md section R.'
+    severity: 2
+    enabled: alwaysOn
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "jobs.pulse" | summarize Pulses = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Pulses'
+          operator: 'LessThan'
+          threshold: 1
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1

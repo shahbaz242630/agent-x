@@ -98,10 +98,18 @@ interface Opening {
   readonly limited: boolean;
   /** Outside the organisation's share of the connections, though an agent's request: its integrity hold and its activity row must not queue. */
   readonly unshared: boolean;
+  /** The app's own limit on each statement's answer, for a connection dead without a word: closed, not given back. */
+  readonly answeredWithinMs: number | undefined;
   taken: boolean;
 }
 
 const opening = new AsyncLocalStorage<Opening>();
+
+/**
+ * For a background job's connections, past which one is taken for dead without a word and closed (`answeredWithinMs`):
+ * three times the database's own limit on a statement. Requests open their transactions with no such limit.
+ */
+export const JOB_ANSWER_WITHIN_MS = 30_000;
 
 /**
  * Runs `work` in one READ COMMITTED transaction scoped to the organisation.
@@ -119,7 +127,11 @@ export async function withTenant<Schema, Result>(
   db: Kysely<Schema>,
   orgId: string,
   work: (tx: Transaction<Schema>) => Promise<Result>,
-  { limited = false, unshared = false }: { readonly limited?: boolean; readonly unshared?: boolean } = {},
+  {
+    limited = false,
+    unshared = false,
+    answeredWithinMs,
+  }: { readonly limited?: boolean; readonly unshared?: boolean; readonly answeredWithinMs?: number } = {},
 ): Promise<Result> {
   // Checked before the transaction opens; the ID itself is never echoed.
   if (!UUID.test(orgId)) throw new TenantContextError('the organisation ID is not a UUID');
@@ -128,7 +140,7 @@ export async function withTenant<Schema, Result>(
   }
   const scope = { open: true };
   const tenant = orgId.toLowerCase();
-  const asked: Opening = { tenant, limited, unshared, taken: false };
+  const asked: Opening = { tenant, limited, unshared, answeredWithinMs, taken: false };
   try {
     return await insideTenant.run(scope, () =>
       openedWith(db, asked, async (tx) => {
@@ -157,8 +169,9 @@ export async function withTenant<Schema, Result>(
 export function limitedTransaction<Schema, Result>(
   db: Kysely<Schema>,
   work: (tx: Transaction<Schema>) => Promise<Result>,
+  { answeredWithinMs }: { readonly answeredWithinMs?: number } = {},
 ): Promise<Result> {
-  const asked: Opening = { tenant: undefined, limited: true, unshared: true, taken: false };
+  const asked: Opening = { tenant: undefined, limited: true, unshared: true, answeredWithinMs, taken: false };
   return openedWith(db, asked, async (tx) => {
     // Another driver: the limit in a round trip of its own.
     if (!asked.taken) await limitStatements(tx);
@@ -456,6 +469,10 @@ function written(tenant: string): string {
   return tenant;
 }
 
+/** A trip with the app's own limit on its answer. The types leave out pg's `query_timeout`, on a statement or a connection alike. */
+const underLimit = (text: string, values: unknown[] | undefined, within: number | undefined): pg.QueryConfig =>
+  ({ text, values, query_timeout: within }) as pg.QueryConfig;
+
 /** A transaction's start, as Kysely's own driver writes it. */
 function startOf({ isolationLevel, accessMode }: TransactionSettings): string {
   if (isolationLevel === undefined && accessMode === undefined) return 'begin';
@@ -474,10 +491,13 @@ function startSent(
   client: pg.PoolClient,
   settings: TransactionSettings,
   asked: Pick<Opening, 'tenant' | 'limited'> | undefined,
+  answeredWithinMs?: number,
 ): Promise<pg.QueryResult[]> {
   const statements = [startOf(settings), CONNECTION_STATE, ...(asked === undefined ? [] : [startSettings(asked)])];
   // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
-  return client.query(statements.join('; ')) as unknown as Promise<pg.QueryResult[]>;
+  return client.query(underLimit(statements.join('; '), undefined, answeredWithinMs)) as unknown as Promise<
+    pg.QueryResult[]
+  >;
 }
 
 /** What a query answered, as Kysely's own driver gives it back. */
@@ -519,6 +539,8 @@ class CheckedConnection implements DatabaseConnection {
   #tenant: string | undefined;
   /** Gives back the organisation's share of the connections this one came from, if it did. */
   readonly #leaveShare: () => void;
+  /** The opening's limit on an answer, in its transaction. */
+  #answeredWithinMs: number | undefined;
 
   constructor(pool: pg.Pool, logger: Logger, attempts: number, client: pg.PoolClient, leaveShare: () => void) {
     this.#pool = pool;
@@ -581,8 +603,9 @@ class CheckedConnection implements DatabaseConnection {
 
   /** The start, with the connection's check and the opening's settings, in one round trip. */
   async begin(settings: TransactionSettings, asked: Opening | undefined): Promise<void> {
+    this.#answeredWithinMs = asked?.answeredWithinMs;
     const set = await this.#sound(async (client) => {
-      const answers = await startSent(client, settings, asked);
+      const answers = await startSent(client, settings, asked, asked?.answeredWithinMs);
       // A connection closed for its state ends the transaction just begun on it.
       return { problem: unusable(stateFrom(answers[1]?.rows[0] as StateRow)), value: answers[2]?.rows[0] as StateRow };
     });
@@ -600,12 +623,11 @@ class CheckedConnection implements DatabaseConnection {
     const tenant = this.#tenant;
     this.#tenant = undefined;
     if (tenant === undefined) {
-      await timedTrip(() => this.#taken().query('commit'), 'commit');
+      await timedTrip(() => this.#trip('commit'), 'commit');
       return;
     }
     try {
-      // eslint-disable-next-line agentx/no-string-built-sql -- partner S162: fixed text but for the organisation's ID, a lower-case UUID checked by written().
-      await timedTrip(() => this.#taken().query(`${stillTenant(tenant)}; commit`), 'commit');
+      await timedTrip(() => this.#trip(`${stillTenant(tenant)}; commit`), 'commit');
     } catch (error) {
       // Changed and put back in between is not seen here; row security still walls each statement to the setting it ran under.
       if (error instanceof Error && (error as { code?: unknown }).code === TENANT_CHANGED) {
@@ -619,7 +641,9 @@ class CheckedConnection implements DatabaseConnection {
 
   async rollback(): Promise<void> {
     this.#tenant = undefined;
-    await timedTrip(() => this.#taken().query('rollback'));
+    // Gone unanswered: it would wait as long again behind that statement. Closing it rolls back.
+    if (this.#broken) return;
+    await timedTrip(() => this.#trip('rollback'));
   }
 
   release(): void {
@@ -633,8 +657,23 @@ class CheckedConnection implements DatabaseConnection {
   }
 
   #written(query: CompiledQuery): Promise<pg.QueryResult> {
-    // eslint-disable-next-line agentx/no-string-built-sql -- Kysely's compiled query, its values bound as parameters: what Kysely's own driver sends.
-    return this.#taken().query(query.sql, [...query.parameters]);
+    return this.#trip(query.sql, [...query.parameters]);
+  }
+
+  /**
+   * One trip of the transaction, under the opening's limit on its answer if it has one. pg gives up on the answer and
+   * leaves the statement running, so a connection that went unanswered is closed, never given back.
+   */
+  #trip(text: string, values?: unknown[]): Promise<pg.QueryResult> {
+    const client = this.#taken();
+    const within = this.#answeredWithinMs;
+    // eslint-disable-next-line agentx/no-string-built-sql -- fixed text, or Kysely's compiled query with its values bound as parameters: what Kysely's own driver sends, with the opening's limit where it has one.
+    const answer = client.query(underLimit(text, values, within));
+    if (within === undefined) return answer;
+    return answer.catch((error: unknown) => {
+      this.#broken = true;
+      throw error;
+    });
   }
 
   #taken(): pg.PoolClient {
