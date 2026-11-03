@@ -8,8 +8,10 @@ import {
   checkSchemaOnSchedule,
   createFullServerWatch,
   createReleaseDriftWatch,
+  RELEASE_START_WAIT_MS,
   schemaSoundAtStart,
 } from './schema-check.ts';
+import type { Clock } from './shared-kernel/index.ts';
 
 const server = inject('postgres');
 const NEW_TABLE = 'create table platform_controls.planted (name text primary key)';
@@ -32,6 +34,16 @@ afterAll(async () => {
 afterEach(async () => {
   await owner.query('drop table if exists platform_controls.planted');
 });
+
+/** A start at the clock's time: whether it may go on, and its warn and error lines. */
+async function startAt(clock: Clock) {
+  const capture = new LogCapture();
+  const sound = await schemaSoundAtStart({ database: app, appRole: 'agentx_app', logger: testLogger(capture), clock });
+  const said = capture.lines().filter((line) => line.level === 'warn' || line.level === 'error');
+  return { sound, said, events: said.map((line) => `${String(line.level)} ${String(line.event)}`) };
+}
+
+const at = (time: Date, msLater: number): Clock => ({ now: () => new Date(time.getTime() + msLater) });
 
 /** One process's checks on the schedule: each run's lines by level and event. */
 function aProcess() {
@@ -119,10 +131,109 @@ describe(`a table this image's migrations did not build (Postgres ${server.versi
       database: app,
       appRole: 'agentx_app',
       logger: testLogger(capture),
+      // No newer migration in this database's ledger, so the time it reads changes nothing.
+      clock: { now: () => new Date(0) },
     });
     expect(sound).toBe(false);
     expect(capture.lines()).toEqual([
       expect.objectContaining({ level: 'error', event: 'audit.integrity_failed', check: 'schema', when: 'start' }),
     ]);
+  });
+});
+
+describe(`a start during a release: an older image meets the newer one's migration (Postgres ${server.version})`, () => {
+  const COMING = '9999_coming.sql';
+
+  /** What the migration job does: a ledger row this image has no file for, then the count. Returns its stamp. */
+  async function migratedNewer(): Promise<Date> {
+    await owner.query("insert into migrations.applied (name, checksum) values ($1, 'not a real file')", [COMING]);
+    await owner.query('analyze migrations.applied');
+    const [row] = await owner.query<{ at: Date }>(
+      "select last_analyze as at from pg_catalog.pg_stat_all_tables where schemaname = 'migrations' and relname = 'applied'",
+    );
+    if (row === undefined) throw new Error('the ledger has no statistics row');
+    return row.at;
+  }
+
+  afterEach(async () => {
+    await owner.query('delete from migrations.applied where name = $1', [COMING]);
+    await owner.query('analyze migrations.applied');
+  });
+
+  it('refuses the start with a warning and no alarm, just after the migration', async () => {
+    await owner.query(NEW_TABLE);
+    const counted = await migratedNewer();
+
+    const { sound, said, events } = await startAt(at(counted, 60_000));
+    expect(sound).toBe(false);
+    expect(events).toEqual(['warn db.schema_start_waits_release']);
+    expect(said[0]).toEqual(
+      expect.objectContaining({
+        problems: expect.arrayContaining([
+          'platform_controls.planted does not have row-level security enabled',
+        ]) as unknown,
+        ledgerMigrations: expect.any(Number) as unknown,
+        countedMsAgo: 60_000,
+      }),
+    );
+    const { ledgerMigrations, builtMigrations } = said[0] as { ledgerMigrations: number; builtMigrations: number };
+    expect(ledgerMigrations).toBe(builtMigrations + 1);
+  });
+
+  it('still waits a moment before the window ends, and is the alarm as it ends', async () => {
+    await owner.query(NEW_TABLE);
+    const counted = await migratedNewer();
+
+    expect((await startAt(at(counted, RELEASE_START_WAIT_MS - 1))).events).toEqual([
+      'warn db.schema_start_waits_release',
+    ]);
+    const late = await startAt(at(counted, RELEASE_START_WAIT_MS));
+    expect(late.sound).toBe(false);
+    expect(late.events).toEqual(['error audit.integrity_failed']);
+    expect(late.said[0]).toEqual(expect.objectContaining({ check: 'schema', when: 'start' }));
+  });
+
+  it("is the alarm at once when a known table's drift is beside it, however fresh the migration", async () => {
+    await owner.query(NEW_TABLE);
+    await owner.query('alter table audit.events no force row level security');
+    try {
+      const counted = await migratedNewer();
+      const { sound, said, events } = await startAt(at(counted, 0));
+      expect(sound).toBe(false);
+      expect(events).toEqual(['error audit.integrity_failed']);
+      expect(said[0]?.problems).toEqual(
+        expect.arrayContaining([
+          'audit.events does not have row-level security forced',
+          'platform_controls.planted does not have row-level security enabled',
+        ]),
+      );
+    } finally {
+      await owner.query('alter table audit.events force row level security');
+    }
+  });
+
+  it('is the alarm when the ledger, freshly counted, holds no migration newer than this image', async () => {
+    await owner.query(NEW_TABLE);
+    await owner.query('analyze migrations.applied');
+    const [row] = await owner.query<{ at: Date }>(
+      "select last_analyze as at from pg_catalog.pg_stat_all_tables where schemaname = 'migrations' and relname = 'applied'",
+    );
+    const { sound, events } = await startAt(at(row?.at ?? new Date(0), 0));
+    expect(sound).toBe(false);
+    expect(events).toEqual(['error audit.integrity_failed']);
+  });
+
+  it("is the alarm when the ledger's marks can't be read", async () => {
+    await owner.query(NEW_TABLE);
+    const counted = await migratedNewer();
+    const admin = database.as('admin');
+    await admin.query('revoke select on pg_catalog.pg_stat_all_tables from public');
+    try {
+      const { sound, events } = await startAt(at(counted, 0));
+      expect(sound).toBe(false);
+      expect(events).toEqual(['error audit.integrity_failed']);
+    } finally {
+      await admin.query('grant select on pg_catalog.pg_stat_all_tables to public');
+    }
   });
 });

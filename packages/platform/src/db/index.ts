@@ -30,6 +30,7 @@ export {
   runMigrations,
 } from './migrate.ts';
 export { createKeyedSlots } from './keyed-slots.ts';
+export { builtMigrationNames, type LedgerMarks, readLedgerMarks } from './ledger-marks.ts';
 export {
   asAgentTraffic,
   isAgentTraffic,

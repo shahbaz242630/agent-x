@@ -44,7 +44,7 @@ import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
-import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
   assertRuntimeRole,
@@ -443,7 +443,7 @@ async function run(
   const log = logger.child({ orgId });
   try {
     // Before anything is written: the new organisation's rows would go through the same walls.
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger, clock: systemClock }))) return 1;
     const created = await createOrganizationAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -482,7 +482,7 @@ async function inviteFirst(
   const log = logger.child({ orgId: request.orgId });
   const invitationId = request.id;
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger, clock: systemClock }))) return 1;
     const invited = await inviteFirstAdminAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -523,7 +523,7 @@ async function handoff(
   logger: Logger,
 ): Promise<number> {
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger, clock: systemClock }))) return 1;
     return await changeHandoffPauseAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -558,7 +558,7 @@ async function auditExport(
   logger: Logger,
 ): Promise<number> {
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger, clock: systemClock }))) return 1;
     const asked = { ...request, exportId: request.id, release: config.release, run: config.run };
     const services = { keys, ids: uuidV7Ids, logger };
     return request.command === 'audit-export'

@@ -274,7 +274,7 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
   // Before anything is written: a database whose walls have been rewritten
   // must not be served from, and the platform chain's own tables are among
   // what is checked (A3e-1b).
-  if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) {
+  if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger, clock: systemClock }))) {
     await database.destroy();
     logger.flush();
     host.exitCode = 1;

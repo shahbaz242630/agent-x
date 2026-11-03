@@ -11,6 +11,11 @@ const guard = vi.hoisted(() => ({
   released: [] as string[],
   /** What the check asked the guard to hold, each time. */
   asked: [] as unknown[],
+  /** The migration ledger's marks (ledger-marks.ts), and this image's migrations. */
+  marks: (): Promise<{ rows: number; countedAt: Date | undefined } | undefined> => Promise.resolve(undefined),
+  built: (): Promise<string[]> => Promise.resolve([]),
+  /** How many times the marks were read. */
+  marksRead: 0,
 }));
 
 vi.mock('@agentx/platform/db', async (importOriginal) => {
@@ -26,6 +31,11 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
           atOnce.then((problems) => given({ atOnce: problems, releaseShaped: guard.released }), refused),
       };
     },
+    readLedgerMarks: () => {
+      guard.marksRead += 1;
+      return guard.marks();
+    },
+    builtMigrationNames: () => guard.built(),
   };
 });
 
@@ -48,10 +58,14 @@ function logger(): { capture: LogCapture; logger: ReturnType<typeof testLogger> 
   };
 }
 
+/** The time the start checks read: the ledger's marks below are counted relative to it. */
+const NOW = new Date('2026-11-03T09:14:00Z');
+
 const options = (log: ReturnType<typeof logger>) => ({
   database: {} as never,
   appRole: 'agentx_app',
   logger: log.logger,
+  clock: { now: () => NOW },
 });
 
 // A spend request's columns fixed when it is made (0039): all but its status.
@@ -78,6 +92,9 @@ const SPEND_REQUESTS_FIXED = [
 beforeEach(() => {
   guard.result = (): Promise<string[]> => Promise.resolve([]);
   guard.released = [];
+  guard.marks = () => Promise.resolve(undefined);
+  guard.built = () => Promise.resolve([]);
+  guard.marksRead = 0;
 });
 
 describe('at start-up', () => {
@@ -478,6 +495,140 @@ describe('drift a release can also make, on the schedule', () => {
     const log = logger();
     expect(await schemaSoundAtStart(options(log))).toBe(false);
     expect(log.capture.lines()).toMatchObject([{ event: ALARM, when: 'start', problems: [FUNCTION_UNKNOWN] }]);
+  });
+});
+
+describe('release-shaped drift at start, while a release is under way (staging, 3 Nov)', () => {
+  const NEW_TABLE = 'directory.org_work does not have row-level security enabled';
+  const COMING = 'directory.orgs carries "marks_orgs", a coming trigger';
+  const OTHER = 'PUBLIC may SELECT on audit.events';
+  const BUILT = ['0001_a.sql', '0002_b.sql'];
+  const { RELEASE_START_WAIT_MS } = schemaCheck;
+  /** The ledger's marks: one migration more than this image's, counted `msAgo` before the clock's now. */
+  const counted = (msAgo: number, rows = BUILT.length + 1) => {
+    guard.marks = () => Promise.resolve({ rows, countedAt: new Date(NOW.getTime() - msAgo) });
+  };
+  const start = async (extra: { signal?: AbortSignal; deadlineMs?: number } = {}) => {
+    const log = logger();
+    const sound = await schemaSoundAtStart({ ...options(log), ...extra });
+    return { sound, lines: log.capture.lines() };
+  };
+
+  beforeEach(() => {
+    guard.released = [NEW_TABLE, COMING];
+    guard.built = () => Promise.resolve(BUILT);
+  });
+
+  it('refuses the start with a warning, naming the drift and the counts, and raises no alarm', async () => {
+    counted(60_000);
+    const { sound, lines } = await start();
+    expect(sound).toBe(false);
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: 'warn',
+        event: 'db.schema_start_waits_release',
+        problems: [NEW_TABLE, COMING],
+        ledgerMigrations: 3,
+        builtMigrations: 2,
+        newestBuilt: '0002_b.sql',
+        countedMsAgo: 60_000,
+      }),
+    ]);
+  });
+
+  it.each([
+    ['just counted', 0],
+    ['a moment before the window ends', RELEASE_START_WAIT_MS - 1],
+    ['stamped ahead of this clock', -5_000],
+  ])('waits when %s', async (_, msAgo) => {
+    counted(msAgo);
+    expect((await start()).lines.map(({ event }) => event)).toEqual(['db.schema_start_waits_release']);
+  });
+
+  it.each([
+    ['as the window ends', RELEASE_START_WAIT_MS],
+    ['long after', RELEASE_START_WAIT_MS * 10],
+  ])('is the alarm %s: a stuck release pages', async (_, msAgo) => {
+    counted(msAgo);
+    const { sound, lines } = await start();
+    expect(sound).toBe(false);
+    expect(lines).toEqual([
+      expect.objectContaining({ level: 'error', event: 'audit.integrity_failed', check: 'schema', when: 'start' }),
+    ]);
+    expect(lines[0]?.problems).toEqual([NEW_TABLE, COMING]);
+  });
+
+  it.each([
+    [
+      'the ledger holds no more than this image has',
+      () => {
+        counted(0, BUILT.length);
+      },
+    ],
+    [
+      'the ledger was never counted',
+      () => {
+        counted(0, -1);
+      },
+    ],
+    [
+      'the ledger has no stamp',
+      () => {
+        guard.marks = () => Promise.resolve({ rows: 3, countedAt: undefined });
+      },
+    ],
+    [
+      'there is no ledger',
+      () => {
+        guard.marks = () => Promise.resolve(undefined);
+      },
+    ],
+    ['the marks cannot be read', () => (guard.marks = () => Promise.reject(new Error('permission denied')))],
+    ['this image cannot list its own', () => (counted(0), (guard.built = () => Promise.reject(new Error('ENOENT'))))],
+  ])('is the alarm when %s', async (_, given) => {
+    given();
+    const { sound, lines } = await start();
+    expect(sound).toBe(false);
+    expect(lines.map(({ level, event }) => `${String(level)} ${String(event)}`)).toEqual([
+      'error audit.integrity_failed',
+    ]);
+  });
+
+  it('is the alarm, with all of it, when other drift is beside it, without reading the marks', async () => {
+    counted(0);
+    guard.result = (): Promise<string[]> => Promise.resolve([OTHER]);
+    const { lines } = await start();
+    expect(lines).toEqual([expect.objectContaining({ level: 'error', problems: [OTHER, NEW_TABLE, COMING] })]);
+    expect(guard.marksRead).toBe(0);
+  });
+
+  it('is the alarm when the marks never answer in time', async () => {
+    guard.marks = () => new Promise(() => undefined);
+    const { lines } = await start({ deadlineMs: 20 });
+    expect(lines.map(({ event }) => event)).toEqual(['audit.integrity_failed']);
+  });
+
+  it('says nothing when the process stops while the marks are read', async () => {
+    const stopping = new AbortController();
+    guard.marks = () => {
+      stopping.abort();
+      return new Promise(() => undefined);
+    };
+    const { sound, lines } = await start({ signal: stopping.signal });
+    expect(sound).toBe(false);
+    expect(lines).toEqual([]);
+  });
+
+  it('waits half an hour, as the plain words for its warning say', () => {
+    expect(RELEASE_START_WAIT_MS).toBe(30 * 60 * 1000);
+  });
+
+  it('never applies on the schedule: a running check reads no marks', async () => {
+    counted(0);
+    const log = logger();
+    await checkSchemaOnSchedule(options(log));
+    expect(log.capture.lines().map(({ event }) => event)).toEqual(['db.schema_release_drift_seen']);
+    expect(guard.marksRead).toBe(0);
   });
 });
 

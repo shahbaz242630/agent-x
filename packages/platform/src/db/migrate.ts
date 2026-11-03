@@ -208,6 +208,9 @@ export async function runMigrations(options: MigrationOptions): Promise<string[]
       await applyWithLockRetries(client, migration, options.logger, lockWait);
       options.logger.info('db.migration.applied', { migration: migration.name, checksum: migration.checksum });
     }
+    // Counts the ledger's rows into the catalogue and stamps when, the marks the image
+    // before this release reads at its start, as it may not read the ledger (ledger-marks.ts).
+    if (pending.length > 0) await client.query('analyze migrations.applied');
     options.logger.info('db.migrations.done', { applied: pending.length, total: files.length });
     return pending.map((migration) => migration.name);
   } finally {

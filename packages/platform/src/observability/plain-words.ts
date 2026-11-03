@@ -352,6 +352,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet: if any later check finds such a rule, it becomes the integrity alarm.',
     next: 'Nothing to do during a release. With no release running, treat it as possible tampering.',
   },
+  'db.schema_start_waits_release': {
+    happened: "An older copy of Agent X tried to start during a release and found the release's new database rules.",
+    broke: 'Nothing: that copy did not start, and the new copy takes over.',
+    next: 'Nothing to do. If the release is not in within 30 minutes, the next try raises the integrity alarm.',
+  },
   'db.schema_unreadable': {
     happened: 'The database would not let Agent X read its own security set-up for the routine check.',
     broke:

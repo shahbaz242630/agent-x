@@ -16,6 +16,8 @@ import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
+import { createDatabase } from './database.ts';
+import { builtMigrationNames, readLedgerMarks } from './ledger-marks.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import {
   applyMigration,
@@ -318,5 +320,45 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
     expect(files[0]).toBe('0001_baseline.sql');
     expect(await run(REPO_MIGRATIONS)).toEqual(files);
     expect(await run(REPO_MIGRATIONS)).toEqual([]);
+    // What an image says it was built with: these same files, by default.
+    expect(await builtMigrationNames()).toEqual(files);
+  });
+
+  describe("the ledger's marks, which the app role reads in place of the ledger (schema-check.ts)", () => {
+    const marks = async () => {
+      const app = createDatabase({ ...database.connection('app'), tls: 'disable', maxConnections: 1 }, testLog());
+      try {
+        return await readLedgerMarks(app);
+      } finally {
+        await app.destroy();
+      }
+    };
+    const testLog = () =>
+      createLogger({
+        service: 'test',
+        config: { environment: 'test', release: 'r-1', log: { level: 'error', eventCapPerMinute: 100 } },
+        destination: { write: () => undefined },
+      });
+
+    it('are none before there is a ledger', async () => {
+      expect(await marks()).toBeUndefined();
+    });
+
+    it('count the rows and stamp when, each time a run applies a file, and not when it applies none', async () => {
+      await write('0001_first.sql', 'create schema demo;');
+      await write('0002_second.sql', 'create table demo.two (id int);');
+      await run();
+      const first = await marks();
+      expect(first).toEqual({ rows: 2, countedAt: expect.any(Date) as unknown });
+
+      await run();
+      expect(await marks()).toEqual(first);
+
+      await write('0003_third.sql', 'create table demo.three (id int);');
+      await run();
+      const third = await marks();
+      expect(third?.rows).toBe(3);
+      expect(third?.countedAt?.getTime()).toBeGreaterThan(first?.countedAt?.getTime() ?? Infinity);
+    });
   });
 });
