@@ -386,13 +386,11 @@ describe(`clearing the integrity hold past 10,000 payments or contacts (4D2e Sta
     await restore();
     expect(await confirm(w, asked)).toMatchObject({ outcome: 'cleared' });
     // Each confirm counted every contact, the refused one too: past the level watched, each said so.
-    const filling = expect.objectContaining({
-      level: 'warn',
-      records: CONTACTS.subject,
-      held: CONTACTS_HELD,
-      during: 'hold_clearing',
-    });
-    expect(jobLines(w, 'identity.records_filling')).toEqual([filling, filling]);
+    const filling = { level: 'warn', records: CONTACTS.subject, held: CONTACTS_HELD, during: 'hold_clearing' };
+    expect(jobLines(w, 'identity.records_filling')).toEqual([
+      expect.objectContaining(filling),
+      expect.objectContaining(filling),
+    ]);
   }, 300_000);
 
   it('a tampered paid payment is found by the history batch and held again', async () => {
