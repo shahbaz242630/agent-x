@@ -44,7 +44,14 @@ export const SEAL_GRACE_MS = 15 * 60_000;
 
 const DAY_MS = 86_400_000;
 
-/** The form of the seal's lines, recorded with each seal so a later form can't be confused with this one. */
+/**
+ * The form of the seal's lines, recorded with each seal so a later form can't be confused with this one.
+ *
+ * Still 1 after 0070: a row with no key reads as it always did, so every seal made before it holds. The price: a
+ * day with keyed rows only reads right on code that knows the key. Code from before 0070 would seal such a day, or
+ * check its seal, on the shorter line, and an organisation goes on a false hold. So never roll back past 0070 once
+ * keyed rows exist, and never release across the seal's run at 00:15 UTC.
+ */
 export const SEAL_FORM = 1;
 
 /** A day, YYYY-MM-DD, UTC. */

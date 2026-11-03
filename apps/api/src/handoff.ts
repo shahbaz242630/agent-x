@@ -152,7 +152,7 @@ export const HANDOFF_EVERY_MS = 10_000;
 export const PARTNER_CALL_TIMEOUT_MS = 30_000;
 
 /** How long a transaction may wait for its answer before it is marked UNKNOWN (ADR-007 §10): far past the call's limit. */
-const UNKNOWN_AFTER_MS = 10 * 60_000;
+export const UNKNOWN_AFTER_MS = 10 * 60_000;
 
 /** How old the hand-off's heartbeat may grow before /health says it has stopped (ADR-013): many runs' worth. */
 export const HEARTBEAT_STALE_MS = 5 * 60_000;

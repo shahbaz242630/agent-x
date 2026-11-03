@@ -460,6 +460,38 @@ describe('the clues the recorder writes (L4)', () => {
     });
   });
 
+  it('names who made a request whose row can’t be written, as its request line may have been sampled away', async () => {
+    const { app, capture } = await recording({ failing: true });
+    await app.inject(asMember(LOG_URL));
+
+    await vi.waitFor(() => {
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({ event: 'access_log.write_failed', userId: LIVE.userId }),
+      );
+    });
+    const [line] = capture.lines().filter(({ event }) => event === 'access_log.write_failed');
+    expect(line).not.toHaveProperty('agentId');
+    expect(line).not.toHaveProperty('agentKeyId');
+  });
+
+  it('names the agent and its key, never the key itself, when an agent’s row can’t be written', async () => {
+    const { app, capture } = await recording({ failing: true, logSample: { oneIn: 20, keeps: () => false } });
+    await app.inject({ method: 'GET', url: '/v1/agent', headers: { authorization: `Bearer ${KEY}` } });
+
+    await vi.waitFor(() => {
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({
+          event: 'access_log.write_failed',
+          agentId: AGENT_ID,
+          agentKeyId: KEY_ACCEPTED.keyId,
+        }),
+      );
+    });
+    const [line] = capture.lines().filter(({ event }) => event === 'access_log.write_failed');
+    expect(line).not.toHaveProperty('userId');
+    expect(JSON.stringify(capture.lines())).not.toContain(KEY);
+  });
+
   it('logs a row whose place couldn’t be found as one that couldn’t be written', async () => {
     const { app, capture } = await recording({
       placeOf: () => {

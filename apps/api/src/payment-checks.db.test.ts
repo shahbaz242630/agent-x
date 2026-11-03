@@ -39,7 +39,7 @@ import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { asARun } from './background.ts';
-import { createHandoff, HEARTBEAT_STALE_MS, handoffDatabaseGate } from './handoff.ts';
+import { createHandoff, HEARTBEAT_STALE_MS, handoffDatabaseGate, UNKNOWN_AFTER_MS } from './handoff.ts';
 import { createRailHealth, type RailHealth } from './rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
 import { heartbeatChecks } from './health.ts';
@@ -380,7 +380,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     });
   });
 
-  it('leaves one the bank doesn’t find as it was: not found proves nothing', async () => {
+  it('leaves one the bank doesn’t find as it was: not found proves nothing, but the bank knew it, so its line stays', async () => {
     const { w, acting } = await ready();
     const request = await ask(acting, w, { amount: ALLOWED() });
     await handoffOf(w).run();
@@ -391,8 +391,51 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     ).run();
 
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });
+    expect(lines('payment_check.checked')).toEqual([
+      expect.objectContaining({ answer: 'not_found', from: 'PROCESSING', to: 'PROCESSING', bankLost: 'Pending' }),
+    ]);
+    expect(lines('payment_check.run_unchanged')).toEqual([]);
+    expect(lines('payment_check.not_found_long')).toEqual([]);
+  });
+
+  it('counts a young payment the bank has never spoken of and can’t find: it has no line of its own', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED(2n) });
+    await handoffOf(w).run();
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN', providerStatus: null });
+
+    await checksOf(
+      w,
+      answering(w, () => ({ kind: 'not_found' })),
+    ).run();
+
     expect(lines('payment_check.checked')).toEqual([]);
     expect(lines('payment_check.run_unchanged')).toEqual([expect.objectContaining({ unchanged: 0, notFound: 1 })]);
+    expect(lines('payment_check.not_found_long')).toEqual([]);
+  });
+
+  it('says each check that the bank still can’t find one under way past its time, naming it; the payment stays waiting', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    await handoffOf(w).run();
+    const { id } = await transactionOf(w, request.id);
+    const notFound = answering(w, () => ({ kind: 'not_found' }));
+
+    clock.advanceBy(UNKNOWN_AFTER_MS - STEP);
+    await checksOf(w, notFound).run();
+    expect(lines('payment_check.not_found_long')).toEqual([]);
+
+    clock.advanceBy(2 * STEP);
+    await checksOf(w, notFound).run();
+    await checksOf(w, notFound).run();
+    const said = expect.objectContaining({ level: 'warn', orgId: w.org, transactionId: id });
+    expect(lines('payment_check.not_found_long')).toEqual([said, said]);
+    expect(lines('payment_check.not_found_long')[0]?.says).toEqual(expect.stringContaining('waiting'));
+    expect(await transactionOf(w, request.id)).toMatchObject({ status: 'PROCESSING' });
+
+    // Found again, nothing more to say.
+    await checksOf(w).run();
+    expect(lines('payment_check.not_found_long')).toHaveLength(2);
   });
 
   it('leaves them as they were while the bank can’t be reached, and says so once a run', async () => {

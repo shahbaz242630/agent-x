@@ -58,6 +58,10 @@
 // its own: a run's `payment_check.run_unchanged` counts them, a bank's not-found
 // apart (4D2e Stage F). The count is a run's, not an exact tally: a check still
 // applying after a run gave up at a stop can miss it, or land in the next run's.
+// A not-found on a payment the bank has spoken of keeps its line, its word having
+// changed; one handed off past UNKNOWN_AFTER_MS is said at warn on each check that
+// finds it so, the payment staying waiting (following it up is the user's with
+// their bank, decision 38).
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
@@ -106,6 +110,7 @@ import {
   PartnerTimedOut,
   RUN_BUDGET_MS,
   STOP_WAIT_MS,
+  UNKNOWN_AFTER_MS,
   withinTime,
 } from './handoff.ts';
 import { alertAdmins, type PaymentAlert } from './payment-alerts.ts';
@@ -235,7 +240,17 @@ interface Checked {
   readonly to: TransactionStatus;
   /** The bank's status, where this check is the first to read it; else null. */
   readonly newBankStatus: string | null;
+  /** The bank's last status, where it now says it can't find the payment; else null. */
+  readonly bankLost: string | null;
 }
+
+/** Whether a check left all as it was, so its count says enough. */
+const nothingNew = ({ from, to, newBankStatus, bankLost }: Checked): boolean =>
+  from === to && newBankStatus === null && bankLost === null;
+
+/** Whether the bank not finding this one by now is worth saying: handed to it, and past when its answer was due. */
+const lostTooLong = (status: TransactionStatus, createdAt: Date, now: Date): boolean =>
+  (status === 'SUBMITTED' || status === 'PROCESSING') && now.getTime() - createdAt.getTime() > UNKNOWN_AFTER_MS;
 
 /** Whether a settled payment's bank state contradicts it: paid and then not, or failed and then paid (rail map §4). */
 const contradicts = (status: TransactionStatus, state: PaymentState): boolean =>
@@ -491,6 +506,7 @@ export function createPaymentChecks({
       /** What the bank's word raised for the organisation's admins (decision 37b), told once it is applied. */
       const alerts: { readonly alert: PaymentAlert; readonly details: Record<string, string> }[] = [];
       let newBankStatus: string | null = null;
+      let bankLost: string | null = null;
 
       /** The status it moved to, or null where its machine refused the move (its facts still kept). */
       const move = async (event: TransactionEvent, facts: ProviderFacts, via: string) => {
@@ -505,7 +521,13 @@ export function createPaymentChecks({
 
       /** Where the bank's word takes it. */
       const movedBy = async (): Promise<TransactionStatus> => {
-        if (word.kind === 'not_found') return from;
+        if (word.kind === 'not_found') {
+          bankLost = transaction.providerStatus;
+          if (lostTooLong(from, transaction.createdAt, clock.now())) {
+            log.warn('payment_check.not_found_long', { transactionId: listed.id });
+          }
+          return from;
+        }
         const found = word.kind === 'found' && answerAbout(word.execution, orgId, locked) ? word.execution : undefined;
         if (found === undefined) {
           if (word.kind === 'found') {
@@ -562,7 +584,7 @@ export function createPaymentChecks({
       for (const { alert, details } of alerts) {
         await alertAdmins(tx, { keys, ids, outbox }, { orgId, transactionId: listed.id, alert, details });
       }
-      return { from, to, newBankStatus };
+      return { from, to, newBankStatus, bankLost };
     });
 
   /** One payment checked with the bank, its outcome logged. */
@@ -574,7 +596,7 @@ export function createPaymentChecks({
     if (gaveUpWaiting) return 'unreached';
     try {
       const checked = await databaseGate.run(orgId, () => applied(orgId, listed, word, log));
-      if (checked.from === checked.to && checked.newBankStatus === null) {
+      if (nothingNew(checked)) {
         run[word.kind === 'not_found' ? 'notFound' : 'unchanged'] += 1;
       } else log.info('payment_check.checked', { transactionId: listed.id, answer: word.kind, ...checked });
       return 'checked';

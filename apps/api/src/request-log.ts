@@ -14,7 +14,8 @@
 // kept 1 in N, saying `sampleOf: N`. A failure, a refusal, a request cut off and
 // a sign-in are always kept, and `http.minute` counts every request exactly, a
 // process a minute, sampled or capped or not. The activity row keeps each known
-// caller's request and its key either way.
+// caller's request and its key either way; a row that can't be written has
+// `access_log.write_failed`, naming the caller, in its place.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { EventName, Logger, ProblemEvent } from '@agentx/platform/observability';
 import { type FastifyInstance, type FastifyReply, type FastifyRequest, LogController } from 'fastify';

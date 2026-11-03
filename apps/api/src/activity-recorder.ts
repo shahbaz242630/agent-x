@@ -180,6 +180,10 @@ export function registerActivityLog(
         route: request.routeOptions.url,
         status: reply.statusCode,
         malformed: error instanceof RangeError,
+        // Who made it: its request line may have been sampled away. Public IDs, never a key itself.
+        agentId: request.agent?.agentId,
+        agentKeyId: request.agent?.keyId,
+        userId: request.person?.userId,
       });
     });
     writing.add(written);

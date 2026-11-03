@@ -5,7 +5,8 @@
 // A client can send its own correlation ID, so the hash is salted with a random
 // value made once a process and never written anywhere: no ID can be picked to
 // be left out. One client repeating one ID does get one answer from one process;
-// the activity row, never sampled, still holds each of its requests.
+// the activity row, never sampled, still holds each of its requests (or, where a
+// row can't be written, `access_log.write_failed` names its caller).
 //
 // This says only which lines may go. What is never sampled (a failure, an abort,
 // a sign-in, `spend_request.decided`, and every other event: `handoff.*`, payment
