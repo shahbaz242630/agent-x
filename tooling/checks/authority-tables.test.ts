@@ -308,7 +308,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: transactions.TRANSACTIONS.fields,
         status: transactions.TRANSACTION,
         fixedAtCreation: ['instruction_id', 'created_at'],
-        liveStatuses: ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN', 'SUCCEEDED'],
+        liveStatuses: ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'],
       },
       // A proposal moves by its machine; its payment, reference, proposer and making fixed.
       {

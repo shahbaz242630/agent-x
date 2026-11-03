@@ -50,8 +50,9 @@ export const TRANSACTIONS = {
   rules: TRANSACTION,
   // Its instruction and when it was opened, fixed when it is made: 0058's `fixed_at_creation` refuses any change after.
   fixedAtCreation: ['instruction_id', 'created_at'],
-  // Clearing the integrity hold checks those whose outcome can still move.
-  liveStatuses: ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN', 'SUCCEEDED'],
+  // Clearing the integrity hold checks those not settled, every one; a paid one (SUCCEEDED, only ever reversed, and
+  // read again then) among the newest, or else by the history batches, as an ended request (4D2e Stage F, decision 5).
+  liveStatuses: ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'],
 } as const satisfies SignedStateTable &
   StatusTable<TransactionStatus, TransactionEvent> & {
     readonly fixedAtCreation: readonly string[];

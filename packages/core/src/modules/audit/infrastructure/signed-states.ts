@@ -200,22 +200,24 @@ export type PageCheck = StateCheck | { readonly outcome: 'backlog' };
 
 /**
  * A table verifyAll checks: all of it, or, for one whose rows only grow (a
- * spend request's, Phase 2 D1), its rows in `liveStatuses` alone: those that
- * can still act. One moved back to a live status is listed, so checked; an
- * ended one, or a live one moved to an end or deleted, is not judged here:
- * clearing reads the record its hold names, the whole history is checked in
- * batches before a clearing is confirmed (Phase 2 D1c), and claims and
- * reservations are reconciled with the log (E1).
+ * spend request's, Phase 2 D1; a payment's), its rows in `liveStatuses`,
+ * those that can still act, and its newest rows up to the limit whatever
+ * their status (4D2e Stage F, decision 5), so a long history never fails it.
+ * One moved back to a live status is listed, so checked; an older ended one,
+ * or a live one moved to an end or deleted, is not judged here: clearing reads
+ * the record its hold names, the whole history is checked in batches before a
+ * clearing is confirmed (Phase 2 D1c), and claims and reservations are
+ * reconciled with the log (E1).
  */
 export interface CheckedTable extends SignedStateTable {
   readonly liveStatuses?: readonly string[];
 }
 
 /**
- * Every object of the tables checked (verifyAll; a growing table's live rows):
+ * Every object of the tables checked (verifyAll; a growing table's as CheckedTable says):
  * all verified, with how many there were; some tampered with, each finding
- * named (every alarm is already raised); or more objects in one table than the
- * limit, with none judged.
+ * named (every alarm is already raised); or more objects in one table that
+ * doesn't grow than the limit, with none judged.
  */
 export type OrganisationCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
@@ -456,7 +458,8 @@ export interface SignedStates {
    * table in the order given, which must be the lock order's (ADR-006 §6),
    * and by ID within each. Past `limit` rows, or objects in the log, in one
    * table: `too_many`, with nothing more judged. A table with `liveStatuses`
-   * is checked in its live rows alone (CheckedTable).
+   * is checked in every live row and its newest `limit` rows, however many it
+   * holds: never `too_many` (CheckedTable).
    */
   verifyAll(
     tx: AuditTransaction,
@@ -1537,6 +1540,42 @@ export function createSignedStates({
     return Object.freeze({ ids, next: next.length > size ? (ids.at(-1) ?? null) : null });
   };
 
+  /**
+   * A growing table as verifyAll checks it (4D2e Stage F, decision 5): its
+   * newest `window` rows whatever their status, and every live row older than
+   * those, a page of `window` at a time, so no count of either fails it;
+   * judged in ID order. Its older ended rows are the history batches' (Phase 2
+   * D1c), which clearing waits for, as it always has for ended spend requests.
+   */
+  const growingJudged = async (
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    live: readonly string[],
+    window: number,
+  ): Promise<{ readonly findings: readonly TamperFinding[]; readonly objects: number }> => {
+    const listed = await signedRowIds(tx, table, orgId, window, null, null, 'newest');
+    const newest = listed.slice(0, window).reverse();
+    const findings: TamperFinding[] = [];
+    let older = 0;
+    const oldestInWindow = newest[0];
+    // One more listed than the window: rows older than it, whose live ones are read here too.
+    if (oldestInWindow !== undefined && listed.length > window) {
+      let after: string | null = null;
+      for (let more = true; more;) {
+        const page: readonly string[] = await signedRowIds(tx, table, orgId, window, after, live);
+        // Lower-case UUID text sorts as Postgres sorts the uuids: those from the window on are judged with it.
+        const before = page.slice(0, window).filter((id) => id < oldestInWindow);
+        findings.push(...(await judged(tx, orgId, table, before)));
+        older += before.length;
+        more = page.length > window && before.length === window;
+        after = before.at(-1) ?? null;
+      }
+    }
+    findings.push(...(await judged(tx, orgId, table, newest)));
+    return { findings, objects: older + newest.length };
+  };
+
   return Object.freeze({
     verifiedState,
     gather,
@@ -1563,10 +1602,14 @@ export function createSignedStates({
       let objects = 0;
       for (const table of tables) {
         notTheHold(table);
-        const live = table.liveStatuses ?? null;
-        const rowIds = await signedRowIds(tx, table, orgId, limit, null, live);
-        // A growing table's log lists every object it ever had, ended ones too.
-        const loggedIds = live === null ? await trail.subjectIds(tx, orgId, table.subject, limit) : [];
+        if (table.liveStatuses !== undefined) {
+          const growing = await growingJudged(tx, orgId, table, table.liveStatuses, limit);
+          findings.push(...growing.findings);
+          objects += growing.objects;
+          continue;
+        }
+        const rowIds = await signedRowIds(tx, table, orgId, limit);
+        const loggedIds = await trail.subjectIds(tx, orgId, table.subject, limit);
         const every = [...new Set([...rowIds, ...loggedIds])].sort();
         if (every.length > limit) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
         findings.push(...(await judged(tx, orgId, table, every)));

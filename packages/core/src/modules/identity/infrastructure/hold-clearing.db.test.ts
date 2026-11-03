@@ -522,11 +522,13 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     ).toMatchObject({ outcome: 'cleared' });
   });
 
-  it('refuses while the record its hold names is tampered with, in a table checked in its live rows alone (Phase 2 D1b)', async () => {
+  it('refuses at once while the record its hold names is tampered with, though past the newest of a growing table (Phase 2 D1b; 4D2e Stage F)', async () => {
     const row = await holdThenRepair();
+    // A newer membership, so the named one is past the newest one verifyAll reads here.
+    await member(org, 'viewer');
     const investigationId = await investigate();
     const challengeId = await steppedUp(investigationId);
-    // Memberships checked as a growing table is, in a status none of these has: verifyAll lists none of them.
+    // Memberships checked as a growing table is, in a status none of these has: verifyAll judges the newest alone.
     const liveOnly = createHoldClearings({
       database: app,
       keys,
@@ -536,6 +538,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       authorityTables: AUTHORITY_TABLES.map((table) =>
         table === MEMBERSHIPS ? { ...table, liveStatuses: ['DEACTIVATED'] } : table,
       ),
+      objectsChecked: 1,
     });
     const confirmLiveOnly = () =>
       liveOnly.confirm(
