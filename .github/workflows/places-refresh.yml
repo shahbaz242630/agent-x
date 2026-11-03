@@ -54,7 +54,7 @@ jobs:
         run: |
           month=$(node tooling/places/pin.ts due)
           echo "month=${month}" >> "$GITHUB_OUTPUT"
-          echo "Due: ${month:-nothing, the Dockerfile already pins this month's file}"
+          echo "Due: ${month:-nothing, the Dockerfile already pins the file for this month}"
 
       - name: Enable pnpm through Corepack
         if: steps.due.outputs.month != ''
