@@ -666,6 +666,7 @@ describe('the payment checks follow theirs', () => {
       await switchedHandoff(w).job.run();
       clock.advanceBy(2 * 24 * 3_600_000);
       // The bank answers for all but the first it is asked about: that old one stays under way.
+      const startedAt = clock.now().getTime();
       const kept: { id?: string } = {};
       const { rail, asked } = noting(w, { answers: (instructionId) => (kept.id ??= instructionId) !== instructionId });
       const { job } = switchedChecks({ rail });
@@ -676,7 +677,10 @@ describe('the payment checks follow theirs', () => {
       // At minute 10 a fresh one, marked as it is handed off, then paid by the bank's word within a few runs.
       await ask(acting, w, { amount: ALLOWED() });
       await switchedHandoff(w).job.run();
-      await minutes(job, 50);
+      await minutes(job, 10);
+      // Paid, and a day's turn since that read none: the mark waits for the old one's turn at 30, not the day's at 20.
+      expect((await marksOf(w)).payment_check?.due_at.getTime()).toBe(startedAt + 30 * 60_000);
+      await minutes(job, 40);
 
       const times = minutesOf(asked, old);
       expect(times[0]).toBe(0);

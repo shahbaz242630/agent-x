@@ -701,13 +701,12 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     });
     const checks = checksOf(w, rejectedAfter);
 
-    // Its first run checks every one, the paid among them; then every 30 minutes from that turn, taken up to half a
-    // run early (a mark is listed by Postgres's clock too), none sooner.
+    // Its first run checks every one, the paid among them; then every 30 minutes from that turn, none sooner.
     await checks.run();
     expect(asked).toBe(1);
     expect(await transactionOf(w, request.id)).toMatchObject({ providerStatus: 'AcceptedSettlementCompleted' });
     expect(lines('payment_check.contradicts')).toEqual([]);
-    clock.advanceBy(30 * STEP - STEP / 2 - 1);
+    clock.advanceBy(30 * STEP - 1);
     await checks.run();
     expect(asked).toBe(1);
     clock.advanceBy(1);

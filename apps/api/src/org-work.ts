@@ -167,7 +167,7 @@ export function markedOrganisations({
       listed.delete(orgId);
     },
     dueBy: (orgId, at) => {
-      dueBy.set(orgId, Math.min(at.getTime(), dueBy.get(orgId) ?? Number.POSITIVE_INFINITY));
+      dueBy.set(orgId, at.getTime());
     },
     async settle(signal) {
       const settling = [...listed];

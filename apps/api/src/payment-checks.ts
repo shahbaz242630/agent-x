@@ -233,9 +233,6 @@ const REGULAR_SHARE = 1 / 2;
 const UNKNOWN_LAP_SHARE = 1 / 3;
 const WATCH_LAP_SHARE = 1 / 6;
 
-/** How early a turn may be taken: half a run, so Postgres's clock running a little ahead never costs a whole period. */
-const DUE_SLACK_MS = PAYMENT_CHECKS_EVERY_MS / 2;
-
 /** How long an organisation's UNKNOWNs may stay due, their turns cut short, before it is said: by then the next is due. */
 const UNKNOWN_BEHIND_MS = LAP_EVERY_MS;
 
@@ -794,14 +791,14 @@ export function createPaymentChecks({
   };
 
   /**
-   * The organisations whose turn of the tier is due at `now`, within half a run: a mark is listed by Postgres's clock
-   * too, which may run a little ahead of this process's, and a turn found a moment early is still taken, not left a
-   * whole period. One seen for the first time is due from now.
+   * The organisations whose turn of the tier is due at `now`; one seen for the first time is due from now. One listed
+   * early (its mark read by Postgres's clock, ahead of this one) has its turn left for now, and its mark is settled
+   * back to that turn (`nextTurn`), never a period on.
    */
   const dueIn = (tier: Tier, orgs: readonly string[], now: number): string[] =>
     orgs.filter((orgId) => {
       if (!tier.next.has(orgId)) tier.next.set(orgId, now);
-      return (tier.next.get(orgId) ?? now) <= now + DUE_SLACK_MS;
+      return (tier.next.get(orgId) ?? now) <= now;
     });
 
   /**
@@ -869,10 +866,10 @@ export function createPaymentChecks({
     ];
     for (const [tier, share] of slower)
       cut.push(...(await turns(tier, dueIn(tier, orgs, now), partOfBudget(share, signal), now)));
-    const unfinishedOrgs = new Set(cut);
-    for (const orgId of unfinishedOrgs) unfinished?.(orgId);
+    // One cut short isn't settled at all, so the time given for it goes unread.
+    for (const orgId of new Set(cut)) unfinished?.(orgId);
     for (const orgId of orgs) {
-      const soonest = unfinishedOrgs.has(orgId) ? undefined : soonestTurn(orgId);
+      const soonest = soonestTurn(orgId);
       if (soonest !== undefined) nextTurn?.(orgId, new Date(soonest));
     }
     forgetIdle(orgs, now);
