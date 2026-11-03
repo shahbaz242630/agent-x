@@ -81,6 +81,10 @@ async function marksOf(w: World): Promise<Record<string, { due_at: Date; marks: 
   return Object.fromEntries(rows.map(({ job, ...rest }) => [job, rest]));
 }
 
+/** The server's time now: the marks' times are its clock's, which may run a few ms off this process's. */
+const serverNow = async () =>
+  (await admin().query<{ now: Date }>('select pg_catalog.now() as now'))[0]?.now.getTime() ?? 0;
+
 const jobsMarked = async (w: World) => Object.keys(await marksOf(w)).toSorted();
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 const JOBS = ['hand_off', 'hand_off_sweep', 'payment_check'];
@@ -146,7 +150,7 @@ describe('where each mark comes from', () => {
     expect(Object.keys(marks)).toEqual(['hand_off']);
     // Due at once, from its transaction's start.
     expect(marks.hand_off?.due_at.getTime()).toBeGreaterThanOrEqual(started);
-    expect(marks.hand_off?.due_at.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(marks.hand_off?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
   });
 
   it("a request's hand-off marks its sweep and its checks, the sweep's ten minutes on, as UNKNOWN_AFTER_MS", async () => {
@@ -370,7 +374,7 @@ describe('the hourly look', () => {
     }).run();
 
     expect(seen.hand_off_sweep?.due_at).toEqual(new Date(created.getTime() + 10 * 60_000));
-    expect(seen.payment_check?.due_at.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(seen.payment_check?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
     expect(lines('org_work.unmarked').map(({ job }) => job as string)).toEqual(['hand_off_sweep', 'payment_check']);
   });
 
@@ -453,7 +457,7 @@ describe('the hourly look', () => {
 
     await admin().query(`update directory.org_work set due_at = 'tomorrow' where org_id = $1`, [w.org]);
     await rediscoveryOf(w.org).run();
-    expect((await marksOf(w)).hand_off?.due_at.getTime()).toBeLessThanOrEqual(Date.now());
+    expect((await marksOf(w)).hand_off?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
     expect(lines('org_work.unmarked')).toEqual([expect.objectContaining({ job: 'hand_off', late: true })]);
     expect(lines('org_work.rediscovered').at(-1)).toEqual(expect.objectContaining({ late: 1 }));
   });
