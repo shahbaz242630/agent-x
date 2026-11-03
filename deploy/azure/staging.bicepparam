@@ -22,6 +22,8 @@ param postgresAdminPassword = readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADM
 // deploy.ts always sets it (load only with --load-size, D2c); the default serves the policy tests.
 param databaseSize = readEnvironmentVariable('AGENTX_AZURE_DATABASE_SIZE', 'normal')
 param databaseDiskGb = int(readEnvironmentVariable('AGENTX_AZURE_DATABASE_DISK_GB', '32'))
+// deploy.ts always sets it (on only with --always-on): staging sleeps. The default serves the policy tests.
+param alwaysOn = bool(readEnvironmentVariable('AGENTX_AZURE_ALWAYS_ON', 'false'))
 // The zone Azure put the server in when it was made (S159): stated so it stays there.
 param postgresZone = '2'
 param postgresBackupRetentionDays = 7

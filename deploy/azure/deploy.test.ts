@@ -36,6 +36,7 @@ import {
   LOAD_VARIABLES,
   main,
   type Makers,
+  DEAD_MAN_RULE,
   parseArguments,
   issuedMissing,
   COPIED_SECRETS,
@@ -104,8 +105,22 @@ const pemHeader = (...label: readonly string[]): string => ['-----BEGIN', ...lab
 
 describe('parseArguments', () => {
   it('reads the ways the tool is run', () => {
-    expect(parseArguments(['foundation'])).toEqual({ command: 'foundation', loadSize: false });
-    expect(parseArguments(['foundation', '--load-size'])).toEqual({ command: 'foundation', loadSize: true });
+    expect(parseArguments(['foundation'])).toEqual({ command: 'foundation', loadSize: false, alwaysOn: false });
+    expect(parseArguments(['foundation', '--load-size'])).toEqual({
+      command: 'foundation',
+      loadSize: true,
+      alwaysOn: false,
+    });
+    expect(parseArguments(['foundation', '--always-on'])).toEqual({
+      command: 'foundation',
+      loadSize: false,
+      alwaysOn: true,
+    });
+    expect(parseArguments(['foundation', '--always-on', '--load-size'])).toEqual({
+      command: 'foundation',
+      loadSize: true,
+      alwaysOn: true,
+    });
     expect(parseArguments(['alerts'])).toEqual({ command: 'alerts' });
     expect(parseArguments(['dns'])).toEqual({ command: 'dns' });
     expect(parseArguments(['certificates'])).toEqual({ command: 'certificates' });
@@ -183,6 +198,7 @@ describe('parseArguments', () => {
       [['foundation', '--all'], /foundation takes only --load-size/],
       [['foundation', '--load-size', '--load-size'], /foundation takes only --load-size/],
       [['foundation', '--load-size=yes'], /foundation takes only --load-size/],
+      [['foundation', '--always-on', '--always-on'], /foundation takes only --load-size/],
       [['alerts', '--fix'], /alerts takes no options, not --fix/],
       [['dns', 'app.example.invalid'], /dns takes no options, not app.example.invalid/],
       [['certificates', '--keep-running'], /certificates takes no options, not --keep-running/],
@@ -521,6 +537,8 @@ const listed = (held: Held) => {
 };
 
 interface AzAnswers {
+  /** Whether the alerts on the jobs stopping are on, or a read that fails. */
+  readonly deadMen?: boolean | 'unreadable';
   /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
   readonly limit?: 'applied' | 'waiting' | 'stays' | 'refused' | 'unreadable';
   /** What the server list answers: the servers, or a failure. */
@@ -702,6 +720,12 @@ class RecordingAz implements Az {
         }
         return json({ state: ended, outputs: { databaseHost: { type: 'String', value: 'db.example.invalid' } } });
       }
+      case 'resource show': {
+        const { deadMen } = this.options;
+        return deadMen === 'unreadable'
+          ? { status: 3, stdout: '', stderr: 'ERROR: (ResourceNotFound) not found' }
+          : json(deadMen ?? false);
+      }
       case 'keyvault list':
         return json(this.options.vaults ?? ['kv-agentx-stg-abcdef']);
       case 'containerapp list':
@@ -835,6 +859,7 @@ describe('deploy foundation', () => {
       'account show --output',
       'bicep version',
       'postgres flexible-server list',
+      'resource show --subscription',
       'deployment sub create',
       'deployment sub show',
       ...RECORDING,
@@ -879,6 +904,7 @@ describe('deploy foundation', () => {
       AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: admin,
       // Always sent: a load size left in the operator's shell never reaches Azure.
       AGENTX_AZURE_DATABASE_SIZE: 'normal',
+      AGENTX_AZURE_ALWAYS_ON: 'false',
     });
     expect(done.terminal.said).toContain(
       'The database stays at (or goes back to) its normal size, B1ms; a change of size restarts it for a few minutes.',
@@ -932,6 +958,53 @@ describe('deploy foundation', () => {
     });
     expect(skipped.status).toBe(1);
     expect(skipped.az.sequence.filter((call) => call === 'rest --method get')).toHaveLength(1);
+  });
+
+  describe('the alerts on the jobs stopping, which a partner must not have to remember (4D2e D)', () => {
+    const TAIL =
+      'Staging sleeps, so they email you every 10 minutes unless apps runs with --keep-running. When that ends, run foundation without --always-on.';
+
+    it.each([
+      [['foundation'], false, 'false', 'The alerts on the jobs stopping are off now, and stay off: staging sleeps.'],
+      [
+        ['foundation'],
+        true,
+        'false',
+        'The alerts on the jobs stopping are on now, and this run turns them off: staging sleeps.',
+      ],
+      [['foundation'], 'unreadable', 'false', 'This run leaves the alerts on the jobs stopping off: staging sleeps.'],
+      [
+        ['foundation', '--always-on'],
+        false,
+        'true',
+        `The alerts on the jobs stopping are off now, and this run turns them on. ${TAIL}`,
+      ],
+      [['foundation', '--always-on'], true, 'true', `The alerts on the jobs stopping are on now, and stay on. ${TAIL}`],
+      [['foundation', '--always-on'], 'unreadable', 'true', `This run turns them on. ${TAIL}`],
+    ] as const)('%j, with them %j: sends %j and says it', async (argv, deadMen, sent, said) => {
+      const admin = aPaste();
+      const done = await run(argv, {
+        answers: ['y', 'ops@example.invalid'],
+        hidden: [admin, admin],
+        az: new RecordingAz({ deadMen }),
+      });
+      expect(done.status).toBe(0);
+      expect(done.az.deployment?.values).toMatchObject({ AGENTX_AZURE_ALWAYS_ON: sent });
+      expect(done.terminal.said).toContain(said);
+      const asked = done.az.calls.find((call) => call.args[0] === 'resource');
+      expect(asked?.args).toEqual(
+        expect.arrayContaining([
+          '--resource-group',
+          'rg-agentx-staging',
+          '--resource-type',
+          'Microsoft.Insights/scheduledQueryRules',
+          '--name',
+          DEAD_MAN_RULE,
+          '--query',
+          'properties.enabled',
+        ]),
+      );
+    });
   });
 
   it('sizes the database for the load run with --load-size, and says what it costs and how to size it back (D2c)', async () => {
@@ -1504,6 +1577,7 @@ describe('deploy apps', () => {
       'deployment group show',
       'containerapp list --subscription',
       'containerapp job list',
+      'resource show --subscription',
     ]);
     const deployment = done.az.deployment;
     expect(deployment?.args).toContain('staging.apps.bicepparam');
@@ -1536,8 +1610,44 @@ describe('deploy apps', () => {
     );
   });
 
+  it.each([
+    [
+      ['apps'],
+      true,
+      'The alerts on the jobs stopping are on, and staging now sleeps, so they will email you every 10 minutes. To stop the emails, run node deploy/azure/deploy.ts foundation.',
+    ],
+    [
+      ['apps', '--keep-running'],
+      false,
+      'Nothing is watching for stopped jobs: those alerts are off. To turn them on while this keeps running, run node deploy/azure/deploy.ts foundation --always-on.',
+    ],
+  ] as const)(
+    '%j with those alerts on %j warns in plain words, and still deploys (4D2e D)',
+    async (argv, deadMen, said) => {
+      const done = await run(argv, { answers, images: recordingImages(), az: new RecordingAz({ deadMen }) });
+      expect(done.status).toBe(0);
+      expect(done.az.deployment).toBeDefined();
+      expect(done.terminal.said).toContain(said);
+    },
+  );
+
+  it.each([
+    [['apps'], false],
+    [['apps', '--keep-running'], true],
+    [['apps'], 'unreadable'],
+    [['apps', '--keep-running'], 'unreadable'],
+  ] as const)('%j with those alerts on %j says nothing of them', async (argv, deadMen) => {
+    const done = await run(argv, { answers, images: recordingImages(), az: new RecordingAz({ deadMen }) });
+    expect(done.status).toBe(0);
+    expect(done.terminal.said.join('\n')).not.toMatch(/stopped jobs|jobs stopping/);
+  });
+
   it('keeps one replica of each app running when asked, and says so before and after', async () => {
-    const done = await run(['apps', '--keep-running'], { answers, images: recordingImages() });
+    const done = await run(['apps', '--keep-running'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ deadMen: true }),
+    });
     expect(done.status).toBe(0);
     const values = done.az.deployment?.values;
     expect(values?.AGENTX_AZURE_APP_MIN_REPLICAS).toBe('1');
