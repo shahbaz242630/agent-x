@@ -20,11 +20,12 @@ let owner: TestSession;
 const ROLES = { appRole: 'agentx_app', ownerRole: 'agentx_owner' } as const;
 
 const BODY = ' begin return null; end ';
+// Plain text, as the SQL rule asks: BODY written out again between the dollar quotes.
 const MAKE_FUNCTION = `create function audit.coming_mark() returns trigger language plpgsql
-  set search_path = pg_catalog as $$${BODY}$$`;
+  set search_path = pg_catalog as $$ begin return null; end $$`;
 
 const REQUESTS = 'spend_requests.requests';
-const CREATE_EXACT = `create constraint trigger coming_mark after insert or update on ${REQUESTS}
+const CREATE_EXACT = `create constraint trigger coming_mark after insert or update on spend_requests.requests
   deferrable initially deferred for each row when (new.status = 'APPROVED')
   execute function audit.coming_mark('a_job', '0 seconds')`;
 const COMING: WrittenTrigger = {
@@ -194,14 +195,14 @@ describe('a trigger a coming migration adds to a table already built', () => {
 
   it("a known table's other drift beside it is still the alarm at once", async () => {
     await owner.query(CREATE_EXACT);
-    await owner.query(`alter table ${REQUESTS} no force row level security`);
+    await owner.query('alter table spend_requests.requests no force row level security');
     try {
       expect(await drift()).toEqual({
         atOnce: [`${REQUESTS} does not have row-level security forced`],
         releaseShaped: [EXACT_READS],
       });
     } finally {
-      await owner.query(`alter table ${REQUESTS} force row level security`);
+      await owner.query('alter table spend_requests.requests force row level security');
     }
   });
 });
