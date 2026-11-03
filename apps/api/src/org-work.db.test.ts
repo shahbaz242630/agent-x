@@ -20,7 +20,7 @@ import {
   testLogger,
   waitUntilQueued,
 } from '@agentx/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, onTestFinished } from 'vitest';
 
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, SMALL } from './handoff-world.helper.test.ts';
@@ -407,14 +407,18 @@ describe('the hourly look', () => {
       await holder.query('begin');
       await holder.query('lock table spend_requests.requests in access exclusive mode');
       const looking = rediscoveryOf(w.org).run();
-      await waitUntilQueued(admin(), 1);
-      return {
-        letGo: async () => {
-          await holder.query('commit');
-          await looking;
-          await holder.end();
-        },
+      let held = true;
+      const letGo = async () => {
+        if (!held) return;
+        held = false;
+        await holder.query('commit');
+        await looking;
+        await holder.end();
       };
+      // A test that fails before letting go must not leave the table locked for the next one.
+      onTestFinished(letGo);
+      await waitUntilQueued(admin(), 1);
+      return { letGo };
     }
 
     it('a payment written meanwhile is read due with its mark in the later read: no miss is said', async () => {
