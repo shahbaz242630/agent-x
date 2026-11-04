@@ -1,6 +1,7 @@
-// The marks (directory.org_work, 0072, 0073), kept honest and followed (4D2e D6-D8).
+// The marks (directory.org_work, 0072, 0073, 0075), kept honest and followed (4D2e D6-D9).
 //
-// Followed: the hand-off, its sweep, the payment checks and the two expiries visit only the
+// Followed: the hand-off, its sweep, the payment checks, the two expiries, the request
+// voids, the waiting rejections and the carry rest visit only the
 // organisations whose marks are due by their clock, at most ORG_WORK_MOST a run,
 // those due longest first, instead of every organisation in the directory. Each
 // one's due time is when its work is next really needed, so with more due than a
@@ -47,8 +48,8 @@ import {
   settleOrgWorkPage,
 } from '@agentx/core/modules/directory';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { mandateExpiryDue, type MandatesTables } from '@agentx/core/modules/mandates';
-import { requestExpiryDue, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { mandateExpiryDue } from '@agentx/core/modules/mandates';
+import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import { type Clock, HOUR_MS, systemClock } from '@agentx/core/shared-kernel';
 import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import { type Database, type DatabaseTransaction, sendTogether, withTenant } from '@agentx/platform/db';
@@ -56,7 +57,11 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { createGate, type Gate } from './fair-lanes.ts';
 import { handOffDue, handOffSweepDue } from './handoff.ts';
+import { carryRestDue } from './mandate-carry-rest.ts';
 import { paymentCheckDue } from './payment-checks.ts';
+import { requestVoidsDue, type VoidTables } from './request-voids.ts';
+import type { DecisionTables } from './spend-request-decisions.ts';
+import { waitingRejectionsDue } from './waiting-rejections.ts';
 
 /** How often every organisation's marks are looked over: a serial burst, one organisation after another. */
 export const ORG_WORK_REDISCOVERY_EVERY_MS = HOUR_MS;
@@ -72,7 +77,7 @@ const LATE_BY_MS = 60_000;
  */
 export const WAITING_AS_A_WHOLE_MS = LATE_BY_MS - 5_000;
 
-type OrgWorkTables = DirectoryTables & SpendRequestsTables & TransactionsTables & AuditTables & MandatesTables;
+type OrgWorkTables = DirectoryTables & VoidTables & DecisionTables & TransactionsTables & AuditTables;
 
 /** How many organisations a job takes from its marks a run: its list stays this size however many have work. */
 const ORG_WORK_MOST = 1_000;
@@ -241,6 +246,9 @@ const DUE_READS = [
   ['payment_check', paymentCheckDue],
   ['request_expiry', requestExpiryDue],
   ['mandate_expiry', mandateExpiryDue],
+  ['request_voids', requestVoidsDue],
+  ['waiting_rejections', waitingRejectionsDue],
+  ['carry_rest', carryRestDue],
 ] as const satisfies readonly (readonly [OrgWorkJob, unknown])[];
 
 /** What the organisation's rows and marks said on one trip. */

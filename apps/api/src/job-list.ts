@@ -51,7 +51,7 @@ import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-ch
 import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { contactFillFrom } from './kept-names.ts';
-import { CARRY_REST_EVERY_MS, createCarryRest } from './mandate-carry-rest.ts';
+import { CARRY_REST_EVERY_MS, carryRestDue, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
@@ -65,12 +65,12 @@ import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from '.
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
-import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
+import { createRequestVoids, REQUEST_VOIDS_EVERY_MS, requestVoidsDue } from './request-voids.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createRoundTripTiming, ROUND_TRIP_EVERY_MS, ROUND_TRIPS_A_RUN } from './round-trip-timing.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createWaitingRequests } from './waiting-requests.ts';
-import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
+import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejectionsDue } from './waiting-rejections.ts';
 
 /**
  * How long the anchor check of one chain may hold its lane before it counts as
@@ -264,6 +264,11 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The two expiries, each visiting only the organisations whose soonest end has come by its marks (4D2e D8).
   const requestExpiryMarks = markedOrganisations({ job: 'request_expiry', nextDue: requestExpiryDue, ...marking });
   const mandateExpiryMarks = markedOrganisations({ job: 'mandate_expiry', nextDue: mandateExpiryDue, ...marking });
+  // The voids, the rejections and the carry, each visiting only the organisations where a candidate stands by its
+  // marks (4D2e D9); the voids also as a consent's end comes.
+  const voidsMarks = markedOrganisations({ job: 'request_voids', nextDue: requestVoidsDue, ...marking });
+  const rejectionMarks = markedOrganisations({ job: 'waiting_rejections', nextDue: waitingRejectionsDue, ...marking });
+  const carryMarks = markedOrganisations({ job: 'carry_rest', nextDue: carryRestDue, ...marking });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
@@ -414,7 +419,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       HOUR_MS,
     ),
     // Pending spend requests whose authority no longer stands voided, their holdings released (Phase 3 C1).
-    job('request_voids', createRequestVoids(clocked), REQUEST_VOIDS_EVERY_MS, HOUR_MS),
+    job(
+      'request_voids',
+      withOrgWork([voidsMarks], createRequestVoids({ ...clocked, list: voidsMarks.list })),
+      REQUEST_VOIDS_EVERY_MS,
+      HOUR_MS,
+    ),
     // The hand-off, where there is one.
     job('handoff', handoff, HANDOFF_EVERY_MS, HALF_HOUR_MS, (running) => {
       logger.info('api.handoff', { running });
@@ -423,9 +433,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       logger.info('api.payment_checks', { running });
     }),
     // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b).
-    job('waiting_rejections', createWaitingRejections(clocked), WAITING_REJECTIONS_EVERY_MS, HOUR_MS),
+    job(
+      'waiting_rejections',
+      withOrgWork([rejectionMarks], createWaitingRejections({ ...clocked, list: rejectionMarks.list })),
+      WAITING_REJECTIONS_EVERY_MS,
+      HOUR_MS,
+    ),
     // A carry past 20's rest weighed and carried onto the version in force (Phase 4 A3, PL-47).
-    job('carry_rest', createCarryRest(clocked), CARRY_REST_EVERY_MS, HOUR_MS),
+    job(
+      'carry_rest',
+      withOrgWork([carryMarks], createCarryRest({ ...clocked, list: carryMarks.list })),
+      CARRY_REST_EVERY_MS,
+      HOUR_MS,
+    ),
     // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6).
     job('activity_seal', createActivitySeal(clocked), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
     // The activity log's background downloads built, a month a file (Phase 3 L5c).

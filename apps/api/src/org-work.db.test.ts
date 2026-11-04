@@ -341,15 +341,24 @@ describe('a mark in COMMIT, against the signed writes', () => {
 });
 
 /**
- * An organisation ready to hand off, as the hourly look's tests start: without the mark its mandate's acceptance made
- * for the mandate expiry (0073), which has nothing due, as the mandate has no end, and which the look would clear.
- * Those marks are the expiries' tests' (org-work-expiry.db.test.ts).
+ * An organisation ready to hand off, as the hourly look's tests start: without the marks its making left that have
+ * nothing due, which the look would clear: the mandate expiry's (0073; its mandate has no end), the waiting
+ * rejections' and the carry rest's (0075; a policy set, a mandate's version in force). The voids' stands: its source's
+ * consent ends one day, so it is never one the look writes or clears. Those marks are their own tests'
+ * (org-work-expiry.db.test.ts, org-work-voids.db.test.ts).
  */
 async function readyToLook() {
   const made = await ready();
-  await admin().query(`delete from directory.org_work where org_id = $1 and job = 'mandate_expiry'`, [made.w.org]);
+  await admin().query(
+    `delete from directory.org_work where org_id = $1 and job in ('mandate_expiry', 'waiting_rejections', 'carry_rest')`,
+    [made.w.org],
+  );
   return made;
 }
+
+/** The organisation's marks of this file's jobs taken away, as a write that missed its marks would leave them. */
+const marksLost = (w: World) =>
+  admin().query('delete from directory.org_work where org_id = $1 and job = any($2::text[])', [w.org, JOBS]);
 
 describe('the hourly look', () => {
   it('with marks and rows agreeing writes nothing, on one trip of reads between its start and commit', async () => {
@@ -369,7 +378,7 @@ describe('the hourly look', () => {
   it('a mark lost is written and said, once; the next look finds nothing', async () => {
     const { w, acting } = await readyToLook();
     await ask(acting, w, { amount: ALLOWED() });
-    await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
+    await marksLost(w);
 
     await rediscoveryOf(w.org).run();
 
@@ -391,7 +400,7 @@ describe('the hourly look', () => {
     const rail: FakeRail = {
       ...w.rail,
       submitApprovedIntent: async (intent) => {
-        await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
+        await marksLost(w);
         await rediscoveryOf(w.org).run();
         return w.rail.submitApprovedIntent(intent);
       },
@@ -471,7 +480,7 @@ describe('the hourly look', () => {
       const request = await ask(acting, w, { amount: SMALL() });
       await handoffOf(w).run();
       const { id } = await transactionOfRequest(request.id);
-      await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
+      await marksLost(w);
       const look = await lookHeldAfterTheFirstRead(w);
       // Its row and mark commit together, after the look read no mark and before it reads what is due.
       await withSignedStates(app, w.org, quiet(), (tx, states) =>
