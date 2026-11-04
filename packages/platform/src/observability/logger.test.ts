@@ -586,7 +586,7 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
 
   it('caps a caller that tries to pass off its own lines as summaries', () => {
     const { logger, lines } = setup({ cap: 2 });
-    for (let i = 0; i < 10; i++) logger.info('log.suppressed' as EventName, { note: 'forged' });
+    for (let i = 0; i < 10; i++) logger.info('log.suppressed', { note: 'forged' });
     // A warning is never held back (4D2e F8), but is still no summary.
     logger.warn('log.suppressed' as ProblemEvent, { note: 'forged' });
     expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
