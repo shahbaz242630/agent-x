@@ -27,9 +27,10 @@ import {
 } from '@agentx/core/modules/identity';
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
-import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
+import { type Clock, HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
+import type { Logger } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 
 import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
@@ -105,6 +106,38 @@ const HOLDINGS_WHOLE_PASS_EVERY_MS = HOUR_MS;
 
 /** The seal check's rotation: twelve slots of its run's half hour, so each organisation once in 6 hours (decision 2). */
 const SEAL_CHECK_SLOTS = 12;
+
+/**
+ * The integrity passes that look in every organisation, an idle one less often, never left out (4D2e D11, Stage D's
+ * decision 2), each listing every one at its first run and visiting again next run any it didn't finish
+ * (org-passes.ts): the holdings check those with marks each run and every one hourly; the seal check a twelfth a run,
+ * each once in 6 hours; the activity seal every one once a UTC day from when yesterday can be sealed; the idempotency
+ * sweep every one once a UTC day.
+ */
+export function integrityPasses({
+  all,
+  marked,
+  logger,
+  clock = systemClock,
+}: {
+  readonly all: () => Promise<readonly string[]>;
+  /** The organisations with marks of any job. */
+  readonly marked: () => Promise<readonly string[]>;
+  readonly logger: Logger;
+  readonly clock?: Clock;
+}) {
+  return {
+    holdings: owedPasses(
+      withWholePasses(
+        { list: marked },
+        { job: 'holdings_check', everyMs: HOLDINGS_WHOLE_PASS_EVERY_MS, all, logger, clock },
+      ),
+    ),
+    sealCheck: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: ACTIVITY_SEAL_CHECK_EVERY_MS, clock })),
+    seal: owedPasses(eachDay({ all, startsAfterMs: SEAL_GRACE_MS, clock })),
+    sweep: owedPasses(eachDay({ all, clock })),
+  };
+}
 
 /** How often people with no kept name are looked up at the login service (decision 25, E10d-4): at the start, then hourly, so a run the login service failed is soon tried again. */
 const CONTACT_FILL_EVERY_MS = HOUR_MS;
@@ -290,21 +323,11 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     ...marking,
   });
   const holdMarks = markedOrganisations({ job: 'hold_history', nextDue: holdHistoryDue, ...marking });
-  // The integrity passes that look in every organisation, an idle one less often, never left out (4D2e D11, Stage D's
-  // decision 2), each listing every one at its first run and visiting again next run any it didn't finish
-  // (org-passes.ts): the holdings check those with marks each run and every one hourly; the seal check a twelfth a run,
-  // each once in 6 hours; the activity seal and the idempotency sweep every one once a UTC day.
-  const holdingsPasses = owedPasses(
-    withWholePasses(
-      { list: () => organisationsWithMarks(database, ORG_WORK_MOST) },
-      { everyMs: HOLDINGS_WHOLE_PASS_EVERY_MS, all: list },
-    ),
-  );
-  const sealCheckPasses = owedPasses(
-    rotation({ all: list, slots: SEAL_CHECK_SLOTS, slotMs: ACTIVITY_SEAL_CHECK_EVERY_MS }),
-  );
-  const sealPasses = owedPasses(eachDay({ all: list, startsAfterMs: SEAL_GRACE_MS }));
-  const sweepPasses = owedPasses(eachDay({ all: list }));
+  const passes = integrityPasses({
+    all: list,
+    marked: () => organisationsWithMarks(database, ORG_WORK_MOST),
+    logger,
+  });
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
   const fullServer = createFullServerWatch(config.audit.anchorSeconds * 3 * 1000, () => systemClock.now().getTime());
   const releaseDrift = createReleaseDriftWatch();
@@ -312,7 +335,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const outboundFetch = createOutboundFetch(config.outbound.allowedOrigins);
   const logged = { keys, ids: uuidV7Ids, logger };
   const removals = resetRemovalsFrom({
-    list: withWholePasses(resetMarks, { everyMs: FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS, all: list }),
+    list: withWholePasses(resetMarks, {
+      job: 'factor_resets',
+      everyMs: FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS,
+      all: list,
+      logger,
+    }),
     config,
     database,
     ...logged,
@@ -354,7 +382,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     job(
       'idempotency_sweep',
       createRetentionSweep({
-        ...sweepPasses,
+        ...passes.sweep,
         sweep: (orgId, most) => sweepExpiredKeys(database, orgId, most),
         logger,
         deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
@@ -458,7 +486,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
     job(
       'holdings_check',
-      createHoldingsCheck({ ...organisationJob, ...holdingsPasses }),
+      createHoldingsCheck({ ...organisationJob, ...passes.holdings }),
       HOLDINGS_CHECK_EVERY_MS,
       LONG_MS,
     ),
@@ -498,7 +526,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       HOUR_MS,
     ),
     // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6).
-    job('activity_seal', createActivitySeal({ ...clocked, ...sealPasses }), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
+    job('activity_seal', createActivitySeal({ ...clocked, ...passes.seal }), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
     // The activity log's background downloads built, a month a file (Phase 3 L5c).
     job(
       'background_downloads',
@@ -512,7 +540,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Each sealed day digested again and held to its seal, a few a run (Phase 3 L6c).
     job(
       'activity_seal_check',
-      createActivitySealCheck({ ...organisationJob, ...sealCheckPasses }),
+      createActivitySealCheck({ ...organisationJob, ...passes.sealCheck }),
       ACTIVITY_SEAL_CHECK_EVERY_MS,
       LONG_MS,
     ),
