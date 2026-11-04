@@ -310,17 +310,17 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
     'mandate_expiry',
     '0 seconds',
   ),
-  // 0075 (4D2e D9): the request voids' look, at once: an organisation, agent or mandate written while not active, a
-  // supplier while not verified (0032's CHECK holds a verified one to its version, so a new version is written while
+  // 0075 (4D2e D9): the request voids' look, at once: an organisation, agent or mandate written while not active, an
+  // organisation lifted (an unfreeze may cancel), a supplier while not verified or lifted (a reactivation may cancel) (0032's CHECK holds a verified one to its version, so a new version is written while
   // not verified), a mandate moved to a new version, and a source on any write (its consent's end is the job's too,
   // the visit settling the mark to it). Each on updates alone: every signed write, a new row's too, points its row
   // at its event with an update in the same transaction (signed-rows.ts pointSignedRow). The waiting rejections' on any write of a
   // policy (a version made), and the carry rest's on a mandate's new version.
-  voidsMark('organizations.organizations', "(new.status <> 'ACTIVE'::text)"),
+  voidsMark('organizations.organizations', "((new.status <> 'ACTIVE'::text) OR (old.status <> 'ACTIVE'::text))"),
   voidsMark('agents.agents', "(new.status <> 'ACTIVE'::text)"),
   voidsMark('mandates.mandates', `((new.status <> 'ACTIVE'::text) OR ${NEW_VERSION})`),
   voidsMark('funding_sources.sources', null),
-  voidsMark('suppliers.suppliers', "(new.status <> 'VERIFIED'::text)"),
+  voidsMark('suppliers.suppliers', "((new.status <> 'VERIFIED'::text) OR (old.status <> 'VERIFIED'::text))"),
   markTrigger('mandates.policies', 'marks_waiting_rejections', null, 'waiting_rejections', '0 seconds', 'UPDATE'),
   markTrigger('mandates.mandates', 'marks_carry_rest', NEW_VERSION, 'carry_rest', '0 seconds', 'UPDATE'),
 ];

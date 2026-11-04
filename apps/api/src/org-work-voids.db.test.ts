@@ -10,9 +10,11 @@ import { readFileSync } from 'node:fs';
 import { AGENTS } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
+import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { policyOf, setPolicy } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { SPEND_REQUESTS, VOID_CAUSES, type VoidCause } from '@agentx/core/modules/spend-requests';
+import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, type DatabaseTransaction } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -33,6 +35,7 @@ import { createOrgWorkRediscovery, markedOrganisations, withOrgWork } from './or
 import { createRequestVoids, requestVoidsDue } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
+import { choiceDetails } from './suspensions.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -53,7 +56,7 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { ready, ask, statusOf, mandateIdOf, moved, STOPS, quiet } = shared;
+const { ready, ask, statusOf, mandateIdOf, moved, signed, STOPS, quiet } = shared;
 
 const admin = () => database.as('admin');
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
@@ -198,6 +201,55 @@ describe('the voids follow their marks', () => {
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
     expect((await markOf(w.org))?.due_at).toEqual(w.state.consentExpiresAt);
   });
+
+  /**
+   * A lift chosen to cancel, past its use case: the organisation unfrozen, or the supplier verified again, its
+   * requests cancelled (CANCEL_BRAKES' cancelsIfChosen). The use case voids the first 20 itself and leaves the rest to
+   * the job; made past it, every request here is that rest.
+   */
+  const LIFTS = {
+    organization: (w: World) =>
+      signed(w, (tx, states) =>
+        states.changeStatus(tx, ORGANIZATIONS, { orgId: w.org, id: w.org }, 'unfreeze', {
+          actor: OPERATOR,
+          action: 'organization.unfreeze',
+          details: choiceDetails('cancel'),
+        }),
+      ),
+    supplier: (w: World) =>
+      signed(w, (tx, states) =>
+        states.changeStatus(tx, SUPPLIERS, { orgId: w.org, id: w.suppliers[0] ?? '' }, 'reactivate_verified', {
+          actor: OPERATOR,
+          action: 'supplier.reactivate_verified',
+          details: choiceDetails('cancel'),
+        }),
+      ),
+  } as const;
+
+  it.each([
+    ['organization', 'ORG_FROZEN'],
+    ['supplier', 'SUPPLIER_NOT_VERIFIED'],
+  ] as const)(
+    'the %s paused, then lifted with its requests cancelled, standing again: marked at once, the rest voided (%s)',
+    async (which, cause) => {
+      const { w, acting } = await ready();
+      const made = [
+        await ask(acting, w),
+        await ask(acting, w, { orderReference: 'INV-2' }),
+        await ask(acting, w, { orderReference: 'INV-3' }),
+      ];
+      await moved(w, await mandateIdOf(w), which, 'pause');
+      await voids().run();
+      expect((await markOf(w.org))?.due_at).toEqual(w.state.consentExpiresAt);
+
+      await LIFTS[which](w);
+      expect((await markOf(w.org))?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
+      await voids().run();
+
+      expect(await Promise.all(made.map(({ id }) => statusOf(w, id)))).toEqual(['DENIED', 'DENIED', 'DENIED']);
+      expect(await causesOf(w, made[0]?.id ?? '')).toContain(cause);
+    },
+  );
 
   it('a stop chosen to cancel, lifted before the run: its mark stands, and the request is voided', async () => {
     const { w, acting } = await ready();
@@ -434,9 +486,9 @@ async function policySetIn(
   });
 }
 
-describe("0075's first marks, for rows written before its triggers", () => {
+describe("0076's first marks, for rows written before 0075's triggers", () => {
   // Its last statement, as the migration ran it: the owner can't read the rows through their tenant walls.
-  const migration = readFileSync(new URL('../../../db/migrations/0075_void_marks.sql', import.meta.url), 'utf8');
+  const migration = readFileSync(new URL('../../../db/migrations/0076_void_first_marks.sql', import.meta.url), 'utf8');
   const firstMarks = migration.slice(migration.indexOf('INSERT INTO directory.org_work'));
   const JOBS = ['request_voids', 'waiting_rejections', 'carry_rest'];
 
