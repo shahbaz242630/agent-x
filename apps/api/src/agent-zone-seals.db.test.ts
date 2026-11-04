@@ -4,19 +4,16 @@
 // owner, its guard off) refuses every decision, simulation and draft that
 // reads it, raises the integrity alarm and holds the organisation, and the
 // holdings check finds it too, as it finds a month sealed that isn't its
-// instant's month in the agent's zone. A zone kept before 0054 (no signed
-// event: here, one whose events the owner deleted and whose pointer it
-// cleared) is sealed by the API's job, only to the zone of the signed mandate
-// its agent's first request was decided under; one that differs, or one with
-// no request at all, is a tamper sign.
+// instant's month in the agent's zone. A zone with no signed event (as one
+// kept before 0054 was: here, one whose events the owner deleted and whose
+// pointer it cleared) is a tamper sign: the job that sealed those once is
+// retired (4D2e D11), every environment's having been sealed by it.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import {
   AGENT_ZONES,
   keptZoneOf,
   keptZonesOf,
   type LimitReservationsTables,
-  MOST_UNSEALED_A_CALL,
-  sealKeptZone,
 } from '@agentx/core/modules/limit-reservations';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -33,7 +30,6 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createZoneSealing } from './agent-zone-seals.ts';
 import { createHoldingsCheck } from './holdings-check.ts';
 import { createMandateRegistry, DRAFT_OPERATION, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, mandateWorld, type MandateWorldTables, refused, type World } from './mandate-world.helper.test.ts';
@@ -137,9 +133,6 @@ async function keptBefore0054(w: World, zone = 'Asia/Dubai') {
   }
   await zoneChanged(w, 'unsealed', zone);
 }
-
-const sealing = (list: () => Promise<readonly string[]>) =>
-  createZoneSealing({ list, database: app, keys, ids, logger: testLogger(capture) });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -281,117 +274,17 @@ describe("the agent's month zone, a signed record (PL-40)", () => {
   });
 });
 
-describe('the zones kept before 0054, sealed by the API', () => {
-  it("seals one to its agent's first request's mandate's zone, once, and decisions go on from it", async () => {
+describe('a zone with no signed event, as one kept before 0054 was (4D2e D11: no job seals one now)', () => {
+  it('refuses every decision on it, alarmed and the organisation held: fails closed, never read as kept', async () => {
     const { w, acting } = await ready();
     await decided(acting, w);
     await keptBefore0054(w);
+
     expect(await zoneOf(w)).toMatchObject({ outcome: 'tampered' });
-    capture = new LogCapture();
-
-    const job = sealing(() => Promise.resolve([w.org]));
-    await job.run();
-    await job.run();
-
-    expect(lines('agent_zones.sealed')).toEqual([expect.objectContaining({ sealed: 1, mismatched: 0 })]);
-    expect(await zoneOf(w)).toEqual({ outcome: 'kept', zone: 'Asia/Dubai' });
-    expect(await eventsAbout(w.org, w.agent, AGENT_ZONES.subject)).toEqual([
-      expect.objectContaining({
-        action: 'agent_zone.kept',
-        actorType: 'system',
-        details: expect.objectContaining({ agentId: w.agent, sealedLater: true }) as unknown,
-      }),
-    ]);
-    expect((await ask(acting, asking(w))).outcome).toBe('decided');
-  });
-
-  it('seals it to the first mandate an agent was weighed under, past a first request weighed with none', async () => {
-    const w = await world();
-    for (const id of w.suppliers) await shared.verified(w, id);
-    const acting = await agentKey(w);
-    // No mandate in force: denied, and no zone kept by it.
-    expect(await ask(acting, asking(w))).toMatchObject({ outcome: 'decided', request: { decision: 'DENY' } });
-    await shared.inForce(registry, w, { approvalThreshold: AED(1_500_000n) });
-    await decided(acting, w);
-    await keptBefore0054(w);
-
-    await sealing(() => Promise.resolve([w.org])).run();
-
-    expect(lines('agent_zones.sealed')).toEqual([expect.objectContaining({ sealed: 1, mismatched: 0 })]);
-    expect(await holdOf(w)).toMatchObject({ outcome: 'clear' });
-  });
-
-  it('goes on past a full page of zones it may not seal, to the ones after', async () => {
-    const { w, acting } = await ready();
-    await decided(acting, w);
-    await keptBefore0054(w);
-    // More zones than one page, each listed before the agent's (their IDs sort first), none with a request.
-    const planted = Array.from({ length: MOST_UNSEALED_A_CALL + 1 }, (_, n) => {
-      const agent = `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-      return { org_id: w.org, id: agent, agent_id: agent, time_zone: 'Asia/Dubai', created_at: clock.now() };
-    });
-    await withTenant(app, w.org, (tx) => tx.insertInto('limit_reservations.agent_zones').values(planted).execute());
-
-    await sealing(() => Promise.resolve([w.org])).run();
-
-    expect(lines('agent_zones.sealed')).toEqual([
-      expect.objectContaining({ sealed: 1, mismatched: MOST_UNSEALED_A_CALL + 1 }),
-    ]);
-    expect(await zoneOf(w)).toEqual({ outcome: 'kept', zone: 'Asia/Dubai' });
-  });
-
-  it("refuses to seal a zone that isn't its agent's first mandate's, alarmed and the organisation held", async () => {
-    const { w, acting } = await ready();
-    await decided(acting, w);
-    await keptBefore0054(w, 'Pacific/Kiritimati');
-
-    await sealing(() => Promise.resolve([w.org])).run();
-
-    expect(lines('agent_zones.sealed')).toEqual([expect.objectContaining({ sealed: 0, mismatched: 1 })]);
-    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
     expect(await ask(acting, asking(w))).toEqual(refused(503, 'INTEGRITY_FAILED'));
-  });
-
-  it('refuses to seal a zone of an agent with no request at all', async () => {
-    const w = await world();
-    await withTenant(app, w.org, (tx) =>
-      tx
-        .insertInto('limit_reservations.agent_zones')
-        .values({ org_id: w.org, id: w.agent, agent_id: w.agent, time_zone: 'Asia/Dubai', created_at: clock.now() })
-        .execute(),
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ subjectType: AGENT_ZONES.subject }),
     );
-
-    await sealing(() => Promise.resolve([w.org])).run();
-
-    expect(lines('agent_zones.sealed')).toEqual([expect.objectContaining({ sealed: 0, mismatched: 1 })]);
-  });
-
-  it('leaves a zone another process sealed first, and seals nothing once stopped', async () => {
-    const { w, acting } = await ready();
-    await decided(acting, w);
-    const listed = { agentId: w.agent, zone: 'Asia/Dubai', createdAt: clock.now() };
-    expect(
-      await withSignedStates(app, w.org, quiet(), (tx, states) =>
-        sealKeptZone(tx, states, w.org, listed, 'Asia/Dubai'),
-      ),
-    ).toBe('gone');
-
-    await keptBefore0054(w);
-    const stopped = new AbortController();
-    stopped.abort();
-    await sealing(() => Promise.resolve([w.org])).run(stopped.signal);
-    expect(await zoneOf(w)).toMatchObject({ outcome: 'tampered' });
-  });
-
-  it('logs a run that could not list the organisations, and an organisation it could not seal in, and goes on', async () => {
-    await sealing(() => Promise.reject(new Error('no directory'))).run();
-    const w = await world();
-    await sealing(() => Promise.resolve(['not-an-organisation', w.org])).run();
-
-    expect(lines('agent_zones.run_failed')).toHaveLength(1);
-    expect(lines('agent_zones.seal_failed')).toEqual([
-      expect.objectContaining({ orgId: 'not-an-organisation', sealed: 0, mismatched: 0, gone: 0 }),
-    ]);
-    expect(lines('agent_zones.sealed')).toEqual([]);
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
   });
 });

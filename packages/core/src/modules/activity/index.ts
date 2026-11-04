@@ -48,6 +48,7 @@ export {
   type BackgroundExport,
   type BackgroundExportAsked,
   type BackgroundExportFile,
+  backgroundDownloadsDue,
   backgroundExportOf,
   backgroundExportsOf,
   type BackgroundExportState,

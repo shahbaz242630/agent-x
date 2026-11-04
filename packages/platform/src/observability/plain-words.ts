@@ -53,10 +53,20 @@ export const PLAIN_WORDS = {
     broke: 'The job it names skipped that work since then (up to an hour); it is due again now.',
     next: 'The mark is now right. One after a release is older work; more means a write misses its mark.',
   },
+  'org_work.hold_mark_skipped': {
+    happened: 'An integrity hold was set, but marking its history check as work to do failed or waited too long.',
+    broke: 'Nothing: the hold stands. Its history check waits for the hourly check to mark it (up to an hour).',
+    next: 'Nothing to do. If this repeats, check the database for long-held locks.',
+  },
   'org_work.rediscovery_failed': {
     happened: 'The hourly check of which organisations have work could not finish for this organisation, or at all.',
     broke: 'A mark lost since the last check stays lost until the next, and its work waits until then.',
     next: 'It runs again within the hour. If this repeats, check the database.',
+  },
+  'org_work.marks_unread': {
+    happened: 'A background job could not read which organisations its marks say have work.',
+    broke: 'Those organisations wait for its next run, or for its pass over every organisation, which goes on anyway.',
+    next: 'It reads them again next run. If this repeats, check the database.',
   },
   'org_work.settle_failed': {
     happened: 'After a background job visited an organisation, its mark of work to do could not be brought up to date.',
@@ -83,16 +93,6 @@ export const PLAIN_WORDS = {
       'The list of organisations could not be read, so no waiting requests were carried to a new mandate version.',
     broke: 'Requests left to carry stay on the old version for now.',
     next: 'It is tried again in about 5 minutes. If it keeps failing, check the database.',
-  },
-  'agent_zones.run_failed': {
-    happened: "The list of organisations could not be read, so no agent's old month time zone was sealed.",
-    broke: 'An agent whose zone is still unsealed has its spend requests refused.',
-    next: 'It is tried again in about 15 minutes. If it keeps failing, check the database.',
-  },
-  'agent_zones.seal_failed': {
-    happened: "Sealing an organisation's old agent month time zones failed.",
-    broke: 'An agent of that organisation whose zone is still unsealed has its spend requests refused.',
-    next: 'It is tried again in about 15 minutes. If it keeps failing, a developer should read the error.',
   },
   'access_log.write_failed': {
     happened: "A request's activity-log row could not be saved.",

@@ -5,12 +5,9 @@
 // list (packages/core/src/authority-tables.ts); the row is made once and
 // sealed in the transaction that adds it (`agent_zone.kept`).
 //
-// A row kept before 0054 has no signed event: `sealKeptZone` seals it once,
-// from the zone of the mandate its agent's first request was decided under,
-// which is the zone that decision kept (zoneInForce's `zoneIfNew`). The
-// caller (the API, at start) reads that mandate through its signed state, so
-// only a zone the signed records already name is sealed, never one an owner
-// planted; one that differs is a tamper sign.
+// A row with no signed event (as one kept before 0054 was, until the API's
+// job sealed it from the zone its agent's first decision kept: retired in
+// 4D2e D11) reads as tampered, so every decision on it is refused.
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { Transaction } from 'kysely';
 
@@ -157,86 +154,4 @@ export async function sealNewZone(
     { time_zone: zone, created_at: at },
     { actor, action: 'agent_zone.kept', details: { agentId: agentId.toLowerCase() } },
   );
-}
-
-/** A zone kept before 0054, still unsealed: its agent, zone and when it was kept. */
-export interface UnsealedZone {
-  readonly agentId: string;
-  readonly zone: string;
-  readonly createdAt: Date;
-}
-
-/** The UUID of all zeros: a page from the start lists the agents after it. */
-const NIL_UUID = '00000000-0000-0000-0000-000000000000';
-
-/** The most unsealed zones one call lists. */
-export const MOST_UNSEALED_A_CALL = 200;
-
-/**
- * The organisation's zones kept before 0054 and not yet sealed, by agent,
- * after the agent `after` (null from the start), at most MOST_UNSEALED_A_CALL.
- */
-export async function unsealedZones(
-  tx: ZonesTransaction,
-  orgId: string,
-  after: string | null,
-): Promise<UnsealedZone[]> {
-  const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the rows with no signed state yet, to seal: none is decided on before sealKeptZone checks it against the signed mandate
-    .selectFrom(AGENT_ZONES.table)
-    .select(['agent_id', 'time_zone', 'created_at'])
-    .where('org_id', '=', orgId)
-    .where('state_event_id', 'is', null)
-    .where('state_version', '=', 1)
-    // From the start, after the nil UUID, which sorts before every other.
-    .where('agent_id', '>', after ?? NIL_UUID)
-    .orderBy('agent_id')
-    .limit(MOST_UNSEALED_A_CALL)
-    .execute();
-  return rows.map((row) => ({ agentId: row.agent_id, zone: row.time_zone, createdAt: row.created_at }));
-}
-
-/**
- * Seals a zone kept before 0054 when it is `expected` (the zone of the signed
- * mandate its agent's first request was decided under): `sealed`; otherwise a
- * tamper sign, its alarm raised (`mismatched`); `gone` if another process
- * sealed it first. In the caller's transaction (withSignedStates').
- */
-export async function sealKeptZone(
-  tx: ZonesTransaction,
-  states: SignedStates,
-  orgId: string,
-  unsealed: UnsealedZone,
-  expected: string,
-): Promise<'sealed' | 'mismatched' | 'gone'> {
-  if (unsealed.zone !== expected) {
-    states.mismatch(AGENT_ZONES.subject, { orgId, id: unsealed.agentId });
-    return 'mismatched';
-  }
-  // Locked and still unsealed, or another process sealed it first.
-  const still = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the row still unsealed as listed, locked to seal it: record('new') below writes and seals exactly these fields
-    .selectFrom(AGENT_ZONES.table)
-    .select('agent_id')
-    .where('org_id', '=', orgId)
-    .where('agent_id', '=', unsealed.agentId)
-    .where('state_event_id', 'is', null)
-    .where('state_version', '=', 1)
-    .where('time_zone', '=', unsealed.zone)
-    .forNoKeyUpdate()
-    .executeTakeFirst();
-  if (still === undefined) return 'gone';
-  await states.record(
-    tx,
-    AGENT_ZONES,
-    { orgId, id: unsealed.agentId },
-    'new',
-    { time_zone: unsealed.zone, created_at: unsealed.createdAt },
-    {
-      actor: { type: 'system', id: 'api' },
-      action: 'agent_zone.kept',
-      details: { agentId: unsealed.agentId.toLowerCase(), sealedLater: true },
-    },
-  );
-  return 'sealed';
 }

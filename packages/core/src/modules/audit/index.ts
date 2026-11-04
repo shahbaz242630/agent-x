@@ -68,6 +68,7 @@ export {
   type InvestigationConclusion,
   isIncidentReference,
 } from './domain/integrity-hold.ts';
+export { holdHistoryDue } from './infrastructure/hold-history-due.ts';
 export { eventsInRange, type LogRange } from './infrastructure/log-range.ts';
 export {
   cancelledSince,
@@ -81,6 +82,7 @@ export { type PageAsked, type PageShown, type VerifiedPage, verifiedPage } from 
 export {
   holdOrganisation,
   HOLDS_WAITING_EVERY_MS,
+  markHoldsWith,
   pollHoldsWaiting,
   type SignedStatesServices,
   withSignedStates,

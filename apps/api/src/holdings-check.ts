@@ -16,6 +16,15 @@
 // organisation and the next run goes on from there, so a long history can't
 // keep the others waiting; a restart starts it again from the beginning.
 //
+// Which organisations a run visits is job-list.ts's (4D2e D11; Stage D's
+// decision 2, a tamper-guard trade told to the partner): every 15 minutes
+// those with a mark of any job (work under way or coming, at most 1,000, due
+// soonest first), and every organisation at a process's first run and at
+// least an hour after the last such (the fourth run), so an idle
+// organisation is checked at most an hour and four runs' time apart, never
+// left out. One not passed (paused at its share, failed, or the run
+// stopped) is `done` only once passed, so it is visited again next run.
+//
 // A run never throws: each failure is logged, naming the organisation, and
 // the run goes on to the next.
 import { type AuditTables, type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
@@ -28,19 +37,20 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-/** How often every organisation's requests are checked against what they hold, once the last run has ended. */
+/** How often the organisations a run lists are checked against what they hold, once the last run has ended. */
 export const HOLDINGS_CHECK_EVERY_MS = 15 * 60_000;
 
 /** How many pages one run checks an organisation: about 10,000 requests a run. */
 const PAGES_A_RUN = 50;
 
 export interface HoldingsCheck {
-  /** Checks each organisation's requests, up to PAGES_A_RUN pages each, until the signal is aborted. Never throws. */
+  /** Checks each listed organisation's requests, up to PAGES_A_RUN pages each, until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
 export function createHoldingsCheck({
   list,
+  done = () => undefined,
   database,
   keys,
   ids,
@@ -48,8 +58,10 @@ export function createHoldingsCheck({
   page = MOST_CHECKED_A_PAGE,
   pagesARun = PAGES_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in this run: job-list.ts's, from the marks and the directory. */
   readonly list: () => Promise<readonly string[]>;
+  /** One whose pass ended this run, its requests all checked: owed no visit until listed again. */
+  readonly done?: (orgId: string) => void;
   readonly database: Database<SpendRequestsTables & LimitReservationsTables & PaymentsTables & AuditTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
@@ -80,6 +92,7 @@ export function createHoldingsCheck({
         tampered += checked.tampered;
         if (checked.next === null) {
           progress.delete(orgId);
+          done(orgId);
           log.info('holdings_check.passed', { requests, mismatched, tampered });
           return true;
         }

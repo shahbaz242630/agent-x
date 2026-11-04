@@ -5,7 +5,7 @@
 // is found, and the organisation put on its integrity hold, as any tamper
 // sign does (ADR-012 §2).
 //
-// For each organisation the directory lists, each run checks its newest two
+// For each organisation a run lists, it checks its newest two
 // seals and a few more read from a point picked at random among its older ones (a
 // page of its log through the signed states' logPageOf, so a seal event that
 // can't be believed raises the alarm itself): each day digested again and
@@ -14,7 +14,15 @@
 // that reaches the oldest seal also finds no row written before its day,
 // which no seal would ever hold. Nothing is kept between runs, so a restart
 // (a release, a server woken) loses nothing: over runs, every seal is
-// checked, the newest every run.
+// checked, the newest every visit.
+//
+// A run lists a twelfth of the organisations (4D2e D11; Stage D's decision 2,
+// a tamper-guard trade told to the partner): a rotation by the hash of each
+// one's ID over twelve half-hour slots fixed to UTC (org-passes.ts), so each
+// is visited once every 6 hours, at most 6 hours and the time between two
+// runs apart; every one at a process's first run, so a restart leaves none
+// past that. One a run listed and didn't check (it failed, or the run was
+// stopped) is visited again next run, from memory.
 //
 // A mismatch raises the alarm (`audit.integrity_failed`, reason `holding`,
 // on the subject `access_log`) and holds the organisation; the check goes on
@@ -35,7 +43,7 @@ import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-/** How often seals are checked, once the last run has ended. */
+/** How often a run checks the seals of those it lists, once the last run has ended. */
 export const ACTIVITY_SEAL_CHECK_EVERY_MS = 30 * 60_000;
 
 /** How many older seals one run checks an organisation, beside its newest. */
@@ -51,7 +59,7 @@ type CheckTables = AuditTables & ActivityTables;
 type CheckTx = DatabaseTransaction<CheckTables>;
 
 export interface ActivitySealCheck {
-  /** Checks a few seals of each organisation, until the signal is aborted. Never throws. */
+  /** Checks a few seals of each listed organisation, until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
@@ -60,6 +68,7 @@ type Broken = 'digest' | 'misdated' | 'gap' | 'before';
 
 export function createActivitySealCheck({
   list,
+  done = () => undefined,
   database,
   keys,
   ids,
@@ -68,8 +77,10 @@ export function createActivitySealCheck({
   batch = CHECK_BATCH,
   pick = (below: bigint) => BigInt(randomInt(1, Number(below) + 1)),
 }: {
-  /** The organisations to check: the directory's list, which job-list.ts passes. */
+  /** The organisations to check this run: job-list.ts's rotation. */
   readonly list: () => Promise<readonly string[]>;
+  /** One checked this run, a broken seal found or none: owed no visit until listed again. */
+  readonly done?: (orgId: string) => void;
   readonly database: Database<CheckTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
@@ -155,6 +166,7 @@ export function createActivitySealCheck({
           if (signal?.aborted === true) return;
           try {
             await checkFor(orgId);
+            done(orgId);
           } catch (error) {
             logger.child({ orgId }).error('access_log_seal_check.failed', { err: error });
           }

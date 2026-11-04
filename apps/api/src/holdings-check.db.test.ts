@@ -218,6 +218,33 @@ describe('the holdings check (E1)', () => {
     expect(lines('holdings_check.paused')).toHaveLength(2);
   });
 
+  it('4D2e D11 says an organisation done only once its pass ends: never paused, failed or stopped', async () => {
+    const { w, acting } = await ready();
+    await requests(acting, w);
+    const done: string[] = [];
+    const check = (page: number, pagesARun: number) =>
+      createHoldingsCheck({
+        list: () => Promise.resolve([w.org]),
+        done: (orgId) => done.push(orgId),
+        database: app,
+        keys,
+        ids,
+        logger: testLogger(capture),
+        page,
+        pagesARun,
+      });
+
+    await check(0, 1).run();
+    await check(2, 1).run(AbortSignal.abort());
+    const paging = check(2, 1);
+    await paging.run();
+    expect(lines('holdings_check.paused')).toHaveLength(1);
+    expect(done).toEqual([]);
+    await paging.run();
+    expect(lines('holdings_check.passed')).toHaveLength(1);
+    expect(done).toEqual([w.org]);
+  });
+
   it('reads a page in the same few statements however many requests it holds (E1c: no per-row loop)', async () => {
     const { w, acting } = await ready();
     /** The statements one page of the check sends, each counted as Kysely sends it. */

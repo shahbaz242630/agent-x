@@ -8,11 +8,7 @@ export {
   AGENT_ZONES,
   keptZoneOf,
   keptZonesOf,
-  MOST_UNSEALED_A_CALL,
-  sealKeptZone,
   sealNewZone,
-  type UnsealedZone,
-  unsealedZones,
   type ZoneCheck,
   zoneInForce,
 } from './infrastructure/agent-zones.ts';

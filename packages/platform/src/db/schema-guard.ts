@@ -276,7 +276,7 @@ const NEW_VERSION = '(new.current_version_id IS DISTINCT FROM old.current_versio
 const voidsMark = (table: string, condition: string | null) =>
   markTrigger(table, 'marks_request_voids', condition, 'request_voids', '0 seconds', 'UPDATE');
 
-/** The marks' triggers (0072, 0073, 0075): on the tables they name, and each as written. */
+/** The marks' triggers (0072, 0073, 0075, 0077): on the tables they name, and each as written. */
 export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
   markTrigger(
     'spend_requests.requests',
@@ -328,16 +328,9 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
   voidsMark('suppliers.suppliers', "((new.status <> 'VERIFIED'::text) OR (old.status <> 'VERIFIED'::text))"),
   markTrigger('mandates.policies', 'marks_waiting_rejections', null, 'waiting_rejections', '0 seconds', 'UPDATE'),
   markTrigger('mandates.mandates', 'marks_carry_rest', NEW_VERSION, 'carry_rest', '0 seconds', 'UPDATE'),
-];
-
-/**
- * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
- * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * Now 0077's (4D2e D10). The factor removals' a day on, the cooling-off's length, as a reset comes to cool off: only an
- * update does, as a reset is born a draft. The background downloads' at once as a month is asked for: a month is born
- * waiting, and every other move of it is the builder's own, which settles the mark after its run.
- */
-export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  // 0077 (4D2e D10): the factor removals' a day on, the cooling-off's length, as a reset comes to cool off (a reset is
+  // born a draft); the background downloads' at once as a month is asked for (a month is born waiting, and every later
+  // move is the builder's own, which settles the mark after its run).
   markTrigger(
     'identity.factor_resets',
     'marks_factor_removals',
@@ -355,6 +348,13 @@ export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
     'INSERT',
   ),
 ];
+
+/**
+ * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
+ * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
+ * None now.
+ */
+const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([

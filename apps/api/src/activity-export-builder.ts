@@ -2,7 +2,8 @@
 // decision 31): the API's job, on a timer of its own, building each waiting
 // month of an admin's download as one compressed file in the store.
 //
-// For each organisation the directory lists, a month is claimed under a
+// For each organisation it is given (job-list.ts: those its marks say have a
+// month to build, 4D2e D10), a month is claimed under a
 // lease (claimFile: FOR UPDATE SKIP LOCKED, so two servers never take the
 // same one), then built outside any long transaction:
 //
@@ -171,7 +172,7 @@ export function createActivityExportBuilder({
   batch = EXPORT_BATCH,
   blockBytes = BLOCK_BYTES,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those its marks say have a month to build, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<BuilderTables>;
   readonly keys: KeyProvider;
