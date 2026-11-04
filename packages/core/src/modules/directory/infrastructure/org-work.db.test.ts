@@ -14,7 +14,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { dueOrgWork, markOrgWork, settleOrgWork, settleOrgWorkPage } from './org-work.ts';
+import { dueOrgWork, markOrgWork, organisationsWithMarks, settleOrgWork, settleOrgWorkPage } from './org-work.ts';
 import type { DirectoryTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -532,6 +532,26 @@ describe('which organisations a job takes from its marks', () => {
     await markedAgo(a, 10);
     await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'hand_off', now())`, [b]);
     expect((await dueOrgWork(app, job, { most: 10, by: new Date(0) })).map(({ orgId }) => orgId)).toEqual([a]);
+  });
+});
+
+describe('which organisations have marks of any job (4D2e D11)', () => {
+  it('each once, whatever its jobs, soonest due first, at most as many as asked', async () => {
+    const [a = '', b = '', c = ''] = [1, 2, 3].map((at) => `0199a0f1-0000-7000-8000-${String(at).padStart(12, '0')}`);
+    await admin().query('insert into directory.orgs (org_id) select unnest($1::uuid[])', [[a, b, c]]);
+    // Ahead of every other test's marks, so the first come back as this test's.
+    const markedAt = (orgId: string, job: string, seconds: number) =>
+      admin().query(
+        `insert into directory.org_work (org_id, job, due_at) values ($1, $2, '2000-01-01'::timestamptz + make_interval(secs => $3))`,
+        [orgId, job, seconds],
+      );
+    await markedAt(a, 'hand_off', 20);
+    await markedAt(b, 'payment_check', 30);
+    await markedAt(b, 'request_expiry', 10);
+    await markedAt(c, 'hand_off', 40);
+
+    expect((await organisationsWithMarks(app, 1_000)).slice(0, 3)).toEqual([b, a, c]);
+    expect(await organisationsWithMarks(app, 2)).toEqual([b, a]);
   });
 });
 

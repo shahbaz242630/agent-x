@@ -97,6 +97,24 @@ export function dueOrgWork(
 }
 
 /**
+ * The organisations with a mark of any job, whenever due: those with work, or work coming. Due soonest first, at most
+ * `most`, so a run's list never grows with the organisations. One statement, in a read of its own.
+ */
+export async function organisationsWithMarks(db: Kysely<DirectoryTables>, most: number): Promise<string[]> {
+  const rows = await readAlone(db, (tx) =>
+    tx
+      .selectFrom('directory.org_work')
+      .select('org_id')
+      .groupBy('org_id')
+      .orderBy((eb) => eb.fn.min('due_at'))
+      .orderBy('org_id')
+      .limit(most)
+      .execute(),
+  );
+  return rows.map(({ org_id }) => org_id);
+}
+
+/**
  * After looking: with nothing more due the mark goes, otherwise it moves to the next due time, either only while it
  * still reads as `marks`, the value read **before** looking. A mark made since has moved it, so this does nothing and
  * that mark stands. Whether it did anything comes back. One row in its own transaction, as markOrgWork.
