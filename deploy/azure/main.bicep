@@ -138,6 +138,10 @@ var tags = resourceTags(environment)
 // these names, and the secrets deployment finds them by the same.
 var names = resourceNames(environment, nameSuffix)
 
+// The login alerts' own small workspace (modules/monitoring.bicep). Named here, not in names.bicep, as the budget is:
+// only the foundation uses it, and a change there asks every hand deploy to run again.
+var loginWorkspaceName = 'log-agentx-${short}-logins'
+
 resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: names.group
   location: location
@@ -149,6 +153,7 @@ resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
 // the policy can check each points at a resource this deployment creates.
 var ids = {
   workspace: resourceId(subscription().subscriptionId, group.name, 'Microsoft.OperationalInsights/workspaces', names.workspace)
+  loginWorkspace: resourceId(subscription().subscriptionId, group.name, 'Microsoft.OperationalInsights/workspaces', loginWorkspaceName)
   actionGroup: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Insights/actionGroups', names.actionGroup)
   network: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks', names.network)
   appsSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'apps')
@@ -163,6 +168,7 @@ module monitoring 'modules/monitoring.bicep' = {
     location: location
     short: short
     workspaceName: names.workspace
+    loginWorkspaceName: loginWorkspaceName
     actionGroupName: names.actionGroup
     tags: tags
     alertEmail: alertEmail
@@ -235,7 +241,8 @@ module database 'modules/postgres.bicep' = {
     geoRedundantBackup: postgresGeoRedundantBackup
     subnetId: ids.databaseSubnet
     privateDnsZoneId: ids.databaseZone
-    workspaceId: ids.workspace
+    // Its server log goes to the login alerts' own workspace, which the main one's cap can't stop (4D2e Stage F).
+    loginWorkspaceId: ids.loginWorkspace
     actionGroupId: ids.actionGroup
     // The apps deployment creates the job under this name, in this environment; the owner-login alert pairs its starts with the owner's logins.
     migrateJobName: jobName(environment, 'migrate')
@@ -259,6 +266,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     identityNames: names.identities
     workspaceName: names.workspace
     workspaceId: ids.workspace
+    loginWorkspaceId: ids.loginWorkspace
     actionGroupId: ids.actionGroup
     errorAlertName: names.appErrors
     errorAlertThreshold: appErrorAlertThreshold
@@ -276,6 +284,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     integrityRunsAlertName: 'alert-agentx-${short}-integrity-runs'
     agentCancelsAlertName: 'alert-agentx-${short}-agent-cancels'
     agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
+    decisionsSuppressedAlertName: 'alert-agentx-${short}-decisions-suppressed'
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
     platformFullAlertName: 'alert-agentx-${short}-platform-full'
@@ -283,6 +292,9 @@ module appsEnvironment 'modules/environment.bicep' = {
     jobsStoppedAlertName: 'alert-agentx-${short}-jobs-stopped'
     alwaysOn: alwaysOn
     anchorStoreAlertName: 'alert-agentx-${short}-anchor-store'
+    recordsFillingAlertName: 'alert-agentx-${short}-records-filling'
+    dailyCheckAlertName: 'alert-agentx-${short}-daily-check'
+    fullPassAlertName: 'alert-agentx-${short}-full-pass'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [
@@ -341,6 +353,19 @@ module activityDownloads 'modules/activity-downloads.bicep' = {
     monitoring
     appsEnvironment
   ]
+}
+
+// What the platform is doing, in counts: one workbook and the measures' saved queries (4D2e Stage F, PR 10).
+module metrics 'modules/metrics.bicep' = {
+  scope: group
+  params: {
+    location: location
+    tags: tags
+    workspaceName: names.workspace
+    workspaceId: ids.workspace
+  }
+  // The workspace must exist first.
+  dependsOn: [monitoring]
 }
 
 // Email for the admins' notices, its data kept in the UAE (B5-2).

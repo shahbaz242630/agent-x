@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
 import { APP_KEYS } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
@@ -40,6 +41,8 @@ export type RuleId =
   | 'anchor-epoch'
   | 'activity-downloads'
   | 'workspace'
+  | 'login-workspace'
+  | 'workbook'
   | 'log-quota-alerts'
   | 'alert-counts-only'
   | 'alert-window'
@@ -65,10 +68,14 @@ export type RuleId =
   | 'handoff-queue-alert'
   | 'platform-full-alert'
   | 'anchor-store-alert'
+  | 'daily-check-alert'
+  | 'full-pass-alert'
   | 'integrity-runs-alert'
+  | 'records-filling-alert'
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
+  | 'decisions-suppressed-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -132,6 +139,7 @@ const TYPES = {
   vault: 'Microsoft.KeyVault/vaults',
   vaultSecret: 'Microsoft.KeyVault/vaults/secrets',
   workspace: 'Microsoft.OperationalInsights/workspaces',
+  workbook: 'Microsoft.Insights/workbooks',
 } as const;
 
 /**
@@ -314,12 +322,34 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 const ANCHOR_STORE_LINES =
   'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
 
+/**
+ * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass
+ * may take to find an old audit event edited (4D2e E7, decision 3), so the clean rows are still there to restore when it is.
+ * Staging's few days are no recovery path.
+ */
+export const leastRestoreDays = (
+  environment: Expectations['environment'],
+  oldEditDays: number = OLD_EDIT_DAYS,
+): number => (environment === 'production' ? Math.max(35, 2 * oldEditDays) : 7);
+
+/** The anchor check's daily count and walk of older events late (4D2e E7, decisions 1 and 2b). */
+const DAILY_CHECK_LATE = 'audit.daily_check_overdue';
+
+/** The full pass of every chain late (4D2e E7, decision 3). */
+const FULL_PASS_LATE = 'audit.full_pass_overdue';
+
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
 const PLATFORM_FULL_LINES =
   'where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out")';
 
 /** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
 const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
+
+/** Decision lines past their budget, counted in one line (4D2e F8, PL-52): the denial-surge alert undercounts that minute. */
+const DECISIONS_SUPPRESSED_LINES = [
+  'where tostring(parse_json(Log).event) == "log.suppressed"',
+  'where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided"',
+] as const;
 
 /**
  * An integrity job that skipped a whole run, its organisation list unread
@@ -328,6 +358,12 @@ const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "han
  */
 const INTEGRITY_RUN_FAILED_LINES =
   'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed")';
+
+/**
+ * An organisation's records past what a list reads well, or a hold clearing reading thousands of one kind
+ * (`identity.records_filling`, partner S170): nothing breaks yet, but a list past its limit stops working.
+ */
+const RECORDS_FILLING_LINES = 'where tostring(parse_json(Log).event) == "identity.records_filling"';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -341,6 +377,15 @@ const OTHER_DESTINATIONS = [
   'marketplacePartnerId',
   'serviceBusRuleId',
 ] as const;
+
+/**
+ * The login alerts' own workspace (4D2e Stage F, PR 9), by its name: the main one's cap reached stops its collecting,
+ * so the alerts on Postgres's logins read a small workspace of their own, holding only what they need, its cap 1 GB.
+ */
+const LOGIN_WORKSPACE = /^log-agentx-(?:stg|prd)-logins$/;
+const LOGIN_WORKSPACE_CAP_GB = 1;
+/** What the login workspace holds: Postgres's server log and the platform's lines, for the owner-login pairing. */
+const LOGIN_LOG_CATEGORIES: readonly unknown[] = ['PostgreSQLLogs', 'ContainerAppSystemLogs'];
 
 /** The environment's logs that reach the workspace: every container's console, and the platform's own events. */
 const APP_LOG_CATEGORIES: readonly unknown[] = ['ContainerAppConsoleLogs', 'ContainerAppSystemLogs'];
@@ -997,6 +1042,23 @@ const settingsOf = (snapshot: Snapshot, resource: PredictedResource): readonly P
 const workspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
   new Set(ofType(snapshot, TYPES.workspace).map((workspace) => workspace.id));
 
+/** The ids of the login alerts' own workspace: only the one this deployment creates under its name. */
+const loginWorkspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
+  new Set(
+    ofType(snapshot, TYPES.workspace)
+      .filter((workspace) => LOGIN_WORKSPACE.test(workspace.name))
+      .map((workspace) => workspace.id),
+  );
+
+/**
+ * The ids of the main workspace: every workspace of this deployment but the login alerts' own, which takes no
+ * console lines, so an alert or a workbook on the apps' lines there would never see one.
+ */
+const mainWorkspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> => {
+  const logins = loginWorkspaceIds(snapshot);
+  return new Set([...workspaceIds(snapshot)].filter((id) => !logins.has(id)));
+};
+
 /** An action group of this deployment that is switched on and reaches someone. */
 const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   ofType(snapshot, TYPES.actionGroup).some(
@@ -1008,16 +1070,17 @@ const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   );
 
 /**
- * Whether an enabled alert on this deployment's workspace has a condition
- * `matches` takes. A `stateless SEV-1` one is severity 1 and never resolves
- * itself (autoMitigate false), so it notifies on every window, not once.
+ * Whether an enabled alert on this deployment's main workspace (or on those
+ * given) has a condition `matches` takes. A `stateless SEV-1` one is severity 1
+ * and never resolves itself (autoMitigate false), so it notifies on every
+ * window, not once.
  */
 const workspaceAlerted = (
   snapshot: Snapshot,
   kind: 'any' | 'stateless SEV-1',
   matches: (criterion: unknown, alert: PredictedResource) => boolean,
+  workspaces: ReadonlySet<unknown> = mainWorkspaceIds(snapshot),
 ): boolean => {
-  const workspaces = workspaceIds(snapshot);
   return ofType(snapshot, TYPES.alert).some(
     (alert) =>
       at(alert.properties, 'enabled') === true &&
@@ -1040,7 +1103,8 @@ const complete: Check = (snapshot, _expected, add) => {
 /** The protections exist at all: a rule that checks each resource of a type passes when there are none. */
 const required: Check = (snapshot, _expected, add) => {
   const counts: readonly (readonly [string, string, number, number])[] = [
-    ['the log workspace', TYPES.workspace, 1, 1],
+    // The main one and the login alerts' own (rule login-workspace).
+    ["log workspaces, the main one and the login alerts' own", TYPES.workspace, 2, 2],
     ['an action group', TYPES.actionGroup, 1, Infinity],
     ['the network', TYPES.network, 1, 1],
     ['the DNS policy', TYPES.dnsPolicy, 1, 1],
@@ -1387,9 +1451,12 @@ const database: Check = (snapshot, expected, add) => {
       problem('database-logins', 'takes password logins only, never Microsoft Entra ones (ADR-002, ADR-010)');
     }
     const retention = at(properties, 'backup', 'backupRetentionDays');
-    const minimum = expected.environment === 'production' ? 35 : 7;
+    const minimum = leastRestoreDays(expected.environment);
     if (typeof retention !== 'number' || retention < minimum) {
-      problem('database-backup', `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002)`);
+      problem(
+        'database-backup',
+        `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002; in production, twice the days an old audit event edited may go unfound, 4D2e decision 3)`,
+      );
     }
     const settings = serverSettings(snapshot, server);
     if (settings.get('require_secure_transport') !== 'on' || settings.get('ssl_min_protocol_version') !== 'TLSv1.3') {
@@ -1407,11 +1474,12 @@ const database: Check = (snapshot, expected, add) => {
       (criterion, alert) =>
         queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
         watchesEveryWindow(alert, criterion),
+      loginWorkspaceIds(snapshot),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }
@@ -2395,6 +2463,112 @@ const workspaceAndQuota: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** The categories one diagnostic setting sends, switched on. */
+const sentCategories = (setting: PredictedResource): readonly unknown[] =>
+  list(at(setting.properties, 'logs'))
+    .filter((log) => at(log, 'enabled') === true)
+    .map((log) => at(log, 'category') ?? at(log, 'categoryGroup'));
+
+/** Whether every resource of the type, and at least one, sends the category to the workspace, in its own table. */
+const sendsTo = (snapshot: Snapshot, type: string, category: string, workspace: string): boolean => {
+  const resources = ofType(snapshot, type);
+  return (
+    resources.length > 0 &&
+    resources.every((resource) =>
+      settingsOf(snapshot, resource).some(
+        (setting) =>
+          at(setting.properties, 'workspaceId') === workspace &&
+          at(setting.properties, 'logAnalyticsDestinationType') === 'Dedicated' &&
+          sentCategories(setting).includes(category),
+      ),
+    )
+  );
+};
+
+/**
+ * The login alerts' own workspace (4D2e Stage F, PR 9): exactly one, its cap 1 GB; the server's log and the
+ * platform's lines reach it, and nothing else does, so the apps' volume can never fill it; its cap reached is a
+ * stateless SEV-1. Rules database-logins and owner-login-alert hold the login alerts to it.
+ */
+const loginWorkspace: Check = (snapshot, _expected, add) => {
+  const found = ofType(snapshot, TYPES.workspace).filter((workspace) => LOGIN_WORKSPACE.test(workspace.name));
+  const [workspace] = found;
+  if (workspace === undefined || found.length > 1) {
+    add({
+      rule: 'login-workspace',
+      resource: 'the deployment',
+      message: `needs exactly one workspace for the login alerts (log-agentx-<env>-logins); the snapshot has ${String(found.length)}`,
+    });
+    return;
+  }
+  const missing: string[] = [];
+  if (at(workspace.properties, 'workspaceCapping', 'dailyQuotaGb') !== LOGIN_WORKSPACE_CAP_GB) {
+    missing.push(`a daily cap of ${String(LOGIN_WORKSPACE_CAP_GB)} GB`);
+  }
+  if (
+    !sendsTo(snapshot, TYPES.server, 'PostgreSQLLogs', workspace.id) ||
+    !sendsTo(snapshot, TYPES.environment, 'ContainerAppSystemLogs', workspace.id)
+  ) {
+    missing.push("the database server's log and the platform's lines, in resource-specific tables");
+  }
+  const others = ofType(snapshot, TYPES.diagnostics).filter(
+    (setting) =>
+      at(setting.properties, 'workspaceId') === workspace.id &&
+      sentCategories(setting).some((category) => !LOGIN_LOG_CATEGORIES.includes(category)),
+  );
+  if (others.length > 0) missing.push(`no other logs (${others.map((setting) => setting.name).join(', ')} sends some)`);
+  const capAlerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion) =>
+      queryIs(
+        at(criterion, 'query'),
+        '_LogOperation',
+        ['where Category =~ "Ingestion"', 'where Detail contains "OverQuota"'],
+        'count()',
+      ),
+    new Set([workspace.id]),
+  );
+  if (!capAlerted) missing.push('a stateless SEV-1 alert when its cap is reached');
+  for (const what of missing) add({ rule: 'login-workspace', resource: workspace.name, message: `must have ${what}` });
+};
+
+/** Every Azure resource ID a workbook's content names: its fallback workspaces and any it reads across. */
+const resourceIdsIn = (content: unknown): readonly string[] => {
+  if (typeof content === 'string') return content.startsWith('/subscriptions/') ? [content] : [];
+  if (typeof content !== 'object' || content === null) return [];
+  return Object.values(content).flatMap(resourceIdsIn);
+};
+
+/** The fields that name who: a workbook shows how much, never which organisation, agent, key or request. */
+const WHO_FIELDS = /\b(?:orgId|agentId|agentKeyId|correlationId|userId)\b/;
+
+/**
+ * A workbook (4D2e Stage F, PR 10) reads only this deployment's workspaces, keeps its content in Azure's own store
+ * in the region rather than a storage account of anyone's, and counts without naming who.
+ */
+const workbooks: Check = (snapshot, _expected, add) => {
+  const workspaces = mainWorkspaceIds(snapshot);
+  for (const workbook of ofType(snapshot, TYPES.workbook)) {
+    const problem = (message: string): void => {
+      add({ rule: 'workbook', resource: workbook.name, message });
+    };
+    let content: unknown;
+    try {
+      content = JSON.parse(text(at(workbook.properties, 'serializedData')));
+    } catch {
+      problem('needs its content as JSON the snapshot can read');
+      continue;
+    }
+    const read = [at(workbook.properties, 'sourceId'), ...resourceIdsIn(content)];
+    if (!read.every((id) => workspaces.has(id))) problem("must read this deployment's main workspace only");
+    if (!isEmpty(at(workbook.properties, 'storageUri')))
+      problem("keeps its content in Azure's own store, not storageUri");
+    if (WHO_FIELDS.test(JSON.stringify(content)))
+      problem('counts only: names no organisation, agent, key, person or request');
+  }
+};
+
 /**
  * The rules that fire on the jobs' lines missing (4D2e D, PL-33): what stands behind a process that can say nothing.
  * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
@@ -2415,7 +2589,7 @@ const isDeadMan = (alert: PredictedResource): boolean =>
   );
 
 const deadManAlerts: Check = (snapshot, expected, add) => {
-  const workspaces = workspaceIds(snapshot);
+  const workspaces = mainWorkspaceIds(snapshot);
   for (const { event, windowSize, severity, autoMitigate } of DEAD_MEN) {
     const found = ofType(snapshot, TYPES.alert).some(
       (alert) =>
@@ -2487,7 +2661,7 @@ const alertRules: Check = (snapshot, expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-R]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-S]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -2702,7 +2876,8 @@ const appsEnvironment: Check = (snapshot, _expected, add) => {
  * (ADR-011 §7).
  */
 const appsLogs: Check = (snapshot, _expected, add) => {
-  const workspaces = workspaceIds(snapshot);
+  // The main workspace: the login alerts' own holds a copy of the platform's lines, never instead of it.
+  const workspaces = mainWorkspaceIds(snapshot);
   for (const environment of ofType(snapshot, TYPES.environment)) {
     const enabledLogs = (setting: PredictedResource): readonly unknown[] =>
       list(at(setting.properties, 'logs')).filter((log) => at(log, 'enabled') === true);
@@ -2723,7 +2898,7 @@ const appsLogs: Check = (snapshot, _expected, add) => {
         rule: 'apps-logs',
         resource: environment.name,
         message:
-          "must send its console and system logs, and no other, to this deployment's workspace in resource-specific tables: never its HTTP log or a category group (client addresses, ADR-011 §7)",
+          "must send its console and system logs, and no other, to this deployment's main workspace in resource-specific tables: never its HTTP log or a category group (client addresses, ADR-011 §7)",
       });
     }
   }
@@ -2919,6 +3094,30 @@ const agentCancelCapAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on any count of decision lines held back (4D2e F8, PL-52), in any window. */
+const decisionsSuppressedAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DECISIONS_SUPPRESSED_LINES, 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'decisions-suppressed-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any log.suppressed line for spend_request.decided, in any window",
+      });
+    }
+  }
+};
+
 /**
  * An enabled alert on the workspace fires on any page of the holdings check
  * that failed (Phase 2 E1b's review): one line is enough, in any window.
@@ -3019,6 +3218,47 @@ const anchorStoreAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * An enabled alert on the workspace fires on any one of these lines, watching every window and firing on the first:
+ * the shape of the five checks above it, for the alerts added since. Those five stay as written while open pull
+ * requests change the lines around them.
+ */
+const anyLineAlert =
+  (rule: RuleId, lines: string, what: string): Check =>
+  (snapshot, _expected, add) => {
+    for (const environment of ofType(snapshot, TYPES.environment)) {
+      const alerted = workspaceAlerted(
+        snapshot,
+        'any',
+        (criterion, alert) =>
+          queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [lines], 'count()') &&
+          totals(criterion) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === 0 &&
+          watchesEveryWindow(alert, criterion),
+      );
+      if (!alerted) {
+        add({
+          rule,
+          resource: environment.name,
+          message: `needs an enabled alert on this deployment's workspace that fires on any ${what} line, watching every window and firing on the first`,
+        });
+      }
+    }
+  };
+
+/** The anchor check's lateness, each its own alert (4D2e E7): a deletion found past 24 hours, an old edit past 7 days. */
+const dailyCheckAlert = anyLineAlert(
+  'daily-check-alert',
+  `where tostring(parse_json(Log).event) == "${DAILY_CHECK_LATE}"`,
+  DAILY_CHECK_LATE,
+);
+const fullPassAlert = anyLineAlert(
+  'full-pass-alert',
+  `where tostring(parse_json(Log).event) == "${FULL_PASS_LATE}"`,
+  FULL_PASS_LATE,
+);
+
+/**
  * An enabled alert on the workspace fires on any run of the integrity jobs
  * skipped whole (Phase 2 E2c; request expiry, D7), or of the activity log's
  * daily seal stopped early (L6b): one line is enough, in any window.
@@ -3046,6 +3286,9 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on any organisation's records filling (partner S170). */
+const recordsFillingAlert = anyLineAlert('records-filling-alert', RECORDS_FILLING_LINES, 'identity.records_filling');
+
 /**
  * An enabled, stateless SEV-1 alert on the workspace fires when the owner role
  * logs in other than as the migration job starting (ADR-012 §2, Phase 1
@@ -3072,12 +3315,13 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
           at(criterion, 'operator') === 'GreaterThan' &&
           at(criterion, 'threshold') === 0 &&
           watchesEveryWindow(alert, criterion),
+        loginWorkspaceIds(snapshot),
       );
     if (!alerted) {
       add({
         rule: 'owner-login-alert',
         resource: server.name,
-        message: `needs an enabled, stateless SEV-1 alert on this deployment's workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
       });
     }
   }
@@ -4099,6 +4343,8 @@ const CHECKS: readonly Check[] = [
   anchorEpoch,
   activityDownloads,
   workspaceAndQuota,
+  loginWorkspace,
+  workbooks,
   alertRules,
   resourceLogs,
   logDestinations,
@@ -4116,10 +4362,14 @@ const CHECKS: readonly Check[] = [
   handoffQueueAlert,
   platformFullAlert,
   anchorStoreAlert,
+  dailyCheckAlert,
+  fullPassAlert,
   integrityRunsAlert,
+  recordsFillingAlert,
   deadManAlerts,
   agentCancelsAlert,
   agentCancelCapAlert,
+  decisionsSuppressedAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,
