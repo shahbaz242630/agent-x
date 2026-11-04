@@ -399,33 +399,50 @@ describe('two transactions marking two jobs in opposite order', () => {
     const [row] = await admin().query<{ blockers: number[] }>('select pg_catalog.pg_blocking_pids($1) as blockers', [
       pid,
     ]);
-    return row!.blockers;
+    return row?.blockers ?? [];
   }
 
   it('with no lock between them can deadlock inside COMMIT: one is refused whole, the other kept', async () => {
-    const held = await holding();
-    const one = await marking(HAND_OFF, CHECK);
-    const two = await marking(CHECK, HAND_OFF);
-    const committed = [one, two].map((client) =>
-      client.query('commit').then(
-        () => 'kept',
-        (error: unknown) => (error as { code?: string }).code,
-      ),
-    );
-    await waitUntilQueued(admin(), 2);
-    await held.handOff.query('commit');
-    // Let go of the second row only once the first transaction holds hand_off and waits on
-    // payment_check (behind the other, queued there first): released earlier, the other
-    // could take both rows first and no cross is made.
-    await expect
-      .poll(async () => {
-        const blockers = await blockersOf(one.pid);
-        return blockers.length > 0 && !blockers.includes(held.handOff.pid);
-      })
-      .toBe(true);
-    await held.check.query('commit');
-    expect((await Promise.all(committed)).toSorted()).toEqual(['40P01', 'kept']);
-    expect(await admin().query('select 1 from audit.marked_rows where org_id = $1', [org])).toHaveLength(2);
+    // Whether the two cross depends on which waiter Postgres wakes first when a held row is let go,
+    // which a test can't choose: so the crossing is tried up to five times and must happen at least
+    // once, and every try must end as one of the two allowed ways, with no mark lost.
+    const outcomes: string[][] = [];
+    for (let attempt = 0; attempt < 5 && !outcomes.some(([first]) => first === '40P01'); attempt += 1) {
+      if (attempt > 0) {
+        next += 1;
+        org = `0199a0f0-0000-7000-8000-${String(next).padStart(12, '0')}`;
+        await admin().query('insert into directory.orgs (org_id) values ($1)', [org]);
+      }
+      const held = await holding();
+      const one = await marking(HAND_OFF, CHECK);
+      const two = await marking(CHECK, HAND_OFF);
+      const committed = [one, two].map((client) =>
+        client.query('commit').then(
+          () => 'kept',
+          (error: unknown) => (error as { code?: string }).code ?? 'unknown',
+        ),
+      );
+      await waitUntilQueued(admin(), 2);
+      await held.handOff.query('commit');
+      // Let go of the second row once the first transaction holds hand_off and waits on payment_check.
+      await expect
+        .poll(async () => {
+          const blockers = await blockersOf(one.pid);
+          return blockers.length > 0 && !blockers.includes(held.handOff.pid);
+        })
+        .toBe(true);
+      await held.check.query('commit');
+      const ended = (await Promise.all(committed)).toSorted();
+      expect([
+        ['40P01', 'kept'],
+        ['kept', 'kept'],
+      ]).toContainEqual(ended);
+      // A refused transaction is refused whole: its rows went with it. A kept one keeps both.
+      const kept = ended.filter((outcome) => outcome === 'kept').length;
+      expect(await admin().query('select 1 from audit.marked_rows where org_id = $1', [org])).toHaveLength(2 * kept);
+      outcomes.push(ended);
+    }
+    expect(outcomes).toContainEqual(['40P01', 'kept']);
   });
 
   it("with a lock both take first, as every signed write takes its chain's head, the second waits there", async () => {
