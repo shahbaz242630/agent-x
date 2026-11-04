@@ -604,6 +604,28 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
     expect(await chain.checkFromAnchor(app, whole)).toEqual({ ok: false, problem: { reason: 'head', seq: 3n } });
   });
 
+  it('counts numbers, not rows: one deleted and made up for by a copy of another, the keys dropped (4D2e E8 review)', async () => {
+    await record(started(1), started(2), started(3));
+    const whole = await checked();
+    await tamper(
+      'alter table platform_controls.audit_events drop constraint audit_events_pkey',
+      'alter table platform_controls.audit_events drop constraint audit_events_id_key',
+      'delete from platform_controls.audit_events where seq = 2',
+      // A copy of the first: the lowest and highest numbers, and the anchored event, all as they were.
+      'insert into platform_controls.audit_events select * from platform_controls.audit_events where seq = 1',
+    );
+    try {
+      expect(await chain.checkFromAnchor(app, whole)).toEqual({ ok: false, problem: { reason: 'gap', seq: 1n } });
+      expect(await chain.countStep(app, 0n, 3n)).toEqual({ reason: 'gap', seq: 1n });
+    } finally {
+      await tamper(
+        'delete from platform_controls.audit_events',
+        'alter table platform_controls.audit_events add constraint audit_events_pkey primary key (seq)',
+        'alter table platform_controls.audit_events add constraint audit_events_id_key unique (id)',
+      );
+    }
+  });
+
   it('finds the anchored event edited', async () => {
     await record(started(1), started(2));
     const from = await checked();

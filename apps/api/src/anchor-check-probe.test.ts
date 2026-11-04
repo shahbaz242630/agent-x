@@ -287,10 +287,12 @@ describe("the probe's pages and its time (4D2e E8 follow-up)", () => {
     expect(partly.pagesGiven).toEqual([1]);
     partly.release();
 
-    // One lane, held: the probe waits for it, never starting beside it, until the run's time is up; then takes it.
-    const full = probing(answer, 50, 1, { held: new Set([ORG]), runWithinMs: 200 });
+    // One lane, held by OTHER_ORG's check after ORG was anchored: the probe waits for it, never starting beside
+    // it, until the run's time is up; then, the lane free, takes it.
+    const full = probing(answer, 50, 1, { held: new Set([OTHER_ORG]), runWithinMs: 200 });
     await full.check.run();
     await full.check.run();
+    expect(full.asked).toEqual([]);
     expect(full.pagesGiven).toEqual([]);
     full.release();
     await full.check.run();
