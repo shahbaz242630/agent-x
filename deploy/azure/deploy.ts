@@ -27,8 +27,12 @@
 // Every run, in this order: the signed-in subscription is shown and confirmed;
 // the Azure CLI is made to use the pinned Bicep the checks ran, never one it
 // downloads for itself; the deployment the run would send is checked by the
-// same rules CI runs, with stand-ins in place of every secret; and Azure's own
-// what-if is shown, the deployment waiting for a "y" (`--confirm-with-what-if`).
+// same rules CI runs, with stand-ins in place of every secret; any log alert
+// the deployment would move to another workspace is found and, on the
+// operator's "y", deleted, since Azure refuses that move only mid-deployment,
+// after a clean what-if, and the same run creates the alert again (S172); and
+// Azure's own what-if is shown, the deployment waiting for a "y"
+// (`--confirm-with-what-if`).
 // The apps run only an image that verify.ts has found signed by CI on main at
 // the commit being deployed, named by its digest (ADR-002 Amendment E2), and
 // only from a clean checkout of that commit: the apps are stamped with it,
@@ -59,7 +63,7 @@ import {
 import { APP_KEYS, newAppKeys } from './app-keys.ts';
 import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, LOAD_SERVER_CONNECTIONS, policyProblems } from './policy.ts';
-import { environmentSnapshot, inCopy } from './snapshot.ts';
+import { deploymentSnapshot, environmentSnapshot, inCopy } from './snapshot.ts';
 
 const ENVIRONMENT = 'staging';
 const REGION = 'uaenorth';
@@ -675,6 +679,44 @@ export function policyCheck(values: Readonly<Record<string, string>>, random: Ra
   });
 }
 
+/** A log alert a deployment creates: its name, the workspaces it reads (full IDs), and the API it is written with. */
+export interface PlannedAlert {
+  readonly name: string;
+  readonly scopes: readonly string[];
+  readonly apiVersion: string;
+}
+
+const LOG_ALERT = 'Microsoft.Insights/scheduledQueryRules';
+
+/** The hand deploys whose Bicep creates log alerts; a test holds this to what each deployment creates. */
+export const ALERTING: readonly Deployment[] = ['foundation'];
+
+/**
+ * The log alerts a deployment would create, from its own snapshot in the real
+ * subscription (deploymentSnapshot), with its secrets shaped as the rules' are.
+ */
+export function plannedAlerts(
+  part: Deployment,
+  subscription: string,
+  values: Readonly<Record<string, string>>,
+  random: Random = randomBytes,
+): PlannedAlert[] {
+  const shaped = shapedForPolicy(values, random);
+  const group = part === 'foundation' ? undefined : RESOURCE_GROUP;
+  return inCopy((dir) =>
+    deploymentSnapshot(dir, DEPLOYMENTS[part], group, shaped, subscription)
+      .predictedResources.filter((resource) => resource.type === LOG_ALERT)
+      .map((alert) => {
+        const scopes = (alert.properties as { scopes?: unknown } | undefined)?.scopes;
+        return {
+          name: alert.name,
+          scopes: Array.isArray(scopes) ? scopes.map(text) : [],
+          apiVersion: alert.apiVersion,
+        };
+      }),
+  );
+}
+
 /** A deployment's name: what it deploys and when, in the characters and the 64 Azure allows. */
 export const deploymentName = (part: string, at: Date): string =>
   `agentx-${ENVIRONMENT}-${part}-${at
@@ -749,6 +791,12 @@ export interface Steps {
   readonly terminal: Terminal;
   readonly az: Az;
   readonly policy: (values: Readonly<Record<string, string>>) => string[];
+  /** The log alerts a deployment would create in the subscription (plannedAlerts). */
+  readonly alerts: (
+    part: Deployment,
+    subscription: string,
+    values: Readonly<Record<string, string>>,
+  ) => readonly PlannedAlert[];
   /** Whether GitHub's published ranges still match the file the rules are built from. */
   readonly rangesCurrent: () => boolean;
   readonly now: () => Date;
@@ -832,18 +880,20 @@ function succeeded(steps: Steps, name: string, ended: Ended): boolean {
 }
 
 /**
- * Sends one hand deploy: Azure's what-if is shown and waits for the
+ * Sends one hand deploy: any log alert it would move to another workspace is
+ * cleared first (clearMovedAlerts), then Azure's what-if is shown and waits for the
  * operator's "y" (`--confirm-with-what-if`), then how it ended is read back
  * (howItEnded). The foundation is a subscription deployment (it makes the
  * resource group); the rest go into the group. The deployment's outputs when
  * it succeeded; undefined when it didn't, which has been said.
  */
-function sendWithWhatIf(
+async function sendWithWhatIf(
   steps: Steps,
   subscription: string,
   part: Deployment,
   values: Readonly<Record<string, string>>,
-): unknown {
+): Promise<unknown> {
+  await clearMovedAlerts(steps, subscription, part, values);
   const name = deploymentName(part, steps.now());
   const kind = part === 'foundation' ? 'sub' : 'group';
   const where = ['--subscription', subscription, ...(kind === 'group' ? ['--resource-group', RESOURCE_GROUP] : [])];
@@ -955,7 +1005,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
   );
   steps.terminal.say(whatFoundationDoesToDeadMen(deadMenOn(steps, subscription), alwaysOn));
   checkPolicy(steps, values);
-  const outputs = sendWithWhatIf(steps, subscription, 'foundation', values);
+  const outputs = await sendWithWhatIf(steps, subscription, 'foundation', values);
   if (outputs === undefined) return 1;
   steps.terminal.say('Deployed. What the foundation reports:');
   const reported = outputs as Record<string, { value?: unknown }>;
@@ -1246,6 +1296,114 @@ function armList(steps: Steps, first: string, what: string): unknown[] {
   return items;
 }
 
+/** A log alert as Azure holds it: its full ID, its name, and the workspaces it reads (full IDs). */
+interface LiveAlert {
+  readonly id: string;
+  readonly name: string;
+  readonly scopes: readonly string[];
+}
+
+/**
+ * The log alerts the resource group holds. A first deploy has no group, so no
+ * alert to move; any other failure stops the run, since a list that couldn't
+ * be read says nothing about which alerts would move.
+ */
+function liveAlerts(steps: Steps, subscription: string, apiVersion: string): LiveAlert[] {
+  let listed: unknown[];
+  try {
+    listed = armList(
+      steps,
+      `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/${LOG_ALERT}?api-version=${apiVersion}`,
+      "the resource group's log alerts",
+    );
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    if (error.message.includes('ResourceGroupNotFound')) return [];
+    throw new Error(
+      `Couldn't read the log alerts Azure holds now, so it can't be told whether this run would move one to another workspace, which Azure refuses partway through a deployment (S172). Nothing was deployed. Run it again; if this repeats, Azure said:\n${error.message}`,
+      { cause: error },
+    );
+  }
+  return listed.map((alert) => {
+    const held = alert as { id?: unknown; name?: unknown; properties?: { scopes?: unknown } };
+    const scopes = held.properties?.scopes;
+    return { id: text(held.id), name: text(held.name), scopes: Array.isArray(scopes) ? scopes.map(text) : [] };
+  });
+}
+
+/** Scopes compared as Azure compares resource IDs: without case, in any order. */
+function sameScopes(held: readonly string[], wanted: readonly string[]): boolean {
+  const key = (scopes: readonly string[]): string =>
+    scopes
+      .map((scope) => scope.toLowerCase())
+      .sort()
+      .join('\n');
+  return key(held) === key(wanted);
+}
+
+/** Workspaces by their names, the last part of each ID. */
+const workspaceNames = (scopes: readonly string[]): string =>
+  scopes.map((scope) => scope.slice(scope.lastIndexOf('/') + 1)).join(', ');
+
+/**
+ * Azure won't change the workspace an existing log alert reads ("Scope can
+ * not be updated"), and says so only partway through the deployment, after a
+ * clean what-if; a failed deployment isn't rolled back (S172). So each alert
+ * this deployment would move is found first and, on the operator's "y",
+ * deleted, for the same deployment to create it again; on anything else the
+ * run stops with nothing deployed and the commands to do it by hand.
+ */
+async function clearMovedAlerts(
+  steps: Steps,
+  subscription: string,
+  part: Deployment,
+  values: Readonly<Record<string, string>>,
+): Promise<void> {
+  if (!ALERTING.includes(part)) return;
+  steps.terminal.say('Checking whether this run moves a log alert to another workspace (about 30 seconds)...');
+  const planned = steps.alerts(part, subscription, values);
+  const first = planned[0];
+  if (first === undefined) return;
+  // A workspace Bicep can only name at deploy time can't be compared, and a wrong "moved" would delete a sound alert.
+  const unsettled = planned.find((alert) => alert.scopes.some((scope) => !scope.startsWith('/subscriptions/')));
+  if (unsettled !== undefined) {
+    throw new Error(
+      `Bicep can't say which workspace ${unsettled.name} reads before it is deployed, so whether it moves can't be told. Nothing was deployed: name the workspace by its resource ID in the Bicep.`,
+    );
+  }
+  const wanted = new Map(planned.map((alert) => [alert.name.toLowerCase(), alert.scopes]));
+  const moved = liveAlerts(steps, subscription, first.apiVersion).flatMap((alert) => {
+    const to = wanted.get(alert.name.toLowerCase());
+    return to === undefined || sameScopes(alert.scopes, to) ? [] : [{ ...alert, to }];
+  });
+  if (moved.length === 0) return;
+  const howMany = moved.length === 1 ? 'a log alert' : `${String(moved.length)} log alerts`;
+  steps.terminal.say(
+    `This run moves ${howMany} to another workspace. Azure can't move an alert: it refuses partway through the deployment ("Scope can not be updated"), after a clean what-if, and leaves the run half done. So each must be deleted first; this same run then creates it again, reading its new workspace, a few minutes later:`,
+  );
+  for (const alert of moved) {
+    steps.terminal.say(`  ${alert.name}: from ${workspaceNames(alert.scopes)} to ${workspaceNames(alert.to)}`);
+  }
+  if (!yes(await steps.terminal.ask('Delete them now so this run recreates them? [y/N] '))) {
+    const commands = moved.map((alert) => `  az resource delete --ids ${alert.id}`).join('\n');
+    throw new Error(
+      `Nothing was deployed, and nothing deleted. To delete them yourself, run:\n${commands}\nthen run node deploy/azure/deploy.ts ${part} again, which creates them.`,
+    );
+  }
+  for (const alert of moved) {
+    const done = steps.az.run(['resource', 'delete', '--ids', alert.id]);
+    if (done.status !== 0) {
+      throw new Error(
+        `Azure didn't delete ${alert.name}, so nothing was deployed. Run node deploy/azure/deploy.ts ${part} again: it asks about any still to delete. Azure said:\n${done.stderr.trim()}`,
+      );
+    }
+    steps.terminal.say(`Deleted ${alert.name}.`);
+  }
+  steps.terminal.say(
+    `Until this run's deployment succeeds, ${moved.length === 1 ? 'that alert is' : 'those alerts are'} gone: answering no at the what-if leaves them so until ${part} runs again.`,
+  );
+}
+
 /** A secret as the vault lists it: its name, and its current version's URL (never its value). */
 interface Listed {
   readonly name: string;
@@ -1368,7 +1526,7 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   }
   const values = secretValues(plan, people, steps.makers);
   checkPolicy(steps, values);
-  if (sendWithWhatIf(steps, subscription, 'secrets', values) === undefined) return 1;
+  if ((await sendWithWhatIf(steps, subscription, 'secrets', values)) === undefined) return 1;
   const now = secretsInVault(steps, subscription, vault);
   steps.terminal.say('Deployed. The vault now holds:');
   for (const secret of now.map((listed) => listed.name).sort()) steps.terminal.say(`  ${secret}`);
@@ -1586,7 +1744,7 @@ async function deployCertificates(steps: Steps): Promise<number> {
   }
   const values = { [CERTIFICATE_VARIABLES.authHost]: authHost, [CERTIFICATE_VARIABLES.appHost]: appHost };
   checkPolicy(steps, values);
-  if (sendWithWhatIf(steps, subscription, 'certificates', values) === undefined) return 1;
+  if ((await sendWithWhatIf(steps, subscription, 'certificates', values)) === undefined) return 1;
   steps.terminal.say('Deployed. The certificates, and how Azure left each:');
   const certificates = armList(
     steps,
@@ -1735,7 +1893,7 @@ async function deployApps(
     [LOAD_VARIABLES.digest]: loadDigest,
   };
   checkPolicy(steps, values);
-  if (sendWithWhatIf(steps, subscription, 'apps', values) === undefined) return 1;
+  if ((await sendWithWhatIf(steps, subscription, 'apps', values)) === undefined) return 1;
   sayWhatIsDeployed(steps, subscription, loadRun);
   steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");
   // Most deploys need no job (S21): only a first one needs all four.
@@ -1800,6 +1958,7 @@ export async function main(
       terminal: realTerminal(),
       az: realAz(),
       policy: (values) => policyCheck(values),
+      alerts: (part, subscription, values) => plannedAlerts(part, subscription, values),
       rangesCurrent,
       now: () => new Date(),
       images: realImages(),
