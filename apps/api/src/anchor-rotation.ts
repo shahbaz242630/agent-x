@@ -376,7 +376,6 @@ export function createRotation({
     if (still.ok)
       return { cursor: { seq, hash, macKeyVersion }, target, began: line.began.getTime(), owed: line.at.getTime() };
     // Nothing honest seals an event again: only a rebase moves a chain's anchors, and it clears the place too (E11).
-    retryFirst.delete(orgId);
     await failed(orgId, 'pass', still.problem);
     startAgain(orgId, target);
     return FAILED;
