@@ -135,11 +135,10 @@ async function waitsUntilOf(tx: HoldingsTransaction, requestIds: readonly string
 }
 
 /**
- * Whether a request's `waits_until` is no later than its sealed wait lets it be: always for one not waiting for
- * approval, with none (made before 0073), or with no decision read (the other comparisons judge that).
+ * Whether a request's `waits_until` is no later than its sealed wait lets it be: always for one with none read (not
+ * waiting for approval, so not read; made before 0073), or with no decision read (the other comparisons judge that).
  */
-const waitsAsSealed = (status: string, waitsUntil: Date | null | undefined, decided: ApprovalClock | undefined) =>
-  status !== 'APPROVAL_REQUIRED' ||
+const waitsAsSealed = (waitsUntil: Date | null | undefined, decided: ApprovalClock | undefined) =>
   waitsUntil == null ||
   decided === undefined ||
   waitsUntil.getTime() <= expiresAtOf(decided).getTime() + WAITS_UNTIL_SLACK_MS;
@@ -334,7 +333,7 @@ async function judged<Tx extends HoldingsTransaction>(
     if (
       !holdingsMatch({ ...request, held, payment: payments.get(request.id) }, reserved, claims) ||
       (held !== null && !inItsZone(request.agentId, held)) ||
-      !waitsAsSealed(request.status, waitsUntil.get(request.id), sealed.get(request.id))
+      !waitsAsSealed(waitsUntil.get(request.id), sealed.get(request.id))
     ) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       mismatched += 1;

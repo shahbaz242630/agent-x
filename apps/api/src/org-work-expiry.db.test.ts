@@ -10,7 +10,7 @@ import { withSignedStates } from '@agentx/core/modules/audit';
 import { mandateExpiryDue, mandateOf } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { checkHoldings, NO_PAYMENTS, requestExpiryDue } from '@agentx/core/modules/spend-requests';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -245,6 +245,25 @@ describe('a request waiting for approval: its wait on its row, and its mark', ()
   });
 });
 
+describe("the request expiry's due read", () => {
+  it('the soonest of those waiting; one with no wait on its row by its age and the shortest wait; none for any other', async () => {
+    const { w, acting } = await ready();
+    const dueOf = () =>
+      withTenant(app, w.org, async (tx) => (await requestExpiryDue(tx, w.org).execute())[0]?.due ?? null);
+
+    await ask(acting, w, { amount: AED(50_000n), supplierId: w.suppliers[1] ?? '' });
+    expect(await dueOf()).toBeNull();
+
+    const newer = await ask(acting, w);
+    expect(await dueOf()).toEqual((await waitOf(newer.id)).waits_until);
+
+    // One made before 0073: its age and 24 hours, sooner than the other's 72, so the due of the two.
+    const older = await ask(acting, w);
+    await waitsUntilMoved(older.id, 'null');
+    expect(await dueOf()).toEqual(new Date((await waitOf(older.id)).created_at.getTime() + 24 * HOUR));
+  });
+});
+
 describe('the request expiry follows its marks', () => {
   it('visited a day on, its mark moves to the wait its decision sealed; expired as that ends, then the mark goes', async () => {
     const { w, acting } = await ready();
@@ -289,6 +308,18 @@ describe('the request expiry follows its marks', () => {
     await job.run();
     expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
     expect(await markOf(w.org, 'request_expiry')).toBeUndefined();
+  });
+
+  it('one made before 0073 sealing 24 hours is expired 24 hours on: its age is read against the shortest wait', async () => {
+    const { w, acting } = await ready();
+    await waitChosen(w, 24);
+    const waiting = await ask(acting, w);
+    await waitsUntilMoved(waiting.id, 'null');
+    clock.advanceBy(24 * HOUR + MINUTE);
+
+    await requestExpiry().run();
+
+    expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
   });
 
   it('its soonest wait bounds the mark: one of 24 hours after one of 72 brings it forward, and is expired first', async () => {
@@ -383,6 +414,16 @@ describe('the mandate expiry follows its marks', () => {
     await job.run();
     expect(await mandateStatus(w, mandateId)).toBe('EXPIRED');
     expect(await markOf(w.org, 'mandate_expiry')).toBeUndefined();
+  });
+
+  it("the soonest end of the organisation's mandates in force bounds the mark", async () => {
+    const sooner = new Date(clock.now().getTime() + HOUR);
+    const { w } = await endingAt(new Date(clock.now().getTime() + 3 * HOUR));
+    await shared.secondAgent(registry, w, { approvalThreshold: AED(100_000n), endsAt: sooner });
+
+    await mandateExpiry().run();
+
+    expect((await markOf(w.org, 'mandate_expiry'))?.due_at).toEqual(sooner);
   });
 
   it('suspended, it is marked again at once; one with no end has its mark taken away', async () => {
