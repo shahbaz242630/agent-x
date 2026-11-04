@@ -583,7 +583,9 @@ describe('which organisations have marks of any job (4D2e D11)', () => {
       await owner.query(
         `insert into directory.org_work (org_id, job, due_at)
            select ('0199a0f2-0000-7000-8000-' || lpad(n::text, 12, '0'))::uuid, job,
-                  now() + make_interval(secs => (n * 7 + length(job)) % 86400)
+                  -- Every organisation soonest by its hand-off, before every other job's mark, and before every
+                  -- other test's: so the first 1,000 are the hand-off's own first 1,000, each job's limit binding.
+                  '1990-01-01'::timestamptz + make_interval(secs => n * 7 + (case job when 'hand_off' then 0 else 100000 end))
              from generate_series(1, $1) n, unnest($2::text[]) job`,
         [first, ORG_WORK_JOBS],
       );
