@@ -137,6 +137,11 @@ param loadImageDigest string
 @maxLength(1000)
 param anchorPublicKeys string = ''
 
+@description('The anchors\' epoch (AGENTX_ANCHOR_EPOCH): raised by one only for a sanctioned restore of the whole database. One value for the API, which signs for it, and the operator, which reads it (4D2e E9).')
+@minValue(1)
+@maxValue(1000000)
+param anchorEpoch int = 1
+
 var names = resourceNames(environment, nameSuffix)
 
 // The restore drill's copy (S78): a point-in-time restore made under this name,
@@ -528,9 +533,17 @@ var activityDownloadsSettings = [
   }
 ]
 
+// The anchors' epoch, the same setting for the API and the operator, so a plan reads the
+// files the API writes (4D2e E9; the policy's `anchor-epoch` holds them equal).
+var anchorEpochSetting = {
+  name: 'AGENTX_ANCHOR_EPOCH'
+  value: string(anchorEpoch)
+}
+
 // Where the API keeps the audit chains' anchors (4D2e E, PL-58): the write-once
 // store's second container, as its own identity. Added as `activityDownloadsSettings` is.
 var anchorStoreSettings = [
+  anchorEpochSetting
   {
     name: 'AGENTX_AUDIT_ANCHORS_URL'
     value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
@@ -546,6 +559,7 @@ var anchorStoreSettings = [
 // it (modules/evidence.bicep), and the public keys the lines are checked with.
 var operatorAnchorSettings = concat(
   [
+    anchorEpochSetting
     {
       name: 'AGENTX_AUDIT_ANCHORS_URL'
       value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'

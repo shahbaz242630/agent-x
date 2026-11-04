@@ -37,6 +37,7 @@ export type RuleId =
   | 'load-run'
   | 'vault'
   | 'evidence-store'
+  | 'anchor-epoch'
   | 'activity-downloads'
   | 'workspace'
   | 'log-quota-alerts'
@@ -1978,6 +1979,41 @@ const isApiApp = (workload: PredictedResource): boolean =>
 /** The operator's job. */
 const isOperatorJob = (workload: PredictedResource): boolean =>
   workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator';
+
+/**
+ * The anchors' epoch (AGENTX_ANCHOR_EPOCH, 4D2e E9): the API, which signs for it,
+ * and the operator's job, which reads the anchors for a chain recovery plan, each
+ * set it once, to the same value, and nothing else sets it. Apart, the operator
+ * would read another epoch's files, or none, and plan against the wrong anchors.
+ */
+const anchorEpoch: Check = (snapshot, _expected, add) => {
+  const values = new Map<string, readonly string[]>();
+  for (const workload of workloadsIn(snapshot)) {
+    const set = containersOf(workload).flatMap((container) =>
+      list(at(container, 'env'))
+        .filter((entry) => at(entry, 'name') === 'AGENTX_ANCHOR_EPOCH')
+        .map((entry) => text(at(entry, 'value'))),
+    );
+    if (isApiApp(workload) || isOperatorJob(workload)) {
+      values.set(workload.name, set);
+    } else if (set.length > 0) {
+      add({
+        rule: 'anchor-epoch',
+        resource: workload.name,
+        message: "sets AGENTX_ANCHOR_EPOCH: only the API and the operator's job",
+      });
+    }
+  }
+  const said = [...values.values()];
+  const first = said[0]?.[0];
+  if (said.length !== 2 || said.some((set) => set.length !== 1 || set[0] !== first)) {
+    add({
+      rule: 'anchor-epoch',
+      resource: 'the deployment',
+      message: "must set AGENTX_ANCHOR_EPOCH once on the API and once on the operator's job, to the same value",
+    });
+  }
+};
 
 /** One of the write-once store's containers, by its name: a role is given on it alone. */
 const containersNamed = (snapshot: Snapshot, name: string): readonly PredictedResource[] =>
@@ -4060,6 +4096,7 @@ const CHECKS: readonly Check[] = [
   dnsAllow,
   vault,
   evidenceStore,
+  anchorEpoch,
   activityDownloads,
   workspaceAndQuota,
   alertRules,

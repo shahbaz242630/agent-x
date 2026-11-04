@@ -1734,6 +1734,36 @@ describe('SEC-OPS-09 each rule can fail', () => {
     });
   });
 
+  it("anchor-epoch: the operator told another epoch than the API's, or none, or another workload told one (4D2e E9)", () => {
+    const epochOf = (workload: Mutable): unknown[] =>
+      settingsOf(workload)
+        .filter((entry) => entry.name === 'AGENTX_ANCHOR_EPOCH')
+        .map((entry) => entry.value);
+    const api = epochOf(staging.predictedResources.find(APP('api')) as unknown as Mutable);
+    expect(api).toHaveLength(1);
+    expect(epochOf(staging.predictedResources.find(JOB('operator')) as unknown as Mutable)).toEqual(api);
+    const epoch = (job: Mutable): Mutable =>
+      settingsOf(job).find((entry) => entry.name === 'AGENTX_ANCHOR_EPOCH') ?? {};
+    for (const change of [
+      (job: Mutable) => (epoch(job).value = '2'),
+      (job: Mutable) => {
+        containerOf(job).env = settingsOf(job).filter((entry) => entry.name !== 'AGENTX_ANCHOR_EPOCH');
+      },
+      (job: Mutable) => settingsOf(job).push({ name: 'AGENTX_ANCHOR_EPOCH', value: api[0] }),
+    ]) {
+      expect(brokenRules(changed(JOB('operator'), change))).toEqual(['anchor-epoch']);
+    }
+    expect(brokenRules(changed(APP('api'), (app) => (epoch(app).value = '3')))).toEqual(['anchor-epoch']);
+    const told = changed(JOB('migrate'), (job) => settingsOf(job).push({ name: 'AGENTX_ANCHOR_EPOCH', value: api[0] }));
+    expect(policyProblems(told, STAGING)).toEqual([
+      {
+        rule: 'anchor-epoch',
+        resource: 'job-agentx-stg-migrate',
+        message: "sets AGENTX_ANCHOR_EPOCH: only the API and the operator's job",
+      },
+    ]);
+  });
+
   it('activity-downloads: a downloads store anyone else can reach, that keeps a file past its week, or that another identity uses (L5c, decision 31)', () => {
     const BLOBS = IN_DOWNLOADS_STORE('Microsoft.Storage/storageAccounts/blobServices');
     const CONTAINER = IN_DOWNLOADS_STORE('Microsoft.Storage/storageAccounts/blobServices/containers');
@@ -3919,7 +3949,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator']) {
       expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({
         workload,
-        rules: workload === 'migrate' ? ['owner-login-alert', 'release-access', 'jobs'] : ['jobs'],
+        // The operator gone, the anchors' epoch is the API's alone (anchor-epoch).
+        rules: { migrate: ['owner-login-alert', 'release-access', 'jobs'], operator: ['anchor-epoch', 'jobs'] }[
+          workload
+        ] ?? ['jobs'],
       });
     }
   });
@@ -3993,7 +4026,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const workload of ['api', 'login', 'zitadel']) {
       expect({ workload, rules: brokenRules(without(APP(workload))) }).toEqual({
         workload,
-        rules: workload === 'api' ? ['release-access', 'apps', 'public-doors'] : ['apps', 'public-doors'],
+        rules:
+          workload === 'api' ? ['anchor-epoch', 'release-access', 'apps', 'public-doors'] : ['apps', 'public-doors'],
       });
     }
   });
