@@ -239,6 +239,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         ...railWork,
         list: handOffMarks.list,
         sweepList: sweepMarks.list,
+        unfinished: handOffMarks.unfinished,
+        waitsAsAWhole: handOffMarks.waitsAsAWhole,
         outbox,
         // The anchor check starts before the hand-off's first run: this list's order.
         anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
@@ -255,9 +257,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         ...clocked,
         ...railWork,
         list: checkMarks.list,
-        unfinished: (orgId) => {
-          checkMarks.keep(orgId);
-        },
+        unfinished: checkMarks.unfinished,
         nextTurn: (orgId, at) => {
           checkMarks.dueBy(orgId, at);
         },
