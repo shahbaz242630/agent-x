@@ -69,6 +69,14 @@ describe('one look at an organisation', () => {
     expect(movesOf({ before: [mark('5', later(60_000))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([]);
   });
 
+  it('work due an hour from now: its mark late only over a minute past that hour, not past now', () => {
+    const rows = later(3_600_000);
+    expect(movesOf({ before: [mark('5', later(3_660_000))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([]);
+    expect(movesOf({ before: [mark('5', later(3_660_001))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([
+      { kind: 'late', job: 'hand_off', dueAt: rows, marks: '5' },
+    ]);
+  });
+
   it("a mark for one job says nothing about another's", () => {
     const other = { job: 'payment_check', due_at: NOW, marks: '1' } as const;
     expect(movesOf({ before: [other], due: due(NOW), after: [other] }, NOW)).toEqual([
