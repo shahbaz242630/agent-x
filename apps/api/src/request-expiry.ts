@@ -7,7 +7,7 @@
 //
 // For each organisation its marks list (4D2e D8: those whose soonest wait is
 // due, `requestExpiryDue`), the candidates are found by their rows
-// (`requestsDueToExpire`, 0073's index: `waits_until` passed, or, made before
+// (`requestsDueToExpire`, 0074's index: `waits_until` passed, or, made before
 // it, waiting the shortest wait), a page at a time, each page after the last, so requests
 // refused on every run (tampered with) can't fill a page and keep the rest
 // waiting; each page kept to those whose sealed wait has run out, read in the

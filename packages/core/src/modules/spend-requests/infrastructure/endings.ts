@@ -84,7 +84,7 @@ export type Ended =
 /**
  * The IDs of the organisation's requests waiting for approval due by `now`
  * by their rows, in order of ID, after `after` when given, at most `most`
- * (0073's index): `waits_until` passed, or, for one made before 0073 with
+ * (0074's index): `waits_until` passed, or, for one made before 0073 with
  * none, waiting the shortest wait by `created_at`. Each to be read through
  * its signed state and judged by its decision's sealed time. The job pages on
  * past the last, so requests refused on every run can't fill a page and keep

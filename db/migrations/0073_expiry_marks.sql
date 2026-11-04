@@ -1,6 +1,13 @@
 -- 4D2e D8: the request expiry and the mandate expiry follow marks (0072) instead of
 -- visiting every organisation every five minutes. Runs only once the image before it
--- knows its two triggers exactly (D8a, schema-guard.ts COMING_TRIGGERS).
+-- knows its two triggers exactly (D8a, schema-guard.ts COMING_TRIGGERS). The expiry's
+-- index is 0074's, so nothing here reads the requests' table whole.
+--
+-- What it locks, each until this file commits, none for longer than a moment: org_work
+-- whole while its CHECK is replaced (it scans org_work, a row an organisation a job), so
+-- a commit marking work waits that long; spend_requests.requests and mandates.mandates
+-- whole for a column and a trigger added, which read no rows. The first marks read
+-- directory.orgs and write a row an organisation a job.
 
 -- Two more jobs a mark may name.
 ALTER TABLE directory.org_work DROP CONSTRAINT org_work_job_check,
@@ -16,13 +23,6 @@ ALTER TABLE directory.org_work DROP CONSTRAINT org_work_job_check,
 -- migration or by the image before it, read by created_at as before; those drain within
 -- 72 hours. No CHECK: one on a column added would read the whole table under its lock.
 ALTER TABLE spend_requests.requests ADD COLUMN waits_until timestamptz;
-
--- The expiry's two reads, both of the requests still waiting: the soonest of those due
--- and the candidates due by now; nulls, the older rows, sort last in it. It replaces
--- 0042's, which read by created_at alone.
-CREATE INDEX requests_waiting_until ON spend_requests.requests (org_id, waits_until)
-  WHERE status = 'APPROVAL_REQUIRED';
-DROP INDEX spend_requests.waiting_for_approval;
 
 -- A request waiting: due a day on, the shortest wait; the job's visit then moves the
 -- mark to when the request's own wait ends, read from waits_until.

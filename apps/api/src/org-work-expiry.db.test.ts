@@ -604,6 +604,46 @@ describe('the hourly look holds both to their rows', () => {
   });
 });
 
+describe('the hourly look leaves a mark a visit settled for work still due', () => {
+  it('a request made before 0073 waiting 72 hours: due by its age a day on, visited, then looked at: no miss said', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    await waitsUntilMoved(waiting.id, 'null');
+    clock.advanceBy(24 * HOUR + MINUTE);
+    await requestExpiry().run();
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+    const settled = await markOf(w.org, 'request_expiry');
+    expect(settled?.due_at).toEqual(clock.now());
+
+    clock.advanceBy(HOUR);
+    await createOrgWorkRediscovery({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      logger: testLogger(capture),
+      clock,
+    }).run();
+
+    expect(lines('org_work.unmarked')).toEqual([]);
+    expect(await markOf(w.org, 'request_expiry')).toEqual(settled);
+  });
+});
+
+describe("0074, the expiry's index, built apart from 0073's brief locks", () => {
+  it("leaves the waiting requests' index on waits_until, and 0042's gone", async () => {
+    const rows = await admin().query<{ indexname: string; indexdef: string }>(
+      `select indexname, indexdef from pg_catalog.pg_indexes
+        where schemaname = 'spend_requests' and indexname in ('requests_waiting_until', 'waiting_for_approval')`,
+    );
+    expect(rows).toEqual([
+      {
+        indexname: 'requests_waiting_until',
+        indexdef:
+          "CREATE INDEX requests_waiting_until ON spend_requests.requests USING btree (org_id, waits_until) WHERE (status = 'APPROVAL_REQUIRED'::text)",
+      },
+    ]);
+  });
+});
+
 describe("0073's first marks, for rows written before its triggers", () => {
   // Its last statement, as the migration ran it: the owner can't read the rows through their tenant walls.
   const migration = readFileSync(new URL('../../../db/migrations/0073_expiry_marks.sql', import.meta.url), 'utf8');
