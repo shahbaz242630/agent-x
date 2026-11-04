@@ -1716,6 +1716,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ]);
     });
 
+    /** An identity's resource ID, by the work it does. */
+    const identityId = (workload: string): string =>
+      String(
+        staging.predictedResources.find(
+          (resource) =>
+            resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
+            resource.name.endsWith(`-${workload}`),
+        )?.id,
+      );
+
     describe("the operator's read of it, for a chain recovery plan (4D2e E9)", () => {
       const READER = (resource: PredictedResource) =>
         ROLE_DEFINITIONS(resource) &&
@@ -1727,14 +1737,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
       const READS = (resource: PredictedResource) =>
         ASSIGNMENTS(resource) &&
         String(at(resource.properties, 'description')).startsWith('operator reads audit anchors');
-      const identityId = (workload: string): string =>
-        String(
-          staging.predictedResources.find(
-            (resource) =>
-              resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
-              resource.name.endsWith(`-${workload}`),
-          )?.id,
-        );
 
       it('its role reads and lists, and can add, overwrite or delete nothing', () => {
         expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
@@ -1796,14 +1798,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
     describe("the chain repair's reads and records (4D2e E10), as its own identity alone", () => {
       const restorerGrant = (what: string) => (resource: PredictedResource) =>
         ASSIGNMENTS(resource) && String(at(resource.properties, 'description')).startsWith(`chain-restore ${what}`);
-      const identityId = (workload: string): string =>
-        String(
-          staging.predictedResources.find(
-            (resource) =>
-              resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
-              resource.name.endsWith(`-${workload}`),
-          )?.id,
-        );
 
       it('is told of both stores as its own identity: named the operator’s, it is refused', () => {
         const restorer = staging.predictedResources.find(JOB('chain-restore')) as unknown as Mutable;
@@ -4741,17 +4735,29 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'chain-restore-request',
     ]);
     expect(
-      messages(changed(JOB('operator'), (job) => mounted(job, 'db-owner-password', 'db-operator-password'))),
+      messages(
+        changed(JOB('operator'), (job) => {
+          mounted(job, 'db-owner-password', 'db-operator-password');
+        }),
+      ),
     ).toEqual([
       "job-agentx-stg-operator [workload-secrets] is given db-owner-password, which GRANTS doesn't let operator read",
     ]);
     expect(
-      messages(changed(JOB('chain-restore'), (job) => mounted(job, 'key-operator-signing-v1', 'db-owner-password'))),
+      messages(
+        changed(JOB('chain-restore'), (job) => {
+          mounted(job, 'key-operator-signing-v1', 'db-owner-password');
+        }),
+      ),
     ).toEqual([
       "job-agentx-stg-chain-restore [workload-secrets] is given key-operator-signing-v1, which GRANTS doesn't let chain-restore read",
     ]);
     expect(
-      messages(changed(JOB('chain-restore'), (job) => mounted(job, 'db-app-password', 'db-owner-password'))),
+      messages(
+        changed(JOB('chain-restore'), (job) => {
+          mounted(job, 'db-app-password', 'db-owner-password');
+        }),
+      ),
     ).toEqual([
       "job-agentx-stg-chain-restore [workload-secrets] is given db-app-password, which GRANTS doesn't let chain-restore read",
     ]);

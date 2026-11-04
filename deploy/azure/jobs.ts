@@ -45,6 +45,12 @@ const REQUEST_JOBS = ['operator', 'chain-restore'] as const;
 export const JOBS = [...FIRST_DEPLOY, ...REQUEST_JOBS] as const;
 export type Job = (typeof JOBS)[number];
 
+/** Why a job that runs a request isn't run or started as it is deployed. */
+const notAsDeployed = (job: Job, command: 'run' | 'start'): UsageError =>
+  new UsageError(
+    `the ${job === 'operator' ? "operator's job" : 'chain repair'} isn't ${command === 'run' ? 'run' : 'started'} as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it`,
+  );
+
 /** Whether a job runs only a request written onto it first. */
 const runsRequest = (job: Job): job is (typeof REQUEST_JOBS)[number] =>
   (REQUEST_JOBS as readonly string[]).includes(job);
@@ -141,11 +147,7 @@ export function parseArguments(argv: readonly string[]): Request {
     throw new UsageError(`say run, start, wait or cleanup, not ${command ?? 'nothing'}`);
   }
   if (!isJob(job)) throw new UsageError(`${job ?? 'nothing'} isn't a job: ${JOBS.join(', ')}`);
-  if (command !== 'wait' && runsRequest(job)) {
-    throw new UsageError(
-      `the ${job === 'operator' ? "operator's job" : 'chain repair'} isn't ${command === 'run' ? 'run' : 'started'} as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it`,
-    );
-  }
+  if (command !== 'wait' && runsRequest(job)) throw notAsDeployed(job, command);
   if (command !== 'wait') {
     if (rest.length > 0) throw new UsageError(`${command} takes one job, not ${rest.join(' ')} as well`);
     return { command, job };

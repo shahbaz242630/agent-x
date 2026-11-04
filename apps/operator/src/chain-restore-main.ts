@@ -62,8 +62,8 @@ const SERVICE = 'chain-restore';
 const APPLICATION_NAME = 'agentx-chain-restore';
 
 /** The one key the repair holds, to check the chain with; the operator's own it checks with its public half alone. */
-export const RESTORE_HELD_KEYS = ['audit-mac'] as const;
-export const RESTORE_CHECKED_KEYS = ['operator-signing'] as const;
+const RESTORE_HELD_KEYS = ['audit-mac'] as const;
+const RESTORE_CHECKED_KEYS = ['operator-signing'] as const;
 
 /** What the owner's login sets off (playbook I), said in every run's first lines. */
 export const OWNER_LOGIN_NOTE =

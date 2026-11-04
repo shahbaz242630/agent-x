@@ -943,10 +943,9 @@ export const PLAIN_WORDS = {
     next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
   },
   'operator.chain_restore_refused': {
-    happened: "An organisation's audit chain repair did not go ahead, or was rolled back.",
-    broke:
-      'Nothing was changed on the live database, and the organisation stays on hold. The reason says why: the plan changed since it was read, the chain moved, or the result failed its check.',
-    next: "Read the reason and the repair's record in the evidence store; make a new plan if it changed, then follow playbook H.",
+    happened: "An organisation's audit chain repair was refused or rolled back.",
+    broke: 'Nothing was changed, and the organisation stays on hold.',
+    next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',

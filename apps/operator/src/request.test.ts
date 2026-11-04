@@ -49,7 +49,7 @@ describe('4D2e E10 the chain repair and its plan, asked with or without the name
       '--id',
       'plan',
     ]);
-    expect(JSON.parse(chainRecoveryRequest('org', 'plan', true)).at(-1)).toBe(DISCARD_FORK);
+    expect((JSON.parse(chainRecoveryRequest('org', 'plan', true)) as string[]).at(-1)).toBe(DISCARD_FORK);
     expect(JSON.parse(chainRestoreRequest(asked))).toEqual([
       'chain-restore',
       '--org',
@@ -61,7 +61,7 @@ describe('4D2e E10 the chain repair and its plan, asked with or without the name
       '--id',
       'id',
     ]);
-    expect(JSON.parse(chainRestoreRequest(asked, true)).at(-1)).toBe(DISCARD_FORK);
+    expect((JSON.parse(chainRestoreRequest(asked, true)) as string[]).at(-1)).toBe(DISCARD_FORK);
   });
 
   it("takes a plan's digest as 64 lower-case hex digits alone", () => {

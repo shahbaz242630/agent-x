@@ -581,7 +581,7 @@ describe("the repair's record", () => {
       { ok: false, reason: 'moved' },
       { ok: false, reason: 'unverified', problem: { reason: 'end', seq: 5n } },
     ];
-    expect(outcomes.map((outcome) => JSON.parse(restoreFile(outcome, facts).toString()))).toEqual([
+    expect(outcomes.map((outcome) => JSON.parse(restoreFile(outcome, facts).toString()) as unknown)).toEqual([
       { k: 'restore', ...facts, ok: false, reason: 'plan', planRefused: 'fork', seq: '4', problem: null },
       { k: 'restore', ...facts, ok: false, reason: 'plan', planRefused: 'copy_broken', seq: '2', problem: 'mac' },
       { k: 'restore', ...facts, ok: false, reason: 'stale', digestNow: 'cd'.repeat(32) },

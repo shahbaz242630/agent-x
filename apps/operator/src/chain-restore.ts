@@ -41,7 +41,6 @@ import {
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import type { ChainProblem, CheckedPoint } from '@agentx/platform/audit-chain';
 import { type Database, JOB_ANSWER_WITHIN_MS, withTenant } from '@agentx/platform/db';
-import type { KeyProvider } from '@agentx/platform/keys';
 
 import {
   fingerprintOf,
@@ -100,7 +99,7 @@ const samePoint = (a: CheckedPoint, b: CheckedPoint): boolean =>
 
 /** Makes the plan again and applies it if it is the one asked for: never throws for what it finds. */
 export async function restoreChain(sides: RestoreSides): Promise<RestoreOutcome> {
-  const { copy, live, keys, anchor, digest, discardFork } = sides;
+  const { copy, live, anchor, digest, discardFork } = sides;
   const orgId = sides.orgId.toLowerCase();
   const plan = await planChainRecovery({ ...sides, orgId, discardFork });
   if (!plan.ok) return { ok: false, reason: 'plan', plan };
@@ -165,7 +164,7 @@ export interface RestoreFacts {
 }
 
 /** How many of a plan's rows are of each action. */
-export const rowCounts = (plan: Planned) => {
+const rowCounts = (plan: Planned) => {
   const count = (action: string): number => plan.rows.filter((row) => row.action === action).length;
   return { putBack: count('put_back'), replaced: count('replace'), removed: count('remove') };
 };

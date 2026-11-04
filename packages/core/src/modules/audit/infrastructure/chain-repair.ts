@@ -64,9 +64,22 @@ const slices = <T>(rows: readonly T[]): T[][] =>
     rows.slice(at * ROWS_A_STATEMENT, (at + 1) * ROWS_A_STATEMENT),
   );
 
-/** Each list as a column of rows, side by side (ROWS FROM over pg_catalog.unnest), each cast to its type. */
-const rowsFrom = (columns: readonly (readonly [readonly unknown[], string])[]) =>
-  sql`rows from (${sql.join(columns.map(([values, type]) => sql`pg_catalog.unnest(${values}::${sql.raw(type)}[])`))})`;
+/** The array types a repair's lists are sent as, each a fixed piece of SQL. */
+const ARRAY_OF = {
+  bigint: sql`bigint[]`,
+  uuid: sql`uuid[]`,
+  timestamptz: sql`timestamptz[]`,
+  text: sql`text[]`,
+  integer: sql`integer[]`,
+} as const;
+
+/** One list as a column of rows, cast to its type. */
+const unnested = (values: readonly unknown[], type: keyof typeof ARRAY_OF) =>
+  sql`pg_catalog.unnest(${values}::${ARRAY_OF[type]})`;
+
+/** Each list as a column of rows, side by side (ROWS FROM). */
+const rowsFrom = (columns: readonly (readonly [readonly unknown[], keyof typeof ARRAY_OF])[]) =>
+  sql`rows from (${sql.join(columns.map(([values, type]) => unnested(values, type)))})`;
 
 /** The events' columns a repair writes, each with its type in the lists it is sent as (hex for the bytes). */
 const EVENT_COLUMNS = [
@@ -84,7 +97,7 @@ const EVENT_COLUMNS = [
   ['hash', 'text'],
   ['mac', 'text'],
   ['macKeyVersion', 'integer'],
-] as const satisfies readonly (readonly [keyof StoredColumns, string])[];
+] as const satisfies readonly (readonly [keyof StoredColumns, keyof typeof ARRAY_OF])[];
 
 /** Puts the rows in as they were read: every column from its text, the bytes from hex. */
 async function insertOriginals(tx: Transaction<AuditTables>, org: string, rows: readonly StoredColumns[]) {

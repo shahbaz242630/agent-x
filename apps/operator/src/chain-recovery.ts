@@ -316,10 +316,9 @@ function createPlanner(
     if (seq === anchor?.seq) atAnchor = entry;
     if (live === undefined) return plan({ action: 'put_back', seq, columns });
     if (isOriginal(live, entry)) return undefined;
-    if (sealedHere(live)) {
-      if (!discardFork) return refused('fork', seq);
-      forked = true;
-    }
+    const fork = sealedHere(live);
+    if (fork && !discardFork) return refused('fork', seq);
+    forked ||= fork;
     return plan({ action: 'replace', seq, columns, replaced: live.stored });
   };
 
@@ -334,10 +333,9 @@ function createPlanner(
       }
       broken = true;
       // Sealed by us, but not on from the copy's event before it: the app wrote on another branch.
-      if (problem.reason === 'link' && sealedHere(live)) {
-        if (!discardFork) return refused('fork', seq);
-        forked = true;
-      }
+      const fork = problem.reason === 'link' && sealedHere(live);
+      if (fork && !discardFork) return refused('fork', seq);
+      forked ||= fork;
     }
     // The fork's branch, past the copy: every row of it goes, the copy's head put back in finish.
     if (forked) return plan({ action: 'remove', seq, stored: live.stored });
