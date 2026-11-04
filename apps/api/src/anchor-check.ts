@@ -1,9 +1,29 @@
 // The anchor check (ADR-012 §2, SEC-DB-11): every few minutes the API checks
-// each audit chain whole against its last anchor, kept in this process's
-// memory and, deployed, in the write-once store (anchor-log.ts, PL-58), and
-// anchors it again. A chain wound back to an earlier state, or grown again on a
-// wound-back head, passes its own seals; only the anchor, held apart from the
-// database, shows it.
+// each audit chain against its last anchor, kept in this process's memory and,
+// deployed, in the write-once store (anchor-log.ts, PL-58), and anchors it
+// again. A chain wound back to an earlier state, or grown again on a wound-back
+// head, passes its own seals; only the anchor, held apart from the database,
+// shows it.
+//
+// No organisation's chain is read whole (4D2e E8). Each run first probes every
+// anchored chain (the trail's probeHeads, a page of organisations a trip, each
+// under its own wall): its head against its anchor, and its last 1,000 events
+// counted (decision 1). A chain found unmoved takes its turn with no read of its
+// own, one found failing is the alarm and its hold; one that moved, has no
+// anchor yet, or wasn't answered for is read from its anchor in its turn, up to
+// 100,000 events a turn, the anchor moving on with each. The old events below an
+// anchor are the rotation's (below). The platform's chain is read from its anchor
+// each run and whole once a day (anchor-rotation.ts's platformChainCheck).
+//
+// The probe reads up to four pages at once (`probePages`), never more than the lanes'
+// places free (it waits for one, as a turn does: checks from the last run may hold
+// them), and holds those it takes until it ends, so it takes no hand-off's
+// connection and turns wait for it. It is cut short by the run's time like any step,
+// keeping what it reached. The trade: an organisation the probe didn't reach takes no
+// turn that run, so a chain wound back there is seen at its next probe, which comes
+// first next run (those left over go first, so the tail never starves);
+// `audit.probe_unfinished` says how many were reached, and one unprobed past the
+// stale limit is the `unchecked` alarm, no hold.
 //
 // A run first reads the store, then checks, writing what moved each minute and
 // at its end. A store that
@@ -48,15 +68,16 @@
 // to read one chain's. So the true limit is memory: more anchors than the heap holds take
 // more hardware, and a store file past it says so (`audit.anchor_store_beyond_memory`).
 //
-// What that means for tamper: a chain wound back is seen at its turn, so a round's
-// length, not a run's, once rounds spread. Tx A compares a payment with the last
-// anchor alone (handoff.ts `chainStops`), so events past that anchor can be taken away
-// unseen until the chain's next turn: up to a round, 63 minutes or more at that size,
-// not 9, until E8's probe reads every head each run.
+// What that means for tamper: a chain wound back is seen at its turn, and with the probe
+// a turn is a few microseconds for a chain that hasn't moved, so a round is a run until
+// the moved chains alone outlast it. Tx A compares a payment with the last anchor alone
+// (handoff.ts `chainStops`), so events past that anchor can be taken away unseen until
+// the chain's next turn.
 //
 // After the organisations' turns, the rotation (anchor-rotation.ts, 4D2e E7): each
 // organisation's daily count and walk, and the full pass's share, within what is left
-// of the run, one read at a time, inside the lanes' share of the connections.
+// of the run, one read at a time, inside the lanes' share of the connections. It is
+// what finds an event below the anchor deleted past the last 1,000, or edited.
 //
 // A chain that fails raises the integrity alarm (`audit.integrity_failed`; its
 // SEV-1 alert rule is A2c-2) and keeps its last good anchor, so the alarm
@@ -68,7 +89,7 @@
 // stops a check (the database unreachable, or a check past its deadline but going on)
 // is a warning until then. Every run ends with one
 // line, so a check that has stopped can be told from one with nothing to say.
-// The platform chain is checked every run; each organisation's chain too,
+// The platform chain is checked every run; each organisation's chain too, probed,
 // found from the directory's list at each run (B1d-2). The list is held to
 // what the platform chain records: every organisation created there
 // (`organization.created`, sealed, so one deleted breaks the platform chain's
@@ -92,6 +113,7 @@ import {
   type AnchorPoint,
   type AnchorStore,
   type Chain,
+  type ChainProbe,
   type ChainReport,
   ChainStoreError,
   type CheckedPoint,
@@ -109,8 +131,11 @@ import { PastDeadline, scheduleRuns, Stopped, withinDeadline } from './backgroun
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
 export interface CheckedChain {
   readonly chain: Chain;
-  readonly verify: (anchor: AnchorPoint | undefined) => Promise<ChainReport>;
+  readonly verify: (anchor: CheckedPoint | undefined) => Promise<ChainReport>;
 }
+
+/** What the probe found of one organisation's chain against its anchor, or that its read failed (the trail's probeHeads). */
+export type ProbeAnswer = ChainProbe | { readonly kind: 'missed'; readonly error: unknown };
 
 export interface AnchorCheck {
   /**
@@ -137,8 +162,17 @@ export interface OrganisationChains {
   list(): Promise<readonly string[]>;
   /** Every organisation the platform chain records as created, by ID: each must be listed. */
   recorded(): Promise<readonly string[]>;
-  /** Checks one organisation's chain against its last anchor, if it has one. */
-  verify(orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  /** Checks one organisation's chain from its last anchor, or from its start where it has none. */
+  verify(orgId: string, anchor: CheckedPoint | undefined): Promise<ChainReport>;
+  /**
+   * Each chain's head read against its anchor at a run's start (4D2e E8), in pages, stopping between them once `signal`
+   * aborts. None given, every organisation is read in its turn.
+   */
+  probe?(
+    chains: readonly { readonly orgId: string; readonly from: CheckedPoint }[],
+    signal: AbortSignal,
+    pagesAtOnce: number,
+  ): Promise<ReadonlyMap<string, ProbeAnswer>>;
   /**
    * Puts the organisation on its integrity hold for how its chain failed (the
    * alarm's reason), or, given none, tries again a hold waiting in this
@@ -186,6 +220,8 @@ export interface AnchorCheckOptions {
   readonly rotation?: RotatedChecks;
   /** Whether this environment sleeps when unused (staging), so a full pass's lateness counts from a process's start. */
   readonly sleeps?: boolean;
+  /** How many of the probe's pages are read at once, each on a connection of its own: never more than the lanes. */
+  readonly probePages?: number;
 }
 
 /** See `stopFlushMs`. */
@@ -193,6 +229,9 @@ const STOP_FLUSH_MS = 5_000;
 
 /** See `lanes`. Each holds a connection for a check, and none across a call to the store. */
 const LANES = 4;
+
+/** See `probePages`: 10,000 organisations in 3.6 s at four, 9.4 s at one (measured locally, 4D2e E8); 100,000 about 36 s. */
+const PROBE_PAGES = 4;
 
 /**
  * See `runWithinMs`. Not the interval's double: lines are up to 9 minutes late, so 10 minutes of run and 5 between would
@@ -266,6 +305,24 @@ const LIST = 'list';
 /** The in-flight key of the rotation's read: one at a time. */
 const ROTATION = 'rotation';
 
+/** The in-flight key of the probe: one at a time. */
+const PROBE = 'probe';
+
+/** A chain the run's probe answered for, and the anchor it was compared with. */
+interface Probed {
+  readonly anchor: CheckedPoint;
+  readonly answer: Exclude<ChainProbe, { readonly kind: 'moved' }>;
+}
+
+const samePoint = (one: CheckedPoint, other: CheckedPoint): boolean =>
+  one.seq === other.seq && one.hash.equals(other.hash) && one.macKeyVersion === other.macKeyVersion;
+
+/** The probe's answer as a check's report on the chain at the anchor it compared with. */
+const reportOf = ({ anchor, answer }: Probed): ChainReport =>
+  answer.kind === 'same'
+    ? { ok: true, seq: anchor.seq, hash: anchor.hash, macKeyVersion: anchor.macKeyVersion }
+    : { ok: false, problem: answer.problem };
+
 export function createAnchorCheck({
   chains,
   organizations,
@@ -286,6 +343,7 @@ export function createAnchorCheck({
   writeEveryMs = WRITE_EVERY_MS,
   rotation: rotatedChecks,
   sleeps = false,
+  probePages = PROBE_PAGES,
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
@@ -311,18 +369,23 @@ export function createAnchorCheck({
    * Work that holds a connection, one at a time under `key`, within the deadline: past it, it stays in flight until it
    * ends, so a hung database can't take a connection every run.
    */
-  const tracked = <T>(key: string, busy: string, start: () => Promise<T>, signal: AbortSignal | undefined) => {
+  const tracked = <T>(
+    key: string,
+    busy: string,
+    start: () => Promise<T>,
+    signal: AbortSignal | undefined,
+    connections = 1,
+  ) => {
     if (inFlight.has(key)) throw new Error(busy);
-    inFlight.add(key);
+    // Work on several connections at once holds as many of the lanes' places, each until the whole of it ends.
+    const held = [key, ...Array.from({ length: connections - 1 }, (_, place) => `${key}#${String(place + 1)}`)];
+    for (const each of held) inFlight.add(each);
     const work = Promise.resolve().then(start);
-    void work.then(
-      () => {
-        ended(key);
-      },
-      () => {
-        ended(key);
-      },
-    );
+    const end = (): void => {
+      for (const each of held.slice(1)) inFlight.delete(each);
+      ended(key);
+    };
+    void work.then(end, end);
     return withinDeadline(work, deadlineMs, signal);
   };
   // Every organisation this process has seen listed or recorded, so one that leaves the list is noticed.
@@ -654,6 +717,111 @@ export function createAnchorCheck({
     }
   };
 
+  // What this run's probe found, by organisation: those it didn't answer for are read in their turns.
+  let probed: ReadonlyMap<string, Probed> = new Map();
+  // Those the last run's time left unprobed, probed first next run.
+  let unprobed: ReadonlySet<string> = new Set();
+
+  /** The probe's misses, in one line: their turns read them as before, so a warning, never the alarm. */
+  const sayProbeMissed = (count: number, error: unknown): void => {
+    logger.warn('audit.anchor_check_failed', { chain: 'organisation', check: 'probe', chains: count, err: error });
+  };
+
+  /**
+   * Every listed chain with an anchor probed at the run's start (4D2e E8): its head against its anchor and its last
+   * events counted, a page of organisations a trip, on one of the lanes' connections. A chain found unmoved, or
+   * failing, takes its turn with no read of its own; one moved, never anchored or not answered for is read from its
+   * anchor in its turn. One whose check from the last run is still under way meets that in its turn, as ever.
+   */
+  const probeAll = async (
+    from: OrganisationChains,
+    orgIds: readonly string[],
+    cap: AbortSignal,
+    stop: AbortSignal | undefined,
+  ): Promise<ReadonlyMap<string, Probed>> => {
+    const probe = from.probe?.bind(from);
+    if (probe === undefined) return new Map();
+    // Those the last run's time left unprobed first, so a tail never starves.
+    const order = [...orgIds.filter((orgId) => unprobed.has(orgId)), ...orgIds.filter((orgId) => !unprobed.has(orgId))];
+    const asked = order.flatMap((orgId) => {
+      const anchor = anchors.latest({ kind: 'organisation', orgId });
+      return anchor === undefined ? [] : [{ orgId, from: anchor }];
+    });
+    if (asked.length === 0) return new Map();
+    // Within the lanes' share, as a turn and the rotation: checks from the last run may still hold some of it.
+    while (inFlight.size >= lanes && !cap.aborted) await roomOrEnd(cap);
+    if (cap.aborted) {
+      // None reached: said as any probe cut short, and all of them first next run in the order they had.
+      sayUnprobed(
+        asked.map(({ orgId }) => orgId),
+        asked.length,
+      );
+      return new Map();
+    }
+    const pages = Math.max(1, Math.min(probePages, lanes - inFlight.size));
+    let answers: ReadonlyMap<string, ProbeAnswer>;
+    try {
+      // The run's time ends the probe between pages, and what it reached is kept; only the stop ends the wait at once.
+      answers = await tracked(PROBE, 'the last probe has not finished', () => probe(asked, cap, pages), stop, pages);
+    } catch (error) {
+      if (!(error instanceof Stopped)) sayProbeMissed(asked.length, error);
+      return new Map();
+    }
+    sayUnprobed(
+      asked.filter(({ orgId }) => !answers.has(orgId)).map(({ orgId }) => orgId),
+      asked.length,
+    );
+    const found = new Map<string, Probed>();
+    const missed: unknown[] = [];
+    for (const { orgId, from: anchor } of asked) {
+      const answer = answers.get(orgId);
+      if (answer?.kind === 'same' || answer?.kind === 'failed') found.set(orgId, { anchor, answer });
+      else if (answer?.kind === 'missed') missed.push(answer.error);
+    }
+    if (missed.length > 0) sayProbeMissed(missed.length, missed[0]);
+    return found;
+  };
+
+  /** What the probe found, each as a check completed in its turn would count, for a run with no time left for turns. */
+  const landProbed = async (from: OrganisationChains): Promise<Outcome[]> => {
+    const outcomes: Outcome[] = [];
+    for (const [orgId, found] of probed) {
+      const chain = { kind: 'organisation', orgId } as const;
+      const outcome = compared(chain, logger.child({ orgId }), reportOf(found), anchors.latest(chain), false);
+      if (outcome === 'failed') await settle(from, orgId, undefined);
+      outcomes.push(outcome);
+    }
+    return outcomes;
+  };
+
+  /**
+   * Those the run's time left unprobed: first next run, a warning, and past the stale limit unchecked the alarm, no hold,
+   * as for any chain unchecked. They take no turn this run either: the time is gone.
+   */
+  const sayUnprobed = (left: readonly string[], total: number): void => {
+    unprobed = new Set(left);
+    if (left.length === 0) return;
+    logger.warn('audit.probe_unfinished', { reached: total - left.length, total });
+    const now = clock.now().getTime();
+    const stale = left.filter((orgId) => now - since(orgId) >= staleAfterMs);
+    if (stale.length > 0) {
+      logger.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'anchor',
+        reason: 'unchecked',
+        organisations: stale.length,
+        firstFew: stale.slice(0, NAMED_ON_A_LINE),
+      });
+    }
+  };
+
+  /** A chain's report from this run's probe, where it compared the very anchor its turn holds: none, and it is read. */
+  const probedReport = (orgId: string, anchor: CheckedPoint | undefined): Promise<ChainReport> | undefined => {
+    const found = probed.get(orgId);
+    if (found === undefined || anchor === undefined || !samePoint(found.anchor, anchor)) return undefined;
+    return Promise.resolve(reportOf(found));
+  };
+
   const remember = (orgId: string): void => {
     if (seen.has(orgId)) return;
     seen.add(orgId);
@@ -673,7 +841,10 @@ export function createAnchorCheck({
     let ranMs: number | undefined;
     const outcome = listed.has(orgId)
       ? await checkOne(
-          { chain: { kind: 'organisation', orgId }, verify: (anchor) => from.verify(orgId, anchor) },
+          {
+            chain: { kind: 'organisation', orgId },
+            verify: (anchor) => probedReport(orgId, anchor) ?? from.verify(orgId, anchor),
+          },
           signal,
           false,
           (ms) => {
@@ -780,6 +951,9 @@ export function createAnchorCheck({
     const listed = inUse ?? [...seen];
     turns.begin(listed, fresh, gone, pastCap);
     if (turns.pastCapStarts()) pastCapSince = clock.now().getTime();
+    probed = await probeAll(from, [...listed, ...pastCap], cap, stop);
+    // The run's time gone during the probe: no turn follows, so what it found counts now, alarms and holds as ever.
+    if (cap.aborted) return landProbed(from);
     return takeTurns(from, new Set([...listed, ...pastCap]), cap);
   };
 
@@ -1014,6 +1188,7 @@ export function createAnchorCheck({
       if (signal?.aborted === true) end();
       signal?.addEventListener('abort', end, { once: true });
       completed = 0;
+      probed = new Map();
       missedThisRun = [];
       staleThisRun = [];
       unlistedThisRun = 0;

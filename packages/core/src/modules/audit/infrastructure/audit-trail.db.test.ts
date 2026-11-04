@@ -15,6 +15,7 @@ import {
 import {
   CHAIN_START,
   ChainBroken,
+  type CheckedPoint,
   type ChainReport,
   linkHash,
   sealState,
@@ -1088,7 +1089,8 @@ describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
       const whole = await checked(org);
       await attacker.query('delete from audit.events where org_id = $1 and seq = 2', [org]);
 
-      expect(await trail.checkFromAnchor(app, org, whole)).toMatchObject({ ok: true, seq: 4n });
+      // Among the chain's last 1,000, which the edges count since 4D2e E8 (decision 1): where the count starts.
+      expect(await trail.checkFromAnchor(app, org, whole)).toEqual({ ok: false, problem: { reason: 'gap', seq: 1n } });
       expect(await trail.countStep(app, org, 0n, 4n)).toEqual({ reason: 'gap', seq: 1n });
       expect(await trail.countStep(app, org, 2n, 4n)).toBeUndefined();
       expect(await trail.passStep(app, org, CHAIN_START, whole, 10)).toEqual({
@@ -1124,6 +1126,127 @@ describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
       await attacker.query('delete from audit.heads where org_id = $1', [org]);
 
       expect(await trail.checkFromAnchor(app, org, from)).toEqual({ ok: false, problem: { reason: 'head', seq: 0n } });
+    });
+  });
+
+  describe('the probe of many organisations at once (4D2e E8)', () => {
+    /** Each organisation's answer, by ID. */
+    const probed = async (asked: readonly { orgId: string; from: CheckedPoint }[], signal?: AbortSignal) =>
+      Object.fromEntries(await trail.probeHeads(app, asked, signal));
+
+    it('probes each under its own wall against its anchor: unmoved, moved, never started, and failing', async () => {
+      const [still, moved, empty, removed, stranger] = [newOrg(), newOrg(), newOrg(), newOrg(), newOrg()];
+      await record(still, event(1), event(2));
+      await record(moved, event(1));
+      await record(removed, event(1), event(2), event(3));
+      const [stillFrom, movedFrom, removedFrom] = [await checked(still), await checked(moved), await checked(removed)];
+      await record(moved, event(2));
+      await attacker.query('delete from audit.events where org_id = $1 and seq = 2', [removed]);
+
+      expect(
+        await probed([
+          { orgId: still.toUpperCase(), from: stillFrom },
+          { orgId: moved, from: movedFrom },
+          { orgId: empty, from: CHAIN_START },
+          { orgId: removed, from: removedFrom },
+          // Another's anchor, read under this organisation's wall: a chain that no longer holds it.
+          { orgId: stranger, from: stillFrom },
+        ]),
+      ).toEqual({
+        [still]: { kind: 'same' },
+        [moved]: { kind: 'moved' },
+        [empty]: { kind: 'same' },
+        [removed]: { kind: 'failed', problem: { reason: 'gap', seq: 1n } },
+        [stranger]: { kind: 'failed', problem: { reason: 'anchor', seq: 2n } },
+      });
+    });
+
+    it('reads 500 organisations a transaction and a trip, and stops between pages once told', async () => {
+      const pages: string[] = [];
+      const counting = app.withPlugin({
+        transformQuery: ({ node }) => {
+          if (node.kind === 'RawNode' && node.sqlFragments.join('').includes("'app.org_id', '', true"))
+            pages.push('page');
+          return node;
+        },
+        transformResult: ({ result }) => Promise.resolve(result),
+      });
+      const asked = Array.from({ length: 1001 }, () => ({ orgId: newOrg(), from: CHAIN_START }));
+
+      const answers = await trail.probeHeads(counting, asked);
+      expect(answers.size).toBe(1001);
+      expect([...answers.values()].every((answer) => answer.kind === 'same')).toBe(true);
+      expect(pages).toHaveLength(3);
+
+      const stop = new AbortController();
+      stop.abort();
+      expect((await trail.probeHeads(counting, asked, stop.signal)).size).toBe(0);
+      expect(pages).toHaveLength(3);
+
+      // Three pages at once, each its own transaction: every one answered, and no page read twice.
+      const together = await trail.probeHeads(counting, asked, undefined, 3);
+      expect([...together.keys()].toSorted()).toEqual(asked.map(({ orgId }) => orgId).toSorted());
+      expect(pages).toHaveLength(6);
+    });
+
+    it('begins its pages at once, and each stops between pages once told', async () => {
+      // Told to stop as the first page is sent: one page a time would read that page alone.
+      const stop = new AbortController();
+      const stopping = app.withPlugin({
+        transformQuery: ({ node }) => {
+          if (node.kind === 'RawNode' && node.sqlFragments.join('').includes("'app.org_id', '', true")) stop.abort();
+          return node;
+        },
+        transformResult: ({ result }) => Promise.resolve(result),
+      });
+      const asked = Array.from({ length: 2500 }, () => ({ orgId: newOrg(), from: CHAIN_START }));
+
+      expect((await trail.probeHeads(stopping, asked, stop.signal, 2)).size).toBe(1000);
+    });
+
+    it("answers the others when one organisation's read fails, and says that one missed, with why", async () => {
+      const [failing, other] = [newOrg(), newOrg()];
+      await record(failing, event(1));
+      await record(other, event(1));
+      const from = await checked(other);
+      // A row of that organisation's divides by zero as it is read. A policy takes no bound value; the ID is newOrg's.
+      // eslint-disable-next-line agentx/no-string-built-sql -- the ID is a UUID this test made, as the line above says.
+      await attacker.query(
+        `create policy probe_fails on audit.events as restrictive
+         using (1 / (case when org_id = '${failing}'::uuid then 0 else 1 end) = 1)`,
+      );
+      try {
+        const answers = await probed([
+          { orgId: failing, from: CHAIN_START },
+          { orgId: other, from },
+        ]);
+        expect(answers).toEqual({
+          [failing]: { kind: 'missed', error: expect.objectContaining({ code: '22012' }) as unknown },
+          [other]: { kind: 'same' },
+        });
+      } finally {
+        await attacker.query('drop policy probe_fails on audit.events');
+      }
+    });
+
+    it('waits for no lock a recording holds: the head held as an event is added, the probe reads on', async () => {
+      await record(org, event(1));
+      const from = await checked(org);
+      const holder = await database.connect('admin');
+      try {
+        await holder.query('begin');
+        await holder.query('select seq from audit.heads where org_id = $1 for no key update', [org]);
+        // A recording queued behind the held head, as one would be.
+        const queued = record(org, event(2));
+        await waitUntilQueued(attacker, 1);
+
+        expect(await within(5_000, probed([{ orgId: org, from }]), 'the probe')).toEqual({ [org]: { kind: 'same' } });
+        await holder.query('commit');
+        await queued;
+      } finally {
+        await holder.end();
+      }
+      expect(await probed([{ orgId: org, from }])).toEqual({ [org]: { kind: 'moved' } });
     });
   });
 

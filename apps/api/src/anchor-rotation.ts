@@ -1,7 +1,9 @@
 // The anchor check's rotation (4D2e E7): what a check from the anchor can't see, an
 // event below the anchor deleted or edited, found on a schedule rather than by
-// reading every chain whole each run. Until E8 switches the whole reads off, this
-// runs beside them and changes no guarantee: it is here to be right, and measured.
+// reading every chain whole each run. Since E8 the runs read no organisation's chain
+// whole (the probe, and the chains that moved from their anchors), so this is what
+// finds an old event deleted past the last 1,000, or edited; the platform's chain,
+// which it doesn't read, is read whole once a day instead (platformChainCheck).
 //
 // - Each organisation's day (decisions 1 and 2b): once a day, at its own five
 //   minutes of 288 (its ID's hash), every event up to its anchor counted, a million
@@ -53,6 +55,7 @@ import {
   type AnchorStore,
   CHAIN_START,
   type ChainProblem,
+  type ChainReport,
   type ChainStep,
   type CheckedPoint,
   OLD_EDIT_DAYS,
@@ -85,6 +88,65 @@ export const rotatedChecksOf = (
   walkLast: (orgId, target, most) => trail.walkLast(database, orgId, target, most),
   passStep: (orgId, cursor, target, most) => trail.passStep(database, orgId, cursor, target, most),
 });
+
+/** How often the platform's chain is read whole: decision 1's day for an old event deleted, and well inside 3's 7 days for one edited. */
+const PLATFORM_WHOLE_EVERY_MS = DAY_MS;
+
+/**
+ * The platform chain's check each run (4D2e E8, "Each run" step 2): whole at a process's first run and once a day after,
+ * as no rotation reads it, and from its anchor in between. A whole check counts only once it has passed, dated when it
+ * began; one that fails, or a chain not yet anchored, is read whole again next run.
+ */
+export function platformChainCheck({
+  fromAnchor,
+  whole,
+  clock,
+}: {
+  readonly fromAnchor: (from: CheckedPoint) => Promise<ChainReport>;
+  readonly whole: (anchor: CheckedPoint | undefined) => Promise<ChainReport>;
+  readonly clock: Clock;
+}): (anchor: CheckedPoint | undefined) => Promise<ChainReport> {
+  let wholeAt: number | undefined;
+  return async (anchor) => {
+    const now = clock.now().getTime();
+    if (anchor !== undefined && wholeAt !== undefined && now - wholeAt < PLATFORM_WHOLE_EVERY_MS) {
+      return fromAnchor(anchor);
+    }
+    const report = await whole(anchor);
+    if (report.ok) wholeAt = now;
+    return report;
+  };
+}
+
+/**
+ * The organisations the platform chain records as created (4D2e E8, "Each run" step 2), for the check to hold the
+ * directory's list to: read only past the last event read, and only as far as the chain's own check has reached (its
+ * anchor), so a row past it is neither believed nor moves the place on. All of them so far each run; a process's first
+ * read takes every one, then only those new. None before the platform chain is anchored. Kept in memory, an ID each.
+ */
+export function recordedSince({
+  since,
+  checkedTo,
+}: {
+  readonly since: (
+    afterSeq: bigint,
+    upTo: bigint,
+  ) => Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
+  readonly checkedTo: () => bigint | undefined;
+}): () => Promise<readonly string[]> {
+  let readTo = 0n;
+  const recorded = new Set<string>();
+  return async () => {
+    const upTo = checkedTo();
+    if (upTo !== undefined && upTo > readTo) {
+      const { orgIds } = await since(readTo, upTo);
+      for (const orgId of orgIds) recorded.add(orgId);
+      // Every row up to it has been read, whether or not one recorded an organisation.
+      readTo = upTo;
+    }
+    return [...recorded];
+  };
+}
 
 /** Which of the rotation's reads found a chain failing, or didn't come back. */
 export type RotationCheck = 'count' | 'walk' | 'pass';

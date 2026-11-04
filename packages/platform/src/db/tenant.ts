@@ -35,7 +35,7 @@ import {
   type Transaction,
   type TransactionSettings,
 } from 'kysely';
-import type pg from 'pg';
+import pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
 import {
@@ -753,6 +753,110 @@ export async function readAloneOnOneTrip<Schema, Row>(
   const query = read.compile(db);
   const { rows } = await db.getExecutor().provideConnection((connection) => checked(connection).readAlone(query));
   return rows;
+}
+
+/** What one organisation's read in readEachTenant came to: its rows, or why it failed. */
+type TenantRead<Row> = { readonly rows: readonly Row[] } | { readonly failed: unknown };
+
+/** A read readEachTenant sends for one organisation: one statement, its values bound. */
+interface TenantStatement<Row> {
+  compile(executorProvider: QueryExecutorProvider): CompiledQuery<Row>;
+}
+
+/** The setting made for one organisation, and given back by the same statement: the read-back. */
+const tenantSet = (tenant: string) =>
+  sql<{ org_id: string | null }>`select pg_catalog.set_config('app.org_id', ${tenant}, true) as org_id`;
+
+/** The setting a set_config statement gave back. */
+const settingIn = (answer: QueryResult<unknown> | undefined): string | undefined =>
+  (answer?.rows[0] as { readonly org_id?: string } | undefined)?.org_id;
+
+/** The setting emptied at the end, before the commit: no organisation's wall outlives its read, whatever comes after. */
+const tenantCleared = sql<{ org_id: string | null }>`select pg_catalog.set_config('app.org_id', '', true) as org_id`;
+
+/**
+ * The same read for many organisations, each under its own wall, in one transaction and one trip (4D2e E8, ADR-005 §2's
+ * named exception): one limitedTransaction with no organisation, then for each in turn its setting, transaction-scoped
+ * as withTenant's, and its read, all through the pipeline, and last the setting emptied. Each setting's read-back is
+ * checked, so one that didn't take fails the transaction, and with it every read. No right, table or function is
+ * added, and no role passes row security: a read sees only the organisation set before it, as under withTenant.
+ *
+ * A transaction that fails, any of its reads or a read-back, is tried again singly, each organisation in a withTenant
+ * of its own, so one organisation's failing read fails no other. A retry that gets no answer from the database (a
+ * trip's limit run out, a connection lost) fails the rest of them with it, rather than each waiting out its own limit.
+ * The answers come back in the order given. Never inside withTenant; an organisation named twice is refused.
+ */
+export async function readEachTenant<Schema, Item extends { readonly orgId: string }, Row>(
+  db: Kysely<Schema>,
+  items: readonly Item[],
+  read: (item: Item) => TenantStatement<Row>,
+  { answeredWithinMs }: { readonly answeredWithinMs?: number } = {},
+): Promise<readonly { readonly item: Item; readonly read: TenantRead<Row> }[]> {
+  if (insideTenant.getStore()?.open === true) {
+    throw new TenantContextError('readEachTenant was called inside withTenant, which walls the transaction to one');
+  }
+  const asked = items.map((item) => {
+    if (!UUID.test(item.orgId)) throw new TenantContextError('an organisation ID is not a UUID');
+    return { item, tenant: item.orgId.toLowerCase() };
+  });
+  if (new Set(asked.map(({ tenant }) => tenant)).size !== asked.length) {
+    throw new TenantContextError('an organisation is named twice');
+  }
+  if (asked.length === 0) return [];
+  try {
+    return await limitedTransaction(
+      db,
+      async (tx) => {
+        const statements = asked.flatMap(({ item, tenant }) => [tenantSet(tenant), read(item)]);
+        const answers = await sendTogether(tx, [...statements, tenantCleared]);
+        if (!sameTenant(settingIn(answers.at(-1)), '')) {
+          throw new TenantContextError("the organisation setting didn't clear");
+        }
+        return asked.map(({ item, tenant }, index) => {
+          const rows = answers[2 * index + 1];
+          if (!sameTenant(settingIn(answers[2 * index]), tenant) || rows === undefined) {
+            throw new TenantContextError("the organisation setting didn't take");
+          }
+          return { item, read: { rows: rows.rows as Row[] } };
+        });
+      },
+      answeredWithinMs === undefined ? {} : { answeredWithinMs },
+    );
+  } catch {
+    return readSingly(db, asked, read, answeredWithinMs);
+  }
+}
+
+/** readEachTenant's retry: each organisation in a withTenant of its own, until the database itself gives no answer. */
+async function readSingly<Schema, Item extends { readonly orgId: string }, Row>(
+  db: Kysely<Schema>,
+  asked: readonly { readonly item: Item; readonly tenant: string }[],
+  read: (item: Item) => TenantStatement<Row>,
+  answeredWithinMs: number | undefined,
+): Promise<readonly { readonly item: Item; readonly read: TenantRead<Row> }[]> {
+  const answers: { item: Item; read: TenantRead<Row> }[] = [];
+  let unanswered: { readonly failed: unknown } | undefined;
+  for (const { item, tenant } of asked) {
+    if (unanswered !== undefined) {
+      answers.push({ item, read: unanswered });
+      continue;
+    }
+    try {
+      const { rows } = await withTenant(
+        db,
+        tenant,
+        (tx): Promise<QueryResult<Row>> => tx.executeQuery(read(item).compile(tx)),
+        { limited: true, unshared: true, ...(answeredWithinMs === undefined ? {} : { answeredWithinMs }) },
+      );
+      answers.push({ item, read: { rows } });
+    } catch (error) {
+      // Postgres's own answer is this read's; anything else is the database's, and every read after would meet it too.
+      if (!(error instanceof pg.DatabaseError) && !(error instanceof TenantContextError))
+        unanswered = { failed: error };
+      answers.push({ item, read: { failed: error } });
+    }
+  }
+  return answers;
 }
 
 /** A connection from the pool, with a full pool's wait run out said as such, its own line (S161: busy, never a 500). */

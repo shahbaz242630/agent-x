@@ -17,6 +17,7 @@ import {
   createTestDatabase,
   LogCapture,
   type OwnerTamper,
+  type SavedRow,
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
@@ -29,6 +30,7 @@ import {
   type SignedStateTable,
   withTenant,
 } from '@agentx/platform/db';
+import { CHAIN_START, type CheckedPoint } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -359,6 +361,123 @@ describe('FX-TAMPER as the owner: what gets past the row check alone, and what c
     expect(await verifyChain({ seq: anchored.seq, hash: anchored.hash })).toEqual({
       ok: false,
       problem: { reason: 'anchor', seq: 2n },
+    });
+  });
+});
+
+describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, with the row rolled back (4D2e E8, decisions 1 and 2b)', () => {
+  /** How many of a chain's last events the probe counts and the day walks. */
+  const LAST = 1000;
+
+  /**
+   * An agent revoked, its row saved as it stood before, then `after` events about something else: the revocation that
+   * many from the head. The anchor is where the anchor check would have put it, at the head. Past the last 1,000 is
+   * one more: the day's walk reads the event before its window whole, as its start.
+   */
+  async function revokedThen(after: number) {
+    const id = await newAgent();
+    const savedRow = await owner.saveRow(id);
+    await changeStatus(id, 'revoke');
+    const [revocation] = await owner.query<{ seq: string }>(
+      "select seq::text as seq from audit.events where org_id = $1 and subject_id = $2 and action = 'agent.revoke'",
+      [org, id],
+    );
+    await withTenant(app, org, async (tx) => {
+      for (let step = 1; step <= after; step += 1) {
+        await trail.record(tx, org, {
+          actor: { type: 'user', id: USER },
+          action: 'probe.stepped',
+          subject: { type: 'probe', id: USER, version: step },
+          details: { step },
+        });
+      }
+    });
+    const head = await verifyChain();
+    if (!head.ok || revocation === undefined) throw new Error('The chain should have checked out before the tampering');
+    const anchor = { seq: head.seq, hash: head.hash, macKeyVersion: head.macKeyVersion };
+    return { id, savedRow, revocation: BigInt(revocation.seq), anchor };
+  }
+
+  const probe = async (anchor: CheckedPoint) => (await trail.probeHeads(app, [{ orgId: org, from: anchor }])).get(org);
+
+  /** The row rolled back to before the revocation: the agent reads as active again to every decision. */
+  async function unrevoked(id: string, savedRow: SavedRow): Promise<void> {
+    await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
+    expect(await check(id)).toMatchObject({ outcome: 'verified', version: 1 });
+  }
+
+  it("deleted among the last 1,000: the next run's probe finds it", async () => {
+    const { id, savedRow, revocation, anchor } = await revokedThen(3);
+    await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
+    await unrevoked(id, savedRow);
+
+    expect(await probe(anchor)).toEqual({ kind: 'failed', problem: { reason: 'gap', seq: 1n } });
+  });
+
+  it('deleted among the last 1,000 and made up for by a copy of another, the keys dropped: the probe counts numbers, not rows', async () => {
+    const { id, savedRow, revocation, anchor } = await revokedThen(3);
+    await owner.query('alter table audit.events drop constraint events_pkey');
+    await owner.query('alter table audit.events drop constraint events_org_id_id_key');
+    try {
+      await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
+      // A byte-for-byte copy of a sealed event at its own number: as many rows as before, one number fewer.
+      await owner.query('insert into audit.events select * from audit.events where org_id = $1 and seq = $2', [
+        org,
+        String(revocation + 2n),
+      ]);
+      await unrevoked(id, savedRow);
+
+      expect(await probe(anchor)).toEqual({ kind: 'failed', problem: { reason: 'gap', seq: 1n } });
+      expect(await trail.countStep(app, org, 0n, anchor.seq)).toEqual({ reason: 'gap', seq: 1n });
+    } finally {
+      await owner.query('delete from audit.events where org_id = $1', [org]);
+      await owner.query('alter table audit.events add constraint events_pkey primary key (org_id, seq)');
+      await owner.query('alter table audit.events add constraint events_org_id_id_key unique (org_id, id)');
+    }
+  });
+
+  it("deleted older than the last 1,000: past the probe, which says so, and the day's count finds it", async () => {
+    const { id, savedRow, revocation, anchor } = await revokedThen(LAST + 1);
+    await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
+    await unrevoked(id, savedRow);
+
+    // The stated limit (decision 1): the probe counts the last 1,000 alone.
+    expect(await probe(anchor)).toEqual({ kind: 'same' });
+    expect(await trail.countStep(app, org, 0n, anchor.seq)).toEqual({ reason: 'gap', seq: 1n });
+  });
+
+  it("moved off its agent among the last 1,000: the count still exact, the day's walk finds it", async () => {
+    const { id, savedRow, revocation, anchor } = await revokedThen(3);
+    await owner.query('update audit.events set subject_id = $3 where org_id = $1 and seq = $2', [
+      org,
+      String(revocation),
+      newId(),
+    ]);
+    await unrevoked(id, savedRow);
+
+    expect(await probe(anchor)).toEqual({ kind: 'same' });
+    expect(await trail.countStep(app, org, 0n, anchor.seq)).toBeUndefined();
+    expect(await trail.walkLast(app, org, anchor, Number(anchor.seq))).toEqual({
+      ok: false,
+      problem: { reason: 'hash', seq: revocation },
+    });
+  });
+
+  it("moved off its agent older than the last 1,000: past the day's walk, and the full pass finds it", async () => {
+    const { id, savedRow, revocation, anchor } = await revokedThen(LAST + 1);
+    await owner.query('update audit.events set subject_id = $3 where org_id = $1 and seq = $2', [
+      org,
+      String(revocation),
+      newId(),
+    ]);
+    await unrevoked(id, savedRow);
+
+    expect(await probe(anchor)).toEqual({ kind: 'same' });
+    // The stated limit (decision 2b): the day walks the last 1,000 alone.
+    expect(await trail.walkLast(app, org, anchor, LAST)).toMatchObject({ ok: true, seq: anchor.seq });
+    expect(await trail.passStep(app, org, CHAIN_START, anchor, 2000)).toEqual({
+      ok: false,
+      problem: { reason: 'hash', seq: revocation },
     });
   });
 });
