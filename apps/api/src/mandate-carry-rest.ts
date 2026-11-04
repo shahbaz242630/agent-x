@@ -10,7 +10,8 @@
 // carried before them hold, and carries or cancels each (`carryPlan`,
 // `carryOut`, decision 17's outcomes), as the API's, naming the acceptance.
 //
-// For each organisation the directory lists, the candidates are mandates with
+// For each organisation its marks list (4D2e D9: those where a candidate
+// stands, `carryRestDue`), the candidates are mandates with
 // requests pending on a version that isn't theirs in force, by their rows, a
 // page at a time; then each in a transaction of its own, in ADR-006's lock
 // order: the organisation and agent read through their signed states (2, 3),
@@ -90,13 +91,12 @@ interface Candidate {
 }
 
 /**
- * The organisation's mandates with pending requests on another version, by
- * their rows, unverified, at most MANDATES_A_RUN: the rest on a later run. One
- * left (stopped) stays a candidate until it can go on, or the voids job ends
- * its requests; an organisation's mandates in force are one an agent, so few.
+ * The organisation's pending requests on a version of their mandate not the
+ * one in force, by their rows, unverified, not run: the mandate and agent each
+ * names (0046's index). The job's candidates, and its due read's.
  */
-async function candidatesOf(tx: CarryRestTx, orgId: string): Promise<Candidate[]> {
-  const rows = await tx
+const onAnotherVersion = (tx: CarryRestTx, orgId: string) =>
+  tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state before anything moves
     .selectFrom('spend_requests.requests as r')
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a filter alone: the mandate is read through its signed state
@@ -104,12 +104,37 @@ async function candidatesOf(tx: CarryRestTx, orgId: string): Promise<Candidate[]
       join.onRef('m.org_id', '=', 'r.org_id').onRef('m.id', '=', 'r.mandate_id'),
     )
     .select(['r.mandate_id', 'r.agent_id'])
-    .distinct()
     .where('r.org_id', '=', orgId)
     .where('r.status', 'in', PENDING_STATUSES)
     .where('m.current_version_id', 'is not', null)
     .where('r.mandate_version_id', 'is not', null)
-    .whereRef('r.mandate_version_id', '<>', 'm.current_version_id')
+    .whereRef('r.mandate_version_id', '<>', 'm.current_version_id');
+
+/**
+ * When the carry rest next has work in an organisation, by `now`, not run (4D2e D9): now while one of its candidates
+ * stands, else none. One left (stopped, or not carried: the voids job's) keeps its organisation due, as it stays a
+ * candidate.
+ */
+export const carryRestDue = (tx: CarryRestTx, orgId: string, now: Date) =>
+  tx.selectNoFrom((eb) =>
+    eb
+      .case()
+      .when(eb.exists(onAnotherVersion(tx, orgId).limit(1)))
+      .then(eb.cast<Date | null>(eb.val(now), 'timestamptz'))
+      .else(null)
+      .end()
+      .as('due'),
+  );
+
+/**
+ * The organisation's mandates with pending requests on another version, by
+ * their rows, unverified, at most MANDATES_A_RUN: the rest on a later run. One
+ * left (stopped) stays a candidate until it can go on, or the voids job ends
+ * its requests; an organisation's mandates in force are one an agent, so few.
+ */
+async function candidatesOf(tx: CarryRestTx, orgId: string): Promise<Candidate[]> {
+  const rows = await onAnotherVersion(tx, orgId)
+    .distinct()
     .$narrowType<{ mandate_id: string }>()
     .orderBy('r.mandate_id')
     .limit(MANDATES_A_RUN)
@@ -135,7 +160,7 @@ export function createCarryRest({
   clock,
   logger,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those its marks say are due, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<CarryRestTables>;
   readonly keys: KeyProvider;

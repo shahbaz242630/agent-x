@@ -10,7 +10,7 @@
 // review), and that step holds the head for no more than its own write. A
 // plain insert is safe here as agents.ts says: the row is new, and
 // recordNewAndMove refuses one the log already holds a state for.
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 
 import {
   type AuditActor,
@@ -74,12 +74,26 @@ export interface NewRequest {
   readonly createdAt: Date;
 }
 
-/** Inserts the request, VALIDATING with its decision, unsigned yet: its reservation and claim go in next, then `sign`. */
+/**
+ * Inserts the request, VALIDATING with its decision, unsigned yet: its reservation and claim go in next, then `sign`.
+ * One that will wait for approval carries when it may expire (0073): the database's clock now plus its wait, so never
+ * after its decision's sealed time, read a moment later by the same clock, plus that wait.
+ */
 export const insertRequestStatement = (tx: RequestsTransaction, request: NewRequest) =>
   tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by recordNewAndMove in signRequest (see the top of this file)
     .insertInto(SPEND_REQUESTS.table)
-    .values({ org_id: request.orgId, id: request.id, ...fieldsOf(request), created_at: request.createdAt });
+    .values({
+      org_id: request.orgId,
+      id: request.id,
+      ...fieldsOf(request),
+      created_at: request.createdAt,
+      waits_until:
+        request.decision === 'REQUIRE_APPROVAL'
+          ? sql<Date>`pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp())
+              + pg_catalog.make_interval(hours => ${request.approvalWait}::integer)`
+          : null,
+    });
 
 /**
  * Signs the request just inserted (`spend_request.received`) and moves it

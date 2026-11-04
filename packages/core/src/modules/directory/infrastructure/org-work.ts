@@ -1,18 +1,19 @@
-// directory.org_work (0072): which organisation has work of which kind, written by
+// directory.org_work (0072, 0073, 0075): which organisation has work of which kind, written by
 // deferred triggers as the work's own row commits. A row chooses when to look, and
 // nothing is believed from it: whoever looks reads and acts inside withTenant.
 //
 // A mark that waits for its row waits inside COMMIT, where statement_timeout doesn't
 // reach (measured, org-work.db.test.ts): lock_timeout does, if the transaction set one,
 // and fails the whole commit. So nothing may hold a mark long: writers commit, and
-// what's here is one row in a transaction of its own, under the idle limit if it hangs.
+// what's here is one row in a transaction of its own, under the idle limit if it hangs,
+// or a page of rows that skips any a commit holds and holds the rest for one trip.
 import { limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type { DirectoryTables } from './tables.ts';
+import { readAlone } from './read-alone.ts';
+import type { DirectoryTables, OrgWorkJob } from './tables.ts';
 
-/** The work the marks follow so far. */
-export type OrgWorkJob = 'hand_off' | 'hand_off_sweep' | 'payment_check';
+export type { OrgWorkJob } from './tables.ts';
 
 /** One mark. `marks` moves with every mark made, and is only ever compared. */
 export interface OrgWorkMark {
@@ -49,6 +50,36 @@ export async function markOrgWork(
   );
 }
 
+/** A mark as a job reads it to choose where to go: whose, and its count then, which its settling compares. */
+export interface DueOrgWork {
+  readonly orgId: string;
+  readonly marks: string;
+}
+
+/**
+ * A job's marks due by `by` (its clock) or by Postgres's, whichever is later, those due longest first, at most `most`,
+ * so a run's list never grows with the organisations: each one settled moves behind those due before it, so none waits
+ * for ever. One statement, in a read of its own.
+ */
+export function dueOrgWork(
+  db: Kysely<DirectoryTables>,
+  job: OrgWorkJob,
+  { most, by }: { readonly most: number; readonly by: Date },
+): Promise<DueOrgWork[]> {
+  return readAlone(db, (tx) =>
+    tx
+      .selectFrom('directory.org_work')
+      // As text, as its type says: the pool reads a bigint as a BigInt.
+      .select((eb) => ['org_id as orgId', eb.cast<string>('marks', 'text').as('marks')])
+      .where('job', '=', job)
+      // By the later clock: the triggers' marks are Postgres's, a job's due times its own.
+      .where('due_at', '<=', sql<Date>`greatest(pg_catalog.now(), ${by}::timestamptz)`)
+      .orderBy('due_at')
+      .limit(most)
+      .execute(),
+  );
+}
+
 /**
  * After looking: with nothing more due the mark goes, otherwise it moves to the next due time, either only while it
  * still reads as `marks`, the value read **before** looking. A mark made since has moved it, so this does nothing and
@@ -76,4 +107,56 @@ export async function settleOrgWork(
     return numUpdatedRows;
   });
   return settled === 1n;
+}
+
+/** One organisation's mark as a job settles it: its count when listed, and what its rows said next after the visit. */
+export interface SettledOrgWork {
+  readonly orgId: string;
+  readonly marks: string;
+  readonly due: Date | null;
+}
+
+/**
+ * settleOrgWork for a page of a job's marks, in one statement in a transaction of its own: each goes (nothing due) or
+ * moves to its next due time, only while it still reads as listed. A row a commit is marking right now is skipped, not
+ * waited for: that commit moves its count, so settling it would do nothing, and never waiting means no settle is ever
+ * in a writer's wait, or a deadlock with one marking several jobs. The rows taken are held from this statement to its
+ * commit, the next trip. How many it settled comes back.
+ */
+export async function settleOrgWorkPage(
+  db: Kysely<DirectoryTables>,
+  job: OrgWorkJob,
+  page: readonly SettledOrgWork[],
+): Promise<number> {
+  if (page.length === 0) return 0;
+  const { rows } = await limitedTransaction(db, (tx) =>
+    sql<{ settled: number }>`
+      with page as (
+        select * from rows from (
+          pg_catalog.unnest(${page.map(({ orgId }) => orgId)}::uuid[]),
+          pg_catalog.unnest(${page.map(({ marks }) => marks)}::bigint[]),
+          pg_catalog.unnest(${page.map(({ due }) => due)}::timestamptz[])
+        ) as p (org_id, marks, due)
+      ),
+      held as (
+        select w.org_id, p.due from directory.org_work w
+        join page p on p.org_id = w.org_id and p.marks = w.marks
+        where w.job = ${job}
+        for update of w skip locked
+      ),
+      gone as (
+        delete from directory.org_work w using held h
+        where w.job = ${job} and w.org_id = h.org_id and h.due is null
+        returning 1
+      ),
+      moved as (
+        update directory.org_work w set due_at = h.due from held h
+        where w.job = ${job} and w.org_id = h.org_id and h.due is not null
+        returning 1
+      )
+      select ((select pg_catalog.count(*) from gone) + (select pg_catalog.count(*) from moved))::integer as settled
+    `.execute(tx),
+  );
+  // One row always: its count.
+  return rows.reduce((sum, { settled }) => sum + settled, 0);
 }

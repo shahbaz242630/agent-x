@@ -799,6 +799,34 @@ it('sees a table given a child, which makes it an inheritance parent', async () 
   }
 });
 
+describe('an index not valid (4D2e D8: what a concurrent build leaves while it runs, or after it failed)', () => {
+  // Postgres marks one so only while building it concurrently or after that failed; the admin flips the flag here.
+  const invalidated = async (index: string) =>
+    database
+      .as('admin')
+      .query('update pg_catalog.pg_index set indisvalid = false where indexrelid = $1::regclass', [index]);
+
+  it('a plain one is no drift: a matter of speed, as one missing is', async () => {
+    await owner.query('create index spare_seq on audit.events (seq)');
+    try {
+      await invalidated('audit.spare_seq');
+      expect(await problems()).toEqual([]);
+    } finally {
+      await owner.query('drop index audit.spare_seq');
+    }
+  });
+
+  it('a unique one is: a wall that enforces nothing', async () => {
+    await owner.query('create unique index spare_key on audit.events (org_id, seq)');
+    try {
+      await invalidated('audit.spare_key');
+      expect(await problems()).toContain(`audit.events's index "spare_key" is not valid`);
+    } finally {
+      await owner.query('drop index audit.spare_key');
+    }
+  });
+});
+
 it('sees a unique key made partial, which enforces nothing outside its condition', async () => {
   await owner.query('create unique index partial_key on audit.events (org_id, id) where seq > 0');
   try {

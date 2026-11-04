@@ -13,14 +13,16 @@
 // answer's time, SUBMITTED, PROCESSING, UNKNOWN) in turns (fair-lanes.ts, 4D2e
 // Stage F: up to 8 calls at once, 2 of them the messages', 2 an organisation and
 // 1 more for a message, slots of its own beside the hand-off's), each organisation's
-// oldest first, a page at a time: one under 15 minutes old every run, one under
-// a day old every 5th run (the real partner's rate limits). Every 30th run, the
-// first after a start among them, two laps begin: every UNKNOWN of any age, then
-// the rest under way with those paid or failed in the last 7 days. A lap carries
-// on run after run, each with its own part of the budget, the UNKNOWNs' larger,
-// until every organisation has had its turn: an UNKNOWN is asked again within 30
-// runs and that lap's length, and one that outlasts its time is said. None is
-// asked twice in a run. The bank is asked outside any
+// oldest first, a page at a time: one under 15 minutes old every visit, one under
+// a day old every 5 minutes (the real partner's rate limits); every 30 minutes,
+// every UNKNOWN of any age, then the rest under way with those paid or failed in
+// the last 7 days, each with its own part of the budget, the UNKNOWNs' larger.
+// Each is by the organisation's own last whole turn of it, and its first turn of
+// each after a start comes at once (4D2e D7): a run takes only the organisations
+// whose marks are due (org-work.ts), so no run number could stand for them all.
+// A turn cut short stays due, its place kept, and its organisation's mark is left
+// as it stands so the next run takes it first; UNKNOWNs due past their time are
+// said. None is asked twice in a run. The bank is asked outside any
 // database transaction; then one transaction a payment, in ADR-006 §6's lock order, as Tx B (`lockPayment`:
 // the transaction for change, 10; its holdings, 11; the move, the head, 12),
 // and every move settled by `settlePayment` (its holdings; on SUCCEEDED, the
@@ -63,7 +65,7 @@
 // finds it so, the payment staying waiting, and its admins are emailed once
 // (`bank_lost`, partner S170): following it up is the user's with their bank,
 // decision 38.
-import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
+import { type AuditTables, type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import type { InstructionsTables } from '@agentx/core/modules/instructions';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import {
@@ -94,7 +96,6 @@ import {
   noteTransactionFacts,
   type ProviderFacts,
   TRANSACTIONS,
-  transactionDueNow,
   type TransactionEvent,
   type TransactionsTables,
   type TransactionStatus,
@@ -130,9 +131,13 @@ const FRESH_MS = 15 * 60_000;
 
 const DAY_MS = 24 * 60 * 60_000;
 
-/** Every this many runs, the payments up to a day old are checked too; every ALL_EVERY runs, every one. */
-const DAY_EVERY = 5;
-const ALL_EVERY = 30;
+/**
+ * How often an organisation's payments up to a day old are checked past their first 15 minutes, and how often its
+ * older ones, its UNKNOWNs and those watched: by its own last check (4D2e D7), not by the run's number, so a run that
+ * takes only some organisations never leaves one out of a slower check. 5 and 30 runs' worth, as before.
+ */
+const DAY_TIER_EVERY_MS = 5 * PAYMENT_CHECKS_EVERY_MS;
+const LAP_EVERY_MS = 30 * PAYMENT_CHECKS_EVERY_MS;
 
 /** How long a SUBMISSION_PENDING one is left to its own Tx B: past the partner's call, so its answer isn't on its way. */
 const ANSWER_DUE_MS = 60_000;
@@ -150,15 +155,69 @@ const STILL_UNKNOWN_MS = DAY_MS;
 /** The statuses a payment is checked in: its outcome can still move. */
 const UNDER_WAY = ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING', 'UNKNOWN'] as const;
 
-/** When the checks next have work in an organisation, not run: now if a payment is under way. */
-export const paymentCheckDue = (tx: DatabaseTransaction<TransactionsTables>, orgId: string) =>
-  transactionDueNow(tx, orgId, UNDER_WAY);
-
 /**
  * The settled ones still watched for PAID_WATCH_MS from their last move: paid,
  * or failed (two admins' mark among them, H10: a week from the mark, gate H3).
  */
 const WATCHED = ['SUCCEEDED', 'FAILED'] as const;
+
+type DueTx = DatabaseTransaction<TransactionsTables & AuditTables>;
+
+/** The organisation's payments under way made since `since` (any age where none): their IDs, not run. */
+const underWaySince = (tx: DueTx, orgId: string, since: Date | undefined) =>
+  tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- whether one stands alone, for choosing when to look
+    .selectFrom(TRANSACTIONS.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where('status', 'in', UNDER_WAY)
+    .where((eb) => (since === undefined ? eb.lit(true) : eb('created_at', '>=', since)));
+
+/**
+ * The organisation's payments paid or failed whose last move was since `since`: from those events, each to the
+ * payment whose newest it is (0048's index, then the key), so the read is a week's events, never every payment the
+ * organisation has made.
+ */
+const watchedSince = (tx: DueTx, orgId: string, since: Date) =>
+  tx
+    .selectFrom('audit.events as e')
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- whether one stands alone, for choosing when to look
+    .innerJoin(`${TRANSACTIONS.table} as t`, (join) =>
+      join.onRef('t.org_id', '=', 'e.org_id').onRef('t.id', '=', 'e.subject_id').onRef('t.state_event_id', '=', 'e.id'),
+    )
+    .select('t.id')
+    .where('e.org_id', '=', orgId)
+    .where('e.recorded_at', '>=', since)
+    .where('e.subject_type', '=', TRANSACTIONS.subject)
+    .where('t.status', 'in', WATCHED);
+
+/**
+ * When the checks next have work in an organisation, counted from `now` (the job's clock), not run: now for a payment
+ * under 15 minutes old; DAY_TIER_EVERY_MS on for one under a day; LAP_EVERY_MS on for an older one, an UNKNOWN past a
+ * day, or one paid or failed within PAID_WATCH_MS; null for none. Each is when its check is next needed once this
+ * visit has made it, so a mark's time carries each organisation's own cadence. Every payment watched was born under way
+ * and marked then, so its mark stands from there for as long as this says.
+ */
+export const paymentCheckDue = (tx: DueTx, orgId: string, now: Date) =>
+  tx.selectNoFrom((eb) => {
+    const at = (ms: number) => eb.cast<Date>(eb.val(new Date(now.getTime() + ms)), 'timestamptz');
+    return eb
+      .case()
+      .when(eb.exists(underWaySince(tx, orgId, new Date(now.getTime() - FRESH_MS))))
+      .then(at(0))
+      .when(eb.exists(underWaySince(tx, orgId, new Date(now.getTime() - DAY_MS))))
+      .then(at(DAY_TIER_EVERY_MS))
+      .when(
+        eb.or([
+          eb.exists(underWaySince(tx, orgId, undefined)),
+          eb.exists(watchedSince(tx, orgId, new Date(now.getTime() - PAID_WATCH_MS))),
+        ]),
+      )
+      .then(at(LAP_EVERY_MS))
+      .else(null)
+      .end()
+      .as('due');
+  });
 
 /** How many of the partner's messages a run takes, oldest first: the rest wait for the next. */
 const NUDGES_A_RUN = 100;
@@ -169,13 +228,13 @@ const UNREACHED_IN_A_ROW = 3;
 /** How many calls to the bank at once, across every organisation and in each: slots of their own, beside the hand-off's. */
 const CHECK_LIMITS = { total: 8, perOrganisation: 2 } as const;
 
-/** How the run's budget is parted: the regular turns, then each lap. A message's pass has the whole of it, beside them. */
+/** How the run's budget is parted: the regular turns, then each slower check. A message's pass has the whole of it, beside them. */
 const REGULAR_SHARE = 1 / 2;
 const UNKNOWN_LAP_SHARE = 1 / 3;
 const WATCH_LAP_SHARE = 1 / 6;
 
-/** How long the UNKNOWNs' lap may take before it is said: by then the next is due. */
-const LAP_DUE_MS = ALL_EVERY * PAYMENT_CHECKS_EVERY_MS;
+/** How long an organisation's UNKNOWNs may stay due, their turns cut short, before it is said: by then the next is due. */
+const UNKNOWN_BEHIND_MS = LAP_EVERY_MS;
 
 /** The API, as the check's actor in the signed events. */
 const ACTOR = { type: 'system', id: 'api' } as const;
@@ -227,16 +286,20 @@ const newRun = (): Run => ({
   unreadable: new Set(),
 });
 
-/** One of the sweeps that reach every payment of its kind, over as many runs as they take. */
-interface Lap {
+/** A kind of check of an organisation's payments, each organisation's turn due by its own last whole one. */
+interface Tier {
   readonly sweep: string;
   readonly lanes: FairLanes;
-  readonly share: number;
-  /** How long it may take before it is said. */
-  readonly outlastsMs: number;
-  /** The organisations yet to have their turn: empty between laps. */
-  left: readonly string[];
-  startedAt: number;
+  /** How long after an organisation's last whole turn its next is due. */
+  readonly everyMs: number;
+  /** How long one may stay due, its turns cut short, before it is said; none for the regular turns. */
+  readonly behindAfterMs: number | undefined;
+  /** When each organisation's next turn is due, by this process's clock: one not here yet is due now. */
+  readonly next: Map<string, number>;
+  /** Those whose turn read payments since their last whole one: the turn is theirs to keep to. */
+  readonly seen: Set<string>;
+  /** Those whose last whole turn read payments: their next turn is one their mark must not pass. */
+  readonly busy: Set<string>;
   said: boolean;
 }
 
@@ -273,6 +336,8 @@ export interface PaymentChecks {
 
 export function createPaymentChecks({
   list,
+  unfinished,
+  nextTurn,
   database,
   rail,
   outbox,
@@ -289,8 +354,15 @@ export function createPaymentChecks({
   runBudgetMs = RUN_BUDGET_MS,
   stopWaitMs = STOP_WAIT_MS,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those marked due (org-work.ts), which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
+  /** Told each organisation whose turn a run cut short: its mark is settled due now, so the next run takes it (org-work.ts). */
+  readonly unfinished?: (orgId: string) => void;
+  /**
+   * Told, for each organisation it took whole, the soonest of its slower turns now pending: its mark is settled no
+   * later, so a cadence its rows read as longer never pushes a turn already counted past its time.
+   */
+  readonly nextTurn?: (orgId: string, at: Date) => void;
   readonly database: Database<CheckTables>;
   readonly rail: FinancialRailAdapter;
   /** Where a payment that SUCCEEDED queues its supplier's remittance email (`settlePayment`). */
@@ -323,7 +395,6 @@ export function createPaymentChecks({
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
   // As the hand-off's: its first beat is its start, then only a run that reads its organisations beats.
   let beat = clock.now().getTime();
-  let runs = 0;
   // A quarter of the calls the messages': enough to go on, never all of them.
   const nudgeSlots = Math.max(1, Math.floor(limits.total / 4));
   // The run under way's, as the lanes' work needs them; runs never overlap.
@@ -657,40 +728,60 @@ export function createPaymentChecks({
     return stepOf(orgId, await checkOnce(orgId, listed, logger.child({ orgId })));
   };
 
-  const lanesOf = (dueNow: () => Due): FairLanes =>
+  /** The lanes of a kind of check, noting in `seen` each organisation a read found payments for. */
+  const lanesOf = (dueNow: () => Due, seen: Set<string>): FairLanes =>
     createFairLanes<Listed>({
       total: Math.max(1, limits.total - nudgeSlots),
       limitOf: () => limits.perOrganisation,
       thrown: laneThrown,
       page,
       idOf: ({ id }) => id,
-      read: (orgId, after) => laneRead(orgId, after, dueNow()),
+      read: async (orgId, after) => {
+        const listed = await laneRead(orgId, after, dueNow());
+        if (listed !== null && listed.length > 0) seen.add(orgId);
+        return listed;
+      },
       work: payment,
     });
 
   const since = (ms: number) => new Date(clock.now().getTime() - ms);
-  // A place kept for each sweep, so one cut short goes on where it left off at its next.
-  const everyRunLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(FRESH_MS), watchPaid: false }));
-  const daysLanes = lanesOf(() => ({ statuses: UNDER_WAY, since: since(DAY_MS), watchPaid: false }));
+  // A place kept for each kind of check, so one cut short goes on where it left off at its next.
 
-  const lapOf = (sweep: string, due: Due, share: number, outlastsMs: number): Lap => ({
-    sweep,
-    lanes: lanesOf(() => due),
-    share,
-    outlastsMs,
-    left: [],
-    startedAt: 0,
-    said: false,
-  });
-  // The UNKNOWNs a lap of their own, ahead of the paid watch: at volume the watch may never end a lap, and these must.
-  const laps = [
-    lapOf('unknown', { statuses: ['UNKNOWN'], since: undefined, watchPaid: false }, UNKNOWN_LAP_SHARE, LAP_DUE_MS),
-    lapOf(
-      'watched',
-      { statuses: UNDER_WAY.filter((status) => status !== 'UNKNOWN'), since: undefined, watchPaid: true },
+  const tierOf = (sweep: string, due: () => Due, everyMs: number, behindAfterMs?: number): Tier => {
+    const seen = new Set<string>();
+    return {
+      sweep,
+      lanes: lanesOf(due, seen),
+      everyMs,
+      behindAfterMs,
+      next: new Map(),
+      seen,
+      busy: new Set(),
+      said: false,
+    };
+  };
+  const fresh = tierOf('fresh', () => ({ statuses: UNDER_WAY, since: since(FRESH_MS), watchPaid: false }), 0);
+  const day = tierOf('day', () => ({ statuses: UNDER_WAY, since: since(DAY_MS), watchPaid: false }), DAY_TIER_EVERY_MS);
+  // The UNKNOWNs a check of their own, ahead of the watch: at volume the watch may never end its turn, and these must.
+  const slower: readonly (readonly [Tier, number])[] = [
+    [
+      tierOf(
+        'unknown',
+        () => ({ statuses: ['UNKNOWN'], since: undefined, watchPaid: false }),
+        LAP_EVERY_MS,
+        UNKNOWN_BEHIND_MS,
+      ),
+      UNKNOWN_LAP_SHARE,
+    ],
+    [
+      tierOf(
+        'watched',
+        () => ({ statuses: UNDER_WAY.filter((status) => status !== 'UNKNOWN'), since: undefined, watchPaid: true }),
+        LAP_EVERY_MS,
+        PAID_WATCH_MS,
+      ),
       WATCH_LAP_SHARE,
-      PAID_WATCH_MS,
-    ),
+    ],
   ];
 
   /** A part of the run's budget, from now: a sweep that spends its own leaves the next its turn. */
@@ -699,21 +790,94 @@ export function createPaymentChecks({
     return () => signal?.aborted === true || clock.now().getTime() >= ends;
   };
 
-  /** A lap's next part: its organisations not yet had their turn; one hung or unreadable has had it, and tries again next lap. */
-  const lapPart = async (lap: Lap, signal: AbortSignal | undefined): Promise<void> => {
-    if (lap.left.length === 0) return;
-    const outcomes = await lap.lanes.run(lap.left, partOfBudget(lap.share, signal));
-    lap.left = lap.left.filter((orgId) => outcomes.get(orgId) === 'cut');
-    if (lap.left.length === 0 || lap.said || clock.now().getTime() - lap.startedAt < lap.outlastsMs) return;
-    lap.said = true;
-    logger.warn('payment_check.lap_behind', { sweep: lap.sweep, organisations: lap.left.length });
+  /**
+   * The organisations whose turn of the tier is due at `now`; one seen for the first time is due from now. One listed
+   * early (its mark read by Postgres's clock, ahead of this one) has its turn left for now, and its mark is settled
+   * back to that turn (`nextTurn`), never a period on.
+   */
+  const dueIn = (tier: Tier, orgs: readonly string[], now: number): string[] =>
+    orgs.filter((orgId) => {
+      if (!tier.next.has(orgId)) tier.next.set(orgId, now);
+      return (tier.next.get(orgId) ?? now) <= now;
+    });
+
+  /**
+   * The tier's turns for these organisations: one whose turn was whole (or ended on the bank, or a failure, tried
+   * again at its next) is next due a tier's time on; one cut short stays due, and is said once it has been past its
+   * time. Those cut short come back.
+   */
+  const turns = async (tier: Tier, orgs: readonly string[], stopped: () => boolean, now: number) => {
+    const outcomes = await tier.lanes.run(orgs, stopped);
+    const cut = orgs.filter((orgId) => outcomes.get(orgId) === 'cut');
+    for (const orgId of orgs) {
+      if (outcomes.get(orgId) === 'cut') continue;
+      tier.next.set(orgId, now + tier.everyMs);
+      // Whole: whether it read any payments decides whether its next turn bounds its mark.
+      if (tier.seen.delete(orgId)) tier.busy.add(orgId);
+      else tier.busy.delete(orgId);
+    }
+    if (tier.behindAfterMs === undefined) return cut;
+    const behindAfterMs = tier.behindAfterMs;
+    const behind = cut.filter((orgId) => now - (tier.next.get(orgId) ?? now) >= behindAfterMs).length;
+    if (behind > 0 && !tier.said) logger.warn('payment_check.lap_behind', { sweep: tier.sweep, organisations: behind });
+    tier.said = behind > 0;
+    return cut;
   };
 
-  /** The regular turns, then the laps under way, each with its part of the budget. */
-  const sweeps = async (n: number, orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
-    const regular = n % DAY_EVERY === 0 ? daysLanes : everyRunLanes;
-    await regular.run(orgs, partOfBudget(REGULAR_SHARE, signal));
-    for (const lap of laps) await lapPart(lap, signal);
+  /**
+   * Each tier's times kept only for organisations seen within the last two slower turns: one gone quiet has no mark,
+   * and if one comes back, its turns are due at once. So the times held grow with the organisations at work, not with
+   * every one ever seen.
+   */
+  const forgetIdle = (orgs: readonly string[], now: number): void => {
+    const listed = new Set(orgs);
+    for (const tier of [fresh, day, ...slower.map(([each]) => each)]) {
+      for (const [orgId, next] of tier.next) {
+        if (listed.has(orgId) || next >= now - 2 * LAP_EVERY_MS) continue;
+        tier.next.delete(orgId);
+        tier.seen.delete(orgId);
+        tier.busy.delete(orgId);
+      }
+    }
+  };
+
+  /**
+   * The soonest of an organisation's pending turns: each slower kind's always, as a mark's own time moves on with
+   * every settle another kind drives and nothing else would hold one due; the day's only where its last whole turn read
+   * payments (once it reads none, the payments it had are past a day or fresh, and fresh ones are visited every run).
+   * At most a visit more each 30 minutes for an organisation with work. None for one never taken.
+   */
+  const soonestTurn = (orgId: string): number | undefined => {
+    const pending = [...(day.busy.has(orgId) ? [day] : []), ...slower.map(([each]) => each)]
+      .map(({ next }) => next.get(orgId))
+      .filter((at) => at !== undefined);
+    return pending.length === 0 ? undefined : Math.min(...pending);
+  };
+
+  /** The regular turns, a day's for those due theirs; then each slower check due, each with its part of the budget. */
+  const sweeps = async (orgs: readonly string[], signal: AbortSignal | undefined): Promise<void> => {
+    const now = clock.now().getTime();
+    const regular = partOfBudget(REGULAR_SHARE, signal);
+    const days = dueIn(day, orgs, now);
+    const daysSet = new Set(days);
+    const cut = [
+      ...(await turns(day, days, regular, now)),
+      ...(await turns(
+        fresh,
+        orgs.filter((orgId) => !daysSet.has(orgId)),
+        regular,
+        now,
+      )),
+    ];
+    for (const [tier, share] of slower)
+      cut.push(...(await turns(tier, dueIn(tier, orgs, now), partOfBudget(share, signal), now)));
+    // One cut short is due now, so the time given for it goes unread.
+    for (const orgId of new Set(cut)) unfinished?.(orgId);
+    for (const orgId of orgs) {
+      const soonest = soonestTurn(orgId);
+      if (soonest !== undefined) nextTurn?.(orgId, new Date(soonest));
+    }
+    forgetIdle(orgs, now);
   };
 
   return {
@@ -726,23 +890,11 @@ export function createPaymentChecks({
         return;
       }
       beatNow();
-      const n = runs;
-      runs += 1;
-      // The first run after a start is among these, so none waits half an hour for a restart. One still going keeps on.
-      for (const lap of n % ALL_EVERY === 0 ? laps.filter(({ left }) => left.length === 0) : []) {
-        lap.left = orgs;
-        lap.startedAt = clock.now().getTime();
-        lap.said = false;
-      }
       run = newRun();
       spent = partOfBudget(1, signal);
       gaveUpWaiting = false;
       // Side by side: a hung lookup under a message must never spend the regular turns' budget.
-      const finished = await finishedWithinStop(
-        Promise.all([checkNudged(), sweeps(n, orgs, signal)]),
-        signal,
-        stopWaitMs,
-      );
+      const finished = await finishedWithinStop(Promise.all([checkNudged(), sweeps(orgs, signal)]), signal, stopWaitMs);
       gaveUpWaiting = finished === undefined;
       beatNow();
       if (run.unchanged + run.notFound > 0) {

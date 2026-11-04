@@ -60,7 +60,8 @@ export {
   denialOf,
   type RejectionShown,
   rejectRequest,
-  requestsWaitingSince,
+  requestExpiryDue,
+  requestsDueToExpire,
   settleCarried,
   type SubjectsNamed,
   type Voided,
@@ -87,6 +88,8 @@ export {
   PENDING_CHOICES,
   PENDING_STATUSES,
   type PendingChoice,
+  VOID_CAUSES,
+  type VoidCause,
 } from './domain/voids.ts';
 export {
   claimAnswered,

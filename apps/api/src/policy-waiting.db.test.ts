@@ -26,7 +26,13 @@ import { supplierOf } from '@agentx/core/modules/suppliers';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { HOUR_MS } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database, type DatabaseTransaction, type IdempotentRequest } from '@agentx/platform/db';
+import {
+  createDatabase,
+  type Database,
+  type DatabaseTransaction,
+  type IdempotentRequest,
+  withTenant,
+} from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -49,7 +55,8 @@ import type { WaitingChoice } from './policy-waiting.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
-import { createWaitingRejections } from './waiting-rejections.ts';
+import { markedOrganisations, withOrgWork } from './org-work.ts';
+import { createWaitingRejections, waitingRejectionsDue } from './waiting-rejections.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -1325,4 +1332,84 @@ describe('the job waits in the lock order, never crosswise (forced, F1 G8)', () 
     });
     expect(lines('waiting_rejection.failed')).toEqual([]);
   });
+});
+
+describe('the waiting rejections follow their marks (4D2e D9)', () => {
+  /** The organisation's rejections mark, if any. */
+  const markOf = async (w: World) =>
+    (
+      await database
+        .as('admin')
+        .query<{ due_at: Date }>(
+          `select due_at from directory.org_work where org_id = $1 and job = 'waiting_rejections'`,
+          [w.org],
+        )
+    )[0];
+
+  /** The waiting rejections as job-list.ts makes them: their organisations from their marks, settled after each run. */
+  const followed = (most?: number) => {
+    const marks = markedOrganisations({
+      job: 'waiting_rejections',
+      nextDue: waitingRejectionsDue,
+      database: app,
+      logger: testLogger(capture),
+      clock,
+    });
+    return withOrgWork(
+      [marks],
+      createWaitingRejections({
+        list: marks.list,
+        database: app,
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        ...(most === undefined ? {} : { most }),
+      }),
+    );
+  };
+
+  it('a change keeping the rest marks it at once; visited, the rest are rejected, and the mark goes', async () => {
+    const { w, made } = await twentyTwoWaiting();
+    // The marks are read across organisations: this one's alone, so no other test's is visited.
+    await database.as('admin').query(`delete from directory.org_work where job = 'waiting_rejections'`);
+
+    await changed(w, ORGANIZATION, rulesOf(10_000n), 'reject');
+    expect(await markOf(w)).toBeDefined();
+    await followed().run();
+
+    for (const id of made.slice(20)) expect(await statusOf(w, id)).toBe('DENIED');
+    expect(await markOf(w)).toBeUndefined();
+  });
+
+  it('one left past its share keeps the organisation due, and the next run rejects it', async () => {
+    const { w, made } = await twentyTwoWaiting();
+    await database.as('admin').query(`delete from directory.org_work where job = 'waiting_rejections'`);
+    await changed(w, ORGANIZATION, rulesOf(10_000n), 'reject');
+
+    await followed(1).run();
+    expect(await statusOf(w, made[21] ?? '')).toBe('APPROVAL_REQUIRED');
+    expect((await markOf(w))?.due_at.getTime()).toBeLessThanOrEqual(clock.now().getTime());
+    await followed(1).run();
+
+    expect(await statusOf(w, made[21] ?? '')).toBe('DENIED');
+    expect(await markOf(w)).toBeUndefined();
+  });
+
+  it('the younger all rejected, one made after the change makes no work: none due, none the hourly look writes', async () => {
+    const { w, acting, made } = await waitingOf(101);
+    const mandateId = await mandateIdOf(w);
+    await database.as('admin').query(`delete from directory.org_work where job = 'waiting_rejections'`);
+    await changed(w, { scope: 'mandate', mandateId }, rulesOf(5_000n), 'reject');
+    await followed().run();
+    expect(await Promise.all(made.map((id) => statusOf(w, id)))).toEqual(Array<string>(101).fill('DENIED'));
+    expect(await markOf(w)).toBeUndefined();
+
+    clock.advanceBy(60_000);
+    expect(await ask(acting, w, { amount: AED(4_000n) })).toMatchObject({ status: 'APPROVAL_REQUIRED' });
+
+    // Its version still names the younger, but this one was made since: never weighed (youngerOf's `until`).
+    const due = await withTenant(app, w.org, async (tx) => waitingRejectionsDue(tx, w.org, clock.now()).execute());
+    expect(due).toEqual([{ due: null }]);
+  }, 120_000);
 });
