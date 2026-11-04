@@ -180,7 +180,7 @@ export function isLockTimeout(error: unknown): error is MigrationFailed {
 }
 
 /** Whether a migration was aborted to break a deadlock: rolled back whole, so it may be tried again. */
-export function isDeadlock(error: unknown): error is MigrationFailed {
+function isDeadlock(error: unknown): error is MigrationFailed {
   return failedWith(error) === DEADLOCK_DETECTED;
 }
 
