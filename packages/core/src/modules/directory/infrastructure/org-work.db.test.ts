@@ -595,7 +595,11 @@ describe('which organisations have marks of any job (4D2e D11)', () => {
       const nodes = JSON.stringify(plan?.Plan);
       expect(nodes).toContain('"Index Name":"org_work_due"');
       expect(nodes).not.toContain('Seq Scan');
-      expect(await organisationsWithMarks(app, 1_000)).toHaveLength(1_000);
+      // The same as grouping the whole table, in the same order.
+      const whole = await owner.query<{ org_id: string }>(
+        'select org_id from directory.org_work group by org_id order by min(due_at), org_id limit 1000',
+      );
+      expect(await organisationsWithMarks(app, 1_000)).toEqual(whole.map(({ org_id }) => org_id));
     } finally {
       await owner.query(`delete from directory.org_work where org_id::text like '0199a0f2-%'`);
       await owner.query(`delete from directory.orgs where org_id::text like '0199a0f2-%'`);
