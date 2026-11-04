@@ -750,7 +750,14 @@ export function createAnchorCheck({
     if (asked.length === 0) return new Map();
     // Within the lanes' share, as a turn and the rotation: checks from the last run may still hold some of it.
     while (inFlight.size >= lanes && !cap.aborted) await roomOrEnd(cap);
-    if (cap.aborted) return new Map();
+    if (cap.aborted) {
+      // None reached: said as any probe cut short, and all of them first next run in the order they had.
+      sayUnprobed(
+        asked.map(({ orgId }) => orgId),
+        asked.length,
+      );
+      return new Map();
+    }
     const pages = Math.max(1, Math.min(probePages, lanes - inFlight.size));
     let answers: ReadonlyMap<string, ProbeAnswer>;
     try {

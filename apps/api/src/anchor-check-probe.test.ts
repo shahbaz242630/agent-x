@@ -294,9 +294,14 @@ describe("the probe's pages and its time (4D2e E8 follow-up)", () => {
     await full.check.run();
     expect(full.asked).toEqual([]);
     expect(full.pagesGiven).toEqual([]);
+    // Waited out, it reached none: said as any probe cut short.
+    expect(full.lines('audit.probe_unfinished')).toEqual([
+      expect.objectContaining({ level: 'warn', reached: 0, total: 1 }),
+    ]);
     full.release();
     await full.check.run();
     expect(full.pagesGiven).toEqual([1]);
+    expect(full.asked.at(-1)?.[0]?.orgId).toBe(ORG);
   });
 
   it('holds as many of the lanes as it reads pages: past its deadline no turn starts until it ends', async () => {
