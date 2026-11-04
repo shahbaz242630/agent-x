@@ -350,6 +350,19 @@ module activityDownloads 'modules/activity-downloads.bicep' = {
   ]
 }
 
+// What the platform is doing, in counts: one workbook and the measures' saved queries (4D2e Stage F, PR 10).
+module metrics 'modules/metrics.bicep' = {
+  scope: group
+  params: {
+    location: location
+    tags: tags
+    workspaceName: names.workspace
+    workspaceId: ids.workspace
+  }
+  // The workspace must exist first.
+  dependsOn: [monitoring]
+}
+
 // Email for the admins' notices, its data kept in the UAE (B5-2).
 module communication 'modules/communication.bicep' = {
   scope: group

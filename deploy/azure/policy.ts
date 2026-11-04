@@ -40,6 +40,7 @@ export type RuleId =
   | 'activity-downloads'
   | 'workspace'
   | 'login-workspace'
+  | 'workbook'
   | 'log-quota-alerts'
   | 'alert-counts-only'
   | 'alert-window'
@@ -132,6 +133,7 @@ const TYPES = {
   vault: 'Microsoft.KeyVault/vaults',
   vaultSecret: 'Microsoft.KeyVault/vaults/secrets',
   workspace: 'Microsoft.OperationalInsights/workspaces',
+  workbook: 'Microsoft.Insights/workbooks',
 } as const;
 
 /**
@@ -2420,6 +2422,42 @@ const loginWorkspace: Check = (snapshot, _expected, add) => {
   for (const what of missing) add({ rule: 'login-workspace', resource: workspace.name, message: `must have ${what}` });
 };
 
+/** Every Azure resource ID a workbook's content names: its fallback workspaces and any it reads across. */
+const resourceIdsIn = (content: unknown): readonly string[] => {
+  if (typeof content === 'string') return content.startsWith('/subscriptions/') ? [content] : [];
+  if (typeof content !== 'object' || content === null) return [];
+  return Object.values(content).flatMap(resourceIdsIn);
+};
+
+/** The fields that name who: a workbook shows how much, never which organisation, agent, key or request. */
+const WHO_FIELDS = /\b(?:orgId|agentId|agentKeyId|correlationId|userId)\b/;
+
+/**
+ * A workbook (4D2e Stage F, PR 10) reads only this deployment's workspaces, keeps its content in Azure's own store
+ * in the region rather than a storage account of anyone's, and counts without naming who.
+ */
+const workbooks: Check = (snapshot, _expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  for (const workbook of ofType(snapshot, TYPES.workbook)) {
+    const problem = (message: string): void => {
+      add({ rule: 'workbook', resource: workbook.name, message });
+    };
+    let content: unknown;
+    try {
+      content = JSON.parse(text(at(workbook.properties, 'serializedData')));
+    } catch {
+      problem('needs its content as JSON the snapshot can read');
+      continue;
+    }
+    const read = [at(workbook.properties, 'sourceId'), ...resourceIdsIn(content)];
+    if (!read.every((id) => workspaces.has(id))) problem("must read this deployment's workspaces only");
+    if (!isEmpty(at(workbook.properties, 'storageUri')))
+      problem("keeps its content in Azure's own store, not storageUri");
+    if (WHO_FIELDS.test(JSON.stringify(content)))
+      problem('counts only: names no organisation, agent, key, person or request');
+  }
+};
+
 /**
  * The rules that fire on the jobs' lines missing (4D2e D, PL-33): what stands behind a process that can say nothing.
  * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
@@ -4124,6 +4162,7 @@ const CHECKS: readonly Check[] = [
   activityDownloads,
   workspaceAndQuota,
   loginWorkspace,
+  workbooks,
   alertRules,
   resourceLogs,
   logDestinations,

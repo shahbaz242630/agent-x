@@ -260,6 +260,7 @@ const MAIN_WORKSPACE = (resource: PredictedResource) =>
 const LOGIN_WORKSPACE = (resource: PredictedResource) => WORKSPACE(resource) && resource.name.endsWith('-logins');
 const LOGIN_CAP_ALERT = named(/-login-logs-cap-reached$/);
 const SYSTEM_LOGS_COPY = named(/^system-logs-to-login-workspace$/);
+const WORKBOOK = type('Microsoft.Insights/workbooks');
 const RULES = type('Microsoft.Network/networkSecurityGroups');
 const DATABASE_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-database');
 const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-apps');
@@ -594,6 +595,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
+      expect.stringMatching(
+        /^Microsoft\.Insights\/workbooks [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      ...['request-failures', 'decision-time', 'handoff-outcomes', 'job-gaps'].map(
+        (measure) => `Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-measure-${measure}`,
+      ),
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -2240,6 +2247,37 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'login-workspace',
       'alert-delivery',
     ]);
+  });
+
+  it('workbook: content unreadable, reading another workspace, kept in a storage account, or naming who', () => {
+    const properties = (entry: Mutable): Mutable => inside(entry, 'properties');
+    const elsewhere = '/subscriptions/x/resourceGroups/y/providers/Microsoft.OperationalInsights/workspaces/elsewhere';
+    const content = (workbook: Mutable): Mutable => JSON.parse(String(properties(workbook).serializedData)) as Mutable;
+    const rewritten = (edit: (data: Mutable) => void) => (workbook: Mutable) => {
+      const data = content(workbook);
+      edit(data);
+      properties(workbook).serializedData = JSON.stringify(data);
+    };
+    // As built: one workbook, on the main workspace, its charts counting by event, level and outcome alone.
+    const built = staging.predictedResources.find(WORKBOOK);
+    expect(at(built?.properties, 'sourceId')).toBe(staging.predictedResources.find(MAIN_WORKSPACE)?.id);
+    expect(at(built, 'location')).toBe('uaenorth');
+    for (const change of [
+      (workbook: Mutable) => (properties(workbook).serializedData = '{ not json'),
+      (workbook: Mutable) => (properties(workbook).sourceId = elsewhere),
+      rewritten((data) => (data.fallbackResourceIds = [elsewhere])),
+      rewritten((data) => (first(data.items).crossComponentResources = [elsewhere])),
+      (workbook: Mutable) => (properties(workbook).storageUri = '/subscriptions/x/storageAccounts/elsewhere/blobs/c'),
+      rewritten((data) => {
+        const decisions = (data.items as Mutable[]).find((item) => item.name === 'decisions');
+        inside(decisions ?? {}, 'content').query =
+          'ContainerAppConsoleLogs | summarize count() by tostring(parse_json(Log).orgId)';
+      }),
+    ]) {
+      expect(brokenRules(changed(WORKBOOK, change))).toEqual(['workbook']);
+    }
+    // Outside the region, the general rule refuses it too.
+    expect(brokenRules(changed(WORKBOOK, (workbook) => (workbook.location = 'westeurope')))).toEqual(['in-country']);
   });
 
   it('database-logins and owner-login-alert: either login alert reading the main workspace, which its cap can blind', () => {
