@@ -14,8 +14,15 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { dueOrgWork, markOrgWork, organisationsWithMarks, settleOrgWork, settleOrgWorkPage } from './org-work.ts';
-import type { DirectoryTables } from './tables.ts';
+import {
+  dueOrgWork,
+  markOrgWork,
+  organisationsWithMarks,
+  organisationsWithMarksRead,
+  settleOrgWork,
+  settleOrgWorkPage,
+} from './org-work.ts';
+import { type DirectoryTables, ORG_WORK_JOBS } from './tables.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -552,6 +559,47 @@ describe('which organisations have marks of any job (4D2e D11)', () => {
 
     expect((await organisationsWithMarks(app, 1_000)).slice(0, 3)).toEqual([b, a, c]);
     expect(await organisationsWithMarks(app, 2)).toEqual([b, a]);
+  });
+
+  it('knows every job the table may hold: its list is the CHECK on `job`', async () => {
+    const [{ check } = { check: '' }] = await admin().query<{ check: string }>(
+      `select pg_catalog.pg_get_constraintdef(oid) as "check" from pg_catalog.pg_constraint
+        where conname = 'org_work_job_check' and conrelid = 'directory.org_work'::regclass`,
+    );
+    expect([...check.matchAll(/'([a-z_]+)'::text/g)].map(([, job]) => job).toSorted()).toEqual(
+      [...ORG_WORK_JOBS].toSorted(),
+    );
+  });
+
+  it('reads 100,000 marks through the due index alone, each job a scan of its soonest, no table read whole', async () => {
+    const owner = database.as('owner');
+    const first = 9_100;
+    await owner.query(
+      `insert into directory.orgs (org_id)
+         select ('0199a0f2-0000-7000-8000-' || lpad(n::text, 12, '0'))::uuid from generate_series(1, $1) n`,
+      [first],
+    );
+    try {
+      await owner.query(
+        `insert into directory.org_work (org_id, job, due_at)
+           select ('0199a0f2-0000-7000-8000-' || lpad(n::text, 12, '0'))::uuid, job,
+                  now() + make_interval(secs => (n * 7 + length(job)) % 86400)
+             from generate_series(1, $1) n, unnest($2::text[]) job`,
+        [first, ORG_WORK_JOBS],
+      );
+      await owner.query('analyze directory.org_work');
+      const { sql: text, parameters } = organisationsWithMarksRead(1_000).compile(app);
+      const [{ 'QUERY PLAN': [plan] = [] } = { 'QUERY PLAN': [] }] = await owner.query<{
+        'QUERY PLAN': { Plan: unknown; 'Execution Time': number }[];
+      }>(`explain (analyze, format json) ${text}`, [...parameters]);
+      const nodes = JSON.stringify(plan?.Plan);
+      expect(nodes).toContain('"Index Name":"org_work_due"');
+      expect(nodes).not.toContain('Seq Scan');
+      expect(await organisationsWithMarks(app, 1_000)).toHaveLength(1_000);
+    } finally {
+      await owner.query(`delete from directory.org_work where org_id::text like '0199a0f2-%'`);
+      await owner.query(`delete from directory.orgs where org_id::text like '0199a0f2-%'`);
+    }
   });
 });
 
