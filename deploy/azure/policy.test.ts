@@ -1221,9 +1221,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
       // Not stated leaves the server's last value, which may be on.
       const unstated = staging.predictedResources.filter((resource) => !MEASURE(name)(resource));
       expect(unstated).toHaveLength(staging.predictedResources.length - 1);
-      expect(brokenRules({ predictedResources: structuredClone(unstated), diagnostics: [] })).toEqual([
-        'database-measures',
-      ]);
+      // An unstated limit leaves the connections rule nothing to count against either (4D2e D12).
+      expect(brokenRules({ predictedResources: structuredClone(unstated), diagnostics: [] })).toEqual(
+        name === 'max_connections' ? ['database-measures', 'connections'] : ['database-measures'],
+      );
     }
     let everyOn = staging;
     for (const [name, value] of Object.entries(on)) {
@@ -4304,6 +4305,122 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
+  it('apps: the API scaled other than its role says (4D2e D12)', () => {
+    const asRole = (settings: Record<string, string>, scale: Record<string, number>) => (app: Mutable) => {
+      settingsOf(app).push(...Object.entries(settings).map(([name, value]) => ({ name, value })));
+      Object.assign(scaleOf(app), scale);
+    };
+    // The app's own problems: a lone `web` app is also the deployment's (no app holds the jobs), tested below.
+    const appProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule, resource }) => rule === 'apps' && resource !== 'the deployment')
+        .map(({ message }) => message);
+    const web = { AGENTX_ROLE: 'web', AGENTX_WEB_COPIES: '3' };
+    expect(appProblems(changed(APP('api'), asRole(web, { minReplicas: 3, maxReplicas: 3 })))).toEqual([]);
+    expect(appProblems(changed(APP('api'), asRole(web, { minReplicas: 2, maxReplicas: 3 })))).toEqual([
+      'must run exactly 3 (minReplicas and maxReplicas 3): AGENTX_WEB_COPIES, which each copy shares its rate limits by; it says 2 to 3',
+    ]);
+    expect(appProblems(changed(APP('api'), asRole(web, { minReplicas: 4, maxReplicas: 4 })))).toHaveLength(1);
+    // One copy where none is said.
+    const oneWeb = asRole({ AGENTX_ROLE: 'web' }, { minReplicas: 1, maxReplicas: 1 });
+    expect(appProblems(changed(APP('api'), oneWeb))).toEqual([]);
+    const jobs = { AGENTX_ROLE: 'jobs' };
+    expect(appProblems(changed(APP('api'), asRole(jobs, { minReplicas: 1, maxReplicas: 1 })))).toEqual([]);
+    for (const scale of [
+      { minReplicas: 0, maxReplicas: 1 },
+      { minReplicas: 1, maxReplicas: 2 },
+    ]) {
+      expect(appProblems(changed(APP('api'), asRole(jobs, scale)))).toEqual([
+        `must run exactly 1 (minReplicas and maxReplicas 1): the jobs keep to one copy, which the lease alone doesn't make safe for the copier; it says ${String(scale.minReplicas)} to ${String(scale.maxReplicas)}`,
+      ]);
+    }
+    // `all`, said or not, holds the jobs: at most one, and none while staging sleeps.
+    expect(
+      appProblems(changed(APP('api'), asRole({ AGENTX_ROLE: 'all' }, { minReplicas: 0, maxReplicas: 1 }))),
+    ).toEqual([]);
+    expect(appProblems(changed(APP('api'), asRole({}, { maxReplicas: 2 })))).toEqual([
+      'must run at most one replica (maxReplicas 1): AGENTX_ROLE all holds the jobs; it says 2',
+    ]);
+    expect(appProblems(changed(APP('api'), asRole({ AGENTX_ROLE: 'worker' }, {})))).toEqual([
+      "sets AGENTX_ROLE to worker, which the API doesn't take: all, web or jobs",
+    ]);
+    // Copies that can't be read hold the replicas to nothing.
+    expect(
+      appProblems(changed(APP('api'), asRole({ AGENTX_ROLE: 'web', AGENTX_WEB_COPIES: 'three' }, { maxReplicas: 1 }))),
+    ).toEqual(['must give AGENTX_WEB_COPIES as a whole number, which its replicas are held to']);
+  });
+
+  it('apps: across the API apps, one unnamed, none or two holding the jobs, or all beside web (4D2e D12)', () => {
+    const deploymentProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule }) => rule === 'apps')
+        .map(({ resource, message }) => `${resource}: ${message}`);
+    const role = (value: string) => (app: Mutable) => {
+      settingsOf(app).push({ name: 'AGENTX_ROLE', value });
+    };
+    /** Staging with a second API app beside its own, named for `workload`, in `role`. */
+    const beside = (workload: string, value: string, from: Snapshot = staging): Snapshot => {
+      const second = structuredClone(from.predictedResources.find(APP('api'))) as unknown as Mutable;
+      second.name = `ca-agentx-stg-${workload}`;
+      role(value)(second);
+      Object.assign(scaleOf(second), { minReplicas: 1, maxReplicas: 1 });
+      return { ...from, predictedResources: [...from.predictedResources, second as unknown as PredictedResource] };
+    };
+    expect(deploymentProblems(staging)).toEqual([]);
+    // The split D13 makes: web beside jobs.
+    const webbed = changed(APP('api'), (app) => {
+      role('web')(app);
+      Object.assign(scaleOf(app), { minReplicas: 1, maxReplicas: 1 });
+    });
+    expect(deploymentProblems(beside('jobs', 'jobs', webbed))).toEqual([]);
+    expect(deploymentProblems(webbed)).toEqual([
+      'the deployment: needs exactly one app holding the jobs (AGENTX_ROLE jobs or all); it has 0',
+    ]);
+    expect(deploymentProblems(beside('jobs', 'jobs'))).toEqual([
+      'the deployment: needs exactly one app holding the jobs (AGENTX_ROLE jobs or all); it has 2',
+    ]);
+    expect(deploymentProblems(beside('jobs', 'web'))).toEqual([
+      'the deployment: runs AGENTX_ROLE all beside web: all counts its rate limits as the only copy',
+    ]);
+    expect(deploymentProblems(beside('worker', 'jobs', webbed))).toEqual([
+      'ca-agentx-stg-worker: runs the API, which only api and jobs may: an app nothing names could hold the jobs',
+    ]);
+  });
+
+  it("apps: the API's heap not set by its command, or outside half to three quarters of its memory (4D2e D12)", () => {
+    const heapProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule, message }) => rule === 'apps' && message.includes('max-old-space-size'))
+        .map(({ message }) => message);
+    const api = staging.predictedResources.find(APP('api'));
+    expect(at(containerOf(api as unknown as Mutable), 'command')).toEqual([
+      'node',
+      '--max-old-space-size=768',
+      'apps/api/src/main.ts',
+    ]);
+    expect(heapProblems(staging)).toEqual([]);
+    const commanded = (command: readonly string[], memory = '1Gi') =>
+      changed(APP('api'), (app) => {
+        containerOf(app).command = [...command];
+        inside(containerOf(app), 'resources').memory = memory;
+      });
+    expect(heapProblems(commanded(['node', '--max-old-space-size=512', 'apps/api/src/main.ts']))).toEqual([]);
+    expect(heapProblems(commanded(['node', '--max-old-space-size=1536', 'x'], '2Gi'))).toEqual([]);
+    for (const [command, memory] of [
+      [['node', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=511', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=769', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=lots', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=768', 'apps/api/src/main.ts'], '1G'],
+    ] as const) {
+      expect({ command, memory, problems: heapProblems(commanded(command, memory)) }).toEqual({
+        command,
+        memory,
+        problems: [expect.stringMatching(/^must start node with --max-old-space-size=<MiB> between half and three/)],
+      });
+    }
+  });
+
   it('public-doors: a door nothing lists or elsewhere, on plain http, routing any other way, or missing', () => {
     // The rule's own messages, so a condition another one also catches can't hide.
     const doorProblems = (snapshotted: Snapshot): string[] =>
@@ -5252,11 +5369,90 @@ describe('the load run (D2c, PL-38)', () => {
     ).toEqual([]);
   });
 
+  it("connections: the apps' pools past the server's connections, in a load run or out of one (4D2e D12)", () => {
+    const connectionProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule }) => rule === 'connections')
+        .map(({ message }) => message);
+    const setting = (name: string, value: string) => (app: Mutable) => {
+      const entries = settingsOf(app);
+      const entry = entries.find((each) => each.name === name);
+      if (entry === undefined) entries.push({ name, value });
+      else entry.value = value;
+    };
+    const api = APP('api');
+    // Staging: two of the API's ten, Zitadel's ten, a job and one more are 32 of 35; eleven are 34, twelve 36.
+    expect(connectionProblems(staging)).toEqual([]);
+    expect(connectionProblems(changed(api, setting('AGENTX_DB_POOL_MAX', '11')))).toEqual([]);
+    expect(connectionProblems(changed(api, setting('AGENTX_DB_POOL_MAX', '12')))).toEqual([
+      "has 35 connections for users (max_connections 50 less Azure's 15), but the apps may hold 36: two of each API copy's pool, Zitadel's, one job and one to spare",
+    ]);
+    // Zitadel's pool where it sets one, in place of its image's ten.
+    expect(
+      connectionProblems(changed(APP('zitadel'), setting('ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '13'))),
+    ).toEqual([]);
+    expect(
+      connectionProblems(changed(APP('zitadel'), setting('ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '14'))),
+    ).toHaveLength(1);
+    // A pool that can't be read is said, never summed as nothing: given as words, or from a secret.
+    for (const entry of [
+      { name: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', value: 'ten' },
+      { name: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', secretRef: 'zitadel-pool' },
+    ]) {
+      expect(connectionProblems(changed(APP('zitadel'), (app) => settingsOf(app).push(entry)))).toEqual([
+        "ca-agentx-stg-zitadel must state ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS as a whole number, or leave it to its image's 10, so its connections can be counted",
+      ]);
+    }
+    expect(
+      connectionProblems(
+        changed(api, (app) => {
+          setting('AGENTX_ROLE', 'web')(app);
+          setting('AGENTX_WEB_COPIES', 'three')(app);
+        }),
+      ),
+    ).toEqual(['ca-agentx-stg-api must state AGENTX_WEB_COPIES as a whole number, so its connections can be counted']);
+    // An API whose pool isn't stated can't be counted.
+    expect(
+      connectionProblems(
+        changed(api, (app) => {
+          containerOf(app).env = settingsOf(app).filter(({ name }) => name !== 'AGENTX_DB_POOL_MAX');
+        }),
+      ),
+    ).toEqual(['ca-agentx-stg-api must state AGENTX_DB_POOL_MAX as a whole number, so its connections can be counted']);
+    // The load run, on the larger server's 85: its one API of twenty is 52.
+    expect(connectionProblems(load.together)).toEqual([]);
+    // The split's load size (Stage D): three web copies of eight and one jobs copy of six are 72; four web copies, 88.
+    const split = (copies: string): Snapshot => {
+      const webbed = loadChanged(api, (app) => {
+        for (const [name, value] of [
+          ['AGENTX_ROLE', 'web'],
+          ['AGENTX_WEB_COPIES', copies],
+          ['AGENTX_DB_POOL_MAX', '8'],
+        ] as const) {
+          setting(name, value)(app);
+        }
+      });
+      const jobs = structuredClone(found(load.together, api)) as unknown as Mutable;
+      jobs.name = 'ca-agentx-stg-jobs';
+      setting('AGENTX_ROLE', 'jobs')(jobs);
+      setting('AGENTX_DB_JOBS_POOL_MAX', '6')(jobs);
+      return { ...webbed, predictedResources: [...webbed.predictedResources, jobs as unknown as PredictedResource] };
+    };
+    expect(connectionProblems(split('3'))).toEqual([]);
+    expect(connectionProblems(split('4'))).toEqual([
+      "has 85 connections for users (max_connections 100 less Azure's 15), but the apps may hold 88: two of each API copy's pool, Zitadel's, one job and one to spare",
+    ]);
+  });
+
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {
     const api = APP('api');
     for (const change of [
       (app: Mutable) => (inside(containerOf(app), 'resources').cpu = 0.5),
-      (app: Mutable) => (inside(containerOf(app), 'resources').memory = '1Gi'),
+      // With its heap brought down too: a heap of 3072 MiB in 1 GiB is the `apps` rule's (4D2e D12).
+      (app: Mutable) => {
+        inside(containerOf(app), 'resources').memory = '1Gi';
+        containerOf(app).command = ['node', '--max-old-space-size=768', 'apps/api/src/main.ts'];
+      },
       (app: Mutable) => {
         for (const entry of settingsOf(app).filter((each) => each.name === 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE')) {
           entry.value = '120';

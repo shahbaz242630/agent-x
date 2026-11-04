@@ -72,6 +72,8 @@ export interface Config {
     readonly rateLimitPerAgentPerMinute: number;
     /** One organisation's agents together (PL-63). */
     readonly rateLimitPerOrganisationPerMinute: number;
+    /** How many `web` copies run together (4D2e D12): each counts its share of every limit above (rate-limit.ts). */
+    readonly webCopies: number;
   };
   /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
   readonly db: {
@@ -82,7 +84,7 @@ export interface Config {
     /** Never logged, never in the fingerprint. */
     readonly password: string;
     readonly tls: DatabaseTlsMode;
-    /** The most connections the pool keeps open. */
+    /** The most connections this process's pool keeps open: AGENTX_DB_JOBS_POOL_MAX for `jobs`, else AGENTX_DB_POOL_MAX. */
     readonly poolMax: number;
   };
   /**
@@ -432,7 +434,9 @@ function readSettings(env: Env, location: LocationChecks) {
     dbUser: setting(env, 'AGENTX_DB_USER'),
     dbPassword: secretSetting(env, 'AGENTX_DB_PASSWORD'),
     dbPoolMax: setting(env, 'AGENTX_DB_POOL_MAX'),
+    dbJobsPoolMax: setting(env, 'AGENTX_DB_JOBS_POOL_MAX'),
     role: setting(env, 'AGENTX_ROLE'),
+    webCopies: setting(env, 'AGENTX_WEB_COPIES'),
     gateActive: setting(env, 'AGENTX_DECISION_GATE_ACTIVE'),
     gatePerOrganisation: setting(env, 'AGENTX_DECISION_GATE_PER_ORGANISATION'),
     gateWaitingPerOrganisation: setting(env, 'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION'),
@@ -550,6 +554,16 @@ function decisionGateProblems({ dbPoolMax, gateActive, gatePerOrganisation }: Se
   ];
 }
 
+/**
+ * Only `web` runs as one of several copies (4D2e D12): `all` holds the jobs, which keep to one copy, and `jobs` has no
+ * limits to share.
+ */
+function copiesProblems({ role, webCopies }: Settings): string[] {
+  return role.ok && webCopies.ok && role.value !== 'web' && webCopies.value > 1
+    ? [`AGENTX_WEB_COPIES: more than one only with AGENTX_ROLE web; ${role.value} runs as one copy`]
+    : [];
+}
+
 /** Rules between the login, email, factor reset and session settings, where those are valid. */
 function serviceRuleProblems(checks: Settings): string[] {
   const { environment, allowedOrigins } = checks;
@@ -628,6 +642,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     ...httpRuleProblems(checks),
     ...rateLimitRuleProblems(checks),
     ...decisionGateProblems(checks),
+    ...copiesProblems(checks),
     ...serviceRuleProblems(checks),
     ...partnerRuleProblems(checks, built),
     ...blobStoreProblems(env, checks),
@@ -652,6 +667,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       rateLimitPerUserPerMinute: checks.rateLimitPerUser.value,
       rateLimitPerAgentPerMinute: checks.rateLimitPerAgent.value,
       rateLimitPerOrganisationPerMinute: checks.rateLimitPerOrganisation.value,
+      webCopies: checks.webCopies.value,
     }),
     db: Object.freeze({
       host: checks.dbHost.value,
@@ -660,7 +676,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       user: checks.dbUser.value,
       password: checks.dbPassword.value,
       tls: checks.dbTls.value,
-      poolMax: checks.dbPoolMax.value,
+      poolMax: checks.role.value === 'jobs' ? checks.dbJobsPoolMax.value : checks.dbPoolMax.value,
     }),
     decisionGate: Object.freeze({
       active: checks.gateActive.value ?? null,

@@ -36,6 +36,7 @@ export type RuleId =
   | 'database-zone'
   | 'database-measures'
   | 'load-run'
+  | 'connections'
   | 'vault'
   | 'evidence-store'
   | 'anchor-epoch'
@@ -504,6 +505,9 @@ const HELD: Readonly<
   ),
 };
 
+/** The load size's max_connections (postgres.bicep, `measured`); `apps --load-run` reads the live server's against it (deploy.ts). */
+export const LOAD_SERVER_CONNECTIONS = 100;
+
 /**
  * The load test's run (D2c, PL-38; apps.bicep `loadRun`): staging's alone,
  * and all of it or none. Its three jobs run the load image, as the API's
@@ -525,6 +529,9 @@ const LOAD_RUN = {
   // Staging's small server has 35 for everyone, so out of a load run its API keeps to ten (PL-63).
   apiPool: '20',
   stagingPool: 10,
+  // The larger server's max_connections (postgres.bicep, `measured`). The apps' snapshot can't show it: the foundation
+  // sizes the server, and a plain foundation's numbers are what an apps run's snapshot holds.
+  serverConnections: LOAD_SERVER_CONNECTIONS,
   apiSettings: {
     AGENTX_RATE_LIMIT_PER_MINUTE: '50000',
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '50000',
@@ -548,16 +555,26 @@ const isLoadJob = (workload: string): boolean => LOAD_RUN.jobs.includes(workload
 const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
 
 /**
- * The apps whose replicas must stay at one, with why. The API's rate limit
- * counts each client's requests in memory (ADR-011 §4), so a second replica
- * would give every client two allowances; Zitadel's projections and cache are
- * one replica's, and a second would take ten more of the server's 35 user
- * connections (ADR-002 Amendment G1).
+ * The apps whose replicas must stay at one, with why: Zitadel's projections and
+ * cache are one replica's, and a second would take ten more of the server's 35
+ * user connections (ADR-002 Amendment G1). An app running the API is held by
+ * its role instead (`roleScaleProblems`).
  */
 const ONE_REPLICA: Readonly<Record<string, string>> = {
-  api: "the rate limit's counts are one replica's, in memory",
   zitadel: "its projections are one replica's, and a second would take ten more database connections",
 };
+
+/** What Azure keeps of a server's max_connections for itself: 35 of 50 left for everyone (postgres.bicep, S167). */
+const AZURE_RESERVED_CONNECTIONS = 15;
+
+/**
+ * Zitadel's pool where it sets none: ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS's default, 10, read from the pinned
+ * image's own binary (v4.17.3, 4D2e D12), not from its documentation.
+ */
+const ZITADEL_POOL = { setting: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', unset: 10 } as const;
+
+/** Beside the apps: one job's connection (they are run one at a time, Azure.md "The jobs"), and one to spare. */
+const ONE_JOB_AND_ONE_MORE = 2;
 
 /**
  * The public doors (ADR-002 Amendment G2e), by the part of the name `doorName`
@@ -3800,13 +3817,138 @@ function scaleProblems(scale: unknown, only: string | undefined, problem: (messa
   }
 }
 
+/** An app's one container's settings where it runs the API (every API process is told AGENTX_ENV), or nothing. */
+function apiSettingsOf(app: PredictedResource): ReadonlyMap<string, unknown> | undefined {
+  const [container] = containersOf(app);
+  const settings = settingsIn(container);
+  return settings.has('AGENTX_ENV') ? settings : undefined;
+}
+
+/** The API's role, as its process reads it: `all` where none is set (settings.ts). */
+const roleIn = (settings: ReadonlyMap<string, unknown>): unknown => settings.get('AGENTX_ROLE') ?? 'all';
+
+/**
+ * A whole-number setting as a count: `unset` where it isn't given, nothing where it's given as anything but digits (a
+ * secret's reference carries no value), so a count that can't be read is said, never summed as NaN.
+ */
+function countIn(settings: ReadonlyMap<string, unknown>, name: string, unset?: number): number | undefined {
+  if (!settings.has(name)) return unset;
+  const value = settings.get(name);
+  return typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : undefined;
+}
+
+/** How many `web` copies the API counts its limits for: one where none is set (settings.ts). */
+const copiesIn = (settings: ReadonlyMap<string, unknown>): number | undefined =>
+  countIn(settings, 'AGENTX_WEB_COPIES', 1);
+
+/**
+ * The apps that may run the API, by workload: `api`, and the `jobs` app D13 adds. D13 must keep this list to the apps
+ * it makes: an API app nothing names could hold the jobs, or a pool nobody counted on.
+ */
+const API_APPS: readonly string[] = ['api', 'jobs'];
+
+/** A size as Container Apps writes one (`1Gi`, `512Mi`), in MiB; nothing for anything else. */
+function mebibytesOf(size: unknown): number | undefined {
+  const [, amount = '', unit = ''] = /^([0-9]+(?:[.][0-9]+)?)(Gi|Mi)$/.exec(text(size)) ?? [];
+  return amount === '' ? undefined : Number(amount) * (unit === 'Gi' ? 1024 : 1);
+}
+
+/** The flag that sets Node's heap, as the API's command gives it. */
+const HEAP_FLAG = '--max-old-space-size=';
+
+/**
+ * The API's heap, set by its command (4D2e D12): between half and three quarters of its container's memory, so its
+ * counters (rate-limit.ts, about 92 MB with all four full) fit with room, and Node's own default (560 MiB under 1 GiB,
+ * measured on the pinned base image) isn't left to decide it.
+ */
+function heapProblems(container: unknown, problem: (message: string) => void): void {
+  const flag = list(at(container, 'command'))
+    .map(text)
+    .find((part) => part.startsWith(HEAP_FLAG));
+  const heap = Number(flag?.slice(HEAP_FLAG.length));
+  const memory = mebibytesOf(at(container, 'resources', 'memory'));
+  if (memory === undefined || !Number.isInteger(heap) || heap < memory / 2 || heap > (memory * 3) / 4) {
+    problem(
+      `must start node with ${HEAP_FLAG}<MiB> between half and three quarters of its memory (${String(memory)} MiB), so its rate limits' counters fit with room; it says ${String(flag)}`,
+    );
+  }
+}
+
+/**
+ * Across the apps running the API (4D2e D12): each one listed in API_APPS, exactly one holding the jobs (`jobs` or
+ * `all`: two would run the copier twice, none would run no job), and never `all` beside `web`, as `all` counts its
+ * rate limits as the only copy.
+ */
+function apiAppsProblems(found: readonly PredictedResource[], add: (problem: Problem) => void): void {
+  const apis = found.flatMap((app) => {
+    const settings = apiSettingsOf(app);
+    return settings === undefined ? [] : [{ app, role: roleIn(settings) }];
+  });
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'apps', resource, message });
+  };
+  for (const { app } of apis.filter((api) => !API_APPS.includes(jobWorkloadOf(api.app.name)))) {
+    problem(
+      app.name,
+      `runs the API, which only ${API_APPS.join(' and ')} may: an app nothing names could hold the jobs`,
+    );
+  }
+  const holders = apis.filter(({ role }) => role === 'jobs' || role === 'all').length;
+  if (apis.length > 0 && holders !== 1) {
+    problem(
+      'the deployment',
+      `needs exactly one app holding the jobs (AGENTX_ROLE jobs or all); it has ${String(holders)}`,
+    );
+  }
+  const roles = new Set(apis.map(({ role }) => role));
+  if (roles.has('all') && roles.has('web')) {
+    problem('the deployment', 'runs AGENTX_ROLE all beside web: all counts its rate limits as the only copy');
+  }
+}
+
+/**
+ * An app running the API, scaled as its role (4D2e D12): `web` runs exactly the copies it counts its rate limits for,
+ * so each allows its share and no more; `jobs` exactly one, as the lease makes a second safe for most jobs but not the
+ * copier; `all` holds the jobs and counts its limits as one copy, so at most one, and none while staging sleeps.
+ */
+function roleScaleProblems(
+  settings: ReadonlyMap<string, unknown>,
+  scale: unknown,
+  problem: (message: string) => void,
+): void {
+  const role = roleIn(settings);
+  const most = at(scale, 'maxReplicas');
+  const fewest = at(scale, 'minReplicas');
+  const exactly = (count: number, why: string): void => {
+    if (most !== count || fewest !== count) {
+      problem(
+        `must run exactly ${String(count)} (minReplicas and maxReplicas ${String(count)}): ${why}; it says ${String(fewest)} to ${String(most)}`,
+      );
+    }
+  };
+  if (role === 'web') {
+    const copies = copiesIn(settings);
+    if (copies === undefined) problem('must give AGENTX_WEB_COPIES as a whole number, which its replicas are held to');
+    else exactly(copies, 'AGENTX_WEB_COPIES, which each copy shares its rate limits by');
+  } else if (role === 'jobs') {
+    exactly(1, "the jobs keep to one copy, which the lease alone doesn't make safe for the copier");
+  } else if (role === 'all') {
+    if (most !== 1) {
+      problem(`must run at most one replica (maxReplicas 1): AGENTX_ROLE all holds the jobs; it says ${String(most)}`);
+    }
+  } else {
+    problem(`sets AGENTX_ROLE to ${String(role)}, which the API doesn't take: all, web or jobs`);
+  }
+}
+
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): in this deployment's
  * environment, on Consumption, running the exact image it names, and **never a
  * public door** — the doors are the route configs (G2e), so an app whose ingress
  * is external is one reachable from the internet that nothing decided to
  * publish. Plain http is refused even inside the environment. The apps that
- * hold something one replica's keep to one (`ONE_REPLICA`), and every app can
+ * hold something one replica's keep to one (`ONE_REPLICA`), the API scales as
+ * its role (`roleScaleProblems`), and every app can
  * run at least one. Together they are the three apps a deployment needs, so a
  * dropped one is caught here rather than at the first deployment.
  */
@@ -3834,9 +3976,16 @@ const apps: Check = (snapshot, _expected, add) => {
     if (at(ingress, 'allowInsecure') !== false) {
       problem('must refuse plain http (allowInsecure false), which peer-to-peer encryption already covers');
     }
-    scaleProblems(at(app.properties, 'template', 'scale'), ONE_REPLICA[workload], problem);
+    const scale = at(app.properties, 'template', 'scale');
+    scaleProblems(scale, ONE_REPLICA[workload], problem);
+    const api = apiSettingsOf(app);
+    if (api !== undefined) {
+      roleScaleProblems(api, scale, problem);
+      heapProblems(containersOf(app)[0], problem);
+    }
     containerProblems(app, problem);
   }
+  apiAppsProblems(found, add);
   for (const workload of APP_WORKLOADS) {
     const count = found.filter((app) => jobWorkloadOf(app.name) === workload).length;
     if (count !== 1) {
@@ -3938,6 +4087,60 @@ const loadTest: Check = (snapshot, expected, add) => {
     apiLoadProblems(api, { loadRun: found.length > 0, staging }, (message) => {
       problem(api.name, message);
     });
+  }
+};
+
+/** The connections an app running the API may hold, by its role: two of each copy's pool, for a deploy's overlap. */
+function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, unknown>): number | string {
+  const role = roleIn(settings);
+  const name = role === 'jobs' ? 'AGENTX_DB_JOBS_POOL_MAX' : 'AGENTX_DB_POOL_MAX';
+  const pool = countIn(settings, name);
+  const copies = role === 'web' ? copiesIn(settings) : 1;
+  if (pool === undefined) return `${app.name} must state ${name} as a whole number, so its connections can be counted`;
+  if (copies === undefined) {
+    return `${app.name} must state AGENTX_WEB_COPIES as a whole number, so its connections can be counted`;
+  }
+  return 2 * copies * pool;
+}
+
+/**
+ * Every connection the apps may hold fits the server's (4D2e D12): two of each API copy's pool (a deploy runs the old
+ * revision beside the new one), Zitadel's pool, one job and one to spare, within max_connections less what Azure keeps.
+ * In a load run, the larger server's; otherwise the one this deployment states. Zitadel's overlap isn't counted: it
+ * runs one replica and isn't redeployed with each release.
+ */
+const connections: Check = (snapshot, _expected, add) => {
+  const [server] = ofType(snapshot, TYPES.server);
+  if (server === undefined) return;
+  const problem = (message: string): void => {
+    add({ rule: 'connections', resource: server.name, message });
+  };
+  const loadRun = loadJobsIn(snapshot).length > 0;
+  const stated = loadRun ? LOAD_RUN.serverConnections : Number(serverSettings(snapshot, server).get('max_connections'));
+  if (!Number.isInteger(stated)) {
+    problem("must state max_connections, which every app's connections are counted against");
+    return;
+  }
+  const counts = ofType(snapshot, TYPES.app).flatMap((app) => {
+    const settings = apiSettingsOf(app);
+    if (settings !== undefined) return [apiConnections(app, settings)];
+    if (jobWorkloadOf(app.name) !== 'zitadel') return [];
+    const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
+    return [
+      pool ??
+        `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`,
+    ];
+  });
+  for (const unstated of counts.filter((count) => typeof count === 'string')) problem(unstated);
+  const needed = [...counts.filter((count) => typeof count === 'number'), ONE_JOB_AND_ONE_MORE].reduce(
+    (sum, count) => sum + count,
+    0,
+  );
+  const forUsers = stated - AZURE_RESERVED_CONNECTIONS;
+  if (needed > forUsers) {
+    problem(
+      `has ${String(forUsers)} connections for users (max_connections ${String(stated)} less Azure's ${String(AZURE_RESERVED_CONNECTIONS)}), but the apps may hold ${String(needed)}: two of each API copy's pool, Zitadel's, one job and one to spare`,
+    );
   }
 };
 
@@ -4379,6 +4582,7 @@ const CHECKS: readonly Check[] = [
   jobs,
   apps,
   loadTest,
+  connections,
   publicDoors,
   doorCertificates,
   workloadSecrets,

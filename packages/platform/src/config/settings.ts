@@ -166,6 +166,10 @@ const SETTINGS = {
     schema: text.pipe(z.enum(API_ROLES, { error: `must be one of: ${API_ROLES.join(', ')}` })),
     default: 'all',
   },
+  // How many `web` copies run together (4D2e D12): each allows its share of every rate limit, the limit / copies
+  // rounded up (rate-limit.ts). More than one only for `web`: `all` holds the jobs, which keep to one copy. The most
+  // only catches a typo: the policy's connections rule bounds copies by the server's connections long before it.
+  AGENTX_WEB_COPIES: { schema: wholeNumber({ min: 1, max: 1000, unit: 'copies' }), default: '1' },
   AGENTX_RELEASE: {
     schema: text
       .regex(/^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/, {
@@ -376,6 +380,17 @@ const SETTINGS = {
   AGENTX_DB_PASSWORD: { schema: text },
   AGENTX_DB_PASSWORD_FILE: { schema: text },
   AGENTX_DB_POOL_MAX: { schema: wholeNumber({ min: 1, max: 100, unit: 'connections' }), default: '10' },
+  // A `jobs` process's pool in place of AGENTX_DB_POOL_MAX (4D2e D12), which `all` and `web` keep. At least six:
+  // the hand-off's two transactions at once may take no more than a third of it (handoff.ts).
+  AGENTX_DB_JOBS_POOL_MAX: {
+    schema: wholeNumber({
+      min: 6,
+      max: 100,
+      unit: 'connections',
+      minimumReason: "the hand-off's two transactions at once may take no more than a third of the pool",
+    }),
+    default: '10',
+  },
   // The fair gate before an agent's decision (4D2e C, PL-63), each a limit per API process. Wide until a load run
   // sets the numbers: unset, as many decisions as connections, one organisation's as many as its share of them.
   AGENTX_DECISION_GATE_ACTIVE: { schema: wholeNumber({ min: 1, max: 100, unit: 'decisions' }).optional() },
@@ -433,6 +448,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
     reads: [
       ...COMMON,
       'AGENTX_ROLE',
+      'AGENTX_WEB_COPIES',
       'AGENTX_HTTP_HOST',
       'AGENTX_HTTP_PORT',
       'AGENTX_PUBLIC_ORIGIN',
@@ -478,6 +494,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_DB_PASSWORD',
       'AGENTX_DB_PASSWORD_FILE',
       'AGENTX_DB_POOL_MAX',
+      'AGENTX_DB_JOBS_POOL_MAX',
       'AGENTX_DECISION_GATE_ACTIVE',
       'AGENTX_DECISION_GATE_PER_ORGANISATION',
       'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION',

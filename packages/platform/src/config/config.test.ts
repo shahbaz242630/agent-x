@@ -98,6 +98,44 @@ describe('config: which side of the work a process does (4D2e D)', () => {
   });
 });
 
+describe("config: several web copies, and the jobs' own pool (4D2e D12)", () => {
+  const STAGING_ANY_ROLE: Env = { ...MINIMAL, AGENTX_ENV: 'staging', ...partnerFor('staging') };
+
+  it('runs one copy unless told, and a web process takes any number', () => {
+    expect(loadConfig(MINIMAL).http.webCopies).toBe(1);
+    expect(loadConfig({ ...MINIMAL, AGENTX_WEB_COPIES: '3' }).http.webCopies).toBe(3);
+  });
+
+  it.each(['all', 'jobs'] as const)('refuses more than one copy for %s, which runs as one', (role) => {
+    expect(problemsWith({ ...STAGING_ANY_ROLE, AGENTX_ROLE: role, AGENTX_WEB_COPIES: '2' })).toEqual([
+      `AGENTX_WEB_COPIES: more than one only with AGENTX_ROLE web; ${role} runs as one copy`,
+    ]);
+    expect(loadConfig({ ...STAGING_ANY_ROLE, AGENTX_ROLE: role, AGENTX_WEB_COPIES: '1' }).http.webCopies).toBe(1);
+  });
+
+  it('refuses copies past their bounds', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_WEB_COPIES: '0' })).toEqual([
+      'AGENTX_WEB_COPIES: must be at least 1 copies',
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_WEB_COPIES: '1001' })).toEqual([
+      'AGENTX_WEB_COPIES: must be at most 1000 copies',
+    ]);
+  });
+
+  it("opens the jobs' pool for jobs alone, and the pool for all and web", () => {
+    const pools = { AGENTX_DB_POOL_MAX: '8', AGENTX_DB_JOBS_POOL_MAX: '6' };
+    const poolOf = (role: string) => loadConfig({ ...STAGING_ANY_ROLE, ...pools, AGENTX_ROLE: role }).db.poolMax;
+    expect([poolOf('jobs'), poolOf('web'), poolOf('all')]).toEqual([6, 8, 8]);
+    expect(loadConfig({ ...STAGING_ANY_ROLE, AGENTX_ROLE: 'jobs' }).db.poolMax).toBe(10);
+  });
+
+  it("refuses a jobs' pool too small for the hand-off, whatever the role", () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_DB_JOBS_POOL_MAX: '5' })).toEqual([
+      "AGENTX_DB_JOBS_POOL_MAX: must be at least 6 connections (the hand-off's two transactions at once may take no more than a third of the pool)",
+    ]);
+  });
+});
+
 describe('config: a correct config loads', () => {
   it('needs only the environment, the release, the public origin and where the keys are, and fills in the defaults', () => {
     expect(loadConfig(MINIMAL)).toEqual({
@@ -115,6 +153,7 @@ describe('config: a correct config loads', () => {
         rateLimitPerUserPerMinute: 120,
         rateLimitPerAgentPerMinute: 120,
         rateLimitPerOrganisationPerMinute: 300,
+        webCopies: 1,
       },
       decisionGate: { active: null, perOrganisation: null, waitingPerOrganisation: 100, waitMs: 10_000 },
       db: DB_DEFAULTS,
@@ -189,6 +228,7 @@ describe('config: a correct config loads', () => {
         rateLimitPerUserPerMinute: 60,
         rateLimitPerAgentPerMinute: 30,
         rateLimitPerOrganisationPerMinute: 300,
+        webCopies: 1,
       },
       db: {
         host: '10.0.0.5',
@@ -292,6 +332,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_DB_TLS',
     'AGENTX_DB_USER',
     'AGENTX_DB_POOL_MAX',
+    'AGENTX_DB_JOBS_POOL_MAX',
+    'AGENTX_WEB_COPIES',
   ])('refuses %s set to an empty value', (name) => {
     expect(problemsWith({ ...MINIMAL, [name]: '' })).toEqual([
       `${name}: is empty: give it a value, or remove it to use the default`,

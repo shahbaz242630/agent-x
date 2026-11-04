@@ -58,7 +58,7 @@ import {
 } from '../image/verify.ts';
 import { APP_KEYS, newAppKeys } from './app-keys.ts';
 import { type Checkout, realCheckout } from './git.ts';
-import { describeProblem, policyProblems } from './policy.ts';
+import { describeProblem, LOAD_SERVER_CONNECTIONS, policyProblems } from './policy.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
 
 const ENVIRONMENT = 'staging';
@@ -1085,6 +1085,50 @@ function settleDatabase(steps: Steps, subscription: string, host: string, loadSi
   return false;
 }
 
+/** The live database's connection limit, as Azure has it now, and whether a change of it waits on a restart. */
+function liveConnectionLimit(steps: Steps, subscription: string): { limit: number; waiting: boolean } {
+  const where = ['--subscription', subscription, '--resource-group', RESOURCE_GROUP];
+  const servers = azJson(steps.az, ['postgres', 'flexible-server', 'list', ...where]) as readonly { name?: unknown }[];
+  const server = servers.length === 1 ? text(servers[0]?.name) : '';
+  if (server === '') throw new Error(`${RESOURCE_GROUP} holds ${String(servers.length)} database servers, not one`);
+  const shown = azJson(steps.az, [
+    'postgres',
+    'flexible-server',
+    'parameter',
+    'show',
+    ...where,
+    '--server-name',
+    server,
+    '--name',
+    'max_connections',
+  ]) as { value?: unknown; isConfigPendingRestart?: unknown };
+  return { limit: Number(shown.value), waiting: shown.isConfigPendingRestart === true };
+}
+
+/**
+ * The load run's database before anything is sent (4D2e D12): policy.ts counts the load run's connections against the
+ * load size's limit, which only `foundation --load-size` sets, and only once its restart has taken. A smaller limit,
+ * one still waiting, or one that can't be read stops the run, as the API would be refused connections (S167).
+ */
+function confirmLoadServer(steps: Steps, subscription: string): void {
+  const next = `Run node deploy/azure/deploy.ts foundation --load-size first (it restarts the server), then apps --load-run again. Nothing was deployed.`;
+  let live: { limit: number; waiting: boolean };
+  try {
+    live = liveConnectionLimit(steps, subscription);
+  } catch (error) {
+    throw new Error(
+      `The database's connection limit couldn't be read (${error instanceof Error ? error.message : String(error)}), and the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}. ${next}`,
+      { cause: error },
+    );
+  }
+  // A value that is no number reads as too few, never as enough.
+  if (Number.isNaN(live.limit) || live.limit < LOAD_SERVER_CONNECTIONS || live.waiting) {
+    throw new Error(
+      `The database allows ${String(live.limit)} connections${live.waiting ? ', and a change of it waits on a restart' : ''}, but the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}: the API would be refused connections. ${next}`,
+    );
+  }
+}
+
 /** Where Azure Resource Manager answers: a list's next page must be there too. */
 export const ARM = 'https://management.azure.com/';
 
@@ -1639,6 +1683,7 @@ async function deployApps(
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
+  if (loadRun) confirmLoadServer(steps, subscription);
   // Before anything else is asked: the API reads its client secret from the vault.
   // A disabled one counts as missing: the API couldn't read it either (the confirmation review).
   const missing = issuedMissing(

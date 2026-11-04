@@ -6,12 +6,19 @@
 // hook marks each request as counted, which would stop any route's own limit
 // from running, such as the per-agent limits in Phase 1.
 //
+// Every count is this process's own, in memory. With several `web` copies
+// (AGENTX_WEB_COPIES, 4D2e D12) each allows its share, the limit / copies
+// rounded up (`shareOfCopies`). The trade: a balancer sending one caller more
+// to one copy than another refuses it a little under its limit, and rounding up
+// lets it through at most copies - 1 over in a window. No count is shared
+// between copies (a shared counter is left out, Stage D's design).
+//
 // The client address comes from the raw request, with the server's own trust
 // rule, not from `request.ip`: Fastify builds the request for a malformed
 // address without its proxy rule, so behind a proxy every such request would
 // count as the proxy's.
 import proxyAddr from '@fastify/proxy-addr';
-import rateLimit, { normalizeIP } from '@fastify/rate-limit';
+import rateLimit, { type CreateRateLimitOptions, normalizeIP } from '@fastify/rate-limit';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -20,6 +27,17 @@ export type ProxyTrust = (address: string, hop: number) => boolean;
 
 /** The setting counts requests per minute. */
 const WINDOW_MS = 60_000;
+
+/**
+ * The callers each counter remembers, about 230 bytes each (measured on the plugin's store), so about 23 MB a counter
+ * when full; the plugin's own default is 5,000. Not a limit on callers: past it, the one longest unheard from is
+ * forgotten and starts a fresh count. That frees a caller from its limit only if 100,000 others are heard from
+ * between two of its requests; copies divide the callers between them, so each remembers further.
+ */
+const CALLERS_REMEMBERED = 100_000;
+
+/** One copy's share of a limit across all `web` copies: rounded up, so never none. */
+export const shareOfCopies = (limit: number, copies: number): number => Math.ceil(limit / copies);
 
 /** IPv6 clients usually hold a whole /64, so it counts as one address (the plugin's default). */
 const IPV6_PREFIX = 64;
@@ -75,6 +93,7 @@ export async function registerRateLimit(app: FastifyInstance, perMinute: number,
     global: false,
     max: perMinute,
     timeWindow: WINDOW_MS,
+    cache: CALLERS_REMEMBERED,
     keyGenerator: (request) => clientKey(rawClientIp(request, trust)),
   });
 }
@@ -84,6 +103,20 @@ export type CountRequest = (request: FastifyRequest, reply: FastifyReply) => Pro
 
 /** One limit's counter, from the plugin's `createRateLimit`. */
 type Limiter = ReturnType<FastifyInstance['createRateLimit']>;
+
+/**
+ * A limit's counter of its own, keyed by `key`. The plugin's store takes `cache` from these options (its `child`),
+ * though its type for them leaves it out; rate-limit.test.ts holds it to remembering past the plugin's default.
+ */
+function counterOf(app: FastifyInstance, perMinute: number, key: (request: FastifyRequest) => string): Limiter {
+  const options: CreateRateLimitOptions & { readonly cache: number } = {
+    max: perMinute,
+    timeWindow: WINDOW_MS,
+    cache: CALLERS_REMEMBERED,
+    keyGenerator: key,
+  };
+  return app.createRateLimit(options);
+}
 
 /**
  * The hook that counts each request against its address's limit and sets the
@@ -117,12 +150,8 @@ export function createPersonCounter(
   trust: ProxyTrust,
   limited: (ip: string | undefined, userId: string) => void,
 ): CountRequest {
-  const limiter = app.createRateLimit({
-    max: perMinute,
-    timeWindow: WINDOW_MS,
-    // Only called for a request with a person: the hook below looks first.
-    keyGenerator: (request) => request.person?.userId ?? UNREADABLE_ADDRESS,
-  });
+  // Only called for a request with a person: the hook below looks first.
+  const limiter = counterOf(app, perMinute, (request) => request.person?.userId ?? UNREADABLE_ADDRESS);
   return async (request, reply) => {
     const person = request.person;
     if (person === null) return;
@@ -149,12 +178,8 @@ export function createAgentCounter(
   trust: ProxyTrust,
   limited: (ip: string | undefined, agentId: string) => void,
 ): CountRequest {
-  const limiter = app.createRateLimit({
-    max: perMinute,
-    timeWindow: WINDOW_MS,
-    // Only called for a request with an agent: the hook below looks first.
-    keyGenerator: (request) => request.agent?.agentId ?? UNREADABLE_ADDRESS,
-  });
+  // Only called for a request with an agent: the hook below looks first.
+  const limiter = counterOf(app, perMinute, (request) => request.agent?.agentId ?? UNREADABLE_ADDRESS);
   return async (request, reply) => {
     const agent = request.agent;
     if (agent === null) return;
@@ -171,8 +196,7 @@ export function createAgentCounter(
  * another organisation's room, and it only ever refuses the organisation that
  * hit it. Never its people's: runaway agents using the count up would lock an
  * admin out of the brakes (the review, S166), and each person has their own limit.
- * It runs after the access hook. Counted per API process, so the real limit grows
- * with replicas. Over the limit, it tells `limited` the client's address, sets
+ * It runs after the access hook. Over the limit, it tells `limited` the client's address, sets
  * the limit headers to the organisation's, and throws the same 429.
  */
 export function createOrganisationCounter(
@@ -181,12 +205,8 @@ export function createOrganisationCounter(
   trust: ProxyTrust,
   limited: (ip: string | undefined) => void,
 ): CountRequest {
-  const limiter = app.createRateLimit({
-    max: perMinute,
-    timeWindow: WINDOW_MS,
-    // Only called for a request with an agent: the hook below looks first.
-    keyGenerator: (request) => request.agent?.orgId ?? UNREADABLE_ADDRESS,
-  });
+  // Only called for a request with an agent: the hook below looks first.
+  const limiter = counterOf(app, perMinute, (request) => request.agent?.orgId ?? UNREADABLE_ADDRESS);
   return async (request, reply) => {
     if (request.agent === null) return;
     if (await overLimit(limiter, request, reply, 'when-refused')) {
