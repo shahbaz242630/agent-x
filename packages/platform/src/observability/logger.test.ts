@@ -16,6 +16,7 @@ import {
   withLogContext,
 } from './logger.ts';
 import { type ProblemEvent, saysFor } from './plain-words.ts';
+import { DECISION_BUDGET_PER_MINUTE, DECISION_EVENT, NEVER_HELD_BACK } from './volume-guard.ts';
 
 /** A catalogued problem, for tests of warnings and errors in general. */
 const PROBLEM = 'db.transaction_retried';
@@ -579,6 +580,63 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
     for (let i = 0; i < 10; i++) logger.warn('log.suppressed' as ProblemEvent, { note: 'forged' });
     expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
     expect(lines().filter((line) => line.event === INVALID_EVENT)).toHaveLength(2);
+  });
+
+  it('caps each warning on its own: a flood of one never holds back a different one', () => {
+    const { logger, lines, advance } = setup({ cap: 3 });
+    for (let i = 0; i < 50; i++) logger.warn(PROBLEM);
+    logger.error('db.pool_wait_ran_out');
+    logger.error('db.pool_wait_ran_out');
+    advance(60_000);
+    logger.flush();
+    expect(lines().filter((line) => line.event === PROBLEM)).toHaveLength(3);
+    expect(lines().filter((line) => line.event === 'db.pool_wait_ran_out')).toHaveLength(2);
+    expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([
+      expect.objectContaining({ level: 'warn', suppressedEvent: PROBLEM, suppressedCount: 47 }),
+    ]);
+  });
+
+  it('never holds back a money or audit line at info or debug, however many come', () => {
+    const { logger, lines, advance } = setup({ cap: 10 });
+    const events = NEVER_HELD_BACK.map((family) => `${family}flood` as EventName);
+    for (const event of events) {
+      for (let i = 0; i < 100; i++) logger.info(event);
+      for (let i = 0; i < 100; i++) logger.debug(event);
+    }
+    advance(60_000);
+    logger.flush();
+    for (const event of events) expect(lines().filter((line) => line.event === event)).toHaveLength(100);
+    expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
+  });
+
+  it('caps a flood of audit.backlog errors with a count, and an integrity alarm still gets out during it', () => {
+    const { logger, lines, advance } = setup({ cap: 3 });
+    for (let i = 0; i < 50; i++) logger.error('audit.backlog');
+    logger.error('audit.integrity_failed');
+    for (let i = 0; i < 50; i++) logger.info('audit.anchored');
+    advance(60_000);
+    logger.flush();
+    expect(lines().filter((line) => line.event === 'audit.backlog')).toHaveLength(3);
+    expect(lines().filter((line) => line.event === 'audit.integrity_failed')).toHaveLength(1);
+    expect(lines().filter((line) => line.event === 'audit.anchored')).toHaveLength(50);
+    expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([
+      expect.objectContaining({ level: 'error', suppressedEvent: 'audit.backlog', suppressedCount: 47 }),
+    ]);
+  });
+
+  it('PL-52: keeps 20,000 decision lines a minute, and counts the rest as a warning with plain words', () => {
+    const { logger, lines, advance } = setup({ cap: 1 });
+    for (let i = 0; i <= DECISION_BUDGET_PER_MINUTE; i++) logger.info(DECISION_EVENT);
+    advance(60_000);
+    logger.flush();
+    expect(lines().filter((line) => line.event === DECISION_EVENT)).toHaveLength(DECISION_BUDGET_PER_MINUTE);
+    expect(lines().at(-1)).toMatchObject({
+      level: 'warn',
+      event: SUPPRESSED_EVENT,
+      suppressedEvent: DECISION_EVENT,
+      suppressedCount: 1,
+      says: saysFor(SUPPRESSED_EVENT),
+    });
   });
 
   it('writes the current minute’s count on flush, as at shutdown', () => {

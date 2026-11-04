@@ -114,6 +114,7 @@ export {
   lockName,
   ORGANISATION_BRAKE,
   readAloneOnOneTrip,
+  readEachTenant,
   type SentTogether,
   STATEMENT_SECONDS,
   TenantContextError,

@@ -126,6 +126,7 @@ describe('the edges and a count, as a store reads them (4D2e E2)', () => {
     lowest: 1n,
     highest: 3n,
     head_event_hash: HASH,
+    last_stored: 3n,
     seq: 2n,
     id: id(2),
     recorded_at: NOW,
@@ -143,6 +144,7 @@ describe('the edges and a count, as a store reads them (4D2e E2)', () => {
       lowest: 1n,
       highest: 3n,
       headEventHash: HASH,
+      lastStored: 3n,
       anchored: {
         seq: 2n,
         id: id(2),
@@ -157,12 +159,15 @@ describe('the edges and a count, as a store reads them (4D2e E2)', () => {
   });
 
   it('reads no event stored, and no head, as such', () => {
-    expect(edgesIn({ ...ROW, heads: 0n, lowest: null, highest: null, head_event_hash: null }, undefined)).toEqual({
+    expect(
+      edgesIn({ ...ROW, heads: 0n, lowest: null, highest: null, head_event_hash: null, last_stored: 0n }, undefined),
+    ).toEqual({
       head: 'none',
       lowest: null,
       highest: null,
       headEventHash: undefined,
       anchored: undefined,
+      lastStored: 0n,
     });
   });
 
@@ -176,6 +181,8 @@ describe('the edges and a count, as a store reads them (4D2e E2)', () => {
     ['a head with a column of the wrong type', { head_seq: '3' }],
     ['a lowest number of the wrong type', { lowest: '1' }],
     ['a highest number of the wrong type', { highest: 3 }],
+    ['a count of the last events of the wrong type', { last_stored: 3 }],
+    ['no count of the last events', { last_stored: null }],
   ])('reads %s as a head that cannot be read', (_what, change) => {
     expect(edgesIn({ ...ROW, ...change }, CONTENT).head).toBe('unreadable');
   });

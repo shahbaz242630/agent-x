@@ -356,7 +356,7 @@ export function createPaymentChecks({
 }: {
   /** The organisations to look in: those marked due (org-work.ts), which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
-  /** Told each organisation whose turn a run cut short: its mark is left as it stands, so the next run takes it first. */
+  /** Told each organisation whose turn a run cut short: its mark is settled due now, so the next run takes it (org-work.ts). */
   readonly unfinished?: (orgId: string) => void;
   /**
    * Told, for each organisation it took whole, the soonest of its slower turns now pending: its mark is settled no
@@ -871,7 +871,7 @@ export function createPaymentChecks({
     ];
     for (const [tier, share] of slower)
       cut.push(...(await turns(tier, dueIn(tier, orgs, now), partOfBudget(share, signal), now)));
-    // One cut short isn't settled at all, so the time given for it goes unread.
+    // One cut short is due now, so the time given for it goes unread.
     for (const orgId of new Set(cut)) unfinished?.(orgId);
     for (const orgId of orgs) {
       const soonest = soonestTurn(orgId);

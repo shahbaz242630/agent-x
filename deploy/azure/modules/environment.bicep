@@ -27,6 +27,8 @@ param zoneRedundant bool
 param identityNames array
 param workspaceName string
 param workspaceId string
+@description('The login alerts\' own workspace (monitoring.bicep), which takes a copy of the platform\'s lines.')
+param loginWorkspaceId string
 param actionGroupId string
 param errorAlertName string
 param errorAlertThreshold int
@@ -39,6 +41,7 @@ param holdingsCheckAlertName string
 param integrityRunsAlertName string
 param agentCancelsAlertName string
 param agentCancelCapAlertName string
+param decisionsSuppressedAlertName string
 param dailyWordsAlertName string
 param handoffQueueAlertName string
 param platformFullAlertName string
@@ -47,6 +50,9 @@ param jobsStoppedAlertName string
 @description('Whether something always runs here, so the rules that fire on lines missing can be on.')
 param alwaysOn bool
 param anchorStoreAlertName string
+param recordsFillingAlertName string
+param dailyCheckAlertName string
+param fullPassAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -92,6 +98,25 @@ resource appLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
         category: 'ContainerAppConsoleLogs'
         enabled: true
       }
+      {
+        category: 'ContainerAppSystemLogs'
+        enabled: true
+      }
+    ]
+  }
+}
+
+// A copy of the platform's lines for the login alerts' own workspace, where the
+// owner-login alert pairs the migration job's starts with the owner's logins
+// (postgres.bicep). Two workspaces take two settings (Microsoft allows five a
+// resource); the main one keeps its own copy for jobs.ts and the saved queries.
+resource systemLogsForLogins 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  scope: environment
+  name: 'system-logs-to-login-workspace'
+  properties: {
+    workspaceId: loginWorkspaceId
+    logAnalyticsDestinationType: 'Dedicated'
+    logs: [
       {
         category: 'ContainerAppSystemLogs'
         enabled: true
@@ -587,6 +612,87 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
   dependsOn: [appLogs]
 }
 
+// The anchor check's daily count and walk of each organisation's older events (4D2e E7, decisions 1 and 2b) running
+// late: a deletion or a hiding edit below the anchor is found later than the 24 hours stated. Capacity, never a
+// hold. Stateful, as above: the line comes every run while it lasts.
+resource dailyCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: dailyCheckAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Audit: daily checks of older history late'
+    description: 'SEV-2. The daily count and walk of the older audit history of some organisations waited more than an hour past its turn (audit.daily_check_overdue): an old record deleted or hidden there is found later than 24 hours. Nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.daily_check_overdue" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The full pass of every chain (4D2e E7, decision 3) late: an old event edited is found later than the 7 days
+// stated, half the production restore window. Capacity, never a hold. Stateful, as above.
+resource fullPassAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: fullPassAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Audit: full pass of the history late'
+    description: 'SEV-2. The audit history of some organisations has not been read through whole in 7 days (audit.full_pass_overdue): an old record edited there is found later than promised, while the 35 days of database restore can still undo it. Nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.full_pass_overdue" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
 // An integrity job skipping a whole run (Phase 2 E2c, the partner's catch):
 // the holdings check, the hold-history check, mandate expiry and request
 // expiry (D7), and request voids and the waiting rejections (F1 G8) each read the organisation list first, and when that read
@@ -613,6 +719,50 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// An organisation's records filling (partner S170): its contacts or sign-in
+// resets past half of what their list reads, or a hold clearing reading over
+// eight thousand of one kind (`identity.records_filling`). Nothing is broken
+// yet, so SEV-2, our lowest: a list past its limit stops working, and a busy
+// organisation's clearing gets slower. The line repeats with each add or
+// clearing, so it is stateful: one notice, resolved after a quiet window.
+resource recordsFillingAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: recordsFillingAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Records: an organisation\'s records filling'
+    description: 'SEV-2. An organisation\'s contacts or sign-in resets passed half of what their list reads, or clearing a hold read over eight thousand of one kind of record (identity.records_filling): nothing is broken yet, but a list past its limit stops working. Runbook: Incident-Response-Playbook.md section S.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "identity.records_filling" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -798,6 +948,49 @@ resource agentCancelCapAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// Decision lines held back (4D2e F8, PL-52): past its budget of 20,000 a
+// minute a process, the logger counts the rest in one `log.suppressed` line
+// naming `spend_request.decided`, so the denial-surge alert undercounts that
+// minute. Each decision is still in the audit trail. Any one line tells
+// someone. Stateful, as above.
+resource decisionsSuppressedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: decisionsSuppressedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Logs: payment decision lines held back'
+    description: 'SEV-2. More payment decisions came in a minute than one copy of the API logs, so the rest were counted, not written: each is still in the audit trail, but the log and the denial-surge alert undercount that minute. Runbook: Incident-Response-Playbook.md section J.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

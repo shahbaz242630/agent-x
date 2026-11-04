@@ -213,6 +213,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet: the next check goes on from where this one stopped.',
     next: 'Nothing if it is rare. If it stays, see whether the database is slow.',
   },
+  'audit.probe_unfinished': {
+    happened: 'The tamper check ran out of time before checking every organisation.',
+    broke: 'Those it missed went unchecked this time; nothing is held.',
+    next: 'They go first next time. If it keeps happening, see whether the database is slow.',
+  },
   'audit.anchor_check_behind': {
     happened: 'Tamper checks are working, but some organisations waited too long for their turn.',
     broke: 'Those audit histories are checked late, so a change goes unseen for longer. Nobody is held.',
@@ -268,6 +273,21 @@ export const PLAIN_WORDS = {
     happened: 'Writing the latest audit anchors to their store failed or ran out of time.',
     broke: 'Nothing yet: they stay in memory and payments go on.',
     next: 'It is tried again at the next check. If this was at a stop, the next start reads the last ones written.',
+  },
+  'audit.daily_check_overdue': {
+    happened: "Some organisations' daily check of their older audit history waited over an hour past its turn.",
+    broke: 'An old audit record deleted or hidden there is found later than the 24 hours promised. Nobody is held.',
+    next: 'See whether the database is slow or the tamper check runs out of time; add capacity if it stays.',
+  },
+  'audit.full_pass_behind': {
+    happened: "The regular full read of the audit history ran out of time before reading this run's share.",
+    broke: 'Nothing yet: what was left is read next time. If it goes on, old records are read later than promised.',
+    next: 'If it repeats, add capacity: a faster database, or more time for the check.',
+  },
+  'audit.full_pass_overdue': {
+    happened: "Some organisations' whole audit history has not been read through in 7 days, as promised.",
+    broke: 'An old audit record edited there is found later than promised; backups can still undo it. Nobody is held.',
+    next: 'See whether the database is slow or the tamper check runs out of time, and add capacity.',
   },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',
@@ -855,7 +875,8 @@ export const PLAIN_WORDS = {
   },
   'log.suppressed': {
     happened: 'One kind of log line came too often in a minute, so further copies were held back and counted.',
-    broke: 'The count is exact, but the details of the held-back lines are not in the log.',
+    broke:
+      'The count is exact, but their details are not in the log; held-back payment decisions stay in the audit trail.',
     next: 'Look at the kind of line it names: a flood usually means something is failing over and over.',
   },
   'mandate_expiry.failed': {
@@ -914,6 +935,12 @@ export const PLAIN_WORDS = {
     happened: 'An operator job could not reach the database.',
     broke: 'The job stopped before doing anything, so nothing was changed.',
     next: 'Check the database is up and reachable, then run the job again.',
+  },
+  'operator.chain_recovery_refused': {
+    happened: "An organisation's audit chain recovery plan was refused.",
+    broke:
+      'Nothing was changed, and the organisation stays on hold: its copy cannot mend the chain with original records.',
+    next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',

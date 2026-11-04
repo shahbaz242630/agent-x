@@ -28,6 +28,10 @@
 // a new migration needs no pin here and CI goes red until the file is refreshed.
 // Each is compared as Postgres prints it, in this process, with no cast read.
 //
+// **Primary keys and unique constraints** are held to built-keys.json the same way
+// (4D2e E8 review): one dropped lets two rows share a number, which a count of rows
+// can't tell from one, and one planted can refuse the very event that sets a hold.
+//
 // **Tables** are named in built-tables.json, written the same way. A release's new
 // table is not in the file of the image before it, so to that image it has no
 // walls, or the wrong rights, the moment the migration ends: that is release-shaped
@@ -60,6 +64,7 @@
 import { type Kysely, sql } from 'kysely';
 
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
+import BUILT_KEYS from './built-keys.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
 import { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
 import { OWN_COLUMNS, type SignedStateTable } from './signed-rows.ts';
@@ -243,8 +248,8 @@ const MARK_FUNCTION = 'directory.mark_org_work';
 const MARK_BODY = '6cae37308679fd17975fca6e78aa25f031395080196fb037e0d947ae2b868229';
 
 /**
- * Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. On every write, or
- * (`UPDATE`) on a row already made alone; while its condition holds, or (null) on each one.
+ * Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. On every write, on a
+ * row already made alone (`UPDATE`), or on a new row alone (`INSERT`); while its condition holds, or (null) on each one.
  */
 const markTrigger = (
   table: string,
@@ -252,7 +257,7 @@ const markTrigger = (
   condition: string | null,
   job: string,
   wait: string,
-  on: 'INSERT OR UPDATE' | 'UPDATE' = 'INSERT OR UPDATE',
+  on: 'INSERT OR UPDATE' | 'UPDATE' | 'INSERT' = 'INSERT OR UPDATE',
 ): WrittenTrigger => {
   const when = condition === null ? '' : ` WHEN (${condition})`;
   return {
@@ -271,7 +276,7 @@ const NEW_VERSION = '(new.current_version_id IS DISTINCT FROM old.current_versio
 const voidsMark = (table: string, condition: string | null) =>
   markTrigger(table, 'marks_request_voids', condition, 'request_voids', '0 seconds', 'UPDATE');
 
-/** The marks' triggers (0072, 0073): on the tables they name, and each as written. */
+/** The marks' triggers (0072, 0073, 0075): on the tables they name, and each as written. */
 export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
   markTrigger(
     'spend_requests.requests',
@@ -310,20 +315,12 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
     'mandate_expiry',
     '0 seconds',
   ),
-];
-
-/**
- * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
- * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * Now 0075's (4D2e D9). The request voids' look, at once: an organisation, agent or mandate written while not active,
- * an organisation lifted (an unfreeze chosen to cancel voids only its first 20 itself), a supplier while not verified
- * or lifted (a reactivation likewise; 0032's CHECK holds a verified one to its version, so a new version is written
- * while not verified), a mandate moved to a new version, and a source on any write (its consent's end is the job's too, the
- * visit settling the mark to it). The waiting rejections' on any write of a policy (a version made), and the carry
- * rest's on a mandate's new version. Each on updates alone: every signed write, a new row's too, points its row at its
- * event with an update in the same transaction (signed-rows.ts pointSignedRow).
- */
-export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  // 0075 (4D2e D9): the request voids' look, at once: an organisation, agent or mandate written while not active, an
+  // organisation lifted (an unfreeze may cancel), a supplier while not verified or lifted (a reactivation may cancel) (0032's CHECK holds a verified one to its version, so a new version is written while
+  // not verified), a mandate moved to a new version, and a source on any write (its consent's end is the job's too,
+  // the visit settling the mark to it). Each on updates alone: every signed write, a new row's too, points its row
+  // at its event with an update in the same transaction (signed-rows.ts pointSignedRow). The waiting rejections' on any write of a
+  // policy (a version made), and the carry rest's on a mandate's new version.
   voidsMark('organizations.organizations', "((new.status <> 'ACTIVE'::text) OR (old.status <> 'ACTIVE'::text))"),
   voidsMark('agents.agents', "(new.status <> 'ACTIVE'::text)"),
   voidsMark('mandates.mandates', `((new.status <> 'ACTIVE'::text) OR ${NEW_VERSION})`),
@@ -331,6 +328,32 @@ export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
   voidsMark('suppliers.suppliers', "((new.status <> 'VERIFIED'::text) OR (old.status <> 'VERIFIED'::text))"),
   markTrigger('mandates.policies', 'marks_waiting_rejections', null, 'waiting_rejections', '0 seconds', 'UPDATE'),
   markTrigger('mandates.mandates', 'marks_carry_rest', NEW_VERSION, 'carry_rest', '0 seconds', 'UPDATE'),
+];
+
+/**
+ * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
+ * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
+ * Now 0077's (4D2e D10). The factor removals' a day on, the cooling-off's length, as a reset comes to cool off: only an
+ * update does, as a reset is born a draft. The background downloads' at once as a month is asked for: a month is born
+ * waiting, and every other move of it is the builder's own, which settles the mark after its run.
+ */
+export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  markTrigger(
+    'identity.factor_resets',
+    'marks_factor_removals',
+    "(new.status = 'COOLING_OFF'::text)",
+    'factor_removals',
+    '24 hours',
+    'UPDATE',
+  ),
+  markTrigger(
+    'activity_exports.files',
+    'marks_background_downloads',
+    null,
+    'background_downloads',
+    '0 seconds',
+    'INSERT',
+  ),
 ];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
@@ -517,6 +540,7 @@ export interface SchemaGuardOptions {
     readonly triggers: readonly WrittenTrigger[];
     readonly tables: readonly string[];
     readonly checks: readonly Omit<CheckConstraint, 'validated'>[];
+    readonly keys?: readonly KeyConstraint[];
   };
 }
 
@@ -664,6 +688,16 @@ export interface CheckConstraint {
   readonly expression: string;
   /** False for one added NOT VALID, and for one made NOT ENFORCED (Postgres 18 on), which Postgres marks not valid too. */
   readonly validated: boolean;
+}
+
+/**
+ * A primary key or unique constraint, as pg_get_constraintdef prints it (its kind and columns), or a unique index no
+ * constraint stands on, as pg_get_indexdef prints it.
+ */
+export interface KeyConstraint {
+  readonly table: string;
+  readonly name: string;
+  readonly definition: string;
 }
 
 /** One right granted to the backup role, on the object the problem names. */
@@ -1022,6 +1056,34 @@ export async function checkConstraints<Schema>(db: Kysely<Schema>): Promise<Chec
   return [...rows];
 }
 
+/** Every primary key and unique constraint in our schemas, as Postgres prints it. */
+export async function keyConstraints<Schema>(db: Kysely<Schema>): Promise<KeyConstraint[]> {
+  // And every whole unique index no constraint stands on (a planted `create unique index` makes no constraint), as
+  // pg_get_indexdef prints it: one a constraint stands on is that constraint's, named once. A partial one is the
+  // schema policy's (partialUniqueIndexes), held there whole; plain indexes aren't keys.
+  const { rows } = await sql<KeyConstraint>`
+    select ${QUALIFIED} as table,
+           con.conname as name,
+           pg_catalog.pg_get_constraintdef(con.oid) as definition
+    from pg_catalog.pg_constraint con
+    join pg_catalog.pg_class c on c.oid = con.conrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS} and con.contype in ('p', 'u')
+    union all
+    select ${QUALIFIED} as table,
+           ic.relname as name,
+           pg_catalog.pg_get_indexdef(i.indexrelid) as definition
+    from pg_catalog.pg_index i
+    join pg_catalog.pg_class ic on ic.oid = i.indexrelid
+    join pg_catalog.pg_class c on c.oid = i.indrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS} and i.indisunique and i.indpred is null
+      and not exists (select from pg_catalog.pg_constraint k where k.conindid = i.indexrelid and k.conrelid = i.indrelid)
+    order by 1, 2
+  `.execute(db);
+  return [...rows];
+}
+
 /**
  * Every right the backup role was granted on what the database owner can grant:
  * our tables, sequences, columns, schemas and functions, and this database. Read
@@ -1245,6 +1307,34 @@ function builtCheckProblems(
     if (!builtIds.has(id(one))) problems.push(`${checkNamed(one)} is not one the migrations built`);
   }
   return problems;
+}
+
+/**
+ * The running keys against those the migrations built, as builtCheckProblems holds CHECK constraints: one added is
+ * named only on a table the migrations built, as a new release's table, or a test's own, is judged by its shape.
+ */
+function builtKeyProblems(
+  live: readonly KeyConstraint[],
+  built: readonly KeyConstraint[],
+  builtTables: ReadonlySet<string>,
+  partial: SchemaPolicy['partialUniqueIndexes'],
+): SchemaProblem[] {
+  const id = ({ table, name }: Pick<KeyConstraint, 'table' | 'name'>): string => JSON.stringify([table, name]);
+  // A listed partial index's name is the policy's to hold, whatever stands under it: said once, there.
+  const policyHolds = new Set(partial.map(id));
+  const named = ({ table, name }: KeyConstraint): string => `${table}'s key ${quoted(name)}`;
+  const liveById = new Map(live.map((one) => [id(one), one]));
+  const builtIds = new Set(built.map(id));
+  return [
+    ...built.flatMap((one) => {
+      const found = liveById.get(id(one));
+      if (found === undefined) return [`${named(one)} is not there`];
+      return found.definition === one.definition ? [] : [`${named(one)} reads differently`];
+    }),
+    ...live
+      .filter((one) => builtTables.has(one.table) && !builtIds.has(id(one)) && !policyHolds.has(id(one)))
+      .map((one) => `${named(one)} is not one the migrations built`),
+  ];
 }
 
 /** Each right the backup role holds beyond reading, and each it could hand on. */
@@ -1772,7 +1862,7 @@ export async function liveSchemaDrift<Schema>(
     madeOnceTables = [],
     fixedAtCreation = {},
     comingTriggers = COMING_TRIGGERS,
-    built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks } = {
+    built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks, keys: builtKeys = BUILT_KEYS } = {
       triggers: MARK_TRIGGERS,
       tables: BUILT_TABLES,
       checks: BUILT_CHECKS,
@@ -1800,6 +1890,7 @@ export async function liveSchemaDrift<Schema>(
       await connectionLimits(one, [appRole, ownerRole]),
       await checkConstraints(one),
       await backupRights(one),
+      await keyConstraints(one),
     ] as const;
   };
   const [
@@ -1820,6 +1911,7 @@ export async function liveSchemaDrift<Schema>(
     limited,
     allChecks,
     backupHeld,
+    allKeys,
   ] = await db.connection().execute((one) => reading(one));
 
   const globalTables = new Set(Object.keys(policy.globalTables));
@@ -1926,6 +2018,7 @@ export async function liveSchemaDrift<Schema>(
     atOnce: inOrder(problems),
     releaseShaped: inOrder([
       ...builtCheckProblems(allChecks, builtChecks),
+      ...builtKeyProblems(allKeys, builtKeys, new Set(builtTables), policy.partialUniqueIndexes),
       ...unknownFunctionProblems(allFunctions, bodies),
       ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),

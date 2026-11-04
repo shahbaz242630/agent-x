@@ -16,7 +16,10 @@
 // approved payment to the bank, for every organisation (Phase 4 B1,
 // handoff-pause.ts): only from a file, its reason never logged, every
 // organisation's admins told. (An UNKNOWN payment is marked failed by the
-// customer's admin, not here: partner decision 38.)
+// customer's admin, not here: partner decision 38.) Or plan an organisation's
+// chain recovery from the drill's copy (4D2e E9, chain-recovery.ts): only from
+// a file, read-only on both sides, checked against the anchors' store, the
+// plan and its rows to the evidence store alone.
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -44,7 +47,8 @@ import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
-import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
+import { type AnchorLog, createAnchorLog } from '@agentx/platform/audit-chain';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
   assertRuntimeRole,
@@ -53,7 +57,7 @@ import {
   transactionsReadOnly,
   UnsafeDatabaseRole,
 } from '@agentx/platform/db';
-import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
+import { type KeyProvider, loadKeys, publicKeyChecker } from '@agentx/platform/keys';
 import {
   createLogger,
   createStartupLogger,
@@ -63,7 +67,12 @@ import {
   type Output,
 } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
-import { azureBlobOrigins } from '@agentx/platform/storage';
+import {
+  azureBlobOrigins,
+  azureWriteOnceStore,
+  folderWriteOnceStore,
+  type WriteOnceStore,
+} from '@agentx/platform/storage';
 
 import { type ActivityExportTables, exportActivityLog } from './activity-export.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
@@ -76,10 +85,12 @@ import {
   ACTIVITY_EXPORT_USAGE,
   AUDIT_EXPORT_USAGE,
   auditExportOf,
+  CHAIN_RECOVERY_USAGE,
   FIRST_ADMIN_USAGE,
   type HandoffCommand,
   handoffAskedOf,
   handoffUsage,
+  NO_ANCHORS_PROBLEM,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
@@ -89,6 +100,7 @@ import {
   UUID_V7,
 } from './request.ts';
 import { checkRestoredCopy } from './restore-check.ts';
+import { planChainRecovery, planFile } from './chain-recovery.ts';
 
 /** Every table the commands reach. */
 type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables & HandoffPauseTables;
@@ -100,6 +112,15 @@ const APPLICATION_NAME = 'agentx-operator';
 
 /** The keys the command holds: the audit chains' MAC, and the field encryption an invited address is kept with (B4-6b). Any other mounted with them is refused. */
 const HELD_KEYS = ['audit-mac', 'field-encryption'] as const;
+
+/** The chain recovery plan's command word (4D2e E9). */
+const CHAIN_RECOVERY = 'chain-recovery-plan';
+
+/**
+ * How long the anchors' store may fail to be read before that is its alert: never,
+ * from here. A plan is refused on a failed read, and the API's own reads raise the alert.
+ */
+const ANCHOR_READ_NEVER_ALERTS_MS = Number.MAX_SAFE_INTEGER;
 
 /** What the operator types after the command's path, the name as one argument. */
 export const USAGE = 'create-organization --name <name>';
@@ -162,7 +183,13 @@ type Request =
       readonly id: string;
     }
   | HandoffRequest
-  | { readonly command: typeof RESTORE_CHECK };
+  | { readonly command: typeof RESTORE_CHECK }
+  | {
+      readonly command: typeof CHAIN_RECOVERY;
+      readonly orgId: string;
+      /** The plan's ID: its file's name in the evidence store. */
+      readonly id: string;
+    };
 
 /** A pause or resume of every hand-off, one shape for each command, so a check of the command narrows to its own. */
 type HandoffRequest = {
@@ -252,6 +279,7 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['handoff-pause', (words, fromFile) => handoffAsked('handoff-pause', words, fromFile)],
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
   [RESTORE_CHECK, restoreCheckAsked],
+  [CHAIN_RECOVERY, chainRecoveryAsked],
 ]);
 
 /**
@@ -290,6 +318,20 @@ function restoreCheckAsked(words: readonly string[], fromFile: boolean): Request
   return fromFile && words.length === 1
     ? { command: RESTORE_CHECK }
     : problem(`${RESTORE_CHECK} runs only from a request file, as the one word in its list`);
+}
+
+/** A chain recovery plan (4D2e E9): only from a file, the organisation and the plan's ID named. */
+function chainRecoveryAsked(words: readonly string[], fromFile: boolean): Request | Problems {
+  const [, orgFlag, orgId, idFlag, id, ...more] = words;
+  if (!fromFile) return problem(`${CHAIN_RECOVERY} runs only from a request file: ${CHAIN_RECOVERY_USAGE}`);
+  if (!(orgFlag === '--org' && idFlag === '--id' && id !== undefined && more.length === 0)) {
+    return problem(`the request file holds ${CHAIN_RECOVERY_USAGE} as a JSON list, and nothing else`);
+  }
+  const problems = [
+    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
+    ...(UUID_V7.test(id) ? [] : ["the plan's ID must be a UUIDv7, in lower case"]),
+  ];
+  return problems.length > 0 ? { problems } : { command: CHAIN_RECOVERY, orgId: String(orgId), id };
 }
 
 /**
@@ -422,6 +464,7 @@ async function run(
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
+  if (request.command === CHAIN_RECOVERY) return chainRecovery(config, keys, request, logger);
   if (request.command === 'audit-export' || request.command === 'activity-export') {
     const store = evidenceStoreOf(config);
     if (store === undefined) {
@@ -570,11 +613,16 @@ async function auditExport(
 }
 
 /**
- * The restore drill's check (S78): the exit code, 0 only when the copy holds.
- * Both sides read-only from their first packet, each proving it before
- * anything is read; nothing here raises the integrity alarm.
+ * Runs `work` on the drill's copy and the live server (S78): both read-only
+ * from their first packet, each proving it before anything is read. The exit
+ * code: `work`'s, or 1 when either side is refused or fails.
  */
-async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger): Promise<number> {
+async function onDrillSides(
+  config: OperatorConfig,
+  logger: Logger,
+  command: string,
+  work: (copy: Database<CommandTables>, live: Database<CommandTables>) => Promise<number>,
+): Promise<number> {
   const drillHost = config.db.drillHost;
   // Both are lower case (the config refuses a host that isn't), so one comparison tells them apart.
   if (drillHost === null || drillHost === config.db.host) {
@@ -592,6 +640,22 @@ async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: L
       logger.error('operator.refused', { problems: ['a connection is not read-only, so nothing was read'] });
       return 1;
     }
+    return await work(copy, live);
+  } catch (error) {
+    logger.error('operator.failed', { command, err: error });
+    return 1;
+  } finally {
+    await copy.destroy();
+    await live?.destroy();
+  }
+}
+
+/**
+ * The restore drill's check (S78): the exit code, 0 only when the copy holds.
+ * Nothing here raises the integrity alarm.
+ */
+function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger): Promise<number> {
+  return onDrillSides(config, logger, RESTORE_CHECK, async (copy, live) => {
     const report = await checkRestoredCopy({ copy, live, keys });
     // The logger keeps the first 50 problems (LOGGABLE_LIMITS); the count says how many in all.
     const line = { ...report, problemCount: report.problems.length };
@@ -601,13 +665,96 @@ async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: L
     }
     logger.info('operator.restore_check_done', line);
     return 0;
-  } catch (error) {
-    logger.error('operator.failed', { command: RESTORE_CHECK, err: error });
-    return 1;
-  } finally {
-    await copy.destroy();
-    await live?.destroy();
+  });
+}
+
+/**
+ * The chains' anchors as the API keeps them, read with their public keys alone
+ * (4D2e E9), or nothing where the store or the keys aren't set.
+ */
+function anchorLogOf({ anchors }: OperatorConfig, logger: Logger): AnchorLog | undefined {
+  const { directory, container, epoch, publicKeys } = anchors;
+  if (publicKeys === null) return undefined;
+  let store: WriteOnceStore;
+  if (container !== null) {
+    store = azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
+  } else if (directory === null) {
+    return undefined;
+  } else {
+    store = folderWriteOnceStore(directory);
   }
+  return createAnchorLog({
+    store,
+    keys: publicKeyChecker('audit-anchor', publicKeys),
+    logger,
+    now: () => systemClock.now(),
+    epoch,
+    alertAfterMs: ANCHOR_READ_NEVER_ALERTS_MS,
+  });
+}
+
+/**
+ * Plans an organisation's chain recovery from the drill's copy (4D2e E9): the
+ * exit code, 0 once a plan is made and in the evidence store. Read-only on both
+ * sides; a refused plan is kept there too, naming why.
+ */
+async function chainRecovery(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Extract<Request, { command: typeof CHAIN_RECOVERY }>,
+  logger: Logger,
+): Promise<number> {
+  const { orgId, id: planId } = request;
+  const log = logger.child({ orgId });
+  const store = evidenceStoreOf(config);
+  // The config has checked each public key's form, so the checker takes them as they are.
+  const anchors = anchorLogOf(config, logger);
+  if (store === undefined || anchors === undefined) {
+    const problems = [
+      ...(store === undefined ? [NO_STORE_PROBLEM] : []),
+      ...(anchors === undefined ? [NO_ANCHORS_PROBLEM] : []),
+    ];
+    log.error('operator.refused', { problems });
+    return 1;
+  }
+  return onDrillSides(config, logger, CHAIN_RECOVERY, async (copy, live) => {
+    await anchors.read();
+    if (anchors.state() !== 'read') {
+      log.error('operator.refused', {
+        problems: ["the chains' anchors' store couldn't be read whole, so no plan can be checked against it"],
+      });
+      return 1;
+    }
+    const anchor = anchors.latest({ kind: 'organisation', orgId });
+    const plan = await planChainRecovery({ copy, live, keys, orgId, anchor });
+    const file = planFile(plan, { planId, orgId, release: config.release, run: config.run, anchor });
+    if ((await store.put(`${orgId}/chain-recovery-${planId}.ndjson`, file)) === 'there_already') {
+      log.error('operator.done_before', { command: CHAIN_RECOVERY, planId });
+      return 1;
+    }
+    if (!plan.ok) {
+      log.error('operator.chain_recovery_refused', {
+        planId,
+        reason: plan.reason,
+        seq: plan.seq,
+        problem: plan.problem ?? null,
+      });
+      return 1;
+    }
+    const count = (action: string): number => plan.rows.filter((row) => row.action === action).length;
+    log.info('operator.chain_recovery_planned', {
+      planId,
+      putBack: count('put_back'),
+      replaced: count('replace'),
+      removed: count('remove'),
+      headReplaced: plan.head !== undefined,
+      copySeq: plan.copySeq,
+      endsAt: plan.endsAt.seq,
+      keptPastCopy: plan.keptPastCopy,
+      anchorSeq: anchor?.seq ?? null,
+    });
+    return 0;
+  });
 }
 
 /** Runs the command, sets the process's exit code and returns it: 0 once it is done. */

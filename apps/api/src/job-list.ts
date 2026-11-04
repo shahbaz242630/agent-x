@@ -25,7 +25,7 @@ import {
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { createMemoryAnchorStore } from '@agentx/platform/audit-chain';
+import { CHAIN_START, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 
@@ -34,6 +34,7 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
+import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
 import { anchorLogOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
@@ -51,7 +52,7 @@ import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-ch
 import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { contactFillFrom } from './kept-names.ts';
-import { CARRY_REST_EVERY_MS, createCarryRest } from './mandate-carry-rest.ts';
+import { CARRY_REST_EVERY_MS, carryRestDue, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
@@ -65,17 +66,17 @@ import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from '.
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
-import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
+import { createRequestVoids, REQUEST_VOIDS_EVERY_MS, requestVoidsDue } from './request-voids.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createRoundTripTiming, ROUND_TRIP_EVERY_MS, ROUND_TRIPS_A_RUN } from './round-trip-timing.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createWaitingRequests } from './waiting-requests.ts';
-import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
+import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejectionsDue } from './waiting-rejections.ts';
 
 /**
- * How long the anchor check of one chain may hold its lane before it counts as
- * not completed (anchor-check.ts). Each of its statements has 10 seconds at most
- * (verifyAlone), and it may go on past this, its result still compared.
+ * How long the anchor check of one chain, or its probe of every head, may hold its
+ * lane before it counts as not completed (anchor-check.ts). Each of its statements
+ * has 10 seconds at most, and it may go on past this, its result still compared.
  */
 const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
@@ -192,11 +193,27 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
-    chains: [{ chain: { kind: 'platform' }, verify: (anchor) => platform.verifyAlone(database, anchor) }],
+    chains: [
+      {
+        chain: { kind: 'platform' },
+        // From its anchor, and whole once a day (4D2e E8).
+        verify: platformChainCheck({
+          fromAnchor: (from) => platform.checkFromAnchor(database, from),
+          whole: (anchor) => platform.verifyAlone(database, anchor),
+          clock: systemClock,
+        }),
+      },
+    ],
     organizations: {
       list: () => listedOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
-      recorded: () => platform.createdOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
-      verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
+      // Only those recorded since the last read, up to where the platform chain's check has reached (4D2e E8).
+      recorded: recordedSince({
+        since: (afterSeq, upTo) => platform.createdOrganizationsSince(database, afterSeq, upTo, JOB_ANSWER_WITHIN_MS),
+        checkedTo: () => anchorStore.latest({ kind: 'platform' })?.seq,
+      }),
+      // No organisation's chain read whole (4D2e E8): every head probed each run, those moved read from their anchors.
+      probe: (chains, signal, pagesAtOnce) => trail.probeHeads(database, chains, signal, pagesAtOnce),
+      verify: (orgId, anchor) => trail.checkFromAnchor(database, orgId, anchor ?? CHAIN_START),
       // The run's own logger: the hold's lines name the organisation themselves.
       hold: (orgId, failure) =>
         holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure, JOB_ANSWER_WITHIN_MS),
@@ -211,6 +228,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     mostOrganisations: config.audit.mostOrganisations,
     anchors: anchorStore,
     ...(anchorLog === undefined ? {} : { durable: anchorLog }),
+    // Old events' counts, walks and full pass (4D2e E7): what finds an old event deleted or edited.
+    rotation: rotatedChecksOf(trail, database),
+    // Staging sleeps when unused: a woken process says nothing of a pass late for the time it slept.
+    sleeps: config.environment !== 'production',
   });
   // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
   // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.
@@ -235,6 +256,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         ...railWork,
         list: handOffMarks.list,
         sweepList: sweepMarks.list,
+        unfinished: handOffMarks.unfinished,
+        waitsAsAWhole: handOffMarks.waitsAsAWhole,
         outbox,
         // The anchor check starts before the hand-off's first run: this list's order.
         anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
@@ -251,9 +274,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         ...clocked,
         ...railWork,
         list: checkMarks.list,
-        unfinished: (orgId) => {
-          checkMarks.keep(orgId);
-        },
+        unfinished: checkMarks.unfinished,
         nextTurn: (orgId, at) => {
           checkMarks.dueBy(orgId, at);
         },
@@ -264,6 +285,11 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The two expiries, each visiting only the organisations whose soonest end has come by its marks (4D2e D8).
   const requestExpiryMarks = markedOrganisations({ job: 'request_expiry', nextDue: requestExpiryDue, ...marking });
   const mandateExpiryMarks = markedOrganisations({ job: 'mandate_expiry', nextDue: mandateExpiryDue, ...marking });
+  // The voids, the rejections and the carry, each visiting only the organisations where a candidate stands by its
+  // marks (4D2e D9); the voids also as a consent's end comes.
+  const voidsMarks = markedOrganisations({ job: 'request_voids', nextDue: requestVoidsDue, ...marking });
+  const rejectionMarks = markedOrganisations({ job: 'waiting_rejections', nextDue: waitingRejectionsDue, ...marking });
+  const carryMarks = markedOrganisations({ job: 'carry_rest', nextDue: carryRestDue, ...marking });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
@@ -414,7 +440,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       HOUR_MS,
     ),
     // Pending spend requests whose authority no longer stands voided, their holdings released (Phase 3 C1).
-    job('request_voids', createRequestVoids(clocked), REQUEST_VOIDS_EVERY_MS, HOUR_MS),
+    job(
+      'request_voids',
+      withOrgWork([voidsMarks], createRequestVoids({ ...clocked, list: voidsMarks.list })),
+      REQUEST_VOIDS_EVERY_MS,
+      HOUR_MS,
+    ),
     // The hand-off, where there is one.
     job('handoff', handoff, HANDOFF_EVERY_MS, HALF_HOUR_MS, (running) => {
       logger.info('api.handoff', { running });
@@ -423,9 +454,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       logger.info('api.payment_checks', { running });
     }),
     // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b).
-    job('waiting_rejections', createWaitingRejections(clocked), WAITING_REJECTIONS_EVERY_MS, HOUR_MS),
+    job(
+      'waiting_rejections',
+      withOrgWork([rejectionMarks], createWaitingRejections({ ...clocked, list: rejectionMarks.list })),
+      WAITING_REJECTIONS_EVERY_MS,
+      HOUR_MS,
+    ),
     // A carry past 20's rest weighed and carried onto the version in force (Phase 4 A3, PL-47).
-    job('carry_rest', createCarryRest(clocked), CARRY_REST_EVERY_MS, HOUR_MS),
+    job(
+      'carry_rest',
+      withOrgWork([carryMarks], createCarryRest({ ...clocked, list: carryMarks.list })),
+      CARRY_REST_EVERY_MS,
+      HOUR_MS,
+    ),
     // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6).
     job('activity_seal', createActivitySeal(clocked), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
     // The activity log's background downloads built, a month a file (Phase 3 L5c).

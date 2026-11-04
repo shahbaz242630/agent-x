@@ -28,8 +28,11 @@ import {
   type ChainEdges,
   ChainStoreError,
   countStep,
+  LAST_COUNTED,
   passStep,
+  probeEdges,
   verifyFromAnchor,
+  walkLast,
 } from './store.ts';
 
 const AUDIT_MAC = PURPOSES.indexOf('audit-mac') + 1;
@@ -137,6 +140,10 @@ class Tables implements ChainEdgeReader {
       highest: sorted.at(-1) ?? null,
       headEventHash: typeof head === 'string' ? undefined : this.rows.find(({ seq }) => seq === head.seq)?.hash,
       anchored: this.unreadable.has(anchored) ? undefined : this.rows.find(({ seq }) => seq === anchored),
+      lastStored:
+        typeof head === 'string'
+          ? 0n
+          : BigInt(this.rows.filter(({ seq }) => seq > head.seq - BigInt(LAST_COUNTED) && seq <= head.seq).length),
     };
     return Promise.resolve(this.edgesAs?.(edges) ?? edges);
   }
@@ -739,6 +746,95 @@ describe('a step of a full pass (4D2e E1)', () => {
   });
 });
 
+describe('the last events walked to a signed anchor (4D2e E7, decision 2b)', () => {
+  it('reads the start with the edges and walks from it to the anchor: two trips', async () => {
+    const tables = new Tables(keys, 9);
+    // Below the window, edited: the walk never sees it (the full pass does).
+    tables.replace(2n, { ...tables.row(2n), content: ['action', 'edited'] });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(8n), 3)).toEqual({
+      ok: true,
+      seq: 8n,
+      hash: tables.row(8n).hash,
+      macKeyVersion: 1,
+      to: 8n,
+    });
+    expect(tables.edgeTrips).toEqual([5n]);
+    expect(tables.pages).toEqual([{ after: 5n, upTo: 8n, limit: 3 }]);
+  });
+
+  it('walks a chain no longer than the window from its first event, with no read of the edges', async () => {
+    const tables = new Tables(keys, 3);
+    tables.replace(1n, { ...tables.row(1n), content: ['action', 'edited'] });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(3n), 3)).toEqual(refusal('hash', 1n));
+    expect(tables.edgeTrips).toEqual([]);
+    expect(await walkLast(keys, CHAIN, new Tables(keys, 0), CHAIN_START, 1000)).toMatchObject({ ok: true, seq: 0n });
+  });
+
+  it('finds an event in the window edited, the one hidden from a signed-state read', async () => {
+    const tables = new Tables(keys, 9);
+    tables.replace(7n, { ...tables.row(7n), content: ['subject', 'another'] });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(9n), 4)).toEqual(refusal('hash', 7n));
+  });
+
+  it('finds an event in the window deleted, and one past the window end not read', async () => {
+    const tables = new Tables(keys, 9);
+    const target = tables.point(8n);
+    tables.remove(7n);
+    tables.replace(9n, { ...tables.row(9n), content: ['action', 'edited'] });
+
+    expect(await walkLast(keys, CHAIN, tables, target, 4)).toEqual(refusal('gap', 7n));
+  });
+
+  it('believes no start that is missing, unreadable, edited, or sealed without the key', async () => {
+    const missing = new Tables(keys, 6);
+    missing.remove(3n);
+    expect(await walkLast(keys, CHAIN, missing, missing.point(6n), 3)).toEqual(refusal('unreadable', 3n));
+
+    const unreadable = new Tables(keys, 6);
+    unreadable.unreadable.add(3n);
+    expect(await walkLast(keys, CHAIN, unreadable, unreadable.point(6n), 3)).toEqual(refusal('unreadable', 3n));
+
+    const edited = new Tables(keys, 6);
+    edited.replace(3n, { ...edited.row(3n), content: ['action', 'edited'] });
+    expect(await walkLast(keys, CHAIN, edited, edited.point(6n), 3)).toEqual(refusal('hash', 3n));
+
+    // Rehashed whole by someone without the MAC key: its hash holds, its seal does not.
+    const forged = new Tables(keys, 6);
+    const row = forged.row(3n);
+    const entry: StoredEntry = { ...row, content: ['action', 'forged'] };
+    forged.replace(3n, { ...entry, hash: linkHash(CHAIN, row.prevHash, entry) });
+    expect(await walkLast(keys, CHAIN, forged, forged.point(6n), 3)).toEqual(refusal('mac', 3n));
+  });
+
+  it('believes no row the edges give for another number than asked', async () => {
+    const tables = new Tables(keys, 6);
+    tables.edgesAs = (edges) => ({ ...edges, anchored: tables.row(4n) });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(6n), 3)).toEqual(refusal('unreadable', 3n));
+  });
+
+  it('ends at the anchor signed: a window sealed afresh to another end fails there', async () => {
+    const tables = new Tables(keys, 6);
+
+    expect(await walkLast(keys, CHAIN, tables, { ...tables.point(6n), hash: fill(5) }, 3)).toEqual(
+      refusal('anchor', 6n),
+    );
+  });
+
+  it('refuses a window of more than 2,000 events, or of none, before any read', async () => {
+    const tables = new Tables(keys, 3);
+
+    await expect(walkLast(keys, CHAIN, tables, tables.point(3n), 2001)).rejects.toThrow(RangeError);
+    await expect(walkLast(keys, CHAIN, tables, tables.point(3n), 0)).rejects.toThrow(RangeError);
+    expect(tables.edgeTrips).toEqual([]);
+    expect(tables.pages).toEqual([]);
+    expect(await walkLast(keys, CHAIN, tables, tables.point(3n), 2000)).toMatchObject({ ok: true, seq: 3n });
+  });
+});
+
 describe('counting a stretch of a chain (4D2e E1)', () => {
   it('passes a stretch with every event there, whichever events lie outside it', async () => {
     const tables = new Tables(keys, 5);
@@ -766,5 +862,83 @@ describe('counting a stretch of a chain (4D2e E1)', () => {
 
     expect(await countStep(tables, 1n, 2n)).toBeUndefined();
     await expect(countStep(tables, 2n, 2n)).rejects.toThrow(RangeError);
+  });
+});
+
+describe("a chain's last events counted with its edges (4D2e E8, decision 1)", () => {
+  it('finds one deleted below the anchor among the last, after the walk, at where the count starts', async () => {
+    const tables = new Tables(keys, 6);
+    const from = tables.point(5n);
+    tables.remove(2n);
+
+    expect(await verifyFromAnchor(keys, CHAIN, tables, from)).toEqual(refusal('gap', 1n));
+    // The walk went first: an event missing past the anchor is said at its place, not where the count starts.
+    expect(tables.pages).toEqual([{ after: 5n, upTo: 6n, limit: 500 }]);
+  });
+
+  it('counts exactly the last LAST_COUNTED: one deleted just inside is found, one just outside is not', async () => {
+    const tables = new Tables(keys, LAST_COUNTED + 3);
+    const head = BigInt(LAST_COUNTED + 3);
+    const from = tables.point(head);
+    tables.remove(3n);
+
+    expect(await verifyFromAnchor(keys, CHAIN, tables, from)).toMatchObject({ ok: true, seq: head });
+    tables.remove(4n);
+    expect(await verifyFromAnchor(keys, CHAIN, tables, from)).toEqual(refusal('gap', 4n));
+  });
+});
+
+describe('the probe of a chain against its anchor (4D2e E8)', () => {
+  const probe = async (tables: Tables, from: CheckedPoint) =>
+    probeEdges(keys, CHAIN, await tables.edges(from.seq), from);
+
+  it('says a chain that has not moved is the same, and one that has is moved, reading no event', async () => {
+    const tables = new Tables(keys, 4);
+
+    expect(await probe(tables, tables.point(4n))).toEqual({ kind: 'same' });
+    expect(await probe(tables, tables.point(2n))).toEqual({ kind: 'moved' });
+    expect(tables.pages).toEqual([]);
+  });
+
+  it('says a chain never started, probed from the start, is the same; one with events is moved', async () => {
+    expect(await probe(new Tables(keys, 0), CHAIN_START)).toEqual({ kind: 'same' });
+    expect(await probe(new Tables(keys, 1), CHAIN_START)).toEqual({ kind: 'moved' });
+  });
+
+  it('finds an unmoved chain short of one of its last events; a moved one is left to its walk', async () => {
+    const tables = new Tables(keys, 4);
+    const at = tables.point(4n);
+    const before = tables.point(3n);
+    tables.remove(2n);
+
+    expect(await probe(tables, at)).toEqual({ kind: 'failed', problem: { reason: 'gap', seq: 1n } });
+    expect(await probe(tables, before)).toEqual({ kind: 'moved' });
+  });
+
+  it('fails a head sealed wrong or unreadable, a chain wound back, its anchored event gone, or its head removed', async () => {
+    const sealedWrong = new Tables(keys, 3);
+    sealedWrong.head = { ...(sealedWrong.head as ChainHead), mac: fill(1) };
+    const unreadable = new Tables(keys, 3);
+    const unreadableFrom = unreadable.point(3n);
+    unreadable.head = 'unreadable';
+    const woundBack = new Tables(keys, 5);
+    const woundFrom = woundBack.point(5n);
+    woundBack.remove(5n);
+    woundBack.head = woundBack.headAt(4n);
+    const edited = new Tables(keys, 3);
+    const editedFrom = edited.point(2n);
+    edited.unreadable.add(2n);
+    const headless = new Tables(keys, 2);
+    const headlessFrom = headless.point(2n);
+    headless.head = 'none';
+
+    expect(await probe(sealedWrong, sealedWrong.point(3n))).toEqual({
+      kind: 'failed',
+      problem: { reason: 'head', seq: 3n },
+    });
+    expect(await probe(unreadable, unreadableFrom)).toEqual({ kind: 'failed', problem: { reason: 'head', seq: 0n } });
+    expect(await probe(woundBack, woundFrom)).toEqual({ kind: 'failed', problem: { reason: 'anchor', seq: 5n } });
+    expect(await probe(edited, editedFrom)).toEqual({ kind: 'failed', problem: { reason: 'anchor', seq: 2n } });
+    expect(await probe(headless, headlessFrom)).toEqual({ kind: 'failed', problem: { reason: 'head', seq: 0n } });
   });
 });

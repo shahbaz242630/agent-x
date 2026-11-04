@@ -29,7 +29,8 @@ param backupRetentionDays int
 param geoRedundantBackup bool
 param subnetId string
 param privateDnsZoneId string
-param workspaceId string
+@description('The login alerts\' own workspace (monitoring.bicep): the server log goes there, and the alerts read it there, so the main workspace reaching its cap never blinds them (4D2e Stage F).')
+param loginWorkspaceId string
 param actionGroupId string
 @description('The migration job, the one thing that logs in as the owner role (apps.bicep).')
 param migrateJobName string
@@ -115,8 +116,8 @@ var settings = [
   // Burstable pricing tier as it causes performance problems." Query Store
   // keeps each query's plan too, so auto_explain (a restart of its own, past
   // the resize's) isn't needed. No slow-statement log either: at saturation
-  // it could fill the workspace's 1 GB a day, and the login alerts would go
-  // blind until the next day (S159 review); Query Store keeps each query's
+  // it could fill the login workspace's 1 GB a day, and the login alerts would
+  // go blind until the next day (S159 review); Query Store keeps each query's
   // slowest time inside the server.
   {
     name: 'pg_qs.query_capture_mode'
@@ -158,11 +159,13 @@ resource setting 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-
   }
 ]
 
+// Kept under its old name, so a deploy moves the one setting to the login workspace rather than adding a second
+// beside it that would go on filling the main one.
 resource serverLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   scope: server
   name: 'logs-to-workspace'
   properties: {
-    workspaceId: workspaceId
+    workspaceId: loginWorkspaceId
     // Resource-specific tables (PGSQLServerLogs), not the shared AzureDiagnostics.
     logAnalyticsDestinationType: 'Dedicated'
     logs: [
@@ -192,7 +195,7 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     description: 'SEV-1. The break-glass server admin or the backup role logged in to Postgres; every such use needs a recorded reason (ADR-002, ADR-012 §2). Runbook: Incident-Response-Playbook.md section B.'
     severity: 1
     enabled: true
-    scopes: [workspaceId]
+    scopes: [loginWorkspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
     // The table appears with the server's first log line, after this rule exists.
@@ -287,7 +290,7 @@ resource ownerLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     description: 'SEV-1. The owner role logged in to Postgres other than as the migration job starting, so someone else may hold its login and could rewrite the tables\' walls; or a start of that job had no login beside it (ADR-012 §2). Runbook: Incident-Response-Playbook.md section I.'
     severity: 1
     enabled: true
-    scopes: [workspaceId]
+    scopes: [loginWorkspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
     overrideQueryTimeRange: 'PT1H'

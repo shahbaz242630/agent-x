@@ -56,7 +56,9 @@ import {
   type Chain,
   type ChainBatchWriter,
   type ChainEdgeReader,
+  type ChainEdges,
   type ChainHead,
+  type ChainProbe,
   type ChainProblem,
   type ChainReader,
   type ChainReport,
@@ -69,13 +71,16 @@ import {
   entryIsSealed,
   headFields,
   headIsSealed,
+  LAST_COUNTED,
   passStep,
+  probeEdges,
   sealedFields,
   type StateSeal,
   stateSealIn,
   type StoredEntry,
   verifyChain,
   verifyFromAnchor,
+  walkLast,
 } from '@agentx/platform/audit-chain';
 import {
   type AnswersOf,
@@ -83,6 +88,7 @@ import {
   type GatheredRead,
   timedLock,
   JOB_ANSWER_WITHIN_MS,
+  readEachTenant,
   sendTogether,
   type SentTogether,
   withTenant,
@@ -251,6 +257,21 @@ export class TooManyEventsAboutObject extends Error {
   }
 }
 
+/** One organisation's chain to probe, and the place it is probed against: its anchor. */
+interface ProbeAsked {
+  readonly orgId: string;
+  readonly from: CheckedPoint;
+}
+
+/** What the probe found of one chain, or that its read failed. */
+type HeadProbe = ChainProbe | { readonly kind: 'missed'; readonly error: unknown };
+
+/**
+ * How many organisations one transaction of the probe reads, all on one trip: two statements each. 500 keeps a page's
+ * answers inside a trip's limit on a slow day (measured, 4D2e E8).
+ */
+const PROBE_PAGE = 500;
+
 export interface AuditTrail {
   /**
    * Adds the event to the organisation's chain, in the caller's transaction:
@@ -285,7 +306,10 @@ export interface AuditTrail {
    * organisation alone, so a chain it can't see reads as empty, never another's.
    */
   checkFromAnchor(db: Kysely<AuditTables>, orgId: string, from: CheckedPoint, most?: number): Promise<ChainStep>;
-  /** One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  /**
+   * One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's,
+   * each trip's answer limited as verifyAlone's: the anchor check runs it (E7).
+   */
   passStep(
     db: Kysely<AuditTables>,
     orgId: string,
@@ -293,8 +317,22 @@ export interface AuditTrail {
     target: CheckedPoint,
     most: number,
   ): Promise<ChainStep>;
-  /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as passStep's. */
   countStep(db: Kysely<AuditTables>, orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
+  /** The chain's last `most` events up to `target` walked (walkLast, 4D2e E7), in a transaction as passStep's. */
+  walkLast(db: Kysely<AuditTables>, orgId: string, target: CheckedPoint, most: number): Promise<ChainStep>;
+  /**
+   * Each organisation's chain probed against the place given (probeEdges, 4D2e E8): its edges and its last events
+   * counted, one statement each under that organisation's own wall, PROBE_PAGE of them a transaction and a trip
+   * (readEachTenant), `pagesAtOnce` pages at a time, each on a connection of its own. In the order given; stops
+   * between pages once `signal` aborts: those not reached are not in the answer. One whose read failed is `missed`.
+   */
+  probeHeads(
+    db: Kysely<AuditTables>,
+    chains: readonly ProbeAsked[],
+    signal?: AbortSignal,
+    pagesAtOnce?: number,
+  ): Promise<ReadonlyMap<string, HeadProbe>>;
   /**
    * Whether the organisation's chain still holds its last anchor, in one read:
    * its head not behind it, and the event anchored there the one anchored (not
@@ -571,7 +609,7 @@ function detailsObject(text: unknown): Readonly<Record<string, unknown>> | undef
 }
 
 /** What the chain sealed for a stored event, from its own columns, or nothing if one can't be read. */
-function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content'] | undefined {
+export function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content'] | undefined {
   const { actor_type: actorType, actor_id: actorId, action, subject_type: subjectType, subject_id: subjectId } = row;
   const { subject_version: subjectVersion, details } = row;
   if (![actorType, actorId, action, subjectType, subjectId, details].every(isText)) return undefined;
@@ -591,7 +629,7 @@ const HEAD_COLUMNS = sql`h.org_id is not null as has_head, h.seq as head_seq, h.
   h.mac_key_version as head_mac_key_version, past.past_head`;
 
 /** An event's own columns (`e`), as wholeEvent and wholeEntry judge them. */
-const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
+export const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
   e.subject_id, e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
   e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms`;
 
@@ -897,31 +935,41 @@ interface Along {
   rows?: readonly Readonly<Record<string, unknown>>[] | undefined;
 }
 
+/**
+ * A chain's edges and the event numbered `anchored` (ChainEdgeReader.edges), in one statement, so all of it comes from
+ * one moment; each on the events' key, whatever the chain's length. The probe sends it for each organisation in turn.
+ */
+const edgesRead = (orgId: string, anchored: bigint) => sql<Record<string, unknown>>`
+  select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${orgId}) as heads,
+         h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
+         (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${orgId}) as lowest,
+         (select pg_catalog.max(p.seq) from audit.events p where p.org_id = ${orgId}) as highest,
+         (select p.hash from audit.events p where p.org_id = ${orgId} and p.seq = h.seq limit 1) as head_event_hash,
+         (select pg_catalog.count(distinct p.seq) from audit.events p
+          where p.org_id = ${orgId} and p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
+         ${EVENT_COLUMNS}
+  from (values (1)) as one (x)
+  left join (select * from audit.heads a where a.org_id = ${orgId} limit 1) as h on true
+  left join audit.events e on e.org_id = ${orgId} and e.seq = ${anchored}
+`;
+
+/** The edges from edgesRead's rows: one always (`values` and left joins), but two where two events share a number, the table's key gone, and neither is the one anchored. */
+function edgesOf(rows: readonly Readonly<Record<string, unknown>>[]): ChainEdges {
+  const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
+  return edgesIn(row, contentOf(row));
+}
+
 /** Checking's reads of the audit tables, for one organisation. */
 function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdgeReader {
   return {
     async edges(anchored) {
-      // One statement, so all of it comes from one moment. Each on the events' key, whatever the chain's length.
-      const { rows } = await sql<Record<string, unknown>>`
-        select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${orgId}) as heads,
-               h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
-               (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${orgId}) as lowest,
-               (select pg_catalog.max(p.seq) from audit.events p where p.org_id = ${orgId}) as highest,
-               (select p.hash from audit.events p where p.org_id = ${orgId} and p.seq = h.seq limit 1) as head_event_hash,
-               ${EVENT_COLUMNS}
-        from (values (1)) as one (x)
-        left join (select * from audit.heads a where a.org_id = ${orgId} limit 1) as h on true
-        left join audit.events e on e.org_id = ${orgId} and e.seq = ${anchored}
-      `.execute(tx);
-      // One row always (`values` and left joins), but two where two events share a number, the table's key
-      // gone: neither is the one anchored.
-      const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
-      return edgesIn(row, contentOf(row));
+      const { rows } = await edgesRead(orgId, anchored).execute(tx);
+      return edgesOf(rows);
     },
 
     async countBetween(after, upTo) {
       const { rows } = await sql<Record<string, unknown>>`
-        select pg_catalog.count(*) as stored from audit.events e
+        select pg_catalog.count(distinct e.seq) as stored from audit.events e
         where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
       `.execute(tx);
       return countIn(rows[0]);
@@ -1037,6 +1085,9 @@ export async function lockChainHeadSeeingWaiting(tx: AuditTransaction, orgId: st
  * it wrote link (ADR-011 §7). Only the trail adds it, never a caller.
  */
 const CORRELATION_DETAIL = 'correlationId';
+
+/** A job's transaction: each statement limited, each trip's answer too (verifyAlone's). */
+const JOB_LIMITS = { limited: true, answeredWithinMs: JOB_ANSWER_WITHIN_MS } as const;
 
 export function createAuditTrail({
   keys,
@@ -1284,10 +1335,7 @@ export function createAuditTrail({
     },
 
     verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
-      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), {
-        limited: true,
-        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
-      });
+      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), JOB_LIMITS);
     },
 
     async checkFromAnchor(
@@ -1301,9 +1349,7 @@ export function createAuditTrail({
         db,
         chain.orgId,
         (tx) => verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId), from, most),
-        {
-          limited: true,
-        },
+        JOB_LIMITS,
       );
     },
 
@@ -1319,9 +1365,7 @@ export function createAuditTrail({
         db,
         chain.orgId,
         (tx) => passStep(keys, chain, readerFor(tx, chain.orgId), cursor, target, most),
-        {
-          limited: true,
-        },
+        JOB_LIMITS,
       );
     },
 
@@ -1332,7 +1376,55 @@ export function createAuditTrail({
       upTo: bigint,
     ): Promise<ChainProblem | undefined> {
       const chain = chainOf(orgId);
-      return withTenant(db, chain.orgId, (tx) => countStep(readerFor(tx, chain.orgId), after, upTo), { limited: true });
+      return withTenant(db, chain.orgId, (tx) => countStep(readerFor(tx, chain.orgId), after, upTo), JOB_LIMITS);
+    },
+
+    async walkLast(db: Kysely<AuditTables>, orgId: string, target: CheckedPoint, most: number): Promise<ChainStep> {
+      const chain = chainOf(orgId);
+      return withTenant(
+        db,
+        chain.orgId,
+        (tx) => walkLast(keys, chain, readerFor(tx, chain.orgId), target, most),
+        JOB_LIMITS,
+      );
+    },
+
+    async probeHeads(
+      db: Kysely<AuditTables>,
+      chains: readonly ProbeAsked[],
+      signal?: AbortSignal,
+      pagesAtOnce = 1,
+    ): Promise<ReadonlyMap<string, HeadProbe>> {
+      // Once each, in lower case, as the wall and the anchors name them.
+      const byOrganisation = new Map<string, ProbeAsked>();
+      for (const { orgId, from } of chains) {
+        const id = chainOf(orgId).orgId;
+        byOrganisation.set(id, { orgId: id, from });
+      }
+      const asked = [...byOrganisation.values()];
+      const found = new Map<string, HeadProbe>();
+      let next = 0;
+      // Each of `pagesAtOnce` takes the next page as it ends one, each page a transaction and a connection of its own.
+      const pages = async (): Promise<void> => {
+        while (next < asked.length && signal?.aborted !== true) {
+          const page = asked.slice(next, next + PROBE_PAGE);
+          next += PROBE_PAGE;
+          const reads = await readEachTenant(db, page, ({ orgId, from }) => edgesRead(orgId, from.seq), {
+            answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+          });
+          for (const { item, read } of reads) {
+            const { orgId, from } = item;
+            found.set(
+              orgId,
+              'failed' in read
+                ? { kind: 'missed', error: read.failed }
+                : probeEdges(keys, chainOf(orgId), edgesOf(read.rows), from),
+            );
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, pagesAtOnce) }, pages));
+      return found;
     },
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {
