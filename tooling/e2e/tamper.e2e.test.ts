@@ -38,7 +38,7 @@ import {
 import { widerThanMandate } from '../../packages/core/src/modules/mandates/index.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/index.ts';
 import { createDatabase, withTenant } from '../../packages/platform/src/db/index.ts';
-import { loadKeys } from '../../packages/platform/src/keys/index.ts';
+import { API_PURPOSES, type KeyProvider, loadKeys, OPERATOR_ONLY } from '../../packages/platform/src/keys/index.ts';
 import { FixedClock, testLogger } from '../../packages/testing/src/index.ts';
 
 import { createHandoff, handoffDatabaseGate } from '../../apps/api/src/handoff.ts';
@@ -48,7 +48,7 @@ import { createMandateRegistry } from '../../apps/api/src/mandate-registry.ts';
 import { AED, mandateWorld, type World } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { createSpendRequestDecisions } from '../../apps/api/src/spend-request-decisions.ts';
 import { spendWorld } from '../../apps/api/src/spend-world.helper.test.ts';
-import { APP_KEYS } from '../../deploy/compose/prepare.ts';
+import { APP_KEYS, OPERATOR_KEYS } from '../../deploy/compose/prepare.ts';
 import { apiAnswers } from './api-sign-in.ts';
 import { API_ORIGIN, execIn, localLogin, restartInPlace, SECRETS_DIR } from './compose.ts';
 import { loginDriver, where } from './login-pages.ts';
@@ -107,7 +107,29 @@ const database = createDatabase<HandoffWorldTables & ActivityExportTables & Acti
   testLogger(),
 );
 const clock = new FixedClock(new Date());
-const keys = loadKeys({ directory: path.join(SECRETS_DIR, APP_KEYS), current: {} });
+/** The API's keys, as its process holds them: every one but the operator's, whose public half alone it checks with. */
+const keys = loadKeys({ directory: path.join(SECRETS_DIR, APP_KEYS), current: {} }, API_PURPOSES, OPERATOR_ONLY);
+/**
+ * The operator's command, as it moves the hand-off pause (PL-57): its own role, and the chains' MAC with its own
+ * signing key, which only it holds.
+ */
+const operatorDatabase = createDatabase<HandoffWorldTables>(
+  {
+    host: '127.0.0.1',
+    port: 56541,
+    database: 'agentx',
+    user: 'agentx_operator',
+    password: localLogin('AGENTX_LOCAL_DB_OPERATOR_PASSWORD'),
+    tls: 'disable',
+    applicationName: 'agentx-tamper-e2e-operator',
+  },
+  testLogger(),
+);
+const operatorSigning = loadKeys({ directory: path.join(SECRETS_DIR, OPERATOR_KEYS), current: {} }, OPERATOR_ONLY);
+const operatorKeys: KeyProvider = {
+  ...keys,
+  sign: (purpose, message) => (purpose === 'operator-signing' ? operatorSigning : keys).sign(purpose, message),
+};
 const shared = mandateWorld({ app: () => database, clock: () => clock, ids: uuidV7Ids, name: 'tamper', keyring: keys });
 const registry = createMandateRegistry({ database, keys, ids: uuidV7Ids, clock, logger: testLogger() });
 const decisions = createSpendRequestDecisions({
@@ -444,14 +466,14 @@ const foreignChain = () =>
 async function seedPayment(): Promise<string> {
   const { w, acting } = await paying.ready();
   const request = await spend.ask(acting, w, { amount: ALLOWED(1n) });
-  const chain = createPlatformChain({ keys, ids: uuidV7Ids });
+  const chain = createPlatformChain({ keys: operatorKeys, ids: uuidV7Ids });
   const pause = (paused: boolean) =>
-    database
+    operatorDatabase
       .transaction()
       .execute((tx) =>
         changeHandoffPause(
           tx,
-          { chain, keys, logger: testLogger() },
+          { chain, keys: operatorKeys, logger: testLogger() },
           { paused, reason: 'TAMPER-E2E-PAYMENT', actor: PAUSE_ACTOR, release: 'tamper-e2e', run: null },
         ),
       );
@@ -1266,7 +1288,7 @@ afterAll(async () => {
     await adminContext?.close();
     await browser?.close();
   } finally {
-    await database.destroy();
+    await Promise.all([database.destroy(), operatorDatabase.destroy()]);
   }
 });
 
