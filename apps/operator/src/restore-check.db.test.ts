@@ -14,8 +14,12 @@ import { createOrganizationAsOperator, type OperatorTables } from './create-orga
 import { checkRestoredCopy } from './restore-check.ts';
 
 const server = inject('postgres');
-const keyFiles = writeTestKeys(['audit-mac', 'field-encryption']);
-const keys = loadKeys({ directory: keyFiles.directory, current: {} }, ['audit-mac', 'field-encryption']);
+const keyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keys = loadKeys({ directory: keyFiles.directory, current: {} }, [
+  'audit-mac',
+  'field-encryption',
+  'operator-signing',
+]);
 
 const quiet = () => testLogger();
 
@@ -23,10 +27,10 @@ let live: TestDatabase;
 let copy: TestDatabase | undefined;
 const open: Database<OperatorTables>[] = [];
 
-/** The app's role on a test database, read-only as the check connects, or not, to write. */
-function appOn(database: TestDatabase, readOnly: boolean): Database<OperatorTables> {
+/** The operator's own role (PL-57) on a test database, read-only as the check connects, or not, to write. */
+function operatorOn(database: TestDatabase, readOnly: boolean): Database<OperatorTables> {
   const handle = createDatabase<OperatorTables>(
-    { ...database.connection('app'), maxConnections: 1, readOnly },
+    { ...database.connection('operator'), maxConnections: 1, readOnly },
     quiet(),
   );
   open.push(handle);
@@ -35,7 +39,7 @@ function appOn(database: TestDatabase, readOnly: boolean): Database<OperatorTabl
 
 /** Makes an organisation as the operator's command does, on the database given. */
 async function organisationOn(database: TestDatabase): Promise<string> {
-  const writer = appOn(database, false);
+  const writer = operatorOn(database, false);
   const orgId = uuidV7Ids.next();
   await createOrganizationAsOperator(
     writer,
@@ -58,7 +62,7 @@ function theCopy(): TestDatabase {
 
 /** The check of the test's copy against its live database. */
 function check() {
-  return checkRestoredCopy({ copy: appOn(theCopy(), true), live: appOn(live, true), keys });
+  return checkRestoredCopy({ copy: operatorOn(theCopy(), true), live: operatorOn(live, true), keys });
 }
 
 beforeEach(async () => {
@@ -148,10 +152,10 @@ describe('SEC-AV-06 the restore drill check', () => {
 
   it("says a chain or a list the copy won't let it read, by the database's code alone", async () => {
     const orgId = await copyWithOrganisation();
-    // The test server's app role (tooling/test-db), as the check connects.
-    await breakCopy((admin) => admin.query('revoke select on audit.events from agentx_app'));
+    // The test server's operator role (tooling/test-db), as the check connects.
+    await breakCopy((admin) => admin.query('revoke select on audit.events from agentx_operator'));
     expect((await check()).problems).toEqual([`organisation ${orgId} on the copy: unreadable (42501)`]);
-    await breakCopy((admin) => admin.query('revoke select on directory.orgs from agentx_app'));
+    await breakCopy((admin) => admin.query('revoke select on directory.orgs from agentx_operator'));
     const report = await check();
     expect(report.problems).toEqual(["the organisations' lists: unreadable (42501)"]);
     expect(report.copyOrganizations).toBe(0);
@@ -165,9 +169,9 @@ describe('SEC-AV-06 the restore drill check', () => {
   });
 
   it('connects read-only: Postgres says so, and refuses a write', async () => {
-    const reader = appOn(live, true);
+    const reader = operatorOn(live, true);
     expect(await transactionsReadOnly(reader)).toBe(true);
-    expect(await transactionsReadOnly(appOn(live, false))).toBe(false);
+    expect(await transactionsReadOnly(operatorOn(live, false))).toBe(false);
     await expect(
       createOrganizationAsOperator(
         reader,

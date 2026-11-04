@@ -6,9 +6,9 @@
 -- agentx_owner owns it, so the migrations (run as agentx_owner) can create the
 -- module schemas. By default every role may connect to a new database and
 -- create temporary tables in it; both are taken back from PUBLIC, and only the
--- app and backup roles may connect.
+-- app, backup and operator roles may connect (operator-role.sql runs first).
 
 CREATE DATABASE :"db" OWNER agentx_owner;
 
 REVOKE ALL ON DATABASE :"db" FROM PUBLIC;
-GRANT CONNECT ON DATABASE :"db" TO agentx_app, agentx_backup;
+GRANT CONNECT ON DATABASE :"db" TO agentx_app, agentx_backup, agentx_operator;

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
-import { APP_KEYS, appKeysProblems } from './app-keys.ts';
+import { createKeyProvider } from '../../packages/platform/src/keys/key-provider.ts';
+import { APP_KEYS, appKeysProblems, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 
 const EVERY_V1 = PURPOSES.map((purpose) => `key-${purpose}-v1`);
 
@@ -45,5 +46,18 @@ describe("ADR-011 §2: the app's keys on Azure are the ones the API starts with"
     ],
   ])('refuses %s', (_what, list, problem) => {
     expect(appKeysProblems(list)).toEqual([problem]);
+  });
+});
+
+describe("the operator's key's public half (PL-57)", () => {
+  it('names one for each operator-only key, and makes it from the same bytes in the same run', () => {
+    expect([...PUBLIC_HALVES]).toEqual([['key-operator-signing-v1', 'public-operator-signing-v1']]);
+    const values = JSON.parse(newAppKeys()) as Record<string, string>;
+    expect(Object.keys(values).sort()).toEqual([...APP_KEYS, 'public-operator-signing-v1'].sort());
+    const seed = Buffer.from(values['key-operator-signing-v1'] ?? '', 'base64url');
+    const own = createKeyProvider({ 'operator-signing': { current: 1, versions: new Map([[1, seed]]) } }, [
+      'operator-signing',
+    ]);
+    expect(own.describe()[0]?.versions[0]?.publicKey).toBe(values['public-operator-signing-v1']);
   });
 });

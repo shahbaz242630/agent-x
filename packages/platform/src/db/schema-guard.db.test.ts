@@ -1875,6 +1875,127 @@ describe('the backup role, which only reads (ADR-005 §3)', () => {
   });
 });
 
+describe("the operator's role, held to exactly its list (PL-57)", () => {
+  it.each([
+    [
+      'a right on a table no command needs',
+      'grant update on platform_controls.audit_events to agentx_operator',
+      'revoke update on platform_controls.audit_events from agentx_operator',
+      'agentx_operator may UPDATE on platform_controls.audit_events',
+    ],
+    [
+      'a right on a column no command needs',
+      'grant update (details) on audit.events to agentx_operator',
+      'revoke update (details) on audit.events from agentx_operator',
+      'agentx_operator may UPDATE on column audit.events.details',
+    ],
+    [
+      'a right on a schema',
+      'grant create on schema audit to agentx_operator',
+      'revoke create on schema audit from agentx_operator',
+      'agentx_operator may CREATE on schema audit',
+    ],
+    [
+      'a right on the database',
+      "do $$ begin execute pg_catalog.format('grant temporary on database %I to agentx_operator', pg_catalog.current_database()); end $$",
+      "do $$ begin execute pg_catalog.format('revoke temporary on database %I from agentx_operator', pg_catalog.current_database()); end $$",
+      'agentx_operator may TEMPORARY on this database',
+    ],
+    [
+      'a right it holds, to hand on',
+      'grant select on audit.events to agentx_operator with grant option',
+      'revoke grant option for select on audit.events from agentx_operator',
+      'agentx_operator may grant SELECT on audit.events',
+    ],
+    [
+      'a right its list names, gone',
+      'revoke insert on notifications.outbox from agentx_operator',
+      'grant insert on notifications.outbox to agentx_operator',
+      'agentx_operator no longer holds INSERT on notifications.outbox',
+    ],
+    [
+      // The API's role only reads the operator's signatures (0079): one it could add is drift, though its schema allows adding.
+      "a signature of the operator's the API's role could add",
+      'grant insert on platform_controls.operator_signatures to agentx_app',
+      'revoke insert on platform_controls.operator_signatures from agentx_app',
+      'agentx_app may INSERT on platform_controls.operator_signatures',
+    ],
+    [
+      // Nor may it write where signing starts, which 0079 wrote as the owner.
+      'where signing starts, made writable by the API',
+      'grant insert on platform_controls.operator_signing to agentx_app',
+      'revoke insert on platform_controls.operator_signing from agentx_app',
+      'agentx_app may INSERT on platform_controls.operator_signing',
+    ],
+    [
+      // On an organisation's chain alike: a tenant table in an append-only schema, held to reading alone.
+      "an organisation's operator signature the API's role could add",
+      'grant insert on audit.operator_signatures to agentx_app',
+      'revoke insert on audit.operator_signatures from agentx_app',
+      'agentx_app may INSERT on audit.operator_signatures',
+    ],
+    [
+      // The API's role no longer moves the pause (0079), only locks it: given a column back, it is the app's drift.
+      "the hand-off pause's move given back to the API's role",
+      'grant update (paused) on platform_controls.handoff_pause to agentx_app',
+      'revoke update (paused) on platform_controls.handoff_pause from agentx_app',
+      `agentx_app may UPDATE platform_controls.handoff_pause's column "paused"`,
+    ],
+  ])('names %s', async (_what, tamper, undo, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(tamper);
+    try {
+      expect(await problems()).toEqual([problem]);
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(undo);
+    }
+    expect(await problems()).toEqual([]);
+  });
+
+  it("holds a right of its on a table a release just made as that release's, and one on a table it built at once", async () => {
+    await owner.query(
+      'create table platform_controls.coming (seq bigint primary key); grant select, update (seq) on platform_controls.coming to agentx_operator',
+    );
+    await owner.query('grant update (details) on platform_controls.audit_events to agentx_operator');
+    try {
+      const { atOnce, releaseShaped } = await liveSchemaDrift(app, ROLES);
+      expect(atOnce).toEqual(['agentx_operator may UPDATE on column platform_controls.audit_events.details']);
+      expect(releaseShaped).toEqual(
+        expect.arrayContaining([
+          'agentx_operator may SELECT on platform_controls.coming',
+          'agentx_operator may UPDATE on column platform_controls.coming.seq',
+        ]),
+      );
+    } finally {
+      await owner.query('revoke update (details) on platform_controls.audit_events from agentx_operator');
+      await owner.query('drop table platform_controls.coming');
+    }
+  });
+
+  it("holds a right it lost with a table a release renamed as that release's (PL-57)", async () => {
+    await owner.query('alter table access.requests rename to requests_moved');
+    try {
+      const { atOnce, releaseShaped } = await liveSchemaDrift(app, ROLES);
+      expect(atOnce).not.toContain('agentx_operator no longer holds SELECT on access.requests');
+      expect(releaseShaped).toContain('agentx_operator no longer holds SELECT on access.requests');
+    } finally {
+      await owner.query('alter table access.requests_moved rename to requests');
+    }
+  });
+
+  it("names a setting pinned to the operator's role on the whole server, as one pinned to the app's", async () => {
+    // Harmless to the other files' operator connections while it stands: their memory for a sort.
+    const admin = database.as('admin');
+    await admin.query("alter role agentx_operator set work_mem = '4MB'");
+    try {
+      expect(await problems()).toEqual(['a setting is pinned to this database or to a role']);
+    } finally {
+      await admin.query('alter role agentx_operator reset work_mem');
+    }
+  });
+});
+
 describe('which drift a release can also make (schema-check.ts holds it one run on the schedule)', () => {
   const PLANTED =
     'create function audit.planted() returns integer language sql set search_path = pg_catalog as $$ select 1 $$';
@@ -2195,10 +2316,15 @@ describe('which drift a release can also make (schema-check.ts holds it one run 
       try {
         const { atOnce, releaseShaped } = await drift();
         expect(atOnce).toEqual(['access.requests must be there']);
-        // Its CHECK constraints and keys go with it, each named as not there, as the table is.
+        // Its CHECK constraints and keys go with it, each named as not there, as the table is; the operator's right on
+        // it moved with it (PL-57): the release's too, never the alarm on its own.
         expect(
           releaseShaped.filter((problem) => !problem.includes('CHECK constraint') && !problem.includes("'s key ")),
-        ).toEqual(['access.requests is a table the migrations built, and is not there']);
+        ).toEqual([
+          'access.requests is a table the migrations built, and is not there',
+          'agentx_operator may SELECT on access.requests_moved',
+          'agentx_operator no longer holds SELECT on access.requests',
+        ]);
       } finally {
         await owner.query('alter table access.requests_moved rename to requests');
       }

@@ -30,10 +30,12 @@ const POLICY: SchemaPolicy = {
   globalTables: { ...SCHEMA_POLICY.globalTables, 'migrations.applied': LEDGER },
   appendOnlySchemas: [...SCHEMA_POLICY.appendOnlySchemas, 'journal'],
   appendOnlyExceptions: REAL_EXCEPTIONS,
+  appReadsOnly: SCHEMA_POLICY.appReadsOnly,
   fillInTables: SCHEMA_POLICY.fillInTables,
   requiredForeignKeys: SCHEMA_POLICY.requiredForeignKeys,
   tablesThatStay: [],
   partialUniqueIndexes: SCHEMA_POLICY.partialUniqueIndexes,
+  operatorRights: SCHEMA_POLICY.operatorRights,
 };
 /** The real global tables but the ledger, for the fixtures about the ledger alone. */
 const OTHER_GLOBALS = Object.fromEntries(
@@ -830,6 +832,25 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
+  describe("PL-57: the operator's role holds exactly the schema policy's list", () => {
+    it('fails a right the list leaves out, on a table, a column or a schema, and one it names that is gone', async () => {
+      const statements = [
+        ...TENANT_TABLE,
+        'grant update on platform_controls.audit_events to agentx_operator',
+        'grant update (label) on t.items to agentx_operator',
+        'grant create on schema audit to agentx_operator',
+        'revoke insert on notifications.outbox from agentx_operator',
+      ];
+      const unlisted = "which the schema policy's operatorRights don't list (PL-57)";
+      expect(await problemsAfter(statements)).toEqual([
+        `column t.items.label: agentx_operator has UPDATE, ${unlisted}`,
+        `schema audit: agentx_operator has CREATE, ${unlisted}`,
+        `table platform_controls.audit_events: agentx_operator has UPDATE, ${unlisted}`,
+        "agentx_operator lacks INSERT on notifications.outbox, which the schema policy's operatorRights list (PL-57)",
+      ]);
+    });
+  });
+
   describe('SEC-EVD-01: the app role only adds to and reads an append-only table', () => {
     it('fails UPDATE, DELETE or TRUNCATE for the app role on an append-only table, or UPDATE on one of its columns', async () => {
       const statements = [
@@ -896,6 +917,43 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         'journal.heads: the append-only exception list gives no reason for it',
         'journal.gone: is on the append-only exception list, but no such table exists',
         "migrations.applied: is on the append-only exception list, but its schema isn't append-only",
+      ]);
+    });
+
+    it("fails the app given INSERT on the operator's signatures on an organisation's chain, or where they start (PL-57)", async () => {
+      expect(
+        await problemsAfter([
+          'grant insert on audit.operator_signatures to agentx_app',
+          'grant insert on audit.operator_signing_starts to agentx_app',
+        ]),
+      ).toEqual([
+        'table audit.operator_signatures: agentx_app has INSERT on a table it may only read (PL-57)',
+        'table audit.operator_signing_starts: agentx_app has INSERT on a table it may only read (PL-57)',
+      ]);
+    });
+
+    it('fails a read-only entry with no reason, for a missing table, outside an append-only schema, or on another list', async () => {
+      const policy = {
+        ...POLICY,
+        appReadsOnly: {
+          ...SCHEMA_POLICY.appReadsOnly,
+          'audit.gone': 'Removed',
+          'audit.heads': 'Also an exception',
+          'migrations.applied': ' ',
+        },
+      };
+      expect(await problemsAfter([], policy)).toEqual([
+        'audit.gone: is on the read-only list, but no such table exists',
+        "audit.heads: is on the read-only list and another list of the app's rights",
+        'migrations.applied: the read-only list gives no reason for it',
+        "migrations.applied: is on the read-only list, but its schema isn't append-only",
+        "migrations.applied: is on the read-only list and another list of the app's rights",
+        // Read only is the narrower rule, so it is the one the head's grants are held to.
+        'column audit.heads.hash: agentx_app has UPDATE on a table it may only read (PL-57)',
+        'column audit.heads.mac: agentx_app has UPDATE on a table it may only read (PL-57)',
+        'column audit.heads.mac_key_version: agentx_app has UPDATE on a table it may only read (PL-57)',
+        'column audit.heads.seq: agentx_app has UPDATE on a table it may only read (PL-57)',
+        'table audit.heads: agentx_app has INSERT on a table it may only read (PL-57)',
       ]);
     });
   });
@@ -1180,14 +1238,18 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         await problemsWith({ ...SESSIONS, appMayUpdate: ['cookie_hash', 'cookie_hash', 'last_seen_at'] }),
       ).toContain(once);
       expect(await problemsWith({ ...SESSIONS, appMayUpdate: [] })).toContain(once);
-      const head = POLICY.globalTables['platform_controls.audit_head'] ?? { reason: '', columns: [] };
+      // Only an append-only table the app may change at all (an exception) may name its columns, as the pause does (0079).
+      const events = POLICY.globalTables['platform_controls.audit_events'] ?? { reason: '', columns: [] };
       expect(
         await problemsAfter([], {
           ...POLICY,
-          globalTables: { ...POLICY.globalTables, 'platform_controls.audit_head': { ...head, appMayUpdate: ['seq'] } },
+          globalTables: {
+            ...POLICY.globalTables,
+            'platform_controls.audit_events': { ...events, appMayUpdate: ['seq'] },
+          },
         }),
       ).toContain(
-        'platform_controls.audit_head: the global-table list names columns the app may change, but its schema is append-only',
+        'platform_controls.audit_events: the global-table list names columns the app may change, but its schema is append-only',
       );
       expect(await problemsWith({ ...SESSIONS, appMayUpdate: ['cookie_hash', 'last_seen_at', 'cookie'] })).toContain(
         "identity.sessions: the app may change column cookie, which the global-table list doesn't name",
@@ -1233,8 +1295,14 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       expect(await problemsAfter([], policy)).toEqual([
         "directory.orgs: the global-table list doesn't name the app's rights on it (B1d-1)",
         "migrations.applied: the global-table list names one of the app's rights twice",
-        "platform_controls.audit_head: the global-table list names the app's rights, but its schema is append-only",
+        'platform_controls.audit_head: the global-table list lets the app do more than add and read, but its schema is append-only',
         'migrations.applied: the global-table list lets the app SELECT it, but the app is granted no such right',
+      ]);
+    });
+
+    it("fails the app given INSERT on the operator's signatures, which its list holds to reading alone (PL-57)", async () => {
+      expect(await problemsAfter(['grant insert on platform_controls.operator_signatures to agentx_app'])).toEqual([
+        'table platform_controls.operator_signatures: agentx_app has INSERT on a global table; it may only SELECT (B1d-1)',
       ]);
     });
 

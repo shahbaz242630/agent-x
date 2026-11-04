@@ -17,7 +17,10 @@
 //   (deploy/azure, G2d-2), so the settings are the same string in both
 // - deploy/compose/secrets/app-keys, with the app's own keys (ADR-011 §2), one
 //   file per key as the API reads them (`key-<purpose>-v1`, 32 random bytes as
-//   base64url). A key once written is kept: the stack's data depends on it
+//   base64url). A key once written is kept: the stack's data depends on it.
+//   The operator's own key (PL-57) goes to secrets/operator-keys instead, which
+//   the API never mounts, and its public half beside the API's keys
+//   (`public-<purpose>-v1`), as Azure mounts them
 // - deploy/compose/secrets/api-sign-in, an empty folder the API mounts, where
 //   the end-to-end suite puts the API's OIDC client secret once it registers
 //   the API with the login service (tooling/e2e/api-sign-in.ts). Made here,
@@ -26,12 +29,12 @@
 // - deploy/compose/secrets/mail-sink, an empty folder the stand-in email
 //   service mounts (mail-sink.ts), where the suite puts its copy of the
 //   API's email access key; made here for the same reason
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
+import { API_PURPOSES, OPERATOR_ONLY } from '../../packages/platform/src/keys/purposes.ts';
 
 /** Where compose reads the file from: its own folder. */
 export const ENV_FILE = fileURLToPath(new URL('./.env', import.meta.url));
@@ -45,6 +48,7 @@ export const PASSWORDS = [
   'AGENTX_LOCAL_DB_OWNER_PASSWORD',
   'AGENTX_LOCAL_DB_APP_PASSWORD',
   'AGENTX_LOCAL_DB_BACKUP_PASSWORD',
+  'AGENTX_LOCAL_DB_OPERATOR_PASSWORD',
   'AGENTX_LOCAL_ZITADEL_DB_PASSWORD',
   'AGENTX_LOCAL_ZITADEL_ADMIN_PASSWORD',
 ] as const;
@@ -69,6 +73,19 @@ export const LOGIN_CLIENT_KEYS = {
  * alone, at the path Azure mounts them (AGENTX_KEYS_DIR is /mnt/secrets in both).
  */
 export const APP_KEYS = 'app-keys';
+
+/** The operator's own keys (PL-57), in a folder compose mounts into the operator's command alone. */
+export const OPERATOR_KEYS = 'operator-keys';
+
+/** Ed25519's PKCS #8 wrapping of a 32-byte seed (RFC 8410), as the app's key provider reads one. */
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+
+/** A signing key's public half, as base64url, from its file's text. */
+export function publicHalfOf(keyText: string): string {
+  const seed = Buffer.from(keyText.trim(), 'base64url');
+  const key = createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]), format: 'der', type: 'pkcs8' });
+  return String(createPublicKey(key).export({ format: 'jwk' }).x);
+}
 
 /** The API's sign-in secret, in a folder of its own that compose mounts into the API alone. */
 export const API_SIGN_IN = 'api-sign-in';
@@ -211,28 +228,42 @@ export function prepareKeys(dir: string = SECRETS_DIR, keyPair: KeyPair = newKey
   return 'created';
 }
 
+/** Writes a key file where there is none (`wx`: the file system decides), or checks the one there: true if written. */
+function writeOnce(file: string, text: string): boolean {
+  try {
+    writeFileSync(file, text, { mode: 0o644, flag: 'wx' });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if (!statSync(file).isFile()) throw new NotAKeyFile(file);
+    return false;
+  }
+}
+
 /**
  * One version 1 key for each of the app's purposes, written only where there
  * is none: the stack's data is sealed with the keys it has, so a key is never
  * replaced. Readable by anyone on this machine for the same reason as the key
- * pair: the API runs as its own unprivileged user.
+ * pair: the API runs as its own unprivileged user. The operator's own keys go
+ * to `operatorDir`, and each one's public half beside the API's, made from the
+ * key there (PL-57).
  */
 export function prepareAppKeys(
   dir: string = path.join(SECRETS_DIR, APP_KEYS),
   random: Random = randomBytes,
+  operatorDir: string = path.join(path.dirname(dir), OPERATOR_KEYS),
 ): 'created' | 'kept' {
   mkdirSync(dir, { recursive: true });
+  mkdirSync(operatorDir, { recursive: true });
   let created = false;
-  for (const purpose of PURPOSES) {
-    const file = path.join(dir, `key-${purpose}-v1`);
-    // `wx` lets the file system decide, in one step, whether a key is already there.
-    try {
-      writeFileSync(file, `${random(32).toString('base64url')}\n`, { mode: 0o644, flag: 'wx' });
-      created = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (!statSync(file).isFile()) throw new NotAKeyFile(file);
-    }
+  for (const purpose of API_PURPOSES) {
+    created = writeOnce(path.join(dir, `key-${purpose}-v1`), `${random(32).toString('base64url')}\n`) || created;
+  }
+  for (const purpose of OPERATOR_ONLY) {
+    const file = path.join(operatorDir, `key-${purpose}-v1`);
+    created = writeOnce(file, `${random(32).toString('base64url')}\n`) || created;
+    const half = `${publicHalfOf(readFileSync(file, 'utf8'))}\n`;
+    created = writeOnce(path.join(dir, `public-${purpose}-v1`), half) || created;
   }
   return created ? 'created' : 'kept';
 }

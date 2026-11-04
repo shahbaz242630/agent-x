@@ -1,6 +1,7 @@
 // The operator's command (B1c; ADR-011 §3): operator actions, run as a job
-// started by a person, as the app's own role, never the owner, so the same
-// tenant walls hold it as hold the API. Its commands:
+// started by a person, as its own role (agentx_operator, PL-57), never the
+// owner's or the API's, so the same tenant walls hold it as hold the API and
+// the database, not only this code, keeps the API from its writes. Its commands:
 //
 //   node apps/operator/src/main.ts create-organization --name <name>
 //   node apps/operator/src/main.ts --request <file>
@@ -36,8 +37,9 @@
 // 3. reads what it was asked and checks the name, before it connects: a
 //    refusal names each rule broken, never the name, which is never logged,
 //    nor anything else a request file holds
-// 4. connects as the app's role, and refuses one that could get round the tenant walls (ADR-005 §3)
-// 5. checks the live schema, and refuses to write through walls that have been rewritten (A3e-1b)
+// 4. connects as its own role, and refuses any other, or one that could get round the tenant walls (ADR-005 §3)
+// 5. checks the live schema, the API's role's rights and its own, and refuses to write through walls that have
+//    been rewritten (A3e-1b)
 // 6. creates the organisation, on its own audit chain and the platform's,
 //    and exits 0; 1 when anything is refused or fails, with nothing changed,
 //    unless the connection was lost as the creation committed (see run's
@@ -53,9 +55,11 @@ import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type AnchorLog, createAnchorLog } from '@agentx/platform/audit-chain';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
+  APP_ROLE,
   assertRuntimeRole,
   createDatabase,
   type Database,
+  OPERATOR_ROLE,
   transactionsReadOnly,
   UnsafeDatabaseRole,
 } from '@agentx/platform/db';
@@ -112,8 +116,14 @@ const SERVICE = 'operator';
 /** How the command's connection is named in Postgres's own views. */
 const APPLICATION_NAME = 'agentx-operator';
 
-/** The keys the command holds: the audit chains' MAC, and the field encryption an invited address is kept with (B4-6b). Any other mounted with them is refused. */
-const HELD_KEYS = ['audit-mac', 'field-encryption'] as const;
+/**
+ * The keys the command holds: the audit chains' MAC, the field encryption an
+ * invited address is kept with (B4-6b), and its own signing key, which no other
+ * process holds (PL-57). Any other mounted with them is refused. The MAC
+ * because it seals its events like any writer; that the operator wrote them is
+ * proven by its signature, which the API can't make.
+ */
+export const HELD_KEYS = ['audit-mac', 'field-encryption', 'operator-signing'] as const;
 
 /** The chain recovery plan's command word (4D2e E9). */
 const CHAIN_RECOVERY = 'chain-recovery-plan';
@@ -432,6 +442,13 @@ async function connect(
   logger: Logger,
   to?: { readonly host: string; readonly readOnly: boolean },
 ): Promise<Database<CommandTables> | undefined> {
+  // Another role's rights are not the operator's: the API's would bring back the writes it no longer holds.
+  if (config.db.user !== OPERATOR_ROLE) {
+    logger.error('operator.start_refused', {
+      problems: [`AGENTX_DB_USER must be ${OPERATOR_ROLE}, the command's own role (PL-57)`],
+    });
+    return undefined;
+  }
   const database = createDatabase<CommandTables>(
     { ...config.db, ...to, maxConnections: 1, applicationName: APPLICATION_NAME },
     logger,
@@ -490,7 +507,7 @@ async function run(
   const log = logger.child({ orgId });
   try {
     // Before anything is written: the new organisation's rows would go through the same walls.
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     const created = await createOrganizationAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -529,7 +546,7 @@ async function inviteFirst(
   const log = logger.child({ orgId: request.orgId });
   const invitationId = request.id;
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     const invited = await inviteFirstAdminAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -570,7 +587,7 @@ async function handoff(
   logger: Logger,
 ): Promise<number> {
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     return await changeHandoffPauseAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -605,7 +622,7 @@ async function auditExport(
   logger: Logger,
 ): Promise<number> {
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     const asked = { ...request, exportId: request.id, release: config.release, run: config.run };
     const services = { keys, ids: uuidV7Ids, logger };
     return request.command === 'audit-export'

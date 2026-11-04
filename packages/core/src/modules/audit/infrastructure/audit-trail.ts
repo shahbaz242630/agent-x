@@ -72,9 +72,11 @@ import {
   headFields,
   headIsSealed,
   LAST_COUNTED,
+  OPERATOR_ID,
+  operatorSignature,
   passStep,
   probeEdges,
-  sealedFields,
+  sealedSigned,
   type StateSeal,
   stateSealIn,
   type StoredEntry,
@@ -628,10 +630,33 @@ export function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['
 const HEAD_COLUMNS = sql`h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
   h.mac_key_version as head_mac_key_version, past.past_head`;
 
-/** An event's own columns (`e`), as wholeEvent and wholeEntry judge them. */
-export const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
+/**
+ * The operator's signature on an event of its, and where signing started on the
+ * chain (PL-57, sealedSigned): read only for the operator's events, the rare
+ * ones, so every other row costs nothing. A chain with no start written by 0079
+ * was started after it: its start is its first place.
+ */
+const OPERATOR_COLUMNS = sql`
+  case when e.actor_id = ${OPERATOR_ID} then (
+    select s.signature from audit.operator_signatures s where s.org_id = e.org_id and s.seq = e.seq
+  ) end as signature,
+  case when e.actor_id = ${OPERATOR_ID} then (
+    select s.key_version from audit.operator_signatures s where s.org_id = e.org_id and s.seq = e.seq
+  ) end as signature_key_version,
+  case when e.actor_id = ${OPERATOR_ID} then coalesce(
+    (select f.signed_from from audit.operator_signing_starts f where f.org_id = e.org_id), 1::bigint
+  ) end as signed_from`;
+
+/** An event's own columns (`e`), as stored: the anchored event's read has these alone (edges). */
+const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
   e.subject_id, e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
   e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms`;
+
+/**
+ * Those and the operator's signature, as wholeEvent, wholeEntry, the chain's
+ * check and the recovery plan's rows (chain-rows.ts) judge them.
+ */
+export const SIGNED_EVENT_COLUMNS = sql`${EVENT_COLUMNS}, ${OPERATOR_COLUMNS}`;
 
 /** The chain's head and the first event past it, joined to each row of a read's `from`. */
 const headJoins = (chain: Chain & { readonly kind: 'organisation' }): RawBuilder<unknown> => sql`
@@ -678,7 +703,7 @@ async function eventsWithHead(
   const { rows } = await sql<Record<string, unknown>>`
     ${withRow}
     select ${HEAD_COLUMNS},
-           ${EVENT_COLUMNS}${rowColumn}
+           ${SIGNED_EVENT_COLUMNS}${rowColumn}
     from (values (1)) as one (x)
     ${headJoins(chain)}
     left join lateral (${picked}) as e on true
@@ -710,7 +735,7 @@ async function historiesWithHead(
   );
   const { rows } = await sql<Record<string, unknown>>`
     select ${HEAD_COLUMNS}, e.find,
-           ${EVENT_COLUMNS}
+           ${SIGNED_EVENT_COLUMNS}
     from (values (1)) as one (x)
     ${headJoins(chain)}
     left join lateral (${sql.join(each, sql` union all `)}) as e on true
@@ -754,7 +779,7 @@ function gatheredWithHead(
     objects as materialized (${sql.join(each, sql` union all `)})
     select o.item, o.subject_id::text as asked_id, o.row_json,
            ${HEAD_COLUMNS},
-           ${EVENT_COLUMNS}
+           ${SIGNED_EVENT_COLUMNS}
     from objects o
     ${headJoins(chain)}
     left join lateral (
@@ -808,7 +833,7 @@ function wholeEntry(
   row: Readonly<Record<string, unknown>>,
   head: ChainHead | undefined,
 ): { readonly read: ReadEvent; readonly sealed: Omit<StoredEntry, 'content'> } | undefined {
-  const sealed = sealedFields(row);
+  const sealed = sealedSigned(keys, chain, row);
   const content = contentOf(row);
   const details = detailsObject(row.details);
   if (
@@ -850,6 +875,7 @@ interface EventToWrite {
 /** Recording's steps over the audit tables, for one organisation and the events recorded together, in their order. */
 function writerFor(
   tx: AuditTransaction,
+  keys: KeyProvider,
   orgId: string,
   toWrite: readonly EventToWrite[],
   along?: Along,
@@ -903,6 +929,24 @@ function writerFor(
                                   subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version)
         ${sql.join(selects, sql` union all `)}
       `;
+      // The operator's events signed with its own key, which no other process holds (PL-57): written with them, in
+      // the same statement, only if the head moved; a role that may not add a signature can't write the events.
+      const chain: Chain = { kind: 'organisation', orgId };
+      const signatures = sealedEvents.flatMap((sealed, index) => {
+        const signed = operatorSignature(keys, chain, toWrite[index]?.event.actor.id ?? '', sealed);
+        return signed === undefined
+          ? []
+          : [sql`(${sealed.seq}::bigint, ${signed.signature}::bytea, ${signed.keyVersion}::integer)`];
+      });
+      const sign =
+        signatures.length === 0
+          ? sql``
+          : sql`, signed as (
+              insert into audit.operator_signatures (org_id, seq, signature, key_version)
+              select m.org_id, v.seq, v.signature, v.key_version
+              from moved m cross join (values ${sql.join(signatures)}) as v (seq, signature, key_version)
+              returning 1
+            )`;
       const move = sql`
         update audit.heads
         set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
@@ -914,7 +958,7 @@ function writerFor(
       if (along !== undefined) {
         // The row's pointer too, only once the events are written (4D2d P8): the statement it came with, run here.
         const { rows } = await sql<{ written: bigint; along: unknown }>`
-          with moved as (${move}), written as (${insert} returning 1),
+          with moved as (${move})${sign}, written as (${insert} returning 1),
           along as (${along.statement(last.id, sql`exists (select from written)`)})
           select (select pg_catalog.count(*) from written) as written,
                  (select pg_catalog.json_agg(pg_catalog.row_to_json(a)) from along a) as along
@@ -923,7 +967,7 @@ function writerFor(
         along.rows = rowsAlong({ row_json: row?.along });
         return row?.written === allWritten;
       }
-      const written = await sql`with moved as (${move}) ${insert}`.execute(tx);
+      const written = await sql`with moved as (${move})${sign} ${insert}`.execute(tx);
       return written.numAffectedRows === allWritten;
     },
   };
@@ -960,7 +1004,7 @@ function edgesOf(rows: readonly Readonly<Record<string, unknown>>[]): ChainEdges
 }
 
 /** Checking's reads of the audit tables, for one organisation. */
-function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdgeReader {
+function readerFor(tx: AuditTransaction, orgId: string, keys: KeyProvider): ChainReader & ChainEdgeReader {
   return {
     async edges(anchored) {
       const { rows } = await edgesRead(orgId, anchored).execute(tx);
@@ -989,18 +1033,14 @@ function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdge
     },
 
     async events(after, upTo, limit) {
-      const rows = await tx
-        .selectFrom('audit.events')
-        .selectAll()
-        .select(sql<boolean>`recorded_at = pg_catalog.date_trunc('milliseconds', recorded_at)`.as('whole_ms'))
-        .where('org_id', '=', orgId)
-        .where('seq', '>', after)
-        .where('seq', '<=', upTo)
-        .orderBy('seq')
-        .limit(limit)
-        .execute();
+      const { rows } = await sql<Record<string, unknown>>`
+        select ${SIGNED_EVENT_COLUMNS} from audit.events e
+        where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
+        order by e.seq limit ${limit}
+      `.execute(tx);
+      const chain: Chain = { kind: 'organisation', orgId };
       return rows.map((row) => {
-        const sealed = sealedFields(row);
+        const sealed = sealedSigned(keys, chain, row);
         const content = contentOf(row);
         return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
       });
@@ -1147,7 +1187,7 @@ export function createAuditTrail({
     const sealed = await appendEvents(
       keys,
       chain,
-      writerFor(tx, chain.orgId, events, along),
+      writerFor(tx, keys, chain.orgId, events, along),
       events.map(({ event, details }) => ({ nextId: () => ids.next(), content: eventContent(event, details) })),
     );
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
@@ -1192,7 +1232,7 @@ export function createAuditTrail({
     if (newestSigned === undefined) return pastHead ? brokenPast : { kind: 'none' };
 
     const head = first.has_head === true ? headIsWhole(keys, chain, first) : undefined;
-    const read = events.map((row) => ({ row, sealed: sealedFields(row), content: contentOf(row) }));
+    const read = events.map((row) => ({ row, sealed: sealedSigned(keys, chain, row), content: contentOf(row) }));
     const bad = read.find(
       ({ sealed, content }) =>
         sealed === undefined ||
@@ -1331,7 +1371,7 @@ export function createAuditTrail({
     async verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      return verifyChain(keys, chain, readerFor(tx, chain.orgId), anchor);
+      return verifyChain(keys, chain, readerFor(tx, chain.orgId, keys), anchor);
     },
 
     verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
@@ -1348,7 +1388,7 @@ export function createAuditTrail({
       return withTenant(
         db,
         chain.orgId,
-        (tx) => verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId), from, most),
+        (tx) => verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId, keys), from, most),
         JOB_LIMITS,
       );
     },
@@ -1364,7 +1404,7 @@ export function createAuditTrail({
       return withTenant(
         db,
         chain.orgId,
-        (tx) => passStep(keys, chain, readerFor(tx, chain.orgId), cursor, target, most),
+        (tx) => passStep(keys, chain, readerFor(tx, chain.orgId, keys), cursor, target, most),
         JOB_LIMITS,
       );
     },
@@ -1376,7 +1416,7 @@ export function createAuditTrail({
       upTo: bigint,
     ): Promise<ChainProblem | undefined> {
       const chain = chainOf(orgId);
-      return withTenant(db, chain.orgId, (tx) => countStep(readerFor(tx, chain.orgId), after, upTo), JOB_LIMITS);
+      return withTenant(db, chain.orgId, (tx) => countStep(readerFor(tx, chain.orgId, keys), after, upTo), JOB_LIMITS);
     },
 
     async walkLast(db: Kysely<AuditTables>, orgId: string, target: CheckedPoint, most: number): Promise<ChainStep> {
@@ -1384,7 +1424,7 @@ export function createAuditTrail({
       return withTenant(
         db,
         chain.orgId,
-        (tx) => walkLast(keys, chain, readerFor(tx, chain.orgId), target, most),
+        (tx) => walkLast(keys, chain, readerFor(tx, chain.orgId, keys), target, most),
         JOB_LIMITS,
       );
     },

@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
-import { APP_KEYS } from './app-keys.ts';
+import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 
@@ -411,15 +411,17 @@ const TELEMETRY_SETTINGS = [
  * because GitGuardian read an app's name beside a secret's name as a password,
  * whichever held which (PRs #27 and #28). The set-up job reads every database
  * login, since each of its runs sets them all. The API reads each of the app's
- * keys (ADR-011 §2), from the one list of them (app-keys.json); the operator's
- * command, the app's login and every version of the audit chains' MAC and of
- * the field encryption alone (ADR-011 §3, B1c, B4-6b).
+ * keys (ADR-011 §2), from the one list of them (app-keys.json), but the
+ * operator's own, whose public half it reads instead (PL-57); the operator's
+ * command, its own login and every version of the audit chains' MAC, of the
+ * field encryption and of its own signing key alone (ADR-011 §3, B1c, B4-6b).
  */
 const GRANTS: ReadonlySet<string> = new Set([
-  ...APP_KEYS.map((key) => `api reads ${key}`),
-  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')).map(
-    (key) => `operator reads ${key}`,
-  ),
+  ...APP_KEYS.filter((key) => !operatorOnly(key)).map((key) => `api reads ${key}`),
+  ...[...PUBLIC_HALVES.values()].map((half) => `api reads ${half}`),
+  ...APP_KEYS.filter(
+    (key) => key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v') || operatorOnly(key),
+  ).map((key) => `operator reads ${key}`),
   'api reads db-app-password',
   // B2-6: the API's own secret as the login service's client, which Zitadel gave.
   'api reads api-oidc-client-secret',
@@ -428,11 +430,12 @@ const GRANTS: ReadonlySet<string> = new Set([
   'api reads zitadel-directory-token',
   // B6-3c: the login service's token for removing second factors once a reset has cooled off.
   'api reads zitadel-reset-token',
-  'operator reads db-app-password',
+  'operator reads db-operator-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',
   'db-setup reads db-app-password',
   'db-setup reads db-backup-password',
+  'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
   'zitadel reads db-zitadel-password',
@@ -522,7 +525,7 @@ const LOAD_RUN = {
   jobs: LOAD_PARTS.map((part) => `load-${part}`),
   runsAs: 'api',
   image: 'ghcr.io/shahbaz242630/agent-x-load@',
-  reads: new Set(['db-app-password', ...APP_KEYS]),
+  reads: new Set(['db-app-password', ...APP_KEYS.filter((key) => !operatorOnly(key)), ...PUBLIC_HALVES.values()]),
   apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
   // Twenty connections, on the larger server `foundation --load-size` gives, whose limit postgres.bicep states.
@@ -765,7 +768,7 @@ const LONGEST_RUN_SECONDS = 3600;
  * encrypted with another master key, and what one of the app's keys sealed or
  * signed needs that key as it was (a rotation adds a version instead).
  */
-const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS]);
+const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS, ...PUBLIC_HALVES.values()]);
 
 /**
  * The secrets a run copies from an Azure service of this deployment on every
@@ -1199,7 +1202,7 @@ const KEY_MEMBER_REFERENCE = /^\[json\(parameters\('[^']+'\)\)\['([^']+)'\]\]$/;
 /** Whether a vault secret's value is its own key member: only for one of the app's keys. */
 const isOwnKeyMember = (secret: PredictedResource, value: unknown): boolean =>
   typeof value === 'string' &&
-  APP_KEYS.includes(secretNameOf(secret)) &&
+  (APP_KEYS.includes(secretNameOf(secret)) || [...PUBLIC_HALVES.values()].includes(secretNameOf(secret))) &&
   KEY_MEMBER_REFERENCE.exec(value)?.[1] === secretNameOf(secret);
 
 /**

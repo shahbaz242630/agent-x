@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ENV_FILE, prepare } from '../../deploy/compose/prepare.ts';
 import { createDatabase, type Database } from '../../packages/platform/src/db/index.ts';
-import { loadKeys } from '../../packages/platform/src/keys/index.ts';
+import { API_PURPOSES, loadKeys, OPERATOR_ONLY } from '../../packages/platform/src/keys/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
 import { probeFreeze, withFreezeProbe } from './freeze-probe.ts';
@@ -213,7 +213,7 @@ async function asApp<T>(password: string, work: (database: Database<LoadTables>)
 const neighboursPhase = (password: string) =>
   asApp(password, (database) => {
     const { agents } = readSeeded();
-    const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} });
+    const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} }, API_PURPOSES, OPERATOR_ONLY);
     return withFreezeProbe(
       freezeProbeAfterMs(false),
       () => probeFreeze(database, keyring, agents),

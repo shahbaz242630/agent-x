@@ -54,6 +54,7 @@ describe('SEC-AV-03 the set-up job refuses to run on a bad config', () => {
           "AGENTX_DB_PASSWORD belongs to the app (apps/api) and the operator's command (apps/operator); the set-up job reads only the database, log and login settings it needs",
           'AGENTX_DB_APP_PASSWORD is required, or AGENTX_DB_APP_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
           'AGENTX_DB_BACKUP_PASSWORD is required, or AGENTX_DB_BACKUP_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
+          'AGENTX_DB_OPERATOR_PASSWORD is required, or AGENTX_DB_OPERATOR_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
           'AGENTX_DB_ZITADEL_PASSWORD is required, or AGENTX_DB_ZITADEL_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
           'AGENTX_DB_OWNER_PASSWORD must be at least 24 characters of printable ASCII with no spaces, so it is out of reach of guessing and can be stored as a SCRAM verifier',
           'AGENTX_DB_ADMIN_PASSWORD and AGENTX_DB_OWNER_PASSWORD hold the same login; every role needs its own',

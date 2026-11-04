@@ -32,6 +32,8 @@ import type { PlatformControlsTables } from './tables.ts';
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<PlatformControlsTables>;
+/** The operator's own role (PL-57): the one that moves the pause. */
+let operator: Database<PlatformControlsTables>;
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -53,7 +55,7 @@ const asked = (paused: boolean, overrides: Partial<HandoffPauseChange> = {}): Ha
 /** Pauses or resumes in a transaction of its own, the log captured. */
 async function change(paused: boolean, overrides: Partial<HandoffPauseChange> = {}) {
   const capture = new LogCapture();
-  const done = await app
+  const done = await operator
     .transaction()
     .execute((tx) => changeHandoffPause(tx, { chain, keys, logger: testLogger(capture) }, asked(paused, overrides)));
   return { done, lines: capture.lines() };
@@ -104,16 +106,23 @@ const ALARM = { event: 'audit.integrity_failed', chain: 'platform', check: 'hand
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<PlatformControlsTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
+  operator = createDatabase<PlatformControlsTables>(
+    { ...database.connection('operator'), maxConnections: 2 },
+    testLogger(),
+  );
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
 });
 
 // One pause for the whole platform: every test starts from it as born, on a chain never started.
 beforeEach(async () => {
-  await tamper('truncate platform_controls.audit_events, platform_controls.audit_head');
+  await tamper(
+    'truncate platform_controls.audit_events, platform_controls.audit_head, platform_controls.operator_signatures',
+  );
   await tamper('delete from platform_controls.handoff_pause');
   await tamper('insert into platform_controls.handoff_pause (paused, event_seq, event_id) values (true, null, null)');
 });
@@ -226,10 +235,20 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
     expect((await pauseNow()).pause).toEqual({ outcome: 'tampered' });
   });
 
+  it("the API's role can't move the row at all (PL-57): only the operator's role may", async () => {
+    await expect(
+      app
+        .transaction()
+        .execute((tx) => tx.updateTable('platform_controls.handoff_pause').set({ paused: false }).execute()),
+    ).rejects.toMatchObject({ code: '42501' });
+    expect(await row()).toEqual({ paused: true, event_seq: null, event_id: null });
+  });
+
   it('an event planted with the app’s own rights, unsealed, the row pointed at it: tampering (B1 review)', async () => {
     await change(false);
     await change(true);
-    // As anything running as the app role could: an event added after the head, the row pointed at it.
+    // As anything running as the app role could add: an event after the head. The row pointed at it past the
+    // app, as the owner can (the app's role may no longer move it, PL-57).
     await app.transaction().execute(async (tx) => {
       await tx
         .insertInto('platform_controls.audit_events')
@@ -247,11 +266,10 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
           mac_key_version: 1,
         })
         .execute();
-      await tx
-        .updateTable('platform_controls.handoff_pause')
-        .set({ paused: false, event_seq: 3n, event_id: '0199a0f0-0000-7000-8000-00000000b1f0' })
-        .execute();
     });
+    await tamper('update platform_controls.handoff_pause set paused = false, event_seq = 3, event_id = $1', [
+      '0199a0f0-0000-7000-8000-00000000b1f0',
+    ]);
 
     expect(await pauseNow()).toEqual({
       pause: { outcome: 'tampered' },
@@ -260,23 +278,52 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
   });
 
   it('an event sealed by another process (the API), not the operator: never believed, nor recorded by the change', async () => {
-    // A process holding the chain's keys records a resume of its own, and points the row at it.
-    const recorded = await app.transaction().execute(async (tx) => {
-      const event = await chain.record(tx, {
+    // A process holding the chain's keys records a resume of its own; the row pointed at it past the app.
+    const recorded = await app.transaction().execute((tx) =>
+      chain.record(tx, {
         actor: { type: 'system', id: 'api' },
         action: HANDOFF_RESUMED,
         details: { reason: 'not-the-operator' },
-      });
-      await tx
-        .updateTable('platform_controls.handoff_pause')
-        .set({ paused: false, event_seq: event.seq, event_id: event.id })
-        .execute();
-      return event;
-    });
+      }),
+    );
+    await tamper('update platform_controls.handoff_pause set paused = false, event_seq = $1, event_id = $2', [
+      recorded.seq,
+      recorded.id,
+    ]);
 
     expect(recorded.seq).toBe(1n);
     expect((await pauseNow()).pause).toEqual({ outcome: 'tampered' });
     await expect(change(false, { actor: { type: 'system', id: 'api' } })).rejects.toThrow(PlatformEventRefused);
+  });
+
+  it("a resume as the operator's, sealed with the chains' MAC but signed with another key, is never believed (PL-57)", async () => {
+    await change(false);
+    await change(true);
+    // The API's MAC key and an operator's signing key of the forger's own, the row pointed at the forgery.
+    const forger = createKeyProvider(
+      Object.fromEntries(
+        PURPOSES.map((purpose, index) => [
+          purpose,
+          { current: 1, versions: new Map([[1, Buffer.alloc(32, purpose === 'operator-signing' ? 0xf0 : index + 1)]]) },
+        ]),
+      ),
+    );
+    const forged = await operator.transaction().execute((tx) =>
+      createPlatformChain({ keys: forger, ids: new SequentialIds(0xb2) }).record(tx, {
+        actor: OPERATOR,
+        action: HANDOFF_RESUMED,
+        details: { reason: 'forged' },
+      }),
+    );
+    await tamper('update platform_controls.handoff_pause set paused = false, event_seq = $1, event_id = $2', [
+      forged.seq,
+      forged.id,
+    ]);
+
+    expect(await pauseNow()).toEqual({
+      pause: { outcome: 'tampered' },
+      lines: [expect.objectContaining({ ...ALARM, reason: 'unsealed' })],
+    });
   });
 
   it('a row pointing at an event that was never recorded, paused or not, is tampering', async () => {
@@ -324,7 +371,7 @@ describe('B1 the pause row is the first lock (ADR-006 §6 level 1)', () => {
     const gate = new Promise<undefined>((resolve) => {
       release = resolve;
     });
-    const first = app.transaction().execute(async (tx) => {
+    const first = operator.transaction().execute(async (tx) => {
       const done = await changeHandoffPause(tx, { chain, keys, logger: testLogger() }, asked(false));
       changed(undefined);
       await gate;
@@ -351,7 +398,7 @@ describe('B1 the pause row is the first lock (ADR-006 §6 level 1)', () => {
     const gate = new Promise<undefined>((resolve) => {
       release = resolve;
     });
-    const resuming = app.transaction().execute(async (tx) => {
+    const resuming = operator.transaction().execute(async (tx) => {
       const done = await changeHandoffPause(tx, { chain, keys, logger: testLogger() }, asked(false));
       changed(undefined);
       await gate;

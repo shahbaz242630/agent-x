@@ -13,8 +13,9 @@
 // it as paused, so a hand-off fails closed.
 //
 // The read checks the row against its newest event, and that event alone
-// against its seal (its hash and MAC, platformEventSealed) and its actor (the
-// operator's command, the one actor that moves the pause): an event planted
+// against its seal (its hash and MAC, platformEventSealed), its actor (the
+// operator's command, the one actor that moves the pause) and that actor's own
+// signature (PL-57, which the API can't make): an event planted
 // with the app's own rights (it may add platform events, and moves this row)
 // is never believed, the B1 review's catch. The chain whole (an event deleted
 // or reordered) is the anchor check's, every 5 minutes; no hand-off pays for
@@ -27,10 +28,14 @@
 // last, under the chain head's lock (level 13).
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { sql } from 'kysely';
 
 import { PlatformEventRefused, type PlatformActor } from '../domain/event.ts';
-import { type PlatformChain, platformEventSealed, type PlatformTransaction } from './platform-chain.ts';
+import {
+  type PlatformChain,
+  platformEventSealed,
+  platformEventsSigned,
+  type PlatformTransaction,
+} from './platform-chain.ts';
 
 /** The one actor whose event moves the pause: the operator's command (apps/operator). */
 export const PAUSE_ACTOR: PlatformActor = { type: 'system', id: 'operator' };
@@ -111,12 +116,9 @@ interface Read {
 async function readPause(tx: PlatformTransaction, lock: HandoffPauseLock, keys: KeyProvider): Promise<Read> {
   const locking = tx.selectFrom('platform_controls.handoff_pause').select(['paused', 'event_seq', 'event_id']);
   const rows = await (lock === 'share' ? locking.forShare() : locking.forNoKeyUpdate()).execute();
-  const newest = await tx
-    .selectFrom('platform_controls.audit_events')
-    .selectAll()
-    .select(sql<boolean>`recorded_at = pg_catalog.date_trunc('milliseconds', recorded_at)`.as('whole_ms'))
-    .where('action', 'in', [HANDOFF_PAUSED, HANDOFF_RESUMED])
-    .orderBy('seq', 'desc')
+  const newest = await platformEventsSigned(tx)
+    .where('e.action', 'in', [HANDOFF_PAUSED, HANDOFF_RESUMED])
+    .orderBy('e.seq', 'desc')
     .limit(1)
     .executeTakeFirst();
   // The key holds one row at most; should the owner drop it and add a second, neither can be believed.

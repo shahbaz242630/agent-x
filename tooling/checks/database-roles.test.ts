@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { OWNER_ROLE } from '../../packages/core/src/schema-check.ts';
-import { BACKUP_ROLE } from '../../packages/platform/src/db/schema-guard.ts';
+import { APP_ROLE, BACKUP_ROLE, OPERATOR_ROLE } from '../../packages/platform/src/db/schema-guard.ts';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const roles = (): string => readFileSync(path.join(ROOT, 'db', 'bootstrap', 'roles.sql'), 'utf8');
@@ -20,6 +20,21 @@ const roles = (): string => readFileSync(path.join(ROOT, 'db', 'bootstrap', 'rol
 describe('the backup role the schema check holds to reading', () => {
   it('is the role db/bootstrap/roles.sql creates: renamed there alone, the check would find no rights to name', () => {
     expect(roles()).toContain(`CREATE ROLE ${BACKUP_ROLE}`);
+  });
+});
+
+describe("the app's and the operator's roles the schema check names (PL-57)", () => {
+  it("is the app's role db/bootstrap/roles.sql creates: the one the operator's command checks the walls for", () => {
+    expect(roles()).toContain(`CREATE ROLE ${APP_ROLE}`);
+  });
+
+  it("is the operator's role db/bootstrap/operator-role.sql creates, held to the app's walls: no BYPASSRLS, nothing inherited", () => {
+    const operator = readFileSync(path.join(ROOT, 'db', 'bootstrap', 'operator-role.sql'), 'utf8');
+    expect(operator).toMatch(
+      new RegExp(
+        `CREATE ROLE ${OPERATOR_ROLE}\\s+LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;`,
+      ),
+    );
   });
 });
 

@@ -8,7 +8,7 @@ import { type DirectoryTables, registerOrganization } from '@agentx/core/modules
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, withTenant } from '@agentx/platform/db';
-import { loadKeys, PURPOSES } from '@agentx/platform/keys';
+import { API_PURPOSES, loadKeys } from '@agentx/platform/keys';
 import { createLogger, type Output } from '@agentx/platform/observability';
 import {
   createTestDatabase,
@@ -26,7 +26,7 @@ import { type ApiProcess, runApi } from './main.ts';
 import { recordStart } from './start-record.ts';
 
 const server = inject('postgres');
-const keys = writeTestKeys(PURPOSES);
+const keys = writeTestKeys(API_PURPOSES);
 let database: TestDatabase;
 
 beforeAll(async () => {
@@ -298,7 +298,10 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     // The chain checks out with the keys the API loaded.
     const reader = createDatabase<PlatformControlsTables>(database.connection('app'), testLogger());
     try {
-      const chain = createPlatformChain({ keys: loadKeys({ directory: keys.directory, current: {} }), ids: uuidV7Ids });
+      const chain = createPlatformChain({
+        keys: loadKeys({ directory: keys.directory, current: {} }, API_PURPOSES),
+        ids: uuidV7Ids,
+      });
       expect(await reader.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({
         ok: true,
         seq: 2n,
@@ -314,7 +317,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const gateRef = `LMG-v3-sha256:${'ab'.repeat(32)}`;
     const app = createDatabase<PlatformControlsTables>(database.connection('app'), testLogger());
     try {
-      const signing = loadKeys({ directory: keys.directory, current: {} });
+      const signing = loadKeys({ directory: keys.directory, current: {} }, API_PURPOSES);
       await recordStart(app, signing, uuidV7Ids, { configHash, release: 'r-live', gateRef });
     } finally {
       await app.destroy();
@@ -346,7 +349,10 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         destination: new LogCapture(),
       }),
     );
-    const trail = createAuditTrail({ keys: loadKeys({ directory: keys.directory, current: {} }), ids: uuidV7Ids });
+    const trail = createAuditTrail({
+      keys: loadKeys({ directory: keys.directory, current: {} }, API_PURPOSES),
+      ids: uuidV7Ids,
+    });
     try {
       for (const orgId of [kept, broken]) {
         await withTenant(writer, orgId, async (tx) => {

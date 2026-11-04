@@ -7,8 +7,13 @@
 //
 // PL-29's key property: recovery writes only original rows, never a new MAC or
 // key, so it can't bless a forgery. So the plan is refused, never bent, when:
+// - `copy_unsigned`: the copy was restored from before 0079 (PL-57), so holds no
+//   operator's signatures, and none of its operator's events could be checked:
+//   a copy from after 0079 is needed
 // - `copy_broken`: the copy fails its own whole check, or holds no chain for the
-//   organisation: nothing in it can be believed
+//   organisation: nothing in it can be believed; or (`signing_start`) where
+//   operator signing starts on the chain differs from the live server's: the
+//   copy's own start, moved, would let it vouch for an operator's event unsigned
 // - `fork`: the live server holds an event sealed by us, in a place the copy
 //   holds another: the app wrote on after the damage (a wound-back head grown
 //   again). Putting the copy's back would throw those away. E10 decides the
@@ -22,13 +27,21 @@
 // - `too_large`: more rows than one plan writes
 //
 // Where the copy ends, the live chain may have grown on whole from it: those
-// events and the live head stay as they are. A live row numbered below 1, or
+// events and the live head stay as they are.
+//
+// An operator's event is judged as every reader judges it (PL-57): from where
+// signing started on its chain, one without the operator's own signature is
+// unsealed. So one past the copy is never kept as grown on, and one in the
+// copy's stretch whose signature is gone or another is no original: the copy's
+// event is planned back with its signature (a row's columns carry it). A live row numbered below 1, or
 // past a sealed live head at exactly the plan's end, was never the app's: it is
 // planned removed, which writes nothing new either.
 import {
   type AuditTables,
   chainRowsAlone,
   createAuditTrail,
+  holdsOperatorSignatures,
+  operatorSigningStart,
   type StoredColumns,
   type StoredRow,
   type StoredValues,
@@ -52,7 +65,8 @@ const PAGE = 1000;
 /** The most rows one plan writes: its file is made in memory, and a chain lost wider than this is past one plan. */
 const MOST_PLANNED_ROWS = 100_000;
 
-type RecoveryRefusal = 'copy_broken' | 'fork' | 'new_seal' | 'behind_anchor' | 'anchor' | 'moved' | 'too_large';
+type RecoveryRefusal =
+  'copy_unsigned' | 'copy_broken' | 'fork' | 'new_seal' | 'behind_anchor' | 'anchor' | 'moved' | 'too_large';
 
 /** A row the plan writes: the copy's original put back where it is missing, or in place of a damaged one; or one removed. */
 export type PlannedRow =
@@ -100,14 +114,14 @@ const sameHead = (a: ChainHead | string, b: ChainHead | string): boolean =>
 
 /** A chain's rows in number order, a page at a time, each page's head the first's or ChainMoved. */
 async function* rowsOf(
-  { readPage = chainRowsAlone, pageSize = PAGE }: Pick<RecoverySides, 'readPage' | 'pageSize'>,
+  { readPage = chainRowsAlone, pageSize = PAGE, keys }: Pick<RecoverySides, 'readPage' | 'pageSize' | 'keys'>,
   db: Database<AuditTables>,
   orgId: string,
   heads: { first?: ChainHead | string },
 ): AsyncGenerator<StoredRow> {
   let after: bigint | null = null;
   for (;;) {
-    const page = await readPage(db, orgId, after, pageSize);
+    const page = await readPage(db, keys, orgId, after, pageSize);
     heads.first ??= page.head;
     if (!sameHead(heads.first, page.head)) throw new ChainMoved();
     yield* page.rows;
@@ -152,6 +166,13 @@ export interface RecoverySides {
 /** Plans the recovery of one organisation's chain from the copy: never writes, and never throws for what it finds. */
 export async function planChainRecovery(sides: RecoverySides): Promise<RecoveryPlan> {
   const orgId = sides.orgId.toLowerCase();
+  if (!(await holdsOperatorSignatures(sides.copy))) return refused('copy_unsigned', 0n, COPY_UNSIGNED);
+  // The copy is judged by the live server's cut-over, never by its own (PL-29: no operator's event put back unsigned).
+  const [copyStart, liveStart] = await Promise.all([
+    operatorSigningStart(sides.copy, orgId),
+    operatorSigningStart(sides.live, orgId),
+  ]);
+  if (copyStart !== liveStart) return refused('copy_broken', 0n, 'signing_start');
   // The IDs are never used: nothing is written. The trail needs a source all the same.
   const copied = await createAuditTrail({ keys: sides.keys, ids: uuidV7Ids }).verifyAlone(sides.copy, orgId, undefined);
   if (!copied.ok) return refused('copy_broken', copied.problem.seq, copied.problem.reason);
@@ -176,6 +197,10 @@ export async function planChainRecovery(sides: RecoverySides): Promise<RecoveryP
   if (copyHead.seq !== copied.seq || !copyHead.hash.equals(copied.hash)) return refused('moved', copied.seq);
   return planner.finish(copyHead);
 }
+
+/** What a copy from before 0079 is refused with, in plain words. */
+const COPY_UNSIGNED =
+  'the copy was restored from before operator signing (migration 0079); a copy restored from after 0079 is needed';
 
 /** The plan's row by row judgement, then its end. */
 function createPlanner(

@@ -439,6 +439,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'dbOwnerPassword',
       'dbAppPassword',
       'dbBackupPassword',
+      'dbOperatorPassword',
       'dbZitadelPassword',
       'zitadelMasterKey',
       'zitadelAdminPassword',
@@ -643,6 +644,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `db-owner-password ${givenOnly('dbOwnerPassword')}`,
       `db-app-password ${givenOnly('dbAppPassword')}`,
       `db-backup-password ${givenOnly('dbBackupPassword')}`,
+      `db-operator-password ${givenOnly('dbOperatorPassword')}`,
       `db-zitadel-password ${givenOnly('dbZitadelPassword')}`,
       `zitadel-admin-password ${givenOnly('zitadelAdminPassword')}`,
       `login-client-private-key ${givenOnly('loginClientPrivateKey')}`,
@@ -654,14 +656,17 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
+      // PL-57: the operator's key's public half, created once with it.
+      'public-operator-signing-v1 once',
       ...[
         'db-setup reads db-admin-password',
         'db-setup reads db-owner-password',
         'migrate reads db-owner-password',
         'db-setup reads db-app-password',
         'api reads db-app-password',
-        'operator reads db-app-password',
         'db-setup reads db-backup-password',
+        'db-setup reads db-operator-password',
+        'operator reads db-operator-password',
         'db-setup reads db-zitadel-password',
         'zitadel-init reads db-zitadel-password',
         'zitadel-setup reads db-zitadel-password',
@@ -675,12 +680,15 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
         'api reads acs-access-key',
-        // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each version.
-        ...APP_KEYS.flatMap((key) =>
-          key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')
+        // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each
+        // version; its own signing key it alone reads, and the API its public half (PL-57).
+        ...APP_KEYS.flatMap((key) => {
+          if (key.startsWith('key-operator-signing-v')) return [`operator reads ${key}`];
+          return key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')
             ? [`api reads ${key}`, `operator reads ${key}`]
-            : [`api reads ${key}`],
-        ),
+            : [`api reads ${key}`];
+        }),
+        'api reads public-operator-signing-v1',
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
   });
@@ -688,7 +696,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(13);
+    expect(variables).toHaveLength(14);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
     // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
     // reach Bicep from Node, as G3's tool sends them.
@@ -697,7 +705,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(13 + APP_KEYS.length);
+      // Fourteen written when given, each key, and the operator's key's public half (PL-57).
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(14 + APP_KEYS.length + 1);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
@@ -4852,7 +4861,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual([
-      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[3].value must come from a @secure() parameter, never a value in the code',
+      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[4].value must come from a @secure() parameter, never a value in the code',
       holdOnce,
     ]);
     // Held twice, held as a vault secret too, or not held at all (with its file gone, so nothing else objects).
@@ -5129,6 +5138,7 @@ describe('what each job is told', () => {
       AGENTX_DB_OWNER_PASSWORD_FILE: '/mnt/secrets/db-owner-password',
       AGENTX_DB_APP_PASSWORD_FILE: '/mnt/secrets/db-app-password',
       AGENTX_DB_BACKUP_PASSWORD_FILE: '/mnt/secrets/db-backup-password',
+      AGENTX_DB_OPERATOR_PASSWORD_FILE: '/mnt/secrets/db-operator-password',
       AGENTX_DB_ZITADEL_PASSWORD_FILE: '/mnt/secrets/db-zitadel-password',
     });
     // The migration job holds the owner's login and nothing else.

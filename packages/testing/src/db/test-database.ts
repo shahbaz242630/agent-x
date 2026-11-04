@@ -10,7 +10,7 @@ import pg from 'pg';
 import type { TestLogin, TestPostgresServer } from './test-server.ts';
 
 /** Who a test connects as. `admin` is the server's superuser, for setup and for playing the attacker. */
-export type TestRole = 'admin' | 'owner' | 'app' | 'backup';
+export type TestRole = 'admin' | 'owner' | 'app' | 'backup' | 'operator';
 
 /** Connection settings in the shape @agentx/platform/db takes. */
 export interface TestConnection {
@@ -133,7 +133,7 @@ async function databaseFrom(server: TestPostgresServer, template: string): Promi
   await onServer(server, [
     `CREATE DATABASE ${quoted} TEMPLATE ${template} OWNER ${pg.escapeIdentifier(server.roles.owner.user)}`,
     `REVOKE ALL ON DATABASE ${quoted} FROM PUBLIC`,
-    `GRANT CONNECT ON DATABASE ${quoted} TO ${pg.escapeIdentifier(server.roles.app.user)}, ${pg.escapeIdentifier(server.roles.backup.user)}`,
+    `GRANT CONNECT ON DATABASE ${quoted} TO ${[server.roles.app, server.roles.backup, server.roles.operator].map(({ user }) => pg.escapeIdentifier(user)).join(', ')}`,
   ]);
 
   const pools = new Map<TestRole, pg.Pool>();

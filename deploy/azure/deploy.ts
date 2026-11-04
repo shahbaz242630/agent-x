@@ -56,7 +56,10 @@ import {
   SOURCE_REPOSITORY,
   verifyImage,
 } from '../image/verify.ts';
-import { APP_KEYS, newAppKeys } from './app-keys.ts';
+import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
+
+/** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
+const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
 import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, LOAD_SERVER_CONNECTIONS, policyProblems } from './policy.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
@@ -133,6 +136,7 @@ export const VAULT_SECRETS: Readonly<
   'db-owner-password': { variable: 'AGENTX_AZURE_DB_OWNER_PASSWORD', source: 'machine' },
   'db-app-password': { variable: 'AGENTX_AZURE_DB_APP_PASSWORD', source: 'machine' },
   'db-backup-password': { variable: 'AGENTX_AZURE_DB_BACKUP_PASSWORD', source: 'machine' },
+  'db-operator-password': { variable: 'AGENTX_AZURE_DB_OPERATOR_PASSWORD', source: 'machine' },
   'db-zitadel-password': { variable: 'AGENTX_AZURE_DB_ZITADEL_PASSWORD', source: 'machine' },
   'zitadel-admin-password': { variable: 'AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD', source: 'person' },
   'login-client-private-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY', source: 'pair' },
@@ -294,7 +298,7 @@ function parseSecretPlan(options: readonly string[]): SecretPlan {
 
 /** A UsageError if `--rotate` can't write the name: an app key, no vault secret, or the master key. */
 function refuseUnrotatable(name: string): void {
-  if (APP_KEYS.includes(name)) {
+  if (CREATED_ONCE.includes(name)) {
     throw new UsageError(
       `${name} is never written again: what it sealed or signed needs it as it was. A key rotates by a new version in app-keys.json, then secrets --keys (Azure.md)`,
     );
@@ -388,7 +392,7 @@ export function describePlan(plan: SecretPlan): string[] {
   return [
     ...secrets,
     ...COPIED_SECRETS.map((name) => `  ${name}: copied from its Azure service, as every run does`),
-    ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
+    ...CREATED_ONCE.map((key) => `  ${key}: written only if the vault has none yet`),
   ];
 }
 
@@ -1287,7 +1291,7 @@ export function keyProblems(
   before: readonly Pick<Listed, 'name' | 'version'>[],
   after: readonly Pick<Listed, 'name' | 'version'>[],
 ): string[] {
-  return APP_KEYS.flatMap((key) => {
+  return CREATED_ONCE.flatMap((key) => {
     const now = after.find((secret) => secret.name === key);
     if (now === undefined) return [`${key} isn't in the vault, so the API won't start: run secrets --keys again`];
     const was = before.find((secret) => secret.name === key);
@@ -1376,7 +1380,7 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   for (const problem of problems) steps.terminal.say(problem);
   if (problems.length > 0) return 1;
   steps.terminal.say(
-    `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
+    `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
   );
   // Recorded only once the keys are sound: a release on a vault missing one would start an API that can't.
   const recorded = leaveRecord(steps, subscription, 'secrets', commit);

@@ -4,17 +4,26 @@
 // stored: what a plan would write back is exactly what was read, its original
 // MAC with it, never anything made again. Read only, in withTenant's
 // transaction for the organisation, limited as the anchor check's reads.
+//
+// An operator's event is judged as every other reader judges it (PL-57,
+// sealedSigned): from where signing started on its chain, one without the
+// operator's own signature reads as unsealed, so a plan never keeps or blesses
+// one. Its signature, where it has one, is a column of the row like any other:
+// put back with its event, never made again.
 import {
+  type Chain,
   type ChainHead,
   ChainStoreError,
   headFields,
   sealedFields,
+  sealedSigned,
   type StoredEntry,
 } from '@agentx/platform/audit-chain';
+import type { KeyProvider } from '@agentx/platform/keys';
 import { JOB_ANSWER_WITHIN_MS, withTenant } from '@agentx/platform/db';
 import { type Kysely, sql } from 'kysely';
 
-import { contentOf, EVENT_COLUMNS } from './audit-trail.ts';
+import { contentOf, SIGNED_EVENT_COLUMNS } from './audit-trail.ts';
 import type { AuditTables } from './tables.ts';
 
 /** An event's columns as stored, the bytes as hex and the time to the millisecond: enough to write the row again exactly. */
@@ -34,6 +43,8 @@ export interface StoredColumns {
   readonly hash: string;
   readonly mac: string;
   readonly macKeyVersion: number;
+  /** The operator's signature on its event (PL-57), as stored in audit.operator_signatures, where it has one. */
+  readonly signature?: { readonly signature: string; readonly keyVersion: number };
 }
 
 /**
@@ -45,7 +56,9 @@ export type StoredValues = Readonly<Record<string, unknown>>;
 
 /**
  * One stored row: its number, every column as stored, and the event as the chain
- * checks it with its columns, or neither where it can't be read.
+ * checks it with its columns, or neither where it can't be read. The entry's MAC
+ * is taken as missing where the operator's signature it needs is not there or
+ * doesn't check (sealedSigned); its columns keep the MAC as stored.
  */
 export interface StoredRow {
   readonly seq: bigint;
@@ -68,6 +81,9 @@ const STORED_COLUMNS = [
   'hash',
   'mac',
   'mac_key_version',
+  // The operator's signature on it, if any: evidence too, kept with a row removed.
+  'signature',
+  'signature_key_version',
 ] as const;
 
 /** A value as JSON can hold it: bytes as hex, a whole number as text; anything else as read. */
@@ -93,6 +109,11 @@ export interface ChainRowsPage {
 
 /** The columns of a row the chain could read, from the row and its checked entry. */
 function columnsOf(row: Readonly<Record<string, unknown>>, entry: StoredEntry): StoredColumns {
+  const { signature, signature_key_version: keyVersion } = row;
+  const signed =
+    Buffer.isBuffer(signature) && typeof keyVersion === 'number'
+      ? { signature: { signature: signature.toString('hex'), keyVersion } }
+      : {};
   return {
     seq: entry.seq.toString(),
     id: entry.id,
@@ -109,19 +130,52 @@ function columnsOf(row: Readonly<Record<string, unknown>>, entry: StoredEntry): 
     hash: entry.hash.toString('hex'),
     mac: entry.mac.toString('hex'),
     macKeyVersion: entry.macKeyVersion,
+    ...signed,
   };
 }
 
 /** A stored row as read: any number the table holds, below 1 too, as one that isn't the app's is part of what a plan judges. */
-function storedRow(row: Readonly<Record<string, unknown>>): StoredRow {
+function storedRow(keys: KeyProvider, chain: Chain, row: Readonly<Record<string, unknown>>): StoredRow {
   const { seq } = row;
   if (typeof seq !== 'bigint') throw new ChainStoreError('it read an event with no number');
   const sealed = sealedFields(row);
+  const signed = sealedSigned(keys, chain, row);
   const content = contentOf(row);
   const stored = storedValues(row);
-  if (sealed === undefined || content === undefined) return { seq, stored, read: undefined };
-  const entry = { ...sealed, content };
-  return { seq, stored, read: { entry, columns: columnsOf(row, entry) } };
+  if (sealed === undefined || signed === undefined || content === undefined) return { seq, stored, read: undefined };
+  return { seq, stored, read: { entry: { ...signed, content }, columns: columnsOf(row, { ...sealed, content }) } };
+}
+
+/**
+ * Whether the database holds 0079's tables of the operator's signatures (PL-57), which every row's read joins: a
+ * copy restored from before 0079 holds none, and a plan refuses it in plain words rather than failing its read.
+ */
+export async function holdsOperatorSignatures(db: Kysely<AuditTables>): Promise<boolean> {
+  const { rows } = await sql<{ held: boolean }>`
+    select pg_catalog.to_regclass('audit.operator_signatures') is not null
+       and pg_catalog.to_regclass('audit.operator_signing_starts') is not null as held
+  `.execute(db);
+  return rows[0]?.held === true;
+}
+
+/**
+ * Where 0079 wrote down that signing starts on the organisation's chain, or null where it wrote nothing (a chain made
+ * after it). A plan holds a copy to the live server's: a copy's own start, raised, would let it believe an operator's
+ * event unsigned that the live chain never could.
+ */
+export function operatorSigningStart(db: Kysely<AuditTables>, orgId: string): Promise<bigint | null> {
+  const org = orgId.toLowerCase();
+  return withTenant(
+    db,
+    org,
+    async (tx) => {
+      const { rows } = await sql<{ signed_from: bigint }>`
+        select f.signed_from from audit.operator_signing_starts f where f.org_id = ${org}
+      `.execute(tx);
+      return rows[0]?.signed_from ?? null;
+    },
+    { limited: true, answeredWithinMs: JOB_ANSWER_WITHIN_MS },
+  );
 }
 
 /** The head as read: none with no head row, unreadable with more than one or one of the wrong types. */
@@ -137,11 +191,13 @@ function headOf(heads: unknown, head: ChainHead | undefined): ChainRowsPage['hea
  */
 export function chainRowsAlone(
   db: Kysely<AuditTables>,
+  keys: KeyProvider,
   orgId: string,
   after: bigint | null,
   limit: number,
 ): Promise<ChainRowsPage> {
   const org = orgId.toLowerCase();
+  const chain: Chain = { kind: 'organisation', orgId: org };
   return withTenant(
     db,
     org,
@@ -153,7 +209,7 @@ export function chainRowsAlone(
         from (values (1)) as one (x)
         left join (select * from audit.heads a where a.org_id = ${org} limit 1) as h on true
         left join lateral (
-          select ${EVENT_COLUMNS}, pg_catalog.to_char(e.recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as recorded_text from audit.events e
+          select ${SIGNED_EVENT_COLUMNS}, pg_catalog.to_char(e.recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as recorded_text from audit.events e
           where e.org_id = ${org} and (${after}::bigint is null or e.seq > ${after}::bigint)
           order by e.seq limit ${limit}
         ) as page on true
@@ -169,7 +225,7 @@ export function chainRowsAlone(
       return {
         head: headOf(first.heads, head),
         // With no event in the page, the one row the left joins give holds no event.
-        rows: rows.filter((row) => row.seq !== null).map(storedRow),
+        rows: rows.filter((row) => row.seq !== null).map((row) => storedRow(keys, chain, row)),
       };
     },
     { limited: true, answeredWithinMs: JOB_ANSWER_WITHIN_MS },

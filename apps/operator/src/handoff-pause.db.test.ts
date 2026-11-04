@@ -23,10 +23,16 @@ import { createOrganizationAsOperator } from './create-organization.ts';
 import { changeHandoffPauseAsOperator, type HandoffPauseRequest, type HandoffPauseTables } from './handoff-pause.ts';
 
 const server = inject('postgres');
-const mounted = writeTestKeys(['audit-mac', 'field-encryption']);
-const keys = loadKeys({ directory: mounted.directory, current: {} }, ['audit-mac', 'field-encryption']);
+const mounted = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keys = loadKeys({ directory: mounted.directory, current: {} }, [
+  'audit-mac',
+  'field-encryption',
+  'operator-signing',
+]);
 let database: TestDatabase;
 let app: Database<HandoffPauseTables>;
+/** The operator's command's own role (PL-57), as the job connects: every command below runs as it. */
+let operator: Database<HandoffPauseTables>;
 
 /** Plain words a test can look for in every log line. */
 const REASON = 'INC-2026/0042';
@@ -34,10 +40,15 @@ const REASON = 'INC-2026/0042';
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<HandoffPauseTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
+  operator = createDatabase<HandoffPauseTables>(
+    { ...database.connection('operator'), maxConnections: 2 },
+    testLogger(),
+  );
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
   mounted.remove();
 });
@@ -46,7 +57,7 @@ afterAll(async () => {
 async function organization(): Promise<string> {
   const orgId = uuidV7Ids.next();
   await createOrganizationAsOperator(
-    app,
+    operator,
     { keys, ids: uuidV7Ids, logger: testLogger() },
     { orgId, name: `Pause Test ${orgId.slice(-6)}`, release: 'r-test', run: null },
   );
@@ -64,7 +75,11 @@ const asked = (paused: boolean, eventId = uuidV7Ids.next()): HandoffPauseRequest
 /** Runs the change and its telling, its log captured. */
 async function changed(request: HandoffPauseRequest) {
   const capture = new LogCapture();
-  const code = await changeHandoffPauseAsOperator(app, { keys, ids: uuidV7Ids, logger: testLogger(capture) }, request);
+  const code = await changeHandoffPauseAsOperator(
+    operator,
+    { keys, ids: uuidV7Ids, logger: testLogger(capture) },
+    request,
+  );
   const lines = capture.lines();
   return {
     code,

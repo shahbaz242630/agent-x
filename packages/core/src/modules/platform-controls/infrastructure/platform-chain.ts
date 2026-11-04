@@ -7,6 +7,17 @@
 // The head is the table's only row by its key. Should someone with the owner's
 // rights drop that key and add a second head, the chain counts as having no
 // readable head: recording is refused and the check fails.
+//
+// **The operator's events carry its own signature too (PL-57).** An event whose
+// actor is the operator's command is signed with `operator-signing`, a key only
+// the operator's job holds, its signature kept in operator_signatures, which only
+// the operator's role may add to. Every read here believes such an event only
+// with a signature that checks against that key's public half, which is all the
+// API holds: a foothold in the API, with the chains' MAC key and the app's role,
+// can't add an operator's act, nor sign one. An operator's event recorded before
+// 0079 ran (before PL-57) has none and needs none; any recorded from the place
+// 0079 wrote down on does, a place no running role can move. The rule is shared
+// with every organisation's chain (audit-chain/operator-signature.ts).
 import {
   type AnchorPoint,
   appendEvent,
@@ -25,8 +36,9 @@ import {
   entryIsSealed,
   headFields,
   LAST_COUNTED,
+  operatorSignature,
   passStep,
-  sealedFields,
+  sealedSigned,
   type StoredEntry,
   verifyChain,
   verifyFromAnchor,
@@ -134,6 +146,25 @@ function orgIdIn(details: unknown): string | undefined {
 
 const CHAIN: Chain = { kind: 'platform' };
 
+/**
+ * Every platform event, each with the operator's signature on it, if any, and
+ * where signatures start (`signed_from`, the chain's next place when 0079 ran,
+ * null if its row is gone): the read every belief in an event goes through.
+ */
+export function platformEventsSigned(tx: PlatformTransaction) {
+  return tx
+    .selectFrom('platform_controls.audit_events as e')
+    .leftJoin('platform_controls.operator_signatures as s', 's.seq', 'e.seq')
+    .selectAll('e')
+    .select([
+      sql<boolean>`e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at)`.as('whole_ms'),
+      's.signature as signature',
+      's.key_version as signature_key_version',
+      // Written once by 0079, by the owner: no running role can move it (PL-57).
+      sql<bigint | null>`(select f.signed_from from platform_controls.operator_signing f)`.as('signed_from'),
+    ]);
+}
+
 /** How many of those events one statement reads. */
 const CREATED_PAGE = 10_000;
 
@@ -150,20 +181,20 @@ function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content
 }
 
 /**
- * Whether one stored platform event, read whole (`select *` with the reader's
- * `whole_ms`), is sealed: its content hashes to its hash and its MAC is right
- * (entryIsSealed). For reading one event on its own, such as the hand-off
- * pause's newest (B1): an event planted or edited past the app isn't believed,
- * without waiting for the whole chain's check.
+ * Whether one stored platform event, read whole through platformEventsSigned,
+ * is sealed: its content hashes to its hash, its MAC is right (entryIsSealed),
+ * and an operator's event carries its signature (PL-57). For reading one event
+ * on its own, such as the hand-off pause's newest (B1): an event planted or
+ * edited past the app isn't believed, without waiting for the whole chain's check.
  */
 export function platformEventSealed(keys: KeyProvider, row: Readonly<Record<string, unknown>>): boolean {
-  const sealed = sealedFields(row);
+  const sealed = sealedSigned(keys, CHAIN, row);
   const content = contentOf(row);
   return sealed !== undefined && content !== undefined && entryIsSealed(keys, CHAIN, { ...sealed, content });
 }
 
 /** Recording's steps over the platform-controls tables, for one event. */
-function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: string): ChainWriter {
+function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: string, keys: KeyProvider): ChainWriter {
   return {
     async lockHead() {
       // The clock in the outer select, which reads a row only once the inner one has locked it.
@@ -189,30 +220,42 @@ function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: strin
     },
 
     async append(sealed, head, previous) {
-      // One statement: the head moves only if it is still `previous` with no event past it,
-      // and the event is written only if the head moved, so a refused one leaves nothing behind.
-      const written = await sql`
-        with moved as (
-          update platform_controls.audit_head
-          set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
-          where seq = ${previous.seq} and hash = ${previous.hash}
-            and not exists (select from platform_controls.audit_events p where p.seq > ${previous.seq})
-          returning seq
-        )
+      // An operator's event signed with its own key, which no other process holds: anyone else's sign() throws.
+      const signed = operatorSignature(keys, CHAIN, event.actor.id, sealed);
+      // The head moves only if it is still `previous` with no event past it.
+      const moveHead = sql`
+        update platform_controls.audit_head
+        set seq = ${head.seq}, hash = ${head.hash}, mac = ${head.mac}, mac_key_version = ${head.macKeyVersion}
+        where seq = ${previous.seq} and hash = ${previous.hash}
+          and not exists (select from platform_controls.audit_events p where p.seq > ${previous.seq})
+        returning seq
+      `;
+      const addEvent = sql`
         insert into platform_controls.audit_events (seq, id, recorded_at, actor_type, actor_id, action, details,
                                                     prev_hash, hash, mac, mac_key_version)
         select ${sealed.seq}::bigint, ${sealed.id}::uuid, ${sealed.recordedAt}::timestamptz, ${event.actor.type}::text,
                ${event.actor.id}::text, ${event.action}::text, ${details}::text, ${sealed.prevHash}::bytea,
                ${sealed.hash}::bytea, ${sealed.mac}::bytea, ${sealed.macKeyVersion}::integer
         from moved
-      `.execute(tx);
+      `;
+      // One statement: the event (and its signature) is written only if the head moved, so a refused one leaves
+      // nothing behind.
+      const written = await (
+        signed === undefined
+          ? sql`with moved as (${moveHead}) ${addEvent}`
+          : sql`
+              with moved as (${moveHead}), added as (${addEvent} returning seq, id)
+              insert into platform_controls.operator_signatures (seq, id, signature, key_version)
+              select a.seq, a.id, ${signed.signature}::bytea, ${signed.keyVersion}::integer from added a
+            `
+      ).execute(tx);
       return written.numAffectedRows === 1n;
     },
   };
 }
 
 /** Checking's reads of the platform-controls tables. */
-function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
+function readerFor(tx: PlatformTransaction, keys: KeyProvider): ChainReader & ChainEdgeReader {
   return {
     async edges(anchored) {
       // One statement, so all of it comes from one moment. Each on the events' key, whatever the chain's length.
@@ -260,17 +303,14 @@ function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
     },
 
     async events(after, upTo, limit) {
-      const rows = await tx
-        .selectFrom('platform_controls.audit_events')
-        .selectAll()
-        .select(sql<boolean>`recorded_at = pg_catalog.date_trunc('milliseconds', recorded_at)`.as('whole_ms'))
-        .where('seq', '>', after)
-        .where('seq', '<=', upTo)
-        .orderBy('seq')
+      const rows = await platformEventsSigned(tx)
+        .where('e.seq', '>', after)
+        .where('e.seq', '<=', upTo)
+        .orderBy('e.seq')
         .limit(limit)
         .execute();
       return rows.map((row) => {
-        const sealed = sealedFields(row);
+        const sealed = sealedSigned(keys, CHAIN, row);
         const content = contentOf(row);
         return sealed === undefined || content === undefined ? undefined : { ...sealed, content };
       });
@@ -311,7 +351,7 @@ export function createPlatformChain({
     const event = checkedPlatformEvent(input, hidesField);
     const details = canonicalDetails(event.details);
     await boundHeadWait(tx);
-    const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details), {
+    const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details, keys), {
       nextId: () => ids.next(),
       content: platformEventContent(event, details),
     });
@@ -329,12 +369,12 @@ export function createPlatformChain({
     },
 
     verify(tx: PlatformTransaction, anchor: AnchorPoint | undefined): Promise<ChainReport> {
-      return verifyChain(keys, CHAIN, readerFor(tx), anchor);
+      return verifyChain(keys, CHAIN, readerFor(tx, keys), anchor);
     },
 
     verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport> {
       // Each statement limited, waits for locks included, so the pool can be closed soon after a stop.
-      return limitedTransaction(db, (tx) => verifyChain(keys, CHAIN, readerFor(tx), anchor), {
+      return limitedTransaction(db, (tx) => verifyChain(keys, CHAIN, readerFor(tx, keys), anchor), {
         answeredWithinMs: JOB_ANSWER_WITHIN_MS,
       });
     },
@@ -372,7 +412,7 @@ export function createPlatformChain({
     },
 
     checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep> {
-      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx), from, most), {
+      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx, keys), from, most), {
         answeredWithinMs: JOB_ANSWER_WITHIN_MS,
       });
     },
@@ -383,11 +423,11 @@ export function createPlatformChain({
       target: CheckedPoint,
       most: number,
     ): Promise<ChainStep> {
-      return limitedTransaction(db, (tx) => passStep(keys, CHAIN, readerFor(tx), cursor, target, most));
+      return limitedTransaction(db, (tx) => passStep(keys, CHAIN, readerFor(tx, keys), cursor, target, most));
     },
 
     countStep(db: Kysely<PlatformControlsTables>, after: bigint, upTo: bigint): Promise<ChainProblem | undefined> {
-      return limitedTransaction(db, (tx) => countStep(readerFor(tx), after, upTo));
+      return limitedTransaction(db, (tx) => countStep(readerFor(tx, keys), after, upTo));
     },
 
     async createdOrganizationsSince(

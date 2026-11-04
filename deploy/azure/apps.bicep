@@ -53,6 +53,8 @@ import {
   jobWorkloads
   networkAddressSpace
   operatorHolds
+  operatorOnly
+  publicHalves
   releaseRoleName
   resourceNames
   resourceTags
@@ -617,6 +619,10 @@ var jobs = concat([
         setting: 'AGENTX_DB_BACKUP_PASSWORD_FILE'
       }
       {
+        reads: 'db-operator-password'
+        setting: 'AGENTX_DB_OPERATOR_PASSWORD_FILE'
+      }
+      {
         reads: 'db-zitadel-password'
         setting: 'AGENTX_DB_ZITADEL_PASSWORD_FILE'
       }
@@ -688,9 +694,9 @@ var jobs = concat([
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
   }
   {
-    // The operator's command (B1c; ADR-011 §3), as the app's role and no other,
-    // holding the audit chains' MAC alone: what it does, it does through the
-    // same tenant walls as the API. It reads what it is asked from the request
+    // The operator's command (B1c; ADR-011 §3), as its own role (PL-57) and no
+    // other, holding the keys it needs and its own signing key: what it does, it
+    // does through the same tenant walls as the API. It reads what it is asked from the request
     // it holds (above), never from a run's own arguments.
     workload: 'operator'
     image: appImage
@@ -708,7 +714,7 @@ var jobs = concat([
     files: concat(
       [
         {
-          reads: 'db-app-password'
+          reads: 'db-operator-password'
           setting: 'AGENTX_DB_PASSWORD_FILE'
         }
       ],
@@ -726,7 +732,7 @@ var jobs = concat([
       }
       {
         name: 'AGENTX_DB_USER'
-        value: 'agentx_app'
+        value: 'agentx_operator'
       }
       {
         // The restore drill's copy, which only the restore check reads, read-only (S78).
@@ -794,8 +800,13 @@ var loadJobs = map(
           setting: 'AGENTX_DB_PASSWORD_FILE'
         }
       ],
-      map(appKeys, key => {
+      // Every key but the operator's own, and its public half instead (PL-57).
+      map(filter(appKeys, key => !operatorOnly(key)), key => {
         reads: key
+        setting: ''
+      }),
+      map(publicHalves, half => {
+        reads: half
         setting: ''
       })
     )
@@ -939,8 +950,13 @@ var apps = [
               setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
             }
           ],
-      map(appKeys, key => {
+      // Every key but the operator's own, and its public half instead (PL-57).
+      map(filter(appKeys, key => !operatorOnly(key)), key => {
         reads: key
+        setting: ''
+      }),
+      map(publicHalves, half => {
+        reads: half
         setting: ''
       })
     )

@@ -14,7 +14,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe(`db/bootstrap/roles.sql: the three roles (Postgres ${server.version})`, () => {
+describe(`db/bootstrap/roles.sql and operator-role.sql: the four roles (Postgres ${server.version})`, () => {
   it('creates them with exactly the attributes ADR-005 §3 gives them', async () => {
     const rows = await database.as('admin').query(
       `select rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls
@@ -30,6 +30,8 @@ describe(`db/bootstrap/roles.sql: the three roles (Postgres ${server.version})`,
     expect(rows).toEqual([
       { rolname: 'agentx_app', ...role, rolinherit: false, rolbypassrls: false },
       { rolname: 'agentx_backup', ...role, rolinherit: false, rolbypassrls: true },
+      // The operator's command's own (PL-57): no more than the app's, under the same walls.
+      { rolname: 'agentx_operator', ...role, rolinherit: false, rolbypassrls: false },
       { rolname: 'agentx_owner', ...role, rolinherit: true, rolbypassrls: false },
     ]);
   });
@@ -45,7 +47,7 @@ describe(`db/bootstrap/roles.sql: the three roles (Postgres ${server.version})`,
 });
 
 describe('db/bootstrap/database.sql: who may connect', () => {
-  it('lets only the app and backup roles connect, besides the owner, and no one else create temporary tables', async () => {
+  it("lets only the app's, the backup's and the operator's roles connect, besides the owner, and no one else create temporary tables", async () => {
     for (const name of [server.templateDatabase, database.name]) {
       const rows = await database.as('admin').query<{ grantee: string; privilege: string }>(
         `select coalesce(grantee.rolname, 'PUBLIC') as grantee, acl.privilege_type as privilege
@@ -58,6 +60,7 @@ describe('db/bootstrap/database.sql: who may connect', () => {
       expect(rows).toEqual([
         { grantee: 'agentx_app', privilege: 'CONNECT' },
         { grantee: 'agentx_backup', privilege: 'CONNECT' },
+        { grantee: 'agentx_operator', privilege: 'CONNECT' },
       ]);
     }
   });

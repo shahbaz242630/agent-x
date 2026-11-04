@@ -13,7 +13,10 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BICEP_VERSION } from '../../tooling/bicep/bicep.ts';
 import { newPassword } from '../compose/prepare.ts';
 import { LOAD_SIGNER } from '../image/verify.ts';
-import { APP_KEYS } from './app-keys.ts';
+import { APP_KEYS, PUBLIC_HALVES } from './app-keys.ts';
+
+/** The app's keys and the operator's key's public half (PL-57), each created once. */
+const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
 import {
   ACTION_GROUP,
   APP_KEYS_VARIABLE,
@@ -252,9 +255,10 @@ describe('the secrets a run writes', () => {
       const keys = JSON.parse(
         secretValues(plan, pasted(aPaste(), aPaste()), quickMakers())[APP_KEYS_VARIABLE] ?? '{}',
       ) as Record<string, string>;
-      expect(Object.keys(keys)).toEqual([...APP_KEYS]);
+      // With each operator-only key's public half beside it (PL-57), 32 bytes as well.
+      expect(Object.keys(keys).toSorted()).toEqual([...CREATED_ONCE].toSorted());
       for (const key of Object.values(keys)) expect(Buffer.from(key, 'base64url')).toHaveLength(32);
-      expect(new Set(Object.values(keys)).size).toBe(APP_KEYS.length);
+      expect(new Set(Object.values(keys)).size).toBe(CREATED_ONCE.length);
     }
   });
 
@@ -303,6 +307,7 @@ describe('the secrets a run writes', () => {
       '  db-owner-password: kept as the vault has it',
       '  db-app-password: written, made fresh by this run',
       '  db-backup-password: kept as the vault has it',
+      '  db-operator-password: kept as the vault has it',
       '  db-zitadel-password: kept as the vault has it',
       '  zitadel-admin-password: kept as the vault has it',
       '  login-client-private-key: kept as the vault has it',
@@ -313,7 +318,7 @@ describe('the secrets a run writes', () => {
       '  zitadel-reset-token: kept as the vault has it',
       // B5-3: copied from the email service on every run, whatever the run writes.
       '  acs-access-key: copied from its Azure service, as every run does',
-      ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
+      ...CREATED_ONCE.map((key) => `  ${key}: written only if the vault has none yet`),
     ]);
     expect(describePlan(all)).toContain('  zitadel-admin-password: written, from what you paste');
     // Zitadel gives the API's secret once the API is registered with it: a first run can't have it, so only its name writes it (B2-6).
@@ -1226,7 +1231,7 @@ describe('alerts', () => {
 describe("what a secrets run did to the app's keys", () => {
   const vault = (versions: Readonly<Record<string, string>>) =>
     Object.entries(versions).map(([name, version]) => ({ name, version }));
-  const every = (version: string) => Object.fromEntries(APP_KEYS.map((key) => [key, version]));
+  const every = (version: string) => Object.fromEntries(CREATED_ONCE.map((key) => [key, version]));
 
   it('accepts every key there, each the version it was, or new', () => {
     expect(keyProblems(vault(every('v1')), vault(every('v1')))).toEqual([]);
@@ -1251,7 +1256,7 @@ describe('deploy secrets', () => {
   /** What a first --all writes: every secret but the ones Zitadel issues, which only their names write (B2-6, B5-3). */
   const nine = Object.keys(VAULT_SECRETS).filter((name) => VAULT_SECRETS[name]?.source !== 'issued');
   /** Every secret a deployment leaves: the nine, the email key it copies (B5-3) and the app's keys. */
-  const everything = [...nine, ...COPIED_SECRETS, ...APP_KEYS];
+  const everything = [...nine, ...COPIED_SECRETS, ...CREATED_ONCE];
 
   it('on a first run, asks for both pastes, writes every secret, and lists the vault afterwards', async () => {
     const admin = aPaste();
@@ -1270,8 +1275,8 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      // Sixteen secrets, three a page: the last one part full.
-      ...Array<string>(6).fill('rest --method get'),
+      // Twenty secrets, three a page: the last one part full.
+      ...Array<string>(7).fill('rest --method get'),
       ...RECORDING,
     ]);
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
@@ -1313,7 +1318,7 @@ describe('deploy secrets', () => {
       [...everything].sort().map((name) => `  ${name}`),
     );
     expect(done.terminal.said.slice(-2)).toEqual([
-      `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
       `Recorded on job-agentx-stg-migrate: secrets sent ${COMMIT}. CI's release takes it for what secrets reads.`,
     ]);
   });
@@ -1342,7 +1347,7 @@ describe('deploy secrets', () => {
       az: new RecordingAz({ before: nine, pages: { emptyFirst: true } }),
     });
     expect(declined.error).toBeInstanceOf(Cancelled);
-    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 9 secrets\./));
+    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 10 secrets\./));
     expect(declined.az.deployment).toBeUndefined();
   });
 
@@ -1425,7 +1430,7 @@ describe('deploy secrets', () => {
     expect(written).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
     done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
     expect(done.terminal.said.at(-2)).toBe(
-      `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
     );
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
   });
@@ -2006,7 +2011,7 @@ describe('what a hand deploy records (T1b)', () => {
       told: { answers: ['y', AUTH_HOST, APP_HOST], dns: readyDns() },
     },
   ];
-  const keys = [...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS];
+  const keys = [...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...CREATED_ONCE];
   /** Staging answering as the options say, with the vault's keys sound. */
   const staging = (options: AzAnswers = {}): RecordingAz => new RecordingAz({ before: keys, after: keys, ...options });
 
@@ -2318,7 +2323,7 @@ describe('the tool and the deployment agree', () => {
     const created = snapshot.predictedResources
       .filter((resource) => resource.type === 'Microsoft.KeyVault/vaults/secrets')
       .map((resource) => resource.name.split('/').at(-1));
-    expect(created.toSorted()).toEqual([...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS].toSorted());
+    expect(created.toSorted()).toEqual([...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...CREATED_ONCE].toSorted());
     const paramsText = readFileSync(path.join(AZURE_DIR, 'staging.secrets.bicepparam'), 'utf8');
     const read = [...paramsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
     expect(read.toSorted()).toEqual(
@@ -2382,7 +2387,7 @@ describe('the tool and the deployment agree', () => {
     // The keys stay one JSON value with a key each, every one of them a stand-in.
     const given = JSON.parse(values[APP_KEYS_VARIABLE] ?? '{}') as Record<string, string>;
     const standIns = JSON.parse(shaped[APP_KEYS_VARIABLE] ?? '{}') as Record<string, string>;
-    expect(Object.keys(standIns)).toEqual([...APP_KEYS]);
+    expect(Object.keys(standIns).toSorted()).toEqual([...CREATED_ONCE].toSorted());
     for (const key of APP_KEYS) expect(standIns[key]).not.toBe(given[key]);
     expect(shaped.AGENTX_AZURE_ALERT_EMAIL).toBe('ops@example.invalid');
     const rotation = shapedForPolicy(secretValues(rotating('db-app-password'), {}, quickMakers()), randomBytes);

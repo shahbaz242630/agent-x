@@ -16,6 +16,7 @@ param postgresAdminPassword = readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADM
 param dbOwnerPassword = readEnvironmentVariable('AGENTX_AZURE_DB_OWNER_PASSWORD')
 param dbAppPassword = readEnvironmentVariable('AGENTX_AZURE_DB_APP_PASSWORD')
 param dbBackupPassword = readEnvironmentVariable('AGENTX_AZURE_DB_BACKUP_PASSWORD')
+param dbOperatorPassword = readEnvironmentVariable('AGENTX_AZURE_DB_OPERATOR_PASSWORD')
 param dbZitadelPassword = readEnvironmentVariable('AGENTX_AZURE_DB_ZITADEL_PASSWORD')
 param zitadelMasterKey = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_MASTERKEY')
 param zitadelAdminPassword = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD')

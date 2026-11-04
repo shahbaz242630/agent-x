@@ -11,6 +11,7 @@ export {
 } from './anchor.ts';
 export { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 export { OLD_EDIT_DAYS } from './limits.ts';
+export { OPERATOR_ID, operatorSignature, sealedSigned } from './operator-signature.ts';
 export {
   type AnchorPoint,
   type Chain,

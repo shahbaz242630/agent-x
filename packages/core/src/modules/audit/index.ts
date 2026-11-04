@@ -21,6 +21,8 @@ export { actorEventsSince } from './infrastructure/actor-counts.ts';
 export {
   chainRowsAlone,
   type ChainRowsPage,
+  holdsOperatorSignatures,
+  operatorSigningStart,
   type StoredColumns,
   type StoredRow,
   type StoredValues,

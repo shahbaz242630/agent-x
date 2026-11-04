@@ -43,8 +43,10 @@ export {
 export { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } from './retry.ts';
 export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
 export {
+  APP_ROLE,
   liveSchemaDrift,
   liveSchemaProblems,
+  OPERATOR_ROLE,
   type SchemaDrift,
   type SchemaGuardOptions,
   type SchemaProblem,

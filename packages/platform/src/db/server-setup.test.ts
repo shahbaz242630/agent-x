@@ -42,10 +42,11 @@ function bootstrapWith(file: string, change: (sql: string) => string): string {
 }
 
 describe('loadBootstrap', () => {
-  it("reads db/bootstrap's four files in the job's order, statement by statement, with the database's name filled in", async () => {
+  it("reads db/bootstrap's five files in the job's order, statement by statement, with the database's name filled in", async () => {
     const bootstrap = await loadBootstrap(BOOTSTRAP, 'agentx');
     expect(bootstrap.roles.map(({ file, roles, statements }) => ({ file, roles, count: statements.length }))).toEqual([
       { file: 'roles.sql', roles: ['agentx_owner', 'agentx_app', 'agentx_backup'], count: 3 },
+      { file: 'operator-role.sql', roles: ['agentx_operator'], count: 1 },
       { file: 'zitadel-role.sql', roles: ['zitadel'], count: 1 },
     ]);
     expect(bootstrap.databases).toEqual([
@@ -56,7 +57,7 @@ describe('loadBootstrap', () => {
         statements: [
           'CREATE DATABASE "agentx" OWNER agentx_owner',
           'REVOKE ALL ON DATABASE "agentx" FROM PUBLIC',
-          'GRANT CONNECT ON DATABASE "agentx" TO agentx_app, agentx_backup',
+          'GRANT CONNECT ON DATABASE "agentx" TO agentx_app, agentx_backup, agentx_operator',
         ],
       },
       {
@@ -135,7 +136,7 @@ describe('setUpServer', () => {
           tls: 'disable',
         },
         database,
-        logins: { owner: 'a', app: 'b', backup: 'c', zitadel: 'd' },
+        logins: { owner: 'a', app: 'b', backup: 'c', operator: 'e', zitadel: 'd' },
         directory: BOOTSTRAP,
         logger,
       });
@@ -164,16 +165,18 @@ const ROLES: readonly RoleRow[] = [
   role('agentx_owner', true),
   role('agentx_app'),
   role('agentx_backup', false, true),
+  role('agentx_operator'),
   role('zitadel'),
 ];
 
 describe('roleProblems', () => {
-  it('passes the four roles as db/bootstrap makes them, members of nothing', () => {
+  it('passes the five roles as db/bootstrap makes them, members of nothing', () => {
     expect(roleProblems(ROLES, [])).toEqual([]);
   });
 
   it('names a missing role', () => {
-    expect(roleProblems(ROLES.slice(0, 3), [])).toEqual(['zitadel does not exist']);
+    expect(roleProblems(ROLES.slice(0, 4), [])).toEqual(['zitadel does not exist']);
+    expect(roleProblems(ROLES.slice(0, 3), [])).toEqual(['agentx_operator does not exist', 'zitadel does not exist']);
   });
 
   it.each([
@@ -188,6 +191,17 @@ describe('roleProblems', () => {
     const rows = ROLES.map((row) => (row.rolname === 'agentx_app' ? { ...row, [attribute]: value } : row));
     expect(roleProblems(rows, [])).toEqual(['agentx_app does not have the attributes db/bootstrap gives it']);
   });
+
+  it.each([
+    ['rolbypassrls', true],
+    ['rolinherit', true],
+  ] as const)(
+    "names the operator's role whose %s was made %s: it is held to the app's walls (PL-57)",
+    (attribute, value) => {
+      const rows = ROLES.map((row) => (row.rolname === 'agentx_operator' ? { ...row, [attribute]: value } : row));
+      expect(roleProblems(rows, [])).toEqual(['agentx_operator does not have the attributes db/bootstrap gives it']);
+    },
+  );
 
   it('names every membership it is shown', () => {
     expect(
@@ -209,10 +223,11 @@ const DATABASES: readonly DatabaseRow[] = [
 const GRANTS: readonly GrantRow[] = [
   { name: 'agentx', grantee: 'agentx_backup', privilege: 'CONNECT' },
   { name: 'agentx', grantee: 'agentx_app', privilege: 'CONNECT' },
+  { name: 'agentx', grantee: 'agentx_operator', privilege: 'CONNECT' },
 ];
 
 describe('databaseProblems', () => {
-  it('passes the two databases owned by their roles, the app and backup roles let into the app database only', () => {
+  it('passes the two databases owned by their roles, the app, backup and operator roles let into the app database only', () => {
     expect(databaseProblems('agentx', DATABASES, GRANTS)).toEqual([]);
   });
 
@@ -239,10 +254,10 @@ describe('databaseProblems', () => {
   it('names who else is let in, and who should be, in the same order whatever order the server gives', () => {
     const grants = [...GRANTS, { name: 'agentx', grantee: 'PUBLIC', privilege: 'TEMPORARY' }];
     expect(databaseProblems('agentx', DATABASES, grants)).toEqual([
-      'the database agentx lets in PUBLIC TEMPORARY, agentx_app CONNECT, agentx_backup CONNECT besides its owner, not agentx_app CONNECT, agentx_backup CONNECT',
+      'the database agentx lets in PUBLIC TEMPORARY, agentx_app CONNECT, agentx_backup CONNECT, agentx_operator CONNECT besides its owner, not agentx_app CONNECT, agentx_backup CONNECT, agentx_operator CONNECT',
     ]);
-    expect(databaseProblems('agentx', DATABASES, GRANTS.slice(0, 1))).toEqual([
-      'the database agentx lets in agentx_backup CONNECT besides its owner, not agentx_app CONNECT, agentx_backup CONNECT',
+    expect(databaseProblems('agentx', DATABASES, GRANTS.slice(0, 2))).toEqual([
+      'the database agentx lets in agentx_app CONNECT, agentx_backup CONNECT besides its owner, not agentx_app CONNECT, agentx_backup CONNECT, agentx_operator CONNECT',
     ]);
     expect(
       databaseProblems('agentx', DATABASES, [
@@ -251,7 +266,7 @@ describe('databaseProblems', () => {
       ]),
     ).toEqual(['the database zitadel lets in agentx_app CONNECT besides its owner, not no one']);
     expect(databaseProblems('agentx', DATABASES, [])).toEqual([
-      'the database agentx lets in no one besides its owner, not agentx_app CONNECT, agentx_backup CONNECT',
+      'the database agentx lets in no one besides its owner, not agentx_app CONNECT, agentx_backup CONNECT, agentx_operator CONNECT',
     ]);
   });
 });
