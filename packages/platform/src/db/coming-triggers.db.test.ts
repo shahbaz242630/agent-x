@@ -66,6 +66,13 @@ afterAll(async () => {
   await database.drop();
 });
 
+/** Each `table name` pair, said as `says` puts it. */
+const eachNamed = (named: readonly string[], says: (table: string, name: string) => string): string[] =>
+  named.map((one) => {
+    const [table = '', name = ''] = one.split(' ');
+    return says(table, name);
+  });
+
 describe('a trigger a coming migration adds to a table already built', () => {
   beforeEach(async () => {
     await owner.query(MAKE_FUNCTION);
@@ -228,11 +235,7 @@ describe("0077's triggers, made as its migration will make them, read by this im
   const DROPPED = `drop trigger if exists marks_factor_removals on identity.factor_resets;
     drop trigger if exists marks_background_downloads on activity_exports.files`;
   const NAMED = ['activity_exports.files marks_background_downloads', 'identity.factor_resets marks_factor_removals'];
-  const each = (says: (table: string, name: string) => string) =>
-    NAMED.map((named) => {
-      const [table = '', name = ''] = named.split(' ');
-      return says(table, name);
-    });
+  const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
 
   it('are each a coming trigger, and nothing is the alarm at once', async () => {
     await owner.query(MADE);
@@ -303,11 +306,7 @@ describe('0075, read as the image before it would read it (4D2e D9)', () => {
     'suppliers.suppliers marks_request_voids',
   ];
   const ours = ({ table, name }: WrittenTrigger) => NAMED.includes(`${table} ${name}`);
-  const each = (says: (table: string, name: string) => string) =>
-    NAMED.map((named) => {
-      const [table = '', name = ''] = named.split(' ');
-      return says(table, name);
-    });
+  const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
   // The image before knew 0072's and 0073's triggers as written, these seven as coming, and the job CHECK as 0073 made it.
   const before = {
     triggers: MARK_TRIGGERS.filter((one) => !ours(one)),
