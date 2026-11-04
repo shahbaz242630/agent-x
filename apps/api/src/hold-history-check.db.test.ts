@@ -69,7 +69,8 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xd1c0_0000_0000);
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
-const services = () => ({ keys, ids, logger: testLogger() });
+/** Each test's own lines: the hold's are said through these. */
+const services = () => ({ keys, ids, logger: testLogger(capture) });
 
 let capture: LogCapture;
 let org: string;
@@ -432,6 +433,34 @@ describe(`the hold history on its marks (4D2e D10, Postgres ${server.version})`,
     expect(BigInt(mark?.marks ?? '0')).toBe(BigInt(standing?.marks ?? '0') + 1n);
     expect(mark?.due_at.getTime()).toBeLessThan(later.getTime());
     expect(lines('audit.integrity_failed').filter((line) => line.check === 'hold')).toEqual([]);
+  });
+
+  it('a hold set while its mark is held past the mark’s limit still commits; the miss is said, and the hourly look marks it (forced)', async () => {
+    // Another transaction making the same mark, uncommitted: the hold's mark waits on its row past 500 ms.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query(
+      `insert into directory.org_work (org_id, job, due_at) values ($1, 'hold_history', pg_catalog.now())`,
+      [org],
+    );
+    try {
+      await within(10_000, held(false), 'the hold');
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+
+    expect((await holdNow()).outcome).toBe('held');
+    expect(lines('org_work.hold_mark_skipped')).toEqual([expect.objectContaining({ level: 'warn', orgId: org })]);
+    expect(lines('audit.integrity_failed').filter((line) => line.check === 'hold')).toEqual([]);
+    expect(await markOf()).toBeUndefined();
+    await createOrgWorkRediscovery({
+      list: () => Promise.resolve([org]),
+      database: marksApp,
+      logger: testLogger(capture),
+    }).run();
+    expect(lines('org_work.unmarked')).toEqual([expect.objectContaining({ job: 'hold_history', late: false })]);
+    expect(await markOf()).toBeDefined();
   });
 
   it('a mark for an organisation the directory does not list makes nothing, and fails nothing', async () => {

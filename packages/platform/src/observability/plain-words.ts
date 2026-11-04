@@ -53,6 +53,11 @@ export const PLAIN_WORDS = {
     broke: 'The job it names skipped that work since then (up to an hour); it is due again now.',
     next: 'The mark is now right. One after a release is older work; more means a write misses its mark.',
   },
+  'org_work.hold_mark_skipped': {
+    happened: 'An integrity hold was set, but marking its history check as work to do failed or waited too long.',
+    broke: 'Nothing: the hold stands. Its history check waits for the hourly check to mark it (up to an hour).',
+    next: 'Nothing to do. If this repeats, check the database for long-held locks.',
+  },
   'org_work.rediscovery_failed': {
     happened: 'The hourly check of which organisations have work could not finish for this organisation, or at all.',
     broke: 'A mark lost since the last check stays lost until the next, and its work waits until then.',
