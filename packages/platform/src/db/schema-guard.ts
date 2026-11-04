@@ -28,6 +28,10 @@
 // a new migration needs no pin here and CI goes red until the file is refreshed.
 // Each is compared as Postgres prints it, in this process, with no cast read.
 //
+// **Primary keys and unique constraints** are held to built-keys.json the same way
+// (4D2e E8 review): one dropped lets two rows share a number, which a count of rows
+// can't tell from one, and one planted can refuse the very event that sets a hold.
+//
 // **Tables** are named in built-tables.json, written the same way. A release's new
 // table is not in the file of the image before it, so to that image it has no
 // walls, or the wrong rights, the moment the migration ends: that is release-shaped
@@ -60,6 +64,7 @@
 import { type Kysely, sql } from 'kysely';
 
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
+import BUILT_KEYS from './built-keys.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
 import { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
 import { OWN_COLUMNS, type SignedStateTable } from './signed-rows.ts';
@@ -467,6 +472,7 @@ export interface SchemaGuardOptions {
     readonly triggers: readonly WrittenTrigger[];
     readonly tables: readonly string[];
     readonly checks: readonly Omit<CheckConstraint, 'validated'>[];
+    readonly keys?: readonly KeyConstraint[];
   };
 }
 
@@ -614,6 +620,13 @@ export interface CheckConstraint {
   readonly expression: string;
   /** False for one added NOT VALID, and for one made NOT ENFORCED (Postgres 18 on), which Postgres marks not valid too. */
   readonly validated: boolean;
+}
+
+/** A primary key or unique constraint, as pg_get_constraintdef prints it: its kind and columns. */
+export interface KeyConstraint {
+  readonly table: string;
+  readonly name: string;
+  readonly definition: string;
 }
 
 /** One right granted to the backup role, on the object the problem names. */
@@ -972,6 +985,21 @@ export async function checkConstraints<Schema>(db: Kysely<Schema>): Promise<Chec
   return [...rows];
 }
 
+/** Every primary key and unique constraint in our schemas, as Postgres prints it. */
+export async function keyConstraints<Schema>(db: Kysely<Schema>): Promise<KeyConstraint[]> {
+  const { rows } = await sql<KeyConstraint>`
+    select ${QUALIFIED} as table,
+           con.conname as name,
+           pg_catalog.pg_get_constraintdef(con.oid) as definition
+    from pg_catalog.pg_constraint con
+    join pg_catalog.pg_class c on c.oid = con.conrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS} and con.contype in ('p', 'u')
+    order by 1, 2
+  `.execute(db);
+  return [...rows];
+}
+
 /**
  * Every right the backup role was granted on what the database owner can grant:
  * our tables, sequences, columns, schemas and functions, and this database. Read
@@ -1195,6 +1223,31 @@ function builtCheckProblems(
     if (!builtIds.has(id(one))) problems.push(`${checkNamed(one)} is not one the migrations built`);
   }
   return problems;
+}
+
+/**
+ * The running keys against those the migrations built, as builtCheckProblems holds CHECK constraints: one added is
+ * named only on a table the migrations built, as a new release's table, or a test's own, is judged by its shape.
+ */
+function builtKeyProblems(
+  live: readonly KeyConstraint[],
+  built: readonly KeyConstraint[],
+  builtTables: ReadonlySet<string>,
+): SchemaProblem[] {
+  const id = ({ table, name }: KeyConstraint): string => JSON.stringify([table, name]);
+  const named = ({ table, name }: KeyConstraint): string => `${table}'s key ${quoted(name)}`;
+  const liveById = new Map(live.map((one) => [id(one), one]));
+  const builtIds = new Set(built.map(id));
+  return [
+    ...built.flatMap((one) => {
+      const found = liveById.get(id(one));
+      if (found === undefined) return [`${named(one)} is not there`];
+      return found.definition === one.definition ? [] : [`${named(one)} reads differently`];
+    }),
+    ...live
+      .filter((one) => builtTables.has(one.table) && !builtIds.has(id(one)))
+      .map((one) => `${named(one)} is not one the migrations built`),
+  ];
 }
 
 /** Each right the backup role holds beyond reading, and each it could hand on. */
@@ -1720,7 +1773,7 @@ export async function liveSchemaDrift<Schema>(
     madeOnceTables = [],
     fixedAtCreation = {},
     comingTriggers = COMING_TRIGGERS,
-    built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks } = {
+    built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks, keys: builtKeys = BUILT_KEYS } = {
       triggers: MARK_TRIGGERS,
       tables: BUILT_TABLES,
       checks: BUILT_CHECKS,
@@ -1748,6 +1801,7 @@ export async function liveSchemaDrift<Schema>(
       await connectionLimits(one, [appRole, ownerRole]),
       await checkConstraints(one),
       await backupRights(one),
+      await keyConstraints(one),
     ] as const;
   };
   const [
@@ -1768,6 +1822,7 @@ export async function liveSchemaDrift<Schema>(
     limited,
     allChecks,
     backupHeld,
+    allKeys,
   ] = await db.connection().execute((one) => reading(one));
 
   const globalTables = new Set(Object.keys(policy.globalTables));
@@ -1874,6 +1929,7 @@ export async function liveSchemaDrift<Schema>(
     atOnce: inOrder(problems),
     releaseShaped: inOrder([
       ...builtCheckProblems(allChecks, builtChecks),
+      ...builtKeyProblems(allKeys, builtKeys, new Set(builtTables)),
       ...unknownFunctionProblems(allFunctions, bodies),
       ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),
