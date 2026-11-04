@@ -60,4 +60,10 @@ param loadImageDigest = readEnvironmentVariable('AGENTX_AZURE_LOAD_IMAGE_DIGEST'
 // The anchor key's public halves (4D2e E9), as staging's API logs them at start
 // (`api.starting`, keys: audit-anchor), `<version>:<key>`: public, so kept here.
 // Empty until copied in: the operator's chain recovery plan is refused until then.
+// Only the public key's `x` value goes here, never the private `d`: this file is
+// committed, and a private key here would let anyone sign anchors.
 param anchorPublicKeys = ''
+
+// The anchors' epoch, the API's and the operator's alike: raised by one only for a
+// sanctioned restore of the whole database (playbook H).
+param anchorEpoch = 1
