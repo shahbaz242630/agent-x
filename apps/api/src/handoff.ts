@@ -305,6 +305,15 @@ export async function withinTime<T>(answer: Promise<T>, ms: number): Promise<T> 
 }
 
 /**
+ * The gate every job's settling of its marks shares (org-work.ts), made once for the process: with the hand-off's own
+ * gate, a third of the pool (pools of 9 and up; staging runs 10, the load run 20), the share handoffDatabaseGate holds
+ * these jobs to. At least one, so below 9 it is one over: settling must still move.
+ */
+export function settleReadsGate(poolMax: number): Gate {
+  return createGate(Math.max(1, Math.floor(poolMax / 3) - DATABASE_GATE));
+}
+
+/**
  * The gate the hand-off and the bank check share, made once for the process. Refused
  * at start where it would take over a third of the pool: past it, these jobs
  * could keep agents' decisions from their connections.
@@ -318,6 +327,7 @@ export function handoffDatabaseGate(poolMax: number): Gate {
 
 export function createHandoff({
   list,
+  sweepList = list,
   database,
   rail,
   outbox,
@@ -335,8 +345,10 @@ export function createHandoff({
   stopWaitMs = STOP_WAIT_MS,
   anchoring,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to hand off in: those marked (org-work.ts), which job-list.ts passes; read only while not held. */
   readonly list: () => Promise<readonly string[]>;
+  /** The organisations to sweep, read only on a run that sweeps: their own marks; `list` unless given. */
+  readonly sweepList?: () => Promise<readonly string[]>;
   readonly database: Database<HandoffTables>;
   readonly rail: FinancialRailAdapter;
   /** Where a denial is written for the admins: an approved payment stopped before the bank (B4b, decision 3). */
@@ -1009,30 +1021,50 @@ export function createHandoff({
     }
   };
 
+  /**
+   * The organisations a read gives, the run beating with them: only a run that reads its organisations beats, so one
+   * failing every time reads as stopped. One that fails is said, and ends the run.
+   */
+  const listed = async (read: () => Promise<readonly string[]>): Promise<readonly string[] | undefined> => {
+    try {
+      const orgs = await read();
+      beatNow();
+      return orgs;
+    } catch (error) {
+      logger.error('handoff.run_failed', { err: error });
+      return undefined;
+    }
+  };
+
+  /** The sweep over its own organisations; false where its list couldn't be read, or a stop cut it short. */
+  const sweptAll = async (signal: AbortSignal | undefined): Promise<boolean> => {
+    const swept = await listed(sweepList);
+    if (swept === undefined) return false;
+    sweptAt = clock.now().getTime();
+    for (const orgId of swept) {
+      // Stopped between organisations too, so the process stops promptly however many there are.
+      if (signal?.aborted === true) return false;
+      await sweepIn(orgId, logger.child({ orgId }));
+    }
+    return true;
+  };
+
   return {
     async run(signal) {
-      let orgs: readonly string[];
-      try {
-        orgs = await list();
-      } catch (error) {
-        logger.error('handoff.run_failed', { err: error });
-        return;
-      }
-      beatNow();
       const sweeping = clock.now().getTime() - sweptAt >= SWEEP_EVERY_MS;
-      if (sweeping) sweptAt = clock.now().getTime();
-      // Read once a run (gate H5): while hand-offs are held, no request is read at all; Tx A still reads it again
-      // under its lock for each one it hands off.
+      // Read once a run (gate H5): while hand-offs are held, no request is read at all, nor which organisations have
+      // them; Tx A still reads it again under its lock for each one it hands off.
       const held = await heldNow();
       if (held !== heldWas) logger.info(held === null ? 'handoff.running' : 'handoff.held', { why: held ?? 'none' });
       heldWas = held;
-      if (held === null) await handOffLanes(orgs, signal);
+      if (held === null) {
+        const orgs = await listed(list);
+        if (orgs === undefined) return;
+        await handOffLanes(orgs, signal);
+        // A pause that couldn't be read says nothing of the run being alive; one read whole does, as a list read does.
+      } else if (held === 'pause_unread' && !sweeping) return;
       // A pass of its own, once the hand-offs have ended, so it never waits behind a lane or holds one up.
-      for (const orgId of sweeping ? orgs : []) {
-        // Stopped between organisations too, so the process stops promptly however many there are.
-        if (signal?.aborted === true) return;
-        await sweepIn(orgId, logger.child({ orgId }));
-      }
+      if (sweeping && !(await sweptAll(signal))) return;
       beatNow();
     },
     beating: () => clock.now().getTime() - beat <= HEARTBEAT_STALE_MS,

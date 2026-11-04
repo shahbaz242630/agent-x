@@ -13,6 +13,16 @@ export {
   organizationsOf,
   registerMember,
 } from './infrastructure/members.ts';
-export { markOrgWork, type OrgWorkJob, type OrgWorkMark, orgWorkOf, settleOrgWork } from './infrastructure/org-work.ts';
+export {
+  type DueOrgWork,
+  dueOrgWork,
+  markOrgWork,
+  type OrgWorkJob,
+  type OrgWorkMark,
+  orgWorkOf,
+  settleOrgWork,
+  type SettledOrgWork,
+  settleOrgWorkPage,
+} from './infrastructure/org-work.ts';
 export { listedOrganizations, registerOrganization } from './infrastructure/organizations.ts';
 export type { DirectoryTables } from './infrastructure/tables.ts';
