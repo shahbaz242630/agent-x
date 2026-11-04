@@ -587,12 +587,13 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
     expect(await chain.passStep(app, CHAIN_START, from, 10)).toMatchObject({ ok: true, seq: 2n, to: 2n });
   });
 
-  it('finds the tail removed, the anchored event gone, and a middle event by count and pass alone', async () => {
+  it('finds the tail removed, the anchored event gone, and a middle event by the count of the last 1,000 and a pass', async () => {
     await record(started(1), started(2), started(3));
     const whole = await checked();
 
     await tamper('delete from platform_controls.audit_events where seq = 2');
-    expect(await chain.checkFromAnchor(app, whole)).toMatchObject({ ok: true, seq: 3n });
+    // Counted with the edges since 4D2e E8 (decision 1): where the count starts, as a count can't say which.
+    expect(await chain.checkFromAnchor(app, whole)).toEqual({ ok: false, problem: { reason: 'gap', seq: 1n } });
     expect(await chain.countStep(app, 0n, 3n)).toEqual({ reason: 'gap', seq: 1n });
     expect(await chain.passStep(app, CHAIN_START, whole, 10)).toEqual({
       ok: false,
@@ -601,6 +602,28 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
 
     await tamper('delete from platform_controls.audit_events where seq = 3');
     expect(await chain.checkFromAnchor(app, whole)).toEqual({ ok: false, problem: { reason: 'head', seq: 3n } });
+  });
+
+  it('counts numbers, not rows: one deleted and made up for by a copy of another, the keys dropped (4D2e E8 review)', async () => {
+    await record(started(1), started(2), started(3));
+    const whole = await checked();
+    await tamper(
+      'alter table platform_controls.audit_events drop constraint audit_events_pkey',
+      'alter table platform_controls.audit_events drop constraint audit_events_id_key',
+      'delete from platform_controls.audit_events where seq = 2',
+      // A copy of the first: the lowest and highest numbers, and the anchored event, all as they were.
+      'insert into platform_controls.audit_events select * from platform_controls.audit_events where seq = 1',
+    );
+    try {
+      expect(await chain.checkFromAnchor(app, whole)).toEqual({ ok: false, problem: { reason: 'gap', seq: 1n } });
+      expect(await chain.countStep(app, 0n, 3n)).toEqual({ reason: 'gap', seq: 1n });
+    } finally {
+      await tamper(
+        'delete from platform_controls.audit_events',
+        'alter table platform_controls.audit_events add constraint audit_events_pkey primary key (seq)',
+        'alter table platform_controls.audit_events add constraint audit_events_id_key unique (id)',
+      );
+    }
   });
 
   it('finds the anchored event edited', async () => {
@@ -710,7 +733,8 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
     await record(started(1), created(first), started(2), created(second), started(3));
 
     expect(await chain.createdOrganizationsSince(app, 0n, 5n)).toEqual({ orgIds: [first, second], seq: 4n });
-    expect(await chain.createdOrganizationsSince(app, 2n, 5n)).toEqual({ orgIds: [second], seq: 4n });
+    // With the job's limit on each trip's answer, as the anchor check reads it (4D2e E8).
+    expect(await chain.createdOrganizationsSince(app, 2n, 5n, 30_000)).toEqual({ orgIds: [second], seq: 4n });
     expect(await chain.createdOrganizationsSince(app, 4n, 5n)).toEqual({ orgIds: [], seq: 4n });
   });
 

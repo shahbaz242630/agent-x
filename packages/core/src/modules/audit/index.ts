@@ -19,6 +19,13 @@ export {
 } from './domain/event.ts';
 export { actorEventsSince } from './infrastructure/actor-counts.ts';
 export {
+  chainRowsAlone,
+  type ChainRowsPage,
+  type StoredColumns,
+  type StoredRow,
+  type StoredValues,
+} from './infrastructure/chain-rows.ts';
+export {
   type AuditTrail,
   type AuditTransaction,
   createAuditTrail,

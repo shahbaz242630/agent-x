@@ -12,6 +12,7 @@ import {
   DNS_ALLOWED,
   type Expectations,
   kqlStages,
+  leastRestoreDays,
   paramsFileProblems,
   policyProblems,
   PREVIEW_API_EXCEPTIONS,
@@ -255,6 +256,12 @@ const named = (pattern: RegExp) => (resource: PredictedResource) => pattern.test
 const SERVER = type('Microsoft.DBforPostgreSQL/flexibleServers');
 const VAULT = type('Microsoft.KeyVault/vaults');
 const WORKSPACE = type('Microsoft.OperationalInsights/workspaces');
+const MAIN_WORKSPACE = (resource: PredictedResource) =>
+  WORKSPACE(resource) && /^log-agentx-[a-z]+$/.test(resource.name);
+const LOGIN_WORKSPACE = (resource: PredictedResource) => WORKSPACE(resource) && resource.name.endsWith('-logins');
+const LOGIN_CAP_ALERT = named(/-login-logs-cap-reached$/);
+const SYSTEM_LOGS_COPY = named(/^system-logs-to-login-workspace$/);
+const WORKBOOK = type('Microsoft.Insights/workbooks');
 const RULES = type('Microsoft.Network/networkSecurityGroups');
 const DATABASE_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-database');
 const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-apps');
@@ -279,11 +286,15 @@ const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
 const AGENT_CANCELS_ALERT = named(/^alert-agentx-.+-agent-cancels$/);
 const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
+const DECISIONS_SUPPRESSED_ALERT = named(/^alert-agentx-.+-decisions-suppressed$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
 const ANCHOR_STORE_ALERT = named(/^alert-agentx-.+-anchor-store$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
+const RECORDS_FILLING_ALERT = named(/^alert-agentx-.+-records-filling$/);
+const DAILY_CHECK_ALERT = named(/^alert-agentx-.+-daily-check$/);
+const FULL_PASS_ALERT = named(/^alert-agentx-.+-full-pass$/);
 const ANCHOR_STOPPED_ALERT = named(/^alert-agentx-.+-anchor-stopped$/);
 const JOBS_STOPPED_ALERT = named(/^alert-agentx-.+-jobs-stopped$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
@@ -491,9 +502,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     ).toEqual([
       'Microsoft.Resources/resourceGroups rg-agentx-staging',
       'Microsoft.OperationalInsights/workspaces log-agentx-stg',
+      'Microsoft.OperationalInsights/workspaces log-agentx-stg-logins',
       'Microsoft.Insights/actionGroups ag-agentx-stg',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-log-quota',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-quota',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-log-cap-reached',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-cap-reached',
       'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
       'Microsoft.Consumption/budgets budget-agentx-staging',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
@@ -528,6 +542,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/^Microsoft\.Insights\/metricAlerts alert-psql-agentx-stg-[a-z0-9]{6}-disk$/),
       'Microsoft.App/managedEnvironments cae-agentx-staging',
       'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
+      'Microsoft.Insights/diagnosticSettings system-logs-to-login-workspace',
       ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'].map(
         (workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`,
       ),
@@ -543,12 +558,16 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-handoff-queue',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-platform-full',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-store',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-daily-check',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-full-pass',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-records-filling',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-stopped',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-jobs-stopped',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-decisions-suppressed',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxstg[a-z0-9]{6}$/),
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxstg[a-z0-9]{6}\/default$/),
       expect.stringMatching(
@@ -556,6 +575,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-anchors$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -585,6 +610,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
+      expect.stringMatching(
+        /^Microsoft\.Insights\/workbooks [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      ...['request-failures', 'decision-time', 'handoff-outcomes', 'job-gaps'].map(
+        (measure) => `Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-measure-${measure}`,
+      ),
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -779,9 +810,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
             resource.type.startsWith('Microsoft.DBforPostgreSQL') || /psql|^logs-to-workspace$/.test(resource.name),
         ),
       ),
-    ).toEqual(['required']);
+      // With no server, no server's log reaches the login alerts' workspace either.
+    ).toEqual(['required', 'login-workspace']);
     expect(brokenRules(without((resource) => NETWORK(resource) || RULES(resource)))).toContain('required');
     expect(brokenRules(without(WORKSPACE))).toContain('required');
+    expect(brokenRules(without(MAIN_WORKSPACE))).toContain('required');
     // Without the policy, no rule of ours judges the network's lookups.
     expect(
       brokenRules(
@@ -799,6 +832,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // their certificates belong to no environment of ours.
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
+      'login-workspace',
       'owner-login-alert',
       'jobs',
       'apps',
@@ -1187,9 +1221,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
       // Not stated leaves the server's last value, which may be on.
       const unstated = staging.predictedResources.filter((resource) => !MEASURE(name)(resource));
       expect(unstated).toHaveLength(staging.predictedResources.length - 1);
-      expect(brokenRules({ predictedResources: structuredClone(unstated), diagnostics: [] })).toEqual([
-        'database-measures',
-      ]);
+      // An unstated limit leaves the connections rule nothing to count against either (4D2e D12).
+      expect(brokenRules({ predictedResources: structuredClone(unstated), diagnostics: [] })).toEqual(
+        name === 'max_connections' ? ['database-measures', 'connections'] : ['database-measures'],
+      );
     }
     let everyOn = staging;
     for (const [name, value] of Object.entries(on)) {
@@ -1644,10 +1679,118 @@ describe('SEC-OPS-09 each rule can fail', () => {
         {
           rule: 'evidence-store',
           resource: 'job-agentx-stg-migrate',
-          message: "sets AGENTX_AUDIT_ANCHORS_URL: only the API keeps the chains' anchors",
+          message:
+            "sets AGENTX_AUDIT_ANCHORS_URL: only the API keeps the chains' anchors and the operator's job reads them",
         },
       ]);
     });
+
+    describe("the operator's read of it, for a chain recovery plan (4D2e E9)", () => {
+      const READER = (resource: PredictedResource) =>
+        ROLE_DEFINITIONS(resource) &&
+        resource.name ===
+          bicepGuid(
+            String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id),
+            'audit-anchors-reader',
+          );
+      const READS = (resource: PredictedResource) =>
+        ASSIGNMENTS(resource) &&
+        String(at(resource.properties, 'description')).startsWith('operator reads audit anchors');
+      const identityId = (workload: string): string =>
+        String(
+          staging.predictedResources.find(
+            (resource) =>
+              resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
+              resource.name.endsWith(`-${workload}`),
+          )?.id,
+        );
+
+      it('its role reads and lists, and can add, overwrite or delete nothing', () => {
+        expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
+          { actions: [], notActions: [], dataActions: [`${ACTIONS_OF}/read`], notDataActions: [] },
+        ]);
+        for (const change of [
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/add/action`),
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
+          (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+        ]) {
+          expect(brokenRules(changed(READER, change))).toEqual(['evidence-store']);
+        }
+        expect(brokenRules(without(READER))).toEqual(['evidence-store']);
+      });
+
+      it('given once, on the anchors container alone, to the operator alone', () => {
+        for (const change of [
+          (grant: Mutable) => {
+            grant.id = String(grant.id).replace('/containers/audit-anchors', '/containers/audit-exports');
+          },
+          (grant: Mutable) =>
+            (inside(grant, 'properties').principalId = String(at(grant, 'properties', 'principalId')).replace(
+              'id-agentx-stg-operator',
+              'id-agentx-stg-api',
+            )),
+          (grant: Mutable) => (inside(grant, 'properties').principalType = 'User'),
+        ]) {
+          expect(brokenRules(changed(READS, change))).toEqual(['evidence-store']);
+        }
+        expect(brokenRules(without(READS))).toEqual(['evidence-store']);
+        const twice = structuredClone(staging.predictedResources.find(READS)) as unknown as Mutable;
+        twice.id = `${String(twice.id)}-second`;
+        expect(brokenRules(withExtra(twice))).toEqual(['evidence-store']);
+      });
+
+      it("the operator's job is told of it as its own identity, and of no public key until one is set", () => {
+        const STORE_NAME = String(staging.predictedResources.find(EVIDENCE_STORE)?.name);
+        const operator = staging.predictedResources.find(JOB('operator')) as unknown as Mutable;
+        expect(settingsOf(operator).filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHOR'))).toEqual([
+          {
+            name: 'AGENTX_AUDIT_ANCHORS_URL',
+            value: `[format('https://{0}.blob.{1}/{2}', '${STORE_NAME}', environment().suffixes.storage, 'audit-anchors')]`,
+          },
+          {
+            name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+            value: `[reference('${identityId('operator')}', '2024-11-30').clientId]`,
+          },
+        ]);
+        // Told the API's identity, it would ask for a token it holds no role as.
+        const asApi = changed(JOB('operator'), (job) => {
+          const clientId = settingsOf(job).find((entry) => entry.name === 'AGENTX_AUDIT_ANCHORS_CLIENT_ID') ?? {};
+          clientId.value = `[reference('${identityId('api')}', '2024-11-30').clientId]`;
+        });
+        expect(brokenRules(asApi)).toEqual(['evidence-store']);
+      });
+    });
+  });
+
+  it("anchor-epoch: the operator told another epoch than the API's, or none, or another workload told one (4D2e E9)", () => {
+    const epochOf = (workload: Mutable): unknown[] =>
+      settingsOf(workload)
+        .filter((entry) => entry.name === 'AGENTX_ANCHOR_EPOCH')
+        .map((entry) => entry.value);
+    const api = epochOf(staging.predictedResources.find(APP('api')) as unknown as Mutable);
+    expect(api).toHaveLength(1);
+    expect(epochOf(staging.predictedResources.find(JOB('operator')) as unknown as Mutable)).toEqual(api);
+    const epoch = (job: Mutable): Mutable =>
+      settingsOf(job).find((entry) => entry.name === 'AGENTX_ANCHOR_EPOCH') ?? {};
+    for (const change of [
+      (job: Mutable) => (epoch(job).value = '2'),
+      (job: Mutable) => {
+        containerOf(job).env = settingsOf(job).filter((entry) => entry.name !== 'AGENTX_ANCHOR_EPOCH');
+      },
+      (job: Mutable) => settingsOf(job).push({ name: 'AGENTX_ANCHOR_EPOCH', value: api[0] }),
+    ]) {
+      expect(brokenRules(changed(JOB('operator'), change))).toEqual(['anchor-epoch']);
+    }
+    expect(brokenRules(changed(APP('api'), (app) => (epoch(app).value = '3')))).toEqual(['anchor-epoch']);
+    const told = changed(JOB('migrate'), (job) => settingsOf(job).push({ name: 'AGENTX_ANCHOR_EPOCH', value: api[0] }));
+    expect(policyProblems(told, STAGING)).toEqual([
+      {
+        rule: 'anchor-epoch',
+        resource: 'job-agentx-stg-migrate',
+        message: "sets AGENTX_ANCHOR_EPOCH: only the API and the operator's job",
+      },
+    ]);
   });
 
   it('activity-downloads: a downloads store anyone else can reach, that keeps a file past its week, or that another identity uses (L5c, decision 31)', () => {
@@ -1927,20 +2070,34 @@ describe('SEC-OPS-09 each rule can fail', () => {
         changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'features').disableLocalAuth = false)),
       ),
     ).toEqual(['workspace']);
-    expect(brokenRules(changed(WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual([
+    expect(brokenRules(changed(MAIN_WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual([
       'workspace',
     ]);
     expect(
       brokenRules(
-        changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 0)),
+        changed(MAIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 0)),
       ),
     ).toEqual(['workspace']);
+    // The login alerts' workspace is held to the same, and to its own 1 GB besides.
+    expect(brokenRules(changed(LOGIN_WORKSPACE, (workspace) => (properties(workspace).retentionInDays = 90)))).toEqual([
+      'workspace',
+    ]);
+    expect(brokenRules(changed(LOGIN_WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual(
+      ['workspace', 'login-workspace'],
+    );
   });
 
   it('SEC-AV-09 log-quota-alerts: the 80% alert off its threshold or its query, or the cap alert inverted or gone', () => {
+    // Either workspace's cap moved without its alert.
     expect(
       brokenRules(
-        changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
+        changed(LOGIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
+      ),
+    ).toEqual(['log-quota-alerts', 'login-workspace']);
+    expect(brokenRules(without(LOGIN_CAP_ALERT))).toEqual(['log-quota-alerts', 'login-workspace']);
+    expect(
+      brokenRules(
+        changed(MAIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
       ),
     ).toEqual(['log-quota-alerts']);
     expect(brokenRules(without(CAP_ALERT))).toEqual(['log-quota-alerts']);
@@ -2048,15 +2205,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to R.
+    // The playbook's sections run from A to S.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
       properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
       expect(properties(alert).description).not.toBe(before);
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('R')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('S')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('S')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('T')))).toEqual(['alert-runbook']);
     // The log cap's own section (T1c): section D is about dependencies.
     for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
       const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
@@ -2137,7 +2294,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (entry: Mutable) => (first(at(entry, 'properties', 'logs')).enabled = false),
       (entry: Mutable) => (first(at(entry, 'properties', 'logs')).category = 'PostgreSQLFlexSessions'),
     ]) {
-      expect(brokenRules(changed(named(/^logs-to-workspace$/), change))).toEqual(['resource-logs']);
+      // The server's log is what the login alerts' workspace is for, so its rule objects too.
+      expect(brokenRules(changed(named(/^logs-to-workspace$/), change))).toEqual(['login-workspace', 'resource-logs']);
     }
     for (const change of [
       (entry: Mutable) => (inside(entry, 'properties').logAnalyticsDestinationType = 'AzureDiagnostics'),
@@ -2149,7 +2307,135 @@ describe('SEC-OPS-09 each rule can fail', () => {
       brokenRules(
         changed(named(/^logs-to-workspace$/), (entry) => (inside(entry, 'properties').workspaceId = elsewhere)),
       ),
-    ).toEqual(['resource-logs', 'log-destinations']);
+    ).toEqual(['login-workspace', 'resource-logs', 'log-destinations']);
+  });
+
+  it("login-workspace: the login alerts' workspace missing, doubled, over its cap, without what they read, holding more, or its cap reached told quietly", () => {
+    const properties = (entry: Mutable): Mutable => inside(entry, 'properties');
+    const logs = (setting: Mutable): Mutable[] => at(setting, 'properties', 'logs') as Mutable[];
+    const loginWorkspace = staging.predictedResources.find(LOGIN_WORKSPACE);
+    // Gone, every login alert goes with it; two, and which one do the alerts read?
+    expect(brokenRules(without(LOGIN_WORKSPACE))).toEqual(
+      expect.arrayContaining(['required', 'login-workspace', 'database-logins', 'owner-login-alert']),
+    );
+    expect(
+      brokenRules(withExtra({ ...structuredClone(loginWorkspace), id: `${String(loginWorkspace?.id)}-second` })),
+    ).toEqual(expect.arrayContaining(['required', 'login-workspace']));
+    // A larger cap costs more on a flood's day, and a smaller one fills sooner.
+    for (const cap of [2, 0.5]) {
+      expect(
+        brokenRules(
+          changed(LOGIN_WORKSPACE, (workspace) => {
+            inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = cap;
+          }),
+        ),
+      ).toContain('login-workspace');
+    }
+    // The server's log sent to the main workspace instead: the main cap blinds the login alerts again.
+    const mainId = String(staging.predictedResources.find(MAIN_WORKSPACE)?.id);
+    expect(
+      brokenRules(changed(named(/^logs-to-workspace$/), (setting) => (properties(setting).workspaceId = mainId))),
+    ).toEqual(['login-workspace']);
+    // The platform's lines missing, sent to the shared table, or switched off: the owner-login pairing can't see starts.
+    for (const change of [
+      (setting: Mutable) => (properties(setting).workspaceId = mainId),
+      (setting: Mutable) => (properties(setting).logAnalyticsDestinationType = 'AzureDiagnostics'),
+      (setting: Mutable) => (first(logs(setting)).enabled = false),
+    ]) {
+      expect(brokenRules(changed(SYSTEM_LOGS_COPY, change))).toEqual(['login-workspace']);
+    }
+    expect(brokenRules(without(SYSTEM_LOGS_COPY))).toEqual(['login-workspace']);
+    // The apps' console sent there too: their volume could fill its cap.
+    expect(
+      brokenRules(
+        changed(SYSTEM_LOGS_COPY, (setting) =>
+          logs(setting).push({ category: 'ContainerAppConsoleLogs', enabled: true }),
+        ),
+      ),
+    ).toEqual(['login-workspace']);
+    // A category group brings every category: the apps' rule refuses it on the environment too.
+    expect(
+      brokenRules(
+        changed(SYSTEM_LOGS_COPY, (setting) => logs(setting).push({ categoryGroup: 'allLogs', enabled: true })),
+      ),
+    ).toEqual(['login-workspace', 'apps-logs']);
+    expect(
+      brokenRules(changed(DNS_LOGS, (setting) => (properties(setting).workspaceId = String(loginWorkspace?.id)))),
+    ).toEqual(['login-workspace']);
+    // Its cap reached only a SEV-2, or one that resolves itself and stays quiet: each refused.
+    expect(brokenRules(changed(LOGIN_CAP_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'login-workspace',
+      'alert-runbook',
+    ]);
+    expect(brokenRules(changed(LOGIN_CAP_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'login-workspace',
+      'alert-delivery',
+    ]);
+  });
+
+  it('workbook: content unreadable, reading another workspace, kept in a storage account, or naming who', () => {
+    const properties = (entry: Mutable): Mutable => inside(entry, 'properties');
+    const elsewhere = '/subscriptions/x/resourceGroups/y/providers/Microsoft.OperationalInsights/workspaces/elsewhere';
+    const content = (workbook: Mutable): Mutable => JSON.parse(String(properties(workbook).serializedData)) as Mutable;
+    const rewritten = (edit: (data: Mutable) => void) => (workbook: Mutable) => {
+      const data = content(workbook);
+      edit(data);
+      properties(workbook).serializedData = JSON.stringify(data);
+    };
+    // As built: one workbook, on the main workspace, its charts counting by event, level and outcome alone.
+    const built = staging.predictedResources.find(WORKBOOK);
+    expect(at(built?.properties, 'sourceId')).toBe(staging.predictedResources.find(MAIN_WORKSPACE)?.id);
+    expect(at(built, 'location')).toBe('uaenorth');
+    for (const change of [
+      (workbook: Mutable) => (properties(workbook).serializedData = '{ not json'),
+      (workbook: Mutable) => (properties(workbook).sourceId = elsewhere),
+      rewritten((data) => (data.fallbackResourceIds = [elsewhere])),
+      rewritten((data) => (first(data.items).crossComponentResources = [elsewhere])),
+      (workbook: Mutable) => (properties(workbook).storageUri = '/subscriptions/x/storageAccounts/elsewhere/blobs/c'),
+      rewritten((data) => {
+        const decisions = (data.items as Mutable[]).find((item) => item.name === 'decisions');
+        inside(decisions ?? {}, 'content').query =
+          'ContainerAppConsoleLogs | summarize count() by tostring(parse_json(Log).orgId)';
+      }),
+    ]) {
+      expect(brokenRules(changed(WORKBOOK, change))).toEqual(['workbook']);
+    }
+    // Outside the region, the general rule refuses it too.
+    expect(brokenRules(changed(WORKBOOK, (workbook) => (workbook.location = 'westeurope')))).toEqual(['in-country']);
+  });
+
+  it("every alert on the apps' lines, and the workbook, reading the login alerts' workspace, where no console line arrives", () => {
+    const loginId = String(staging.predictedResources.find(LOGIN_WORKSPACE)?.id);
+    const onLogins = (alert: Mutable) => (inside(alert, 'properties').scopes = [loginId]);
+    for (const [pick, rule] of [
+      [ERRORS_ALERT, 'app-errors-alert'],
+      [named(/-daily-words$/), 'daily-words-alert'],
+      [INTEGRITY_ALERT, 'audit-integrity-alert'],
+      [TOKEN_REFUSED_ALERT, 'token-refused-alert'],
+      [DENIAL_SURGE_ALERT, 'denial-surge-alert'],
+      [AGENT_CANCELS_ALERT, 'agent-cancels-alert'],
+      [AGENT_CANCEL_CAP_ALERT, 'agent-cancel-cap-alert'],
+      [HOLDINGS_CHECK_ALERT, 'holdings-check-alert'],
+      [HANDOFF_QUEUE_ALERT, 'handoff-queue-alert'],
+      [PLATFORM_FULL_ALERT, 'platform-full-alert'],
+      [ANCHOR_STORE_ALERT, 'anchor-store-alert'],
+      [INTEGRITY_RUNS_ALERT, 'integrity-runs-alert'],
+      [RECORDS_FILLING_ALERT, 'records-filling-alert'],
+      [ANCHOR_STOPPED_ALERT, 'dead-man-alerts'],
+      [JOBS_STOPPED_ALERT, 'dead-man-alerts'],
+    ] as const) {
+      expect(brokenRules(changed(pick, onLogins))).toEqual([rule]);
+    }
+    expect(brokenRules(changed(WORKBOOK, (workbook) => (inside(workbook, 'properties').sourceId = loginId)))).toEqual([
+      'workbook',
+    ]);
+  });
+
+  it('database-logins and owner-login-alert: either login alert reading the main workspace, which its cap can blind', () => {
+    const mainId = String(staging.predictedResources.find(MAIN_WORKSPACE)?.id);
+    const onMain = (alert: Mutable) => (inside(alert, 'properties').scopes = [mainId]);
+    expect(brokenRules(changed(LOGIN_ALERT, onMain))).toEqual(['database-logins']);
+    expect(brokenRules(changed(OWNER_ALERT, onMain))).toEqual(['owner-login-alert']);
   });
 
   it('dns-watch: a network no policy of ours watches, or whose every-name rule is off, allows, or covers less', () => {
@@ -2929,6 +3215,69 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
+  it("decisions-suppressed-alert: no alert on decision lines held back (PL-52), or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(DECISIONS_SUPPRESSED_ALERT))).toEqual(['decisions-suppressed-alert']);
+    for (const change of [
+      // Any held-back count, not the decision line's.
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.created" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided" | summarize Events = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(DECISIONS_SUPPRESSED_ALERT, change))).toEqual(['decisions-suppressed-alert']);
+    }
+    expect(String(at(staging.predictedResources.find(DECISIONS_SUPPRESSED_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section J\.$/,
+    );
+  });
+
+  it("records-filling-alert: no alert on an organisation's records filling, or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(RECORDS_FILLING_ALERT))).toEqual(['records-filling-alert']);
+    for (const change of [
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "identity.records_full" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).says) == "identity.records_filling" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "identity.records_filling" | summarize Events = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(RECORDS_FILLING_ALERT, change))).toEqual(['records-filling-alert']);
+    }
+    expect(brokenRules(changed(RECORDS_FILLING_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'records-filling-alert',
+    ]);
+    // SEV-2, stateful: nothing is broken yet, and the line repeats with each add or clearing.
+    const built = staging.predictedResources.find(RECORDS_FILLING_ALERT);
+    expect([at(built?.properties, 'severity'), at(built?.properties, 'autoMitigate')]).toEqual([2, true]);
+    // Its runbook is the playbook's section S.
+    expect(String(at(built?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section S\.$/,
+    );
+  });
+
   it("platform-full-alert: no alert on the whole platform full (PL-63), or one that counts something else, can't fire or fires too late", () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
@@ -2993,6 +3342,44 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const description = String(at(staging.predictedResources.find(ANCHOR_STORE_ALERT)?.properties, 'description'));
     expect(description).toMatch(/^SEV-2\. /);
     expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section H\.$/);
+  });
+
+  it.each([
+    ['daily-check-alert', DAILY_CHECK_ALERT, 'audit.daily_check_overdue', 'audit.full_pass_overdue'],
+    ['full-pass-alert', FULL_PASS_ALERT, 'audit.full_pass_overdue', 'audit.daily_check_overdue'],
+  ] as const)(
+    "%s: no alert on the anchor check's rotation running late (4D2e E7), or one that counts something else, can't fire or fires too late",
+    (rule, alert, event, other) => {
+      const properties = (found: Mutable): Mutable => inside(found, 'properties');
+      const query = (text: string) => (found: Mutable) => (criterion(found).query = text);
+      expect(brokenRules(without(alert))).toEqual([rule]);
+      for (const change of [
+        query(
+          `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${other}" | summarize Events = count()`,
+        ),
+        query(
+          `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize Events = count()`,
+        ),
+        (found: Mutable) => (criterion(found).threshold = 1),
+        ...LATE_OR_BLIND,
+        (found: Mutable) => (criterion(found).operator = 'LessThan'),
+        (found: Mutable) => (criterion(found).timeAggregation = 'Count'),
+        (found: Mutable) => (properties(found).scopes = ['/subscriptions/x/workspaces/y']),
+      ]) {
+        expect(brokenRules(changed(alert, change))).toEqual([rule]);
+      }
+      const description = String(at(staging.predictedResources.find(alert)?.properties, 'description'));
+      expect(description).toMatch(/^SEV-2\. /);
+      expect(description).toContain(event);
+      expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section H\.$/);
+    },
+  );
+
+  it('database-backup: production keeps twice the days an old audit edit may go unfound, 35 at least (4D2e decision 3)', () => {
+    expect(leastRestoreDays('production')).toBe(35);
+    expect(leastRestoreDays('production', 20)).toBe(40);
+    expect(leastRestoreDays('production', 17)).toBe(35);
+    expect(leastRestoreDays('staging', 20)).toBe(7);
   });
 
   it("handoff-queue-alert: no alert on approved payments left standing (gate H8), or one that counts something else, can't fire or fires too late", () => {
@@ -3835,7 +4222,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator']) {
       expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({
         workload,
-        rules: workload === 'migrate' ? ['owner-login-alert', 'release-access', 'jobs'] : ['jobs'],
+        // The operator gone, the anchors' epoch is the API's alone (anchor-epoch).
+        rules: { migrate: ['owner-login-alert', 'release-access', 'jobs'], operator: ['anchor-epoch', 'jobs'] }[
+          workload
+        ] ?? ['jobs'],
       });
     }
   });
@@ -3909,7 +4299,124 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const workload of ['api', 'login', 'zitadel']) {
       expect({ workload, rules: brokenRules(without(APP(workload))) }).toEqual({
         workload,
-        rules: workload === 'api' ? ['release-access', 'apps', 'public-doors'] : ['apps', 'public-doors'],
+        rules:
+          workload === 'api' ? ['anchor-epoch', 'release-access', 'apps', 'public-doors'] : ['apps', 'public-doors'],
+      });
+    }
+  });
+
+  it('apps: the API scaled other than its role says (4D2e D12)', () => {
+    const asRole = (settings: Record<string, string>, scale: Record<string, number>) => (app: Mutable) => {
+      settingsOf(app).push(...Object.entries(settings).map(([name, value]) => ({ name, value })));
+      Object.assign(scaleOf(app), scale);
+    };
+    // The app's own problems: a lone `web` app is also the deployment's (no app holds the jobs), tested below.
+    const appProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule, resource }) => rule === 'apps' && resource !== 'the deployment')
+        .map(({ message }) => message);
+    const web = { AGENTX_ROLE: 'web', AGENTX_WEB_COPIES: '3' };
+    expect(appProblems(changed(APP('api'), asRole(web, { minReplicas: 3, maxReplicas: 3 })))).toEqual([]);
+    expect(appProblems(changed(APP('api'), asRole(web, { minReplicas: 2, maxReplicas: 3 })))).toEqual([
+      'must run exactly 3 (minReplicas and maxReplicas 3): AGENTX_WEB_COPIES, which each copy shares its rate limits by; it says 2 to 3',
+    ]);
+    expect(appProblems(changed(APP('api'), asRole(web, { minReplicas: 4, maxReplicas: 4 })))).toHaveLength(1);
+    // One copy where none is said.
+    const oneWeb = asRole({ AGENTX_ROLE: 'web' }, { minReplicas: 1, maxReplicas: 1 });
+    expect(appProblems(changed(APP('api'), oneWeb))).toEqual([]);
+    const jobs = { AGENTX_ROLE: 'jobs' };
+    expect(appProblems(changed(APP('api'), asRole(jobs, { minReplicas: 1, maxReplicas: 1 })))).toEqual([]);
+    for (const scale of [
+      { minReplicas: 0, maxReplicas: 1 },
+      { minReplicas: 1, maxReplicas: 2 },
+    ]) {
+      expect(appProblems(changed(APP('api'), asRole(jobs, scale)))).toEqual([
+        `must run exactly 1 (minReplicas and maxReplicas 1): the jobs keep to one copy, which the lease alone doesn't make safe for the copier; it says ${String(scale.minReplicas)} to ${String(scale.maxReplicas)}`,
+      ]);
+    }
+    // `all`, said or not, holds the jobs: at most one, and none while staging sleeps.
+    expect(
+      appProblems(changed(APP('api'), asRole({ AGENTX_ROLE: 'all' }, { minReplicas: 0, maxReplicas: 1 }))),
+    ).toEqual([]);
+    expect(appProblems(changed(APP('api'), asRole({}, { maxReplicas: 2 })))).toEqual([
+      'must run at most one replica (maxReplicas 1): AGENTX_ROLE all holds the jobs; it says 2',
+    ]);
+    expect(appProblems(changed(APP('api'), asRole({ AGENTX_ROLE: 'worker' }, {})))).toEqual([
+      "sets AGENTX_ROLE to worker, which the API doesn't take: all, web or jobs",
+    ]);
+    // Copies that can't be read hold the replicas to nothing.
+    expect(
+      appProblems(changed(APP('api'), asRole({ AGENTX_ROLE: 'web', AGENTX_WEB_COPIES: 'three' }, { maxReplicas: 1 }))),
+    ).toEqual(['must give AGENTX_WEB_COPIES as a whole number, which its replicas are held to']);
+  });
+
+  it('apps: across the API apps, one unnamed, none or two holding the jobs, or all beside web (4D2e D12)', () => {
+    const deploymentProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule }) => rule === 'apps')
+        .map(({ resource, message }) => `${resource}: ${message}`);
+    const role = (value: string) => (app: Mutable) => {
+      settingsOf(app).push({ name: 'AGENTX_ROLE', value });
+    };
+    /** Staging with a second API app beside its own, named for `workload`, in `role`. */
+    const beside = (workload: string, value: string, from: Snapshot = staging): Snapshot => {
+      const second = structuredClone(from.predictedResources.find(APP('api'))) as unknown as Mutable;
+      second.name = `ca-agentx-stg-${workload}`;
+      role(value)(second);
+      Object.assign(scaleOf(second), { minReplicas: 1, maxReplicas: 1 });
+      return { ...from, predictedResources: [...from.predictedResources, second as unknown as PredictedResource] };
+    };
+    expect(deploymentProblems(staging)).toEqual([]);
+    // The split D13 makes: web beside jobs.
+    const webbed = changed(APP('api'), (app) => {
+      role('web')(app);
+      Object.assign(scaleOf(app), { minReplicas: 1, maxReplicas: 1 });
+    });
+    expect(deploymentProblems(beside('jobs', 'jobs', webbed))).toEqual([]);
+    expect(deploymentProblems(webbed)).toEqual([
+      'the deployment: needs exactly one app holding the jobs (AGENTX_ROLE jobs or all); it has 0',
+    ]);
+    expect(deploymentProblems(beside('jobs', 'jobs'))).toEqual([
+      'the deployment: needs exactly one app holding the jobs (AGENTX_ROLE jobs or all); it has 2',
+    ]);
+    expect(deploymentProblems(beside('jobs', 'web'))).toEqual([
+      'the deployment: runs AGENTX_ROLE all beside web: all counts its rate limits as the only copy',
+    ]);
+    expect(deploymentProblems(beside('worker', 'jobs', webbed))).toEqual([
+      'ca-agentx-stg-worker: runs the API, which only api and jobs may: an app nothing names could hold the jobs',
+    ]);
+  });
+
+  it("apps: the API's heap not set by its command, or outside half to three quarters of its memory (4D2e D12)", () => {
+    const heapProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule, message }) => rule === 'apps' && message.includes('max-old-space-size'))
+        .map(({ message }) => message);
+    const api = staging.predictedResources.find(APP('api'));
+    expect(at(containerOf(api as unknown as Mutable), 'command')).toEqual([
+      'node',
+      '--max-old-space-size=768',
+      'apps/api/src/main.ts',
+    ]);
+    expect(heapProblems(staging)).toEqual([]);
+    const commanded = (command: readonly string[], memory = '1Gi') =>
+      changed(APP('api'), (app) => {
+        containerOf(app).command = [...command];
+        inside(containerOf(app), 'resources').memory = memory;
+      });
+    expect(heapProblems(commanded(['node', '--max-old-space-size=512', 'apps/api/src/main.ts']))).toEqual([]);
+    expect(heapProblems(commanded(['node', '--max-old-space-size=1536', 'x'], '2Gi'))).toEqual([]);
+    for (const [command, memory] of [
+      [['node', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=511', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=769', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=lots', 'apps/api/src/main.ts'], '1Gi'],
+      [['node', '--max-old-space-size=768', 'apps/api/src/main.ts'], '1G'],
+    ] as const) {
+      expect({ command, memory, problems: heapProblems(commanded(command, memory)) }).toEqual({
+        command,
+        memory,
+        problems: [expect.stringMatching(/^must start node with --max-old-space-size=<MiB> between half and three/)],
       });
     }
   });
@@ -4862,11 +5369,90 @@ describe('the load run (D2c, PL-38)', () => {
     ).toEqual([]);
   });
 
+  it("connections: the apps' pools past the server's connections, in a load run or out of one (4D2e D12)", () => {
+    const connectionProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule }) => rule === 'connections')
+        .map(({ message }) => message);
+    const setting = (name: string, value: string) => (app: Mutable) => {
+      const entries = settingsOf(app);
+      const entry = entries.find((each) => each.name === name);
+      if (entry === undefined) entries.push({ name, value });
+      else entry.value = value;
+    };
+    const api = APP('api');
+    // Staging: two of the API's ten, Zitadel's ten, a job and one more are 32 of 35; eleven are 34, twelve 36.
+    expect(connectionProblems(staging)).toEqual([]);
+    expect(connectionProblems(changed(api, setting('AGENTX_DB_POOL_MAX', '11')))).toEqual([]);
+    expect(connectionProblems(changed(api, setting('AGENTX_DB_POOL_MAX', '12')))).toEqual([
+      "has 35 connections for users (max_connections 50 less Azure's 15), but the apps may hold 36: two of each API copy's pool, Zitadel's, one job and one to spare",
+    ]);
+    // Zitadel's pool where it sets one, in place of its image's ten.
+    expect(
+      connectionProblems(changed(APP('zitadel'), setting('ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '13'))),
+    ).toEqual([]);
+    expect(
+      connectionProblems(changed(APP('zitadel'), setting('ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '14'))),
+    ).toHaveLength(1);
+    // A pool that can't be read is said, never summed as nothing: given as words, or from a secret.
+    for (const entry of [
+      { name: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', value: 'ten' },
+      { name: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', secretRef: 'zitadel-pool' },
+    ]) {
+      expect(connectionProblems(changed(APP('zitadel'), (app) => settingsOf(app).push(entry)))).toEqual([
+        "ca-agentx-stg-zitadel must state ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS as a whole number, or leave it to its image's 10, so its connections can be counted",
+      ]);
+    }
+    expect(
+      connectionProblems(
+        changed(api, (app) => {
+          setting('AGENTX_ROLE', 'web')(app);
+          setting('AGENTX_WEB_COPIES', 'three')(app);
+        }),
+      ),
+    ).toEqual(['ca-agentx-stg-api must state AGENTX_WEB_COPIES as a whole number, so its connections can be counted']);
+    // An API whose pool isn't stated can't be counted.
+    expect(
+      connectionProblems(
+        changed(api, (app) => {
+          containerOf(app).env = settingsOf(app).filter(({ name }) => name !== 'AGENTX_DB_POOL_MAX');
+        }),
+      ),
+    ).toEqual(['ca-agentx-stg-api must state AGENTX_DB_POOL_MAX as a whole number, so its connections can be counted']);
+    // The load run, on the larger server's 85: its one API of twenty is 52.
+    expect(connectionProblems(load.together)).toEqual([]);
+    // The split's load size (Stage D): three web copies of eight and one jobs copy of six are 72; four web copies, 88.
+    const split = (copies: string): Snapshot => {
+      const webbed = loadChanged(api, (app) => {
+        for (const [name, value] of [
+          ['AGENTX_ROLE', 'web'],
+          ['AGENTX_WEB_COPIES', copies],
+          ['AGENTX_DB_POOL_MAX', '8'],
+        ] as const) {
+          setting(name, value)(app);
+        }
+      });
+      const jobs = structuredClone(found(load.together, api)) as unknown as Mutable;
+      jobs.name = 'ca-agentx-stg-jobs';
+      setting('AGENTX_ROLE', 'jobs')(jobs);
+      setting('AGENTX_DB_JOBS_POOL_MAX', '6')(jobs);
+      return { ...webbed, predictedResources: [...webbed.predictedResources, jobs as unknown as PredictedResource] };
+    };
+    expect(connectionProblems(split('3'))).toEqual([]);
+    expect(connectionProblems(split('4'))).toEqual([
+      "has 85 connections for users (max_connections 100 less Azure's 15), but the apps may hold 88: two of each API copy's pool, Zitadel's, one job and one to spare",
+    ]);
+  });
+
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {
     const api = APP('api');
     for (const change of [
       (app: Mutable) => (inside(containerOf(app), 'resources').cpu = 0.5),
-      (app: Mutable) => (inside(containerOf(app), 'resources').memory = '1Gi'),
+      // With its heap brought down too: a heap of 3072 MiB in 1 GiB is the `apps` rule's (4D2e D12).
+      (app: Mutable) => {
+        inside(containerOf(app), 'resources').memory = '1Gi';
+        containerOf(app).command = ['node', '--max-old-space-size=768', 'apps/api/src/main.ts'];
+      },
       (app: Mutable) => {
         for (const entry of settingsOf(app).filter((each) => each.name === 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE')) {
           entry.value = '120';

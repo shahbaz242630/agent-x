@@ -1762,6 +1762,56 @@ describe('a CHECK constraint, held to what the migrations built', () => {
   );
 });
 
+describe('a primary key or unique constraint, held to what the migrations built (4D2e E8 review)', () => {
+  const EVENTS = 'alter table audit.events';
+  const PLATFORM = 'alter table platform_controls.audit_events';
+  const PUT_KEY_BACK = `${EVENTS} add constraint events_pkey primary key (org_id, seq)`;
+  const KEY_NAME = `audit.events's key "events_pkey"`;
+
+  it.each([
+    [
+      "dropped from an organisation's chain, so two events may share a number",
+      `${EVENTS} drop constraint events_pkey`,
+      PUT_KEY_BACK,
+      `${KEY_NAME} is not there`,
+    ],
+    [
+      "dropped from the platform's chain",
+      `${PLATFORM} drop constraint audit_events_pkey`,
+      `${PLATFORM} add constraint audit_events_pkey primary key (seq)`,
+      `platform_controls.audit_events's key "audit_events_pkey" is not there`,
+    ],
+    [
+      'made again on other columns under its own name',
+      `${EVENTS} drop constraint events_pkey; ${EVENTS} add constraint events_pkey primary key (org_id, seq, id)`,
+      `${EVENTS} drop constraint events_pkey; ${PUT_KEY_BACK}`,
+      `${KEY_NAME} reads differently`,
+    ],
+    [
+      'planted beside the rest',
+      `${EVENTS} add constraint planted unique (org_id, id, seq)`,
+      `${EVENTS} drop constraint planted`,
+      `audit.events's key "planted" is not one the migrations built`,
+    ],
+    [
+      'planted as a unique index alone, which makes no constraint (round 2 review)',
+      'create unique index planted on audit.events (org_id, id, seq)',
+      'drop index audit.planted',
+      `audit.events's key "planted" is not one the migrations built`,
+    ],
+  ])('names one %s', async (_what, tamper, undo, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(tamper);
+    try {
+      expect(await problems()).toEqual([problem]);
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(undo);
+    }
+    expect(await problems()).toEqual([]);
+  });
+});
+
 describe('the backup role, which only reads (ADR-005 §3)', () => {
   it.each([
     [
@@ -2145,9 +2195,10 @@ describe('which drift a release can also make (schema-check.ts holds it one run 
       try {
         const { atOnce, releaseShaped } = await drift();
         expect(atOnce).toEqual(['access.requests must be there']);
-        expect(releaseShaped.filter((problem) => !problem.includes('CHECK constraint'))).toEqual([
-          'access.requests is a table the migrations built, and is not there',
-        ]);
+        // Its CHECK constraints and keys go with it, each named as not there, as the table is.
+        expect(
+          releaseShaped.filter((problem) => !problem.includes('CHECK constraint') && !problem.includes("'s key ")),
+        ).toEqual(['access.requests is a table the migrations built, and is not there']);
       } finally {
         await owner.query('alter table access.requests_moved rename to requests');
       }

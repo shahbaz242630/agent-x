@@ -24,6 +24,7 @@ import {
   edgesIn,
   entryIsSealed,
   headFields,
+  LAST_COUNTED,
   passStep,
   sealedFields,
   type StoredEntry,
@@ -106,12 +107,13 @@ export interface PlatformChain {
    * hasn't reached is neither believed nor moves the number on, or one planted
    * far past the head and deleted after a single alarm would leave every later
    * organisation unread. An event's number moves on even where its details give
-   * no organisation. Limited as checkFromAnchor's.
+   * no organisation. Limited as checkFromAnchor's, each trip's answer within `answeredWithinMs` where given.
    */
   createdOrganizationsSince(
     db: Kysely<PlatformControlsTables>,
     afterSeq: bigint,
     upTo: bigint,
+    answeredWithinMs?: number,
   ): Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
 }
 
@@ -220,6 +222,8 @@ function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
                (select pg_catalog.min(p.seq) from platform_controls.audit_events p) as lowest,
                (select pg_catalog.max(p.seq) from platform_controls.audit_events p) as highest,
                (select p.hash from platform_controls.audit_events p where p.seq = h.seq limit 1) as head_event_hash,
+               (select pg_catalog.count(distinct p.seq) from platform_controls.audit_events p
+                where p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
                e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
         from (values (1)) as one (x)
         left join (select * from platform_controls.audit_head limit 1) as h on true
@@ -233,7 +237,7 @@ function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
 
     async countBetween(after, upTo) {
       const { rows } = await sql<Record<string, unknown>>`
-        select pg_catalog.count(*) as stored from platform_controls.audit_events e
+        select pg_catalog.count(distinct e.seq) as stored from platform_controls.audit_events e
         where e.seq > ${after} and e.seq <= ${upTo}
       `.execute(tx);
       return countIn(rows[0]);
@@ -368,7 +372,9 @@ export function createPlatformChain({
     },
 
     checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep> {
-      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx), from, most));
+      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx), from, most), {
+        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+      });
     },
 
     passStep(
@@ -384,16 +390,24 @@ export function createPlatformChain({
       return limitedTransaction(db, (tx) => countStep(readerFor(tx), after, upTo));
     },
 
-    async createdOrganizationsSince(db: Kysely<PlatformControlsTables>, afterSeq: bigint, upTo: bigint) {
-      const rows = await limitedTransaction(db, (tx) =>
-        tx
-          .selectFrom('platform_controls.audit_events')
-          .select(['seq', 'details'])
-          .where('action', '=', ORGANIZATION_CREATED)
-          .where('seq', '>', afterSeq)
-          .where('seq', '<=', upTo)
-          .orderBy('seq')
-          .execute(),
+    async createdOrganizationsSince(
+      db: Kysely<PlatformControlsTables>,
+      afterSeq: bigint,
+      upTo: bigint,
+      answeredWithinMs?: number,
+    ) {
+      const rows = await limitedTransaction(
+        db,
+        (tx) =>
+          tx
+            .selectFrom('platform_controls.audit_events')
+            .select(['seq', 'details'])
+            .where('action', '=', ORGANIZATION_CREATED)
+            .where('seq', '>', afterSeq)
+            .where('seq', '<=', upTo)
+            .orderBy('seq')
+            .execute(),
+        answeredWithinMs === undefined ? {} : { answeredWithinMs },
       );
       return Object.freeze({
         orgIds: rows.map((row) => orgIdIn(row.details)).filter((id) => id !== undefined),

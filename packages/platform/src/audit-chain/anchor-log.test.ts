@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
-import { type Anchor, signAnchor } from './anchor.ts';
+import { type Anchor, type Progress, signAnchor, signPass, signProgress } from './anchor.ts';
 import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 import type { Chain } from './chain.ts';
 
@@ -64,14 +64,15 @@ const signedFile = (signing: typeof keys, name: string, ...lines: readonly (Anch
   ]);
 const fileOf = (name: string, ...lines: readonly (Anchor | string)[]): Buffer => signedFile(keys, name, ...lines);
 
-const lineOf = (anchor: Anchor): string =>
+const lineOf = (anchor: Anchor | Progress, k = 'a'): string =>
   JSON.stringify({
-    k: 'a',
+    k,
     chain: anchor.chain,
     seq: anchor.seq.toString(),
     hash: anchor.hash.toString('hex'),
     mk: anchor.macKeyVersion,
     at: anchor.at.toISOString(),
+    ...('began' in anchor ? { b: anchor.began.toISOString() } : {}),
     kv: anchor.keyVersion,
     sig: anchor.signature.toString('base64'),
   });
@@ -463,15 +464,23 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
     it("passes over the lines a later piece writes, with no alarm: going back a release isn't tampering", async () => {
       const fake = createFakeWriteOnceStore();
-      fake.files.set(
-        nameOf('deltas', 0),
-        fileOf(nameOf('deltas', 0), JSON.stringify({ k: 'p' }), JSON.stringify({ k: 'r' }), good),
-      );
+      fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), JSON.stringify({ k: 'r' }), good));
       const { log, lines } = logOver(fake);
       await log.read();
 
       expect(lines('audit.integrity_failed')).toEqual([]);
       expect(log.latest(CHAIN)?.seq).toBe(7n);
+    });
+
+    it('a finished pass is a kind of its own now (E7): one with no signature is a line that fails', async () => {
+      const fake = createFakeWriteOnceStore();
+      fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), JSON.stringify({ k: 'p' }), good));
+      const { log, lines } = logOver(fake);
+      await log.read();
+
+      expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 1 })]);
+      expect(log.latest(CHAIN)?.seq).toBe(7n);
+      expect(log.lastPass(CHAIN)).toBeUndefined();
     });
 
     it('SEC-DB-11 same place, two hashes: the alarm, and the older kept whichever is read first', async () => {
@@ -1820,3 +1829,321 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     expect(fake.calls).toEqual(calls);
   });
 });
+
+describe('finished full passes, kept beside the anchors (4D2e E7)', () => {
+  const passAt = (chain: Chain, seq: bigint, at = START, signing = keys, epoch = 1): Anchor =>
+    signPass(signing, chain, { seq, hash: Buffer.alloc(32, Number(seq)), macKeyVersion: 2 }, at, epoch);
+
+  it('writes a pass as a signed `p` line with what moved, and a restart reads it back', async () => {
+    const fake = createFakeWriteOnceStore();
+    const { log, advance } = await started(fake);
+    advance(5);
+    const pass = passAt(CHAIN, 4n, new Date(START.getTime() + 5 * MINUTE));
+    log.keepPass(pass);
+    expect(log.lastPass(CHAIN)).toBe(pass);
+    await log.flush();
+
+    const [delta] = files(fake, 'deltas');
+    expect(linesIn(fake.files.get(String(delta)))).toEqual([
+      {
+        k: 'p',
+        chain: `organisation:${ORG}`,
+        seq: '4',
+        hash: Buffer.alloc(32, 4).toString('hex'),
+        mk: 2,
+        at: pass.at.toISOString(),
+        kv: 1,
+        sig: pass.signature.toString('base64'),
+      },
+    ]);
+    const again = logOver(fake);
+    await again.log.read();
+    expect(again.log.lastPass(CHAIN)?.at).toEqual(pass.at);
+    expect(again.log.lastPass(OTHER_CHAIN)).toBeUndefined();
+    // A pass is no anchor: the chain is not anchored by it.
+    expect(again.log.latest(CHAIN)).toBeUndefined();
+    expect(again.lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('every snapshot holds every pass too, so a restart past the hour still knows them', async () => {
+    const fake = createFakeWriteOnceStore();
+    const { log, advance } = await started(fake);
+    log.keepPass(passAt(CHAIN, 4n));
+    await log.flush();
+    advance(60);
+    log.keep(anchorAt(OTHER_CHAIN, 3n));
+    await log.flush();
+
+    const [newest] = files(fake, 'snapshots').toSorted();
+    expect(linesIn(fake.files.get(String(newest))).map((line) => line.k)).toEqual(['a', 'a', 'p']);
+    // Only the newest snapshot is read: what the delta held must be in it.
+    for (const name of files(fake, 'deltas')) fake.files.delete(name);
+    const again = logOver(fake);
+    await again.log.read();
+    expect(again.log.lastPass(CHAIN)?.seq).toBe(4n);
+  });
+
+  it('writes a file for a pass alone, and nothing again once it is written', async () => {
+    const fake = createFakeWriteOnceStore();
+    const { log, advance } = await started(fake);
+    advance(1);
+    log.keepPass(passAt(CHAIN, 4n));
+    await log.flush();
+    expect(files(fake, 'deltas')).toHaveLength(1);
+    const puts = fake.calls.puts;
+    await log.flush();
+    expect(fake.calls.puts).toBe(puts);
+  });
+
+  it('keeps the newest pass of a chain, whichever file is read first', async () => {
+    const older = passAt(CHAIN, 4n, START);
+    const newer = passAt(CHAIN, 3n, new Date(START.getTime() + MINUTE));
+    for (const [first, second] of [
+      [older, newer],
+      [newer, older],
+    ] as const) {
+      const fake = createFakeWriteOnceStore();
+      fake.files.set(nameOf('deltas', 0), signedFileOf(nameOf('deltas', 0), [first]));
+      fake.files.set(nameOf('deltas', 5), signedFileOf(nameOf('deltas', 5), [second]));
+      const { log } = logOver(fake);
+      await log.read();
+      expect(log.lastPass(CHAIN)?.at).toEqual(newer.at);
+    }
+  });
+
+  it("SEC-DB-11 a pass line signed as an anchor, or an anchor's as a pass, is a line that fails", async () => {
+    const asAnchor = anchorAt(CHAIN, 4n);
+    const asPass = passAt(CHAIN, 4n);
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(
+      nameOf('deltas', 0),
+      fileOf(nameOf('deltas', 0), lineOf(asAnchor, 'p'), lineOf(asPass, 'a'), anchorAt(OTHER_CHAIN, 2n)),
+    );
+    const { log, lines } = logOver(fake);
+    await log.read();
+
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 2 })]);
+    expect(log.lastPass(CHAIN)).toBeUndefined();
+    expect(log.latest(CHAIN)).toBeUndefined();
+    expect(log.latest(OTHER_CHAIN)?.seq).toBe(2n);
+  });
+
+  it('a pass line signed for another epoch fails as an anchor line would', async () => {
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(nameOf('deltas', 0), signedFileOf(nameOf('deltas', 0), [passAt(CHAIN, 4n, START, keys, 2)]));
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 1 })]);
+    expect(log.lastPass(CHAIN)).toBeUndefined();
+  });
+
+  it('passes count against what this process can hold, with the anchors', async () => {
+    const fake = createFakeWriteOnceStore();
+    const chains = Array.from({ length: 3 }, (_, index): Chain => ({
+      kind: 'organisation',
+      orgId: `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}`,
+    }));
+    fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), ...chains.map((one) => anchorAt(one, 1n))));
+    fake.files.set(
+      nameOf('deltas', 5),
+      signedFileOf(
+        nameOf('deltas', 5),
+        chains.map((one) => passAt(one, 1n)),
+      ),
+    );
+    // Either file alone is under it; three anchors and three passes held, six lines, are past it.
+    const { log, capture } = limited(fake, 1800);
+    await log.read();
+    expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toHaveLength(1);
+  });
+
+  it('SEC-DB-11 a name that holds other bytes: its passes go again under a new name, unless a later one waits', async () => {
+    const fake = createFakeWriteOnceStore();
+    const { log, advance } = await started(fake);
+    fake.instead.put = async (name) => {
+      await fake.real.put(name, Buffer.from('someone else'));
+      throw new Error('the answer was lost');
+    };
+    log.keepPass(passAt(CHAIN, 4n));
+    log.keepPass(passAt(OTHER_CHAIN, 2n));
+    await log.flush();
+    delete fake.instead.put;
+    log.keepPass(passAt(OTHER_CHAIN, 3n, new Date(START.getTime() + MINUTE)));
+    await log.flush();
+    advance(5);
+    await log.flush();
+
+    const written = files(fake, 'deltas').flatMap((name) => {
+      const bytes = fake.files.get(name);
+      return bytes?.toString() === 'someone else'
+        ? []
+        : linesIn(bytes).map((line) => `${String(line.k)}${String(line.seq)}`);
+    });
+    expect(written.toSorted()).toEqual(['p3', 'p4']);
+  });
+});
+
+describe('the place a pass under way has reached, kept beside the passes (4D2e E7 review)', () => {
+  const placeAt = (chain: Chain, seq: bigint, at = START, began = at): Progress =>
+    signProgress(keys, chain, { seq, hash: Buffer.alloc(32, Number(seq)), macKeyVersion: 2 }, { at, began }, 1);
+
+  it("keeps the latest pass's place, and of that pass the furthest, however the files are read", async () => {
+    const older = placeAt(CHAIN, 90n, START, START);
+    const furtherSame = placeAt(CHAIN, 50n, START, new Date(START.getTime() + MINUTE));
+    const nearerSame = placeAt(CHAIN, 30n, START, new Date(START.getTime() + MINUTE));
+    for (const order of [
+      [older, furtherSame, nearerSame],
+      [nearerSame, furtherSame, older],
+    ]) {
+      const fake = createFakeWriteOnceStore();
+      order.forEach((line, index) => {
+        fake.files.set(nameOf('deltas', index), fileOf(nameOf('deltas', index), lineOf(line, 'u')));
+      });
+      const { log } = logOver(fake);
+      await log.read();
+      expect(log.lastProgress(CHAIN)?.seq).toBe(50n);
+    }
+  });
+
+  it('a place of the very pass that finished, begun at the same moment, is overtaken by it', async () => {
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(
+      nameOf('deltas', 0),
+      fileOf(
+        nameOf('deltas', 0),
+        lineOf(placeAt(CHAIN, 40n, START, START), 'u'),
+        lineOf(signPass(keys, CHAIN, { seq: 90n, hash: Buffer.alloc(32, 90), macKeyVersion: 2 }, START, 1), 'p'),
+      ),
+    );
+    const { log } = logOver(fake);
+    await log.read();
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+  });
+
+  it("SEC-DB-11 a place whose pass's start was changed fails its signature", async () => {
+    const place = placeAt(CHAIN, 40n);
+    const changed = JSON.stringify({
+      ...(JSON.parse(lineOf(place, 'u')) as object),
+      b: new Date(START.getTime() + MINUTE).toISOString(),
+    });
+    const missing = JSON.stringify({ ...(JSON.parse(lineOf(place, 'u')) as object), b: undefined });
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), changed, missing));
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 2 })]);
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+  });
+
+  it('writes a place as a signed `u` line, a restart reads it back, and a later finished pass overtakes it', async () => {
+    const fake = createFakeWriteOnceStore();
+    const { log, advance } = await started(fake);
+    advance(5);
+    log.keepProgress(placeAt(CHAIN, 40n, new Date(START.getTime() + 5 * MINUTE)));
+    await log.flush();
+    expect(
+      linesIn(fake.files.get(String(files(fake, 'deltas')[0]))).map((line) => `${String(line.k)}${String(line.seq)}`),
+    ).toEqual(['u40']);
+
+    const again = logOver(fake);
+    await again.log.read();
+    expect(again.log.lastProgress(CHAIN)?.seq).toBe(40n);
+    expect(again.log.latest(CHAIN)).toBeUndefined();
+    expect(again.lines('audit.integrity_failed')).toEqual([]);
+
+    // A pass finished after it, in another copy's file: the place goes on to nothing.
+    fake.files.set(
+      nameOf('deltas', 10),
+      signedFileOf(nameOf('deltas', 10), [
+        signPass(
+          keys,
+          CHAIN,
+          { seq: 90n, hash: Buffer.alloc(32, 90), macKeyVersion: 2 },
+          new Date(START.getTime() + 10 * MINUTE),
+          1,
+        ),
+      ]),
+    );
+    const third = logOver(fake);
+    await third.log.read();
+    expect(third.log.lastProgress(CHAIN)).toBeUndefined();
+    // And its next snapshot leaves the overtaken place out.
+    third.log.keep(anchorAt(OTHER_CHAIN, 3n));
+    await third.log.flush();
+    const [newest] = files(fake, 'snapshots').toSorted();
+    expect(linesIn(fake.files.get(String(newest))).map((line) => line.k)).toEqual(['a', 'a', 'p']);
+  });
+
+  it("keepPass drops the chain's place: no file after holds it", async () => {
+    const fake = createFakeWriteOnceStore();
+    const { log, advance } = await started(fake);
+    log.keepProgress(placeAt(CHAIN, 40n));
+    log.keepProgress(placeAt(OTHER_CHAIN, 7n));
+    log.keepPass(signPass(keys, CHAIN, { seq: 90n, hash: Buffer.alloc(32, 90), macKeyVersion: 2 }, START, 1));
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+    expect(log.lastProgress(OTHER_CHAIN)?.seq).toBe(7n);
+    // Nor the delta written now: the dropped place is not even sent.
+    advance(1);
+    await log.flush();
+    expect(
+      linesIn(fake.files.get(String(files(fake, 'deltas')[0]))).map(
+        (line) => `${String(line.k)} ${String(line.chain)}`,
+      ),
+    ).toEqual([`p organisation:${ORG}`, `u organisation:${OTHER_ORG}`]);
+    advance(60);
+    log.keepProgress(placeAt(OTHER_CHAIN, 8n));
+    await log.flush();
+    const [newest] = files(fake, 'snapshots').toSorted();
+    expect(
+      linesIn(fake.files.get(String(newest)))
+        .map((line) => `${String(line.k)} ${String(line.chain)}`)
+        .toSorted(),
+    ).toEqual(['a platform', `p organisation:${ORG}`, `u organisation:${OTHER_ORG}`].toSorted());
+  });
+
+  it('a place dropped by its pass no longer counts against memory', async () => {
+    const fake = createFakeWriteOnceStore();
+    // Room for two lines and a little: an anchor and a pass are under 80% of it, a dropped place kept as well is not.
+    const { log, capture } = limited(fake, 1000);
+    await log.read();
+    log.keep(anchorAt(CHAIN, 1n));
+    log.keepProgress(placeAt(CHAIN, 1n));
+    log.keepPass(signPass(keys, CHAIN, { seq: 1n, hash: Buffer.alloc(32, 1), macKeyVersion: 2 }, START, 1));
+    await log.flush();
+    expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_near_memory')).toEqual([]);
+  });
+
+  it('SEC-DB-11 a place signed as a pass, or as an anchor, is a line that fails', async () => {
+    const fake = createFakeWriteOnceStore();
+    const asPass = signPass(keys, CHAIN, { seq: 4n, hash: Buffer.alloc(32, 4), macKeyVersion: 2 }, START, 1);
+    fake.files.set(
+      nameOf('deltas', 0),
+      fileOf(nameOf('deltas', 0), lineOf(asPass, 'u'), lineOf(anchorAt(CHAIN, 4n), 'u')),
+    );
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 2 })]);
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+  });
+
+  it('says when the newest file read or written was named: where the last process left off', async () => {
+    expect(logOver().log.lastFileAt()).toBeUndefined();
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 1n)));
+    fake.files.set(nameOf('deltas', 30), fileOf(nameOf('deltas', 30), anchorAt(CHAIN, 2n)));
+    const { log } = logOver(fake);
+    await log.read();
+    expect(log.lastFileAt()).toEqual(new Date(START.getTime() + 30 * MINUTE));
+
+    const snapshotOnly = createFakeWriteOnceStore();
+    snapshotOnly.files.set(nameOf('snapshots', 20), fileOf(nameOf('snapshots', 20), anchorAt(CHAIN, 1n)));
+    const second = logOver(snapshotOnly);
+    await second.log.read();
+    expect(second.log.lastFileAt()).toEqual(new Date(START.getTime() + 20 * MINUTE));
+  });
+});
+
+/** A file of pass lines as the log writes them, closed for its name. */
+function signedFileOf(name: string, passes: readonly Anchor[]): Buffer {
+  return fileOf(name, ...passes.map((pass) => lineOf(pass, 'p')));
+}

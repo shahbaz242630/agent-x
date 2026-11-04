@@ -22,9 +22,10 @@
 // - every app's ingress is internal, and the environment routes one app to
 //   another by name inside it. The environment has a public IP, but an app is
 //   only ever public because a door below says so (G2e), never by accident
-// - the apps scale as the environment allows, within two limits: the API and
-//   Zitadel each hold something one replica's (a rate limit's counts in memory;
-//   Zitadel's projections and its ten database connections), and staging keeps
+// - the apps scale as the environment allows, within two limits: the API scales
+//   as its role (AGENTX_ROLE all, as here, holds the jobs: one copy; policy.ts),
+//   Zitadel holds something one replica's (its projections and its ten database
+//   connections), and staging keeps
 //   no replica at all while nothing runs (ADR-002), unless the operator deploys
 //   with `apps --keep-running` for a while
 // - manual trigger only: no *job* here runs on a clock or an event. The set-up
@@ -132,6 +133,15 @@ param loadImageRepository string
 @description('The digest of the load test\'s image for the same commit as ours, which `deploy/image/verify.ts` has checked a signature for; empty unless `loadRun`.')
 @maxLength(71)
 param loadImageDigest string
+
+@description('The anchor key\'s public halves, `<version>:<key>` comma-separated, as the API\'s `api.starting` line shows them (4D2e E9): the operator checks the anchors\' store with them alone. Empty until set: a chain recovery plan is then refused.')
+@maxLength(1000)
+param anchorPublicKeys string = ''
+
+@description('The anchors\' epoch (AGENTX_ANCHOR_EPOCH): raised by one only for a sanctioned restore of the whole database. One value for the API, which signs for it, and the operator, which reads it (4D2e E9).')
+@minValue(1)
+@maxValue(1000000)
+param anchorEpoch int = 1
 
 var names = resourceNames(environment, nameSuffix)
 
@@ -524,9 +534,17 @@ var activityDownloadsSettings = [
   }
 ]
 
+// The anchors' epoch, the same setting for the API and the operator, so a plan reads the
+// files the API writes (4D2e E9; the policy's `anchor-epoch` holds them equal).
+var anchorEpochSetting = {
+  name: 'AGENTX_ANCHOR_EPOCH'
+  value: string(anchorEpoch)
+}
+
 // Where the API keeps the audit chains' anchors (4D2e E, PL-58): the write-once
 // store's second container, as its own identity. Added as `activityDownloadsSettings` is.
 var anchorStoreSettings = [
+  anchorEpochSetting
   {
     name: 'AGENTX_AUDIT_ANCHORS_URL'
     value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
@@ -536,6 +554,31 @@ var anchorStoreSettings = [
     value: apiIdentity.properties.clientId
   }
 ]
+
+// Where the operator reads the chains' anchors for a chain recovery plan (4D2e
+// E9): the same container, as the operator's own identity, which may only read
+// it (modules/evidence.bicep), and the public keys the lines are checked with.
+var operatorAnchorSettings = concat(
+  [
+    anchorEpochSetting
+    {
+      name: 'AGENTX_AUDIT_ANCHORS_URL'
+      value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
+    }
+    {
+      name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
+      value: operatorIdentity.properties.clientId
+    }
+  ],
+  empty(anchorPublicKeys)
+    ? []
+    : [
+        {
+          name: 'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS'
+          value: anchorPublicKeys
+        }
+      ]
+)
 
 // Every job: the work it does (its identity and its name come from that), the
 // image and command, how long one run may take, what it reads as a mounted file
@@ -660,6 +703,8 @@ var jobs = concat([
     timeoutSeconds: 900
     // Writes an audit export to the write-once store as its own identity (E10c).
     evidence: true
+    // Reads the chains' anchors for a chain recovery plan (4D2e E9).
+    readsAnchors: true
     files: concat(
       [
         {
@@ -829,7 +874,10 @@ var apps = [
     // The API (Product-Documentation/API.md), as the app role and no other.
     workload: 'api'
     image: appImage
-    command: ['node', 'apps/api/src/main.ts']
+    // Its heap three quarters of its memory (policy.ts holds it between a half and
+    // three quarters): its rate limits' counters take up to about 92 MB, and
+    // Node's own default under 1 GiB is 560 MiB (4D2e D12, measured).
+    command: ['node', '--max-old-space-size=${loadRun ? '3072' : '768'}', 'apps/api/src/main.ts']
     args: []
     targetPort: 8080
     transport: 'auto'
@@ -847,9 +895,8 @@ var apps = [
     keepsDownloads: true
     // Keeps the audit chains' anchors (`anchorStoreSettings`).
     keepsAnchors: true
-    // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
-    // second replica would give every client two allowances. The worker, which
-    // holds no such count, is the part that scales in Phase 4.
+    // AGENTX_ROLE all (unset) holds the jobs and counts its rate limits as the
+    // only copy (4D2e D12): one. A split's `web` copies scale (D13).
     maxReplicas: 1
     // Longer than the API's own 25-second stop deadline (API.md), so the log's
     // held-back counts are still written.
@@ -1136,6 +1183,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 value: '${secretsPath}/${file.reads}'
               }),
               job.evidence ? evidenceSettings : [],
+              (job.?readsAnchors ?? false) ? operatorAnchorSettings : [],
               (job.?callsApi ?? false) ? [loadApiSetting] : []
             )
             volumeMounts: empty(concat(job.files, job.held))

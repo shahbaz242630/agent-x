@@ -69,6 +69,7 @@ import {
   proxyTrust,
   RATE_LIMIT_HEADERS,
   registerRateLimit,
+  shareOfCopies,
 } from './rate-limit.ts';
 import type { LogSample } from './log-sample.ts';
 import { createRequestLines, registerRequestMinutes, REQUEST_FAILED, RequestLog } from './request-log.ts';
@@ -349,7 +350,9 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.addHook('onResponse', inRequestScope);
   // First, so no route escapes it.
   await registerContract(app);
-  await registerRateLimit(app, config.http.rateLimitPerMinute, trust);
+  // Each limit is this copy's share of it across every `web` copy (rate-limit.ts).
+  const share = (limit: number): number => shareOfCopies(limit, config.http.webCopies);
+  await registerRateLimit(app, share(config.http.rateLimitPerMinute), trust);
   registerRequestMinutes(app, requestLines);
 
   app.addHook('onRequest', async (request, reply) => {
@@ -385,11 +388,11 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   const signIn = options.signIn?.service;
-  const personCounter = createPersonCounter(app, config.http.rateLimitPerUserPerMinute, trust, (ip, userId) => {
+  const personCounter = createPersonCounter(app, share(config.http.rateLimitPerUserPerMinute), trust, (ip, userId) => {
     securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId });
   });
   // The security events keep people, not agents: the refused request's line names the agent (request-log.ts).
-  const agentCounter = createAgentCounter(app, config.http.rateLimitPerAgentPerMinute, trust, (ip) => {
+  const agentCounter = createAgentCounter(app, share(config.http.rateLimitPerAgentPerMinute), trust, (ip) => {
     securityEvents.note({ kind: 'rate_limited', reason: 'per_agent', ip });
   });
   registerAccess(app, {
@@ -407,7 +410,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // Once it has, so an agent past its own limit doesn't use its organisation's (PL-63).
   app.addHook(
     'onRequest',
-    createOrganisationCounter(app, config.http.rateLimitPerOrganisationPerMinute, trust, (ip) => {
+    createOrganisationCounter(app, share(config.http.rateLimitPerOrganisationPerMinute), trust, (ip) => {
       securityEvents.note({ kind: 'rate_limited', reason: 'per_organisation', ip });
     }),
   );

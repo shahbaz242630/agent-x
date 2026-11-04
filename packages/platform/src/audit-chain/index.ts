@@ -1,5 +1,16 @@
-export { type Anchor, type AnchorStore, createMemoryAnchorStore, signAnchor } from './anchor.ts';
+export {
+  type Anchor,
+  type AnchorStore,
+  createMemoryAnchorStore,
+  createMemoryPassRecord,
+  type PassRecord,
+  type Progress,
+  signAnchor,
+  signPass,
+  signProgress,
+} from './anchor.ts';
 export { type AnchorLog, createAnchorLog } from './anchor-log.ts';
+export { OLD_EDIT_DAYS } from './limits.ts';
 export {
   type AnchorPoint,
   type Chain,
@@ -12,6 +23,7 @@ export {
   type ChainReport,
   ChainSealError,
   type CheckedPoint,
+  createChainWalker,
   entryIsSealed,
   GENESIS_HASH,
   headIsSealed,
@@ -25,6 +37,7 @@ export {
   type ChainBatchWriter,
   type ChainEdgeReader,
   type ChainEdges,
+  type ChainProbe,
   type ChainReader,
   type ChainStep,
   ChainStoreError,
@@ -34,12 +47,15 @@ export {
   countStep,
   edgesIn,
   headFields,
+  LAST_COUNTED,
   type LockedHead,
   passStep,
+  probeEdges,
   type SealedEvent,
   sealedFields,
   verifyChain,
   verifyFromAnchor,
+  walkLast,
 } from './store.ts';
 export {
   sealState,
