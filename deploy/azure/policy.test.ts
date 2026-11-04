@@ -12,6 +12,7 @@ import {
   DNS_ALLOWED,
   type Expectations,
   kqlStages,
+  leastRestoreDays,
   paramsFileProblems,
   policyProblems,
   PREVIEW_API_EXCEPTIONS,
@@ -285,12 +286,15 @@ const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
 const AGENT_CANCELS_ALERT = named(/^alert-agentx-.+-agent-cancels$/);
 const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
+const DECISIONS_SUPPRESSED_ALERT = named(/^alert-agentx-.+-decisions-suppressed$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
 const ANCHOR_STORE_ALERT = named(/^alert-agentx-.+-anchor-store$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
 const RECORDS_FILLING_ALERT = named(/^alert-agentx-.+-records-filling$/);
+const DAILY_CHECK_ALERT = named(/^alert-agentx-.+-daily-check$/);
+const FULL_PASS_ALERT = named(/^alert-agentx-.+-full-pass$/);
 const ANCHOR_STOPPED_ALERT = named(/^alert-agentx-.+-anchor-stopped$/);
 const JOBS_STOPPED_ALERT = named(/^alert-agentx-.+-jobs-stopped$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
@@ -554,6 +558,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-handoff-queue',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-platform-full',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-store',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-daily-check',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-full-pass',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-records-filling',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-stopped',
@@ -561,6 +567,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-decisions-suppressed',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxstg[a-z0-9]{6}$/),
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxstg[a-z0-9]{6}\/default$/),
       expect.stringMatching(
@@ -3093,6 +3100,34 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
+  it("decisions-suppressed-alert: no alert on decision lines held back (PL-52), or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(DECISIONS_SUPPRESSED_ALERT))).toEqual(['decisions-suppressed-alert']);
+    for (const change of [
+      // Any held-back count, not the decision line's.
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.created" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided" | summarize Events = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(DECISIONS_SUPPRESSED_ALERT, change))).toEqual(['decisions-suppressed-alert']);
+    }
+    expect(String(at(staging.predictedResources.find(DECISIONS_SUPPRESSED_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section J\.$/,
+    );
+  });
+
   it("records-filling-alert: no alert on an organisation's records filling, or one that counts something else, can't fire or fires too late", () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
@@ -3192,6 +3227,44 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const description = String(at(staging.predictedResources.find(ANCHOR_STORE_ALERT)?.properties, 'description'));
     expect(description).toMatch(/^SEV-2\. /);
     expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section H\.$/);
+  });
+
+  it.each([
+    ['daily-check-alert', DAILY_CHECK_ALERT, 'audit.daily_check_overdue', 'audit.full_pass_overdue'],
+    ['full-pass-alert', FULL_PASS_ALERT, 'audit.full_pass_overdue', 'audit.daily_check_overdue'],
+  ] as const)(
+    "%s: no alert on the anchor check's rotation running late (4D2e E7), or one that counts something else, can't fire or fires too late",
+    (rule, alert, event, other) => {
+      const properties = (found: Mutable): Mutable => inside(found, 'properties');
+      const query = (text: string) => (found: Mutable) => (criterion(found).query = text);
+      expect(brokenRules(without(alert))).toEqual([rule]);
+      for (const change of [
+        query(
+          `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${other}" | summarize Events = count()`,
+        ),
+        query(
+          `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize Events = count()`,
+        ),
+        (found: Mutable) => (criterion(found).threshold = 1),
+        ...LATE_OR_BLIND,
+        (found: Mutable) => (criterion(found).operator = 'LessThan'),
+        (found: Mutable) => (criterion(found).timeAggregation = 'Count'),
+        (found: Mutable) => (properties(found).scopes = ['/subscriptions/x/workspaces/y']),
+      ]) {
+        expect(brokenRules(changed(alert, change))).toEqual([rule]);
+      }
+      const description = String(at(staging.predictedResources.find(alert)?.properties, 'description'));
+      expect(description).toMatch(/^SEV-2\. /);
+      expect(description).toContain(event);
+      expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section H\.$/);
+    },
+  );
+
+  it('database-backup: production keeps twice the days an old audit edit may go unfound, 35 at least (4D2e decision 3)', () => {
+    expect(leastRestoreDays('production')).toBe(35);
+    expect(leastRestoreDays('production', 20)).toBe(40);
+    expect(leastRestoreDays('production', 17)).toBe(35);
+    expect(leastRestoreDays('staging', 20)).toBe(7);
   });
 
   it("handoff-queue-alert: no alert on approved payments left standing (gate H8), or one that counts something else, can't fire or fires too late", () => {

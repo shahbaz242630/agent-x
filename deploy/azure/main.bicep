@@ -284,6 +284,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     integrityRunsAlertName: 'alert-agentx-${short}-integrity-runs'
     agentCancelsAlertName: 'alert-agentx-${short}-agent-cancels'
     agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
+    decisionsSuppressedAlertName: 'alert-agentx-${short}-decisions-suppressed'
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
     platformFullAlertName: 'alert-agentx-${short}-platform-full'
@@ -292,6 +293,8 @@ module appsEnvironment 'modules/environment.bicep' = {
     alwaysOn: alwaysOn
     anchorStoreAlertName: 'alert-agentx-${short}-anchor-store'
     recordsFillingAlertName: 'alert-agentx-${short}-records-filling'
+    dailyCheckAlertName: 'alert-agentx-${short}-daily-check'
+    fullPassAlertName: 'alert-agentx-${short}-full-pass'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [

@@ -30,6 +30,7 @@ import {
   countStep,
   passStep,
   verifyFromAnchor,
+  walkLast,
 } from './store.ts';
 
 const AUDIT_MAC = PURPOSES.indexOf('audit-mac') + 1;
@@ -736,6 +737,95 @@ describe('a step of a full pass (4D2e E1)', () => {
     tables.pageAs = () => [row, row];
 
     await expect(passStep(keys, CHAIN, tables, CHAIN_START, tables.point(3n), 1)).rejects.toThrow(ChainStoreError);
+  });
+});
+
+describe('the last events walked to a signed anchor (4D2e E7, decision 2b)', () => {
+  it('reads the start with the edges and walks from it to the anchor: two trips', async () => {
+    const tables = new Tables(keys, 9);
+    // Below the window, edited: the walk never sees it (the full pass does).
+    tables.replace(2n, { ...tables.row(2n), content: ['action', 'edited'] });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(8n), 3)).toEqual({
+      ok: true,
+      seq: 8n,
+      hash: tables.row(8n).hash,
+      macKeyVersion: 1,
+      to: 8n,
+    });
+    expect(tables.edgeTrips).toEqual([5n]);
+    expect(tables.pages).toEqual([{ after: 5n, upTo: 8n, limit: 3 }]);
+  });
+
+  it('walks a chain no longer than the window from its first event, with no read of the edges', async () => {
+    const tables = new Tables(keys, 3);
+    tables.replace(1n, { ...tables.row(1n), content: ['action', 'edited'] });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(3n), 3)).toEqual(refusal('hash', 1n));
+    expect(tables.edgeTrips).toEqual([]);
+    expect(await walkLast(keys, CHAIN, new Tables(keys, 0), CHAIN_START, 1000)).toMatchObject({ ok: true, seq: 0n });
+  });
+
+  it('finds an event in the window edited, the one hidden from a signed-state read', async () => {
+    const tables = new Tables(keys, 9);
+    tables.replace(7n, { ...tables.row(7n), content: ['subject', 'another'] });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(9n), 4)).toEqual(refusal('hash', 7n));
+  });
+
+  it('finds an event in the window deleted, and one past the window end not read', async () => {
+    const tables = new Tables(keys, 9);
+    const target = tables.point(8n);
+    tables.remove(7n);
+    tables.replace(9n, { ...tables.row(9n), content: ['action', 'edited'] });
+
+    expect(await walkLast(keys, CHAIN, tables, target, 4)).toEqual(refusal('gap', 7n));
+  });
+
+  it('believes no start that is missing, unreadable, edited, or sealed without the key', async () => {
+    const missing = new Tables(keys, 6);
+    missing.remove(3n);
+    expect(await walkLast(keys, CHAIN, missing, missing.point(6n), 3)).toEqual(refusal('unreadable', 3n));
+
+    const unreadable = new Tables(keys, 6);
+    unreadable.unreadable.add(3n);
+    expect(await walkLast(keys, CHAIN, unreadable, unreadable.point(6n), 3)).toEqual(refusal('unreadable', 3n));
+
+    const edited = new Tables(keys, 6);
+    edited.replace(3n, { ...edited.row(3n), content: ['action', 'edited'] });
+    expect(await walkLast(keys, CHAIN, edited, edited.point(6n), 3)).toEqual(refusal('hash', 3n));
+
+    // Rehashed whole by someone without the MAC key: its hash holds, its seal does not.
+    const forged = new Tables(keys, 6);
+    const row = forged.row(3n);
+    const entry: StoredEntry = { ...row, content: ['action', 'forged'] };
+    forged.replace(3n, { ...entry, hash: linkHash(CHAIN, row.prevHash, entry) });
+    expect(await walkLast(keys, CHAIN, forged, forged.point(6n), 3)).toEqual(refusal('mac', 3n));
+  });
+
+  it('believes no row the edges give for another number than asked', async () => {
+    const tables = new Tables(keys, 6);
+    tables.edgesAs = (edges) => ({ ...edges, anchored: tables.row(4n) });
+
+    expect(await walkLast(keys, CHAIN, tables, tables.point(6n), 3)).toEqual(refusal('unreadable', 3n));
+  });
+
+  it('ends at the anchor signed: a window sealed afresh to another end fails there', async () => {
+    const tables = new Tables(keys, 6);
+
+    expect(await walkLast(keys, CHAIN, tables, { ...tables.point(6n), hash: fill(5) }, 3)).toEqual(
+      refusal('anchor', 6n),
+    );
+  });
+
+  it('refuses a window of more than 2,000 events, or of none, before any read', async () => {
+    const tables = new Tables(keys, 3);
+
+    await expect(walkLast(keys, CHAIN, tables, tables.point(3n), 2001)).rejects.toThrow(RangeError);
+    await expect(walkLast(keys, CHAIN, tables, tables.point(3n), 0)).rejects.toThrow(RangeError);
+    expect(tables.edgeTrips).toEqual([]);
+    expect(tables.pages).toEqual([]);
+    expect(await walkLast(keys, CHAIN, tables, tables.point(3n), 2000)).toMatchObject({ ok: true, seq: 3n });
   });
 });
 

@@ -22,6 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, onTestFi
 import {
   createHandoff,
   handOffDue,
+  RUN_BUDGET_MS,
   handoffDatabaseGate,
   handOffSweepDue,
   HEARTBEAT_STALE_MS,
@@ -30,9 +31,9 @@ import {
 import { ALLOWED, handoffWorld, type HandoffWorldTables, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, type World } from './mandate-world.helper.test.ts';
-import { createOrgWorkRediscovery, markedOrganisations, withOrgWork } from './org-work.ts';
+import { createOrgWorkRediscovery, markedOrganisations, WAITING_AS_A_WHOLE_MS, withOrgWork } from './org-work.ts';
 import { createPaymentChecks, paymentCheckDue } from './payment-checks.ts';
-import { createRailHealth } from './rail-health.ts';
+import { createRailHealth, type RailHealth } from './rail-health.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
 
@@ -62,9 +63,11 @@ const { ready } = handoffWorld({ app: () => app, clock: () => clock, ids, regist
 const admin = () => database.as('admin');
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
+/** The organisation's marks of the hand-off's and the checks' jobs: those 0073 adds for the expiries are their tests'. */
 async function marksOf(w: World): Promise<Record<string, { due_at: Date; marks: string }>> {
   const rows = await admin().query<{ job: string; due_at: Date; marks: string }>(
-    'select job, due_at, marks from directory.org_work where org_id = $1',
+    `select job, due_at, marks from directory.org_work
+      where org_id = $1 and job in ('hand_off', 'hand_off_sweep', 'payment_check')`,
     [w.org],
   );
   return Object.fromEntries(rows.map(({ job, ...rest }) => [job, rest]));
@@ -98,7 +101,17 @@ const marked = (job: 'hand_off' | 'hand_off_sweep', most?: number) =>
 /** The hand-off as job-list.ts makes it: its organisations from the marks, settled after each run. */
 function switchedHandoff(
   w: World,
-  { rail = w.rail, db = app }: { rail?: FakeRail; db?: Database<HandoffWorldTables> } = {},
+  {
+    rail = w.rail,
+    db = app,
+    runBudgetMs,
+    health = createRailHealth({ clock, logger: testLogger(capture) }),
+  }: {
+    rail?: FakeRail;
+    db?: Database<HandoffWorldTables>;
+    runBudgetMs?: number;
+    health?: RailHealth;
+  } = {},
 ) {
   const handOffs = marked('hand_off');
   const sweeps = marked('hand_off_sweep');
@@ -107,6 +120,9 @@ function switchedHandoff(
     createHandoff({
       list: handOffs.list,
       sweepList: sweeps.list,
+      unfinished: handOffs.unfinished,
+      waitsAsAWhole: handOffs.waitsAsAWhole,
+      ...(runBudgetMs === undefined ? {} : { runBudgetMs }),
       database: db,
       outbox: createOutbox({ ids, clock }),
       rail,
@@ -114,7 +130,7 @@ function switchedHandoff(
       ids,
       clock,
       logger: testLogger(capture),
-      health: createRailHealth({ clock, logger: testLogger(capture) }),
+      health,
       databaseGate: handoffDatabaseGate(6),
     }),
   );
@@ -143,9 +159,7 @@ function switchedChecks({
     [checks],
     createPaymentChecks({
       list: checks.list,
-      unfinished: (orgId) => {
-        checks.keep(orgId);
-      },
+      unfinished: checks.unfinished,
       nextTurn: (orgId, at) => {
         checks.dueBy(orgId, at);
       },
@@ -276,6 +290,143 @@ describe('the hand-off follows its marks', () => {
     expect(after?.marks).toBe(before?.marks);
     expect(after?.due_at.getTime()).toBeGreaterThanOrEqual(started);
     expect(after?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
+  });
+
+  it("a run its budget cut before the organisation's turn leaves it due now, by the job's word, not its rows", async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const before = (await marksOf(w)).hand_off;
+
+    await switchedHandoff(w, { runBudgetMs: 0 }).job.run();
+
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    // The job's clock, behind Postgres's: its rows, read, would have said Postgres's now.
+    expect((await marksOf(w)).hand_off).toEqual({ marks: before?.marks, due_at: clock.now() });
+    await switchedHandoff(w).job.run();
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+  });
+
+  it('one stopped at the gate as the budget ran out is due now too', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const before = (await marksOf(w)).hand_off;
+    const real = createRailHealth({ clock, logger: testLogger(capture) });
+    // The budget (a millisecond, so the job's clock stays behind Postgres's) spent while it waited for the gate.
+    const health: RailHealth = {
+      ...real,
+      enter: (orgId) => {
+        clock.advanceBy(1);
+        return real.enter(orgId);
+      },
+    };
+
+    await switchedHandoff(w, { health, runBudgetMs: 1 }).job.run();
+
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    // Its rows, read, would have said Postgres's now, later.
+    expect(clock.now().getTime()).toBeLessThan(await serverNow());
+    expect((await marksOf(w)).hand_off).toEqual({ marks: before?.marks, due_at: clock.now() });
+  });
+
+  it('a frozen organisation is visited once a minute, not every run, and lifted, is handed off within it', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const mandateId = await shared.mandateIdOf(w);
+    await shared.moved(w, mandateId, 'organization', 'pause');
+    const { job } = switchedHandoff(w);
+    const visited = () => lines('handoff.waiting').length + lines('handoff.handed_off').length;
+    const dueAt = async () => (await marksOf(w)).hand_off?.due_at.getTime();
+
+    await job.run();
+    expect(lines('handoff.waiting')).toEqual([expect.objectContaining({ requestId: request.id, why: 'organization' })]);
+    const waitsUntil = clock.now().getTime() + WAITING_AS_A_WHOLE_MS;
+    expect(await dueAt()).toBe(waitsUntil);
+    // Within its minute: not listed, so not visited, and its mark stays where it was.
+    clock.advanceBy(WAITING_AS_A_WHOLE_MS / 2);
+    capture = new LogCapture();
+    const quiet = switchedHandoff(w);
+    await quiet.job.run();
+    expect(await dueAt()).toBe(waitsUntil);
+    expect(visited()).toBe(0);
+    // Its minute passed: visited again (a new job says its waiting afresh), and waits another.
+    clock.advanceBy(WAITING_AS_A_WHOLE_MS / 2);
+    await quiet.job.run();
+    expect(visited()).toBe(1);
+    expect(await dueAt()).toBe(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
+
+    await shared.moved(w, mandateId, 'organization', 'resume');
+    clock.advanceBy(WAITING_AS_A_WHOLE_MS);
+    await quiet.job.run();
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+  });
+
+  it("one held by the bank breaker waits its minute too, as a reason its whole organisation's", async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const real = createRailHealth({ clock, logger: testLogger(capture) });
+    const health: RailHealth = { ...real, enter: () => ({ hold: 'lane', outage: 0 }) };
+
+    await switchedHandoff(w, { health }).job.run();
+
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    expect((await marksOf(w)).hand_off?.due_at.getTime()).toBe(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
+  });
+
+  it('held as a whole and stopped at the gate in one turn: it waits its minute, its rows unable to move', async () => {
+    const { w, acting } = await ready();
+    const requests = [await ask(acting, w, { amount: SMALL() }), await ask(acting, w, { amount: SMALL(5n) })];
+    const real = createRailHealth({ clock, logger: testLogger(capture) });
+    let entered = 0;
+    // Both taken at once in its lane: the first held, and the budget spent as it is; the second finds it spent.
+    const health: RailHealth = {
+      ...real,
+      enter: (orgId) => {
+        entered += 1;
+        if (entered > 1) return real.enter(orgId);
+        clock.advanceBy(RUN_BUDGET_MS);
+        return { hold: 'lane', outage: 0 };
+      },
+    };
+
+    await switchedHandoff(w, { health }).job.run();
+
+    expect(entered).toBe(2);
+    for (const { id } of requests) expect(await statusOf(w, id)).toBe('APPROVED');
+    expect((await marksOf(w)).hand_off?.due_at.getTime()).toBe(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
+  });
+
+  it('one frozen beside another in the same run: only the frozen one waits its minute', async () => {
+    const frozen = await ready();
+    await ask(frozen.acting, frozen.w, { amount: ALLOWED() });
+    const mandateId = await shared.mandateIdOf(frozen.w);
+    await shared.moved(frozen.w, mandateId, 'organization', 'pause');
+    const other = await ready();
+    // Waiting for its supplier's payee: a reason of its own request's.
+    await ask(other.acting, other.w, { amount: ALLOWED(), supplierId: other.w.suppliers[1] ?? '' });
+
+    await switchedHandoff(frozen.w).job.run();
+
+    const waitsUntil = clock.now().getTime() + WAITING_AS_A_WHOLE_MS;
+    expect((await marksOf(frozen.w)).hand_off?.due_at.getTime()).toBe(waitsUntil);
+    expect((await marksOf(other.w)).hand_off?.due_at.getTime()).toBeLessThan(waitsUntil);
+  });
+
+  it('a whole organisation lifted: a run after that ends its turn on its own request settles by its rows again', async () => {
+    const { w, acting } = await ready();
+    // Waiting for its supplier's payee, a reason of its own, once the freeze is lifted.
+    await ask(acting, w, { amount: ALLOWED(), supplierId: w.suppliers[1] ?? '' });
+    const mandateId = await shared.mandateIdOf(w);
+    await shared.moved(w, mandateId, 'organization', 'pause');
+    const { job } = switchedHandoff(w);
+    await job.run();
+    await shared.moved(w, mandateId, 'organization', 'resume');
+    clock.advanceBy(WAITING_AS_A_WHOLE_MS);
+
+    await job.run();
+
+    expect(lines('handoff.waiting').map(({ why }) => why)).toEqual(['organization', 'payee']);
+    // Due now by its rows (Postgres's clock), not another minute on.
+    expect((await marksOf(w)).hand_off?.due_at.getTime()).toBeLessThan(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
   });
 
   it('takes at most as many as it may, due longest first', async () => {
@@ -475,6 +626,53 @@ describe('a mark row held only for a moment, and never lost', () => {
     expect(await marksOf(w)).toEqual({});
   });
 
+  it('one the run left unfinished, a commit marking it during the settle: skipped, and that mark stands', async () => {
+    const { w } = await ready();
+    const earlier = new Date(clock.now().getTime() - 60_000);
+    await markOrgWork(app, w.org, 'hand_off', earlier);
+    const handOffs = marked('hand_off');
+    expect(await handOffs.list()).toEqual([w.org]);
+    const listed = (await marksOf(w)).hand_off?.marks ?? '0';
+    handOffs.unfinished(w.org);
+    const writer = await database.connect('admin');
+    try {
+      await writer.query('begin');
+      await writer.query(`update directory.org_work set marks = marks + 1 where org_id = $1 and job = 'hand_off'`, [
+        w.org,
+      ]);
+      // Returns while the writer still holds the row: had it waited, it could not.
+      await handOffs.settle();
+      await writer.query('commit');
+    } finally {
+      await writer.end();
+    }
+    // Not moved to now: the writer's mark stands as it made it.
+    expect((await marksOf(w)).hand_off).toEqual({ marks: String(BigInt(listed) + 1n), due_at: earlier });
+  });
+
+  it('those left unfinished settle due now, behind those due before them: one cut every run keeps no other out', async () => {
+    const orgs: string[] = [];
+    for (let n = 0; n < 3; n += 1) orgs.push((await ready()).w.org);
+    await admin().query('delete from directory.org_work');
+    // None has rows due: only the job's word keeps the two it didn't finish marked.
+    for (const [at, orgId] of orgs.entries()) {
+      await markOrgWork(app, orgId, 'hand_off', new Date(clock.now().getTime() - (orgs.length - at) * 1000));
+    }
+    const [first, second, third] = orgs;
+    const handOffs = marked('hand_off', 2);
+    expect(await handOffs.list()).toEqual([first, second]);
+    handOffs.unfinished(first ?? '');
+    handOffs.unfinished(second ?? '');
+    await handOffs.settle();
+
+    const next = await handOffs.list();
+    expect(next[0]).toBe(third);
+    expect(next).toHaveLength(2);
+    await handOffs.settle();
+    // Read by their rows this time, the two settled go; the one left behind is listed again.
+    expect(await handOffs.list()).toEqual([first, second].filter((orgId) => !next.includes(orgId ?? '')));
+  });
+
   it.each([
     [15, 3],
     [6, 1],
@@ -594,16 +792,21 @@ describe('the payment checks follow theirs', () => {
     expect((await checks.list()).toSorted()).toEqual([w.org, other.w.org].toSorted());
   });
 
-  it('an organisation whose turn a run cut short keeps its mark as it stood, and the next run takes it', async () => {
+  it('an organisation whose turn a run cut short is due now, whatever its rows say, and the next run takes it', async () => {
     const { w, acting } = await ready();
     await ask(acting, w, { amount: SMALL() });
     await switchedHandoff(w).job.run();
     const before = await marksOf(w);
     const { rail, asked } = noting(w);
+    // Past its first 15 minutes, its rows say its next turn is 5 minutes on.
+    clock.advanceBy(16 * 60_000);
 
     await switchedChecks({ rail, runBudgetMs: 0 }).job.run();
     expect(asked).toEqual([]);
-    expect(await marksOf(w)).toEqual(before);
+    expect((await marksOf(w)).payment_check).toEqual({
+      marks: before.payment_check?.marks,
+      due_at: clock.now(),
+    });
 
     await switchedChecks({ rail }).job.run();
     expect(asked.map(({ orgId }) => orgId)).toContain(w.org);

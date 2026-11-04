@@ -1165,6 +1165,104 @@ describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
     expect(await trail.countStep(app, org, 1n, 2n)).toBeUndefined();
     expect(await trail.countStep(app, org, 2n, 5n)).toEqual({ reason: 'gap', seq: 3n });
   });
+
+  describe("an organisation's day: its last events walked to its anchor (4D2e E7, decision 2b)", () => {
+    const sixAnchored = async () => {
+      await record(org, ...[1, 2, 3, 4, 5, 6].map(event));
+      return checked(org);
+    };
+
+    it('reads the start with the edges, then walks to the anchor: two trips, in one transaction', async () => {
+      const target = await sixAnchored();
+      const walking = counted();
+
+      expect(await trail.walkLast(walking.counting, org, target, 3)).toMatchObject({
+        ok: true,
+        seq: 6n,
+        to: 6n,
+        hash: target.hash,
+      });
+      expect(walking.trips).toHaveLength(2);
+    });
+
+    it('finds an event in the window edited to hide it from a signed-state read, its count unchanged', async () => {
+      const target = await sixAnchored();
+      await attacker.query(`update audit.events set subject_id = gen_random_uuid() where org_id = $1 and seq = 5`, [
+        org,
+      ]);
+
+      expect(await trail.countStep(app, org, 0n, 6n)).toBeUndefined();
+      expect(await trail.walkLast(app, org, target, 3)).toEqual({ ok: false, problem: { reason: 'hash', seq: 5n } });
+    });
+
+    it('finds the window start edited, and leaves an edit below it to the full pass', async () => {
+      const target = await sixAnchored();
+      await attacker.query(`update audit.events set action = 'probe.edited' where org_id = $1 and seq = 2`, [org]);
+      expect(await trail.walkLast(app, org, target, 3)).toMatchObject({ ok: true, seq: 6n });
+      expect(await trail.passStep(app, org, CHAIN_START, target, 10)).toEqual({
+        ok: false,
+        problem: { reason: 'hash', seq: 2n },
+      });
+
+      await attacker.query(`update audit.events set action = 'probe.edited' where org_id = $1 and seq = 3`, [org]);
+      expect(await trail.walkLast(app, org, target, 3)).toEqual({ ok: false, problem: { reason: 'hash', seq: 3n } });
+    });
+
+    it('finds the window start deleted, as the count does', async () => {
+      const target = await sixAnchored();
+      await attacker.query('delete from audit.events where org_id = $1 and seq = 3', [org]);
+
+      expect(await trail.walkLast(app, org, target, 3)).toEqual({
+        ok: false,
+        problem: { reason: 'unreadable', seq: 3n },
+      });
+      expect(await trail.countStep(app, org, 0n, 6n)).toEqual({ reason: 'gap', seq: 1n });
+    });
+
+    it("reads under the organisation's own wall: another's anchor is a chain not held", async () => {
+      const other = newOrg();
+      await record(other, ...[1, 2, 3, 4].map(event));
+      const theirs = await checked(other);
+
+      expect(await trail.walkLast(app, org, theirs, 2)).toEqual({
+        ok: false,
+        problem: { reason: 'unreadable', seq: 2n },
+      });
+      await expect(withTenant(app, newOrg(), () => trail.walkLast(app, org, theirs, 2))).rejects.toThrow(
+        TenantContextError,
+      );
+    });
+
+    it('waits for no event being added: a held transaction appending does not slow, nor trip, the count or the walk', async () => {
+      const target = await sixAnchored();
+      const { promise: recorded, resolve: wasRecorded } = Promise.withResolvers<undefined>();
+      const { promise: release, resolve: letGo } = Promise.withResolvers<undefined>();
+      // Bound to the test's own context, so it is a transaction of its own, its head lock held until let go.
+      const holding = AsyncResource.bind(() =>
+        withTenant(app, org, async (tx) => {
+          await trail.record(tx, org, event(7));
+          wasRecorded(undefined);
+          await release;
+        }),
+      )();
+      await recorded;
+      try {
+        expect(await within(5000, trail.countStep(app, org, 0n, 6n), 'the count')).toBeUndefined();
+        expect(await within(5000, trail.walkLast(app, org, target, 3), 'the walk')).toMatchObject({
+          ok: true,
+          seq: 6n,
+        });
+        expect(await within(5000, trail.passStep(app, org, CHAIN_START, target, 6), 'the pass step')).toMatchObject({
+          ok: true,
+          seq: 6n,
+        });
+      } finally {
+        letGo(undefined);
+        await holding;
+      }
+      expect(await trail.countStep(app, org, 0n, 7n)).toBeUndefined();
+    });
+  });
 });
 
 describe('checking a chain while events are added', () => {

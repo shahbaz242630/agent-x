@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
 import { APP_KEYS } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
@@ -66,11 +67,14 @@ export type RuleId =
   | 'handoff-queue-alert'
   | 'platform-full-alert'
   | 'anchor-store-alert'
+  | 'daily-check-alert'
+  | 'full-pass-alert'
   | 'integrity-runs-alert'
   | 'records-filling-alert'
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
+  | 'decisions-suppressed-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -317,12 +321,34 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 const ANCHOR_STORE_LINES =
   'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
 
+/**
+ * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass
+ * may take to find an old audit event edited (4D2e E7, decision 3), so the clean rows are still there to restore when it is.
+ * Staging's few days are no recovery path.
+ */
+export const leastRestoreDays = (
+  environment: Expectations['environment'],
+  oldEditDays: number = OLD_EDIT_DAYS,
+): number => (environment === 'production' ? Math.max(35, 2 * oldEditDays) : 7);
+
+/** The anchor check's daily count and walk of older events late (4D2e E7, decisions 1 and 2b). */
+const DAILY_CHECK_LATE = 'audit.daily_check_overdue';
+
+/** The full pass of every chain late (4D2e E7, decision 3). */
+const FULL_PASS_LATE = 'audit.full_pass_overdue';
+
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
 const PLATFORM_FULL_LINES =
   'where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out")';
 
 /** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
 const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
+
+/** Decision lines past their budget, counted in one line (4D2e F8, PL-52): the denial-surge alert undercounts that minute. */
+const DECISIONS_SUPPRESSED_LINES = [
+  'where tostring(parse_json(Log).event) == "log.suppressed"',
+  'where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided"',
+] as const;
 
 /**
  * An integrity job that skipped a whole run, its organisation list unread
@@ -1418,9 +1444,12 @@ const database: Check = (snapshot, expected, add) => {
       problem('database-logins', 'takes password logins only, never Microsoft Entra ones (ADR-002, ADR-010)');
     }
     const retention = at(properties, 'backup', 'backupRetentionDays');
-    const minimum = expected.environment === 'production' ? 35 : 7;
+    const minimum = leastRestoreDays(expected.environment);
     if (typeof retention !== 'number' || retention < minimum) {
-      problem('database-backup', `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002)`);
+      problem(
+        'database-backup',
+        `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002; in production, twice the days an old audit event edited may go unfound, 4D2e decision 3)`,
+      );
     }
     const settings = serverSettings(snapshot, server);
     if (settings.get('require_secure_transport') !== 'on' || settings.get('ssl_min_protocol_version') !== 'TLSv1.3') {
@@ -2999,6 +3028,30 @@ const agentCancelCapAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on any count of decision lines held back (4D2e F8, PL-52), in any window. */
+const decisionsSuppressedAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DECISIONS_SUPPRESSED_LINES, 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'decisions-suppressed-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any log.suppressed line for spend_request.decided, in any window",
+      });
+    }
+  }
+};
+
 /**
  * An enabled alert on the workspace fires on any page of the holdings check
  * that failed (Phase 2 E1b's review): one line is enough, in any window.
@@ -3099,6 +3152,47 @@ const anchorStoreAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * An enabled alert on the workspace fires on any one of these lines, watching every window and firing on the first:
+ * the shape of the five checks above it, for the alerts added since. Those five stay as written while open pull
+ * requests change the lines around them.
+ */
+const anyLineAlert =
+  (rule: RuleId, lines: string, what: string): Check =>
+  (snapshot, _expected, add) => {
+    for (const environment of ofType(snapshot, TYPES.environment)) {
+      const alerted = workspaceAlerted(
+        snapshot,
+        'any',
+        (criterion, alert) =>
+          queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [lines], 'count()') &&
+          totals(criterion) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === 0 &&
+          watchesEveryWindow(alert, criterion),
+      );
+      if (!alerted) {
+        add({
+          rule,
+          resource: environment.name,
+          message: `needs an enabled alert on this deployment's workspace that fires on any ${what} line, watching every window and firing on the first`,
+        });
+      }
+    }
+  };
+
+/** The anchor check's lateness, each its own alert (4D2e E7): a deletion found past 24 hours, an old edit past 7 days. */
+const dailyCheckAlert = anyLineAlert(
+  'daily-check-alert',
+  `where tostring(parse_json(Log).event) == "${DAILY_CHECK_LATE}"`,
+  DAILY_CHECK_LATE,
+);
+const fullPassAlert = anyLineAlert(
+  'full-pass-alert',
+  `where tostring(parse_json(Log).event) == "${FULL_PASS_LATE}"`,
+  FULL_PASS_LATE,
+);
+
+/**
  * An enabled alert on the workspace fires on any run of the integrity jobs
  * skipped whole (Phase 2 E2c; request expiry, D7), or of the activity log's
  * daily seal stopped early (L6b): one line is enough, in any window.
@@ -3125,35 +3219,6 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
     }
   }
 };
-
-/**
- * An enabled alert on the workspace fires on any one of these lines, watching every window and firing on the first:
- * the shape of the five checks above, for the alerts added since. Those five stay as written while open pull
- * requests change the lines around them.
- */
-const anyLineAlert =
-  (rule: RuleId, lines: string, what: string): Check =>
-  (snapshot, _expected, add) => {
-    for (const environment of ofType(snapshot, TYPES.environment)) {
-      const alerted = workspaceAlerted(
-        snapshot,
-        'any',
-        (criterion, alert) =>
-          queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [lines], 'count()') &&
-          totals(criterion) &&
-          at(criterion, 'operator') === 'GreaterThan' &&
-          at(criterion, 'threshold') === 0 &&
-          watchesEveryWindow(alert, criterion),
-      );
-      if (!alerted) {
-        add({
-          rule,
-          resource: environment.name,
-          message: `needs an enabled alert on this deployment's workspace that fires on any ${what} line, watching every window and firing on the first`,
-        });
-      }
-    }
-  };
 
 /** An enabled alert on the workspace fires on any organisation's records filling (partner S170). */
 const recordsFillingAlert = anyLineAlert('records-filling-alert', RECORDS_FILLING_LINES, 'identity.records_filling');
@@ -4227,11 +4292,14 @@ const CHECKS: readonly Check[] = [
   handoffQueueAlert,
   platformFullAlert,
   anchorStoreAlert,
+  dailyCheckAlert,
+  fullPassAlert,
   integrityRunsAlert,
   recordsFillingAlert,
   deadManAlerts,
   agentCancelsAlert,
   agentCancelCapAlert,
+  decisionsSuppressedAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,
