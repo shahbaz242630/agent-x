@@ -36,10 +36,52 @@ export interface StoredColumns {
   readonly macKeyVersion: number;
 }
 
-/** One stored row: its number, and the event as the chain checks it with its columns, or neither where it can't be read. */
+/**
+ * Every column of a row as stored, whatever it holds: numbers as text, bytes as
+ * hex, the time in UTC to the microsecond, as Postgres holds it. A row the app never
+ * wrote is kept so, as evidence, before a recovery removes it.
+ */
+export type StoredValues = Readonly<Record<string, unknown>>;
+
+/**
+ * One stored row: its number, every column as stored, and the event as the chain
+ * checks it with its columns, or neither where it can't be read.
+ */
 export interface StoredRow {
   readonly seq: bigint;
+  readonly stored: StoredValues;
   readonly read: { readonly entry: StoredEntry; readonly columns: StoredColumns } | undefined;
+}
+
+/** The event table's columns, as a stored row keeps them. */
+const STORED_COLUMNS = [
+  'seq',
+  'id',
+  'actor_type',
+  'actor_id',
+  'action',
+  'subject_type',
+  'subject_id',
+  'subject_version',
+  'details',
+  'prev_hash',
+  'hash',
+  'mac',
+  'mac_key_version',
+] as const;
+
+/** A value as JSON can hold it: bytes as hex, a whole number as text; anything else as read. */
+const storedValue = (value: unknown): unknown => {
+  if (typeof value === 'bigint') return value.toString();
+  return Buffer.isBuffer(value) ? value.toString('hex') : value;
+};
+
+/** Every column of a row as stored, the time as Postgres's own text in UTC (`recorded_text`). */
+function storedValues(row: Readonly<Record<string, unknown>>): StoredValues {
+  return Object.fromEntries([
+    ...STORED_COLUMNS.map((column) => [column, storedValue(row[column])]),
+    ['recorded_at', row.recorded_text],
+  ]);
 }
 
 /** A page of a chain's rows, and its head as it stood in the same statement. */
@@ -75,9 +117,10 @@ function storedRow(row: Readonly<Record<string, unknown>>): StoredRow {
   if (typeof seq !== 'bigint') throw new ChainStoreError('it read an event with no number');
   const sealed = sealedFields(row);
   const content = contentOf(row);
-  if (sealed === undefined || content === undefined) return { seq, read: undefined };
+  const stored = storedValues(row);
+  if (sealed === undefined || content === undefined) return { seq, stored, read: undefined };
   const entry = { ...sealed, content };
-  return { seq, read: { entry, columns: columnsOf(row, entry) } };
+  return { seq, stored, read: { entry, columns: columnsOf(row, entry) } };
 }
 
 /** The head as read: none with no head row, unreadable with more than one or one of the wrong types. */
@@ -109,7 +152,7 @@ export function chainRowsAlone(
         from (values (1)) as one (x)
         left join (select * from audit.heads a where a.org_id = ${org} limit 1) as h on true
         left join lateral (
-          select ${EVENT_COLUMNS} from audit.events e
+          select ${EVENT_COLUMNS}, pg_catalog.to_char(e.recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as recorded_text from audit.events e
           where e.org_id = ${org} and (${after}::bigint is null or e.seq > ${after}::bigint)
           order by e.seq limit ${limit}
         ) as page on true

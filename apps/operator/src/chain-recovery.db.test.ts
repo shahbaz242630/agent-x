@@ -276,12 +276,38 @@ describe('PL-29 the chain recovery plan puts back only original rows', () => {
           [orgId, seq],
         );
       }
+      // One of them at a time the app never writes, to the microsecond: kept exactly as evidence.
+      await admin.query(
+        "update audit.events set recorded_at = recorded_at + interval '1 microsecond' where org_id = $1 and seq = 0",
+        [orgId],
+      );
     });
     const planned = await plan();
     expect(planned.ok && actions(planned.rows)).toEqual([
       ['remove', 0n],
       ['remove', head + 1n],
     ]);
+    // Every column of each row removed, as the database holds it, in the plan and its file.
+    const admin = await live.connect('admin');
+    const held = await admin.query(
+      `select seq::text as seq, id::text as id, actor_type, actor_id, action, subject_type, subject_id, subject_version,
+              details, encode(prev_hash, 'hex') as prev_hash, encode(hash, 'hex') as hash, encode(mac, 'hex') as mac,
+              mac_key_version,
+              to_char(recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as recorded_at
+       from audit.events where org_id = $1 and seq in (0, $2) order by seq`,
+      [orgId, head + 1n],
+    );
+    await admin.end();
+    expect(held).toHaveLength(2);
+    expect(held[0]?.recorded_at).toMatch(/\.\d{6}Z$/);
+    expect(planned.ok && planned.rows.map((row) => ('stored' in row ? row.stored : undefined))).toEqual(held);
+    const facts = { planId: uuidV7Ids.next(), orgId, release: 'r-1', run: null, anchor: undefined };
+    const lines = planFile(planned, facts)
+      .toString()
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.slice(1).map((line) => line.stored)).toEqual(held);
   });
 });
 

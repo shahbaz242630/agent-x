@@ -31,6 +31,7 @@ import {
   createAuditTrail,
   type StoredColumns,
   type StoredRow,
+  type StoredValues,
 } from '@agentx/core/modules/audit';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import {
@@ -56,7 +57,12 @@ type RecoveryRefusal = 'copy_broken' | 'fork' | 'new_seal' | 'behind_anchor' | '
 /** A row the plan writes: the copy's original put back where it is missing, or in place of a damaged one; or one removed. */
 export type PlannedRow =
   | { readonly action: 'put_back' | 'replace'; readonly seq: bigint; readonly columns: StoredColumns }
-  | { readonly action: 'remove'; readonly seq: bigint };
+  | {
+      readonly action: 'remove';
+      readonly seq: bigint;
+      /** Every column as the live row holds it: evidence of what was added, kept before it is deleted. */
+      readonly stored: StoredValues;
+    };
 
 export type RecoveryPlan =
   | {
@@ -238,7 +244,7 @@ function createPlanner(
     // Never the app's: not sealed by us, and past a sealed head that stands exactly where the plan ends (every row
     // here is past that end).
     if (!sealedHere(live) && head?.seq === end.seq) {
-      return plan({ action: 'remove', seq });
+      return plan({ action: 'remove', seq, stored: live.stored });
     }
     return refused('new_seal', end.seq + 1n);
   };
@@ -246,7 +252,7 @@ function createPlanner(
   return {
     take(seq: bigint, copy: StoredRow | undefined, live: StoredRow | undefined): Refused | undefined {
       // The copy holds nothing below 1 (its whole check counted every row), so a row there is live and never the app's.
-      if (seq < 1n) return plan({ action: 'remove', seq });
+      if (seq < 1n && live !== undefined) return plan({ action: 'remove', seq, stored: live.stored });
       // The copy's whole check read every row up to its head, so each of its rows here is read and sealed.
       if (copy?.read !== undefined) return inCopy(seq, copy.read, live);
       return live === undefined ? undefined : pastCopy(seq, live);
@@ -330,7 +336,7 @@ export function planFile(plan: RecoveryPlan, facts: PlanFacts): Buffer {
     },
     ...plan.rows.map((row) =>
       row.action === 'remove'
-        ? { k: 'row', action: row.action, seq: row.seq.toString() }
+        ? { k: 'row', action: row.action, seq: row.seq.toString(), stored: row.stored }
         : { k: 'row', action: row.action, seq: row.seq.toString(), columns: row.columns },
     ),
     ...(plan.head === undefined
