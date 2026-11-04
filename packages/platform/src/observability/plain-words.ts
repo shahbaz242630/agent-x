@@ -916,11 +916,10 @@ export const PLAIN_WORDS = {
     next: 'Check the database is up and reachable, then run the job again.',
   },
   'operator.chain_recovery_refused': {
-    happened:
-      "An organisation's audit chain recovery plan was refused: the restored copy can't mend the chain with its original records alone.",
+    happened: "An organisation's audit chain recovery plan was refused.",
     broke:
-      'Nothing was changed. The organisation stays on its integrity hold. The reason says why: a copy that fails its own check, events written after the damage (a fork), records the copy does not hold, or a copy older than the last anchor.',
-    next: "Read the reason and the plan's file in the evidence store, then restore a copy from another point and plan again, or follow playbook H.",
+      'Nothing was changed, and the organisation stays on hold: its copy cannot mend the chain with original records.',
+    next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
