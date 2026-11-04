@@ -242,14 +242,34 @@ export interface WrittenTrigger {
 const MARK_FUNCTION = 'directory.mark_org_work';
 const MARK_BODY = '6cae37308679fd17975fca6e78aa25f031395080196fb037e0d947ae2b868229';
 
-/** Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. */
-const markTrigger = (table: string, name: string, condition: string, job: string, wait: string): WrittenTrigger => ({
-  table,
-  name,
-  definition: `CREATE CONSTRAINT TRIGGER ${name} AFTER INSERT OR UPDATE ON ${table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (${condition}) EXECUTE FUNCTION ${MARK_FUNCTION}('${job}', '${wait}')`,
-  function: MARK_FUNCTION,
-  body: MARK_BODY,
-});
+/**
+ * Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. On every write, or
+ * (`UPDATE`) on a row already made alone; while its condition holds, or (null) on each one.
+ */
+const markTrigger = (
+  table: string,
+  name: string,
+  condition: string | null,
+  job: string,
+  wait: string,
+  on: 'INSERT OR UPDATE' | 'UPDATE' = 'INSERT OR UPDATE',
+): WrittenTrigger => {
+  const when = condition === null ? '' : ` WHEN (${condition})`;
+  return {
+    table,
+    name,
+    definition: `CREATE CONSTRAINT TRIGGER ${name} AFTER ${on} ON ${table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW${when} EXECUTE FUNCTION ${MARK_FUNCTION}('${job}', '${wait}')`,
+    function: MARK_FUNCTION,
+    body: MARK_BODY,
+  };
+};
+
+/** A row moved to a new version in force, as Postgres prints it: only an update has one before it. */
+const NEW_VERSION = '(new.current_version_id IS DISTINCT FROM old.current_version_id)';
+
+/** The request voids' look, due at once, as what a pending request was decided under is written. */
+const voidsMark = (table: string, condition: string | null) =>
+  markTrigger(table, 'marks_request_voids', condition, 'request_voids', '0 seconds', 'UPDATE');
 
 /** The marks' triggers (0072, 0073): on the tables they name, and each as written. */
 export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
@@ -295,9 +315,22 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * None now.
+ * Now 0075's (4D2e D9). The request voids' look, at once: an organisation, agent or mandate written while not active,
+ * a supplier while not verified (0032's CHECK holds a verified one to its version, so a new version is written while
+ * not verified), a mandate moved to a new version, and a source on any write (its consent's end is the job's too, the
+ * visit settling the mark to it). The waiting rejections' on any write of a policy (a version made), and the carry
+ * rest's on a mandate's new version. Each on updates alone: every signed write, a new row's too, points its row at its
+ * event with an update in the same transaction (signed-rows.ts pointSignedRow).
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
+export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  voidsMark('organizations.organizations', "(new.status <> 'ACTIVE'::text)"),
+  voidsMark('agents.agents', "(new.status <> 'ACTIVE'::text)"),
+  voidsMark('mandates.mandates', `((new.status <> 'ACTIVE'::text) OR ${NEW_VERSION})`),
+  voidsMark('funding_sources.sources', null),
+  voidsMark('suppliers.suppliers', "(new.status <> 'VERIFIED'::text)"),
+  markTrigger('mandates.policies', 'marks_waiting_rejections', null, 'waiting_rejections', '0 seconds', 'UPDATE'),
+  markTrigger('mandates.mandates', 'marks_carry_rest', NEW_VERSION, 'carry_rest', '0 seconds', 'UPDATE'),
+];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
