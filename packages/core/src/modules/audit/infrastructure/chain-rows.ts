@@ -78,10 +78,11 @@ const storedValue = (value: unknown): unknown => {
 
 /** Every column of a row as stored, the time as Postgres's own text in UTC (`recorded_text`). */
 function storedValues(row: Readonly<Record<string, unknown>>): StoredValues {
-  return Object.fromEntries([
-    ...STORED_COLUMNS.map((column) => [column, storedValue(row[column])]),
+  const entries: [string, unknown][] = [
+    ...STORED_COLUMNS.map((column): [string, unknown] => [column, storedValue(row[column])]),
     ['recorded_at', row.recorded_text],
-  ]);
+  ];
+  return Object.fromEntries(entries);
 }
 
 /** A page of a chain's rows, and its head as it stood in the same statement. */
