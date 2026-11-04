@@ -8,7 +8,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type RawNode, sql, type Transaction, ValueNode } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
@@ -20,6 +20,7 @@ import {
   limitStatements,
   lockName,
   readAloneOnOneTrip,
+  readEachTenant,
   STATEMENT_SECONDS,
   TenantContextError,
   withTenant,
@@ -758,5 +759,143 @@ describe(`a statement's answer given up on, for a connection dead without a word
       answeredWithinMs: 5000,
     });
     expect(rows).toEqual([{ one: 1 }]);
+  });
+});
+
+describe(`each organisation's read under its own wall, in one trip (4D2e E8, Postgres ${server.version})`, () => {
+  const ORG_C = '0199c000-0000-7000-8000-00000000000c';
+  /** Each organisation's labels, with the setting each read ran under: no filter but the wall. */
+  const labels = () => sql<{ label: string | null; tenant: string }>`
+    select (select pg_catalog.string_agg(label, ',' order by label) from probe.items) as label,
+           pg_catalog.current_setting('app.org_id', true) as tenant
+  `;
+  const each = (orgIds: readonly string[], db: Kysely<ProbeSchema> = app, answeredWithinMs?: number) =>
+    readEachTenant(
+      db,
+      orgIds.map((orgId) => ({ orgId })),
+      labels,
+      answeredWithinMs === undefined ? {} : { answeredWithinMs },
+    );
+  const rowsOf = (answers: Awaited<ReturnType<typeof each>>) =>
+    answers.map(({ item, read }) => [item.orgId, 'rows' in read ? read.rows : 'failed']);
+  /** What the organisation sees under withTenant, as `labels` reads it: other tests add rows. */
+  const seenBy = async (orgId: string) => {
+    const seen = await labelsSeenBy(orgId);
+    return [{ label: seen.length === 0 ? null : seen.join(','), tenant: orgId }];
+  };
+
+  it('reads each under its own setting, in the order given, and forty take the trips two do', async () => {
+    const two = noStatementTimes();
+    expect(rowsOf(await timingStatements(two, () => each([ORG_B, ORG_A.toUpperCase(), ORG_C])))).toEqual([
+      [ORG_B, await seenBy(ORG_B)],
+      [ORG_A.toUpperCase(), await seenBy(ORG_A)],
+      [ORG_C, [{ label: null, tenant: ORG_C }]],
+    ]);
+    const forty = noStatementTimes();
+    const many = Array.from({ length: 40 }, (_, n) => `0199d000-0000-7000-8000-${String(n).padStart(12, '0')}`);
+    await timingStatements(forty, () => each(many));
+    // The start, the reads together, the commit.
+    expect(two.trips).toBe(3);
+    expect(forty.trips).toBe(3);
+  });
+
+  it('leaves the connection with no organisation and no limit, used again with nothing discarded', async () => {
+    const { capture, logger } = capturedLogger();
+    const single = appDatabase(1, logger);
+    try {
+      await each([ORG_A, ORG_B], single);
+      expect(await settingOutside(single)).toBe('');
+      const { rows } = await sql<{
+        limit: string;
+      }>`select pg_catalog.current_setting('statement_timeout') as limit`.execute(single);
+      expect(rows).toEqual([{ limit: '0' }]);
+      expect(capture.lines().filter((line) => line.event === 'db.tenant.leftover_discarded')).toEqual([]);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('refuses an ID that is not one, one named twice, or a call inside withTenant; and reads nothing for none', async () => {
+    await expect(each([ORG_A, 'not-an-id'])).rejects.toThrow(TenantContextError);
+    await expect(each([ORG_A, ORG_A.toUpperCase()])).rejects.toThrow(/named twice/);
+    await expect(withTenant(app, ORG_B, () => each([ORG_A]))).rejects.toThrow(/inside withTenant/);
+    const none = noStatementTimes();
+    expect(await timingStatements(none, () => each([]))).toEqual([]);
+    expect(none.trips).toBe(0);
+  });
+
+  it("reads again singly a page one organisation's read fails, and only that one fails, with its own error", async () => {
+    const dividing = (item: { orgId: string }) =>
+      sql<{ label: string }>`select (select pg_catalog.string_agg(label, ',' order by label) from probe.items) as label,
+        1 / ${item.orgId === ORG_B ? 0 : 1}::integer as one`;
+    const answers = await readEachTenant(app, [{ orgId: ORG_A }, { orgId: ORG_B }, { orgId: ORG_C }], dividing);
+
+    expect(answers.map(({ read }) => ('rows' in read ? read.rows : read.failed))).toEqual([
+      [{ label: (await seenBy(ORG_A))[0]?.label, one: 1 }],
+      expect.objectContaining({ code: '22012' }),
+      [{ label: null, one: 1 }],
+    ]);
+  });
+
+  it('fails the rest with a retry the database gives no answer to, rather than each waiting out its limit', async () => {
+    const small = appDatabase(2);
+    try {
+      const sleeping = (item: { orgId: string }) =>
+        sql<{ one: number }>`select 1 as one, pg_catalog.pg_sleep(${item.orgId === ORG_B ? 2 : 0}::float8)`;
+      const began = performance.now();
+      const answers = await readEachTenant(small, [{ orgId: ORG_A }, { orgId: ORG_B }, { orgId: ORG_C }], sleeping, {
+        answeredWithinMs: 300,
+      });
+      const [first, second, third] = answers.map(({ read }) => read);
+
+      expect(first).toMatchObject({ rows: [{ one: 1 }] });
+      expect(second).toEqual({ failed: expect.objectContaining({ message: expect.stringMatching(/read timeout/i) }) });
+      // The same failure, the read never sent.
+      expect(third && 'failed' in third ? third.failed : undefined).toBe(
+        second && 'failed' in second ? second.failed : 0,
+      );
+      // The page's limit and one retry's, not a third.
+      expect(performance.now() - began).toBeLessThan(1500);
+    } finally {
+      await small.destroy();
+    }
+  });
+
+  /** The app's pool, each statement's text or values changed on the way, as a database that broke a setting would. */
+  const twisted = (rewrite: (node: RawNode) => RawNode) =>
+    app.withPlugin({
+      transformQuery: ({ node }) => (node.kind === 'RawNode' ? rewrite(node as RawNode) : node),
+      transformResult: ({ result }) => Promise.resolve(result),
+    });
+
+  it("refuses a page whose setting didn't take, and reads each again under its own wall", async () => {
+    let twistedOnce = false;
+    const settingAnother = twisted((node) => {
+      const [value] = node.parameters;
+      if (!node.sqlFragments.join('').includes('set_config') || value === undefined || !ValueNode.is(value))
+        return node;
+      if (value.value !== ORG_B) return node;
+      twistedOnce = true;
+      return { ...node, parameters: [ValueNode.create(ORG_A)] };
+    });
+
+    expect(rowsOf(await each([ORG_A, ORG_B], settingAnother))).toEqual([
+      [ORG_A, await seenBy(ORG_A)],
+      [ORG_B, await seenBy(ORG_B)],
+    ]);
+    expect(twistedOnce).toBe(true);
+  });
+
+  it("refuses a page whose setting didn't clear, and reads each again under its own wall", async () => {
+    let twistedOnce = false;
+    const leftSet = twisted((node) => {
+      const text = node.sqlFragments.join('');
+      if (!text.includes("'app.org_id', '', true")) return node;
+      twistedOnce = true;
+      return { ...node, sqlFragments: [text.replace("'app.org_id', ''", "'app.org_id', 'left'")] };
+    });
+
+    expect(rowsOf(await each([ORG_B], leftSet))).toEqual([[ORG_B, await seenBy(ORG_B)]]);
+    expect(twistedOnce).toBe(true);
   });
 });
