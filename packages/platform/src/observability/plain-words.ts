@@ -842,10 +842,11 @@ export const PLAIN_WORDS = {
     broke: 'The line was still kept, under a general name, so alerts that watch for its real name may miss it.',
     next: 'Tell the developer: it is a code mistake to fix.',
   },
+  // Since 4D2e F8 only lost decision lines are counted at warn: warnings and errors are never held back.
   'log.suppressed': {
-    happened: 'One kind of log line came too often in a minute, so further copies were held back and counted.',
-    broke: 'The count is exact, but the details of the held-back lines are not in the log.',
-    next: 'Look at the kind of line it names: a flood usually means something is failing over and over.',
+    happened: 'More payment decisions came in a minute than the log keeps, so the rest were counted, not written.',
+    broke: 'Each is still in the audit trail, but the log and the denial alert undercount that minute.',
+    next: 'If it repeats, traffic has outgrown the log budget: see the runbook.',
   },
   'mandate_expiry.failed': {
     happened: 'A mandate past its end date could not be marked as expired.',

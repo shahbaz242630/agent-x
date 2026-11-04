@@ -16,9 +16,12 @@ import {
   withLogContext,
 } from './logger.ts';
 import { type ProblemEvent, saysFor } from './plain-words.ts';
+import { DECISION_BUDGET_PER_MINUTE, DECISION_EVENT, NEVER_HELD_BACK } from './volume-guard.ts';
 
 /** A catalogued problem, for tests of warnings and errors in general. */
 const PROBLEM = 'db.transaction_retried';
+/** An ordinary info line, held back past the cap: warnings and errors never are (4D2e F8). */
+const BUSY = 'busy.event';
 /** A marker value that must never come out. Plain words, so secret scanners ignore it. */
 const PLANTED = 'planted value that must not appear';
 const START = Date.UTC(2026, 8, 14, 10, 0, 0);
@@ -488,15 +491,22 @@ describe('decision 29: a warning or error says what happened in plain words', ()
     expect(lines()[0]?.says).toBe(saysFor('db.transaction_retried'));
   });
 
-  it('gives an invalid name, and a held-back count, the logger’s own words', () => {
+  it('gives an invalid name, and a held-back count of decision lines, the logger’s own words', () => {
     const { logger, lines, advance } = setup({ cap: 1 });
     logger.error('Bad.Event' as ProblemEvent);
-    logger.warn('db.transaction_retried');
-    logger.warn('db.transaction_retried');
+    // PL-52: the decision line's budget is 20,000 a minute; one more is held back and counted as a warning.
+    for (let i = 0; i <= DECISION_BUDGET_PER_MINUTE; i++) logger.info(DECISION_EVENT);
     advance(60_000);
     logger.flush();
     expect(lines()[0]).toMatchObject({ event: INVALID_EVENT, says: saysFor(INVALID_EVENT) });
-    expect(lines().at(-1)).toMatchObject({ event: SUPPRESSED_EVENT, says: saysFor(SUPPRESSED_EVENT) });
+    expect(lines().filter((line) => line.event === DECISION_EVENT)).toHaveLength(DECISION_BUDGET_PER_MINUTE);
+    expect(lines().at(-1)).toMatchObject({
+      level: 'warn',
+      event: SUPPRESSED_EVENT,
+      suppressedEvent: DECISION_EVENT,
+      suppressedCount: 1,
+      says: saysFor(SUPPRESSED_EVENT),
+    });
   });
 
   it('adds no words to a held-back count of info lines', () => {
@@ -521,17 +531,17 @@ describe('decision 29: a warning or error says what happened in plain words', ()
 describe('SEC-AV-09: a flood of one event is capped, and the count is always written', () => {
   it('writes up to the cap each minute, then one summary line with the exact count and its minute', () => {
     const { logger, lines, advance } = setup({ cap: 3 });
-    for (let i = 0; i < 8; i++) logger.warn(PROBLEM);
+    for (let i = 0; i < 8; i++) logger.info(BUSY);
     logger.info('other.event');
-    expect(lines().map((line) => line.event)).toEqual([PROBLEM, PROBLEM, PROBLEM, 'other.event']);
+    expect(lines().map((line) => line.event)).toEqual([BUSY, BUSY, BUSY, 'other.event']);
 
     advance(60_000);
     logger.info('next.minute');
     expect(lines().slice(4)).toEqual([
       expect.objectContaining({
-        level: 'warn',
+        level: 'info',
         event: SUPPRESSED_EVENT,
-        suppressedEvent: PROBLEM,
+        suppressedEvent: BUSY,
         suppressedCount: 5,
         suppressedFrom: '2026-09-14T10:00:00.000Z',
         suppressedTo: '2026-09-14T10:01:00.000Z',
@@ -551,12 +561,12 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
     expect(summary).not.toHaveProperty('correlationId');
   });
 
-  it.each(['error', 'warn', 'info', 'debug'] as const)(
+  it.each(['info', 'debug'] as const)(
     'writes the summary of %s lines at that level, so the level filter that let them through lets it through',
     (level) => {
       const { logger, lines, advance } = setup({ level, cap: 1 });
-      logger[level](PROBLEM);
-      logger[level](PROBLEM);
+      logger[level](BUSY);
+      logger[level](BUSY);
       advance(60_000);
       logger.flush();
       expect(lines()).toContainEqual(expect.objectContaining({ level, event: SUPPRESSED_EVENT, suppressedCount: 1 }));
@@ -576,9 +586,30 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
 
   it('caps a caller that tries to pass off its own lines as summaries', () => {
     const { logger, lines } = setup({ cap: 2 });
-    for (let i = 0; i < 10; i++) logger.warn('log.suppressed' as ProblemEvent, { note: 'forged' });
+    for (let i = 0; i < 10; i++) logger.info('log.suppressed' as EventName, { note: 'forged' });
+    // A warning is never held back (4D2e F8), but is still no summary.
+    logger.warn('log.suppressed' as ProblemEvent, { note: 'forged' });
     expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
-    expect(lines().filter((line) => line.event === INVALID_EVENT)).toHaveLength(2);
+    expect(lines().filter((line) => line.event === INVALID_EVENT)).toHaveLength(3);
+  });
+
+  it.each(['error', 'warn'] as const)('never holds back a line at %s, however many come', (level) => {
+    const { logger, lines, advance } = setup({ cap: 10 });
+    for (let i = 0; i < 500; i++) logger[level](PROBLEM);
+    advance(60_000);
+    logger.flush();
+    expect(lines().filter((line) => line.event === PROBLEM)).toHaveLength(500);
+    expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
+  });
+
+  it('never holds back a money or security line, even at info, however many come', () => {
+    const { logger, lines, advance } = setup({ cap: 10 });
+    const events = NEVER_HELD_BACK.map((family) => `${family}flood` as EventName);
+    for (const event of events) for (let i = 0; i < 100; i++) logger.info(event);
+    advance(60_000);
+    logger.flush();
+    for (const event of events) expect(lines().filter((line) => line.event === event)).toHaveLength(100);
+    expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
   });
 
   it('writes the current minute’s count on flush, as at shutdown', () => {
