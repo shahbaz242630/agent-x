@@ -12,7 +12,13 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
-import { liveSchemaDrift, liveSchemaProblems, MARK_TRIGGERS, type WrittenTrigger } from './schema-guard.ts';
+import {
+  COMING_TRIGGERS,
+  liveSchemaDrift,
+  liveSchemaProblems,
+  MARK_TRIGGERS,
+  type WrittenTrigger,
+} from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 
 const server = inject('postgres');
@@ -59,6 +65,13 @@ afterAll(async () => {
   await app.destroy();
   await database.drop();
 });
+
+/** Each `table name` pair, said as `says` puts it. */
+const eachNamed = (named: readonly string[], says: (table: string, name: string) => string): string[] =>
+  named.map((one) => {
+    const [table = '', name = ''] = one.split(' ');
+    return says(table, name);
+  });
 
 describe('a trigger a coming migration adds to a table already built', () => {
   beforeEach(async () => {
@@ -210,6 +223,77 @@ describe('a trigger a coming migration adds to a table already built', () => {
   });
 });
 
+describe("0077's triggers, made as its migration will make them, read by this image (4D2e D10)", () => {
+  // Word for word as db/migrations/0077 writes them: this image must know each exactly before that migration runs.
+  const MADE = `create constraint trigger marks_factor_removals after update on identity.factor_resets
+      deferrable initially deferred for each row
+      when (new.status = 'COOLING_OFF')
+      execute function directory.mark_org_work('factor_removals', '24 hours');
+    create constraint trigger marks_background_downloads after insert on activity_exports.files
+      deferrable initially deferred for each row
+      execute function directory.mark_org_work('background_downloads', '0 seconds')`;
+  const DROPPED = `drop trigger if exists marks_factor_removals on identity.factor_resets;
+    drop trigger if exists marks_background_downloads on activity_exports.files`;
+  const NAMED = ['activity_exports.files marks_background_downloads', 'identity.factor_resets marks_factor_removals'];
+  const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
+
+  it('are each a coming trigger, and nothing is the alarm at once', async () => {
+    await owner.query(MADE);
+    try {
+      expect(COMING_TRIGGERS.map(({ table, name }) => `${table} ${name}`).toSorted()).toEqual(NAMED);
+      expect(await liveSchemaDrift(app, ROLES)).toEqual({
+        atOnce: [],
+        releaseShaped: each((table, name) => `${table} carries "${name}", a coming trigger`),
+      });
+    } finally {
+      await owner.query(DROPPED);
+    }
+  });
+
+  it('to the image before this one, are the false alarm at once', async () => {
+    await owner.query(MADE);
+    try {
+      expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual(
+        each((table, name) => `${table} carries the trigger "${name}"`),
+      );
+    } finally {
+      await owner.query(DROPPED);
+    }
+  });
+
+  it.each([
+    [
+      'the removals firing on an insert too',
+      `create constraint trigger marks_factor_removals after insert or update on identity.factor_resets
+        deferrable initially deferred for each row when (new.status = 'COOLING_OFF')
+        execute function directory.mark_org_work('factor_removals', '24 hours')`,
+      'identity.factor_resets carries the trigger "marks_factor_removals"',
+    ],
+    [
+      'the removals marked later than the cooling-off',
+      `create constraint trigger marks_factor_removals after update on identity.factor_resets
+        deferrable initially deferred for each row when (new.status = 'COOLING_OFF')
+        execute function directory.mark_org_work('factor_removals', '48 hours')`,
+      'identity.factor_resets carries the trigger "marks_factor_removals"',
+    ],
+    [
+      'the downloads firing on a condition',
+      `create constraint trigger marks_background_downloads after insert on activity_exports.files
+        deferrable initially deferred for each row when (new.state = 'building')
+        execute function directory.mark_org_work('background_downloads', '0 seconds')`,
+      'activity_exports.files carries the trigger "marks_background_downloads"',
+    ],
+  ])('one written otherwise, %s, is the alarm at once', async (_what, made, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
+    await owner.query(made);
+    try {
+      expect(await liveSchemaDrift(app, ROLES)).toEqual({ atOnce: [problem], releaseShaped: [] });
+    } finally {
+      await owner.query(DROPPED);
+    }
+  });
+});
+
 describe('0075, read as the image before it would read it (4D2e D9)', () => {
   /** Each trigger 0075 makes, as `table name`. */
   const NAMED = [
@@ -222,11 +306,7 @@ describe('0075, read as the image before it would read it (4D2e D9)', () => {
     'suppliers.suppliers marks_request_voids',
   ];
   const ours = ({ table, name }: WrittenTrigger) => NAMED.includes(`${table} ${name}`);
-  const each = (says: (table: string, name: string) => string) =>
-    NAMED.map((named) => {
-      const [table = '', name = ''] = named.split(' ');
-      return says(table, name);
-    });
+  const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
   // The image before knew 0072's and 0073's triggers as written, these seven as coming, and the job CHECK as 0073 made it.
   const before = {
     triggers: MARK_TRIGGERS.filter((one) => !ours(one)),
