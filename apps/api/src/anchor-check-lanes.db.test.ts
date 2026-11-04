@@ -3,7 +3,7 @@
 // durable write, while real chains are read on real connections.
 import { createAuditTrail, holdOrganisation, type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { createAnchorLog } from '@agentx/platform/audit-chain';
+import { CHAIN_START, createAnchorLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -120,5 +120,81 @@ describe(`one organisation locked out holds no one else (Postgres ${server.versi
     expect(held).toMatchObject({ outcome: 'held' });
     // No anchor for the one that failed.
     expect(durable.latest({ kind: 'organisation', orgId: locked })).toBeUndefined();
+  });
+});
+
+describe(`the probe on the real schema (4D2e E8, Postgres ${server.version})`, () => {
+  it('reads no unmoved chain, reads a moved one from its anchor, and holds one wound back, as the product wires it', async () => {
+    const mine: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const id = ids.next();
+      mine.push(id);
+      await withSignedStates(app, id, { keys, ids, logger: testLogger() }, (tx, states) =>
+        createOrganization(tx, states, { id, name: `Probe ${String(index)} LLC`, actor: OPERATOR }),
+      );
+    }
+    const [, moving = '', woundBack = ''] = mine;
+    const capture = new LogCapture();
+    const logger = testLogger(capture);
+    const trail = createAuditTrail({ keys, ids });
+    const verified: string[] = [];
+    const organizations: OrganisationChains = {
+      list: () => Promise.resolve(mine),
+      recorded: () => Promise.resolve(mine),
+      probe: (chains, signal) => trail.probeHeads(app, chains, signal),
+      verify: (orgId, anchor) => {
+        verified.push(orgId);
+        return trail.checkFromAnchor(app, orgId, anchor ?? CHAIN_START);
+      },
+      hold: (orgId, failure) => holdOrganisation(app, orgId, { keys, ids, logger }, failure),
+    };
+    const check = createAnchorCheck({
+      chains: [],
+      organizations,
+      keys,
+      clock,
+      logger,
+      staleAfterMs: 600_000,
+      deadlineMs: 30_000,
+      lanes: 2,
+    });
+    const done = () =>
+      capture
+        .lines()
+        .filter((line) => line.event === 'audit.anchor_check_done')
+        .at(-1);
+
+    await check.run();
+    expect(done()).toMatchObject({ anchored: 4, failed: 0 });
+    expect(verified).toHaveLength(4);
+
+    verified.length = 0;
+    await check.run();
+    expect(verified).toEqual([]);
+    expect(done()).toMatchObject({ unchanged: 4, failed: 0 });
+
+    // One organisation moves on; another is wound back by one event, its head left where it was.
+    await holdOrganisation(app, moving, { keys, ids, logger: testLogger() }, 'probe test');
+    const admin = database.as('admin');
+    await admin.query(
+      'delete from audit.events where org_id = $1 and seq = (select max(seq) from audit.events where org_id = $1)',
+      [woundBack],
+    );
+    const linesBefore = capture.lines().length;
+    await check.run();
+
+    expect(verified).toEqual([moving]);
+    expect(done()).toMatchObject({ anchored: 1, unchanged: 2, failed: 1 });
+    const alarms = capture
+      .lines()
+      .slice(linesBefore)
+      .filter((line) => line.event === 'audit.integrity_failed');
+    expect(alarms.filter((line) => line.check === 'anchor')).toEqual([
+      expect.objectContaining({ reason: 'head', orgId: woundBack }),
+    ]);
+    const held = await withSignedStates(app, woundBack, { keys, ids, logger: testLogger() }, (tx, states) =>
+      states.holdRecord(tx, woundBack),
+    );
+    expect(held).toMatchObject({ outcome: 'held' });
   });
 });
