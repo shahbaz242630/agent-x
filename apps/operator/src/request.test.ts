@@ -5,7 +5,15 @@
 import { organizationName } from '@agentx/core/modules/organizations';
 import { describe, expect, it } from 'vitest';
 
-import { createOrganizationRequest, REQUEST_LIMIT_BYTES, UUID_V7 } from './request.ts';
+import {
+  chainRecoveryRequest,
+  chainRestoreRequest,
+  createOrganizationRequest,
+  DISCARD_FORK,
+  PLAN_DIGEST_HEX,
+  REQUEST_LIMIT_BYTES,
+  UUID_V7,
+} from './request.ts';
 
 describe('B1c-2b the request the operator is sent', () => {
   it('holds the longest name an organisation may have, in the widest letters UTF-8 writes, with room to spare', () => {
@@ -27,5 +35,38 @@ describe('B1c-2b the request the operator is sent', () => {
       '--id',
       'an ID',
     ]);
+  });
+});
+
+describe('4D2e E10 the chain repair and its plan, asked with or without the named fork flag', () => {
+  const asked = { orgId: 'org', planId: 'plan', digest: 'digest', id: 'id' };
+
+  it('names the flag last, only when asked', () => {
+    expect(JSON.parse(chainRecoveryRequest('org', 'plan'))).toEqual([
+      'chain-recovery-plan',
+      '--org',
+      'org',
+      '--id',
+      'plan',
+    ]);
+    expect(JSON.parse(chainRecoveryRequest('org', 'plan', true)).at(-1)).toBe(DISCARD_FORK);
+    expect(JSON.parse(chainRestoreRequest(asked))).toEqual([
+      'chain-restore',
+      '--org',
+      'org',
+      '--plan',
+      'plan',
+      '--digest',
+      'digest',
+      '--id',
+      'id',
+    ]);
+    expect(JSON.parse(chainRestoreRequest(asked, true)).at(-1)).toBe(DISCARD_FORK);
+  });
+
+  it("takes a plan's digest as 64 lower-case hex digits alone", () => {
+    expect('ab'.repeat(32)).toMatch(PLAN_DIGEST_HEX);
+    expect('AB'.repeat(32)).not.toMatch(PLAN_DIGEST_HEX);
+    expect('ab'.repeat(33)).not.toMatch(PLAN_DIGEST_HEX);
   });
 });

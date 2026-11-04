@@ -4,12 +4,12 @@
 // change or delete an event. What it writes is the copy's original rows as a
 // plan read them (chain-rows.ts), each with its original MAC and, where it has
 // one, the operator's original signature: nothing here makes a MAC, a
-// signature or a hash, and it holds no key. A row it can't vouch for still
+// signature or a hash, nor takes a key. A row it can't vouch for still
 // reaches the table only to fail the whole check the repair runs before it
 // commits, which rolls everything back.
 import type { ChainHead } from '@agentx/platform/audit-chain';
 import { assertTenant } from '@agentx/platform/db';
-import { sql, type Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { StoredColumns } from './chain-rows.ts';
 import type { AuditTables } from './tables.ts';
@@ -18,6 +18,30 @@ import type { AuditTables } from './tables.ts';
 export type RepairRow =
   | { readonly action: 'put_back' | 'replace'; readonly seq: bigint; readonly columns: StoredColumns }
   | { readonly action: 'remove'; readonly seq: bigint };
+
+/** The role a repair writes as: the owner, which the migrations made the tables' owner. */
+export const REPAIR_ROLE = 'agentx_owner';
+
+/**
+ * Why the connection can't write a repair, or nothing: it must be the owner,
+ * logged in as itself (no SET ROLE to switch back from) and no superuser, so
+ * the tenant wall, forced on the owner too, still holds each statement to the
+ * one organisation. Role names alone, never a value.
+ */
+export async function repairRoleProblems(db: Kysely<AuditTables>): Promise<string[]> {
+  const { rows } = await sql<{ session: string; current: string; superuser: boolean; bypass: boolean }>`
+    select session_user::text as session, current_user::text as current, r.rolsuper as superuser,
+           r.rolbypassrls as bypass
+    from pg_catalog.pg_roles r where r.rolname = session_user
+  `.execute(db);
+  const [role] = rows;
+  if (role === undefined) return ['the connected role was not found in pg_roles'];
+  return [
+    ...(role.session === REPAIR_ROLE ? [] : [`it is logged in as ${role.session}, not ${REPAIR_ROLE}`]),
+    ...(role.current === role.session ? [] : ['the session has switched to another role (SET ROLE)']),
+    ...(role.superuser || role.bypass ? ['it can bypass row-level security'] : []),
+  ];
+}
 
 /** How many rows one insert carries: a long repair in a few statements, none of them huge. */
 const ROWS_A_STATEMENT = 5000;

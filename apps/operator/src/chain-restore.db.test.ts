@@ -461,6 +461,55 @@ describe('PL-29 a forged row is never written', () => {
   });
 });
 
+describe('PL-29 a failure while writing', () => {
+  it('is thrown as it is, and nothing is kept', async () => {
+    await copied(3);
+    await deleteEvent(live, 2n);
+    const digest = await digestNow();
+    const before = await snapshot(live);
+    await tamper(live, async (admin) => {
+      await admin.query(`create function public.refuse() returns trigger language plpgsql as $$
+        begin raise exception 'refused by a trigger'; end $$`);
+      await admin.query(
+        'create trigger refuse before insert on audit.events for each row execute function public.refuse()',
+      );
+    });
+    await expect(restore(digest)).rejects.toThrow('refused by a trigger');
+    await tamper(live, (admin) => admin.query('drop trigger refuse on audit.events'));
+    expect(await snapshot(live)).toBe(before);
+  });
+});
+
+describe("the live chain's fingerprint", () => {
+  it('is no fingerprint when the head moved between its pages', async () => {
+    await record(live, 3);
+    let first = true;
+    const moved = await fingerprintOf(
+      {
+        keys,
+        pageSize: 1,
+        readPage: async (db, withKeys, org, after, limit) => {
+          if (!first) return chainRowsAlone(db, withKeys, org, after, limit);
+          first = false;
+          const page = await chainRowsAlone(db, withKeys, org, after, limit);
+          await record(live, 1);
+          return page;
+        },
+      },
+      on(live, 'operator', true),
+      orgId,
+    );
+    expect(moved).toBeNull();
+  });
+
+  it('throws what stopped a read', async () => {
+    const failed = new Error('the read failed');
+    await expect(
+      fingerprintOf({ keys, readPage: () => Promise.reject(failed) }, on(live, 'operator', true), orgId),
+    ).rejects.toBe(failed);
+  });
+});
+
 describe('a fork, with the named flag', () => {
   it("discards the live branch: the copy's events and head put back, the branch kept as evidence", async () => {
     await record(live, 1);
