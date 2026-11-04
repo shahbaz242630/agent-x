@@ -168,12 +168,33 @@ describe('4D2e F8 each event has its budget; money and audit lines are never hel
   };
 
   it.each(NEVER_HELD_BACK.map((family) => `${family}some_line`))(
-    'never holds back %s, a money or audit line, at any level',
+    'never holds back %s at info or debug, a money or audit line',
     (event) => {
-      for (const level of [DEBUG, INFO, WARN, ERROR])
-        expect(flood(event, level)).toEqual({ admitted: FLOOD, suppressed: [] });
+      for (const level of [DEBUG, INFO]) expect(flood(event, level)).toEqual({ admitted: FLOOD, suppressed: [] });
     },
   );
+
+  it.each(NEVER_HELD_BACK.map((family) => `${family}some_line`))(
+    'caps %s at warn and error like any other, so a caller who can repeat one cannot fill the log',
+    (event) => {
+      for (const level of [WARN, ERROR]) {
+        expect(flood(event, level).suppressed).toEqual([{ event, count: FLOOD - 2, level, minuteStart: minute(0) }]);
+      }
+    },
+  );
+
+  it('holds back a flood of audit.backlog errors with a count, while an integrity alarm still gets out', () => {
+    const clock = manualClock();
+    const guard = createVolumeGuard(3, clock.now);
+    for (let i = 0; i < FLOOD; i++) guard.admit('audit.backlog', ERROR);
+    expect(guard.admit('audit.integrity_failed', ERROR)).toBe(true);
+    // The family's info lines are still never held back during the flood.
+    expect(Array.from({ length: FLOOD }, () => guard.admit('audit.anchored', INFO)).every(Boolean)).toBe(true);
+    clock.advance(MINUTE_MS);
+    expect(guard.takeSuppressed()).toEqual([
+      { event: 'audit.backlog', count: FLOOD - 3, level: ERROR, minuteStart: minute(0) },
+    ]);
+  });
 
   it('keeps the cap on warnings, errors and the security and activity-log lines an outsider can drive', () => {
     for (const [event, level] of [
@@ -202,9 +223,9 @@ describe('4D2e F8 each event has its budget; money and audit lines are never hel
   });
 
   it('gives a decision line 20,000 a minute a process, the configured cap for the rest', () => {
-    expect(budgetOf(DECISION_EVENT, 600)).toBe(DECISION_BUDGET_PER_MINUTE);
+    expect(budgetOf(DECISION_EVENT, INFO, 600)).toBe(DECISION_BUDGET_PER_MINUTE);
     expect(DECISION_BUDGET_PER_MINUTE).toBe(20_000);
-    expect(budgetOf('http.request_completed', 600)).toBe(600);
+    expect(budgetOf('http.request_completed', INFO, 600)).toBe(600);
     const clock = manualClock();
     const guard = createVolumeGuard(600, clock.now);
     let admitted = 0;
@@ -216,7 +237,7 @@ describe('4D2e F8 each event has its budget; money and audit lines are never hel
   });
 
   it('keeps a configured cap above the decision budget for decisions too, as in a load run', () => {
-    expect(budgetOf(DECISION_EVENT, 200_000)).toBe(200_000);
+    expect(budgetOf(DECISION_EVENT, INFO, 200_000)).toBe(200_000);
     expect(flood(DECISION_EVENT, INFO, 100).admitted).toBe(FLOOD);
   });
 

@@ -9,9 +9,12 @@
 // own, warnings, errors and security lines included, since an outsider can
 // drive those and uncapped they could fill the workspace's daily cap and stop
 // all logging. The decision line gets 20,000 a minute a process, since peak
-// traffic passes 600 in seconds. The money and audit families are never held
-// back: their volume follows real payments and chain events, not callers, and
-// a count can't stand in for them.
+// traffic passes 600 in seconds. Info and debug lines of the money and audit
+// families are never held back: their volume follows real payments and chain
+// events, not callers. A warning or error of any family, those included, keeps
+// the configured cap on its own event name, since a signed-in caller can repeat
+// some (a backlog line per page read): a flood of one never hides another, and
+// an alarm's first lines always get out.
 
 /** How many lines of one event were held back in one minute, and the level to write their count at. */
 interface Suppressed {
@@ -36,14 +39,14 @@ export interface VolumeGuard {
 
 export const MINUTE_MS = 60_000;
 
-/** pino's warn level number: a count of lost decision lines is written at least at it. */
+/** pino's warn level number: every warning and error is capped, and a count of lost decision lines is one. */
 const WARN = 40;
 
 /** The decision line (PL-52): its own budget, and a count of lost ones is a warning. */
 export const DECISION_EVENT = 'spend_request.decided';
 export const DECISION_BUDGET_PER_MINUTE = 20_000;
 
-/** Event families never held back, nor counted: the hand-off, payment moves and the audit trail. */
+/** Event families whose info and debug lines are never held back, nor counted: the hand-off, payment moves, the audit trail. */
 export const NEVER_HELD_BACK = [
   'handoff.',
   'payment.',
@@ -53,9 +56,9 @@ export const NEVER_HELD_BACK = [
   'audit.',
 ] as const;
 
-/** An event's lines a minute before any are held back; infinite for those never held back. */
-export function budgetOf(event: string, capPerMinute: number): number {
-  if (NEVER_HELD_BACK.some((family) => event.startsWith(family))) return Number.POSITIVE_INFINITY;
+/** An event's lines a minute at this level before any are held back; infinite for those never held back. */
+export function budgetOf(event: string, level: number, capPerMinute: number): number {
+  if (level < WARN && NEVER_HELD_BACK.some((family) => event.startsWith(family))) return Number.POSITIVE_INFINITY;
   // A configured cap above the decision budget, as in a load run, stands for decisions too.
   return event === DECISION_EVENT ? Math.max(capPerMinute, DECISION_BUDGET_PER_MINUTE) : capPerMinute;
 }
@@ -103,10 +106,10 @@ export function createVolumeGuard(capPerMinute: number, now: () => number): Volu
     admit(event, level) {
       roll();
       // Never counted, so they take no room in the tallies either.
-      if (budgetOf(event, capPerMinute) === Number.POSITIVE_INFINITY) return true;
+      if (budgetOf(event, level, capPerMinute) === Number.POSITIVE_INFINITY) return true;
       const bucket = tallies.has(event) || tallies.size < MAX_EVENTS_PER_MINUTE ? event : OTHER_EVENTS;
       const tally = tallies.get(bucket) ?? {
-        budget: budgetOf(bucket, capPerMinute),
+        budget: budgetOf(bucket, level, capPerMinute),
         lines: 0,
         reported: 0,
         level: 0,

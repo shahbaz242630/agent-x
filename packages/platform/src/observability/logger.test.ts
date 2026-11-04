@@ -596,18 +596,32 @@ describe('SEC-AV-09: a flood of one event is capped, and the count is always wri
     ]);
   });
 
-  it('never holds back a money or audit line, at any level, however many come', () => {
+  it('never holds back a money or audit line at info or debug, however many come', () => {
     const { logger, lines, advance } = setup({ cap: 10 });
     const events = NEVER_HELD_BACK.map((family) => `${family}flood` as EventName);
     for (const event of events) {
       for (let i = 0; i < 100; i++) logger.info(event);
       for (let i = 0; i < 100; i++) logger.debug(event);
     }
-    logger.warn('handoff.bank_held');
     advance(60_000);
     logger.flush();
     for (const event of events) expect(lines().filter((line) => line.event === event)).toHaveLength(100);
     expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([]);
+  });
+
+  it('caps a flood of audit.backlog errors with a count, and an integrity alarm still gets out during it', () => {
+    const { logger, lines, advance } = setup({ cap: 3 });
+    for (let i = 0; i < 50; i++) logger.error('audit.backlog');
+    logger.error('audit.integrity_failed');
+    for (let i = 0; i < 50; i++) logger.info('audit.anchored');
+    advance(60_000);
+    logger.flush();
+    expect(lines().filter((line) => line.event === 'audit.backlog')).toHaveLength(3);
+    expect(lines().filter((line) => line.event === 'audit.integrity_failed')).toHaveLength(1);
+    expect(lines().filter((line) => line.event === 'audit.anchored')).toHaveLength(50);
+    expect(lines().filter((line) => line.event === SUPPRESSED_EVENT)).toEqual([
+      expect.objectContaining({ level: 'error', suppressedEvent: 'audit.backlog', suppressedCount: 47 }),
+    ]);
   });
 
   it('PL-52: keeps 20,000 decision lines a minute, and counts the rest as a warning with plain words', () => {
