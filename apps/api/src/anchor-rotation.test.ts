@@ -678,6 +678,10 @@ describe('the full pass (decision 3)', () => {
       made.anchor(orgId, 864n);
       await made.run([orgId]);
       await made.run([]);
+      // Nor when its read didn't come back, its share unread: that is said as a miss, not capacity.
+      made.answer.pass = () => Promise.reject(new Error('the database is away'));
+      await made.run([orgId]);
+      expect(made.missed).toHaveLength(1);
       expect(made.lines('audit.full_pass_behind')).toEqual([]);
     });
 
