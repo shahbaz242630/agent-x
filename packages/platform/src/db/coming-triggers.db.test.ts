@@ -12,7 +12,13 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
-import { liveSchemaDrift, liveSchemaProblems, MARK_TRIGGERS, type WrittenTrigger } from './schema-guard.ts';
+import {
+  COMING_TRIGGERS,
+  liveSchemaDrift,
+  liveSchemaProblems,
+  MARK_TRIGGERS,
+  type WrittenTrigger,
+} from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 
 const server = inject('postgres');
@@ -206,6 +212,48 @@ describe('a trigger a coming migration adds to a table already built', () => {
       });
     } finally {
       await owner.query('alter table spend_requests.requests force row level security');
+    }
+  });
+});
+
+describe("0073's triggers, made as its migration will make them, read by this image (4D2e D8)", () => {
+  // Word for word as db/migrations/0073 writes them: this image must know each exactly before that migration runs.
+  const MADE = `create constraint trigger marks_request_expiry after insert or update on spend_requests.requests
+      deferrable initially deferred for each row
+      when (new.status = 'APPROVAL_REQUIRED')
+      execute function directory.mark_org_work('request_expiry', '24 hours');
+    create constraint trigger marks_mandate_expiry after insert or update on mandates.mandates
+      deferrable initially deferred for each row
+      when (new.status in ('ACTIVE', 'SUSPENDED'))
+      execute function directory.mark_org_work('mandate_expiry', '0 seconds')`;
+  const DROPPED = `drop trigger if exists marks_request_expiry on spend_requests.requests;
+    drop trigger if exists marks_mandate_expiry on mandates.mandates`;
+
+  it('are each a coming trigger, and nothing is the alarm at once', async () => {
+    await owner.query(MADE);
+    try {
+      expect(COMING_TRIGGERS.map(({ name }) => name)).toEqual(['marks_request_expiry', 'marks_mandate_expiry']);
+      expect(await liveSchemaDrift(app, ROLES)).toEqual({
+        atOnce: [],
+        releaseShaped: [
+          'mandates.mandates carries "marks_mandate_expiry", a coming trigger',
+          'spend_requests.requests carries "marks_request_expiry", a coming trigger',
+        ],
+      });
+    } finally {
+      await owner.query(DROPPED);
+    }
+  });
+
+  it('to the image before this one, are the false alarm at once', async () => {
+    await owner.query(MADE);
+    try {
+      expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual([
+        'mandates.mandates carries the trigger "marks_mandate_expiry"',
+        'spend_requests.requests carries the trigger "marks_request_expiry"',
+      ]);
+    } finally {
+      await owner.query(DROPPED);
     }
   });
 });

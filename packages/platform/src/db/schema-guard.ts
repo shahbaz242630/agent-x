@@ -279,9 +279,25 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * None now.
+ * Now 0073's (4D2e D8): a request waiting for approval marks its expiry a day on, the shortest wait; a mandate open
+ * or suspended marks its expiry's look at once, which reads its version's end.
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
+export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  markTrigger(
+    'spend_requests.requests',
+    'marks_request_expiry',
+    "(new.status = 'APPROVAL_REQUIRED'::text)",
+    'request_expiry',
+    '24 hours',
+  ),
+  markTrigger(
+    'mandates.mandates',
+    'marks_mandate_expiry',
+    "(new.status = ANY (ARRAY['ACTIVE'::text, 'SUSPENDED'::text]))",
+    'mandate_expiry',
+    '0 seconds',
+  ),
+];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
