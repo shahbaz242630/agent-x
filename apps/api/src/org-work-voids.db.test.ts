@@ -175,9 +175,12 @@ describe('every cause a void may give marks the voids as its stop commits', () =
       await voids().run();
       expect(await statusOf(w, waiting.id)).toBe('DENIED');
       expect(await causesOf(w, waiting.id)).toContain(cause);
-      // Nothing stopped is left: no later than its source's consent's end, or none once the source ended.
-      const settled = await markOf(w.org);
-      if (settled !== undefined) expect(settled.due_at).toEqual(w.state.consentExpiresAt);
+      // Nothing stopped is left: due as its source's consent ends, or none once the source has ended.
+      const [source] = await admin().query<{ status: string }>(
+        'select status from funding_sources.sources where id = $1',
+        [w.source],
+      );
+      expect((await markOf(w.org))?.due_at).toEqual(source?.status === 'ENDED' ? undefined : w.state.consentExpiresAt);
     },
   );
 });
@@ -233,6 +236,19 @@ describe('the voids follow their marks', () => {
     await voids().run();
     expect(await markOf(w.org)).toBeUndefined();
     expect(lines('consent_lapse.recorded')).toHaveLength(1);
+  });
+
+  it('a consent renewed, its source still active, marks it; visited, the mark moves to the new end', async () => {
+    const { w } = await ready();
+    await voids().run();
+    expect((await markOf(w.org))?.due_at).toEqual(w.state.consentExpiresAt);
+    const renewed = new Date(w.state.consentExpiresAt.getTime() + 30 * 24 * 60 * 60_000);
+
+    await shared.partnerSays(w, { consentExpiresAt: renewed });
+    expect((await markOf(w.org))?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
+    await voids().run();
+
+    expect((await markOf(w.org))?.due_at).toEqual(renewed);
   });
 
   it('a request left past its share keeps the organisation due, visited each run until none is left', async () => {
@@ -295,6 +311,18 @@ describe('the hourly look holds the voids’ mark to their rows', () => {
     expect((await markOf(stopped.w.org))?.due_at.getTime()).toBeLessThanOrEqual(clock.now().getTime());
     expect((await markOf(standing.w.org))?.due_at).toEqual(standing.w.state.consentExpiresAt);
     expect(lines('org_work.unmarked').filter(({ job }) => job === 'request_voids')).toHaveLength(2);
+  });
+
+  it('a consent run out with its lapse not yet logged is work on its own, with no request: written due now', async () => {
+    const { w } = await ready();
+    clock.advanceBy(w.state.consentExpiresAt.getTime() - clock.now().getTime() + 60_000);
+    await unmarked(w);
+
+    await lookAt(w).run();
+
+    expect((await markOf(w.org))?.due_at.getTime()).toBeLessThanOrEqual(clock.now().getTime());
+    await voids().run();
+    expect(lines('consent_lapse.recorded')).toHaveLength(1);
   });
 });
 

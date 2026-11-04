@@ -1347,7 +1347,7 @@ describe('the waiting rejections follow their marks (4D2e D9)', () => {
     )[0];
 
   /** The waiting rejections as job-list.ts makes them: their organisations from their marks, settled after each run. */
-  const followed = () => {
+  const followed = (most?: number) => {
     const marks = markedOrganisations({
       job: 'waiting_rejections',
       nextDue: waitingRejectionsDue,
@@ -1357,7 +1357,15 @@ describe('the waiting rejections follow their marks (4D2e D9)', () => {
     });
     return withOrgWork(
       [marks],
-      createWaitingRejections({ list: marks.list, database: app, keys, ids, clock, logger: testLogger(capture) }),
+      createWaitingRejections({
+        list: marks.list,
+        database: app,
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        ...(most === undefined ? {} : { most }),
+      }),
     );
   };
 
@@ -1371,6 +1379,20 @@ describe('the waiting rejections follow their marks (4D2e D9)', () => {
     await followed().run();
 
     for (const id of made.slice(20)) expect(await statusOf(w, id)).toBe('DENIED');
+    expect(await markOf(w)).toBeUndefined();
+  });
+
+  it('one left past its share keeps the organisation due, and the next run rejects it', async () => {
+    const { w, made } = await twentyTwoWaiting();
+    await database.as('admin').query(`delete from directory.org_work where job = 'waiting_rejections'`);
+    await changed(w, ORGANIZATION, rulesOf(10_000n), 'reject');
+
+    await followed(1).run();
+    expect(await statusOf(w, made[21] ?? '')).toBe('APPROVAL_REQUIRED');
+    expect((await markOf(w))?.due_at.getTime()).toBeLessThanOrEqual(clock.now().getTime());
+    await followed(1).run();
+
+    expect(await statusOf(w, made[21] ?? '')).toBe('DENIED');
     expect(await markOf(w)).toBeUndefined();
   });
 
