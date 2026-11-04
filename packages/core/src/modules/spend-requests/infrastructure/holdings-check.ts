@@ -139,7 +139,8 @@ async function waitsUntilOf(tx: HoldingsTransaction, requestIds: readonly string
  * waiting for approval, so not read; made before 0073), or with no decision read (the other comparisons judge that).
  */
 const waitsAsSealed = (waitsUntil: Date | null | undefined, decided: ApprovalClock | undefined) =>
-  waitsUntil == null ||
+  waitsUntil === null ||
+  waitsUntil === undefined ||
   decided === undefined ||
   waitsUntil.getTime() <= expiresAtOf(decided).getTime() + WAITS_UNTIL_SLACK_MS;
 

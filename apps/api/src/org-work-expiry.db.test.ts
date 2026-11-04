@@ -157,15 +157,22 @@ function heldGate() {
       return work();
     },
   };
-  return { gate, letGo: () => letGo(), waiting: () => waiting };
+  return {
+    gate,
+    letGo: () => {
+      letGo();
+    },
+    waiting: () => waiting,
+  };
 }
 
 /** Until `held` has a read waiting at it: the settle has listed and is reading. */
 async function untilWaiting(waiting: () => number): Promise<void> {
-  for (let turn = 0; waiting() === 0; turn += 1) {
-    if (turn > 200) throw new Error('the settle never reached its read');
+  for (let turn = 0; turn <= 200; turn += 1) {
+    if (waiting() > 0) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+  throw new Error('the settle never reached its read');
 }
 
 /** A world whose mandate, in force, ends at `endsAt`: approval above AED 1,000, as `ready`'s. */
@@ -613,6 +620,7 @@ describe("0073's first marks, for rows written before its triggers", () => {
     const standing = await markOf(two.w.org, 'request_expiry');
     const started = await serverNow();
 
+    // eslint-disable-next-line agentx/no-string-built-sql -- the migration's own fixed text, read from its file
     await database.as('owner').query(firstMarks);
 
     for (const job of ['request_expiry', 'mandate_expiry'] as const) {
