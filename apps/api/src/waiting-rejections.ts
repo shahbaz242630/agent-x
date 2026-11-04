@@ -12,7 +12,8 @@
 // each as a leftover is; none once any other policy has a new version since,
 // as no confirm weighed them under the policies then in force.
 //
-// For each organisation the directory lists, the candidates are its policies
+// For each organisation its marks list (4D2e D9: those where a candidate
+// stands, `waitingRejectionsDue`), the candidates are its policies
 // whose version in force names leftovers still waiting, or the youngest its
 // confirm weighed with any request waiting, found by their rows and that
 // event's details, unverified: a filter alone. Each policy is then
@@ -107,17 +108,14 @@ const MADE = {
 
 /**
  * The organisation's policies whose version in force names leftovers still
- * waiting, by their rows and that version's event, unverified, in order of
- * ID, after `after` when given, at most `most`: each then read through its
- * signed state.
+ * waiting, or the younger with one made no later than that version still
+ * waiting (one made since is never weighed: youngerOf's `until`), by their
+ * rows and that version's event, unverified, after `after` when given, not
+ * run: their IDs, each then read through its signed state. The job's
+ * candidates, and its due read's.
  */
-async function withLeftovers(
-  tx: RejectionTx,
-  orgId: string,
-  most: number,
-  after: string | undefined,
-): Promise<readonly string[]> {
-  const rows = await tx
+const leftoverRows = (tx: RejectionTx, orgId: string, after: string | undefined) =>
+  tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state before anything moves
     .selectFrom('mandates.policies as p')
     .select('p.id')
@@ -134,16 +132,50 @@ async function withLeftovers(
           .where((named) =>
             named.or([
               namedInDetails({ ...MADE, keys: WAITING_LEFTOVER_KEYS, named: 'r.id' }),
-              withDetail({ ...MADE, key: WAITING_YOUNGER_KEY }),
+              named.and([
+                withDetail({ ...MADE, key: WAITING_YOUNGER_KEY }),
+                named(
+                  'r.created_at',
+                  '<=',
+                  named
+                    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a filter alone, which only leaves requests with their approvers
+                    .selectFrom('mandates.policy_versions as v')
+                    .select('v.made_at')
+                    .whereRef('v.org_id', '=', 'p.org_id')
+                    .whereRef('v.id', '=', 'p.current_version_id'),
+                ),
+              ]),
             ]),
           ),
       ),
-    )
-    .orderBy('p.id')
-    .limit(most)
-    .execute();
+    );
+
+/** The IDs of the organisation's candidate policies, in order of ID, after `after` when given, at most `most`. */
+async function withLeftovers(
+  tx: RejectionTx,
+  orgId: string,
+  most: number,
+  after: string | undefined,
+): Promise<readonly string[]> {
+  const rows = await leftoverRows(tx, orgId, after).orderBy('p.id').limit(most).execute();
   return rows.map(({ id }) => id);
 }
+
+/**
+ * When the waiting rejections next have work in an organisation, by `now`, not run (4D2e D9): now while one of its
+ * candidate policies stands, else none. A visit that leaves one (the rules in force let it stand, past its share)
+ * keeps its organisation due.
+ */
+export const waitingRejectionsDue = (tx: RejectionTx, orgId: string, now: Date) =>
+  tx.selectNoFrom((eb) =>
+    eb
+      .case()
+      .when(eb.exists(leftoverRows(tx, orgId, undefined).limit(1)))
+      .then(eb.cast<Date | null>(eb.val(now), 'timestamptz'))
+      .else(null)
+      .end()
+      .as('due'),
+  );
 
 /**
  * The policy's leftovers whose rows still wait, and the younger's start, its
@@ -290,7 +322,7 @@ export function createWaitingRejections({
   most = MOST_REJECTED_A_RUN,
   page = POLICIES_A_PAGE,
 }: {
-  /** The organisations to look in: the directory's list, which main.ts passes. */
+  /** The organisations to look in: those its marks say are due, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<DecisionTables>;
   readonly keys: KeyProvider;

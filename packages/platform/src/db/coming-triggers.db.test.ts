@@ -12,13 +12,7 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
-import {
-  COMING_TRIGGERS,
-  liveSchemaDrift,
-  liveSchemaProblems,
-  MARK_TRIGGERS,
-  type WrittenTrigger,
-} from './schema-guard.ts';
+import { liveSchemaDrift, liveSchemaProblems, MARK_TRIGGERS, type WrittenTrigger } from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 
 const server = inject('postgres');
@@ -216,41 +210,7 @@ describe('a trigger a coming migration adds to a table already built', () => {
   });
 });
 
-describe("0075's triggers, made as its migration will make them, read by this image (4D2e D9)", () => {
-  // Word for word as db/migrations/0075 writes them: this image must know each exactly before that migration runs.
-  const MADE = `create constraint trigger marks_request_voids after update on organizations.organizations
-      deferrable initially deferred for each row
-      when (new.status <> 'ACTIVE' or old.status <> 'ACTIVE')
-      execute function directory.mark_org_work('request_voids', '0 seconds');
-    create constraint trigger marks_request_voids after update on agents.agents
-      deferrable initially deferred for each row
-      when (new.status <> 'ACTIVE')
-      execute function directory.mark_org_work('request_voids', '0 seconds');
-    create constraint trigger marks_request_voids after update on mandates.mandates
-      deferrable initially deferred for each row
-      when (new.status <> 'ACTIVE' or new.current_version_id is distinct from old.current_version_id)
-      execute function directory.mark_org_work('request_voids', '0 seconds');
-    create constraint trigger marks_request_voids after update on funding_sources.sources
-      deferrable initially deferred for each row
-      execute function directory.mark_org_work('request_voids', '0 seconds');
-    create constraint trigger marks_request_voids after update on suppliers.suppliers
-      deferrable initially deferred for each row
-      when (new.status <> 'VERIFIED' or old.status <> 'VERIFIED')
-      execute function directory.mark_org_work('request_voids', '0 seconds');
-    create constraint trigger marks_waiting_rejections after update on mandates.policies
-      deferrable initially deferred for each row
-      execute function directory.mark_org_work('waiting_rejections', '0 seconds');
-    create constraint trigger marks_carry_rest after update on mandates.mandates
-      deferrable initially deferred for each row
-      when (new.current_version_id is distinct from old.current_version_id)
-      execute function directory.mark_org_work('carry_rest', '0 seconds')`;
-  const DROPPED = `drop trigger if exists marks_request_voids on organizations.organizations;
-    drop trigger if exists marks_request_voids on agents.agents;
-    drop trigger if exists marks_request_voids on mandates.mandates;
-    drop trigger if exists marks_request_voids on funding_sources.sources;
-    drop trigger if exists marks_request_voids on suppliers.suppliers;
-    drop trigger if exists marks_waiting_rejections on mandates.policies;
-    drop trigger if exists marks_carry_rest on mandates.mandates`;
+describe('0075, read as the image before it would read it (4D2e D9)', () => {
   /** Each trigger 0075 makes, as `table name`. */
   const NAMED = [
     'agents.agents marks_request_voids',
@@ -261,38 +221,46 @@ describe("0075's triggers, made as its migration will make them, read by this im
     'organizations.organizations marks_request_voids',
     'suppliers.suppliers marks_request_voids',
   ];
+  const ours = ({ table, name }: WrittenTrigger) => NAMED.includes(`${table} ${name}`);
   const each = (says: (table: string, name: string) => string) =>
     NAMED.map((named) => {
       const [table = '', name = ''] = named.split(' ');
       return says(table, name);
     });
+  // The image before knew 0072's and 0073's triggers as written, these seven as coming, and the job CHECK as 0073 made it.
+  const before = {
+    triggers: MARK_TRIGGERS.filter((one) => !ours(one)),
+    tables: BUILT_TABLES,
+    checks: BUILT_CHECKS.map((one) =>
+      one.name === 'org_work_job_check'
+        ? {
+            ...one,
+            expression:
+              "(job = ANY (ARRAY['hand_off'::text, 'hand_off_sweep'::text, 'payment_check'::text, 'request_expiry'::text, 'mandate_expiry'::text]))",
+          }
+        : one,
+    ),
+  };
+  const coming = MARK_TRIGGERS.filter(ours);
 
-  it('are each a coming trigger, and nothing is the alarm at once', async () => {
-    await owner.query(MADE);
-    try {
-      expect(COMING_TRIGGERS.map(({ table, name }) => `${table} ${name}`).toSorted()).toEqual(NAMED);
-      expect(await liveSchemaDrift(app, ROLES)).toEqual({
-        atOnce: [],
-        releaseShaped: each((table, name) => `${table} carries "${name}", a coming trigger`),
-      });
-    } finally {
-      await owner.query(DROPPED);
-    }
+  it('knowing its triggers as coming: nothing is the alarm at once, and all of it warns first', async () => {
+    expect(coming.map(({ table, name }) => `${table} ${name}`).toSorted()).toEqual(NAMED);
+    expect(await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: coming })).toEqual({
+      atOnce: [],
+      releaseShaped: [
+        `directory.org_work's CHECK constraint "org_work_job_check" reads differently`,
+        ...each((table, name) => `${table} carries "${name}", a coming trigger`),
+      ].toSorted(),
+    });
   });
 
-  it('to the image before this one, are the false alarm at once', async () => {
-    await owner.query(MADE);
-    try {
-      expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual(
-        each((table, name) => `${table} carries the trigger "${name}"`),
-      );
-    } finally {
-      await owner.query(DROPPED);
-    }
+  it('not knowing them: the false alarm D9a landed first to prevent, on those seven alone', async () => {
+    const { atOnce } = await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: [] });
+    expect(atOnce).toEqual(each((table, name) => `${table} carries the trigger "${name}"`));
   });
 
-  it('one written otherwise, firing on more or on less, is the alarm at once', async () => {
-    await owner.query(MADE);
+  it('once its image is in, each held as written: one firing on more or on less is the alarm at once', async () => {
+    expect(await liveSchemaDrift(app, ROLES)).toEqual({ atOnce: [], releaseShaped: [] });
     await owner.query(`drop trigger marks_carry_rest on mandates.mandates;
       create constraint trigger marks_carry_rest after update on mandates.mandates
         deferrable initially deferred for each row
@@ -304,12 +272,21 @@ describe("0075's triggers, made as its migration will make them, read by this im
         execute function directory.mark_org_work('request_voids', '0 seconds')`);
     try {
       expect((await liveSchemaDrift(app, ROLES)).atOnce).toEqual([
-        'funding_sources.sources carries the trigger "marks_request_voids"',
-        'mandates.mandates carries the trigger "marks_carry_rest"',
+        "funding_sources.sources's marks_request_voids is not the trigger its migration wrote",
+        "mandates.mandates's marks_carry_rest is not the trigger its migration wrote",
       ]);
     } finally {
-      await owner.query(DROPPED);
+      await owner.query(`drop trigger marks_carry_rest on mandates.mandates;
+        create constraint trigger marks_carry_rest after update on mandates.mandates
+          deferrable initially deferred for each row
+          when (new.current_version_id is distinct from old.current_version_id)
+          execute function directory.mark_org_work('carry_rest', '0 seconds');
+        drop trigger marks_request_voids on funding_sources.sources;
+        create constraint trigger marks_request_voids after update on funding_sources.sources
+          deferrable initially deferred for each row
+          execute function directory.mark_org_work('request_voids', '0 seconds')`);
     }
+    expect(await liveSchemaDrift(app, ROLES)).toEqual({ atOnce: [], releaseShaped: [] });
   });
 });
 
@@ -379,14 +356,8 @@ describe('0072, read as the image before it would read it', () => {
 
   it('not knowing them: the false alarm this all exists to prevent, on the triggers alone', async () => {
     const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: [] });
-    // The migrated database holds 0073's two as well, which that image knew no more of.
-    expect(atOnce).toEqual([
-      'mandates.mandates carries the trigger "marks_mandate_expiry"',
-      'spend_requests.requests carries the trigger "marks_hand_off"',
-      'spend_requests.requests carries the trigger "marks_request_expiry"',
-      'transactions.transactions carries the trigger "marks_hand_off_sweep"',
-      'transactions.transactions carries the trigger "marks_payment_check"',
-    ]);
+    // The migrated database holds 0073's and 0075's as well, which that image knew no more of.
+    expect(atOnce).toEqual(MARK_TRIGGERS.map(({ table, name }) => `${table} carries the trigger "${name}"`).toSorted());
     expect(releaseShaped).toContain('directory.mark_org_work is a function our schemas should not hold');
   });
 });

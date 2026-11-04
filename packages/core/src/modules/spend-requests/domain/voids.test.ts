@@ -8,7 +8,15 @@
 // good, whatever it is now, a pause in force too (decision 32a, F1 G1).
 import { describe, expect, it } from 'vitest';
 
-import { type AuthorityNow, type DecidedUnder, type Pausable, voidCauses } from './voids.ts';
+import {
+  type AuthorityNow,
+  type DecidedUnder,
+  isPending,
+  isPendingChoice,
+  type Pausable,
+  VOID_CAUSES,
+  voidCauses,
+} from './voids.ts';
 
 const DECIDED: DecidedUnder = { mandateId: 'm', mandateVersionId: 'mv1', supplierVersionId: 'sv1' };
 
@@ -243,5 +251,36 @@ describe('voidCauses', () => {
         'SUPPLIER_CHANGED',
       ]);
     });
+  });
+});
+
+describe('VOID_CAUSES and the choice', () => {
+  it('names every cause, each found when its own brake alone has stopped what a request was decided under', () => {
+    const each = [
+      voidCauses(DECIDED, { ...STANDING, organizationStatus: 'FROZEN' }),
+      voidCauses(DECIDED, { ...STANDING, agentStatus: 'SUSPENDED' }),
+      voidCauses(DECIDED, { ...STANDING, mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }),
+      voidCauses(DECIDED, { ...STANDING, source: { ...STANDING.source, status: 'SUSPENDED' } }),
+      voidCauses(DECIDED, { ...STANDING, supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } }),
+      voidCauses(DECIDED, { ...STANDING, supplier: { status: 'VERIFIED', currentVersionId: 'sv2', pausedFrom: [] } }),
+    ];
+    expect(each).toEqual(VOID_CAUSES.map((cause) => [cause]));
+  });
+
+  it('holds a request pending only before hand-off: waiting, approved or ready', () => {
+    expect(
+      (['APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY', 'HANDED_OFF', 'DENIED'] as const).map((status) =>
+        isPending(status),
+      ),
+    ).toEqual([true, true, true, false, false]);
+  });
+
+  it('takes cancel or pause as a choice, and nothing else', () => {
+    expect([
+      isPendingChoice('cancel'),
+      isPendingChoice('pause'),
+      isPendingChoice('hold'),
+      isPendingChoice(null),
+    ]).toEqual([true, true, false, false]);
   });
 });

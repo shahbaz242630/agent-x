@@ -12,7 +12,8 @@
 // void their own requests as they stop (C2); this finds the rest, and any a
 // brake left past its batch.
 //
-// For each organisation the directory lists, the candidates are found by
+// For each organisation its marks list (4D2e D9: those where a candidate
+// stands or a consent's end has come, `requestVoidsDue`), the candidates are found by
 // their rows (pending, 0046's index, joined to their organisation's, agent's,
 // mandate's, source's and supplier's rows), a page at a time, each page after the last,
 // so requests refused on every run (tampered with) can't fill a page and keep
@@ -120,18 +121,12 @@ const choiceOf = (events: { readonly type: string; readonly actions: readonly st
   newestDetail({ ...events, idColumn, orgColumn: 'r.org_id', key: 'pendingRequests' });
 
 /**
- * The IDs of the organisation's pending requests whose rows look stopped, in
- * order of ID, after `after` when given, at most `most`: each to be judged by
- * the signed states of what it names.
+ * The organisation's pending requests whose rows look stopped, after `after`
+ * when given, not run: their IDs, each to be judged by the signed states of
+ * what it names. The job's candidates, and its due read's.
  */
-async function stoppedByTheirRows(
-  tx: VoidTx,
-  orgId: string,
-  now: Date,
-  most: number,
-  after: string | undefined,
-): Promise<readonly string[]> {
-  const rows = await tx
+const stoppedRows = (tx: VoidTx, orgId: string, now: Date, after: string | undefined) =>
+  tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each judged through its signed states before anything moves
     .selectFrom('spend_requests.requests as r')
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a candidate's row alone, judged through its signed state before anything moves
@@ -216,27 +211,31 @@ async function stoppedByTheirRows(
           }),
         ]),
       ]);
-    })
-    .orderBy('r.id')
-    .limit(most)
-    .execute();
-  return rows.map(({ id }) => id);
-}
+    });
 
 /**
- * The IDs of the organisation's sources not ended whose consent has run out
- * by `now` and whose newest lapse, unverified, names another consent or
- * none, in order of ID, after `after` when given, at most `most`: each then
- * judged through its signed state.
+ * The IDs of the organisation's pending requests whose rows look stopped, in
+ * order of ID, after `after` when given, at most `most`.
  */
-async function lapsedByTheirRows(
+async function stoppedByTheirRows(
   tx: VoidTx,
   orgId: string,
   now: Date,
   most: number,
   after: string | undefined,
 ): Promise<readonly string[]> {
-  const rows = await tx
+  const rows = await stoppedRows(tx, orgId, now, after).orderBy('r.id').limit(most).execute();
+  return rows.map(({ id }) => id);
+}
+
+/**
+ * The organisation's sources not ended whose consent has run out by `now` and
+ * whose newest lapse, unverified, names another consent or none, after `after`
+ * when given, not run: their IDs, each then judged through its signed state.
+ * The job's candidates, and its due read's.
+ */
+const lapsedRows = (tx: VoidTx, orgId: string, now: Date, after: string | undefined) =>
+  tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each judged through its signed state before anything is recorded
     .selectFrom('funding_sources.sources as s')
     .select('s.id')
@@ -256,12 +255,49 @@ async function lapsedByTheirRows(
         'is distinct from',
         where.ref('s.account_consent_id'),
       ),
-    )
-    .orderBy('s.id')
-    .limit(most)
-    .execute();
+    );
+
+/** The IDs of the organisation's sources whose consent's lapse is due, in order of ID, after `after`, at most `most`. */
+async function lapsedByTheirRows(
+  tx: VoidTx,
+  orgId: string,
+  now: Date,
+  most: number,
+  after: string | undefined,
+): Promise<readonly string[]> {
+  const rows = await lapsedRows(tx, orgId, now, after).orderBy('s.id').limit(most).execute();
   return rows.map(({ id }) => id);
 }
+
+/**
+ * When the voids' look next has work in an organisation, by `now`, not run (4D2e D9): now while one of its
+ * candidates stands, a pending request whose rows look stopped or a consent run out with no lapse logged; else as
+ * the soonest consent of a source not ended runs out, whose lapse it logs; else none. A visit that leaves one (refused,
+ * past its share) keeps its organisation due.
+ */
+export const requestVoidsDue = (tx: VoidTx, orgId: string, now: Date) =>
+  tx.selectNoFrom((eb) =>
+    eb
+      .case()
+      .when(
+        eb.or([
+          eb.exists(stoppedRows(tx, orgId, now, undefined).limit(1)),
+          eb.exists(lapsedRows(tx, orgId, now, undefined).limit(1)),
+        ]),
+      )
+      .then(eb.cast<Date | null>(eb.val(now), 'timestamptz'))
+      .else(
+        eb
+          // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, for choosing when to look
+          .selectFrom('funding_sources.sources as s')
+          .select((min) => min.fn.min<Date | null>('s.consent_expires_at').as('soonest'))
+          .where('s.org_id', '=', orgId)
+          .where('s.status', '<>', 'ENDED')
+          .where('s.consent_expires_at', '>', now),
+      )
+      .end()
+      .as('due'),
+  );
 
 /**
  * What the request's row names, unlocked: each then read through its signed
@@ -421,7 +457,7 @@ export function createRequestVoids({
   logger,
   most = MOST_VOIDED_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those its marks say are due, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<VoidTables>;
   readonly keys: KeyProvider;
