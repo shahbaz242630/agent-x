@@ -586,6 +586,10 @@ interface AzAnswers {
   readonly listedApps?: readonly string[];
   /** Whether Azure refuses to remove an app. */
   readonly removeRefused?: boolean;
+  /** How many reads of a removed app still find it (default one); Infinity for one that never goes. */
+  readonly removalReads?: number;
+  /** The jobs app's identity: there (default), missing, or unreadable. */
+  readonly jobsIdentity?: 'there' | 'missing' | 'unreadable';
   /** The environment's certificates after the deployment. */
   readonly certificates?: readonly unknown[];
   /**
@@ -671,6 +675,7 @@ class RecordingAz implements Az {
   #deployed = false;
   #readings = 0;
   #limitApplied = false;
+  #appReads = 0;
 
   constructor(options: AzAnswers = {}) {
     this.options = options;
@@ -743,16 +748,41 @@ class RecordingAz implements Az {
         return this.#tagUpdate(args);
       case 'tag list':
         return json({ properties: { tags: this.tags } });
+      case 'identity show':
+        return this.#jobsIdentity();
       case 'rest --method':
-        if (args[2] === 'delete') {
-          return this.options.removeRefused === true
-            ? { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"AuthorizationFailed"}})' }
-            : { status: 0, stdout: '', stderr: '' };
-        }
-        return this.#rest(args[args.indexOf('--url') + 1] ?? '');
+        return this.#restCall(args);
       default:
         throw new Error(`unexpected az ${args.join(' ')}`);
     }
+  }
+
+  /** The jobs app's identity, as the options say Azure has it (4D2e D13). */
+  #jobsIdentity(): AzResult {
+    const identity = this.options.jobsIdentity ?? 'there';
+    if (identity === 'there') return json({ name: 'id-agentx-stg-jobs' });
+    return {
+      status: 3,
+      stdout: '',
+      stderr: identity === 'missing' ? 'ERROR: (ResourceNotFound) The Resource was not found.' : 'ERROR: Bad Gateway',
+    };
+  }
+
+  /** A Resource Manager call: the jobs app's removal and its reads back (4D2e D13), or a read (`#rest`). */
+  #restCall(args: readonly string[]): AzResult {
+    const url = args[args.indexOf('--url') + 1] ?? '';
+    if (args[2] === 'get' && url.includes('/containerApps/')) {
+      this.#appReads += 1;
+      return this.#appReads <= (this.options.removalReads ?? 1)
+        ? json({ name: 'ca-agentx-stg-jobs' })
+        : { status: 3, stdout: '', stderr: 'ERROR: (ResourceNotFound) The Resource was not found.' };
+    }
+    if (args[2] === 'delete') {
+      return this.options.removeRefused === true
+        ? { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"AuthorizationFailed"}})' }
+        : { status: 0, stdout: '', stderr: '' };
+    }
+    return this.#rest(url);
   }
 
   /** A write of the migration job's tags, as the options say Azure takes it. */
@@ -848,6 +878,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     },
     rangesCurrent: () => scenario.rangesCurrent ?? true,
     now: () => new Date('2026-09-16T16:42:15Z'),
+    sleep: () => Promise.resolve(),
     makers: quickMakers(),
     ...(scenario.images === undefined ? {} : { images: scenario.images }),
     ...(scenario.dns === undefined ? {} : { dns: scenario.dns }),
@@ -1694,7 +1725,11 @@ describe('deploy apps', () => {
     expect(values?.AGENTX_AZURE_APP_IMAGE_DIGEST).toBe(DIGEST);
     expect(done.checked).toEqual([values]);
     const said = done.terminal.said;
-    const cost = said.findIndex((line) => line.startsWith('The load run: the API at 2 CPUs and 4 GiB'));
+    const cost = said.findIndex((line) =>
+      line.startsWith(
+        'The load run: the API as three copies at 2 CPUs and 4 GiB each beside the jobs app at 1 CPU and 2 GiB, all always running (roughly $0.70 to $0.90 an hour',
+      ),
+    );
     expect(cost).toBeGreaterThan(-1);
     expect(cost).toBeLessThan(said.findIndex((line) => line.startsWith("Azure's what-if follows")));
     expect(said.join('\n')).not.toContain('load.ts finish');
@@ -1784,9 +1819,19 @@ describe('deploy apps', () => {
     expect(plain.az.calls.findIndex((call) => call.args[2] === 'delete')).toBeGreaterThan(
       plain.az.calls.findIndex((call) => call.values !== undefined),
     );
-    expect(plain.terminal.said).toContain(
-      'Removed ca-agentx-stg-jobs, which the load run left: the API holds the jobs again (4D2e D13).',
-    );
+    expect(plain.terminal.said).toContain('Removed ca-agentx-stg-jobs: the API holds the jobs again (4D2e D13).');
+    // Said removed only once a read finds it gone: Azure takes the removal before it is done.
+    expect(plain.az.calls.filter((call) => call.args[2] === 'get' && call.args.includes(removed))).toHaveLength(2);
+    const lingering = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ listedApps, removalReads: Infinity }),
+    });
+    expect(lingering.error).toMatchObject({
+      message:
+        'Deployed, and Azure took the removal of ca-agentx-stg-jobs, but it was still there 10 minutes later, beside the API now holding the jobs again: two hold them until it goes. Remove it in the Azure portal (Container Apps, ca-agentx-stg-jobs, Delete), or run apps again.',
+    });
+    expect(lingering.terminal.said.join(' ')).not.toContain('Removed ca-agentx-stg-jobs');
     // A load run keeps it, and a plain apps with none left removes nothing.
     const loadRun = await run(['apps', '--load-run'], {
       answers,
@@ -1812,6 +1857,32 @@ describe('deploy apps', () => {
       message:
         'Deployed, but Azure refused to remove ca-agentx-stg-jobs, which a load run left beside the API, now holding the jobs again: two hold them until it goes. Remove it in the Azure portal (Container Apps, ca-agentx-stg-jobs, Delete), or run apps again.',
     });
+  });
+
+  it("sends no load run while the jobs app's identity is missing or can't be read, saying to run foundation first (4D2e D13)", async () => {
+    const loadRun = (jobsIdentity: 'missing' | 'unreadable') =>
+      run(['apps', '--load-run'], { answers, images: recordingImages(), az: new RecordingAz({ jobsIdentity }) });
+    const missing = await loadRun('missing');
+    expect(missing.error).toMatchObject({
+      message:
+        "The jobs app's identity (id-agentx-stg-jobs) isn't there yet: the load run's jobs app runs as it. Run node deploy/azure/deploy.ts foundation first, then secrets (which lets it read its secrets), then apps --load-run again. Nothing was deployed.",
+    });
+    expect(missing.az.deployment).toBeUndefined();
+    const unreadable = await loadRun('unreadable');
+    expect(unreadable.error).toMatchObject({
+      message: expect.stringMatching(
+        /^The jobs app's identity \(id-agentx-stg-jobs\) couldn't be read \(ERROR: Bad Gateway\): .* Nothing was deployed\.$/,
+      ) as unknown,
+    });
+    expect(unreadable.az.deployment).toBeUndefined();
+    // A plain apps needs no jobs identity: it reads none.
+    const plain = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ jobsIdentity: 'missing' }),
+    });
+    expect(plain.status).toBe(0);
+    expect(plain.az.calls.some((call) => call.args[0] === 'identity')).toBe(false);
   });
 
   it('says nothing about a running replica when a kept-running deployment fails', async () => {

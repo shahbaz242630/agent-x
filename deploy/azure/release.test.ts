@@ -21,6 +21,7 @@ import {
   type Decision,
   type Folder,
   HAND_DEPLOYED,
+  LOAD_RUN_UP,
   handDeployedList,
   main,
   ORDER,
@@ -1937,23 +1938,25 @@ describe('release', () => {
     }
   });
 
-  it("stops red when the API's web copies never answer /health, the jobs down over five minutes, once traffic has switched (4D2e D13)", async () => {
-    const web = (azure: Staging): void => {
-      azure.app = { ...azure.app, env: [...azure.app.env, { name: 'AGENTX_ROLE', value: 'web' }] };
-    };
+  it('refuses while a load run is up (the API at AGENTX_ROLE web), before anything is written, migrate included (4D2e D13)', async () => {
     const azure = new Staging();
-    web(azure);
-    azure.probes = [503];
-    expect((await outcome(azure)).message).toBe(
-      `The API's new revision wasn't answering /health 5 minutes after its update. Its copies run as AGENTX_ROLE web, which answer 503 while the jobs' heartbeat is over 5 minutes old: look at ca-agentx-stg-jobs and its log first.\nLeft: migrate ran ${NEW}; the API's template holds ${NEW}, and until a new revision serves it the old one does.`,
-    );
-    // The API was updated first: its new revision took all traffic before /health was asked.
-    expect(methods(azure)).toEqual(['patch', 'post', 'patch']);
-    // Copies that answer once the jobs beat again are released.
-    const recovered = new Staging();
-    web(recovered);
-    recovered.probes = [503, 503, 200];
-    expect((await outcome(recovered)).status).toBe(0);
+    azure.app = { ...azure.app, env: [...azure.app.env, { name: 'AGENTX_ROLE', value: 'web' }] };
+    const ended_ = await outcome(azure);
+    expect(ended_.status).toBe(1);
+    expect(ended_.said).toContain(LOAD_RUN_UP);
+    expect(methods(azure)).toEqual([]);
+    expect(azure.writes).toEqual([]);
+    // `check` says the same, and changes nothing.
+    const checking = new Staging();
+    checking.app = azure.app;
+    const steps = checking.steps(ordinary());
+    expect(await check(RELEASE_NEW, steps)).toBe(1);
+    expect(steps.said).toContain(LOAD_RUN_UP);
+    expect(methods(checking)).toEqual([]);
+    // The API at `all`, said outright, is staging's own shape: released as ever.
+    const all = new Staging();
+    all.app = { ...all.app, env: [...all.app.env, { name: 'AGENTX_ROLE', value: 'all' }] };
+    expect((await outcome(all)).status).toBe(0);
   });
 });
 

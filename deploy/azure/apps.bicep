@@ -539,37 +539,33 @@ resource jobsIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-
   name: identityName(environment, 'jobs')
 }
 
-// Each app that runs the API reaches a store as its own identity, by its work.
-var clientIds = {
-  api: apiIdentity.properties.clientId
-  jobs: jobsIdentity.properties.clientId
-}
-
 var activityDownloadsUrl = 'https://${activityDownloadsAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${activityDownloadsContainerName()}'
 
-// A `web` copy hands a download out and the jobs build it, so both are told (4D2e D13).
-var activityDownloadsSettings = {
-  api: [
-    {
-      name: 'AGENTX_ACTIVITY_DOWNLOADS_URL'
-      value: activityDownloadsUrl
-    }
-    {
-      name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
-      value: clientIds.api
-    }
-  ]
-  jobs: [
-    {
-      name: 'AGENTX_ACTIVITY_DOWNLOADS_URL'
-      value: activityDownloadsUrl
-    }
-    {
-      name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
-      value: clientIds.jobs
-    }
-  ]
-}
+// A `web` copy hands a download out and the jobs build it, so both are told
+// (4D2e D13), each as its own identity. Kept apart, and chosen by a condition
+// (ARM evaluates only the branch taken), so a deployment with no `jobs` app never
+// reads the jobs' identity: an apps run before the foundation has made it works.
+var apiDownloadsSettings = [
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_URL'
+    value: activityDownloadsUrl
+  }
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
+    value: apiIdentity.properties.clientId
+  }
+]
+
+var jobsDownloadsSettings = [
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_URL'
+    value: activityDownloadsUrl
+  }
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
+    value: jobsIdentity.properties.clientId
+  }
+]
 
 // The anchors' epoch, the same setting for the app that holds the jobs and the
 // operator, so a plan reads the files those jobs write (4D2e E9; the policy's
@@ -583,31 +579,30 @@ var anchorsUrl = 'https://${evidenceAccountName(shortName(environment), nameSuff
 
 // Where the app that holds the jobs keeps the audit chains' anchors (4D2e E,
 // PL-58; D13): the write-once store's second container, as its own identity.
-// Added as `activityDownloadsSettings` is.
-var anchorStoreSettings = {
-  api: [
-    anchorEpochSetting
-    {
-      name: 'AGENTX_AUDIT_ANCHORS_URL'
-      value: anchorsUrl
-    }
-    {
-      name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
-      value: clientIds.api
-    }
-  ]
-  jobs: [
-    anchorEpochSetting
-    {
-      name: 'AGENTX_AUDIT_ANCHORS_URL'
-      value: anchorsUrl
-    }
-    {
-      name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
-      value: clientIds.jobs
-    }
-  ]
-}
+// Kept apart by identity as the downloads' settings are.
+var apiAnchorSettings = [
+  anchorEpochSetting
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_URL'
+    value: anchorsUrl
+  }
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
+    value: apiIdentity.properties.clientId
+  }
+]
+
+var jobsAnchorSettings = [
+  anchorEpochSetting
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_URL'
+    value: anchorsUrl
+  }
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
+    value: jobsIdentity.properties.clientId
+  }
+]
 
 // Where the operator reads the chains' anchors for a chain recovery plan (4D2e
 // E9): the same container, as the operator's own identity, which may only read
@@ -1120,9 +1115,9 @@ var apps = concat([
     // and each notice would end as a warning. Zitadel stays its one origin.
     sendsEmail: !loadRun
     signsIn: true
-    // Keeps the activity log's background downloads (`activityDownloadsSettings`).
+    // Keeps the activity log's background downloads (`apiDownloadsSettings`).
     keepsDownloads: true
-    // Keeps the audit chains' anchors (`anchorStoreSettings`) where it holds the
+    // Keeps the audit chains' anchors (`apiAnchorSettings`) where it holds the
     // jobs: out of a split. In one, the `jobs` app keeps them (4D2e D13).
     keepsAnchors: !split
     // AGENTX_ROLE all (unset) holds the jobs and counts its rate limits as the
@@ -1456,8 +1451,8 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
                 value: zitadelInternalUrl
               }),
               app.sendsEmail ? emailSettings : app.signsIn ? zitadelOrigins : [],
-              app.keepsDownloads ? activityDownloadsSettings[app.workload] : [],
-              app.keepsAnchors ? anchorStoreSettings[app.workload] : []
+              !app.keepsDownloads ? [] : app.workload == 'jobs' ? jobsDownloadsSettings : apiDownloadsSettings,
+              !app.keepsAnchors ? [] : app.workload == 'jobs' ? jobsAnchorSettings : apiAnchorSettings
             )
             volumeMounts: empty(app.files)
               ? []

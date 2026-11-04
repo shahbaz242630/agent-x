@@ -374,6 +374,8 @@ export const released = (running: Running, image: string, commit: string): Conta
 
 export type Decision =
   | { readonly kind: 'current' }
+  /** The API runs as `web` copies (a load run is up, 4D2e D13): a release would leave the jobs app behind. */
+  | { readonly kind: 'load-run' }
   | { readonly kind: 'past' }
   | { readonly kind: 'by-hand'; readonly reasons: readonly string[] }
   | {
@@ -617,6 +619,10 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   const reads = new Map(ORDER.map((workload) => [workload, readWorkload(steps.az, subscription, workload)] as const));
   const running = new Map([...reads].map(([workload, read]) => [workload, read.running] as const));
   for (const [workload, found] of running) steps.say(`${workload} runs ${found.release} (${found.image}).`);
+  const api = running.get('api');
+  if (api !== undefined && settingValue(api.container, 'AGENTX_ROLE') === 'web') {
+    return { subscription, image, reads, running, decision: { kind: 'load-run' } };
+  }
   const first = decide(running, request.commit, image, steps.history);
   if (first.kind !== 'by-hand') return { subscription, image, reads, running, decision: first };
   const readers = await readersAt(request.commit, steps);
@@ -638,6 +644,14 @@ function sayDeployed(decision: Decision, say: (line: string) => void): void {
 }
 
 /**
+ * Why a release stops while the API runs as `web` copies (4D2e D13): that is a load run (apps --load-run), whose jobs
+ * app a release can't move (CI's role is on the API and the migration job alone). Updating the copies would leave the
+ * jobs on another build, and the prune could later remove the image they run. Read before anything is written.
+ */
+export const LOAD_RUN_UP =
+  'A load run is up (the API runs as AGENTX_ROLE web, beside the jobs app): finish it (load.ts finish, then a plain apps), or run apps --load-run again after merging. This release changed nothing, red.';
+
+/**
  * A decision that leaves nothing to update, said: the status to end with, or
  * nothing when there are updates to make.
  */
@@ -649,6 +663,10 @@ function settled(decision: Decision, commit: string, say: (line: string) => void
   if (decision.kind === 'past') {
     say(`Staging already runs a later commit than ${commit}: a release of it has nothing to do.`);
     return 0;
+  }
+  if (decision.kind === 'load-run') {
+    say(LOAD_RUN_UP);
+    return 1;
   }
   if (decision.kind === 'by-hand') {
     say(`A release of ${commit} stops here, red: this needs a hand deploy.`);
@@ -983,15 +1001,6 @@ function revisionName(name: unknown): string {
 }
 
 /**
- * Why /health may never answer 200 where the API runs as `web` copies (4D2e D13): a copy answers 503 while the jobs'
- * heartbeat, which the jobs app beats, is older than five minutes (handoff.ts HEARTBEAT_STALE_MS). So a release while
- * the jobs have been down that long stops red, once traffic has switched to the new revision: the release updates the
- * API alone and can't start them, and the old revision would answer the same.
- */
-const JOBS_DOWN =
-  " Its copies run as AGENTX_ROLE web, which answer 503 while the jobs' heartbeat is over 5 minutes old: look at ca-agentx-stg-jobs and its log first.";
-
-/**
  * Waits until the API serves the release: a new revision is the ready one;
  * it holds this image and build, is provisioned, active, takes all traffic and
  * is healthy; and the door answers /health while it does (which starts a
@@ -1001,7 +1010,7 @@ async function served(
   steps: ReleaseSteps,
   subscription: string,
   before: string,
-  target: { readonly origin: string; readonly image: string; readonly commit: string; readonly web: boolean },
+  target: { readonly origin: string; readonly image: string; readonly commit: string },
 ): Promise<string> {
   const deadline = steps.now().getTime() + SERVE_WAIT_MS;
   const late = (what: string): Error =>
@@ -1038,10 +1047,7 @@ async function served(
   steps.say(`The API's new revision ${revision} takes all traffic; asking the door for /health...`);
   for (;;) {
     if ((await steps.probe(`${target.origin}/health`)) === 200) break;
-    if (steps.now().getTime() >= deadline) {
-      const error = late('answering /health');
-      throw target.web ? new Error(`${error.message}${JOBS_DOWN}`) : error;
-    }
+    if (steps.now().getTime() >= deadline) throw late('answering /health');
     await wait();
   }
   await serving(true);
@@ -1133,12 +1139,7 @@ export async function release(request: Request, steps: ReleaseSteps): Promise<nu
     `migrate ran ${commit}; the API's template holds ${commit}, and until a new revision serves it the old one does.`,
     async () => {
       await settledUpdate(steps, subscription, 'api', apiAfter);
-      return served(steps, subscription, String(before.properties.latestRevisionName), {
-        origin,
-        image,
-        commit,
-        web: settingValue(api.running.container, 'AGENTX_ROLE') === 'web',
-      });
+      return served(steps, subscription, String(before.properties.latestRevisionName), { origin, image, commit });
     },
   );
   steps.say(
