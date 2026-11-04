@@ -1017,6 +1017,15 @@ const loginWorkspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
       .map((workspace) => workspace.id),
   );
 
+/**
+ * The ids of the main workspace: every workspace of this deployment but the login alerts' own, which takes no
+ * console lines, so an alert or a workbook on the apps' lines there would never see one.
+ */
+const mainWorkspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> => {
+  const logins = loginWorkspaceIds(snapshot);
+  return new Set([...workspaceIds(snapshot)].filter((id) => !logins.has(id)));
+};
+
 /** An action group of this deployment that is switched on and reaches someone. */
 const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   ofType(snapshot, TYPES.actionGroup).some(
@@ -1028,7 +1037,7 @@ const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   );
 
 /**
- * Whether an enabled alert on one of this deployment's workspaces (or of those
+ * Whether an enabled alert on this deployment's main workspace (or on those
  * given) has a condition `matches` takes. A `stateless SEV-1` one is severity 1
  * and never resolves itself (autoMitigate false), so it notifies on every
  * window, not once.
@@ -1037,7 +1046,7 @@ const workspaceAlerted = (
   snapshot: Snapshot,
   kind: 'any' | 'stateless SEV-1',
   matches: (criterion: unknown, alert: PredictedResource) => boolean,
-  workspaces: ReadonlySet<unknown> = workspaceIds(snapshot),
+  workspaces: ReadonlySet<unknown> = mainWorkspaceIds(snapshot),
 ): boolean => {
   return ofType(snapshot, TYPES.alert).some(
     (alert) =>
@@ -2444,7 +2453,7 @@ const WHO_FIELDS = /\b(?:orgId|agentId|agentKeyId|correlationId|userId)\b/;
  * in the region rather than a storage account of anyone's, and counts without naming who.
  */
 const workbooks: Check = (snapshot, _expected, add) => {
-  const workspaces = workspaceIds(snapshot);
+  const workspaces = mainWorkspaceIds(snapshot);
   for (const workbook of ofType(snapshot, TYPES.workbook)) {
     const problem = (message: string): void => {
       add({ rule: 'workbook', resource: workbook.name, message });
@@ -2457,7 +2466,7 @@ const workbooks: Check = (snapshot, _expected, add) => {
       continue;
     }
     const read = [at(workbook.properties, 'sourceId'), ...resourceIdsIn(content)];
-    if (!read.every((id) => workspaces.has(id))) problem("must read this deployment's workspaces only");
+    if (!read.every((id) => workspaces.has(id))) problem("must read this deployment's main workspace only");
     if (!isEmpty(at(workbook.properties, 'storageUri')))
       problem("keeps its content in Azure's own store, not storageUri");
     if (WHO_FIELDS.test(JSON.stringify(content)))
@@ -2485,7 +2494,7 @@ const isDeadMan = (alert: PredictedResource): boolean =>
   );
 
 const deadManAlerts: Check = (snapshot, expected, add) => {
-  const workspaces = workspaceIds(snapshot);
+  const workspaces = mainWorkspaceIds(snapshot);
   for (const { event, windowSize, severity, autoMitigate } of DEAD_MEN) {
     const found = ofType(snapshot, TYPES.alert).some(
       (alert) =>
@@ -2773,8 +2782,7 @@ const appsEnvironment: Check = (snapshot, _expected, add) => {
  */
 const appsLogs: Check = (snapshot, _expected, add) => {
   // The main workspace: the login alerts' own holds a copy of the platform's lines, never instead of it.
-  const logins = loginWorkspaceIds(snapshot);
-  const workspaces = new Set([...workspaceIds(snapshot)].filter((id) => !logins.has(id)));
+  const workspaces = mainWorkspaceIds(snapshot);
   for (const environment of ofType(snapshot, TYPES.environment)) {
     const enabledLogs = (setting: PredictedResource): readonly unknown[] =>
       list(at(setting.properties, 'logs')).filter((log) => at(log, 'enabled') === true);

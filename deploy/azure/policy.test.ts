@@ -2282,6 +2282,33 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(WORKBOOK, (workbook) => (workbook.location = 'westeurope')))).toEqual(['in-country']);
   });
 
+  it("every alert on the apps' lines, and the workbook, reading the login alerts' workspace, where no console line arrives", () => {
+    const loginId = String(staging.predictedResources.find(LOGIN_WORKSPACE)?.id);
+    const onLogins = (alert: Mutable) => (inside(alert, 'properties').scopes = [loginId]);
+    for (const [pick, rule] of [
+      [ERRORS_ALERT, 'app-errors-alert'],
+      [named(/-daily-words$/), 'daily-words-alert'],
+      [INTEGRITY_ALERT, 'audit-integrity-alert'],
+      [TOKEN_REFUSED_ALERT, 'token-refused-alert'],
+      [DENIAL_SURGE_ALERT, 'denial-surge-alert'],
+      [AGENT_CANCELS_ALERT, 'agent-cancels-alert'],
+      [AGENT_CANCEL_CAP_ALERT, 'agent-cancel-cap-alert'],
+      [HOLDINGS_CHECK_ALERT, 'holdings-check-alert'],
+      [HANDOFF_QUEUE_ALERT, 'handoff-queue-alert'],
+      [PLATFORM_FULL_ALERT, 'platform-full-alert'],
+      [ANCHOR_STORE_ALERT, 'anchor-store-alert'],
+      [INTEGRITY_RUNS_ALERT, 'integrity-runs-alert'],
+      [RECORDS_FILLING_ALERT, 'records-filling-alert'],
+      [ANCHOR_STOPPED_ALERT, 'dead-man-alerts'],
+      [JOBS_STOPPED_ALERT, 'dead-man-alerts'],
+    ] as const) {
+      expect(brokenRules(changed(pick, onLogins))).toEqual([rule]);
+    }
+    expect(brokenRules(changed(WORKBOOK, (workbook) => (inside(workbook, 'properties').sourceId = loginId)))).toEqual([
+      'workbook',
+    ]);
+  });
+
   it('database-logins and owner-login-alert: either login alert reading the main workspace, which its cap can blind', () => {
     const mainId = String(staging.predictedResources.find(MAIN_WORKSPACE)?.id);
     const onMain = (alert: Mutable) => (inside(alert, 'properties').scopes = [mainId]);
