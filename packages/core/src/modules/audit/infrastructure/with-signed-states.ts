@@ -209,12 +209,13 @@ async function markHeld(tx: Transaction<AuditTables>, held: string, log: Logger)
   try {
     await sql`select pg_catalog.set_config('lock_timeout', ${HOLD_MARK_LIMITS.lock}, true),
       pg_catalog.set_config('statement_timeout', ${HOLD_MARK_LIMITS.statement}, true)`.execute(tx);
+    // Left unreleased on success: the commit ends it, a trip fewer.
     await markHold(tx, held);
-    await sql`release savepoint ${savepoint}`.execute(tx);
   } catch (error) {
     await sql`rollback to savepoint ${savepoint}`.execute(tx);
     log.warn('org_work.hold_mark_skipped', { err: error });
   }
+  // Nothing follows the mark in the hold's transaction now; put back so nothing added later is held to its limits.
   await sql`select pg_catalog.set_config('lock_timeout', ${was.lock}, true),
     pg_catalog.set_config('statement_timeout', ${was.statement}, true)`.execute(tx);
 }

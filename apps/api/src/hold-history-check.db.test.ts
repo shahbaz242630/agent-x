@@ -400,6 +400,8 @@ describe(`the hold history on its marks (4D2e D10, Postgres ${server.version})`,
       markingAsBooted();
     }
     expect(await markOf()).toBeUndefined();
+    // Nothing tried, so nothing skipped.
+    expect(lines('org_work.hold_mark_skipped')).toEqual([]);
 
     await createOrgWorkRediscovery({
       list: () => Promise.resolve([org]),
