@@ -67,10 +67,10 @@ const LATE_BY_MS = 60_000;
 /**
  * How long an organisation whose turn ended on a reason its whole organisation's waits for its next visit. Its rows
  * still say due now, so settled by them alone it would cost a page and a Tx A every run for as long as the freeze, hold
- * or pause lasts; lifting one marks nothing for the job, so this is also the most a lifted one waits. No more than
- * LATE_BY_MS, so the hourly look never reads it as a lost mark.
+ * or pause lasts; lifting one marks nothing for the job, so this is also the most a lifted one waits. 5 s inside
+ * LATE_BY_MS: the hourly look takes its `now` before its trip, so a settle a moment later must still read as no miss.
  */
-export const WAITING_AS_A_WHOLE_MS = LATE_BY_MS;
+export const WAITING_AS_A_WHOLE_MS = LATE_BY_MS - 5_000;
 
 type OrgWorkTables = DirectoryTables & SpendRequestsTables & TransactionsTables & AuditTables & MandatesTables;
 

@@ -82,6 +82,11 @@ describe('one look at an organisation', () => {
     expect(movesOf({ before: [waiting], due: due(NOW), after: [waiting] }, NOW)).toEqual([]);
   });
 
+  it("settled a few seconds after the look's own now: still no miss", () => {
+    const waiting = mark('5', later(4_000 + WAITING_AS_A_WHOLE_MS));
+    expect(movesOf({ before: [waiting], due: due(NOW), after: [waiting] }, NOW)).toEqual([]);
+  });
+
   it("a mark for one job says nothing about another's", () => {
     const other = { job: 'payment_check', due_at: NOW, marks: '1' } as const;
     expect(movesOf({ before: [other], due: due(NOW), after: [other] }, NOW)).toEqual([

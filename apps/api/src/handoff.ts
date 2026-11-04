@@ -12,7 +12,7 @@
 // one an organisation a pass), each organisation's oldest first, a page at a
 // time, each page after the last and the place kept between runs, so a page of
 // requests left waiting never keeps a younger one from its turn; a reason that
-// is the whole organisation's ends its turn, and its next visit waits a minute
+// is the whole organisation's ends its turn, and its next visit waits 55 s
 // (org-work.ts); one the budget cut short is due again at once. Up to 24 at
 // once, 4 an organisation, in this order: a bank slot, the database gate (2 at
 // once), Tx A's commit, the gate let go, the bank's call, the gate again, ahead
