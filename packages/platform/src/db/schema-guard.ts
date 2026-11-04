@@ -279,9 +279,25 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * None now.
+ * Now 0073's (4D2e D8): a request waiting for approval marks its expiry a day on, the shortest wait; a mandate open
+ * or suspended marks its expiry's look at once, which reads its version's end.
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
+export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  markTrigger(
+    'spend_requests.requests',
+    'marks_request_expiry',
+    "(new.status = 'APPROVAL_REQUIRED'::text)",
+    'request_expiry',
+    '24 hours',
+  ),
+  markTrigger(
+    'mandates.mandates',
+    'marks_mandate_expiry',
+    "(new.status = ANY (ARRAY['ACTIVE'::text, 'SUSPENDED'::text]))",
+    'mandate_expiry',
+    '0 seconds',
+  ),
+];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
@@ -1452,8 +1468,10 @@ function missingGuardProblems(
 
 /**
  * Indexes. A plain index missing is a matter of speed, so it is not checked
- * here; a **unique** one is a wall. An invalid one enforces nothing while
- * still being listed, a partial one enforces nothing outside its condition
+ * here, and nor is one not valid, which is all a plain index is while a
+ * migration builds it concurrently, or after such a build failed (the next run
+ * of that migration replaces it); a **unique** one is a wall. An invalid one
+ * enforces nothing while still being listed, a partial one enforces nothing outside its condition
  * (but one the schema policy lists, exactly), and a unique key that leaves
  * org_id out would make two organisations collide (SEC-TEN-05, which CI-06
  * checks at migration time — this is the same rule on the running database).
@@ -1463,9 +1481,9 @@ function indexProblems(
   isGlobal: boolean,
   allowedPartial: SchemaPolicy['partialUniqueIndexes'],
 ): SchemaProblem[] {
+  if (!index.is_unique) return [];
   const problems: SchemaProblem[] = [];
   if (!index.is_valid) problems.push(`${index.table}'s index ${quoted(index.name)} is not valid`);
-  if (!index.is_unique) return problems;
   if (index.predicate !== null) problems.push(...partialIndexProblems(index, allowedPartial));
   if (!isGlobal && !index.key_columns.includes('org_id')) {
     problems.push(`${index.table}'s unique index ${quoted(index.name)} does not cover org_id`);
