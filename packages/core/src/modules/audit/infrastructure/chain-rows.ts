@@ -20,8 +20,8 @@ import {
   type StoredEntry,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
-import { JOB_ANSWER_WITHIN_MS, withTenant } from '@agentx/platform/db';
-import { type Kysely, sql } from 'kysely';
+import { assertTenant, JOB_ANSWER_WITHIN_MS, withTenant } from '@agentx/platform/db';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { contentOf, SIGNED_EVENT_COLUMNS } from './audit-trail.ts';
 import type { AuditTables } from './tables.ts';
@@ -164,18 +164,20 @@ export async function holdsOperatorSignatures(db: Kysely<AuditTables>): Promise<
  * event unsigned that the live chain never could.
  */
 export function operatorSigningStart(db: Kysely<AuditTables>, orgId: string): Promise<bigint | null> {
+  return withTenant(db, orgId, (tx) => operatorSigningStartIn(tx, orgId), {
+    limited: true,
+    answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+  });
+}
+
+/** operatorSigningStart in the caller's transaction, withTenant's for the organisation: a chain repair's (4D2e E10). */
+export async function operatorSigningStartIn(tx: Transaction<AuditTables>, orgId: string): Promise<bigint | null> {
   const org = orgId.toLowerCase();
-  return withTenant(
-    db,
-    org,
-    async (tx) => {
-      const { rows } = await sql<{ signed_from: bigint }>`
-        select f.signed_from from audit.operator_signing_starts f where f.org_id = ${org}
-      `.execute(tx);
-      return rows[0]?.signed_from ?? null;
-    },
-    { limited: true, answeredWithinMs: JOB_ANSWER_WITHIN_MS },
-  );
+  await assertTenant(tx, org);
+  const { rows } = await sql<{ signed_from: bigint }>`
+    select f.signed_from from audit.operator_signing_starts f where f.org_id = ${org}
+  `.execute(tx);
+  return rows[0]?.signed_from ?? null;
 }
 
 /** The head as read: none with no head row, unreadable with more than one or one of the wrong types. */
@@ -187,8 +189,47 @@ function headOf(heads: unknown, head: ChainHead | undefined): ChainRowsPage['hea
 /**
  * Up to `limit` of the organisation's events numbered after `after` (from the
  * lowest stored when null), in number order, and its head, all in one
- * statement, so a page and its head come from one moment.
+ * statement, so a page and its head come from one moment: in the caller's
+ * transaction, withTenant's for the organisation (a chain repair's, 4D2e E10).
  */
+export async function chainRowsIn(
+  tx: Transaction<AuditTables>,
+  keys: KeyProvider,
+  orgId: string,
+  after: bigint | null,
+  limit: number,
+): Promise<ChainRowsPage> {
+  const org = orgId.toLowerCase();
+  await assertTenant(tx, org);
+  const chain: Chain = { kind: 'organisation', orgId: org };
+  const { rows } = await sql<Record<string, unknown>>`
+    select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${org}) as heads,
+           h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
+           page.*
+    from (values (1)) as one (x)
+    left join (select * from audit.heads a where a.org_id = ${org} limit 1) as h on true
+    left join lateral (
+      select ${SIGNED_EVENT_COLUMNS}, pg_catalog.to_char(e.recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as recorded_text from audit.events e
+      where e.org_id = ${org} and (${after}::bigint is null or e.seq > ${after}::bigint)
+      order by e.seq limit ${limit}
+    ) as page on true
+    order by page.seq
+  `.execute(tx);
+  const [first = {}] = rows;
+  const head = headFields({
+    seq: first.head_seq,
+    hash: first.head_hash,
+    mac: first.head_mac,
+    mac_key_version: first.head_mac_key_version,
+  });
+  return {
+    head: headOf(first.heads, head),
+    // With no event in the page, the one row the left joins give holds no event.
+    rows: rows.filter((row) => row.seq !== null).map((row) => storedRow(keys, chain, row)),
+  };
+}
+
+/** chainRowsIn in a transaction of its own, withTenant's for the organisation, limited as the anchor check's reads. */
 export function chainRowsAlone(
   db: Kysely<AuditTables>,
   keys: KeyProvider,
@@ -196,38 +237,8 @@ export function chainRowsAlone(
   after: bigint | null,
   limit: number,
 ): Promise<ChainRowsPage> {
-  const org = orgId.toLowerCase();
-  const chain: Chain = { kind: 'organisation', orgId: org };
-  return withTenant(
-    db,
-    org,
-    async (tx) => {
-      const { rows } = await sql<Record<string, unknown>>`
-        select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${org}) as heads,
-               h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
-               page.*
-        from (values (1)) as one (x)
-        left join (select * from audit.heads a where a.org_id = ${org} limit 1) as h on true
-        left join lateral (
-          select ${SIGNED_EVENT_COLUMNS}, pg_catalog.to_char(e.recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as recorded_text from audit.events e
-          where e.org_id = ${org} and (${after}::bigint is null or e.seq > ${after}::bigint)
-          order by e.seq limit ${limit}
-        ) as page on true
-        order by page.seq
-      `.execute(tx);
-      const [first = {}] = rows;
-      const head = headFields({
-        seq: first.head_seq,
-        hash: first.head_hash,
-        mac: first.head_mac,
-        mac_key_version: first.head_mac_key_version,
-      });
-      return {
-        head: headOf(first.heads, head),
-        // With no event in the page, the one row the left joins give holds no event.
-        rows: rows.filter((row) => row.seq !== null).map((row) => storedRow(keys, chain, row)),
-      };
-    },
-    { limited: true, answeredWithinMs: JOB_ANSWER_WITHIN_MS },
-  );
+  return withTenant(db, orgId, (tx) => chainRowsIn(tx, keys, orgId, after, limit), {
+    limited: true,
+    answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+  });
 }

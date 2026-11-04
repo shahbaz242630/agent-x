@@ -18,11 +18,14 @@ export {
   type AuditSubjectKey,
 } from './domain/event.ts';
 export { actorEventsSince } from './infrastructure/actor-counts.ts';
+export { lockChainHead, type RepairRow, writeOriginalRows } from './infrastructure/chain-repair.ts';
 export {
   chainRowsAlone,
+  chainRowsIn,
   type ChainRowsPage,
   holdsOperatorSignatures,
   operatorSigningStart,
+  operatorSigningStartIn,
   type StoredColumns,
   type StoredRow,
   type StoredValues,
