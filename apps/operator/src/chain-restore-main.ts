@@ -19,12 +19,15 @@
 // It:
 // 1. guards stdout and stderr, reads its settings and its keys, or refuses
 // 2. reads the request, from the file alone, before it connects
-// 3. connects to the drill's copy read-only, and to the live server, each as
+// 3. reads the plan's own file in the evidence store, and refuses unless it is
+//    this organisation's plan, made, with the digest asked: the repair is tied
+//    to the plan the operator read, kept as evidence, not to a copied number
+// 4. connects to the drill's copy read-only, and to the live server, each as
 //    the owner, and refuses any other role, or one that can bypass the walls
-// 4. reads the anchors' store whole and checks the live schema
-// 5. writes the repair's start to the evidence store, once: a request run
+// 5. reads the anchors' store whole and checks the live schema
+// 6. writes the repair's start to the evidence store, once: a request run
 //    again is refused there, before anything is read or written
-// 6. repairs (chain-restore.ts) and writes the outcome beside its start
+// 7. repairs (chain-restore.ts) and writes the outcome beside its start
 // It exits 0 once the chain is repaired; 1 when anything is refused or fails.
 // The integrity hold stays: the organisation's admin clears it with a step-up.
 import { type AuditTables, REPAIR_ROLE, repairRoleProblems } from '@agentx/core/modules/audit';
@@ -33,6 +36,8 @@ import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/pl
 import { APP_ROLE, createDatabase, type Database, transactionsReadOnly } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createLogger, createStartupLogger, guardOutputs, type Logger } from '@agentx/platform/observability';
+import { createOutboundFetch } from '@agentx/platform/outbound';
+import { azureBlobOrigins, azureWriteOnceStore, BlobStoreFailed, folderWriteOnceStore } from '@agentx/platform/storage';
 
 import { outcomeLine, type RestoreFacts, restoreChain, restoreFile } from './chain-restore.ts';
 import type { EvidenceStore } from './evidence-store.ts';
@@ -119,6 +124,48 @@ function settingsProblems(config: OperatorConfig, store: unknown, anchors: unkno
   ];
 }
 
+/**
+ * Why the plan asked for can't be applied, from its own file in the evidence
+ * store (chain-recovery-plan's): none there, not this organisation's plan of
+ * that ID, a plan that was refused, or another digest than the one asked. Its
+ * first line is its summary; the rows after it are what the repair makes again.
+ */
+async function storedPlanProblems({ evidence }: OperatorConfig, asked: Asked): Promise<string[]> {
+  const { container, directory } = evidence;
+  let reader;
+  if (container !== null) {
+    reader = azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
+  } else if (directory === null) {
+    return [];
+  } else {
+    reader = folderWriteOnceStore(directory);
+  }
+  const name = `${asked.orgId}/chain-recovery-${asked.planId}.ndjson`;
+  let summary: Readonly<Record<string, unknown>>;
+  try {
+    const text = (await reader.get(name)).toString('utf8');
+    const parsed: unknown = JSON.parse(text.slice(0, text.indexOf('\n')));
+    summary = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch (error) {
+    // None there, a folder's own refusal (development and test), or a first line that isn't JSON; anything else is a bug.
+    const unreadable =
+      error instanceof BlobStoreFailed || error instanceof SyntaxError || (error instanceof Error && 'code' in error);
+    if (!unreadable) throw error;
+    return [
+      `the plan ${asked.planId} has no readable file in the evidence store (${name}): make the plan first, or check its ID`,
+    ];
+  }
+  if (summary.k !== 'plan' || summary.planId !== asked.planId || summary.orgId !== asked.orgId) {
+    return [`the file ${name} is not this organisation's plan ${asked.planId}`];
+  }
+  if (summary.ok !== true) {
+    return [`the plan ${asked.planId} was refused (${String(summary.reason)}): there is nothing to apply`];
+  }
+  return summary.digest === asked.digest
+    ? []
+    : [`the digest asked is not the plan ${asked.planId}'s: copy it again from the plan's line`];
+}
+
 /** Opens one connection to a server as the owner. */
 const ownerOn = (config: OperatorConfig, logger: Logger, to: { host: string; readOnly: boolean }) =>
   createDatabase<AuditTables>({ ...config.db, ...to, maxConnections: 1, applicationName: APPLICATION_NAME }, logger);
@@ -149,6 +196,11 @@ async function restoreRun(config: OperatorConfig, keys: KeyProvider, argv: reado
   const refused = settingsProblems(config, store, anchors);
   if (store === undefined || anchors === undefined || config.db.drillHost === null || refused.length > 0) {
     log.error('operator.refused', { problems: refused });
+    return 1;
+  }
+  const planProblems = await storedPlanProblems(config, asked);
+  if (planProblems.length > 0) {
+    log.error('operator.refused', { restoreId, problems: planProblems });
     return 1;
   }
   const copy = ownerOn(config, logger, { host: config.db.drillHost, readOnly: true });

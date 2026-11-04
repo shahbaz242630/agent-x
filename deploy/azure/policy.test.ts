@@ -603,9 +603,16 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
-      // 4D2e E10: the chain repair's identity adds its records and reads the anchors, with the same two roles.
+      // 4D2e E10: the chain repair's identity adds its records and reads the anchors, with the same two roles,
+      // and reads the plans with a role of its own.
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -1821,8 +1828,31 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }
       });
 
-      it('each of its two roles given once, to its identity: gone, or given to the API instead, is refused', () => {
-        for (const what of ['adds chain repair records', 'reads audit anchors']) {
+      it('its read of the plans reads alone, on the exports alone', () => {
+        const READER = (resource: PredictedResource) =>
+          ROLE_DEFINITIONS(resource) &&
+          resource.name ===
+            bicepGuid(
+              String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id),
+              'evidence-plan-reader',
+            );
+        expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
+          { actions: [], notActions: [], dataActions: [`${ACTIONS_OF}/read`], notDataActions: [] },
+        ]);
+        for (const change of [
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
+        ]) {
+          expect(brokenRules(changed(READER, change))).toEqual(['evidence-store']);
+        }
+        const onAnchors = changed(restorerGrant('reads recovery plans'), (grant: Mutable) => {
+          grant.id = String(grant.id).replace('/containers/audit-exports', '/containers/audit-anchors');
+        });
+        expect(brokenRules(onAnchors)).toEqual(['evidence-store']);
+      });
+
+      it('each of its three roles given once, to its identity: gone, or given to the API instead, is refused', () => {
+        for (const what of ['adds chain repair records', 'reads audit anchors', 'reads recovery plans']) {
           expect({ what, rules: brokenRules(without(restorerGrant(what))) }).toEqual({
             what,
             rules: ['evidence-store'],

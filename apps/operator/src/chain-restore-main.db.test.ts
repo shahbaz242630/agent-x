@@ -4,7 +4,7 @@
 // and its plan writes nothing: the repair's rules themselves are proven in
 // chain-restore.db.test.ts. Here: the request, the owner's role and nothing
 // else, the settings, the evidence records, and every refusal before a write.
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -22,7 +22,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
-import { planChainRecovery, planDigest } from './chain-recovery.ts';
+import { planChainRecovery, planDigest, planFile } from './chain-recovery.ts';
 import { OWNER_LOGIN_NOTE, runChainRestore } from './chain-restore-main.ts';
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
 import type { OperatorProcess } from './main.ts';
@@ -147,18 +147,33 @@ async function run(argv: readonly string[], env: Record<string, string> = envFor
   };
 }
 
-/** The digest of the plan the operator reads now, as the plan's command logs it. */
-async function digestNow(): Promise<string> {
+/** The plan the operator reads now, kept in the evidence store as the plan's command keeps it: its ID and digest. */
+async function planned(): Promise<{ planId: string; digest: string }> {
   const reader = createDatabase<OperatorTables>(
     { ...database.connection('operator'), maxConnections: 1, readOnly: true },
     testLogger(),
   );
   try {
     const plan = await planChainRecovery({ copy: reader, live: reader, keys: operatorKeys, orgId, anchor: undefined });
-    return planDigest(plan, orgId, undefined);
+    const planId = uuidV7Ids.next();
+    const facts = { planId, orgId, release: 'r-1', run: null, anchor: undefined };
+    mkdirSync(path.join(evidence, orgId), { recursive: true });
+    writeFileSync(path.join(evidence, orgId, `chain-recovery-${planId}.ndjson`), planFile(plan, facts));
+    return { planId, digest: planDigest(plan, orgId, undefined) };
   } finally {
     await reader.destroy();
   }
+}
+
+/** A plan's file whose first line says what a test needs, and its ID: by default this organisation's, made, with `digest`. */
+function stored(digest: string, summary: Readonly<Record<string, unknown>> = {}, text?: string): string {
+  const planId = uuidV7Ids.next();
+  mkdirSync(path.join(evidence, orgId), { recursive: true });
+  writeFileSync(
+    path.join(evidence, orgId, `chain-recovery-${planId}.ndjson`),
+    text ?? `${JSON.stringify({ k: 'plan', planId, orgId, ok: true, digest, ...summary })}\n`,
+  );
+  return planId;
 }
 
 /** A request file asking for a repair, and the repair's ID. */
@@ -176,8 +191,7 @@ const records = (restoreId: string, which: 'start' | 'outcome') =>
 
 describe('4D2e E10 the chain repair, run as its job runs it', () => {
   it('repairs as the owner, says the owner-login alert fires by design, keeps both records, never twice', async () => {
-    const digest = await digestNow();
-    const planId = uuidV7Ids.next();
+    const { planId, digest } = await planned();
     const restoreId = uuidV7Ids.next();
     const asked = requested(chainRestoreRequest({ orgId, planId, digest, id: restoreId }));
 
@@ -217,7 +231,7 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
   it('refuses a stale digest, and keeps that as its outcome', async () => {
     const restoreId = uuidV7Ids.next();
     const asked = requested(
-      chainRestoreRequest({ orgId, planId: uuidV7Ids.next(), digest: 'a'.repeat(64), id: restoreId }, true),
+      chainRestoreRequest({ orgId, planId: stored('a'.repeat(64)), digest: 'a'.repeat(64), id: restoreId }, true),
     );
     const { code, line } = await run(['--request', asked]);
     expect(code).toBe(1);
@@ -228,7 +242,7 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
   it("an outcome's record already there: said, and the run fails", async () => {
     const restoreId = uuidV7Ids.next();
     const asked = requested(
-      chainRestoreRequest({ orgId, planId: uuidV7Ids.next(), digest: 'b'.repeat(64), id: restoreId }),
+      chainRestoreRequest({ orgId, planId: stored('b'.repeat(64)), digest: 'b'.repeat(64), id: restoreId }),
     );
     writeFileSync(path.join(evidence, orgId, `chain-restore-${restoreId}-outcome.ndjson`), 'there\n');
     const { code, events } = await run(['--request', asked]);
@@ -238,7 +252,7 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
 
   it('refuses any role but the owner, and settings without the stores or a copy, before it connects', async () => {
     const asked = requested(
-      chainRestoreRequest({ orgId, planId: uuidV7Ids.next(), digest: 'c'.repeat(64), id: uuidV7Ids.next() }),
+      chainRestoreRequest({ orgId, planId: stored('c'.repeat(64)), digest: 'c'.repeat(64), id: uuidV7Ids.next() }),
     );
     const leftOut = new Set(['AGENTX_EVIDENCE_DIR', 'AGENTX_AUDIT_ANCHORS_DIR', 'AGENTX_DB_DRILL_HOST']);
     const env = Object.fromEntries(Object.entries(envFor('operator')).filter(([name]) => !leftOut.has(name)));
@@ -256,7 +270,9 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
 
   it('refuses a copy that is not read-only', async () => {
     const asked = () =>
-      requested(chainRestoreRequest({ orgId, planId: uuidV7Ids.next(), digest: 'd'.repeat(64), id: uuidV7Ids.next() }));
+      requested(
+        chainRestoreRequest({ orgId, planId: stored('d'.repeat(64)), digest: 'd'.repeat(64), id: uuidV7Ids.next() }),
+      );
     faults.readOnly.push(false);
     const writable = await run(['--request', asked()]);
     expect(writable.code).toBe(1);
@@ -268,7 +284,7 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
   it('refuses a connection whose role could get round the walls, naming the side', async () => {
     faults.roles.push(['it can bypass row-level security'], ['the session has switched to another role (SET ROLE)']);
     const asked = requested(
-      chainRestoreRequest({ orgId, planId: uuidV7Ids.next(), digest: '9'.repeat(64), id: uuidV7Ids.next() }),
+      chainRestoreRequest({ orgId, planId: stored('9'.repeat(64)), digest: '9'.repeat(64), id: uuidV7Ids.next() }),
     );
     const { code, line } = await run(['--request', asked]);
     expect(code).toBe(1);
@@ -284,7 +300,7 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
     const unreadable = path.join(folder, 'not-a-folder');
     writeFileSync(unreadable, 'a file, not a folder\n');
     const asked = requested(
-      chainRestoreRequest({ orgId, planId: uuidV7Ids.next(), digest: 'e'.repeat(64), id: uuidV7Ids.next() }),
+      chainRestoreRequest({ orgId, planId: stored('e'.repeat(64)), digest: 'e'.repeat(64), id: uuidV7Ids.next() }),
     );
     const { code, line } = await run(['--request', asked], envFor('owner', { AGENTX_AUDIT_ANCHORS_DIR: unreadable }));
     expect(code).toBe(1);
@@ -294,14 +310,44 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
   });
 
   it('a failure part-way is said, the run fails', async () => {
-    const notAFolder = path.join(folder, 'evidence-file');
-    writeFileSync(notAFolder, 'a file, not a folder\n');
     const asked = requested(
-      chainRestoreRequest({ orgId, planId: uuidV7Ids.next(), digest: 'f'.repeat(64), id: uuidV7Ids.next() }),
+      chainRestoreRequest({ orgId, planId: stored('f'.repeat(64)), digest: 'f'.repeat(64), id: uuidV7Ids.next() }),
     );
-    const { code, line } = await run(['--request', asked], envFor('owner', { AGENTX_EVIDENCE_DIR: notAFolder }));
+    // The drill's copy named but not there: its connection fails after the plan is read.
+    const { code, line } = await run(
+      ['--request', asked],
+      envFor('owner', { AGENTX_DB_DRILL_HOST: 'no-copy.invalid' }),
+    );
     expect(code).toBe(1);
     expect(line('operator.failed')).toMatchObject({ command: 'chain-restore' });
+  });
+
+  it("refuses, before connecting, a plan that isn't in the evidence store, isn't this one, was refused, or has another digest", async () => {
+    const digest = '7'.repeat(64);
+    const cases: readonly (readonly [string, RegExp])[] = [
+      [
+        uuidV7Ids.next(),
+        /^the plan \S+ has no readable file in the evidence store \(.+\): make the plan first, or check its ID$/,
+      ],
+      [stored(digest, {}, 'not json\n'), /^the plan \S+ has no readable file in the evidence store/],
+      [stored(digest, { orgId: uuidV7Ids.next() }), /^the file \S+ is not this organisation's plan \S+$/],
+      [stored(digest, { k: 'row' }), /^the file \S+ is not this organisation's plan/],
+      [stored(digest, { planId: uuidV7Ids.next() }), /^the file \S+ is not this organisation's plan/],
+      [stored(digest, { ok: false, reason: 'fork' }), /^the plan \S+ was refused \(fork\): there is nothing to apply$/],
+      [stored('8'.repeat(64)), /^the digest asked is not the plan \S+'s: copy it again from the plan's line$/],
+      [stored(digest, {}, '[1]\n'), /^the file \S+ is not this organisation's plan/],
+    ];
+    for (const [planId, problem] of cases) {
+      const restoreId = uuidV7Ids.next();
+      const asked = requested(chainRestoreRequest({ orgId, planId, digest, id: restoreId }));
+      const { code, events, line } = await run(['--request', asked]);
+      expect({ planId, code, events }).toEqual({
+        planId,
+        code: 1,
+        events: ['operator.starting', 'operator.chain_restore_owner_login', 'operator.refused'],
+      });
+      expect(line('operator.refused')).toMatchObject({ restoreId, problems: [expect.stringMatching(problem)] });
+    }
   });
 });
 

@@ -832,6 +832,9 @@ const ANCHOR_READ_ACTIONS = ['Microsoft.Storage/storageAccounts/blobServices/con
 /** The operator's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors-reader');
 
+/** The chain repair's read of the plans as a role assignment names it, without case (modules/evidence.bicep, 4D2e E10). */
+const planReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-plan-reader');
+
 /** The audit exports' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-writer');
 
@@ -2019,6 +2022,19 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
       workloads: STORE_WRITERS,
       called: "the audit exports' role",
+      on: 'the export container',
+    },
+    problem,
+  );
+  // The chain repair reads the plan it applies (4D2e E10): reading alone, on the exports, to its identity alone.
+  storeRoleProblems(
+    snapshot,
+    {
+      name: planReaderRoleName(groupOf(snapshot)),
+      dataActions: ANCHOR_READ_ACTIONS,
+      containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
+      workloads: ['chain-restore'],
+      called: "the chain repair's read of the plans",
       on: 'the export container',
     },
     problem,
@@ -3559,7 +3575,8 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const downloads = customRoleId(groupOf(snapshot), downloadsRoleName(groupOf(snapshot)));
   const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
   const readAnchors = customRoleId(groupOf(snapshot), anchorReaderRoleName(groupOf(snapshot)));
-  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors]);
+  const readPlans = customRoleId(groupOf(snapshot), planReaderRoleName(groupOf(snapshot)));
+  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors, readPlans]);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
@@ -3664,6 +3681,7 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
     evidenceRoleName(groupOf(snapshot)),
     anchorRoleName(groupOf(snapshot)),
     anchorReaderRoleName(groupOf(snapshot)),
+    planReaderRoleName(groupOf(snapshot)),
     downloadsRoleName(groupOf(snapshot)),
   ]);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));

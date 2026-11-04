@@ -322,6 +322,7 @@ module evidence 'modules/evidence.bicep' = {
     anchorRoleName: 'Agent X audit anchors (${environment} ${nameSuffix})'
     anchorReaderRoleName: 'Agent X audit anchors reader (${environment} ${nameSuffix})'
     restorerIdentityName: identityName(environment, 'chain-restore')
+    planReaderRoleName: 'Agent X recovery plans reader (${environment} ${nameSuffix})'
     retentionDays: evidenceRetentionDays
     immutability: evidenceImmutability
     redundancy: evidenceRedundancy
