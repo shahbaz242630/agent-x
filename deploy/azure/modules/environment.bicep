@@ -48,6 +48,8 @@ param jobsStoppedAlertName string
 @description('Whether something always runs here, so the rules that fire on lines missing can be on.')
 param alwaysOn bool
 param anchorStoreAlertName string
+param dailyCheckAlertName string
+param fullPassAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -569,6 +571,87 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The anchor check's daily count and walk of each organisation's older events (4D2e E7, decisions 1 and 2b) running
+// late: a deletion or a hiding edit below the anchor is found later than the 24 hours stated. Capacity, never a
+// hold. Stateful, as above: the line comes every run while it lasts.
+resource dailyCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: dailyCheckAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Audit: daily checks of older history late'
+    description: 'SEV-2. The daily count and walk of the older audit history of some organisations waited more than an hour past its turn (audit.daily_check_overdue): an old record deleted or hidden there is found later than 24 hours. Nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.daily_check_overdue" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The full pass of every chain (4D2e E7, decision 3) late: an old event edited is found later than the 7 days
+// stated, half the production restore window. Capacity, never a hold. Stateful, as above.
+resource fullPassAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: fullPassAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Audit: full pass of the history late'
+    description: 'SEV-2. The audit history of some organisations has not been read through whole in 7 days (audit.full_pass_overdue): an old record edited there is found later than promised, while the 35 days of database restore can still undo it. Nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.full_pass_overdue" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

@@ -111,13 +111,24 @@ export interface AuthorityNow {
   readonly cancelledBy: ReadonlySet<Pausable>;
 }
 
+/** Every cause a void may give, in the engine's order: what the voids' marks must each answer (4D2e D9). */
+export const VOID_CAUSES = [
+  'ORG_FROZEN',
+  'AGENT_SUSPENDED',
+  'MANDATE_NOT_IN_FORCE',
+  'SOURCE_NOT_USABLE',
+  'SUPPLIER_NOT_VERIFIED',
+  'SUPPLIER_CHANGED',
+] as const satisfies readonly ReasonCode[];
+export type VoidCause = (typeof VOID_CAUSES)[number];
+
 /** Why the request is void, the engine's order; empty while its authority stands. */
-export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly ReasonCode[] {
+export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly VoidCause[] {
   // Stopped: cancelled since its decision, or not as it must be unless stopped with its requests paused.
   const stopped = (status: string, standing: string, which: Pausable) =>
     now.cancelledBy.has(which) ||
     (status !== standing && !((PAUSED_IN[which] as readonly string[]).includes(status) && now.paused.has(which)));
-  const causes: ReasonCode[] = [];
+  const causes: VoidCause[] = [];
   if (stopped(now.organizationStatus, 'ACTIVE', 'organization')) causes.push('ORG_FROZEN');
   if (stopped(now.agentStatus, 'ACTIVE', 'agent')) causes.push('AGENT_SUSPENDED');
   const { mandate, source, supplier } = now;

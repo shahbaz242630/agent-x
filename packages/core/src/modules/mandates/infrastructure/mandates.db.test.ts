@@ -47,9 +47,13 @@ interface Org {
 
 const seed = () => seedRows(database.as('admin'), AT);
 
-/** An organisation with an agent and a funding source, made past the app, as the steps that add them are tested elsewhere. */
+/**
+ * An organisation with an agent and a funding source, made past the app, as the steps that add them are tested
+ * elsewhere. In the directory too, as every organisation is: a mandate in force marks its expiry there (0073).
+ */
 const organisation = async (): Promise<Org> => {
   const id = randomUUID();
+  await seed().org(id);
   return { id, agent: await seed().agent(id), source: await seed().source(id) };
 };
 

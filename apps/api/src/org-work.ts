@@ -1,6 +1,7 @@
-// The marks (directory.org_work, 0072), kept honest and followed (4D2e D6, D7).
+// The marks (directory.org_work, 0072, 0073, 0075), kept honest and followed (4D2e D6-D9).
 //
-// Followed: the hand-off, its sweep and the payment checks visit only the
+// Followed: the hand-off, its sweep, the payment checks, the two expiries, the request
+// voids, the waiting rejections and the carry rest visit only the
 // organisations whose marks are due by their clock, at most ORG_WORK_MOST a run,
 // those due longest first, instead of every organisation in the directory. Each
 // one's due time is when its work is next really needed, so with more due than a
@@ -16,7 +17,11 @@
 // decision) waits a trip at most, and no settle ever waits on one. A mark made
 // since moves `marks` and stands; a stopped or crashed run settles nothing, and
 // its marks are read again; a visit that failed leaves its rows due, so their mark
-// too; one a job says it didn't finish (`keep`) stays as it was, first next run.
+// too. One a job says it didn't finish (`unfinished`: its budget ran out on it) is
+// due now whatever its rows say, its rows unread: behind those due before it, so
+// it waits a run or so, never ahead of all for ever. One whose turn ended on a
+// reason its whole organisation's (`waitsAsAWhole`: frozen, held, paused) settles
+// by its rows, but no sooner than WAITING_AS_A_WHOLE_MS on.
 //
 // Kept honest: each hour, every organisation's marks held to what its own rows say
 // is due. A mark the triggers should have made and didn't is written and said
@@ -43,7 +48,8 @@ import {
   settleOrgWorkPage,
 } from '@agentx/core/modules/directory';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { mandateExpiryDue } from '@agentx/core/modules/mandates';
+import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import { type Clock, HOUR_MS, systemClock } from '@agentx/core/shared-kernel';
 import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import { type Database, type DatabaseTransaction, sendTogether, withTenant } from '@agentx/platform/db';
@@ -51,7 +57,11 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { createGate, type Gate } from './fair-lanes.ts';
 import { handOffDue, handOffSweepDue } from './handoff.ts';
+import { carryRestDue } from './mandate-carry-rest.ts';
 import { paymentCheckDue } from './payment-checks.ts';
+import { requestVoidsDue, type VoidTables } from './request-voids.ts';
+import type { DecisionTables } from './spend-request-decisions.ts';
+import { waitingRejectionsDue } from './waiting-rejections.ts';
 
 /** How often every organisation's marks are looked over: a serial burst, one organisation after another. */
 export const ORG_WORK_REDISCOVERY_EVERY_MS = HOUR_MS;
@@ -59,7 +69,15 @@ export const ORG_WORK_REDISCOVERY_EVERY_MS = HOUR_MS;
 /** How far past what is due a mark may read before it counts as late: a mark's time and its row's differ by a transaction. */
 const LATE_BY_MS = 60_000;
 
-type OrgWorkTables = DirectoryTables & SpendRequestsTables & TransactionsTables & AuditTables;
+/**
+ * How long an organisation whose turn ended on a reason its whole organisation's waits for its next visit. Its rows
+ * still say due now, so settled by them alone it would cost a page and a Tx A every run for as long as the freeze, hold
+ * or pause lasts; lifting one marks nothing for the job, so this is also the most a lifted one waits. 5 s inside
+ * LATE_BY_MS: the hourly look takes its `now` before its trip, so a settle a moment later must still read as no miss.
+ */
+export const WAITING_AS_A_WHOLE_MS = LATE_BY_MS - 5_000;
+
+type OrgWorkTables = DirectoryTables & VoidTables & DecisionTables & TransactionsTables & AuditTables;
 
 /** How many organisations a job takes from its marks a run: its list stays this size however many have work. */
 const ORG_WORK_MOST = 1_000;
@@ -78,13 +96,24 @@ type NextDue = (
 export interface MarkedOrganisations {
   /** Those due by the job's clock, at most ORG_WORK_MOST, due longest first. */
   readonly list: () => Promise<readonly string[]>;
-  /** One the run didn't finish: its mark left as it stands, due since before, so the next run takes it first. */
-  keep(orgId: string): void;
+  /** One the run didn't finish: its mark settled due now, its rows unread, so the next run takes it. */
+  readonly unfinished: (orgId: string) => void;
+  /** One whose turn ended on a reason its whole organisation's: settled by its rows, due no sooner than WAITING_AS_A_WHOLE_MS on. */
+  readonly waitsAsAWhole: (orgId: string) => void;
   /** A time the job knows its next turn there is due: the mark is settled no later, whatever its rows say. */
   dueBy(orgId: string, at: Date): void;
   /** Each one listed since the last settling, its mark settled by what its rows say now; at a stop, none. */
   settle(signal?: AbortSignal): Promise<void>;
 }
+
+/** What a job said of the organisations it visited since the last settling: each read when that settling is. */
+interface Told {
+  readonly dueBy: Map<string, number>;
+  readonly unfinished: Set<string>;
+  readonly asAWhole: Set<string>;
+}
+
+const noneTold = (): Told => ({ dueBy: new Map(), unfinished: new Set(), asAWhole: new Set() });
 
 /** How many organisations' next due times are read at once where no gate is given (job-list.ts gives all its jobs one). */
 const READS_AT_ONCE = 4;
@@ -124,23 +153,29 @@ export function markedOrganisations({
   // Each one's marks as first read since the last settling. A later read can only be newer: settling by the older does
   // nothing where they differ, and the mark stands for another visit.
   let listed = new Map<string, string>();
-  let dueBy = new Map<string, number>();
+  let told = noneTold();
 
-  /** When the organisation is next due: what its rows say, no later than a time the job gave; nothing, none. */
-  const dueOf = async (orgId: string, given: ReadonlyMap<string, number>): Promise<Date | null> => {
-    const rows = await nextDueOf(database, orgId, nextDue, clock.now());
-    const by = given.get(orgId);
-    return rows === null || by === undefined || rows.getTime() <= by ? rows : new Date(by);
+  /**
+   * When the organisation is next due: what its rows say, no later than a time the job gave; nothing, none. Work due
+   * already (left by the visit: refused, past its share, a moment early) is due now, behind those due before it: kept
+   * at its old time, it would be listed ahead of every other for ever, and with more such than a run takes, the rest
+   * never. One the job didn't finish is due now, unread; one waiting as a whole no sooner than its wait.
+   */
+  const dueOf = async (orgId: string, given: Told): Promise<Date | null> => {
+    const now = clock.now();
+    if (given.unfinished.has(orgId)) return now;
+    const rows = await nextDueOf(database, orgId, nextDue, now);
+    const by = given.dueBy.get(orgId);
+    const due = rows === null || by === undefined || rows.getTime() <= by ? rows : new Date(by);
+    const soonest = given.asAWhole.has(orgId) ? new Date(now.getTime() + WAITING_AS_A_WHOLE_MS) : now;
+    return due !== null && due < soonest ? soonest : due;
   };
 
   /**
    * A page's next due times, as many at a time as `reads` lets, each in its own withTenant: one that can't be read is said, and its
    * mark left for another visit.
    */
-  const pageOf = async (
-    marks: readonly (readonly [string, string])[],
-    given: ReadonlyMap<string, number>,
-  ): Promise<SettledOrgWork[]> => {
+  const pageOf = async (marks: readonly (readonly [string, string])[], given: Told): Promise<SettledOrgWork[]> => {
     const read = await Promise.all(
       marks.map(([orgId, counted]) =>
         reads.run(orgId, async (): Promise<SettledOrgWork | undefined> => {
@@ -162,17 +197,20 @@ export function markedOrganisations({
       for (const { orgId, marks: read } of marks) if (!listed.has(orgId)) listed.set(orgId, read);
       return marks.map(({ orgId }) => orgId);
     },
-    keep: (orgId) => {
-      listed.delete(orgId);
+    unfinished: (orgId) => {
+      told.unfinished.add(orgId);
+    },
+    waitsAsAWhole: (orgId) => {
+      told.asAWhole.add(orgId);
     },
     dueBy: (orgId, at) => {
-      dueBy.set(orgId, at.getTime());
+      told.dueBy.set(orgId, at.getTime());
     },
     async settle(signal) {
       const settling = [...listed];
       listed = new Map();
-      const given = dueBy;
-      dueBy = new Map();
+      const given = told;
+      told = noneTold();
       for (let at = 0; at < settling.length; at += SETTLE_PAGE) {
         // Stopped, the rest stay as they are, and are read again.
         if (signal?.aborted === true) return;
@@ -206,6 +244,11 @@ const DUE_READS = [
   ['hand_off', handOffDue],
   ['hand_off_sweep', handOffSweepDue],
   ['payment_check', paymentCheckDue],
+  ['request_expiry', requestExpiryDue],
+  ['mandate_expiry', mandateExpiryDue],
+  ['request_voids', requestVoidsDue],
+  ['waiting_rejections', waitingRejectionsDue],
+  ['carry_rest', carryRestDue],
 ] as const satisfies readonly (readonly [OrgWorkJob, unknown])[];
 
 /** What the organisation's rows and marks said on one trip. */
@@ -221,12 +264,18 @@ type Move =
   | { readonly kind: 'late'; readonly job: OrgWorkJob; readonly dueAt: Date; readonly marks: string }
   | { readonly kind: 'cleared'; readonly job: OrgWorkJob; readonly marks: string };
 
-export function movesOf({ before, due, after }: Looked): Move[] {
+/**
+ * What one look calls for, at `now` (the jobs' clock). Work due already is due now, as a settle stores it (dueOf): a
+ * mark is late only past the later of its rows' time and now, so one settled at a visit for work still due (refused,
+ * stuck, a request made before 0073) is no miss, and is left where the settle put it, behind those due before it.
+ */
+export function movesOf({ before, due, after }: Looked, now: Date): Move[] {
   return due.flatMap(({ job, dueAt }): Move[] => {
     const standing = before.find((mark) => mark.job === job);
     if (dueAt === null) return standing === undefined ? [] : [{ kind: 'cleared', job, marks: standing.marks }];
     if (!after.some((mark) => mark.job === job)) return [{ kind: 'unmarked', job, dueAt }];
-    if (standing === undefined || standing.due_at.getTime() - dueAt.getTime() <= LATE_BY_MS) return [];
+    const neededBy = Math.max(dueAt.getTime(), now.getTime());
+    if (standing === undefined || standing.due_at.getTime() - neededBy <= LATE_BY_MS) return [];
     return [{ kind: 'late', job, dueAt, marks: standing.marks }];
   });
 }
@@ -298,7 +347,8 @@ export function createOrgWorkRediscovery({
         const log = logger.child({ orgId });
         counts.organisations += 1;
         try {
-          for (const move of movesOf(await lookedAt(database, orgId, clock.now()))) {
+          const now = clock.now();
+          for (const move of movesOf(await lookedAt(database, orgId, now), now)) {
             if (await carriedOut(database, orgId, move, log)) counts[move.kind] += 1;
           }
         } catch (error) {

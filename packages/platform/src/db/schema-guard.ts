@@ -242,16 +242,36 @@ export interface WrittenTrigger {
 const MARK_FUNCTION = 'directory.mark_org_work';
 const MARK_BODY = '6cae37308679fd17975fca6e78aa25f031395080196fb037e0d947ae2b868229';
 
-/** Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. */
-const markTrigger = (table: string, name: string, condition: string, job: string, wait: string): WrittenTrigger => ({
-  table,
-  name,
-  definition: `CREATE CONSTRAINT TRIGGER ${name} AFTER INSERT OR UPDATE ON ${table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (${condition}) EXECUTE FUNCTION ${MARK_FUNCTION}('${job}', '${wait}')`,
-  function: MARK_FUNCTION,
-  body: MARK_BODY,
-});
+/**
+ * Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. On every write, on a
+ * row already made alone (`UPDATE`), or on a new row alone (`INSERT`); while its condition holds, or (null) on each one.
+ */
+const markTrigger = (
+  table: string,
+  name: string,
+  condition: string | null,
+  job: string,
+  wait: string,
+  on: 'INSERT OR UPDATE' | 'UPDATE' | 'INSERT' = 'INSERT OR UPDATE',
+): WrittenTrigger => {
+  const when = condition === null ? '' : ` WHEN (${condition})`;
+  return {
+    table,
+    name,
+    definition: `CREATE CONSTRAINT TRIGGER ${name} AFTER ${on} ON ${table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW${when} EXECUTE FUNCTION ${MARK_FUNCTION}('${job}', '${wait}')`,
+    function: MARK_FUNCTION,
+    body: MARK_BODY,
+  };
+};
 
-/** The marks' triggers (0072): on the tables they name, and each as written. */
+/** A row moved to a new version in force, as Postgres prints it: only an update has one before it. */
+const NEW_VERSION = '(new.current_version_id IS DISTINCT FROM old.current_version_id)';
+
+/** The request voids' look, due at once, as what a pending request was decided under is written. */
+const voidsMark = (table: string, condition: string | null) =>
+  markTrigger(table, 'marks_request_voids', condition, 'request_voids', '0 seconds', 'UPDATE');
+
+/** The marks' triggers (0072, 0073, 0075): on the tables they name, and each as written. */
 export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
   markTrigger(
     'spend_requests.requests',
@@ -274,14 +294,62 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
     'payment_check',
     '0 seconds',
   ),
+  // 0073 (4D2e D8): a request waiting for approval marks its expiry a day on, the shortest wait; a mandate open or
+  // suspended marks its expiry's look at once, which reads its version's end.
+  markTrigger(
+    'spend_requests.requests',
+    'marks_request_expiry',
+    "(new.status = 'APPROVAL_REQUIRED'::text)",
+    'request_expiry',
+    '24 hours',
+  ),
+  markTrigger(
+    'mandates.mandates',
+    'marks_mandate_expiry',
+    "(new.status = ANY (ARRAY['ACTIVE'::text, 'SUSPENDED'::text]))",
+    'mandate_expiry',
+    '0 seconds',
+  ),
+  // 0075 (4D2e D9): the request voids' look, at once: an organisation, agent or mandate written while not active, an
+  // organisation lifted (an unfreeze may cancel), a supplier while not verified or lifted (a reactivation may cancel) (0032's CHECK holds a verified one to its version, so a new version is written while
+  // not verified), a mandate moved to a new version, and a source on any write (its consent's end is the job's too,
+  // the visit settling the mark to it). Each on updates alone: every signed write, a new row's too, points its row
+  // at its event with an update in the same transaction (signed-rows.ts pointSignedRow). The waiting rejections' on any write of a
+  // policy (a version made), and the carry rest's on a mandate's new version.
+  voidsMark('organizations.organizations', "((new.status <> 'ACTIVE'::text) OR (old.status <> 'ACTIVE'::text))"),
+  voidsMark('agents.agents', "(new.status <> 'ACTIVE'::text)"),
+  voidsMark('mandates.mandates', `((new.status <> 'ACTIVE'::text) OR ${NEW_VERSION})`),
+  voidsMark('funding_sources.sources', null),
+  voidsMark('suppliers.suppliers', "((new.status <> 'VERIFIED'::text) OR (old.status <> 'VERIFIED'::text))"),
+  markTrigger('mandates.policies', 'marks_waiting_rejections', null, 'waiting_rejections', '0 seconds', 'UPDATE'),
+  markTrigger('mandates.mandates', 'marks_carry_rest', NEW_VERSION, 'carry_rest', '0 seconds', 'UPDATE'),
 ];
 
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * None now.
+ * Now 0077's (4D2e D10). The factor removals' a day on, the cooling-off's length, as a reset comes to cool off: only an
+ * update does, as a reset is born a draft. The background downloads' at once as a month is asked for: a month is born
+ * waiting, and every other move of it is the builder's own, which settles the mark after its run.
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
+export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  markTrigger(
+    'identity.factor_resets',
+    'marks_factor_removals',
+    "(new.status = 'COOLING_OFF'::text)",
+    'factor_removals',
+    '24 hours',
+    'UPDATE',
+  ),
+  markTrigger(
+    'activity_exports.files',
+    'marks_background_downloads',
+    null,
+    'background_downloads',
+    '0 seconds',
+    'INSERT',
+  ),
+];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
@@ -1452,8 +1520,10 @@ function missingGuardProblems(
 
 /**
  * Indexes. A plain index missing is a matter of speed, so it is not checked
- * here; a **unique** one is a wall. An invalid one enforces nothing while
- * still being listed, a partial one enforces nothing outside its condition
+ * here, and nor is one not valid, which is all a plain index is while a
+ * migration builds it concurrently, or after such a build failed (the next run
+ * of that migration replaces it); a **unique** one is a wall. An invalid one
+ * enforces nothing while still being listed, a partial one enforces nothing outside its condition
  * (but one the schema policy lists, exactly), and a unique key that leaves
  * org_id out would make two organisations collide (SEC-TEN-05, which CI-06
  * checks at migration time — this is the same rule on the running database).
@@ -1463,9 +1533,9 @@ function indexProblems(
   isGlobal: boolean,
   allowedPartial: SchemaPolicy['partialUniqueIndexes'],
 ): SchemaProblem[] {
+  if (!index.is_unique) return [];
   const problems: SchemaProblem[] = [];
   if (!index.is_valid) problems.push(`${index.table}'s index ${quoted(index.name)} is not valid`);
-  if (!index.is_unique) return problems;
   if (index.predicate !== null) problems.push(...partialIndexProblems(index, allowedPartial));
   if (!isGlobal && !index.key_columns.includes('org_id')) {
     problems.push(`${index.table}'s unique index ${quoted(index.name)} does not cover org_id`);
