@@ -1118,9 +1118,11 @@ function confirmLoadServer(steps: Steps, subscription: string): void {
   } catch (error) {
     throw new Error(
       `The database's connection limit couldn't be read (${error instanceof Error ? error.message : String(error)}), and the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}. ${next}`,
+      { cause: error },
     );
   }
-  if (!(live.limit >= LOAD_SERVER_CONNECTIONS) || live.waiting) {
+  // A value that is no number reads as too few, never as enough.
+  if (Number.isNaN(live.limit) || live.limit < LOAD_SERVER_CONNECTIONS || live.waiting) {
     throw new Error(
       `The database allows ${String(live.limit)} connections${live.waiting ? ', and a change of it waits on a restart' : ''}, but the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}: the API would be refused connections. ${next}`,
     );

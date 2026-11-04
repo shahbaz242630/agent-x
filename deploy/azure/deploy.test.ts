@@ -1722,6 +1722,8 @@ describe('deploy apps', () => {
     expect(asked?.args).toEqual(
       expect.arrayContaining(['--server-name', 'psql-agentx-stg-abcdef', '--name', 'max_connections']),
     );
+    // A limit Azure gives as no number is too few, never enough.
+    expect((await loadRun({ connectionLimit: 'unknown' })).az.deployment).toBeUndefined();
     const waiting = await loadRun({ limit: 'stays' });
     expect(waiting.error).toMatchObject({
       message: `The database allows 100 connections, and a change of it waits on a restart, but the load run is counted against 100: the API would be refused connections. ${next}`,
