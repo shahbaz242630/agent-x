@@ -50,13 +50,18 @@ export const PLAIN_WORDS = {
   },
   'org_work.unmarked': {
     happened: 'An organisation had work due for a background job with no mark saying so, or a mark saying too late.',
-    broke: 'Nothing yet: every job still visits every organisation. Once jobs use the marks, that work would wait.',
+    broke: 'The job it names skipped that work since then (up to an hour); it is due again now.',
     next: 'The mark is now right. One after a release is older work; more means a write misses its mark.',
   },
   'org_work.rediscovery_failed': {
     happened: 'The hourly check of which organisations have work could not finish for this organisation, or at all.',
-    broke: 'Nothing yet: every job still visits every organisation. Its marks stay as they were until the next check.',
+    broke: 'A mark lost since the last check stays lost until the next, and its work waits until then.',
     next: 'It runs again within the hour. If this repeats, check the database.',
+  },
+  'org_work.settle_failed': {
+    happened: 'After a background job visited an organisation, its mark of work to do could not be brought up to date.',
+    broke: 'Nothing: the mark stands as it was, so that organisation is only visited again on the next run.',
+    next: 'Nothing if it passes. If this repeats, check the database.',
   },
   'job.stalled': {
     happened: 'A background job has been running far longer than it ever should.',
@@ -376,6 +381,17 @@ export const PLAIN_WORDS = {
     happened: 'A database update waited too long for a table that was in use.',
     broke: 'Nothing changed yet: that update was undone and is tried again after a short pause, up to 5 tries.',
     next: 'Nothing to do. If all 5 tries fail, the job stops: run it again at a quieter time.',
+  },
+  'db.migration.deadlocked': {
+    happened:
+      'A database update and the app each waited for a table the other held, so the database stopped the update.',
+    broke: 'Nothing changed yet: that update was undone whole and is tried again after a short pause, up to 5 tries.',
+    next: 'Nothing to do. If all 5 tries fail, the job stops: run it again at a quieter time.',
+  },
+  'db.migration.invalid_index_dropped': {
+    happened: 'A database update found an index an earlier try of it had left half built.',
+    broke: 'Nothing: that index only made some reads faster. It was removed and is being built again now.',
+    next: 'Nothing to do, unless the update fails again: then read its own error.',
   },
   'db.migration.ledger_not_counted': {
     happened: 'The database update job applied its changes but could not count its list of applied changes.',

@@ -701,13 +701,15 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     });
     const checks = checksOf(w, rejectedAfter);
 
-    // Its first run checks every one, the paid among them; then every 30th.
+    // Its first run checks every one, the paid among them; then every 30 minutes from that turn, none sooner.
     await checks.run();
     expect(asked).toBe(1);
     expect(await transactionOf(w, request.id)).toMatchObject({ providerStatus: 'AcceptedSettlementCompleted' });
     expect(lines('payment_check.contradicts')).toEqual([]);
-    for (let run = 1; run < 30; run += 1) await checks.run();
+    clock.advanceBy(30 * STEP - 1);
+    await checks.run();
     expect(asked).toBe(1);
+    clock.advanceBy(1);
     bank = 'Rejected';
     await checks.run();
     expect(asked).toBe(2);
@@ -840,32 +842,40 @@ describe('when and how often (the partner’s rate limits)', () => {
     return { rail, asked: () => asked };
   };
 
-  it('checks a payment under 15 minutes old every run, under a day every 5th, older every 30th; every one first', async () => {
+  it('checks a payment under 15 minutes old every run, under a day every 5 minutes, older every 30, by its organisation’s own turns; every one first', async () => {
     const { w, acting } = await ready();
     await ask(acting, w, { amount: ALLOWED() });
     await handoffOf(w).run();
     const { rail, asked } = counting(w);
     const checks = checksOf(w, rail);
+    /** `n` runs, a minute apart. */
     const runs = async (n: number) => {
-      for (let run = 0; run < n; run += 1) await checks.run();
+      for (let run = 0; run < n; run += 1) {
+        await checks.run();
+        clock.advanceBy(STEP);
+      }
     };
 
     await runs(2);
     expect(asked()).toBe(2);
 
-    clock.advanceBy(15 * STEP + 1);
-    // Runs 2–4 skip it; the 5th (run 5) checks it.
-    await runs(3);
-    expect(asked()).toBe(2);
+    // Past 15 minutes: its day's turn, last taken at the first run, is due at once; then 5 minutes on.
+    clock.advanceBy(13 * STEP + 1);
     await runs(1);
     expect(asked()).toBe(3);
-
-    clock.advanceBy(24 * 60 * STEP);
-    // Runs 6–29 skip it; run 30 checks it.
-    await runs(24);
+    await runs(4);
     expect(asked()).toBe(3);
     await runs(1);
     expect(asked()).toBe(4);
+
+    // Past a day: its slower turn, last taken at the first run, at once; then 30 minutes on.
+    clock.advanceBy(24 * 60 * STEP);
+    await runs(1);
+    expect(asked()).toBe(5);
+    await runs(29);
+    expect(asked()).toBe(5);
+    await runs(1);
+    expect(asked()).toBe(6);
   });
 
   it('pages through them all, oldest first, a page at a time', async () => {
@@ -1548,7 +1558,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       expect(lines('payment_check.lap_behind')).toEqual([expect.objectContaining({ sweep: 'unknown', level: 'warn' })]);
     });
 
-    it('keeps a lap going past its 30th run, unrestarted: said once however long', async () => {
+    it('keeps a turn cut short going past its next time, unrestarted: said once however long', async () => {
       const { w } = await oldPayments(1);
       // No budget: it goes nowhere, run after run.
       const job = checksOver([w], w.rail, breaker(), { runBudgetMs: 0 });
@@ -1559,6 +1569,12 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       expect(lines('payment_check.lap_behind').filter(({ sweep }) => sweep === 'unknown')).toHaveLength(1);
 
       // Its 31st run, when another would begin, and one more: a restart would have it said again.
+      await job.run();
+      clock.advanceBy(31 * 60_000);
+      await job.run();
+      expect(lines('payment_check.lap_behind').filter(({ sweep }) => sweep === 'unknown')).toHaveLength(1);
+
+      // Past an hour behind, still taken each run, its time is kept: forgetting it would say it again.
       await job.run();
       clock.advanceBy(31 * 60_000);
       await job.run();
@@ -1578,7 +1594,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       expect(asked).toHaveLength(2);
     });
 
-    it('starts no new lap while one is going, and a new one once it has ended, at its 30th run', async () => {
+    it('asks an UNKNOWN again 30 minutes after its last whole turn, however many runs come between', async () => {
       const { w, unknown } = await oldPayments(1);
       const { rail, asked } = costingASecond(w);
       const job = checksOver([w], rail, breaker());
@@ -1587,6 +1603,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       for (let run = 0; run < 30; run += 1) await job.run();
       expect(asked.filter((id) => id === instruction)).toHaveLength(1);
 
+      clock.advanceBy(30 * 60_000);
       await job.run();
       expect(asked.filter((id) => id === instruction)).toHaveLength(2);
     });

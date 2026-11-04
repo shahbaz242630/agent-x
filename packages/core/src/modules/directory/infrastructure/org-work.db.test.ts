@@ -14,7 +14,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { markOrgWork, settleOrgWork } from './org-work.ts';
+import { dueOrgWork, markOrgWork, settleOrgWork, settleOrgWorkPage } from './org-work.ts';
 import type { DirectoryTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -394,21 +394,55 @@ describe('two transactions marking two jobs in opposite order', () => {
     return { handOff, check };
   }
 
+  /** The processes `pid` is waiting for now. */
+  async function blockersOf(pid: number): Promise<number[]> {
+    const [row] = await admin().query<{ blockers: number[] }>('select pg_catalog.pg_blocking_pids($1) as blockers', [
+      pid,
+    ]);
+    return row?.blockers ?? [];
+  }
+
   it('with no lock between them can deadlock inside COMMIT: one is refused whole, the other kept', async () => {
-    const held = await holding();
-    const one = await marking(HAND_OFF, CHECK);
-    const two = await marking(CHECK, HAND_OFF);
-    const committed = [one, two].map((client) =>
-      client.query('commit').then(
-        () => 'kept',
-        (error: unknown) => (error as { code?: string }).code,
-      ),
-    );
-    await waitUntilQueued(admin(), 2);
-    await held.handOff.query('commit');
-    await held.check.query('commit');
-    expect((await Promise.all(committed)).toSorted()).toEqual(['40P01', 'kept']);
-    expect(await admin().query('select 1 from audit.marked_rows where org_id = $1', [org])).toHaveLength(2);
+    // Whether the two cross depends on which waiter Postgres wakes first when a held row is let go,
+    // which a test can't choose: so the crossing is tried up to five times and must happen at least
+    // once, and every try must end as one of the two allowed ways, with no mark lost.
+    const outcomes: string[][] = [];
+    for (let attempt = 0; attempt < 5 && !outcomes.some(([first]) => first === '40P01'); attempt += 1) {
+      if (attempt > 0) {
+        next += 1;
+        org = `0199a0f0-0000-7000-8000-${String(next).padStart(12, '0')}`;
+        await admin().query('insert into directory.orgs (org_id) values ($1)', [org]);
+      }
+      const held = await holding();
+      const one = await marking(HAND_OFF, CHECK);
+      const two = await marking(CHECK, HAND_OFF);
+      const committed = [one, two].map((client) =>
+        client.query('commit').then(
+          () => 'kept',
+          (error: unknown) => (error as { code?: string }).code ?? 'unknown',
+        ),
+      );
+      await waitUntilQueued(admin(), 2);
+      await held.handOff.query('commit');
+      // Let go of the second row once the first transaction holds hand_off and waits on payment_check.
+      await expect
+        .poll(async () => {
+          const blockers = await blockersOf(one.pid);
+          return blockers.length > 0 && !blockers.includes(held.handOff.pid);
+        })
+        .toBe(true);
+      await held.check.query('commit');
+      const ended = (await Promise.all(committed)).toSorted();
+      expect([
+        ['40P01', 'kept'],
+        ['kept', 'kept'],
+      ]).toContainEqual(ended);
+      // A refused transaction is refused whole: its rows went with it. A kept one keeps both.
+      const kept = ended.filter((outcome) => outcome === 'kept').length;
+      expect(await admin().query('select 1 from audit.marked_rows where org_id = $1', [org])).toHaveLength(2 * kept);
+      outcomes.push(ended);
+    }
+    expect(outcomes).toContainEqual(['40P01', 'kept']);
   });
 
   it("with a lock both take first, as every signed write takes its chain's head, the second waits there", async () => {
@@ -446,5 +480,121 @@ describe('two transactions marking two jobs in opposite order', () => {
     await committing;
     expect(await admin().query('select 1 from audit.marked_rows where org_id = $1', [org])).toHaveLength(2);
     expect(Object.keys(await marksOf()).toSorted()).toEqual(['hand_off', 'payment_check']);
+  });
+});
+
+describe('which organisations a job takes from its marks', () => {
+  // A job no other test here marks, so what comes back is this test's alone.
+  const job = 'hand_off_sweep';
+  const orgsMarked = async (count: number): Promise<string[]> => {
+    await admin().query(`delete from directory.org_work where job = $1`, [job]);
+    const orgs: string[] = [];
+    for (let at = 0; at < count; at += 1) {
+      next += 1;
+      orgs.push(`0199a0f0-0000-7000-8000-${String(next).padStart(12, '0')}`);
+    }
+    await admin().query('insert into directory.orgs (org_id) select unnest($1::uuid[])', [orgs]);
+    return orgs;
+  };
+  /** Marks each organisation due `ago` seconds before now (negative: ahead), on Postgres's clock. */
+  const markedAgo = (orgId: string, ago: number) =>
+    admin().query(
+      `insert into directory.org_work (org_id, job, due_at) values ($1, $2, now() - make_interval(secs => $3))`,
+      [orgId, job, ago],
+    );
+
+  it('those due by now, due longest first, at most as many as asked, each with its marks as read', async () => {
+    const [a = '', b = '', c = '', d = ''] = await orgsMarked(4);
+    await markedAgo(a, 10);
+    await markedAgo(b, 30);
+    await markedAgo(c, 20);
+    await markedAgo(d, -60);
+    const all = await dueOrgWork(app, job, { most: 10, by: new Date(0) });
+    expect(all.map(({ orgId }) => orgId)).toEqual([b, c, a]);
+    expect(all[0]?.marks).toBe((await marksOf(b))[job]?.marks);
+    expect((await dueOrgWork(app, job, { most: 2, by: new Date(0) })).map(({ orgId }) => orgId)).toEqual([b, c]);
+  });
+
+  it("by the job's clock where it runs ahead of Postgres's: a time it counted is due by it", async () => {
+    const [a = '', b = ''] = await orgsMarked(2);
+    await markedAgo(a, -60);
+    await markedAgo(b, -600);
+    // Counted from Postgres's own clock, which the marks were written by.
+    const [{ now } = { now: new Date(0) }] = await admin().query<{ now: Date }>('select pg_catalog.now() as now');
+    const ahead = (seconds: number) => new Date(now.getTime() + seconds * 1_000);
+    expect(await dueOrgWork(app, job, { most: 10, by: new Date(0) })).toEqual([]);
+    expect((await dueOrgWork(app, job, { most: 10, by: ahead(120) })).map(({ orgId }) => orgId)).toEqual([a]);
+    expect((await dueOrgWork(app, job, { most: 10, by: ahead(1_200) })).map(({ orgId }) => orgId)).toEqual([a, b]);
+  });
+
+  it("only this job's marks", async () => {
+    const [a = '', b = ''] = await orgsMarked(2);
+    await markedAgo(a, 10);
+    await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'hand_off', now())`, [b]);
+    expect((await dueOrgWork(app, job, { most: 10, by: new Date(0) })).map(({ orgId }) => orgId)).toEqual([a]);
+  });
+});
+
+describe('a page of marks settled in one statement', () => {
+  const job = 'hand_off';
+  const marksNow = async (orgId: string) => (await marksOf(orgId))[job]?.marks ?? '';
+  const anotherOrg = async (): Promise<string> => {
+    next += 1;
+    const orgId = `0199a0f0-0000-7000-8000-${String(next).padStart(12, '0')}`;
+    await admin().query('insert into directory.orgs (org_id) values ($1)', [orgId]);
+    return orgId;
+  };
+
+  it('each goes with nothing due, or moves to its next; only its own job, and only while it reads as listed', async () => {
+    const other = await anotherOrg();
+    const third = await anotherOrg();
+    for (const orgId of [org, other, third]) await markOrgWork(app, orgId, job, clock.now());
+    await markOrgWork(app, org, 'payment_check', clock.now());
+    const [mine, theirs, stale] = [await marksNow(org), await marksNow(other), await marksNow(third)];
+    // A mark made since the third was listed: its count moved, so it stands.
+    await markOrgWork(app, third, job, clock.now());
+    const later = anHourOn();
+    const settled = await settleOrgWorkPage(app, job, [
+      { orgId: org, marks: mine, due: null },
+      { orgId: other, marks: theirs, due: later },
+      { orgId: third, marks: stale, due: null },
+    ]);
+    expect(settled).toBe(2);
+    expect(Object.keys(await marksOf(org))).toEqual(['payment_check']);
+    expect((await marksOf(other))[job]).toEqual({ marks: theirs, due_at: later });
+    expect((await marksOf(third))[job]?.marks).toBe(String(BigInt(stale) + 1n));
+    expect(await settleOrgWorkPage(app, job, [])).toBe(0);
+  });
+
+  it("skips a row a commit is marking, never waiting on it, and that commit's mark stands; the rest settle", async () => {
+    const other = await anotherOrg();
+    for (const orgId of [org, other]) await markOrgWork(app, orgId, job, clock.now());
+    const [mine, theirs] = [await marksNow(org), await marksNow(other)];
+    // A committing writer's position: it has moved marks and not ended.
+    const writer = await connected('admin');
+    await writer.query('begin');
+    await writer.query('update directory.org_work set marks = marks + 1 where org_id = $1 and job = $2', [org, job]);
+    // Settled while the writer holds its row: had it waited, this would not return before the commit.
+    expect(
+      await settleOrgWorkPage(app, job, [
+        { orgId: org, marks: mine, due: null },
+        { orgId: other, marks: theirs, due: null },
+      ]),
+    ).toBe(1);
+    await writer.query('commit');
+    expect((await marksOf(org))[job]?.marks).toBe(String(BigInt(mine) + 1n));
+    expect(await marksOf(other)).toEqual({});
+  });
+
+  it('skips one it reads as listed while a commit holds it, though that commit then rolls back', async () => {
+    await markOrgWork(app, org, job, clock.now());
+    const mine = await marksNow(org);
+    const holder = await connected('admin');
+    await holder.query('begin');
+    await holder.query('select 1 from directory.org_work where org_id = $1 and job = $2 for update', [org, job]);
+    expect(await settleOrgWorkPage(app, job, [{ orgId: org, marks: mine, due: null }])).toBe(0);
+    await holder.query('rollback');
+    // Left for another visit: settled then, it goes.
+    expect(await settleOrgWorkPage(app, job, [{ orgId: org, marks: mine, due: null }])).toBe(1);
   });
 });

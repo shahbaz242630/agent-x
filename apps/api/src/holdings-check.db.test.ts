@@ -247,9 +247,9 @@ describe('the holdings check (E1)', () => {
     expect(many.checked).toMatchObject({ requests: 8, mismatched: 0, tampered: 0 });
     expect(many.sent).toBe(few.sent);
     // The IDs (rows and log), the rows, their signed states, the decided events, reservations, claims, order keys,
-    // the agents' zones and their signed states (0054), each read with its tenant check: 17 in all, the same for 3
-    // requests or 200.
-    expect(few.sent).toBeLessThanOrEqual(17);
+    // the agents' zones and their signed states (0054), the waiting ones' waits_until (0073), each read with its
+    // tenant check: 18 in all, the same for 3 requests or 200.
+    expect(few.sent).toBeLessThanOrEqual(18);
   });
 
   it('refuses a page where one request has more decided events than one decision makes, however few the rest have', async () => {

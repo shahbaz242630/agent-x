@@ -13,6 +13,8 @@ import {
   pollHoldsWaiting,
 } from '@agentx/core/modules/audit';
 import { listedOrganizations } from '@agentx/core/modules/directory';
+import { mandateExpiryDue } from '@agentx/core/modules/mandates';
+import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
   activeContactsFor,
   contactAddressFor,
@@ -38,26 +40,38 @@ import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
-import { createHandoff, HANDOFF_EVERY_MS, handoffDatabaseGate } from './handoff.ts';
+import {
+  createHandoff,
+  HANDOFF_EVERY_MS,
+  handOffDue,
+  handoffDatabaseGate,
+  handOffSweepDue,
+  settleReadsGate,
+} from './handoff.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
 import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { contactFillFrom } from './kept-names.ts';
-import { CARRY_REST_EVERY_MS, createCarryRest } from './mandate-carry-rest.ts';
+import { CARRY_REST_EVERY_MS, carryRestDue, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
-import { createOrgWorkRediscovery, ORG_WORK_REDISCOVERY_EVERY_MS } from './org-work.ts';
-import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS } from './payment-checks.ts';
+import {
+  createOrgWorkRediscovery,
+  markedOrganisations,
+  ORG_WORK_REDISCOVERY_EVERY_MS,
+  withOrgWork,
+} from './org-work.ts';
+import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
-import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
+import { createRequestVoids, REQUEST_VOIDS_EVERY_MS, requestVoidsDue } from './request-voids.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createRoundTripTiming, ROUND_TRIP_EVERY_MS, ROUND_TRIPS_A_RUN } from './round-trip-timing.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createWaitingRequests } from './waiting-requests.ts';
-import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS } from './waiting-rejections.ts';
+import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejectionsDue } from './waiting-rejections.ts';
 
 /**
  * How long the anchor check of one chain, or its probe of every head, may hold its
@@ -228,18 +242,54 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   };
   // Every approved request handed to the partner once, its authority checked again first (Phase 4 B4, PL-46); only
   // where the partner's rail is built (ADR-014 §4; the fake alone, until Phase 5). Its heartbeat is /health's first check (B5, ADR-013).
+  // Each visits only the organisations its marks say have work, and settles them after (4D2e D7).
+  // One gate for every job's settling reads, so they and the hand-off's own transactions stay within a third of the pool.
+  const marking = { database, logger, reads: settleReadsGate(config.db.poolMax) };
+  const handOffMarks = markedOrganisations({ job: 'hand_off', nextDue: handOffDue, ...marking });
+  const sweepMarks = markedOrganisations({ job: 'hand_off_sweep', nextDue: handOffSweepDue, ...marking });
   const handoff =
     railWork &&
-    createHandoff({
-      ...clocked,
-      ...railWork,
-      outbox,
-      // The anchor check starts before the hand-off's first run: this list's order.
-      anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
-    });
+    withOrgWork(
+      [handOffMarks, sweepMarks],
+      createHandoff({
+        ...clocked,
+        ...railWork,
+        list: handOffMarks.list,
+        sweepList: sweepMarks.list,
+        unfinished: handOffMarks.unfinished,
+        waitsAsAWhole: handOffMarks.waitsAsAWhole,
+        outbox,
+        // The anchor check starts before the hand-off's first run: this list's order.
+        anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
+      }),
+    );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
-  // the payments the partner's messages name first (E1b).
-  const paymentChecks = railWork && createPaymentChecks({ ...clocked, ...railWork, outbox, events: providerEvents });
+  // the payments the partner's messages name first (E1b). Its marks carry each organisation's own cadence of checks.
+  const checkMarks = markedOrganisations({ job: 'payment_check', nextDue: paymentCheckDue, ...marking });
+  const paymentChecks =
+    railWork &&
+    withOrgWork(
+      [checkMarks],
+      createPaymentChecks({
+        ...clocked,
+        ...railWork,
+        list: checkMarks.list,
+        unfinished: checkMarks.unfinished,
+        nextTurn: (orgId, at) => {
+          checkMarks.dueBy(orgId, at);
+        },
+        outbox,
+        events: providerEvents,
+      }),
+    );
+  // The two expiries, each visiting only the organisations whose soonest end has come by its marks (4D2e D8).
+  const requestExpiryMarks = markedOrganisations({ job: 'request_expiry', nextDue: requestExpiryDue, ...marking });
+  const mandateExpiryMarks = markedOrganisations({ job: 'mandate_expiry', nextDue: mandateExpiryDue, ...marking });
+  // The voids, the rejections and the carry, each visiting only the organisations where a candidate stands by its
+  // marks (4D2e D9); the voids also as a consent's end comes.
+  const voidsMarks = markedOrganisations({ job: 'request_voids', nextDue: requestVoidsDue, ...marking });
+  const rejectionMarks = markedOrganisations({ job: 'waiting_rejections', nextDue: waitingRejectionsDue, ...marking });
+  const carryMarks = markedOrganisations({ job: 'carry_rest', nextDue: carryRestDue, ...marking });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
@@ -366,7 +416,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       },
     ),
     // Mandates past their end expired (Phase 2 B4).
-    job('mandate_expiry', createMandateExpiry({ ...clocked, outbox }), MANDATE_EXPIRY_EVERY_MS, HOUR_MS),
+    job(
+      'mandate_expiry',
+      withOrgWork([mandateExpiryMarks], createMandateExpiry({ ...clocked, list: mandateExpiryMarks.list, outbox })),
+      MANDATE_EXPIRY_EVERY_MS,
+      HOUR_MS,
+    ),
     // A held organisation's whole history checked in batches before its clearing is confirmed (Phase 2 D1c).
     job(
       'hold_history',
@@ -378,9 +433,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
     job('holdings_check', createHoldingsCheck(organisationJob), HOLDINGS_CHECK_EVERY_MS, LONG_MS),
     // Spend requests waiting for approval past their wait expired, their holdings released (Phase 2 D7).
-    job('request_expiry', createRequestExpiry(clocked), REQUEST_EXPIRY_EVERY_MS, HOUR_MS),
+    job(
+      'request_expiry',
+      withOrgWork([requestExpiryMarks], createRequestExpiry({ ...clocked, list: requestExpiryMarks.list })),
+      REQUEST_EXPIRY_EVERY_MS,
+      HOUR_MS,
+    ),
     // Pending spend requests whose authority no longer stands voided, their holdings released (Phase 3 C1).
-    job('request_voids', createRequestVoids(clocked), REQUEST_VOIDS_EVERY_MS, HOUR_MS),
+    job(
+      'request_voids',
+      withOrgWork([voidsMarks], createRequestVoids({ ...clocked, list: voidsMarks.list })),
+      REQUEST_VOIDS_EVERY_MS,
+      HOUR_MS,
+    ),
     // The hand-off, where there is one.
     job('handoff', handoff, HANDOFF_EVERY_MS, HALF_HOUR_MS, (running) => {
       logger.info('api.handoff', { running });
@@ -389,9 +454,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       logger.info('api.payment_checks', { running });
     }),
     // The rest of the waiting requests an admin chose to reject with a policy change (decision 33b).
-    job('waiting_rejections', createWaitingRejections(clocked), WAITING_REJECTIONS_EVERY_MS, HOUR_MS),
+    job(
+      'waiting_rejections',
+      withOrgWork([rejectionMarks], createWaitingRejections({ ...clocked, list: rejectionMarks.list })),
+      WAITING_REJECTIONS_EVERY_MS,
+      HOUR_MS,
+    ),
     // A carry past 20's rest weighed and carried onto the version in force (Phase 4 A3, PL-47).
-    job('carry_rest', createCarryRest(clocked), CARRY_REST_EVERY_MS, HOUR_MS),
+    job(
+      'carry_rest',
+      withOrgWork([carryMarks], createCarryRest({ ...clocked, list: carryMarks.list })),
+      CARRY_REST_EVERY_MS,
+      HOUR_MS,
+    ),
     // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6).
     job('activity_seal', createActivitySeal(clocked), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
     // The activity log's background downloads built, a month a file (Phase 3 L5c).

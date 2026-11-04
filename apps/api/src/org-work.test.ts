@@ -2,7 +2,8 @@
 // a write committing between them must never read as a miss, and a mark made while looking must never be cleared.
 import { describe, expect, it } from 'vitest';
 
-import { movesOf } from './org-work.ts';
+import { settleReadsGate } from './handoff.ts';
+import { movesOf, WAITING_AS_A_WHOLE_MS } from './org-work.ts';
 
 const NOW = new Date('2026-11-02T10:00:00.000Z');
 const mark = (marks: string, dueAt = NOW) => ({ job: 'hand_off', due_at: dueAt, marks }) as const;
@@ -15,49 +16,107 @@ const later = (ms: number) => new Date(NOW.getTime() + ms);
 
 describe('one look at an organisation', () => {
   it('nothing due and no mark calls for nothing', () => {
-    expect(movesOf({ before: [], due: due(null), after: [] })).toEqual([]);
+    expect(movesOf({ before: [], due: due(null), after: [] }, NOW)).toEqual([]);
   });
 
   it('due with a mark at the time calls for nothing', () => {
-    expect(movesOf({ before: [mark('5')], due: due(NOW), after: [mark('5')] })).toEqual([]);
+    expect(movesOf({ before: [mark('5')], due: due(NOW), after: [mark('5')] }, NOW)).toEqual([]);
   });
 
   it('due and no mark in either read is a real miss', () => {
-    expect(movesOf({ before: [], due: due(NOW), after: [] })).toEqual([
+    expect(movesOf({ before: [], due: due(NOW), after: [] }, NOW)).toEqual([
       { kind: 'unmarked', job: 'hand_off', dueAt: NOW },
     ]);
   });
 
   it('a row and its mark committing between the reads is no miss: the later read has the mark', () => {
-    expect(movesOf({ before: [], due: due(NOW), after: [mark('1')] })).toEqual([]);
+    expect(movesOf({ before: [], due: due(NOW), after: [mark('1')] }, NOW)).toEqual([]);
   });
 
   it('nothing due with a mark clears it by the value read before looking, whatever came after', () => {
-    expect(movesOf({ before: [mark('5')], due: due(null), after: [mark('6')] })).toEqual([
+    expect(movesOf({ before: [mark('5')], due: due(null), after: [mark('6')] }, NOW)).toEqual([
       { kind: 'cleared', job: 'hand_off', marks: '5' },
     ]);
   });
 
   it('a mark made only after the first read is not cleared', () => {
-    expect(movesOf({ before: [], due: due(null), after: [mark('1')] })).toEqual([]);
+    expect(movesOf({ before: [], due: due(null), after: [mark('1')] }, NOW)).toEqual([]);
   });
 
   it('a mark over a minute past what is due is late, by the value read before looking', () => {
-    expect(movesOf({ before: [mark('5', later(60_001))], due: due(NOW), after: [mark('6')] })).toEqual([
+    expect(movesOf({ before: [mark('5', later(60_001))], due: due(NOW), after: [mark('6')] }, NOW)).toEqual([
       { kind: 'late', job: 'hand_off', dueAt: NOW, marks: '5' },
     ]);
   });
 
   it('a mark a minute past, or before, what is due is left', () => {
-    expect(movesOf({ before: [mark('5', later(60_000))], due: due(NOW), after: [mark('5')] })).toEqual([]);
-    expect(movesOf({ before: [mark('5', later(-600_000))], due: due(NOW), after: [mark('5')] })).toEqual([]);
+    expect(movesOf({ before: [mark('5', later(60_000))], due: due(NOW), after: [mark('5')] }, NOW)).toEqual([]);
+    expect(movesOf({ before: [mark('5', later(-600_000))], due: due(NOW), after: [mark('5')] }, NOW)).toEqual([]);
+  });
+
+  it('work due since long ago, its mark settled at a visit since: no miss, and left where the settle put it', () => {
+    const rows = later(-2 * 86_400_000);
+    expect(movesOf({ before: [mark('5', NOW)], due: due(rows), after: [mark('5', NOW)] }, later(3_600_000))).toEqual(
+      [],
+    );
+  });
+
+  it('work due since long ago, its mark not due until over a minute from now: late', () => {
+    const rows = later(-86_400_000);
+    expect(movesOf({ before: [mark('5', later(60_001))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([
+      { kind: 'late', job: 'hand_off', dueAt: rows, marks: '5' },
+    ]);
+    expect(movesOf({ before: [mark('5', later(60_000))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([]);
+  });
+
+  it('work due an hour from now: its mark late only over a minute past that hour, not past now', () => {
+    const rows = later(3_600_000);
+    expect(movesOf({ before: [mark('5', later(3_660_000))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([]);
+    expect(movesOf({ before: [mark('5', later(3_660_001))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([
+      { kind: 'late', job: 'hand_off', dueAt: rows, marks: '5' },
+    ]);
+  });
+
+  it('a mark settled as a whole, its rows due now, is no miss to the hourly look', () => {
+    const waiting = mark('5', later(WAITING_AS_A_WHOLE_MS));
+    expect(movesOf({ before: [waiting], due: due(NOW), after: [waiting] }, NOW)).toEqual([]);
+  });
+
+  it("settled a few seconds after the look's own now: still no miss", () => {
+    const waiting = mark('5', later(4_000 + WAITING_AS_A_WHOLE_MS));
+    expect(movesOf({ before: [waiting], due: due(NOW), after: [waiting] }, NOW)).toEqual([]);
   });
 
   it("a mark for one job says nothing about another's", () => {
     const other = { job: 'payment_check', due_at: NOW, marks: '1' } as const;
-    expect(movesOf({ before: [other], due: due(NOW), after: [other] })).toEqual([
+    expect(movesOf({ before: [other], due: due(NOW), after: [other] }, NOW)).toEqual([
       { kind: 'unmarked', job: 'hand_off', dueAt: NOW },
       { kind: 'cleared', job: 'payment_check', marks: '1' },
     ]);
   });
+});
+
+describe("the settles' one gate", () => {
+  it.each([
+    [6, 1],
+    [10, 1],
+    [15, 3],
+    [30, 8],
+  ])(
+    'with a pool of %i lets %i read at once: a third of the pool less the hand-off’s 2, at least 1 (one over below 9)',
+    async (pool, most) => {
+      const gate = settleReadsGate(pool);
+      let inside = 0;
+      const never = new Promise<void>(() => undefined);
+      for (let n = 0; n < 10; n += 1) {
+        void gate.run(`org-${String(n)}`, () => {
+          inside += 1;
+          return never;
+        });
+      }
+      // Each admitted one starts on the turn it is let in: a few turns are enough for all that will.
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+      expect(inside).toBe(most);
+    },
+  );
 });
