@@ -1468,8 +1468,10 @@ function missingGuardProblems(
 
 /**
  * Indexes. A plain index missing is a matter of speed, so it is not checked
- * here; a **unique** one is a wall. An invalid one enforces nothing while
- * still being listed, a partial one enforces nothing outside its condition
+ * here, and nor is one not valid, which is all a plain index is while a
+ * migration builds it concurrently, or after such a build failed (the next run
+ * of that migration replaces it); a **unique** one is a wall. An invalid one
+ * enforces nothing while still being listed, a partial one enforces nothing outside its condition
  * (but one the schema policy lists, exactly), and a unique key that leaves
  * org_id out would make two organisations collide (SEC-TEN-05, which CI-06
  * checks at migration time — this is the same rule on the running database).
@@ -1479,9 +1481,9 @@ function indexProblems(
   isGlobal: boolean,
   allowedPartial: SchemaPolicy['partialUniqueIndexes'],
 ): SchemaProblem[] {
+  if (!index.is_unique) return [];
   const problems: SchemaProblem[] = [];
   if (!index.is_valid) problems.push(`${index.table}'s index ${quoted(index.name)} is not valid`);
-  if (!index.is_unique) return problems;
   if (index.predicate !== null) problems.push(...partialIndexProblems(index, allowedPartial));
   if (!isGlobal && !index.key_columns.includes('org_id')) {
     problems.push(`${index.table}'s unique index ${quoted(index.name)} does not cover org_id`);
