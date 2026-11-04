@@ -222,7 +222,7 @@ function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
                (select pg_catalog.min(p.seq) from platform_controls.audit_events p) as lowest,
                (select pg_catalog.max(p.seq) from platform_controls.audit_events p) as highest,
                (select p.hash from platform_controls.audit_events p where p.seq = h.seq limit 1) as head_event_hash,
-               (select pg_catalog.count(*) from platform_controls.audit_events p
+               (select pg_catalog.count(distinct p.seq) from platform_controls.audit_events p
                 where p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
                e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
         from (values (1)) as one (x)
@@ -237,7 +237,7 @@ function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
 
     async countBetween(after, upTo) {
       const { rows } = await sql<Record<string, unknown>>`
-        select pg_catalog.count(*) as stored from platform_controls.audit_events e
+        select pg_catalog.count(distinct e.seq) as stored from platform_controls.audit_events e
         where e.seq > ${after} and e.seq <= ${upTo}
       `.execute(tx);
       return countIn(rows[0]);

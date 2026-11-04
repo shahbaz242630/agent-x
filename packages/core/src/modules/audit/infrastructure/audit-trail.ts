@@ -945,7 +945,7 @@ const edgesRead = (orgId: string, anchored: bigint) => sql<Record<string, unknow
          (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${orgId}) as lowest,
          (select pg_catalog.max(p.seq) from audit.events p where p.org_id = ${orgId}) as highest,
          (select p.hash from audit.events p where p.org_id = ${orgId} and p.seq = h.seq limit 1) as head_event_hash,
-         (select pg_catalog.count(*) from audit.events p
+         (select pg_catalog.count(distinct p.seq) from audit.events p
           where p.org_id = ${orgId} and p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
          ${EVENT_COLUMNS}
   from (values (1)) as one (x)
@@ -969,7 +969,7 @@ function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdge
 
     async countBetween(after, upTo) {
       const { rows } = await sql<Record<string, unknown>>`
-        select pg_catalog.count(*) as stored from audit.events e
+        select pg_catalog.count(distinct e.seq) as stored from audit.events e
         where e.org_id = ${orgId} and e.seq > ${after} and e.seq <= ${upTo}
       `.execute(tx);
       return countIn(rows[0]);

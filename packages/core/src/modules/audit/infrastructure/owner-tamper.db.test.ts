@@ -414,6 +414,28 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
     expect(await probe(anchor)).toEqual({ kind: 'failed', problem: { reason: 'gap', seq: 1n } });
   });
 
+  it('deleted among the last 1,000 and made up for by a copy of another, the keys dropped: the probe counts numbers, not rows', async () => {
+    const { id, savedRow, revocation, anchor } = await revokedThen(3);
+    await owner.query('alter table audit.events drop constraint events_pkey');
+    await owner.query('alter table audit.events drop constraint events_org_id_id_key');
+    try {
+      await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
+      // A byte-for-byte copy of a sealed event at its own number: as many rows as before, one number fewer.
+      await owner.query('insert into audit.events select * from audit.events where org_id = $1 and seq = $2', [
+        org,
+        String(revocation + 2n),
+      ]);
+      await unrevoked(id, savedRow);
+
+      expect(await probe(anchor)).toEqual({ kind: 'failed', problem: { reason: 'gap', seq: 1n } });
+      expect(await trail.countStep(app, org, 0n, anchor.seq)).toEqual({ reason: 'gap', seq: 1n });
+    } finally {
+      await owner.query('delete from audit.events where org_id = $1', [org]);
+      await owner.query('alter table audit.events add constraint events_pkey primary key (org_id, seq)');
+      await owner.query('alter table audit.events add constraint events_org_id_id_key unique (org_id, id)');
+    }
+  });
+
   it("deleted older than the last 1,000: past the probe, which says so, and the day's count finds it", async () => {
     const { id, savedRow, revocation, anchor } = await revokedThen(LAST + 1);
     await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
