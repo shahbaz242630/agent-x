@@ -340,6 +340,29 @@ describe('PL-29 the repair refuses, writing nothing', () => {
     expect(await snapshot(live)).toBe(before);
   });
 
+  it("an event edited under the head's lock, the head untouched: the live chain read again tells it apart", async () => {
+    await copied(3);
+    await deleteEvent(live, 2n);
+    const digest = await digestNow();
+    const before = await snapshot(live);
+    // Someone past the app holds the head's lock and edits an earlier event, uncommitted, before the repair starts.
+    const admin = await live.connect('admin');
+    try {
+      await admin.query('begin');
+      await admin.query('select seq from audit.heads where org_id = $1 for update', [orgId]);
+      await admin.query(`update audit.events set details = '{"step":99}' where org_id = $1 and seq = 3`, [orgId]);
+      const repairing = restore(digest);
+      await waitUntilQueued(live.as('admin'), 1);
+      await admin.query('commit');
+      // Refused before a write, not only by the whole check after one.
+      expect(await repairing).toEqual({ ok: false, reason: 'moved' });
+    } finally {
+      await admin.end();
+    }
+    expect(await snapshot(live)).not.toBe(before);
+    expect((await chainRowsAlone(on(live, 'operator', true), keys, orgId, 1n, 1)).rows[0]?.seq).toBe(3n);
+  });
+
   it("where signing starts moved on the live server after the plan read it: refused under the head's lock", async () => {
     await copied(2);
     await deleteEvent(live, 2n);
