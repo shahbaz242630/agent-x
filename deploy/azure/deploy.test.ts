@@ -542,8 +542,8 @@ const listed = (held: Held) => {
 interface AzAnswers {
   /** The log alerts the resource group holds (none by default), no group yet (a first deploy), or a list that fails. */
   readonly alerts?: readonly unknown[] | 'no group' | 'unreadable';
-  /** Whether Azure refuses to delete an alert. */
-  readonly deleteRefused?: boolean;
+  /** Whether Azure refuses to delete an alert: every one, or every one after the first. */
+  readonly deleteRefused?: boolean | 'after one';
   /** Whether the alerts on the jobs stopping are on, or a read that fails. */
   readonly deadMen?: boolean | 'unreadable';
   /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
@@ -732,10 +732,13 @@ class RecordingAz implements Az {
         }
         return json({ state: ended, outputs: { databaseHost: { type: 'String', value: 'db.example.invalid' } } });
       }
-      case 'resource delete':
-        return this.options.deleteRefused === true
+      case 'resource delete': {
+        const { deleteRefused } = this.options;
+        const earlier = this.calls.filter((call) => call.args.slice(0, 2).join(' ') === 'resource delete').length;
+        return deleteRefused === true || (deleteRefused === 'after one' && earlier > 1)
           ? { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) The client may not delete alerts.\n' }
           : { status: 0, stdout: '', stderr: '' };
+      }
       case 'resource show': {
         const { deadMen } = this.options;
         return deadMen === 'unreadable'
@@ -2433,8 +2436,10 @@ describe('foundation and log alerts that move to another workspace, which Azure 
     ]);
     expect(done.terminal.said).toContain(`Deleted ${OWNER}.`);
     expect(said).toContain(
-      'those alerts are gone: answering no at the what-if leaves them so until foundation runs again.',
+      'If you then answer no at the what-if, or the deployment fails, they stay deleted until foundation runs again:',
     );
+    // Deployed, so they are back: no word of them missing.
+    expect(said).not.toContain('are not back');
     // Read, then deleted, then deployed: never the other way round.
     const sequence = done.az.sequence;
     expect(sequence.indexOf('rest --method get')).toBeLessThan(sequence.indexOf('resource delete --ids'));
@@ -2491,13 +2496,41 @@ describe('foundation and log alerts that move to another workspace, which Azure 
     expect(done.az.deployment).toBeUndefined();
   });
 
-  it('says of one alert moved that it is gone until the deployment succeeds', async () => {
+  it('deletes one alert moved on a y, and deploys', async () => {
     const done = await foundation(new RecordingAz({ alerts: [held(OWNER, MAIN_LOGS)] }), 'Y');
     expect(done.status).toBe(0);
     expect(deletes(done.az).map((call) => call.args)).toEqual([['resource', 'delete', '--ids', idOf(OWNER)]]);
-    expect(done.terminal.said).toContain(
-      "Until this run's deployment succeeds, that alert is gone: answering no at the what-if leaves them so until foundation runs again.",
+    expect(done.terminal.said).toContainEqual(
+      expect.stringContaining('This run moves a log alert to another workspace.'),
     );
+  });
+
+  const NOT_BACK = `These alerts were deleted and are not back: ${PRIVILEGED}, ${OWNER}. Run node deploy/azure/deploy.ts foundation again to create them.`;
+
+  it.each([
+    ['the operator answers no at the what-if', { ended: 'Declined' }],
+    ['the deployment fails', { ended: 'Failed' }],
+    ['the CLI ends with a failure', { status: 1 }],
+  ] as const)('ends saying which deleted alerts are not back when %s', async (_, ending) => {
+    const az = new RecordingAz({ alerts: [held(PRIVILEGED, MAIN_LOGS), held(OWNER, MAIN_LOGS)], ...ending });
+    const done = await foundation(az, 'y');
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(1);
+    expect(deletes(done.az)).toHaveLength(2);
+    expect(done.terminal.said.at(-1)).toBe(NOT_BACK);
+  });
+
+  it('names the alerts already deleted when Azure refuses a later delete', async () => {
+    const az = new RecordingAz({
+      alerts: [held(PRIVILEGED, MAIN_LOGS), held(OWNER, MAIN_LOGS)],
+      deleteRefused: 'after one',
+    });
+    const done = await foundation(az, 'y');
+    expect(done.status).toBeUndefined();
+    expect((done.error as Error).message).toContain(
+      `Azure didn't delete ${OWNER}, so nothing was deployed. These alerts were deleted and are not back: ${PRIVILEGED}. Run node deploy/azure/deploy.ts foundation again to create them.`,
+    );
+    expect(done.az.deployment).toBeUndefined();
   });
 });
 

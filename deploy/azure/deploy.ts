@@ -893,7 +893,24 @@ async function sendWithWhatIf(
   part: Deployment,
   values: Readonly<Record<string, string>>,
 ): Promise<unknown> {
-  await clearMovedAlerts(steps, subscription, part, values);
+  const deleted = await clearMovedAlerts(steps, subscription, part, values);
+  let outputs: unknown;
+  try {
+    outputs = whatIfAndSend(steps, subscription, part, values);
+    return outputs;
+  } finally {
+    // Declined, failed or cut short: the deleted alerts weren't created again, which the operator must not miss.
+    if (outputs === undefined && deleted.length > 0) steps.terminal.say(notBack(deleted, part));
+  }
+}
+
+/** sendWithWhatIf's sending, once the alerts are settled. */
+function whatIfAndSend(
+  steps: Steps,
+  subscription: string,
+  part: Deployment,
+  values: Readonly<Record<string, string>>,
+): unknown {
   const name = deploymentName(part, steps.now());
   const kind = part === 'foundation' ? 'sub' : 'group';
   const where = ['--subscription', subscription, ...(kind === 'group' ? ['--resource-group', RESOURCE_GROUP] : [])];
@@ -1358,12 +1375,12 @@ async function clearMovedAlerts(
   subscription: string,
   part: Deployment,
   values: Readonly<Record<string, string>>,
-): Promise<void> {
-  if (!ALERTING.includes(part)) return;
+): Promise<string[]> {
+  if (!ALERTING.includes(part)) return [];
   steps.terminal.say('Checking whether this run moves a log alert to another workspace (about 30 seconds)...');
   const planned = steps.alerts(part, subscription, values);
   const first = planned[0];
-  if (first === undefined) return;
+  if (first === undefined) return [];
   // A workspace Bicep can only name at deploy time can't be compared, and a wrong "moved" would delete a sound alert.
   const unsettled = planned.find((alert) => alert.scopes.some((scope) => !scope.startsWith('/subscriptions/')));
   if (unsettled !== undefined) {
@@ -1376,10 +1393,10 @@ async function clearMovedAlerts(
     const to = wanted.get(alert.name.toLowerCase());
     return to === undefined || sameScopes(alert.scopes, to) ? [] : [{ ...alert, to }];
   });
-  if (moved.length === 0) return;
+  if (moved.length === 0) return [];
   const howMany = moved.length === 1 ? 'a log alert' : `${String(moved.length)} log alerts`;
   steps.terminal.say(
-    `This run moves ${howMany} to another workspace. Azure can't move an alert: it refuses partway through the deployment ("Scope can not be updated"), after a clean what-if, and leaves the run half done. So each must be deleted first; this same run then creates it again, reading its new workspace, a few minutes later:`,
+    `This run moves ${howMany} to another workspace. Azure can't move an alert: it refuses partway through the deployment ("Scope can not be updated"), after a clean what-if, and leaves the run half done. So each must be deleted first; this same run then creates it again, reading its new workspace, a few minutes later. If you then answer no at the what-if, or the deployment fails, they stay deleted until ${part} runs again:`,
   );
   for (const alert of moved) {
     steps.terminal.say(`  ${alert.name}: from ${workspaceNames(alert.scopes)} to ${workspaceNames(alert.to)}`);
@@ -1390,19 +1407,24 @@ async function clearMovedAlerts(
       `Nothing was deployed, and nothing deleted. To delete them yourself, run:\n${commands}\nthen run node deploy/azure/deploy.ts ${part} again, which creates them.`,
     );
   }
+  const deleted: string[] = [];
   for (const alert of moved) {
     const done = steps.az.run(['resource', 'delete', '--ids', alert.id]);
     if (done.status !== 0) {
+      const gone = deleted.length === 0 ? '' : ` ${notBack(deleted, part)}`;
       throw new Error(
-        `Azure didn't delete ${alert.name}, so nothing was deployed. Run node deploy/azure/deploy.ts ${part} again: it asks about any still to delete. Azure said:\n${done.stderr.trim()}`,
+        `Azure didn't delete ${alert.name}, so nothing was deployed.${gone} Run node deploy/azure/deploy.ts ${part} again: it asks about any still to delete. Azure said:\n${done.stderr.trim()}`,
       );
     }
     steps.terminal.say(`Deleted ${alert.name}.`);
+    deleted.push(alert.name);
   }
-  steps.terminal.say(
-    `Until this run's deployment succeeds, ${moved.length === 1 ? 'that alert is' : 'those alerts are'} gone: answering no at the what-if leaves them so until ${part} runs again.`,
-  );
+  return deleted;
 }
+
+/** The closing word on alerts a run deleted and didn't create again. */
+const notBack = (names: readonly string[], part: Deployment): string =>
+  `These alerts were deleted and are not back: ${names.join(', ')}. Run node deploy/azure/deploy.ts ${part} again to create them.`;
 
 /** A secret as the vault lists it: its name, and its current version's URL (never its value). */
 interface Listed {
