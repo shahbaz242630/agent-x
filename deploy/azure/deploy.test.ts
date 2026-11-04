@@ -541,8 +541,10 @@ interface AzAnswers {
   readonly deadMen?: boolean | 'unreadable';
   /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
   readonly limit?: 'applied' | 'waiting' | 'stays' | 'refused' | 'unreadable';
-  /** What the server list answers: the servers, or a failure. */
+  /** What the server list answers: the servers (by default one, named), or a failure. */
   readonly servers?: readonly unknown[] | 'unreadable';
+  /** The server's max_connections as Azure shows it: by default the load size's 100. */
+  readonly connectionLimit?: string;
   /** What `az bicep version` prints. */
   readonly bicep?: string;
   /** The key vaults the resource group holds. */
@@ -677,7 +679,7 @@ class RecordingAz implements Az {
       const { servers } = this.options;
       return servers === 'unreadable'
         ? { status: 1, stdout: '', stderr: 'ERROR: ResourceGroupNotFound' }
-        : json(servers ?? []);
+        : json(servers ?? [{ name: 'psql-agentx-stg-abcdef' }]);
     }
     if (limit === 'unreadable') return { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway' };
     if (args[2] === 'restart') {
@@ -686,7 +688,7 @@ class RecordingAz implements Az {
       return json({});
     }
     const waiting = limit !== 'applied' && !this.#limitApplied;
-    return json({ value: '100', isConfigPendingRestart: limit === 'stays' || waiting });
+    return json({ value: this.options.connectionLimit ?? '100', isConfigPendingRestart: limit === 'stays' || waiting });
   }
 
   interactive(args: readonly string[], values: Readonly<Record<string, string>>): number | null {
@@ -1704,6 +1706,44 @@ describe('deploy apps', () => {
     expect(refused.az.deployment).toBeUndefined();
     // Nothing is asked for a refused image: the hosts come after.
     expect(refused.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+  });
+
+  it("sends nothing for a load run when the live database allows fewer connections than the load size's, waits on a restart, or can't be read (4D2e D12)", async () => {
+    const next =
+      'Run node deploy/azure/deploy.ts foundation --load-size first (it restarts the server), then apps --load-run again. Nothing was deployed.';
+    const loadRun = (options: AzAnswers) =>
+      run(['apps', '--load-run'], { answers, images: recordingImages(), az: new RecordingAz(options) });
+    const small = await loadRun({ connectionLimit: '50' });
+    expect(small.error).toMatchObject({
+      message: `The database allows 50 connections, but the load run is counted against 100: the API would be refused connections. ${next}`,
+    });
+    expect(small.az.deployment).toBeUndefined();
+    const asked = small.az.calls.find((call) => call.args[2] === 'parameter');
+    expect(asked?.args).toEqual(
+      expect.arrayContaining(['--server-name', 'psql-agentx-stg-abcdef', '--name', 'max_connections']),
+    );
+    const waiting = await loadRun({ limit: 'stays' });
+    expect(waiting.error).toMatchObject({
+      message: `The database allows 100 connections, and a change of it waits on a restart, but the load run is counted against 100: the API would be refused connections. ${next}`,
+    });
+    for (const options of [{ limit: 'unreadable' }, { servers: [] }, { servers: 'unreadable' }] as const) {
+      const unread = await loadRun(options);
+      expect({ options, message: (unread.error as Error | undefined)?.message }).toEqual({
+        options,
+        message: expect.stringMatching(
+          /^The database's connection limit couldn't be read \([\s\S]+\), and the load run is counted against 100\. Run node/,
+        ) as unknown,
+      });
+      expect(unread.az.deployment).toBeUndefined();
+    }
+    // A plain apps reads no limit: staging's own is the policy's to count.
+    const plain = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ connectionLimit: '50' }),
+    });
+    expect(plain.status).toBe(0);
+    expect(plain.az.calls.some((call) => call.args[2] === 'parameter')).toBe(false);
   });
 
   it("says the load test's jobs are still there after a plain apps, which never removes them", async () => {
