@@ -49,6 +49,7 @@ param jobsStoppedAlertName string
 @description('Whether something always runs here, so the rules that fire on lines missing can be on.')
 param alwaysOn bool
 param anchorStoreAlertName string
+param recordsFillingAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -634,6 +635,50 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// An organisation's records filling (partner S170): its contacts or sign-in
+// resets past half of what their list reads, or a hold clearing reading over
+// eight thousand of one kind (`identity.records_filling`). Nothing is broken
+// yet, so SEV-2, our lowest: a list past its limit stops working, and a busy
+// organisation's clearing gets slower. The line repeats with each add or
+// clearing, so it is stateful: one notice, resolved after a quiet window.
+resource recordsFillingAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: recordsFillingAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Records: an organisation\'s records filling'
+    description: 'SEV-2. An organisation\'s contacts or sign-in resets passed half of what their list reads, or clearing a hold read over eight thousand of one kind of record (identity.records_filling): nothing is broken yet, but a list past its limit stops working. Runbook: Incident-Response-Playbook.md section S.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "identity.records_filling" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

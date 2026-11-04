@@ -291,6 +291,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     jobsStoppedAlertName: 'alert-agentx-${short}-jobs-stopped'
     alwaysOn: alwaysOn
     anchorStoreAlertName: 'alert-agentx-${short}-anchor-store'
+    recordsFillingAlertName: 'alert-agentx-${short}-records-filling'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [

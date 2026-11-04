@@ -290,6 +290,7 @@ const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
 const ANCHOR_STORE_ALERT = named(/^alert-agentx-.+-anchor-store$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
+const RECORDS_FILLING_ALERT = named(/^alert-agentx-.+-records-filling$/);
 const ANCHOR_STOPPED_ALERT = named(/^alert-agentx-.+-anchor-stopped$/);
 const JOBS_STOPPED_ALERT = named(/^alert-agentx-.+-jobs-stopped$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
@@ -554,6 +555,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-platform-full',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-store',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-records-filling',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-stopped',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-jobs-stopped',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
@@ -2081,15 +2083,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to R.
+    // The playbook's sections run from A to S.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
       properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
       expect(properties(alert).description).not.toBe(before);
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('R')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('S')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('S')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('T')))).toEqual(['alert-runbook']);
     // The log cap's own section (T1c): section D is about dependencies.
     for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
       const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
@@ -3061,6 +3063,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // Its runbook is the playbook's section N.
     expect(String(at(staging.predictedResources.find(HOLDINGS_CHECK_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section N\.$/,
+    );
+  });
+
+  it("records-filling-alert: no alert on an organisation's records filling, or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(RECORDS_FILLING_ALERT))).toEqual(['records-filling-alert']);
+    for (const change of [
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "identity.records_full" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).says) == "identity.records_filling" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "identity.records_filling" | summarize Events = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(RECORDS_FILLING_ALERT, change))).toEqual(['records-filling-alert']);
+    }
+    expect(brokenRules(changed(RECORDS_FILLING_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'records-filling-alert',
+    ]);
+    // SEV-2, stateful: nothing is broken yet, and the line repeats with each add or clearing.
+    const built = staging.predictedResources.find(RECORDS_FILLING_ALERT);
+    expect([at(built?.properties, 'severity'), at(built?.properties, 'autoMitigate')]).toEqual([2, true]);
+    // Its runbook is the playbook's section S.
+    expect(String(at(built?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section S\.$/,
     );
   });
 

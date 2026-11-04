@@ -67,6 +67,7 @@ export type RuleId =
   | 'platform-full-alert'
   | 'anchor-store-alert'
   | 'integrity-runs-alert'
+  | 'records-filling-alert'
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
@@ -330,6 +331,12 @@ const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "han
  */
 const INTEGRITY_RUN_FAILED_LINES =
   'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed")';
+
+/**
+ * An organisation's records past what a list reads well, or a hold clearing reading thousands of one kind
+ * (`identity.records_filling`, partner S170): nothing breaks yet, but a list past its limit stops working.
+ */
+const RECORDS_FILLING_LINES = 'where tostring(parse_json(Log).event) == "identity.records_filling"';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -2550,7 +2557,7 @@ const alertRules: Check = (snapshot, expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-R]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-S]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -3110,6 +3117,38 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
     }
   }
 };
+
+/**
+ * An enabled alert on the workspace fires on any one of these lines, watching every window and firing on the first:
+ * the shape of the five checks above, for the alerts added since. Those five stay as written while open pull
+ * requests change the lines around them.
+ */
+const anyLineAlert =
+  (rule: RuleId, lines: string, what: string): Check =>
+  (snapshot, _expected, add) => {
+    for (const environment of ofType(snapshot, TYPES.environment)) {
+      const alerted = workspaceAlerted(
+        snapshot,
+        'any',
+        (criterion, alert) =>
+          queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [lines], 'count()') &&
+          totals(criterion) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === 0 &&
+          watchesEveryWindow(alert, criterion),
+      );
+      if (!alerted) {
+        add({
+          rule,
+          resource: environment.name,
+          message: `needs an enabled alert on this deployment's workspace that fires on any ${what} line, watching every window and firing on the first`,
+        });
+      }
+    }
+  };
+
+/** An enabled alert on the workspace fires on any organisation's records filling (partner S170). */
+const recordsFillingAlert = anyLineAlert('records-filling-alert', RECORDS_FILLING_LINES, 'identity.records_filling');
 
 /**
  * An enabled, stateless SEV-1 alert on the workspace fires when the owner role
@@ -4181,6 +4220,7 @@ const CHECKS: readonly Check[] = [
   platformFullAlert,
   anchorStoreAlert,
   integrityRunsAlert,
+  recordsFillingAlert,
   deadManAlerts,
   agentCancelsAlert,
   agentCancelCapAlert,
