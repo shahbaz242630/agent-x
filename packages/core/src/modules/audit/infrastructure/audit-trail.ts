@@ -571,7 +571,7 @@ function detailsObject(text: unknown): Readonly<Record<string, unknown>> | undef
 }
 
 /** What the chain sealed for a stored event, from its own columns, or nothing if one can't be read. */
-function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content'] | undefined {
+export function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content'] | undefined {
   const { actor_type: actorType, actor_id: actorId, action, subject_type: subjectType, subject_id: subjectId } = row;
   const { subject_version: subjectVersion, details } = row;
   if (![actorType, actorId, action, subjectType, subjectId, details].every(isText)) return undefined;
@@ -591,7 +591,7 @@ const HEAD_COLUMNS = sql`h.org_id is not null as has_head, h.seq as head_seq, h.
   h.mac_key_version as head_mac_key_version, past.past_head`;
 
 /** An event's own columns (`e`), as wholeEvent and wholeEntry judge them. */
-const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
+export const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type,
   e.subject_id, e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
   e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms`;
 

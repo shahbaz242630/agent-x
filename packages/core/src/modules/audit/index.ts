@@ -18,6 +18,7 @@ export {
   type AuditSubjectKey,
 } from './domain/event.ts';
 export { actorEventsSince } from './infrastructure/actor-counts.ts';
+export { chainRowsAlone, type ChainRowsPage, type StoredColumns, type StoredRow } from './infrastructure/chain-rows.ts';
 export {
   type AuditTrail,
   type AuditTransaction,
