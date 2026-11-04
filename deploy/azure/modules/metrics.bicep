@@ -161,8 +161,9 @@ var measures = [
   }
   {
     name: 'agentx-measure-job-gaps'
-    displayName: 'Measure: longest gap between job pulses, an hour'
-    query: '${lines} | where Event == "jobs.pulse" | sort by TimeGenerated asc | extend GapMinutes = (TimeGenerated - prev(TimeGenerated)) / 1m | summarize Pulses = count(), LongestGapMinutes = max(GapMinutes) by Hour = bin(TimeGenerated, 1h) | order by Hour desc'
+    displayName: 'Measure: longest gap between job pulses, an hour, by process'
+    // Each copy of the API pulses on its own, so a gap is read only between one process's pulses, never across two.
+    query: '${lines} | where Event == "jobs.pulse" | extend Process = coalesce(ContainerAppName, JobName), Replica = tostring(ContainerGroupName) | sort by Process asc, Replica asc, TimeGenerated asc | extend GapMinutes = iff(prev(Process) == Process and prev(Replica) == Replica, (TimeGenerated - prev(TimeGenerated)) / 1m, real(null)) | summarize Pulses = count(), LongestGapMinutes = max(GapMinutes) by Process, Replica, Hour = bin(TimeGenerated, 1h) | order by Hour desc, Process asc, Replica asc'
   }
 ]
 
