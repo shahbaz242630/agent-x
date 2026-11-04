@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
-import { type Anchor, signAnchor, signPass, signProgress } from './anchor.ts';
+import { type Anchor, type Progress, signAnchor, signPass, signProgress } from './anchor.ts';
 import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 import type { Chain } from './chain.ts';
 
@@ -64,7 +64,7 @@ const signedFile = (signing: typeof keys, name: string, ...lines: readonly (Anch
   ]);
 const fileOf = (name: string, ...lines: readonly (Anchor | string)[]): Buffer => signedFile(keys, name, ...lines);
 
-const lineOf = (anchor: Anchor, k = 'a'): string =>
+const lineOf = (anchor: Anchor | Progress, k = 'a'): string =>
   JSON.stringify({
     k,
     chain: anchor.chain,
@@ -72,6 +72,7 @@ const lineOf = (anchor: Anchor, k = 'a'): string =>
     hash: anchor.hash.toString('hex'),
     mk: anchor.macKeyVersion,
     at: anchor.at.toISOString(),
+    ...('began' in anchor ? { b: anchor.began.toISOString() } : {}),
     kv: anchor.keyVersion,
     sig: anchor.signature.toString('base64'),
   });
@@ -1983,8 +1984,41 @@ describe('finished full passes, kept beside the anchors (4D2e E7)', () => {
 });
 
 describe('the place a pass under way has reached, kept beside the passes (4D2e E7 review)', () => {
-  const placeAt = (chain: Chain, seq: bigint, at = START): Anchor =>
-    signProgress(keys, chain, { seq, hash: Buffer.alloc(32, Number(seq)), macKeyVersion: 2 }, at, 1);
+  const placeAt = (chain: Chain, seq: bigint, at = START, began = at): Progress =>
+    signProgress(keys, chain, { seq, hash: Buffer.alloc(32, Number(seq)), macKeyVersion: 2 }, { at, began }, 1);
+
+  it("keeps the latest pass's place, and of that pass the furthest, however the files are read", async () => {
+    const older = placeAt(CHAIN, 90n, START, START);
+    const furtherSame = placeAt(CHAIN, 50n, START, new Date(START.getTime() + MINUTE));
+    const nearerSame = placeAt(CHAIN, 30n, START, new Date(START.getTime() + MINUTE));
+    for (const order of [
+      [older, furtherSame, nearerSame],
+      [nearerSame, furtherSame, older],
+    ]) {
+      const fake = createFakeWriteOnceStore();
+      order.forEach((line, index) => {
+        fake.files.set(nameOf('deltas', index), fileOf(nameOf('deltas', index), lineOf(line, 'u')));
+      });
+      const { log } = logOver(fake);
+      await log.read();
+      expect(log.lastProgress(CHAIN)?.seq).toBe(50n);
+    }
+  });
+
+  it("SEC-DB-11 a place whose pass's start was changed fails its signature", async () => {
+    const place = placeAt(CHAIN, 40n);
+    const changed = JSON.stringify({
+      ...(JSON.parse(lineOf(place, 'u')) as object),
+      b: new Date(START.getTime() + MINUTE).toISOString(),
+    });
+    const missing = JSON.stringify({ ...(JSON.parse(lineOf(place, 'u')) as object), b: undefined });
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(nameOf('deltas', 0), fileOf(nameOf('deltas', 0), changed, missing));
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'signature', lines: 2 })]);
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+  });
 
   it('writes a place as a signed `u` line, a restart reads it back, and a later finished pass overtakes it', async () => {
     const fake = createFakeWriteOnceStore();

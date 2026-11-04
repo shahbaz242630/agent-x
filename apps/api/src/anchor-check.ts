@@ -846,6 +846,13 @@ export function createAnchorCheck({
     sayLate();
   };
 
+  /**
+   * Where the last process left off: the newest file in the store at this process's first whole read, taken before this
+   * process writes any, so the rotation's first look back sees the whole outage (4D2e E7).
+   */
+  let leftOffAt: Date | undefined;
+  let leftOffTaken = false;
+
   /** What the store holds that this process hasn't read, and every organisation in it as seen. Never throws. */
   const readStore = async (from: AnchorLog, signal: AbortSignal | undefined): Promise<void> => {
     try {
@@ -853,6 +860,10 @@ export function createAnchorCheck({
     } catch (error) {
       if (error instanceof Stopped) return;
       from.readFailed(error);
+    }
+    if (!leftOffTaken && from.state() === 'read') {
+      leftOffTaken = true;
+      leftOffAt = from.lastFileAt();
     }
     for (const orgId of from.organisations()) remember(orgId);
   };
@@ -923,7 +934,7 @@ export function createAnchorCheck({
           logger,
           epoch: durable?.epoch,
           lateAfterMs: reachWithinMs,
-          lastRanAt: () => durable?.lastFileAt(),
+          lastRanAt: () => leftOffAt,
           sleeps,
           bounded: async (work, signal) => {
             // Within the lanes' share, as a turn: never a hand-off's connection.

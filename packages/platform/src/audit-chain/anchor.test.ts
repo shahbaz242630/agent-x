@@ -116,12 +116,34 @@ describe('a finished full pass (4D2e E7)', () => {
 
   it("keeps each chain's place under way until its pass finishes, signed under a label of its own", () => {
     const record = createMemoryPassRecord();
-    const place = signProgress(keys, PLATFORM, POINT, AT, 1);
+    const place = signProgress(keys, PLATFORM, POINT, { at: AT, began: AT }, 1);
     record.keepProgress(place);
     expect(record.lastProgress(PLATFORM)).toBe(place);
     expect(place.signature).not.toEqual(signPass(keys, PLATFORM, POINT, AT, 1).signature);
     expect(place.signature).not.toEqual(signAnchor(keys, PLATFORM, POINT, AT, 1).signature);
     record.keepPass(signPass(keys, PLATFORM, POINT, AT));
     expect(record.lastProgress(PLATFORM)).toBeUndefined();
+  });
+
+  it('signs when its pass began as well as since when one was owed', () => {
+    const publicKey = keys.describe().find((key) => key.purpose === 'audit-anchor')?.versions[0]?.publicKey;
+    if (publicKey === undefined) throw new Error('The anchor key has no public half');
+    const outsiders = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: publicKey }, format: 'jwk' });
+    const began = new Date(AT.getTime() + 1000);
+    const place = signProgress(keys, PLATFORM, POINT, { at: AT, began }, 1);
+    const fields = ['1', 'platform', '7', POINT.hash, '3', AT.toISOString()] as const;
+
+    expect(place.began).toBe(began);
+    expect(
+      verify(
+        null,
+        encodeMessage(['audit-anchor-progress', ...fields, began.toISOString()]),
+        outsiders,
+        place.signature,
+      ),
+    ).toBe(true);
+    expect(
+      verify(null, encodeMessage(['audit-anchor-progress', ...fields, AT.toISOString()]), outsiders, place.signature),
+    ).toBe(false);
   });
 });

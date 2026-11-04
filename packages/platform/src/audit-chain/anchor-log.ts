@@ -32,10 +32,11 @@
 // is the alarm, so it can't hide later files. Every chain in the store counts as
 // seen, so an organisation taken off the list and the record is still missed.
 //
-// A chain's finished full pass is a line of its own (`k:"p"`, 4D2e E7), and so is the place a pass under way has
-// reached (`k:"u"`), each signed under its own label: the newest of each kept, written with what moved and in every
-// snapshot, so a restart goes on with the chains passed longest ago, and from where a pass had got to. A place reached
-// is dropped once its chain's pass finishes after it.
+// A chain's finished full pass is a line of its own (`k:"p"`, 4D2e E7, its time when that pass began), and so is the
+// place a pass under way has reached (`k:"u"`, with when its pass began, `b`, and since when one was owed), each signed
+// under its own label: the newest of each kept, written with what moved and in every snapshot, so a restart goes on with
+// the chains passed longest ago, and from where a pass had got to. A place reached is dropped once a pass that began at
+// or after its own has finished.
 //
 // Signed lines stand, and the highest place wins, so they count as they are read. A chain
 // this process holds moves on at once, even if the read then fails, or the file turns out
@@ -64,6 +65,7 @@ import {
   anchorMessage,
   passMessage,
   type PassRecord,
+  type Progress,
   progressMessage,
 } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
@@ -129,9 +131,6 @@ type LineKind = 'a' | SideKind;
 type SideKind = 'p' | 'u';
 const SIDE_KINDS: readonly SideKind[] = ['p', 'u'];
 
-/** What each kind's signature covers. */
-const MESSAGE_OF = { a: anchorMessage, p: passMessage, u: progressMessage } as const;
-
 const isLineKind = (kind: unknown): kind is LineKind => kind === 'a' || kind === 'p' || kind === 'u';
 
 type Kind = 'deltas' | 'snapshots';
@@ -183,7 +182,7 @@ interface Unsent {
   readonly name: string;
   readonly bytes: Buffer;
   readonly lines: readonly Anchor[];
-  readonly sides: readonly (readonly [SideKind, Anchor])[];
+  readonly sides: readonly (readonly [SideKind, Anchor | Progress])[];
 }
 
 const tooManySpoiled = (spoiled: number): string =>
@@ -194,7 +193,7 @@ const countedDown = (ms: number): string => String(LAST_MS - ms).padStart(13, '0
 /** The time a file's name counts down from, as a time a person can look for in the store's own logs. */
 const whenNamed = (countdown: string): string => new Date(LAST_MS - Number(countdown)).toISOString();
 
-const lineOf = (anchor: Anchor, k: LineKind): string =>
+const lineOf = (anchor: Anchor | Progress, k: LineKind): string =>
   JSON.stringify({
     k,
     chain: anchor.chain,
@@ -202,9 +201,35 @@ const lineOf = (anchor: Anchor, k: LineKind): string =>
     hash: anchor.hash.toString('hex'),
     mk: anchor.macKeyVersion,
     at: anchor.at.toISOString(),
+    ...('began' in anchor ? { b: anchor.began.toISOString() } : {}),
     kv: anchor.keyVersion,
     sig: anchor.signature.toString('base64'),
   });
+
+/** A time as a line writes it, or nothing if it isn't one exactly. */
+const timeIn = (value: unknown): Date | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const when = new Date(value);
+  return Number.isNaN(when.getTime()) || when.toISOString() !== value ? undefined : when;
+};
+
+/** A parsed line of a kind, if it is one in every field, and the message its signature must cover. */
+function signedLineOf(
+  kind: LineKind,
+  fields: Record<string, unknown>,
+  epoch: number,
+): { readonly line: Anchor | Progress; readonly message: Message } | undefined {
+  const anchor = anchorFrom(fields);
+  if (anchor === undefined) return undefined;
+  if (kind === 'a') return { line: anchor, message: anchorMessage(anchor.chain, anchor, anchor.at, epoch) };
+  if (kind === 'p') return { line: anchor, message: passMessage(anchor.chain, anchor, anchor.at, epoch) };
+  const began = timeIn(fields.b);
+  if (began === undefined) return undefined;
+  return {
+    line: { ...anchor, began },
+    message: progressMessage(anchor.chain, anchor, anchor.at, epoch, began),
+  };
+}
 
 const isCount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -215,9 +240,9 @@ function anchorFrom(line: Record<string, unknown>): Anchor | undefined {
   if (typeof chain !== 'string' || !CHAIN.test(chain)) return undefined;
   if (typeof seq !== 'string' || !SEQ.test(seq)) return undefined;
   if (typeof hash !== 'string' || !HASH.test(hash)) return undefined;
-  if (!isCount(mk) || !isCount(kv) || typeof at !== 'string' || typeof sig !== 'string') return undefined;
-  const when = new Date(at);
-  if (Number.isNaN(when.getTime()) || when.toISOString() !== at) return undefined;
+  if (!isCount(mk) || !isCount(kv) || typeof sig !== 'string') return undefined;
+  const when = timeIn(at);
+  if (when === undefined) return undefined;
   return {
     chain,
     seq: BigInt(seq),
@@ -301,7 +326,7 @@ async function* linesIn(bytes: Buffer, opened: { bytes: number }): AsyncGenerato
 async function readFile(
   keys: KeyProvider,
   { bytes, name, epoch, mostBytes }: { bytes: Buffer; name: string; epoch: number; mostBytes: number },
-  keep: (anchor: Anchor, kind: LineKind) => void,
+  keep: (anchor: Anchor | Progress, kind: LineKind) => void,
 ) {
   const opened = { bytes: 0 };
   let bad = 0;
@@ -311,15 +336,15 @@ async function readFile(
     const kind = kindOf(fields);
     if (LATER_KINDS.has(kind)) return;
     const lineKind = isLineKind(kind) ? kind : undefined;
-    const line = lineKind === undefined ? undefined : anchorFrom(fields as Record<string, unknown>);
+    const read = lineKind === undefined ? undefined : signedLineOf(lineKind, fields as Record<string, unknown>, epoch);
     if (
       lineKind === undefined ||
-      line === undefined ||
-      !isSigned(keys, line.keyVersion, MESSAGE_OF[lineKind](line.chain, line, line.at, epoch), line.signature)
+      read === undefined ||
+      !isSigned(keys, read.line.keyVersion, read.message, read.line.signature)
     ) {
       bad += 1;
     } else if (opened.bytes <= mostBytes) {
-      keep(line, lineKind);
+      keep(read.line, lineKind);
     }
   };
   let last: unknown;
@@ -376,14 +401,14 @@ export function createAnchorLog({
   // What has moved since it was last written: one line a chain at most, however long the store stays away.
   const pending = new Map<string, Anchor>();
   // Each chain's newest line of each side kind, and those not written yet, the same way.
-  const sides = { p: new Map<string, Anchor>(), u: new Map<string, Anchor>() };
-  const pendingSides = { p: new Map<string, Anchor>(), u: new Map<string, Anchor>() };
+  const sides = { p: new Map<string, Anchor>(), u: new Map<string, Progress>() };
+  const pendingSides = { p: new Map<string, Anchor>(), u: new Map<string, Progress>() };
   /** How many lines this process holds, against what it can: anchors and the side lines alike. */
   const linesHeld = (): number => anchors.size + sides.p.size + sides.u.size;
-  /** A place reached that its chain's pass has finished after, which nothing goes on from. */
-  const overtaken = (line: Anchor): boolean => {
+  /** A place reached by a pass no later than the chain's last finished one: nothing goes on from it. */
+  const overtaken = (line: Progress): boolean => {
     const pass = sides.p.get(line.chain);
-    return pass !== undefined && pass.at >= line.at;
+    return pass !== undefined && pass.at >= line.began;
   };
   let unsent: Unsent | undefined;
 
@@ -443,7 +468,8 @@ export function createAnchorLog({
     try {
       file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line, lineKind) => {
         if (lineKind === 'a') staged(stage, line, kind, fileAt);
-        else sideLine(lineKind, stage, line, kind, fileAt);
+        else if ('began' in line) placeLine(stage, line, kind, fileAt);
+        else passLine(stage, line, kind, fileAt);
       });
     } catch (error) {
       if (error instanceof BeyondMemory) throw error;
@@ -494,15 +520,29 @@ export function createAnchorLog({
     if ((linesHeld() + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
   };
 
-  /**
-   * A side line as it is read: the newest of its kind kept, at once, as it moves nothing a check compares with. Counted
-   * against memory with the rest.
-   */
-  const sideLine = (side: SideKind, stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
-    const kept = sides[side].get(line.chain);
-    if (kept !== undefined && kept.at >= line.at) return;
-    sides[side].set(line.chain, line);
+  /** Whether what's held and what this read staged are past what this process can hold. */
+  const pastMemory = (stage: Map<string, Anchor>, kind: Kind, fileAt: string): void => {
     if ((linesHeld() + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
+  };
+
+  /** A finished pass as it is read: the latest begun kept, at once, as it moves nothing a check compares with. */
+  const passLine = (stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
+    const kept = sides.p.get(line.chain);
+    if (kept !== undefined && kept.at >= line.at) return;
+    sides.p.set(line.chain, line);
+    pastMemory(stage, kind, fileAt);
+  };
+
+  /** A place reached as it is read: the latest pass's, and of that pass the furthest, kept at once. */
+  const placeLine = (stage: Map<string, Anchor>, line: Progress, kind: Kind, fileAt: string): void => {
+    const kept = sides.u.get(line.chain);
+    if (
+      kept !== undefined &&
+      (kept.began > line.began || (kept.began.getTime() === line.began.getTime() && kept.seq >= line.seq))
+    )
+      return;
+    sides.u.set(line.chain, line);
+    pastMemory(stage, kind, fileAt);
   };
 
   /**
@@ -639,7 +679,7 @@ export function createAnchorLog({
     const lines = kind === 'snapshots' ? [...anchors.values()] : [...pending.values()];
     const sideLines = SIDE_KINDS.flatMap((side) =>
       [...(kind === 'snapshots' ? sides : pendingSides)[side].values()]
-        .filter((line) => kind === 'deltas' || side === 'p' || !overtaken(line))
+        .filter((line) => kind === 'deltas' || !('began' in line) || !overtaken(line))
         .map((line) => [side, line] as const),
     );
     const count = lines.length + sideLines.length;
@@ -713,7 +753,7 @@ export function createAnchorLog({
       const line = sides.u.get(chainName(chain));
       return line === undefined || overtaken(line) ? undefined : line;
     },
-    keepProgress(line: Anchor) {
+    keepProgress(line: Progress) {
       sides.u.set(line.chain, line);
       pendingSides.u.set(line.chain, line);
     },

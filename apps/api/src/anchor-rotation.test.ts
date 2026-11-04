@@ -451,7 +451,8 @@ describe('the full pass (decision 3)', () => {
     made.anchor(orgId, 4000n);
     await made.run([orgId]);
     const pass = made.passes.lastPass(chainOf(orgId));
-    expect(pass).toEqual(signPass(keys, chainOf(orgId), target, made.clock.now(), 4));
+    // Dated when the pass began, three runs and a second ago: every event to its target was read since then.
+    expect(pass).toEqual(signPass(keys, chainOf(orgId), target, AT, 4));
     expect(made.lines('audit.anchor_rotation_done').at(-1)).toMatchObject({ finished: 1 });
   });
 
@@ -625,10 +626,11 @@ describe('the full pass (decision 3)', () => {
       expect(after.lines('audit.full_pass_overdue')).toHaveLength(1);
     });
 
-    it('never passed: late 7 days from when this process started', async () => {
+    it('never passed: late 7 days from when it was first owed one, a place line in the store', async () => {
       const made = rotating();
       const orgId = orgInSlot(1);
       made.anchor(orgId, 1728n * 4000n);
+      await made.run([orgId]);
       made.clock.advanceBy(PASS_LATE_MS - 1);
       await made.run([orgId]);
       expect(made.lines('audit.full_pass_overdue')).toEqual([]);
@@ -763,7 +765,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     made.anchor(orgId, 3456n);
     await made.run([orgId]);
     expect(made.passes.lastProgress(chainOf(orgId))).toEqual(
-      signProgress(keys, chainOf(orgId), point(2n), made.clock.now(), 2),
+      signProgress(keys, chainOf(orgId), point(2n), { at: AT, began: AT }, 2),
     );
     made.answer.pass = (_orgId, _cursor, to) => Promise.resolve({ ok: true, ...to, to: to.seq });
     await made.run([orgId]);
@@ -800,7 +802,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     expect(verified.length).toBe(runs - 1);
   });
 
-  it("a place whose event no longer holds what was signed starts that chain's pass again, and says so", async () => {
+  it("SEC-DB-11 a place whose event no longer holds what was signed is tampering: the alarm and the hold, and the chain's pass starts again", async () => {
     const before = rotating();
     const orgId = orgInSlot(1);
     before.anchor(orgId, 3456n);
@@ -810,21 +812,112 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     const after = rotating({ after: before });
     after.answer.walk = () => Promise.resolve({ ok: false, problem: { reason: 'hash', seq: 4n } });
     await after.run([orgId]);
+    expect(after.failed).toEqual([[orgId, 'pass', { reason: 'hash', seq: 4n }]]);
     expect(after.calls).toEqual([
       { check: 'walk', orgId, to: 4n, most: 1 },
       { check: 'pass', orgId, from: 0n, to: 3456n, most: 2 },
     ]);
-    expect(after.lines('audit.full_pass_restarted')).toEqual([
-      expect.objectContaining({ level: 'warn', orgId, seq: '4', reason: 'hash' }),
+  });
+
+  it("a place whose pass began more than 7 days ago isn't gone on from: that pass starts again, its lateness kept", async () => {
+    const before = rotating();
+    const orgId = orgInSlot(1);
+    before.anchor(orgId, 1728n * 4000n);
+    await before.run([orgId]);
+    const owed = before.passes.lastProgress(chainOf(orgId))?.at;
+
+    const after = rotating({ started: new Date(AT.getTime() + PASS_LATE_MS + 1), after: before });
+    await after.run([orgId]);
+    // No check of the old place: read from the start again.
+    expect(after.calls.map((call) => (call.check === 'pass' ? call.from : -1n))).toEqual([0n, 2000n]);
+    const place = after.passes.lastProgress(chainOf(orgId));
+    expect(place?.began).toEqual(after.clock.now());
+    // Owed since the first pass began: never passed, it is late all the same.
+    expect(place?.at).toEqual(owed);
+    expect(after.lines('audit.full_pass_overdue')).toHaveLength(1);
+  });
+
+  it('a step that fails leaves a place at the start: the next round reads the chain whole', async () => {
+    const made = rotating();
+    const orgId = orgInSlot(1);
+    made.anchor(orgId, 3456n);
+    await made.run([orgId]);
+    await made.run([orgId]);
+    made.answer.pass = () => Promise.resolve({ ok: false, problem: { reason: 'mac', seq: 5n } });
+    await made.run([orgId]);
+    expect(made.passes.lastProgress(chainOf(orgId))?.seq).toBe(0n);
+
+    // A restart: nothing goes on from below what failed.
+    const after = rotating({ after: made });
+    await after.run([orgId]);
+    expect(after.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 3456n, most: 2 }]);
+  });
+
+  describe("a chain whose read didn't come back is tried first next run, not a round later", () => {
+    const three = (made: ReturnType<typeof rotating>) => {
+      const orgs = [orgInSlot(1), orgInSlot(2), orgInSlot(3)];
+      for (const orgId of orgs) made.anchor(orgId, 1728n * 2n);
+      return orgs;
+    };
+
+    it('its first step', async () => {
+      const made = rotating();
+      const orgs = three(made);
+      const [first = ''] = orgs;
+      let failures = 1;
+      made.answer.pass = (orgId, cursor, to, most) =>
+        orgId === first && failures-- > 0
+          ? Promise.reject(new Error('away'))
+          : Promise.resolve(stepTo(cursor.seq + BigInt(most), to.seq));
+      await made.run(orgs);
+      made.calls.length = 0;
+      await made.run(orgs);
+      expect(made.calls[0]).toMatchObject({ orgId: first, from: 0n });
+    });
+
+    it('its resume check after a restart', async () => {
+      const before = rotating();
+      const orgs = three(before);
+      const [first = ''] = orgs;
+      // The first gets under way, with its place in the store.
+      await before.run(orgs);
+      const after = rotating({ after: before });
+      let failures = 1;
+      after.answer.walk = (orgId) =>
+        orgId === first && failures-- > 0 ? Promise.reject(new Error('away')) : Promise.resolve(stepTo(1n, 1n));
+      await after.run(orgs);
+      expect(after.missed).toEqual([[first, 'pass', expect.any(Error) as Error]]);
+      after.calls.length = 0;
+      await after.run(orgs);
+      expect(after.calls[0]).toMatchObject({ check: 'walk', orgId: first });
+      expect(after.calls[1]).toMatchObject({ check: 'pass', orgId: first, from: 6n });
+    });
+  });
+
+  it('a chain never reached is owed a pass from when it was first seen anchored, across restarts', async () => {
+    const before = rotating();
+    const [reached, waiting] = [orgInSlot(1), orgInSlot(2)];
+    before.anchor(reached, 1728n * 4000n);
+    before.anchor(waiting, 1728n * 4000n);
+    await before.run([reached, waiting]);
+    expect(new Set(before.calls.map(({ orgId }) => orgId))).toEqual(new Set([reached]));
+    expect(before.passes.lastProgress(chainOf(waiting))).toMatchObject({ seq: 0n, at: AT });
+
+    const after = rotating({ started: new Date(AT.getTime() + 6.9 * DAY), after: before });
+    await after.run([reached, waiting]);
+    expect(after.lines('audit.full_pass_overdue')).toEqual([]);
+    after.clock.advanceBy(0.1 * DAY);
+    await after.run([reached, waiting]);
+    expect(after.lines('audit.full_pass_overdue')).toEqual([
+      expect.objectContaining({ organisations: 2, firstFew: [reached, waiting] }),
     ]);
-    expect(after.failed).toEqual([]);
   });
 
   it("a place past the chain's anchor, or a check of it that doesn't come back, goes on safely", async () => {
     const before = rotating();
     const orgId = orgInSlot(1);
     before.anchor(orgId, 3456n);
-    before.passes.keepProgress(signProgress(keys, chainOf(orgId), point(5000n), AT));
+    before.passes.keepProgress(signProgress(keys, chainOf(orgId), point(5000n), { at: AT, began: AT }));
     await before.run([orgId]);
     expect(before.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 3456n, most: 2 }]);
 

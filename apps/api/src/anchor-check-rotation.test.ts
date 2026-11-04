@@ -326,4 +326,52 @@ describe('the rotation in a run (4D2e E7)', () => {
     await check.run();
     expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
   });
+
+  it('takes where the last process left off before this one writes: a snapshot written mid-run moves nothing back', async () => {
+    const inOutage = orgInSlot(80);
+    const slow = orgInSlot(5);
+    const { organizations, held, hanging } = directory([inOutage, slow]);
+    hanging.add(slow);
+    const { reads, calls } = rotationReads();
+    const fake = createFakeWriteOnceStore();
+    const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
+    const logOn = () =>
+      createAnchorLog({
+        store: fake.store,
+        keys,
+        logger: testLogger(new LogCapture()),
+        now: () => clock.now(),
+        epoch: 3,
+        alertAfterMs: 120_000,
+      });
+    const last = logOn();
+    await last.read();
+    last.keep(
+      signAnchor(
+        keys,
+        { kind: 'organisation', orgId: inOutage },
+        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
+        clock.now(),
+        3,
+      ),
+    );
+    await last.flush();
+    clock.advanceBy(3 * 3_600_000);
+    const restarted = logOn();
+    const { check } = checking(organizations, {
+      rotation: reads,
+      durable: restarted,
+      anchors: restarted,
+      clock,
+      writeEveryMs: 5,
+    });
+    const run = check.run();
+    // While the slow organisation's check is held, this process writes a file of its own, dated now.
+    const before = fake.files.size;
+    await vi.waitUntil(() => fake.files.size > before, { timeout: 4000, interval: 2 });
+    expect(restarted.lastFileAt()).toEqual(clock.now());
+    held.get(slow)?.();
+    await run;
+    expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
+  });
 });

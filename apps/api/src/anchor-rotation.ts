@@ -17,14 +17,21 @@
 //   as it stood when the pass reached it, the chains passed longest ago first. A
 //   run's share is the sum of every chain's length over 1,728 runs (six days at five
 //   minutes), at most 150 seconds of it, 2,000 events a step.
-//   Each chain's pass finished is a signed line in the store, and so is the place a pass
-//   under way has reached, written each run it moves: a restart goes on with the oldest,
-//   from where it had got to once the event there still holds the hash and MAC version
-//   signed (else that chain's pass starts again from its first event, and says so). A
-//   chain not passed for 7 days is `audit.full_pass_overdue`, judged after the run's
-//   steps. Where the environment sleeps (staging), the 7 days count from this process's
-//   start at the earliest, so a woken process raises nothing for the time it slept;
-//   in production a restart never moves them.
+//   Each chain's pass finished is a signed line in the store, dated when that pass began
+//   (so it says when its first event was read), and so is the place a pass under way has
+//   reached, written each run it moves, with when its pass began and since when one was
+//   owed. A restart goes on with the oldest, from where it had got to, once the event there
+//   still holds the hash and MAC version signed; one that doesn't is tampering, the alarm
+//   and the hold, and that chain's pass starts again. A place whose pass began more than
+//   7 days ago isn't gone on from: the pass starts again. A step that fails leaves a place
+//   at the start, so the next round reads the chain whole. A chain whose read doesn't come
+//   back is tried first next run, ahead of the round's order.
+//   A chain not passed for 7 days is `audit.full_pass_overdue`, judged after the run's
+//   steps: from its last pass's start, or for one never passed, from when it was first
+//   owed one (its first place line, written when it is first seen anchored). Where the
+//   environment sleeps (staging), the 7 days count from this process's start at the
+//   earliest, so a woken process raises nothing for the time it slept; in production a
+//   restart never moves them.
 //
 // A chain found failing is the integrity alarm and its hold, as any check's. A read
 // that doesn't come back is said, and that organisation waits for next run while the
@@ -43,6 +50,7 @@ import {
   type CheckedPoint,
   OLD_EDIT_DAYS,
   type PassRecord,
+  type Progress,
   signPass,
   signProgress,
 } from '@agentx/platform/audit-chain';
@@ -155,10 +163,12 @@ interface Day {
   countedTo: bigint;
 }
 
-/** A chain's full pass under way: read to `cursor`, going to `target`. */
+/** A chain's full pass under way: read to `cursor`, going to `target`, begun at `began`, owed since `owed` (ms). */
 interface Passing {
   readonly cursor: CheckedPoint;
   readonly target: Anchor;
+  readonly began: number;
+  readonly owed: number;
 }
 
 /** A run's pass: whether it has begun a new round, and the chains it tried whose reads didn't come back. */
@@ -195,6 +205,8 @@ export function createRotation({
   let order: readonly string[] = [];
   let next = 0;
   const underWay = new Map<string, Passing>();
+  // Chains whose first read of a pass didn't come back: first next run, ahead of the round's order.
+  const retryFirst = new Set<string>();
   // What the run did, for its line.
   let counted = 0n;
   let walked = 0;
@@ -297,9 +309,14 @@ export function createRotation({
       .sort((one, other) => one.at - other.at)
       .map(({ orgId }) => orgId);
 
-  /** The next chain to pass: one under way first, then by the round's order; a new round at most once a run. */
+  /**
+   * The next chain to pass: one whose read didn't come back first, then one under way, then by the round's order; a new
+   * round at most once a run.
+   */
   const nextChain = (listed: readonly string[], listedNow: ReadonlySet<string>, run: PassRun): string | undefined => {
-    for (const orgId of underWay.keys()) if (listedNow.has(orgId) && !run.tried.has(orgId)) return orgId;
+    for (const orgId of [...retryFirst, ...underWay.keys()]) {
+      if (listedNow.has(orgId) && !run.tried.has(orgId)) return orgId;
+    }
     for (;;) {
       const orgId = order[next];
       if (orgId === undefined) {
@@ -314,43 +331,71 @@ export function createRotation({
     }
   };
 
+  /** Since when a chain has owed a pass, for one starting at `now`: for one never passed, its first place line's. */
+  const owedFor = (orgId: string, now: number): number =>
+    passes.lastPass(chainOf(orgId)) === undefined ? (passes.lastProgress(chainOf(orgId))?.at.getTime() ?? now) : now;
+
+  /** A place line: where a pass has got to, when it began and since when one was owed. */
+  const placeLine = (orgId: string, cursor: CheckedPoint, began: number, owed: number): Progress =>
+    signProgress(keys, chainOf(orgId), cursor, { at: new Date(owed), began: new Date(began) }, epoch);
+
+  /** Starts the chain's next pass from its first event, the store told so: nothing goes on from a place before. */
+  const startAgain = (orgId: string, target: Anchor): Passing => {
+    const now = clock.now().getTime();
+    const owed = owedFor(orgId, now);
+    passes.keepProgress(placeLine(orgId, CHAIN_START, now, owed));
+    return { cursor: CHAIN_START, target, began: now, owed };
+  };
+
   /**
    * Where a chain's pass goes from: this process's place, or the store's from a process before, once the event there
-   * still holds what was signed; otherwise its first event. MISSED where that read didn't come back.
+   * still holds what was signed and its pass began within the last 7 days; otherwise its first event. An event that no
+   * longer holds what was signed is tampering. MISSED where that read didn't come back.
    */
   const passFrom = async (orgId: string, signal: AbortSignal): Promise<Passing | typeof MISSED | undefined> => {
     const held = underWay.get(orgId);
     if (held !== undefined) return held;
     const target = anchors.latest(chainOf(orgId));
     if (target === undefined) return undefined;
+    const now = clock.now().getTime();
     const line = passes.lastProgress(chainOf(orgId));
-    if (line === undefined || line.seq === 0n || line.seq > target.seq) return { cursor: CHAIN_START, target };
+    if (line === undefined || line.seq === 0n || line.seq > target.seq || now - line.began.getTime() > PASS_LATE_MS) {
+      return { cursor: CHAIN_START, target, began: now, owed: owedFor(orgId, now) };
+    }
     const still = await read(orgId, 'pass', () => checks.walkLast(orgId, line, 1), signal);
     if (still === MISSED) return MISSED;
     const { seq, hash, macKeyVersion } = line;
-    if (still.ok) return { cursor: { seq, hash, macKeyVersion }, target };
-    logger.child({ orgId }).warn('audit.full_pass_restarted', { seq, reason: still.problem.reason });
-    return { cursor: CHAIN_START, target };
+    if (still.ok)
+      return { cursor: { seq, hash, macKeyVersion }, target, began: line.began.getTime(), owed: line.at.getTime() };
+    // Nothing honest seals an event again: only a rebase moves a chain's anchors, and it clears the place too (E11).
+    await failed(orgId, 'pass', still.problem);
+    return startAgain(orgId, target);
   };
 
   /** One step of a chain's pass, or its pass finished: what of the budget it took, or MISSED. */
-  const passStep = async (orgId: string, { cursor, target }: Passing, budget: bigint, signal: AbortSignal) => {
+  const passStep = async (orgId: string, passing: Passing, budget: bigint, signal: AbortSignal) => {
+    const { cursor, target } = passing;
     if (cursor.seq < target.seq) {
       const most = smallest(PASS_STEP, budget, target.seq - cursor.seq);
       const step = await read(orgId, 'pass', () => checks.passStep(orgId, cursor, target, Number(most)), signal);
       if (step === MISSED) return MISSED;
+      retryFirst.delete(orgId);
       if (!step.ok) {
         underWay.delete(orgId);
         await failed(orgId, 'pass', step.problem);
+        // The next round reads it whole: nothing goes on from a place below what failed.
+        startAgain(orgId, target);
         return 0n;
       }
       const { seq, hash, macKeyVersion } = step;
-      underWay.set(orgId, { cursor: { seq, hash, macKeyVersion }, target });
+      underWay.set(orgId, { ...passing, cursor: { seq, hash, macKeyVersion } });
       passed += seq - cursor.seq;
       if (seq < target.seq) return seq - cursor.seq;
     }
     underWay.delete(orgId);
-    passes.keepPass(signPass(keys, chainOf(orgId), target, clock.now(), epoch));
+    retryFirst.delete(orgId);
+    // Dated when the pass began: every event to its target has been read since then.
+    passes.keepPass(signPass(keys, chainOf(orgId), target, new Date(passing.began), epoch));
     finished += 1;
     return target.seq - cursor.seq;
   };
@@ -359,8 +404,17 @@ export function createRotation({
   const keepPlaces = (moved: ReadonlySet<string>): void => {
     for (const orgId of moved) {
       const place = underWay.get(orgId);
-      if (place !== undefined)
-        passes.keepProgress(signProgress(keys, chainOf(orgId), place.cursor, clock.now(), epoch));
+      if (place !== undefined) passes.keepProgress(placeLine(orgId, place.cursor, place.began, place.owed));
+    }
+  };
+
+  /** Every listed chain anchored and never owed a pass yet: owed one from now, in the store, so no restart moves it. */
+  const markOwed = (listed: readonly string[]): void => {
+    const now = clock.now().getTime();
+    for (const orgId of listed) {
+      const chain = chainOf(orgId);
+      if (anchors.latest(chain) === undefined || passes.lastPass(chain) !== undefined) continue;
+      if (passes.lastProgress(chain) === undefined) passes.keepProgress(placeLine(orgId, CHAIN_START, now, now));
     }
   };
 
@@ -389,6 +443,8 @@ export function createRotation({
         const took = from === undefined || from === MISSED ? MISSED : await passStep(orgId, from, left, slices.signal);
         if (took === MISSED) {
           run.tried.add(orgId);
+          // Not under way yet, so not first next run by that: it must not wait for the round to come round.
+          if (from !== undefined && !underWay.has(orgId)) retryFirst.add(orgId);
           continue;
         }
         moved.add(orgId);
@@ -416,8 +472,8 @@ export function createRotation({
     const latePasses = listed.filter((orgId) => {
       const chain = chainOf(orgId);
       if (anchors.latest(chain) === undefined) return false;
-      const last = passes.lastPass(chain)?.at.getTime();
-      // A restart never moves a pass's 7 days on, but where the environment sleeps.
+      // From the last pass's start, or since one was first owed; a restart never moves it, but where the environment sleeps.
+      const last = (passes.lastPass(chain)?.at ?? passes.lastProgress(chain)?.at)?.getTime();
       const since = sleeps ? Math.max(last ?? 0, started) : (last ?? started);
       return now - since >= PASS_LATE_MS;
     });
@@ -444,6 +500,7 @@ export function createRotation({
         await takeDays(listedNow, signal);
         const daysMs = Math.round(performance.now() - began);
         const { budget, slicesMs } = await takePass(listed, listedNow, signal);
+        markOwed(listed);
         sayLate(listed);
         logger.info('audit.anchor_rotation_done', {
           due,
