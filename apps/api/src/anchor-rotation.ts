@@ -72,19 +72,19 @@ export const SLOTS = 288;
 const SLOT_MS = DAY_MS / SLOTS;
 
 /** How many of a chain's last events its day walks (decision 2b). */
-export const WALKED = 1000;
+const WALKED = 1000;
 
 /** How many events one statement of a day's count counts. */
 export const COUNTED_AT_ONCE = 1_000_000n;
 
 /** The runs a full pass is spread over: six days at the default five minutes. */
-export const PASS_RUNS = 1728n;
+const PASS_RUNS = 1728n;
 
 /** How long a run's pass steps may take. */
 export const PASS_WITHIN_MS = 150_000;
 
 /** The most events one pass step reads, in one statement. */
-export const PASS_STEP = 2000n;
+const PASS_STEP = 2000n;
 
 /** How long a chain may go without a finished pass. */
 export const PASS_LATE_MS = OLD_EDIT_DAYS * DAY_MS;
