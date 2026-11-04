@@ -216,8 +216,9 @@ describe('where each mark comes from', () => {
       ['hand_off_sweep', beforeTxB.hand_off_sweep?.due_at, 2n],
       ['payment_check', beforeTxB.payment_check?.due_at, 2n],
     ]);
+    // Failed, it is watched for a week (D7): the checks' mark stays, as it stood; the rest go.
     await rediscoveryOf(w.org).run();
-    expect(await jobsMarked(w)).toEqual([]);
+    expect(await marksOf(w)).toEqual({ payment_check: before.payment_check });
     expect(Object.keys(before).toSorted()).toEqual(JOBS);
   });
 });

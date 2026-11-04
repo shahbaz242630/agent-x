@@ -322,9 +322,10 @@ describe('a message names a payment: it is checked with the bank, ahead of its t
     await handoffOf(w).run();
     const { rail, asked } = counted(w);
     const checks = checksOf(w, rail);
-    // Its own turn taken, then past 15 minutes: only a message could bring it forward now.
+    // Its own turn taken, then past 15 minutes its day's turn too: only a message could bring it forward now.
     await checks.run();
     clock.advanceBy(16 * STEP);
+    await checks.run();
     asked.length = 0;
     // A message routed to the organisation, naming another consent of its.
     await database.as('admin').query(
