@@ -92,7 +92,7 @@ type OrgWorkTables = DirectoryTables &
   ActivityExportTables;
 
 /** How many organisations a job takes from its marks a run: its list stays this size however many have work. */
-const ORG_WORK_MOST = 1_000;
+export const ORG_WORK_MOST = 1_000;
 
 /** How many organisations' marks one statement settles: their reads first, then the page's one write. */
 const SETTLE_PAGE = 100;
@@ -258,26 +258,40 @@ export function withOrgWork<Job extends { run(signal?: AbortSignal): Promise<unk
 /**
  * A job's list from its marks, and at its first run and once every `everyMs` after, every organisation `all` lists
  * besides: for a visit that also checks what no mark can point at (a record changed past the app, which no trigger
- * sees). Those the marks gave first, so a pass never holds up work that is due; each once.
+ * sees). Those the marks gave first, so a pass never holds up work that is due; each once. Marks that can't be read
+ * are said (`org_work.marks_unread`) and never hold up a whole pass that is due: the run goes on with it alone; with
+ * none due, the run fails as its list did, and its own line says so.
  */
 export function withWholePasses(
-  marked: MarkedOrganisations,
+  marked: Pick<MarkedOrganisations, 'list'>,
   {
+    job,
     everyMs,
     all,
+    logger,
     clock = systemClock,
   }: {
+    /** The job's name, for its line. */
+    readonly job: string;
     readonly everyMs: number;
     readonly all: () => Promise<readonly string[]>;
+    readonly logger: Logger;
     /** The job's own. */
     readonly clock?: Clock;
   },
 ): () => Promise<readonly string[]> {
   let lastWhole: number | undefined;
   return async () => {
-    const listed = await marked.list();
     const at = clock.now().getTime();
-    if (lastWhole !== undefined && at - lastWhole < everyMs) return listed;
+    const wholeDue = lastWhole === undefined || at - lastWhole >= everyMs;
+    let listed: readonly string[] = [];
+    try {
+      listed = await marked.list();
+    } catch (error) {
+      logger.error('org_work.marks_unread', { job, err: error });
+      if (!wholeDue) throw error;
+    }
+    if (!wholeDue) return listed;
     const whole = await all();
     lastWhole = at;
     return [...new Set([...listed, ...whole])];

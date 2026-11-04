@@ -6,7 +6,7 @@
 // Nothing here starts until start-jobs.ts starts it: the anchor check's order
 // (it must start before the hand-off's first run) is this list's.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
-import { backgroundDownloadsDue } from '@agentx/core/modules/activity';
+import { backgroundDownloadsDue, SEAL_GRACE_MS } from '@agentx/core/modules/activity';
 import {
   createAuditTrail,
   holdHistoryDue,
@@ -14,7 +14,7 @@ import {
   HOLDS_WAITING_EVERY_MS,
   pollHoldsWaiting,
 } from '@agentx/core/modules/audit';
-import { listedOrganizations } from '@agentx/core/modules/directory';
+import { listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
 import { mandateExpiryDue } from '@agentx/core/modules/mandates';
 import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
@@ -27,15 +27,15 @@ import {
 } from '@agentx/core/modules/identity';
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
-import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
+import { type Clock, HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { CHAIN_START, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
+import type { Logger } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 
 import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
 import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
-import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
 import { anchorLogOf } from './anchor-store.ts';
@@ -62,10 +62,12 @@ import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import {
   createOrgWorkRediscovery,
   markedOrganisations,
+  ORG_WORK_MOST,
   ORG_WORK_REDISCOVERY_EVERY_MS,
   withOrgWork,
   withWholePasses,
 } from './org-work.ts';
+import { eachDay, owedPasses, rotation } from './org-passes.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
@@ -86,8 +88,9 @@ const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
 /**
  * The idempotency keys' retention sweep (B1e-3): at each start, then an hour
- * after each sweep ends; a batch of 1,000 keys at a time, at most 100 batches
- * an organisation a run, each within the anchor check's deadline.
+ * after each run ends, each organisation once a UTC day (4D2e D11); a batch of
+ * 1,000 keys at a time, at most 100 batches an organisation a run, each within
+ * the anchor check's deadline.
  */
 const SWEEP = { batch: 1_000, mostBatches: 100 } as const;
 const SWEEP_EVERY_MS = HOUR_MS;
@@ -98,6 +101,44 @@ const SWEEP_EVERY_MS = HOUR_MS;
  * each a batch of 1,000 rows at a time, at most 100 batches a run.
  */
 const ROW_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
+
+/** How often the holdings check visits every organisation, not only those with marks: its fourth run (decision 2). */
+const HOLDINGS_WHOLE_PASS_EVERY_MS = HOUR_MS;
+
+/** The seal check's rotation: twelve slots of its run's half hour, so each organisation once in 6 hours (decision 2). */
+const SEAL_CHECK_SLOTS = 12;
+
+/**
+ * The integrity passes that look in every organisation, an idle one less often, never left out (4D2e D11, Stage D's
+ * decision 2), each listing every one at its first run and visiting again next run any it didn't finish
+ * (org-passes.ts): the holdings check those with marks each run and every one hourly; the seal check a twelfth a run,
+ * each once in 6 hours; the activity seal every one once a UTC day from when yesterday can be sealed; the idempotency
+ * sweep every one once a UTC day.
+ */
+export function integrityPasses({
+  all,
+  marked,
+  logger,
+  clock = systemClock,
+}: {
+  readonly all: () => Promise<readonly string[]>;
+  /** The organisations with marks of any job. */
+  readonly marked: () => Promise<readonly string[]>;
+  readonly logger: Logger;
+  readonly clock?: Clock;
+}) {
+  return {
+    holdings: owedPasses(
+      withWholePasses(
+        { list: marked },
+        { job: 'holdings_check', everyMs: HOLDINGS_WHOLE_PASS_EVERY_MS, all, logger, clock },
+      ),
+    ),
+    sealCheck: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: ACTIVITY_SEAL_CHECK_EVERY_MS, clock })),
+    seal: owedPasses(eachDay({ all, startsAfterMs: SEAL_GRACE_MS, clock })),
+    sweep: owedPasses(eachDay({ all, clock })),
+  };
+}
 
 /** How often people with no kept name are looked up at the login service (decision 25, E10d-4): at the start, then hourly, so a run the login service failed is soon tried again. */
 const CONTACT_FILL_EVERY_MS = HOUR_MS;
@@ -178,8 +219,7 @@ export function eachProcessJobs({ keys, logger, database }: Booted, { recorder, 
 
 /**
  * The `jobs` side, made but not started. The hand-off and the payment checks
- * come back too, for /health; the zones' sealing, whose first pass comes before
- * a process at `all` answers.
+ * come back too, for /health.
  */
 export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
   const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch } = parts;
@@ -304,8 +344,11 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     ...marking,
   });
   const holdMarks = markedOrganisations({ job: 'hold_history', nextDue: holdHistoryDue, ...marking });
-  // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
-  const zoneSealing = createZoneSealing(organisationJob);
+  const passes = integrityPasses({
+    all: list,
+    marked: () => organisationsWithMarks(database, ORG_WORK_MOST),
+    logger,
+  });
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
   const fullServer = createFullServerWatch(config.audit.anchorSeconds * 3 * 1000, () => systemClock.now().getTime());
   const releaseDrift = createReleaseDriftWatch();
@@ -313,7 +356,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const outboundFetch = createOutboundFetch(config.outbound.allowedOrigins);
   const logged = { keys, ids: uuidV7Ids, logger };
   const removals = resetRemovalsFrom({
-    list: withWholePasses(resetMarks, { everyMs: FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS, all: list }),
+    list: withWholePasses(resetMarks, {
+      job: 'factor_resets',
+      everyMs: FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS,
+      all: list,
+      logger,
+    }),
     config,
     database,
     ...logged,
@@ -355,7 +403,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     job(
       'idempotency_sweep',
       createRetentionSweep({
-        list,
+        ...passes.sweep,
         sweep: (orgId, most) => sweepExpiredKeys(database, orgId, most),
         logger,
         deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
@@ -456,9 +504,13 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       HOLD_HISTORY_EVERY_MS,
       HOUR_MS,
     ),
-    job('zone_sealing', zoneSealing, ZONE_SEALING_EVERY_MS, HOUR_MS),
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
-    job('holdings_check', createHoldingsCheck(organisationJob), HOLDINGS_CHECK_EVERY_MS, LONG_MS),
+    job(
+      'holdings_check',
+      createHoldingsCheck({ ...organisationJob, ...passes.holdings }),
+      HOLDINGS_CHECK_EVERY_MS,
+      LONG_MS,
+    ),
     // Spend requests waiting for approval past their wait expired, their holdings released (Phase 2 D7).
     job(
       'request_expiry',
@@ -495,7 +547,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       HOUR_MS,
     ),
     // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6).
-    job('activity_seal', createActivitySeal(clocked), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
+    job('activity_seal', createActivitySeal({ ...clocked, ...passes.seal }), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
     // The activity log's background downloads built, a month a file (Phase 3 L5c).
     job(
       'background_downloads',
@@ -507,7 +559,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       },
     ),
     // Each sealed day digested again and held to its seal, a few a run (Phase 3 L6c).
-    job('activity_seal_check', createActivitySealCheck(organisationJob), ACTIVITY_SEAL_CHECK_EVERY_MS, LONG_MS),
+    job(
+      'activity_seal_check',
+      createActivitySealCheck({ ...organisationJob, ...passes.sealCheck }),
+      ACTIVITY_SEAL_CHECK_EVERY_MS,
+      LONG_MS,
+    ),
     // Every organisation's marks of work held to what its own rows say (4D2e D6).
     job(
       'org_work_rediscovery',
@@ -516,5 +573,5 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       LONG_MS,
     ),
   ];
-  return { jobs, handoff, paymentChecks, zoneSealing };
+  return { jobs, handoff, paymentChecks };
 }

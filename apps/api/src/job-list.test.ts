@@ -4,12 +4,13 @@
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { loadConfig } from '@agentx/platform/config';
 import { createLogger } from '@agentx/platform/observability';
-import { LogCapture } from '@agentx/testing';
+import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import type { Leadership } from './background.ts';
 import { type Booted, sharedParts } from './boot.ts';
-import { oneCopyJobs } from './job-list.ts';
+import { integrityPasses, oneCopyJobs } from './job-list.ts';
+import type { OwedPasses } from './org-passes.ts';
 
 const BASE = {
   AGENTX_ENV: 'test',
@@ -70,5 +71,73 @@ describe('the jobs side as a config makes it (4D2e D10)', () => {
 
   it('makes the same list with every job the config can leave off on', () => {
     expect(namesWith(EVERYTHING_ON)).toEqual(namesWith(BASE));
+  });
+});
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const ALL = Array.from({ length: 48 }, (_, at) => `0199d011-0000-7000-8000-${String(at).padStart(12, '0')}`);
+const MARKED = [ALL[0] ?? ''];
+
+const passesAt = (start: string) => {
+  const clock = new FixedClock(new Date(start));
+  const passes = integrityPasses({
+    all: () => Promise.resolve(ALL),
+    marked: () => Promise.resolve(MARKED),
+    logger: testLogger(),
+    clock,
+  });
+  return { clock, passes };
+};
+
+/** What the passes list, each organisation then finished. */
+const listedOnce = async (passes: OwedPasses) => {
+  const listed = await passes.list();
+  for (const orgId of listed) passes.done(orgId);
+  return listed;
+};
+
+describe('the integrity passes as the jobs side wires them, each bound (4D2e D11, decision 2)', () => {
+  it('the holdings check: the marked each run, every organisation hourly', async () => {
+    const { clock, passes } = passesAt('2026-11-04T10:00:00.000Z');
+    expect(await listedOnce(passes.holdings)).toEqual(ALL);
+    clock.advanceBy(HOUR - 1);
+    expect(await listedOnce(passes.holdings)).toEqual(MARKED);
+    clock.advanceBy(1);
+    expect(await listedOnce(passes.holdings)).toEqual(ALL);
+  });
+
+  it('the seal check: each organisation once in 6 hours, by half-hour slots', async () => {
+    const { clock, passes } = passesAt('2026-11-04T00:00:00.000Z');
+    expect(await listedOnce(passes.sealCheck)).toEqual(ALL);
+    const seen: string[] = [];
+    for (let run = 0; run < 12; run += 1) {
+      clock.advanceBy(30 * MINUTE);
+      seen.push(...(await listedOnce(passes.sealCheck)));
+    }
+    expect(seen.toSorted()).toEqual(ALL.toSorted());
+    // A slot is half an hour: a run a moment short of the next lists none.
+    clock.advanceBy(30 * MINUTE - 1);
+    expect(await listedOnce(passes.sealCheck)).toEqual([]);
+  });
+
+  it('the activity seal: every organisation once a UTC day, once yesterday can be sealed, at 00:15', async () => {
+    const { clock, passes } = passesAt('2026-11-04T00:10:00.000Z');
+    expect(await listedOnce(passes.seal)).toEqual(ALL);
+    clock.advanceBy(5 * MINUTE - 1);
+    expect(await listedOnce(passes.seal)).toEqual([]);
+    clock.advanceBy(1);
+    expect(await listedOnce(passes.seal)).toEqual(ALL);
+    clock.advanceBy(24 * HOUR - 1);
+    expect(await listedOnce(passes.seal)).toEqual([]);
+  });
+
+  it('the idempotency sweep: every organisation once a UTC day, from midnight', async () => {
+    const { clock, passes } = passesAt('2026-11-04T23:59:00.000Z');
+    expect(await listedOnce(passes.sweep)).toEqual(ALL);
+    clock.advanceBy(MINUTE - 1);
+    expect(await listedOnce(passes.sweep)).toEqual([]);
+    clock.advanceBy(1);
+    expect(await listedOnce(passes.sweep)).toEqual(ALL);
   });
 });

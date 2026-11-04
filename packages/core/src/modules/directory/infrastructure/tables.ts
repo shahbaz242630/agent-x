@@ -30,19 +30,22 @@ interface AgentKeysTable {
   org_id: string;
 }
 
-/** The work the marks follow so far. */
-export type OrgWorkJob =
-  | 'hand_off'
-  | 'hand_off_sweep'
-  | 'payment_check'
-  | 'request_expiry'
-  | 'mandate_expiry'
-  | 'request_voids'
-  | 'waiting_rejections'
-  | 'carry_rest'
-  | 'factor_removals'
-  | 'background_downloads'
-  | 'hold_history';
+/** The work the marks follow so far: 0077's CHECK on `job`, held to it by org-work.db.test.ts. */
+export const ORG_WORK_JOBS = [
+  'hand_off',
+  'hand_off_sweep',
+  'payment_check',
+  'request_expiry',
+  'mandate_expiry',
+  'request_voids',
+  'waiting_rejections',
+  'carry_rest',
+  'factor_removals',
+  'background_downloads',
+  'hold_history',
+] as const;
+
+export type OrgWorkJob = (typeof ORG_WORK_JOBS)[number];
 
 interface OrgWorkTable {
   org_id: string;

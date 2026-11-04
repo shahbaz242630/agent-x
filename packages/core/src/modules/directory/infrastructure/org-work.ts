@@ -12,7 +12,7 @@ import { limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, type QueryExecutorProvider, sql, type Transaction } from 'kysely';
 
 import { readAlone } from './read-alone.ts';
-import type { DirectoryTables, OrgWorkJob } from './tables.ts';
+import { type DirectoryTables, ORG_WORK_JOBS, type OrgWorkJob } from './tables.ts';
 
 export type { OrgWorkJob } from './tables.ts';
 
@@ -94,6 +94,33 @@ export function dueOrgWork(
       .limit(most)
       .execute(),
   );
+}
+
+/**
+ * The organisations with a mark of any job, whenever due: those with work, or work coming. Due soonest first, at most
+ * `most`, so a run's list never grows with the organisations. One statement, in a read of its own: each job's soonest
+ * `most` from the due index (org_work_due), then each organisation once by its soonest. Exact: an organisation among
+ * the soonest `most` by its soonest mark has fewer than `most` marks of that mark's job before it, each another
+ * organisation's that comes before it too, so that mark is among its job's soonest `most`.
+ */
+export async function organisationsWithMarks(db: Kysely<DirectoryTables>, most: number): Promise<string[]> {
+  const rows = await readAlone(db, async (tx) => (await organisationsWithMarksRead(most).execute(tx)).rows);
+  return rows.map(({ org_id }) => org_id);
+}
+
+/** organisationsWithMarks' statement, not run: its plan is the test's. */
+export function organisationsWithMarksRead(most: number) {
+  const eachJob = sql.join(
+    ORG_WORK_JOBS.map(
+      (job) =>
+        sql`(select org_id, due_at from directory.org_work where job = ${job} order by due_at, org_id limit ${most})`,
+    ),
+    sql` union all `,
+  );
+  return sql<{ org_id: string }>`
+    select org_id from (${eachJob}) soonest
+    group by org_id order by min(due_at), org_id limit ${most}
+  `;
 }
 
 /**

@@ -1,6 +1,6 @@
 // What one look at an organisation calls for. The reads are statements of their own, each at its own moment, so
 // a write committing between them must never read as a miss, and a mark made while looking must never be cleared.
-import { FixedClock } from '@agentx/testing';
+import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import { settleReadsGate } from './handoff.ts';
@@ -152,6 +152,8 @@ describe('a job on its marks (4D2e D10)', () => {
     const { marks } = stubMarks(['b', 'm']);
     let wholes = 0;
     const list = withWholePasses(marks, {
+      job: 'factor_resets',
+      logger: testLogger(),
       everyMs: 6 * 3_600_000,
       all: () => {
         wholes += 1;
@@ -173,6 +175,8 @@ describe('a job on its marks (4D2e D10)', () => {
     const { marks } = stubMarks(['m']);
     let fails = true;
     const list = withWholePasses(marks, {
+      job: 'factor_resets',
+      logger: testLogger(),
       everyMs: 3_600_000,
       all: () => (fails ? Promise.reject(new Error('no directory')) : Promise.resolve(['a'])),
       clock,
@@ -181,5 +185,34 @@ describe('a job on its marks (4D2e D10)', () => {
     await expect(list()).rejects.toThrow('no directory');
     fails = false;
     expect(await list()).toEqual(['m', 'a']);
+  });
+
+  it('4D2e D11 marks it cannot read are said, and never hold up a whole pass that is due; with none due, the run fails', async () => {
+    const clock = new FixedClock(NOW);
+    const capture = new LogCapture();
+    let fails = true;
+    const list = withWholePasses(
+      { list: () => (fails ? Promise.reject(new Error('marks unread')) : Promise.resolve(['m'])) },
+      {
+        job: 'holdings_check',
+        everyMs: 3_600_000,
+        all: () => Promise.resolve(['a', 'b']),
+        logger: testLogger(capture),
+        clock,
+      },
+    );
+    const unread = () => capture.lines().filter((line) => line.event === 'org_work.marks_unread');
+
+    expect(await list()).toEqual(['a', 'b']);
+    expect(unread()).toEqual([expect.objectContaining({ level: 'error', job: 'holdings_check' })]);
+    clock.advanceBy(3_600_000 - 1);
+    await expect(list()).rejects.toThrow('marks unread');
+    expect(unread()).toHaveLength(2);
+    // The whole pass came at its time, so the next is an hour after it, not after the failure.
+    clock.advanceBy(1);
+    expect(await list()).toEqual(['a', 'b']);
+    fails = false;
+    clock.advanceBy(1);
+    expect(await list()).toEqual(['m']);
   });
 });

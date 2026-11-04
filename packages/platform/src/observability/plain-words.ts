@@ -63,6 +63,11 @@ export const PLAIN_WORDS = {
     broke: 'A mark lost since the last check stays lost until the next, and its work waits until then.',
     next: 'It runs again within the hour. If this repeats, check the database.',
   },
+  'org_work.marks_unread': {
+    happened: 'A background job could not read which organisations its marks say have work.',
+    broke: 'Those organisations wait for its next run, or for its pass over every organisation, which goes on anyway.',
+    next: 'It reads them again next run. If this repeats, check the database.',
+  },
   'org_work.settle_failed': {
     happened: 'After a background job visited an organisation, its mark of work to do could not be brought up to date.',
     broke: 'Nothing: the mark stands as it was, so that organisation is only visited again on the next run.',
@@ -88,16 +93,6 @@ export const PLAIN_WORDS = {
       'The list of organisations could not be read, so no waiting requests were carried to a new mandate version.',
     broke: 'Requests left to carry stay on the old version for now.',
     next: 'It is tried again in about 5 minutes. If it keeps failing, check the database.',
-  },
-  'agent_zones.run_failed': {
-    happened: "The list of organisations could not be read, so no agent's old month time zone was sealed.",
-    broke: 'An agent whose zone is still unsealed has its spend requests refused.',
-    next: 'It is tried again in about 15 minutes. If it keeps failing, check the database.',
-  },
-  'agent_zones.seal_failed': {
-    happened: "Sealing an organisation's old agent month time zones failed.",
-    broke: 'An agent of that organisation whose zone is still unsealed has its spend requests refused.',
-    next: 'It is tried again in about 15 minutes. If it keeps failing, a developer should read the error.',
   },
   'access_log.write_failed': {
     happened: "A request's activity-log row could not be saved.",
