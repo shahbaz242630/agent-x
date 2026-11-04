@@ -125,11 +125,7 @@ const ORGANISATION = 'organisation:';
 const LATER_KINDS: ReadonlySet<unknown> = new Set(['r']);
 
 /** A line's kind: an anchor, or a finished full pass. */
-type LineKind = 'a' | SideKind;
-
-/** The lines kept beside the anchors: a finished full pass, and a pass's place reached. */
-type SideKind = 'p' | 'u';
-const SIDE_KINDS: readonly SideKind[] = ['p', 'u'];
+type LineKind = 'a' | 'p' | 'u';
 
 const isLineKind = (kind: unknown): kind is LineKind => kind === 'a' || kind === 'p' || kind === 'u';
 
@@ -182,7 +178,9 @@ interface Unsent {
   readonly name: string;
   readonly bytes: Buffer;
   readonly lines: readonly Anchor[];
-  readonly sides: readonly (readonly [SideKind, Anchor | Progress])[];
+  /** The lines kept beside the anchors: finished full passes, and passes' places reached. */
+  readonly passes: readonly Anchor[];
+  readonly places: readonly Progress[];
 }
 
 const tooManySpoiled = (spoiled: number): string =>
@@ -205,6 +203,9 @@ const lineOf = (anchor: Anchor | Progress, k: LineKind): string =>
     kv: anchor.keyVersion,
     sig: anchor.signature.toString('base64'),
   });
+
+/** Whether a line read is a pass's place, which says when its pass began. */
+const isPlace = (line: Anchor | Progress): line is Progress => 'began' in line && line.began instanceof Date;
 
 /** A time as a line writes it, or nothing if it isn't one exactly. */
 const timeIn = (value: unknown): Date | undefined => {
@@ -468,7 +469,7 @@ export function createAnchorLog({
     try {
       file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line, lineKind) => {
         if (lineKind === 'a') staged(stage, line, kind, fileAt);
-        else if ('began' in line) placeLine(stage, line, kind, fileAt);
+        else if (isPlace(line)) placeLine(stage, line, kind, fileAt);
         else passLine(stage, line, kind, fileAt);
       });
     } catch (error) {
@@ -657,8 +658,8 @@ export function createAnchorLog({
         alarm('overwrite', { kind: file.kind });
         // They go again under a new name, unless a later line of the chain is waiting already.
         for (const line of file.lines) if (!pending.has(line.chain)) pending.set(line.chain, line);
-        for (const [side, line] of file.sides)
-          if (!pendingSides[side].has(line.chain)) pendingSides[side].set(line.chain, line);
+        for (const line of file.passes) if (!pendingSides.p.has(line.chain)) pendingSides.p.set(line.chain, line);
+        for (const line of file.places) if (!pendingSides.u.has(line.chain)) pendingSides.u.set(line.chain, line);
         unsent = undefined;
         return;
       }
@@ -668,7 +669,11 @@ export function createAnchorLog({
     else {
       snapshotFrom = countdownOf('snapshots', file.name);
     }
-    logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines.length, sides: file.sides.length });
+    logger.info('audit.anchors_written', {
+      kind: file.kind,
+      lines: file.lines.length,
+      sides: file.passes.length + file.places.length,
+    });
   };
 
   /** The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. */
@@ -677,12 +682,10 @@ export function createAnchorLog({
     const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
     const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
     const lines = kind === 'snapshots' ? [...anchors.values()] : [...pending.values()];
-    const sideLines = SIDE_KINDS.flatMap((side) =>
-      [...(kind === 'snapshots' ? sides : pendingSides)[side].values()]
-        .filter((line) => kind === 'deltas' || !('began' in line) || !overtaken(line))
-        .map((line) => [side, line] as const),
-    );
-    const count = lines.length + sideLines.length;
+    const from = kind === 'snapshots' ? sides : pendingSides;
+    const passLines = [...from.p.values()];
+    const placeLines = [...from.u.values()].filter((line) => kind === 'deltas' || !overtaken(line));
+    const count = lines.length + passLines.length + placeLines.length;
     const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
     const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, count));
     const closing = JSON.stringify({
@@ -696,7 +699,8 @@ export function createAnchorLog({
     const bytes = await gzippedLines(
       (function* lined() {
         for (const line of lines) yield `${lineOf(line, 'a')}\n`;
-        for (const [side, line] of sideLines) yield `${lineOf(line, side)}\n`;
+        for (const line of passLines) yield `${lineOf(line, 'p')}\n`;
+        for (const line of placeLines) yield `${lineOf(line, 'u')}\n`;
         yield `${closing}\n`;
       })(),
     );
@@ -707,9 +711,9 @@ export function createAnchorLog({
     }
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);
-    for (const [side, line] of sideLines)
-      if (pendingSides[side].get(line.chain) === line) pendingSides[side].delete(line.chain);
-    return { kind, name, bytes, lines, sides: sideLines };
+    for (const line of passLines) if (pendingSides.p.get(line.chain) === line) pendingSides.p.delete(line.chain);
+    for (const line of placeLines) if (pendingSides.u.get(line.chain) === line) pendingSides.u.delete(line.chain);
+    return { kind, name, bytes, lines, passes: passLines, places: placeLines };
   };
 
   const writeDue = async (): Promise<void> => {

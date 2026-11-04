@@ -374,4 +374,55 @@ describe('the rotation in a run (4D2e E7)', () => {
     await run;
     expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
   });
+
+  it("keeps the store's first look, though this process writes before the rotation's first run, a run later", async () => {
+    const inOutage = orgInSlot(80);
+    const { organizations } = directory([inOutage]);
+    let listFails = true;
+    const listing: OrganisationChains = {
+      ...organizations,
+      list: () => (listFails ? Promise.reject(new Error('the list is away')) : organizations.list()),
+    };
+    const { reads, calls } = rotationReads();
+    const fake = createFakeWriteOnceStore();
+    const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
+    const logOn = () =>
+      createAnchorLog({
+        store: fake.store,
+        keys,
+        logger: testLogger(new LogCapture()),
+        now: () => clock.now(),
+        epoch: 3,
+        alertAfterMs: 120_000,
+      });
+    const last = logOn();
+    await last.read();
+    last.keep(
+      signAnchor(
+        keys,
+        { kind: 'organisation', orgId: inOutage },
+        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
+        clock.now(),
+        3,
+      ),
+    );
+    await last.flush();
+    clock.advanceBy(3 * 3_600_000);
+    const restarted = logOn();
+    const { check } = checking(listing, {
+      chains: [{ chain: { kind: 'platform' }, verify: () => Promise.resolve(ok(5n)) }],
+      rotation: reads,
+      durable: restarted,
+      anchors: restarted,
+      clock,
+    });
+    // The first run: the list unread, so no rotation; the platform chain anchored and written, dated now.
+    await check.run();
+    expect(calls).toEqual([]);
+    expect(restarted.lastFileAt()).toEqual(clock.now());
+    listFails = false;
+    clock.advanceBy(300_000);
+    await check.run();
+    expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
+  });
 });

@@ -776,19 +776,20 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
   it('a restart goes on from the place the store holds, once the event there still holds it: no slower than unbroken', async () => {
     const steady = rotating();
     const orgId = orgInSlot(1);
-    steady.anchor(orgId, 1728n * 5n);
+    // 100 events, a share of 1 a run: 100 runs unbroken.
+    steady.anchor(orgId, 100n);
     let runs = 0;
-    // Bounded, so a pass that never finishes fails here rather than spinning: 1,728 runs unbroken.
-    while (steady.passes.lastPass(chainOf(orgId)) === undefined && runs < 2000) {
+    // Bounded, so a pass that never finishes fails here rather than spinning.
+    while (steady.passes.lastPass(chainOf(orgId)) === undefined && runs < 200) {
       await steady.run([orgId]);
       runs += 1;
     }
 
     let process = rotating();
-    process.anchor(orgId, 1728n * 5n);
+    process.anchor(orgId, 100n);
     let restarted = 0;
     const verified: Call[] = [];
-    while (process.passes.lastPass(chainOf(orgId)) === undefined && restarted < 4000) {
+    while (process.passes.lastPass(chainOf(orgId)) === undefined && restarted < 400) {
       await process.run([orgId]);
       restarted += 1;
       // A restart after every run: memory gone but the store's lines.
@@ -798,6 +799,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
         return Promise.resolve(stepTo(1n, 1n));
       };
     }
+    expect(runs).toBe(100);
     expect(restarted).toBe(runs);
     expect(verified.length).toBe(runs - 1);
   });
@@ -873,6 +875,31 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
       made.calls.length = 0;
       await made.run(orgs);
       expect(made.calls[0]).toMatchObject({ orgId: first, from: 0n });
+    });
+
+    it('and once its step has come back failing, it is not first again: the round goes on', async () => {
+      const made = rotating();
+      const orgs = three(made);
+      const [first = ''] = orgs;
+      let calls = 0;
+      made.answer.pass = (orgId, cursor, to, most) => {
+        if (orgId !== first) return Promise.resolve(stepTo(cursor.seq + BigInt(most), to.seq));
+        calls += 1;
+        return calls === 1
+          ? Promise.reject(new Error('away'))
+          : // On a later turn of the event loop, as a database answers: a chain retried without end fails the test, not hangs it.
+            new Promise<ChainStep>((resolve) =>
+              setImmediate(() => {
+                resolve({ ok: false, problem: { reason: 'mac', seq: 1n } });
+              }),
+            );
+      };
+      await made.run(orgs);
+      await made.run(orgs);
+      expect(made.failed).toEqual([[first, 'pass', { reason: 'mac', seq: 1n }]]);
+      made.calls.length = 0;
+      await made.run(orgs);
+      expect(made.calls[0]).toMatchObject({ orgId: orgs[1] });
     });
 
     it('its resume check after a restart', async () => {

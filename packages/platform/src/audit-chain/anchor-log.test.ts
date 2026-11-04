@@ -2005,6 +2005,21 @@ describe('the place a pass under way has reached, kept beside the passes (4D2e E
     }
   });
 
+  it('a place of the very pass that finished, begun at the same moment, is overtaken by it', async () => {
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(
+      nameOf('deltas', 0),
+      fileOf(
+        nameOf('deltas', 0),
+        lineOf(placeAt(CHAIN, 40n, START, START), 'u'),
+        lineOf(signPass(keys, CHAIN, { seq: 90n, hash: Buffer.alloc(32, 90), macKeyVersion: 2 }, START, 1), 'p'),
+      ),
+    );
+    const { log } = logOver(fake);
+    await log.read();
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+  });
+
   it("SEC-DB-11 a place whose pass's start was changed fails its signature", async () => {
     const place = placeAt(CHAIN, 40n);
     const changed = JSON.stringify({
