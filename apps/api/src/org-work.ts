@@ -92,9 +92,9 @@ export interface MarkedOrganisations {
   /** Those due by the job's clock, at most ORG_WORK_MOST, due longest first. */
   readonly list: () => Promise<readonly string[]>;
   /** One the run didn't finish: its mark settled due now, its rows unread, so the next run takes it. */
-  unfinished(orgId: string): void;
+  readonly unfinished: (orgId: string) => void;
   /** One whose turn ended on a reason its whole organisation's: settled by its rows, due no sooner than WAITING_AS_A_WHOLE_MS on. */
-  waitsAsAWhole(orgId: string): void;
+  readonly waitsAsAWhole: (orgId: string) => void;
   /** A time the job knows its next turn there is due: the mark is settled no later, whatever its rows say. */
   dueBy(orgId: string, at: Date): void;
   /** Each one listed since the last settling, its mark settled by what its rows say now; at a stop, none. */

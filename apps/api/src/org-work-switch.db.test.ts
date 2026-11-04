@@ -120,12 +120,8 @@ function switchedHandoff(
     createHandoff({
       list: handOffs.list,
       sweepList: sweeps.list,
-      unfinished: (orgId) => {
-        handOffs.unfinished(orgId);
-      },
-      waitsAsAWhole: (orgId) => {
-        handOffs.waitsAsAWhole(orgId);
-      },
+      unfinished: handOffs.unfinished,
+      waitsAsAWhole: handOffs.waitsAsAWhole,
       ...(runBudgetMs === undefined ? {} : { runBudgetMs }),
       database: db,
       outbox: createOutbox({ ids, clock }),
@@ -163,9 +159,7 @@ function switchedChecks({
     [checks],
     createPaymentChecks({
       list: checks.list,
-      unfinished: (orgId) => {
-        checks.unfinished(orgId);
-      },
+      unfinished: checks.unfinished,
       nextTurn: (orgId, at) => {
         checks.dueBy(orgId, at);
       },
@@ -374,6 +368,47 @@ describe('the hand-off follows its marks', () => {
 
     expect(await statusOf(w, request.id)).toBe('APPROVED');
     expect((await marksOf(w)).hand_off?.due_at.getTime()).toBe(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
+  });
+
+  it('held as a whole and stopped at the gate in one turn: it waits its minute, its rows unable to move', async () => {
+    const { w, acting } = await ready();
+    const requests = [await ask(acting, w, { amount: SMALL() }), await ask(acting, w, { amount: SMALL(5n) })];
+    const real = createRailHealth({ clock, logger: testLogger(capture) });
+    let entered = 0;
+    // Both taken at once in its lane: the first held, and the budget spent as it is; the second finds it spent.
+    const health: RailHealth = {
+      ...real,
+      enter: (orgId) => {
+        entered += 1;
+        if (entered > 1) return real.enter(orgId);
+        clock.advanceBy(RUN_BUDGET_MS);
+        return { hold: 'lane', outage: 0 };
+      },
+    };
+
+    await switchedHandoff(w, { health }).job.run();
+
+    expect(entered).toBe(2);
+    for (const { id } of requests) expect(await statusOf(w, id)).toBe('APPROVED');
+    expect((await marksOf(w)).hand_off?.due_at.getTime()).toBe(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
+  });
+
+  it('a whole organisation lifted: a run after that ends its turn on its own request settles by its rows again', async () => {
+    const { w, acting } = await ready();
+    // Waiting for its supplier's payee, a reason of its own, once the freeze is lifted.
+    await ask(acting, w, { amount: ALLOWED(), supplierId: w.suppliers[1] ?? '' });
+    const mandateId = await shared.mandateIdOf(w);
+    await shared.moved(w, mandateId, 'organization', 'pause');
+    const { job } = switchedHandoff(w);
+    await job.run();
+    await shared.moved(w, mandateId, 'organization', 'resume');
+    clock.advanceBy(WAITING_AS_A_WHOLE_MS);
+
+    await job.run();
+
+    expect(lines('handoff.waiting').map(({ why }) => why)).toEqual(['organization', 'payee']);
+    // Due now by its rows (Postgres's clock), not another minute on.
+    expect((await marksOf(w)).hand_off?.due_at.getTime()).toBeLessThan(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
   });
 
   it('takes at most as many as it may, due longest first', async () => {
