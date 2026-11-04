@@ -22,9 +22,10 @@
 // - every app's ingress is internal, and the environment routes one app to
 //   another by name inside it. The environment has a public IP, but an app is
 //   only ever public because a door below says so (G2e), never by accident
-// - the apps scale as the environment allows, within two limits: the API and
-//   Zitadel each hold something one replica's (a rate limit's counts in memory;
-//   Zitadel's projections and its ten database connections), and staging keeps
+// - the apps scale as the environment allows, within two limits: the API scales
+//   as its role (AGENTX_ROLE all, as here, holds the jobs: one copy; policy.ts),
+//   Zitadel holds something one replica's (its projections and its ten database
+//   connections), and staging keeps
 //   no replica at all while nothing runs (ADR-002), unless the operator deploys
 //   with `apps --keep-running` for a while
 // - manual trigger only: no *job* here runs on a clock or an event. The set-up
@@ -829,7 +830,10 @@ var apps = [
     // The API (Product-Documentation/API.md), as the app role and no other.
     workload: 'api'
     image: appImage
-    command: ['node', 'apps/api/src/main.ts']
+    // Its heap three quarters of its memory (policy.ts holds it between a half and
+    // three quarters): its rate limits' counters take up to about 92 MB, and
+    // Node's own default under 1 GiB is 560 MiB (4D2e D12, measured).
+    command: ['node', '--max-old-space-size=${loadRun ? '3072' : '768'}', 'apps/api/src/main.ts']
     args: []
     targetPort: 8080
     transport: 'auto'
@@ -847,9 +851,8 @@ var apps = [
     keepsDownloads: true
     // Keeps the audit chains' anchors (`anchorStoreSettings`).
     keepsAnchors: true
-    // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
-    // second replica would give every client two allowances. The worker, which
-    // holds no such count, is the part that scales in Phase 4.
+    // AGENTX_ROLE all (unset) holds the jobs and counts its rate limits as the
+    // only copy (4D2e D12): one. A split's `web` copies scale (D13).
     maxReplicas: 1
     // Longer than the API's own 25-second stop deadline (API.md), so the log's
     // held-back counts are still written.

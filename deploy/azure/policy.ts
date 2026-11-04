@@ -459,6 +459,9 @@ const HELD: Readonly<
   ),
 };
 
+/** The load size's max_connections (postgres.bicep, `measured`); `apps --load-run` reads the live server's against it (deploy.ts). */
+export const LOAD_SERVER_CONNECTIONS = 100;
+
 /**
  * The load test's run (D2c, PL-38; apps.bicep `loadRun`): staging's alone,
  * and all of it or none. Its three jobs run the load image, as the API's
@@ -482,7 +485,7 @@ const LOAD_RUN = {
   stagingPool: 10,
   // The larger server's max_connections (postgres.bicep, `measured`). The apps' snapshot can't show it: the foundation
   // sizes the server, and a plain foundation's numbers are what an apps run's snapshot holds.
-  serverConnections: 100,
+  serverConnections: LOAD_SERVER_CONNECTIONS,
   apiSettings: {
     AGENTX_RATE_LIMIT_PER_MINUTE: '50000',
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '50000',
@@ -3511,8 +3514,84 @@ function apiSettingsOf(app: PredictedResource): ReadonlyMap<string, unknown> | u
 /** The API's role, as its process reads it: `all` where none is set (settings.ts). */
 const roleIn = (settings: ReadonlyMap<string, unknown>): unknown => settings.get('AGENTX_ROLE') ?? 'all';
 
+/**
+ * A whole-number setting as a count: `unset` where it isn't given, nothing where it's given as anything but digits (a
+ * secret's reference carries no value), so a count that can't be read is said, never summed as NaN.
+ */
+function countIn(settings: ReadonlyMap<string, unknown>, name: string, unset?: number): number | undefined {
+  if (!settings.has(name)) return unset;
+  const value = settings.get(name);
+  return typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : undefined;
+}
+
 /** How many `web` copies the API counts its limits for: one where none is set (settings.ts). */
-const copiesIn = (settings: ReadonlyMap<string, unknown>): number => Number(settings.get('AGENTX_WEB_COPIES') ?? '1');
+const copiesIn = (settings: ReadonlyMap<string, unknown>): number | undefined =>
+  countIn(settings, 'AGENTX_WEB_COPIES', 1);
+
+/**
+ * The apps that may run the API, by workload: `api`, and the `jobs` app D13 adds. D13 must keep this list to the apps
+ * it makes: an API app nothing names could hold the jobs, or a pool nobody counted on.
+ */
+const API_APPS: readonly string[] = ['api', 'jobs'];
+
+/** A size as Container Apps writes one (`1Gi`, `512Mi`), in MiB; nothing for anything else. */
+function mebibytesOf(size: unknown): number | undefined {
+  const [, amount = '', unit = ''] = /^([0-9]+(?:[.][0-9]+)?)(Gi|Mi)$/.exec(text(size)) ?? [];
+  return amount === '' ? undefined : Number(amount) * (unit === 'Gi' ? 1024 : 1);
+}
+
+/** The flag that sets Node's heap, as the API's command gives it. */
+const HEAP_FLAG = '--max-old-space-size=';
+
+/**
+ * The API's heap, set by its command (4D2e D12): between half and three quarters of its container's memory, so its
+ * counters (rate-limit.ts, about 92 MB with all four full) fit with room, and Node's own default (560 MiB under 1 GiB,
+ * measured on the pinned base image) isn't left to decide it.
+ */
+function heapProblems(container: unknown, problem: (message: string) => void): void {
+  const flag = list(at(container, 'command'))
+    .map(text)
+    .find((part) => part.startsWith(HEAP_FLAG));
+  const heap = Number(flag?.slice(HEAP_FLAG.length));
+  const memory = mebibytesOf(at(container, 'resources', 'memory'));
+  if (memory === undefined || !Number.isInteger(heap) || heap < memory / 2 || heap > (memory * 3) / 4) {
+    problem(
+      `must start node with ${HEAP_FLAG}<MiB> between half and three quarters of its memory (${String(memory)} MiB), so its rate limits' counters fit with room; it says ${String(flag)}`,
+    );
+  }
+}
+
+/**
+ * Across the apps running the API (4D2e D12): each one listed in API_APPS, exactly one holding the jobs (`jobs` or
+ * `all`: two would run the copier twice, none would run no job), and never `all` beside `web`, as `all` counts its
+ * rate limits as the only copy.
+ */
+function apiAppsProblems(found: readonly PredictedResource[], add: (problem: Problem) => void): void {
+  const apis = found.flatMap((app) => {
+    const settings = apiSettingsOf(app);
+    return settings === undefined ? [] : [{ app, role: roleIn(settings) }];
+  });
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'apps', resource, message });
+  };
+  for (const { app } of apis.filter((api) => !API_APPS.includes(jobWorkloadOf(api.app.name)))) {
+    problem(
+      app.name,
+      `runs the API, which only ${API_APPS.join(' and ')} may: an app nothing names could hold the jobs`,
+    );
+  }
+  const holders = apis.filter(({ role }) => role === 'jobs' || role === 'all').length;
+  if (apis.length > 0 && holders !== 1) {
+    problem(
+      'the deployment',
+      `needs exactly one app holding the jobs (AGENTX_ROLE jobs or all); it has ${String(holders)}`,
+    );
+  }
+  const roles = new Set(apis.map(({ role }) => role));
+  if (roles.has('all') && roles.has('web')) {
+    problem('the deployment', 'runs AGENTX_ROLE all beside web: all counts its rate limits as the only copy');
+  }
+}
 
 /**
  * An app running the API, scaled as its role (4D2e D12): `web` runs exactly the copies it counts its rate limits for,
@@ -3535,7 +3614,9 @@ function roleScaleProblems(
     }
   };
   if (role === 'web') {
-    exactly(copiesIn(settings), 'AGENTX_WEB_COPIES, which each copy shares its rate limits by');
+    const copies = copiesIn(settings);
+    if (copies === undefined) problem('must give AGENTX_WEB_COPIES as a whole number, which its replicas are held to');
+    else exactly(copies, 'AGENTX_WEB_COPIES, which each copy shares its rate limits by');
   } else if (role === 'jobs') {
     exactly(1, "the jobs keep to one copy, which the lease alone doesn't make safe for the copier");
   } else if (role === 'all') {
@@ -3585,9 +3666,13 @@ const apps: Check = (snapshot, _expected, add) => {
     const scale = at(app.properties, 'template', 'scale');
     scaleProblems(scale, ONE_REPLICA[workload], problem);
     const api = apiSettingsOf(app);
-    if (api !== undefined) roleScaleProblems(api, scale, problem);
+    if (api !== undefined) {
+      roleScaleProblems(api, scale, problem);
+      heapProblems(containersOf(app)[0], problem);
+    }
     containerProblems(app, problem);
   }
+  apiAppsProblems(found, add);
   for (const workload of APP_WORKLOADS) {
     const count = found.filter((app) => jobWorkloadOf(app.name) === workload).length;
     if (count !== 1) {
@@ -3696,9 +3781,13 @@ const loadTest: Check = (snapshot, expected, add) => {
 function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, unknown>): number | string {
   const role = roleIn(settings);
   const name = role === 'jobs' ? 'AGENTX_DB_JOBS_POOL_MAX' : 'AGENTX_DB_POOL_MAX';
-  const pool = Number(settings.get(name));
-  if (!Number.isInteger(pool)) return `${app.name} must state ${name}, so the connections it may hold can be counted`;
-  return 2 * (role === 'web' ? copiesIn(settings) : 1) * pool;
+  const pool = countIn(settings, name);
+  const copies = role === 'web' ? copiesIn(settings) : 1;
+  if (pool === undefined) return `${app.name} must state ${name} as a whole number, so its connections can be counted`;
+  if (copies === undefined) {
+    return `${app.name} must state AGENTX_WEB_COPIES as a whole number, so its connections can be counted`;
+  }
+  return 2 * copies * pool;
 }
 
 /**
@@ -3719,16 +3808,18 @@ const connections: Check = (snapshot, _expected, add) => {
     problem("must state max_connections, which every app's connections are counted against");
     return;
   }
-  const appsFound = ofType(snapshot, TYPES.app);
-  const counts = appsFound.flatMap((app) => {
+  const counts = ofType(snapshot, TYPES.app).flatMap((app) => {
     const settings = apiSettingsOf(app);
-    return settings === undefined ? [] : [apiConnections(app, settings)];
+    if (settings !== undefined) return [apiConnections(app, settings)];
+    if (jobWorkloadOf(app.name) !== 'zitadel') return [];
+    const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
+    return [
+      pool ??
+        `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`,
+    ];
   });
   for (const unstated of counts.filter((count) => typeof count === 'string')) problem(unstated);
-  const zitadel = appsFound
-    .filter((app) => jobWorkloadOf(app.name) === 'zitadel')
-    .map((app) => Number(settingsIn(containersOf(app)[0]).get(ZITADEL_POOL.setting) ?? ZITADEL_POOL.unset));
-  const needed = [...counts.filter((count) => typeof count === 'number'), ...zitadel, ONE_JOB_AND_ONE_MORE].reduce(
+  const needed = [...counts.filter((count) => typeof count === 'number'), ONE_JOB_AND_ONE_MORE].reduce(
     (sum, count) => sum + count,
     0,
   );
