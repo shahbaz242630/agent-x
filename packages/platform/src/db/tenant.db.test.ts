@@ -17,6 +17,7 @@ import { noStatementTimes, timingStatements } from './statement-times.ts';
 import {
   assertTenant,
   holdTransactionLock,
+  inBoundedSavepoint,
   limitStatements,
   lockName,
   readAloneOnOneTrip,
@@ -758,5 +759,55 @@ describe(`a statement's answer given up on, for a connection dead without a word
       answeredWithinMs: 5000,
     });
     expect(rows).toEqual([{ one: 1 }]);
+  });
+});
+
+describe(`inBoundedSavepoint (4D2e D10, Postgres ${server.version})`, () => {
+  const limits = (tx: Transaction<ProbeSchema>) =>
+    sql<{ lock: string; statement: string }>`select pg_catalog.current_setting('lock_timeout') as lock,
+      pg_catalog.current_setting('statement_timeout') as statement`
+      .execute(tx)
+      .then(({ rows }) => rows[0]);
+  const BOUNDS = { statementMs: 1_000, lockMs: 500 };
+  const label = (n: number) => `bounded-${String(n)}`;
+  const insert = (tx: Transaction<ProbeSchema>, n: number) =>
+    tx
+      .insertInto('probe.items')
+      .values({ org_id: ORG_A, id: ITEM(9_100 + n), label: label(n) })
+      .execute();
+
+  it('runs the step under its own limits, keeps what it wrote, and puts the transaction’s limits back', async () => {
+    const seen = await withTenant(app, ORG_A, async (tx) => {
+      await sql`set local lock_timeout = '5s'`.execute(tx);
+      const before = await limits(tx);
+      const inside = await inBoundedSavepoint(tx, 'probe_step', BOUNDS, async () => {
+        await insert(tx, 1);
+        return limits(tx);
+      });
+      return { before, inside, after: await limits(tx) };
+    });
+    expect(seen.inside).toEqual({ lock: '500ms', statement: '1s' });
+    expect(seen.after).toEqual(seen.before);
+    expect(seen.before?.lock).toBe('5s');
+    expect(await labelsSeenBy(ORG_A)).toContain(label(1));
+  });
+
+  it('a step that fails is undone alone and thrown; the transaction goes on, its limits back, and commits', async () => {
+    const after = await withTenant(app, ORG_A, async (tx) => {
+      await insert(tx, 2);
+      const before = await limits(tx);
+      await expect(
+        inBoundedSavepoint(tx, 'probe_step', BOUNDS, async () => {
+          await insert(tx, 3);
+          await sql`select pg_catalog.pg_sleep(2)`.execute(tx);
+        }),
+      ).rejects.toMatchObject({ code: '57014' });
+      await insert(tx, 4);
+      return { before, after: await limits(tx) };
+    });
+    expect(after.after).toEqual(after.before);
+    const labels = await labelsSeenBy(ORG_A);
+    expect(labels).toEqual(expect.arrayContaining([label(2), label(4)]));
+    expect(labels).not.toContain(label(3));
   });
 });

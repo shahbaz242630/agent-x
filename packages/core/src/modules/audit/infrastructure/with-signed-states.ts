@@ -94,7 +94,7 @@
 // rolled back alone, said (`org_work.hold_mark_skipped`), and the hold commits;
 // the hourly look marks it.
 import { ChainBroken } from '@agentx/platform/audit-chain';
-import { withTenant } from '@agentx/platform/db';
+import { inBoundedSavepoint, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
@@ -190,34 +190,20 @@ const HOLD_MARK_SAVEPOINT = 'agentx_hold_mark';
  * How long the mark may wait for a lock, and take in all, before it gives way: a mark row a commit or a settle holds
  * waits a trip; the hold's own 5 s head wait stays the hold's.
  */
-const HOLD_MARK_LIMITS = { lock: '500ms', statement: '1s' } as const;
+const HOLD_MARK_LIMITS = { lockMs: 500, statementMs: 1_000 } as const;
 
 /**
- * The hold history's mark for a hold just set, in the hold's transaction, inside a savepoint with its waits bounded:
- * any failure is rolled back alone and said, so the hold commits all the same. The transaction's own limits come back
- * after it, either way.
+ * The hold history's mark for a hold just set, in the hold's transaction, inside a savepoint of its own with its waits
+ * bounded: any failure is rolled back alone and said, so the hold commits all the same.
  */
 async function markHeld(tx: Transaction<AuditTables>, held: string, log: Logger): Promise<void> {
-  if (markHold === undefined) return;
-  const savepoint = sql.id(HOLD_MARK_SAVEPOINT);
-  const { rows } = await sql<{ lock: string; statement: string }>`select
-      pg_catalog.current_setting('lock_timeout') as lock, pg_catalog.current_setting('statement_timeout') as statement`.execute(
-    tx,
-  );
-  const [was = { lock: '0', statement: '0' }] = rows;
-  await sql`savepoint ${savepoint}`.execute(tx);
+  const mark = markHold;
+  if (mark === undefined) return;
   try {
-    await sql`select pg_catalog.set_config('lock_timeout', ${HOLD_MARK_LIMITS.lock}, true),
-      pg_catalog.set_config('statement_timeout', ${HOLD_MARK_LIMITS.statement}, true)`.execute(tx);
-    // Left unreleased on success: the commit ends it, a trip fewer.
-    await markHold(tx, held);
+    await inBoundedSavepoint(tx, HOLD_MARK_SAVEPOINT, HOLD_MARK_LIMITS, () => mark(tx, held));
   } catch (error) {
-    await sql`rollback to savepoint ${savepoint}`.execute(tx);
     log.warn('org_work.hold_mark_skipped', { err: error });
   }
-  // Nothing follows the mark in the hold's transaction now; put back so nothing added later is held to its limits.
-  await sql`select pg_catalog.set_config('lock_timeout', ${was.lock}, true),
-    pg_catalog.set_config('statement_timeout', ${was.statement}, true)`.execute(tx);
 }
 
 /** The organisation a poll last tried: the next starts after it, so no organisation is always the last reached. */

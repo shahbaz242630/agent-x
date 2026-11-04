@@ -252,6 +252,38 @@ export async function limitStatementsTo<Schema>(
 }
 
 /**
+ * Runs `work` in the caller's transaction inside a savepoint named `name`, its statements and lock waits limited to
+ * these milliseconds for it alone, the transaction's own limits put back after either way. A failure rolls back to the
+ * savepoint alone and is thrown, the transaction still usable: for a step that must never undo what came before it (a
+ * hold's mark). On success the savepoint is left for the commit to end, a trip fewer.
+ */
+export async function inBoundedSavepoint<Schema, Result>(
+  tx: Transaction<Schema>,
+  name: string,
+  { statementMs, lockMs }: { readonly statementMs: number; readonly lockMs: number },
+  work: () => Promise<Result>,
+): Promise<Result> {
+  const savepoint = sql.id(name);
+  // The transaction's own limits kept in settings of this transaction, outside the savepoint, to be put back from.
+  await sql`select pg_catalog.set_config('agentx.was_lock_timeout', pg_catalog.current_setting('lock_timeout'), true),
+    pg_catalog.set_config('agentx.was_statement_timeout', pg_catalog.current_setting('statement_timeout'), true)`.execute(
+    tx,
+  );
+  await sql`savepoint ${savepoint}`.execute(tx);
+  try {
+    await limitStatementsTo(tx, { statementMs, lockMs });
+    return await work();
+  } catch (error) {
+    await sql`rollback to savepoint ${savepoint}`.execute(tx);
+    throw error;
+  } finally {
+    await sql`select
+      pg_catalog.set_config('statement_timeout', pg_catalog.current_setting('agentx.was_statement_timeout'), true),
+      pg_catalog.set_config('lock_timeout', pg_catalog.current_setting('agentx.was_lock_timeout'), true)`.execute(tx);
+  }
+}
+
+/**
  * Raises the idle limit (database.ts) for this transaction alone, to past a load
  * phase, for the load test's stuck organisation, which holds its rows open for a
  * whole phase on purpose, and for nothing in the product. Still a limit: a hung
