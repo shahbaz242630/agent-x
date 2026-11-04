@@ -73,9 +73,11 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
 const rediscoveryOf = (...orgs: readonly string[]) =>
   createOrgWorkRediscovery({ list: () => Promise.resolve(orgs), database: app, logger: testLogger(capture) });
 
+/** The organisation's marks of the hand-off's and the checks' jobs: those 0073 adds for the expiries are their tests'. */
 async function marksOf(w: World): Promise<Record<string, { due_at: Date; marks: string }>> {
   const rows = await admin().query<{ job: string; due_at: Date; marks: string }>(
-    'select job, due_at, marks from directory.org_work where org_id = $1',
+    `select job, due_at, marks from directory.org_work
+      where org_id = $1 and job in ('hand_off', 'hand_off_sweep', 'payment_check')`,
     [w.org],
   );
   return Object.fromEntries(rows.map(({ job, ...rest }) => [job, rest]));
@@ -338,9 +340,20 @@ describe('a mark in COMMIT, against the signed writes', () => {
   });
 });
 
+/**
+ * An organisation ready to hand off, as the hourly look's tests start: without the mark its mandate's acceptance made
+ * for the mandate expiry (0073), which has nothing due, as the mandate has no end, and which the look would clear.
+ * Those marks are the expiries' tests' (org-work-expiry.db.test.ts).
+ */
+async function readyToLook() {
+  const made = await ready();
+  await admin().query(`delete from directory.org_work where org_id = $1 and job = 'mandate_expiry'`, [made.w.org]);
+  return made;
+}
+
 describe('the hourly look', () => {
   it('with marks and rows agreeing writes nothing, on one trip of reads between its start and commit', async () => {
-    const { w, acting } = await ready();
+    const { w, acting } = await readyToLook();
     await ask(acting, w, { amount: ALLOWED() });
     const before = await marksOf(w);
     const times = noStatementTimes();
@@ -354,7 +367,7 @@ describe('the hourly look', () => {
   });
 
   it('a mark lost is written and said, once; the next look finds nothing', async () => {
-    const { w, acting } = await ready();
+    const { w, acting } = await readyToLook();
     await ask(acting, w, { amount: ALLOWED() });
     await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
 
@@ -372,7 +385,7 @@ describe('the hourly look', () => {
   });
 
   it("the sweep's mark lost is written for when the row's wait ends, its checks' for now", async () => {
-    const { w, acting } = await ready();
+    const { w, acting } = await readyToLook();
     const request = await ask(acting, w, { amount: ALLOWED() });
     // Looks while the partner is being called: Tx A committed, its transaction still waiting for the answer.
     const rail: FakeRail = {
@@ -400,6 +413,36 @@ describe('the hourly look', () => {
     expect(lines('org_work.unmarked').map(({ job }) => job as string)).toEqual(['hand_off_sweep', 'payment_check']);
   });
 
+  it("a sweep's work due since long ago, its mark settled at a visit since: no miss said, the mark left", async () => {
+    const { w, acting } = await readyToLook();
+    await ask(acting, w, { amount: ALLOWED() });
+    // The jobs' clock a day on: the payment's ten minutes long past, its mark settled then, as a visit leaves one stuck.
+    const lookClock = new FixedClock(new Date(Date.now() + 24 * 60 * 60_000));
+    let settled: { due_at: Date; marks: string } | undefined;
+    await handoffOf(w, {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await admin().query(`update directory.org_work set due_at = $2 where org_id = $1 and job = 'hand_off_sweep'`, [
+          w.org,
+          lookClock.now(),
+        ]);
+        settled = (await marksOf(w)).hand_off_sweep;
+        lookClock.advanceBy(60 * 60_000);
+        await createOrgWorkRediscovery({
+          list: () => Promise.resolve([w.org]),
+          database: app,
+          logger: testLogger(capture),
+          clock: lookClock,
+        }).run();
+        expect((await marksOf(w)).hand_off_sweep).toEqual(settled);
+        return w.rail.submitApprovedIntent(intent);
+      },
+    }).run();
+
+    expect(settled).toBeDefined();
+    expect(lines('org_work.unmarked')).toEqual([]);
+  });
+
   describe('a commit landing between its reads, forced', () => {
     // The look reads the marks, then the requests, then the transactions, then the marks again: each its own statement
     // on one trip. A session holding the requests' table stops it after its first read of the marks, until let go.
@@ -423,7 +466,7 @@ describe('the hourly look', () => {
     }
 
     it('a payment written meanwhile is read due with its mark in the later read: no miss is said', async () => {
-      const { w, acting } = await ready();
+      const { w, acting } = await readyToLook();
       // The fils choose it stays under way, so it can still be noted.
       const request = await ask(acting, w, { amount: SMALL() });
       await handoffOf(w).run();
@@ -452,7 +495,7 @@ describe('the hourly look', () => {
     });
 
     it('a mark made meanwhile on work the look read as done is not cleared; the next look clears it', async () => {
-      const { w } = await ready();
+      const { w } = await readyToLook();
       await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'payment_check', now())`, [
         w.org,
       ]);
@@ -471,7 +514,7 @@ describe('the hourly look', () => {
   });
 
   it('a mark saying too late is brought forward and said; one a moment off is left', async () => {
-    const { w, acting } = await ready();
+    const { w, acting } = await readyToLook();
     await ask(acting, w, { amount: ALLOWED() });
     await admin().query(`update directory.org_work set due_at = now() + interval '50 seconds' where org_id = $1`, [
       w.org,
@@ -489,7 +532,7 @@ describe('the hourly look', () => {
   });
 
   it('a mark with nothing due goes, without a word: finished work, or one forged', async () => {
-    const { w } = await ready();
+    const { w } = await readyToLook();
     await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'payment_check', now())`, [
       w.org,
     ]);
@@ -500,7 +543,7 @@ describe('the hourly look', () => {
   });
 
   it('an organisation it cannot read is said, and the rest are still looked at', async () => {
-    const { w, acting } = await ready();
+    const { w, acting } = await readyToLook();
     await ask(acting, w, { amount: ALLOWED() });
     await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
     await rediscoveryOf('not-a-uuid', w.org).run();
@@ -521,7 +564,7 @@ describe('the hourly look', () => {
   });
 
   it('stops between organisations when told, saying nothing of a run it did not finish', async () => {
-    const { w, acting } = await ready();
+    const { w, acting } = await readyToLook();
     await ask(acting, w, { amount: ALLOWED() });
     await admin().query('delete from directory.org_work where org_id = $1', [w.org]);
     const stop = new AbortController();

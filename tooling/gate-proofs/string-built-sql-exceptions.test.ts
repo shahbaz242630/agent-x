@@ -39,7 +39,8 @@ describe('SEC-TEN-07 the string-built SQL rule is turned off in product code onl
       [...new Set(off)].map((file) => [file, off.filter((each) => each === file).length]),
     );
     expect(counted).toEqual({
-      'packages/platform/src/db/migrate.ts': 1,
+      // Each file's text; a no-transaction file's statements (4D2e D8); an index name the catalogue gave, quoted by format('%I.%I').
+      'packages/platform/src/db/migrate.ts': 3,
       'packages/platform/src/db/server-setup.ts': 4,
       'packages/platform/src/db/tenant.ts': 2,
     });

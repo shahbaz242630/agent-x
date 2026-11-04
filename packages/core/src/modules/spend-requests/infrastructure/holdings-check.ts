@@ -10,6 +10,9 @@
 // states two (verifiedStates), the decided events one, and the handed-off
 // ones' payments a few more (C3: `PaymentsOf`, the outcomes module's, after
 // the requests and before their reservations and claims, in the lock order).
+// A request waiting for approval whose unsealed `waits_until` (0073) reads
+// later than its sealed wait allows is a mismatch too: it would hide the
+// request from the expiry and keep its money held (one statement a page).
 // A request whose holdings don't match raises the integrity alarm (`holding`),
 // and the organisation is put on hold once the page's transaction ends
 // (withSignedStates).
@@ -32,7 +35,7 @@ import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRea
 import { keptZonesOf, type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
 import { periodOf } from '../../../shared-kernel/index.ts';
 import { bankKeyOf } from '../domain/asked.ts';
-import { type ApprovalClock, approvalWaitOf } from '../domain/approval-wait.ts';
+import { type ApprovalClock, approvalWaitOf, expiresAtOf } from '../domain/approval-wait.ts';
 import {
   type ClaimHolding,
   type HeldSealed,
@@ -111,6 +114,35 @@ async function claimsFor(tx: HoldingsTransaction, requestIds: readonly string[])
     payeeKey: row.payee_key,
   }));
 }
+
+/**
+ * How far past its sealed expiry a request's `waits_until` may read. It is written from the database's clock just
+ * before the decision's time is sealed from it, so never after, unless that clock steps back between; a minute's
+ * delay to an expiry holds nothing, where an alarm wrongly raised holds the organisation.
+ */
+const WAITS_UNTIL_SLACK_MS = 60_000;
+
+/** The `waits_until` of the requests named, by ID, in one statement. */
+async function waitsUntilOf(tx: HoldingsTransaction, requestIds: readonly string[]): Promise<Map<string, Date | null>> {
+  if (requestIds.length === 0) return new Map();
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an unsealed time, compared below with the request's sealed wait
+    .selectFrom(SPEND_REQUESTS.table)
+    .select(['id', 'waits_until'])
+    .where('id', 'in', requestIds)
+    .execute();
+  return new Map(rows.map(({ id, waits_until }) => [id, waits_until]));
+}
+
+/**
+ * Whether a request's `waits_until` is no later than its sealed wait lets it be: always for one with none read (not
+ * waiting for approval, so not read; made before 0073), or with no decision read (the other comparisons judge that).
+ */
+const waitsAsSealed = (waitsUntil: Date | null | undefined, decided: ApprovalClock | undefined) =>
+  waitsUntil === null ||
+  waitsUntil === undefined ||
+  decided === undefined ||
+  waitsUntil.getTime() <= expiresAtOf(decided).getTime() + WAITS_UNTIL_SLACK_MS;
 
 /** Each reference's canonical form, as a request's `order_key` is made (`orderKeyOf`), in one statement. */
 async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[]): Promise<Map<string, string>> {
@@ -257,6 +289,10 @@ async function judged<Tx extends HoldingsTransaction>(
   const reservations = byRequest(await reservationsFor(tx, found));
   const claimed = byRequest(await claimsFor(tx, found));
   const orderKeys = await orderKeysOf(tx, [...new Set(requests.map(({ orderReference }) => orderReference))]);
+  const waitsUntil = await waitsUntilOf(
+    tx,
+    requests.filter(({ status }) => status === 'APPROVAL_REQUIRED').map(({ id }) => id),
+  );
   // Only what still holds anything was sealed with what it holds.
   const sealed = await decisionsOf(
     tx,
@@ -297,7 +333,8 @@ async function judged<Tx extends HoldingsTransaction>(
     }));
     if (
       !holdingsMatch({ ...request, held, payment: payments.get(request.id) }, reserved, claims) ||
-      (held !== null && !inItsZone(request.agentId, held))
+      (held !== null && !inItsZone(request.agentId, held)) ||
+      !waitsAsSealed(waitsUntil.get(request.id), sealed.get(request.id))
     ) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       mismatched += 1;

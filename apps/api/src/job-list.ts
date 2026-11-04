@@ -13,6 +13,8 @@ import {
   pollHoldsWaiting,
 } from '@agentx/core/modules/audit';
 import { listedOrganizations } from '@agentx/core/modules/directory';
+import { mandateExpiryDue } from '@agentx/core/modules/mandates';
+import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
   activeContactsFor,
   contactAddressFor,
@@ -259,6 +261,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         events: providerEvents,
       }),
     );
+  // The two expiries, each visiting only the organisations whose soonest end has come by its marks (4D2e D8).
+  const requestExpiryMarks = markedOrganisations({ job: 'request_expiry', nextDue: requestExpiryDue, ...marking });
+  const mandateExpiryMarks = markedOrganisations({ job: 'mandate_expiry', nextDue: mandateExpiryDue, ...marking });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
@@ -385,7 +390,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       },
     ),
     // Mandates past their end expired (Phase 2 B4).
-    job('mandate_expiry', createMandateExpiry({ ...clocked, outbox }), MANDATE_EXPIRY_EVERY_MS, HOUR_MS),
+    job(
+      'mandate_expiry',
+      withOrgWork([mandateExpiryMarks], createMandateExpiry({ ...clocked, list: mandateExpiryMarks.list, outbox })),
+      MANDATE_EXPIRY_EVERY_MS,
+      HOUR_MS,
+    ),
     // A held organisation's whole history checked in batches before its clearing is confirmed (Phase 2 D1c).
     job(
       'hold_history',
@@ -397,7 +407,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
     job('holdings_check', createHoldingsCheck(organisationJob), HOLDINGS_CHECK_EVERY_MS, LONG_MS),
     // Spend requests waiting for approval past their wait expired, their holdings released (Phase 2 D7).
-    job('request_expiry', createRequestExpiry(clocked), REQUEST_EXPIRY_EVERY_MS, HOUR_MS),
+    job(
+      'request_expiry',
+      withOrgWork([requestExpiryMarks], createRequestExpiry({ ...clocked, list: requestExpiryMarks.list })),
+      REQUEST_EXPIRY_EVERY_MS,
+      HOUR_MS,
+    ),
     // Pending spend requests whose authority no longer stands voided, their holdings released (Phase 3 C1).
     job('request_voids', createRequestVoids(clocked), REQUEST_VOIDS_EVERY_MS, HOUR_MS),
     // The hand-off, where there is one.

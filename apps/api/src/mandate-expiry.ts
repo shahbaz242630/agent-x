@@ -4,7 +4,8 @@
 // EXPIRED, recorded as the API's, and telling every admin and approver
 // (0036), in the same transaction.
 //
-// For each organisation the directory lists, the candidates are found by
+// For each organisation its marks list (4D2e D8: those whose soonest end of a
+// version in force has come, `mandateExpiryDue`), the candidates are found by
 // their rows (`mandatesPastTheirEnd`), a page at a time, each page after the
 // last, so mandates refused on every run (tampered with) can't fill a page
 // and keep the rest from their end (S90 review), then each in a transaction
@@ -12,7 +13,9 @@
 // the mandate read for change through its signed state (a tampered one is
 // refused there, and the job goes on to the next), still open, its version in
 // force verified and ended still; then moved. A mandate moved meanwhile
-// (revoked, or expired by another run) is left as it is.
+// (revoked, or expired by another run) is left as it is. One left past its
+// end (it failed, or was past the run's share) keeps its organisation's mark
+// due, so the next run comes back.
 //
 // The job is the record, not the brake: a spend checks the version's end
 // itself (SEC-AG-12), so the minutes before the job reaches a mandate
@@ -58,7 +61,7 @@ export function createMandateExpiry({
   logger,
   most = MOST_EXPIRED_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those its marks say are due, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<MandateTables & NotificationsTables>;
   readonly keys: KeyProvider;

@@ -64,6 +64,6 @@ export {
   rulesHash,
   setPolicy,
 } from './infrastructure/policies.ts';
-export { mandatesPastTheirEnd } from './infrastructure/expiry.ts';
+export { mandateExpiryDue, mandatesPastTheirEnd } from './infrastructure/expiry.ts';
 export { MANDATE_VERSIONS, MANDATES, POLICIES, POLICY_VERSIONS } from './infrastructure/mandates.ts';
 export type { MandatesTables } from './infrastructure/tables.ts';

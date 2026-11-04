@@ -19,14 +19,16 @@
 // The wait runs from the decision's own event (`spend_request.decided`),
 // whose time the audit chain seals: a request still waiting has signed no
 // other since, so it is the verified read's own event. The row's `created_at`
-// is unsealed, so it only picks the candidates (`requestsWaitingSince`): a
-// request that claims to be older than it is is never expired early, and one
-// moved later past the app is only left holding (money kept, never paid). The
+// and `waits_until` (0073) are unsealed, so they only pick the candidates
+// (`requestsDueToExpire`): a request that claims to be due sooner than it is
+// is never expired early; `waits_until` moved later past the app is caught by
+// the holdings check against the sealed wait, and `created_at` (a request
+// made before 0073) moved later is only left holding (money kept, never paid). The
 // sealed time is the database's clock, `now` the app's: seconds apart at most,
 // against a wait of 24 hours or more (E6).
 import { holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 
 import {
   actorEventsSince,
@@ -42,7 +44,7 @@ import {
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
 import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
-import { waitedOut } from '../domain/approval-wait.ts';
+import { SHORTEST_APPROVAL_WAIT_MS, waitedOut } from '../domain/approval-wait.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
@@ -80,16 +82,18 @@ export type Ended =
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
- * The IDs of the organisation's requests waiting for approval since `before`
- * or earlier by their rows, in order of ID, after `after` when given, at most
- * `most` (0042's index): each to be read through its signed state and judged
- * by its decision's sealed time. The job pages on past the last, so requests
- * refused on every run can't fill a page and keep the others from expiring.
+ * The IDs of the organisation's requests waiting for approval due by `now`
+ * by their rows, in order of ID, after `after` when given, at most `most`
+ * (0074's index): `waits_until` passed, or, for one made before 0073 with
+ * none, waiting the shortest wait by `created_at`. Each to be read through
+ * its signed state and judged by its decision's sealed time. The job pages on
+ * past the last, so requests refused on every run can't fill a page and keep
+ * the others from expiring.
  */
-export async function requestsWaitingSince(
+export async function requestsDueToExpire(
   tx: Transaction<SpendRequestsTables>,
   orgId: string,
-  before: Date,
+  now: Date,
   most: number,
   after?: string,
 ): Promise<readonly string[]> {
@@ -99,13 +103,46 @@ export async function requestsWaitingSince(
     .select('id')
     .where('org_id', '=', orgId)
     .where('status', '=', 'APPROVAL_REQUIRED')
-    .where('created_at', '<=', before)
+    .where((where) =>
+      where.or([
+        where('waits_until', '<=', now),
+        where.and([
+          where('waits_until', 'is', null),
+          where('created_at', '<=', new Date(now.getTime() - SHORTEST_APPROVAL_WAIT_MS)),
+        ]),
+      ]),
+    )
     .where((where) => (after === undefined ? where.lit(true) : where('id', '>', after)))
     .orderBy('id')
     .limit(most)
     .execute();
   return rows.map(({ id }) => id);
 }
+
+/**
+ * When the organisation's soonest request waiting for approval is due to expire by its row, or null where none waits;
+ * not run: the request expiry's mark is settled to it (0073). `waits_until`, or for one made before 0073 with none,
+ * `created_at` and the shortest wait, as requestsDueToExpire reads them, so a mark is never settled past a request it
+ * would take.
+ */
+export const requestExpiryDue = (tx: Transaction<SpendRequestsTables>, orgId: string) => {
+  const waiting = () =>
+    tx
+      // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, for choosing when to look
+      .selectFrom(SPEND_REQUESTS.table)
+      .where('org_id', '=', orgId)
+      .where('status', '=', 'APPROVAL_REQUIRED');
+  const soonest = waiting().select(sql<Date | null>`pg_catalog.min(waits_until)`.as('due'));
+  const older = waiting()
+    .where('waits_until', 'is', null)
+    .select(
+      sql<Date | null>`pg_catalog.min(created_at) + pg_catalog.make_interval(secs => ${SHORTEST_APPROVAL_WAIT_MS / 1000})`.as(
+        'due',
+      ),
+    );
+  // LEAST (SQL's own, no function) passes over a null: none of either kind reads as the other's, both none as null.
+  return tx.selectNoFrom(sql<Date | null>`least((${soonest}), (${older}))`.as('due'));
+};
 
 /**
  * Expires the request if it is still waiting for approval and the wait its

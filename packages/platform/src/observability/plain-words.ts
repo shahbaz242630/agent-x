@@ -50,7 +50,7 @@ export const PLAIN_WORDS = {
   },
   'org_work.unmarked': {
     happened: 'An organisation had work due for a background job with no mark saying so, or a mark saying too late.',
-    broke: 'The hand-off or the payment checks skipped that work since then (up to an hour); it is due again now.',
+    broke: 'The job it names skipped that work since then (up to an hour); it is due again now.',
     next: 'The mark is now right. One after a release is older work; more means a write misses its mark.',
   },
   'org_work.rediscovery_failed': {
@@ -361,6 +361,17 @@ export const PLAIN_WORDS = {
     happened: 'A database update waited too long for a table that was in use.',
     broke: 'Nothing changed yet: that update was undone and is tried again after a short pause, up to 5 tries.',
     next: 'Nothing to do. If all 5 tries fail, the job stops: run it again at a quieter time.',
+  },
+  'db.migration.deadlocked': {
+    happened:
+      'A database update and the app each waited for a table the other held, so the database stopped the update.',
+    broke: 'Nothing changed yet: that update was undone whole and is tried again after a short pause, up to 5 tries.',
+    next: 'Nothing to do. If all 5 tries fail, the job stops: run it again at a quieter time.',
+  },
+  'db.migration.invalid_index_dropped': {
+    happened: 'A database update found an index an earlier try of it had left half built.',
+    broke: 'Nothing: that index only made some reads faster. It was removed and is being built again now.',
+    next: 'Nothing to do, unless the update fails again: then read its own error.',
   },
   'db.migration.ledger_not_counted': {
     happened: 'The database update job applied its changes but could not count its list of applied changes.',
