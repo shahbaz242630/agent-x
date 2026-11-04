@@ -15,10 +15,13 @@
 //   go on. Any still waiting an hour past its five minutes is `audit.daily_check_overdue`.
 // - The full pass (decision 3): every chain read from its first event to its anchor
 //   as it stood when the pass reached it, the chains passed longest ago first. A
-//   run's share is the sum of every chain's length over 864 runs (three days at five
-//   minutes), at most 150 seconds of it, 2,000 events a step. Three, not six: a pass is
-//   dated when it began, so a chain's lateness is the time between two passes' starts
-//   and the second's own length, two rounds at worst, and that must stay within 7 days.
+//   run's share is the sum of every chain's length times the time since the last run
+//   over three days (five minutes' worth at least, three days' at most), so a round is
+//   three days of wall time whatever the runs' cadence; at most 150 seconds of it, 2,000
+//   events a step. Three, not six: a pass is dated when it began, so a chain's lateness
+//   is the time between two passes' starts and the second's own length, two rounds at
+//   worst, and that must stay within 7 days. A share not read within its 150 seconds is
+//   capacity, said as `audit.full_pass_behind`; `audit.full_pass_overdue` stays the alarm.
 //   Each chain's pass finished is a signed line in the store, dated when that pass began
 //   (so it says when its first event was read), and so is the place a pass under way has
 //   reached, written each run it moves, with when its pass began and since when one was
@@ -94,8 +97,11 @@ const WALKED = 1000;
 /** How many events one statement of a day's count counts. */
 export const COUNTED_AT_ONCE = 1_000_000n;
 
-/** The runs a full pass is spread over: three days at the default five minutes, so two rounds stay within 7 days. */
-const PASS_RUNS = 864n;
+/** How long a round of the full pass takes, whatever the runs' cadence: two rounds stay within 7 days. */
+const PASS_ROUND_MS = 3 * DAY_MS;
+
+/** The least time a run's share is sized for: the default interval, so a run soon after another still reads some. */
+const LEAST_GAP_MS = 5 * 60_000;
 
 /** How long a run's pass steps may take. */
 export const PASS_WITHIN_MS = 150_000;
@@ -123,8 +129,15 @@ export function slotsBetween(afterMs: number, upToMs: number): ReadonlySet<numbe
   return slots;
 }
 
-/** A run's share of a full pass, in events: the sum of the chains' lengths over its runs, rounded up. */
-export const passBudget = (total: bigint): bigint => (total + PASS_RUNS - 1n) / PASS_RUNS;
+/**
+ * A run's share of a full pass, in events: the chains' lengths, times the time since the last run over a round, rounded up.
+ * Five minutes' worth at least, a whole round's at most.
+ */
+export const passBudget = (total: bigint, sinceLastMs: number): bigint => {
+  const gap = BigInt(Math.round(Math.min(Math.max(sinceLastMs, LEAST_GAP_MS), PASS_ROUND_MS)));
+  const round = BigInt(PASS_ROUND_MS);
+  return (total * gap + round - 1n) / round;
+};
 
 const smallest = (...values: readonly bigint[]): bigint =>
   values.reduce((least, value) => (value < least ? value : least));
@@ -217,6 +230,8 @@ export function createRotation({
   let walked = 0;
   let passed = 0n;
   let finished = 0;
+  // When the last run's pass began, so the next run's share covers the time since.
+  let lastPassAt: number | undefined;
 
   const slotFor = (orgId: string): number => {
     let slot = slots.get(orgId);
@@ -430,20 +445,26 @@ export function createRotation({
   /** The run's share of the full pass, within its own time and the run's. */
   const takePass = async (listed: readonly string[], listedNow: ReadonlySet<string>, signal: AbortSignal) => {
     const total = listed.reduce((sum, orgId) => sum + (anchors.latest(chainOf(orgId))?.seq ?? 0n), 0n);
-    const budget = passBudget(total);
+    const at = clock.now().getTime();
+    const budget = passBudget(total, at - (lastPassAt ?? at));
+    lastPassAt = at;
     const slices = new AbortController();
     const end = (): void => {
       slices.abort();
     };
-    const timer = setTimeout(end, PASS_WITHIN_MS);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      end();
+    }, PASS_WITHIN_MS);
     timer.unref();
     signal.addEventListener('abort', end, { once: true });
     if (signal.aborted) end();
     const began = performance.now();
     const run: PassRun = { roundBegun: false, tried: new Set() };
     const moved = new Set<string>();
+    let left = budget;
     try {
-      let left = budget;
       while (left > 0n && !slices.signal.aborted) {
         const orgId = nextChain(listed, listedNow, run);
         if (orgId === undefined) break;
@@ -469,6 +490,8 @@ export function createRotation({
       signal.removeEventListener('abort', end);
       keepPlaces(moved);
     }
+    // The share not read in the pass's own time: capacity, before it is late.
+    if (timedOut && left > 0n) logger.warn('audit.full_pass_behind', { share: budget, left, withinMs: PASS_WITHIN_MS });
     return { budget, slicesMs: Math.round(performance.now() - began) };
   };
 

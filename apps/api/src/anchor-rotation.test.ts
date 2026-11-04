@@ -188,12 +188,23 @@ describe("an organisation's five minutes of the day", () => {
 });
 
 describe('the full pass share', () => {
-  it("is the chains' lengths over 864 runs, rounded up: three days at five minutes", () => {
-    expect(passBudget(0n)).toBe(0n);
-    expect(passBudget(1n)).toBe(1n);
-    expect(passBudget(864n)).toBe(1n);
-    expect(passBudget(865n)).toBe(2n);
-    expect(passBudget(4_000_000_000n)).toBe(4_629_630n);
+  const MINUTE = 60_000;
+  it("is the chains' lengths times the time since the last run over three days, rounded up", () => {
+    expect(passBudget(0n, 5 * MINUTE)).toBe(0n);
+    expect(passBudget(1n, 5 * MINUTE)).toBe(1n);
+    // Five minutes are 1/864 of three days.
+    expect(passBudget(864n, 5 * MINUTE)).toBe(1n);
+    expect(passBudget(865n, 5 * MINUTE)).toBe(2n);
+    expect(passBudget(864n, 9 * MINUTE)).toBe(2n);
+    expect(passBudget(8640n, 9 * MINUTE)).toBe(18n);
+    expect(passBudget(4_000_000_000n, 5 * MINUTE)).toBe(4_629_630n);
+  });
+
+  it("five minutes' worth at least, a whole round's at most", () => {
+    expect(passBudget(8640n, 0)).toBe(10n);
+    expect(passBudget(8640n, MINUTE)).toBe(10n);
+    expect(passBudget(8640n, 3 * DAY)).toBe(8640n);
+    expect(passBudget(8640n, 30 * DAY)).toBe(8640n);
   });
 });
 
@@ -626,21 +637,49 @@ describe('the full pass (decision 3)', () => {
       expect(after.lines('audit.full_pass_overdue')).toHaveLength(1);
     });
 
-    it('a big chain passed round after round at five-minute runs is never late: two rounds stay within 7 days', async () => {
+    it('a big chain passed round after round is never late, though runs come every 9 minutes, not 5', async () => {
       const made = rotating();
       const orgId = orgInSlot(1);
-      // 864 events, a share of 1 a run: a round is 864 runs, three days. Nine days of runs, three rounds.
-      made.anchor(orgId, 864n);
+      // 4,320 events at a run every 9 minutes (5 between, 4 of run): 9 a run, 480 runs, three days a round. A share by
+      // run count, 5 a run, would take 864 runs, 5.4 days a round, and be late before the second ended.
+      made.anchor(orgId, 4320n);
       const passedAt = new Set<number>();
-      for (let run = 0; run < 3 * 864; run += 1) {
+      for (let run = 0; run < 1445; run += 1) {
+        made.clock.advanceBy(9 * 60_000);
         await made.run([orgId]);
-        made.clock.advanceBy(5 * 60_000);
         const last = made.passes.lastPass(chainOf(orgId))?.at.getTime();
         if (last !== undefined) passedAt.add(last);
       }
+      // Nine days: three rounds finished, none late.
       expect(passedAt.size).toBe(3);
       expect(made.lines('audit.full_pass_overdue')).toEqual([]);
-    }, 60_000); // 2,592 runs: measured near 4 s alone, more under load.
+    });
+
+    it('a share not read within its 150 seconds is said as capacity', async () => {
+      vi.useFakeTimers();
+      const made = rotating();
+      const orgId = orgInSlot(1);
+      made.anchor(orgId, 864n * 10_000n);
+      const { promise: held, resolve: letGo } = Promise.withResolvers<ChainStep>();
+      made.answer.pass = () => held;
+      const running = made.run([orgId]);
+      await settled();
+      await vi.advanceTimersByTimeAsync(PASS_WITHIN_MS);
+      await running;
+      expect(made.lines('audit.full_pass_behind')).toEqual([
+        expect.objectContaining({ level: 'warn', share: '10000', left: '10000', withinMs: PASS_WITHIN_MS }),
+      ]);
+      letGo(stepTo(2000n, 864n * 10_000n));
+    });
+
+    it('says nothing when its share was read, or nothing was left to read', async () => {
+      const made = rotating();
+      const orgId = orgInSlot(1);
+      made.anchor(orgId, 864n);
+      await made.run([orgId]);
+      await made.run([]);
+      expect(made.lines('audit.full_pass_behind')).toEqual([]);
+    });
 
     it('a chain whose pass stalls is late, 7 days after its pass began', async () => {
       const made = rotating();

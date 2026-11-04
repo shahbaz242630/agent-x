@@ -269,6 +269,11 @@ export const PLAIN_WORDS = {
     broke: 'An old audit record deleted or hidden there is found later than the 24 hours promised. Nobody is held.',
     next: 'See whether the database is slow or the tamper check runs out of time; add capacity if it stays.',
   },
+  'audit.full_pass_behind': {
+    happened: "The regular full read of the audit history ran out of its time before reading this run's share.",
+    broke: 'Nothing yet: old records are read a little later. If it goes on, they are read later than promised.',
+    next: 'If it repeats, add capacity: a faster database, or more time for the check.',
+  },
   'audit.full_pass_overdue': {
     happened: "Some organisations' whole audit history has not been read through in 7 days, as promised.",
     broke: 'An old audit record edited there is found later than promised; backups can still undo it. Nobody is held.',
