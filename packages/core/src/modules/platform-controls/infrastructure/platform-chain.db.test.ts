@@ -711,7 +711,8 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
     await record(started(1), created(first), started(2), created(second), started(3));
 
     expect(await chain.createdOrganizationsSince(app, 0n, 5n)).toEqual({ orgIds: [first, second], seq: 4n });
-    expect(await chain.createdOrganizationsSince(app, 2n, 5n)).toEqual({ orgIds: [second], seq: 4n });
+    // With the job's limit on each trip's answer, as the anchor check reads it (4D2e E8).
+    expect(await chain.createdOrganizationsSince(app, 2n, 5n, 30_000)).toEqual({ orgIds: [second], seq: 4n });
     expect(await chain.createdOrganizationsSince(app, 4n, 5n)).toEqual({ orgIds: [], seq: 4n });
   });
 
