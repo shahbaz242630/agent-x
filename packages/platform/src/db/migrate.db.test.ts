@@ -591,5 +591,40 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
       expect(await running).toEqual(['0073_expiry_marks.sql']);
       expect(capture.lines().filter((line) => line.event === 'db.migration.deadlocked')).toEqual([]);
     });
+
+    it('gives way to a transaction reading requests then mandates: the app is never the one aborted', async () => {
+      for (const name of (await readdir(REPO_MIGRATIONS)).filter((file) => file < '0073')) {
+        await copyFile(path.join(REPO_MIGRATIONS, name), path.join(folder, name));
+      }
+      await run();
+      await copyFile(path.join(REPO_MIGRATIONS, '0073_expiry_marks.sql'), path.join(folder, '0073_expiry_marks.sql'));
+      // As request voids and mandate carry read: requests first, mandates next, at Postgres's own 1 s deadlock_timeout.
+      const reader = await database.connect('admin');
+      await reader.query("set deadlock_timeout = '1s'");
+      await reader.query('begin');
+      await reader.query('select 1 from spend_requests.requests limit 1');
+      const running = runMigrations({
+        connection: database.connection('owner'),
+        directory: folder,
+        logger: createLogger({
+          service: 'migrate',
+          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+          destination: capture,
+        }),
+        // Longer than the deadlock check: only the file's own 500 ms keeps the reader from being the victim.
+        lockWait: { timeoutMs: 8000, pauseMs: 2000 },
+      });
+      try {
+        // The file holds mandates and waits for requests. The reader comes past the file's own deadlock check
+        // (1 s into its wait, finding no cycle yet), so only the reader's check could find the one it makes.
+        await waitUntilQueued(database.as('admin'), 1);
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        await within(5000, reader.query('select 1 from mandates.mandates limit 1'), 'the reader reaching mandates');
+        await reader.query('commit');
+      } finally {
+        await reader.end();
+      }
+      expect(await running).toEqual(['0073_expiry_marks.sql']);
+    });
   });
 });

@@ -3,15 +3,18 @@
 -- knows its two triggers exactly (D8a, schema-guard.ts COMING_TRIGGERS). The expiry's
 -- index is 0074's, so nothing here reads the requests' table whole.
 --
--- Its locks, in the order the app's transactions take them, so it can't deadlock with
--- one: mandates, then requests (ADR-006's levels 4 and 8), both whole, then org_work,
--- which a transaction marks only as it commits (0072's deferred triggers). Taken the
--- other way, a request transaction committing would wait for org_work behind this file
--- while this file waited for that transaction: one of them aborted. Each wait is the
--- runner's lock limit, tried again after a pause; while it waits, new reads and writes
--- of a table it waits for queue behind it, for that limit at most. Once it has them,
--- it holds all three until it commits: no table is read whole but org_work (its CHECK)
--- and directory.orgs (the first marks), so a few milliseconds.
+-- Its locks: mandates, then requests (ADR-006's levels 4 and 8), both whole, then
+-- org_work, which a transaction marks only as it commits (0072's deferred triggers).
+-- Taken the other way, a request transaction committing would wait for org_work behind
+-- this file while this file waited for that transaction. No one table order is safe
+-- against every reader, though: request voids and mandate carry read requests before
+-- mandates. So each wait here is 500 ms, under Postgres's 1 s deadlock_timeout: in any
+-- deadlock this file gives up first and is tried again after a pause, and the app's
+-- transaction is never the one aborted. While it waits, new reads and writes of a table
+-- it waits for queue behind it, for 500 ms at most. Once it has them, it holds all
+-- three until it commits: no table is read whole but org_work (its CHECK) and
+-- directory.orgs (the first marks), so a few milliseconds.
+SET LOCAL lock_timeout = '500ms';
 LOCK TABLE mandates.mandates, spend_requests.requests IN ACCESS EXCLUSIVE MODE;
 
 -- Two more jobs a mark may name.
