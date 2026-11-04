@@ -26,7 +26,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
-import type { DirectoryTables } from '../../directory/index.ts';
+import { type DirectoryTables, listedOrganizations } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { PlatformControlsTables } from '../../platform-controls/index.ts';
@@ -38,6 +38,7 @@ import {
   confirmReset,
   draftReset,
   FACTOR_RESETS,
+  factorRemovalsDue,
   resetChange,
   resetForChange,
   resetRecord,
@@ -184,8 +185,8 @@ const deactivate = ({ org, person }: Org) =>
     }),
   );
 
-/** A reset of the person, asked, sent and confirmed by the contact now, as B6-3b does: its ID. */
-async function coolingOff({ org, admin, person, contact: contactId }: Org): Promise<string> {
+/** A reset of the person, asked and sent to the contact now, as B6-3b does: its ID. */
+async function sent({ org, admin, person, contact: contactId }: Org): Promise<string> {
   const id = ids.next();
   const { change } = resetChange({
     orgId: org,
@@ -213,6 +214,13 @@ async function coolingOff({ org, admin, person, contact: contactId }: Org): Prom
       details: {},
     });
   });
+  return id;
+}
+
+/** A reset of the person, asked, sent and confirmed by the contact now, as B6-3b does: its ID. */
+async function coolingOff(who: Org): Promise<string> {
+  const { org, contact: contactId } = who;
+  const id = await sent(who);
   await withSignedStates(app, org, quiet(), async (tx, states) => {
     const read = await resetForChange(tx, states, { orgId: org, id });
     if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
@@ -243,6 +251,7 @@ function loginService(answer: (subject: string) => Promise<number> = () => Promi
 const removalsWith = (factors: SecondFactorRemover) => {
   capture = new LogCapture();
   return createResetRemovals({
+    list: () => listedOrganizations(app),
     database: app,
     factors,
     keys,
@@ -816,5 +825,66 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
 
     expect(asked).toEqual([]);
     expect(await statusOf(who.org, id)).toBe('COOLING_OFF');
+  });
+});
+
+describe(`the factor removals' marks (4D2e D10, 0077, Postgres ${server.version})`, () => {
+  const markOf = async (org: string) =>
+    (
+      await database
+        .as('admin')
+        .query<{ due_at: Date; marks: string }>(
+          `select due_at, marks from directory.org_work where org_id = $1 and job = 'factor_removals'`,
+          [org],
+        )
+    )[0];
+  const dueOf = async (org: string) =>
+    (await withTenant(app, org, (tx) => factorRemovalsDue(tx, org).executeTakeFirst()))?.due ?? null;
+  const serverNow = async () =>
+    (await database.as('admin').query<{ now: Date }>('select pg_catalog.now() as now'))[0]?.now.getTime() ?? 0;
+
+  it('a reset asked and sent marks nothing; confirmed, it marks the removals a day on, the cooling-off’s length', async () => {
+    const who = await organization();
+    const first = await sent(who);
+    expect(await markOf(who.org)).toBeUndefined();
+    expect(await dueOf(who.org)).toBeNull();
+
+    const before = await serverNow();
+    const id = await coolingOff(who);
+    const after = await serverNow();
+
+    // The trigger's clock is Postgres's, at the confirming transaction's start.
+    const mark = await markOf(who.org);
+    expect(mark?.due_at.getTime()).toBeGreaterThanOrEqual(before + RESET_COOLING_OFF_HOURS * HOUR_MS);
+    expect(mark?.due_at.getTime()).toBeLessThanOrEqual(after + RESET_COOLING_OFF_HOURS * HOUR_MS);
+    // The due read is the rows': the cooling-off's end, never the first reset, still only sent.
+    expect(await dueOf(who.org)).toEqual(resetCoolingOffUntil(clock.now()));
+    expect(await statusOf(who.org, first)).toBe('AWAITING_CONTACT');
+    expect(await statusOf(who.org, id)).toBe('COOLING_OFF');
+  });
+
+  it('the soonest of two cooling-offs is due, and none once both are carried out', async () => {
+    const who = await organization();
+    await coolingOff(who);
+    const soonest = resetCoolingOffUntil(clock.now());
+    const second = await member(who.org, 'developer');
+    clock.advanceBy(HOUR_MS);
+    await coolingOff({ ...who, person: second });
+    expect(await dueOf(who.org)).toEqual(soonest);
+
+    clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
+    await removalsWith(loginService().factors).run();
+    expect(await dueOf(who.org)).toBeNull();
+  });
+
+  it('a write on a reset not cooling off marks nothing more: its completion leaves the mark as it was', async () => {
+    const who = await organization();
+    await coolingOff(who);
+    const marked = await markOf(who.org);
+    clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
+
+    await removalsWith(loginService().factors).run();
+
+    expect(await markOf(who.org)).toEqual(marked);
   });
 });

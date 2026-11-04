@@ -109,6 +109,7 @@ export {
   JOB_ANSWER_WITHIN_MS,
   limitedTransaction,
   holdOpenOnPurpose,
+  inBoundedSavepoint,
   limitStatements,
   limitStatementsTo,
   lockName,

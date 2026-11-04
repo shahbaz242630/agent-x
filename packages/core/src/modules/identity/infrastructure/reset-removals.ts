@@ -3,9 +3,10 @@
 // reset whose cooling-off has passed (`isDue`) and removing the person's
 // second factors at the login service (idp-factors.ts).
 //
-// For each organisation the directory lists, its resets are read and
-// verified (`resetsOf`: one that can't be believed raises the alarm and holds
-// the organisation, and the job leaves them all); then each due reset:
+// For each organisation it is given (the API's: those its marks say have a
+// cooling-off ended, and every one every few hours, 4D2e D10), its resets are
+// read and verified (`resetsOf`: one that can't be believed raises the alarm and
+// holds the organisation, and the job leaves them all); then each due reset:
 // 1. read and judged, in a transaction of its own that holds nothing after:
 //    the person the reset's row names, and whom the directory lists with that
 //    membership (where to look, never whose it is); their membership (2a),
@@ -50,7 +51,7 @@ import { type Kysely, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
-import { type DirectoryTables, listedElsewhere, listedMember, listedOrganizations } from '../../directory/index.ts';
+import { type DirectoryTables, listedElsewhere, listedMember } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
 import { isDue } from '../domain/factor-reset.ts';
@@ -92,6 +93,7 @@ class RemovalRefused extends Error {
 }
 
 export function createResetRemovals({
+  list,
   database,
   factors,
   keys,
@@ -101,6 +103,8 @@ export function createResetRemovals({
   outbox,
   logger,
 }: {
+  /** The organisations to look in. */
+  readonly list: () => Promise<readonly string[]>;
   readonly database: Kysely<Tables>;
   readonly factors: SecondFactorRemover;
   readonly keys: KeyProvider;
@@ -247,9 +251,9 @@ export function createResetRemovals({
 
   return {
     async run(signal) {
-      let orgs: string[];
+      let orgs: readonly string[];
       try {
-        orgs = await listedOrganizations(database);
+        orgs = await list();
       } catch (error) {
         logger.warn('factor_resets.run_failed', { err: error });
         return 'skipped';

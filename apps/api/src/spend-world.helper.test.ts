@@ -4,6 +4,7 @@
 // through decideAndReserve; and reads of where a request stands, what it
 // holds and the agent's month.
 import type { FixedClock, TestDatabase } from '@agentx/testing';
+import type { ActivityExportTables } from '@agentx/core/modules/activity';
 import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
@@ -41,7 +42,8 @@ import {
 } from './spend-request-decisions.ts';
 import { choiceDetails, SUSPENDS } from './suspensions.ts';
 
-export type SpendWorldTables = MandateWorldTables;
+/** With the background downloads' months: the marks' hourly look reads every job's rows (org-work.ts). */
+export type SpendWorldTables = MandateWorldTables & ActivityExportTables;
 
 /**
  * The request's claim or reservation released, or its reservation's amount

@@ -12,8 +12,8 @@
 // exits. Every exit writes the logger's held-back line counts first, so none
 // are lost.
 import type { AgentsTables } from '@agentx/core/modules/agents';
-import type { AuditTables } from '@agentx/core/modules/audit';
-import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
+import { type AuditTables, markHoldsWith } from '@agentx/core/modules/audit';
+import { type DirectoryTables, markOrgWorkNow } from '@agentx/core/modules/directory';
 import {
   createLoginFlows,
   createSessions,
@@ -270,6 +270,8 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     host.exitCode = 1;
     return undefined;
   }
+  // Every role sets holds: each set marks the hold history's work, in the hold's own transaction (4D2e D10).
+  markHoldsWith((tx, orgId) => markOrgWorkNow(tx, orgId, 'hold_history'));
 
   // Before anything is written: a database whose walls have been rewritten
   // must not be served from, and the platform chain's own tables are among
@@ -337,7 +339,6 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
     securityEvents,
     // The activity log's background downloads (L5c): on where the config names a store for them.
     downloads: backgroundDownloadsFrom(downloadStoreOf(config), {
-      list: () => listedOrganizations(database),
       database,
       keys,
       ids: uuidV7Ids,

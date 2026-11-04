@@ -75,6 +75,8 @@ const MOVES = { constraint: 'file_moves' };
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Record<string, never>>(database.connection('app'), testLogger());
+  // Both in the directory, as every organisation the API serves is: a month asked marks the builder's work (0077).
+  await database.as('admin').query('insert into directory.orgs (org_id) values ($1), ($2)', [ORG, OTHER_ORG]);
 });
 
 afterAll(async () => {

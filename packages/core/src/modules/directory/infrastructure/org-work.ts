@@ -1,5 +1,6 @@
-// directory.org_work (0072, 0073, 0075): which organisation has work of which kind, written by
-// deferred triggers as the work's own row commits. A row chooses when to look, and
+// directory.org_work (0072, 0073, 0075, 0077): which organisation has work of which kind, written by
+// deferred triggers as the work's own row commits, or (a hold, an audit event, which no trigger
+// watches) by the work's own transaction last of all. A row chooses when to look, and
 // nothing is believed from it: whoever looks reads and acts inside withTenant.
 //
 // A mark that waits for its row waits inside COMMIT, where statement_timeout doesn't
@@ -8,7 +9,7 @@
 // what's here is one row in a transaction of its own, under the idle limit if it hangs,
 // or a page of rows that skips any a commit holds and holds the rest for one trip.
 import { limitedTransaction } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type QueryExecutorProvider, sql, type Transaction } from 'kysely';
 
 import { readAlone } from './read-alone.ts';
 import type { DirectoryTables, OrgWorkJob } from './tables.ts';
@@ -48,6 +49,21 @@ export async function markOrgWork(
       )
       .execute(),
   );
+}
+
+/**
+ * Makes the organisation's mark of the job, due now, or brings one that stands forward, in the caller's transaction, as
+ * a trigger would at its commit: its last statement, after every lock ADR-006 orders (the head's too), so it waits on
+ * no one but a mark's own row. Only an organisation the directory lists, the only ones a job visits: an ID it doesn't
+ * list makes nothing, never an error that would undo the work it marks.
+ */
+export async function markOrgWorkNow(tx: QueryExecutorProvider, orgId: string, job: OrgWorkJob): Promise<void> {
+  await sql`
+    insert into directory.org_work (org_id, job, due_at)
+    select o.org_id, ${job}, pg_catalog.now() from directory.orgs o where o.org_id = ${orgId}::uuid
+    on conflict (org_id, job) do update set marks = org_work.marks + 1,
+      due_at = least(org_work.due_at, excluded.due_at)
+  `.execute(tx);
 }
 
 /** A mark as a job reads it to choose where to go: whose, and its count then, which its settling compares. */

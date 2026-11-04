@@ -47,6 +47,8 @@ const inOrg = <T>(orgId: string, work: (tx: Transaction<Tables>) => Promise<T>):
 /** A download of August 15 to October 2 (three months), asked in the organisation: its ID. */
 async function asked(orgId: string, change: Partial<BackgroundExportAsked> = {}): Promise<string> {
   const id = newId();
+  // Asked only in an organisation the directory lists, as the API's are: its months mark the builder's work (0077).
+  await database.as('admin').query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
   await inOrg(orgId, (tx) =>
     addBackgroundExport(tx, orgId, {
       id,

@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The directory schema's tables (db/migrations/0007_directory.sql, 0015_memberships.sql, 0016_invitations.sql, 0027_agents.sql, 0072_org_work.sql, 0073_expiry_marks.sql, 0075_void_marks.sql), as Kysely sees them. */
+/** The directory schema's tables (db/migrations/0007_directory.sql, 0015_memberships.sql, 0016_invitations.sql, 0027_agents.sql, 0072_org_work.sql, 0073_expiry_marks.sql, 0075_void_marks.sql, 0077_reset_download_hold_marks.sql), as Kysely sees them. */
 export interface DirectoryTables {
   'directory.orgs': OrgsTable;
   'directory.members': MembersTable;
@@ -39,7 +39,10 @@ export type OrgWorkJob =
   | 'mandate_expiry'
   | 'request_voids'
   | 'waiting_rejections'
-  | 'carry_rest';
+  | 'carry_rest'
+  | 'factor_removals'
+  | 'background_downloads'
+  | 'hold_history';
 
 interface OrgWorkTable {
   org_id: string;

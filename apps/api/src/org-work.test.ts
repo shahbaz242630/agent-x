@@ -1,9 +1,10 @@
 // What one look at an organisation calls for. The reads are statements of their own, each at its own moment, so
 // a write committing between them must never read as a miss, and a mark made while looking must never be cleared.
+import { FixedClock } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import { settleReadsGate } from './handoff.ts';
-import { movesOf, WAITING_AS_A_WHOLE_MS } from './org-work.ts';
+import { type MarkedOrganisations, movesOf, WAITING_AS_A_WHOLE_MS, withOrgWork, withWholePasses } from './org-work.ts';
 
 const NOW = new Date('2026-11-02T10:00:00.000Z');
 const mark = (marks: string, dueAt = NOW) => ({ job: 'hand_off', due_at: dueAt, marks }) as const;
@@ -119,4 +120,66 @@ describe("the settles' one gate", () => {
       expect(inside).toBe(most);
     },
   );
+});
+
+/** A job's marks that list `listed` each run, and count their settlings. */
+function stubMarks(listed: readonly string[]) {
+  const settled: (AbortSignal | undefined)[] = [];
+  const marks: MarkedOrganisations = {
+    list: () => Promise.resolve(listed),
+    unfinished: () => undefined,
+    waitsAsAWhole: () => undefined,
+    dueBy: () => undefined,
+    settle: (signal) => {
+      settled.push(signal);
+      return Promise.resolve();
+    },
+  };
+  return { marks, settled };
+}
+
+describe('a job on its marks (4D2e D10)', () => {
+  it('says what its run said, a skip too, once its marks are settled', async () => {
+    const { marks, settled } = stubMarks([]);
+    const job = withOrgWork([marks], { run: () => Promise.resolve('skipped' as const) });
+
+    await expect(job.run()).resolves.toBe('skipped');
+    expect(settled).toEqual([undefined]);
+  });
+
+  it('visits every organisation besides its marks at its first run and once each whole pass, the marked first, each once', async () => {
+    const clock = new FixedClock(NOW);
+    const { marks } = stubMarks(['b', 'm']);
+    let wholes = 0;
+    const list = withWholePasses(marks, {
+      everyMs: 6 * 3_600_000,
+      all: () => {
+        wholes += 1;
+        return Promise.resolve(['a', 'b', 'c']);
+      },
+      clock,
+    });
+
+    expect(await list()).toEqual(['b', 'm', 'a', 'c']);
+    clock.advanceBy(6 * 3_600_000 - 1);
+    expect(await list()).toEqual(['b', 'm']);
+    clock.advanceBy(1);
+    expect(await list()).toEqual(['b', 'm', 'a', 'c']);
+    expect(wholes).toBe(2);
+  });
+
+  it('a whole list it cannot read fails the run, and the next run tries the whole pass again', async () => {
+    const clock = new FixedClock(NOW);
+    const { marks } = stubMarks(['m']);
+    let fails = true;
+    const list = withWholePasses(marks, {
+      everyMs: 3_600_000,
+      all: () => (fails ? Promise.reject(new Error('no directory')) : Promise.resolve(['a'])),
+      clock,
+    });
+
+    await expect(list()).rejects.toThrow('no directory');
+    fails = false;
+    expect(await list()).toEqual(['m', 'a']);
+  });
 });
