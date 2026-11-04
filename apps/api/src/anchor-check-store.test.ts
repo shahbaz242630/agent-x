@@ -907,6 +907,7 @@ describe('a rebase moves the check on (4D2e E11)', () => {
       at,
       reason: 'repaired',
       evidence: 'INC-2026-11-05',
+      from: 9n,
     });
     return { name: rebaseFileName(1, rebase.id), bytes: rebaseFile(rebase) };
   };

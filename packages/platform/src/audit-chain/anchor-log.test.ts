@@ -2164,6 +2164,7 @@ describe('a rebase moves a chain on (4D2e E11)', () => {
       at: at(minutes),
       reason: 'repaired',
       evidence: 'INC-2026-11-05',
+      from: null,
     });
   const stored = (fake: FakeWriteOnceStore, rebase: Rebase): void => {
     fake.files.set(rebaseFileName(1, rebase.id), rebaseFile(rebase));
@@ -2348,21 +2349,53 @@ describe('a rebase moves a chain on (4D2e E11)', () => {
     expect(lines('audit.integrity_failed')).toHaveLength(3);
   });
 
-  it('one dated ahead of the clock waits, the alarm each read, then stands once its time comes', async () => {
+  const SECOND = 1000;
+  const seconds = (count: number): number => (count * SECOND) / MINUTE;
+
+  it('E11 review: dated by a database clock up to 20 s ahead of this one, it stands at once; its own anchors from before pass over', async () => {
     const fake = anchoredAtTen();
     stored(fake, rebaseOf(CHAIN, 4n, 30));
-    const { log, lines, advance } = logOver(fake, 1, keys, at(20));
+    const { log, lines } = logOver(fake, 1, keys, new Date(at(30).getTime() - 15 * SECOND));
     await log.read();
-    advance(4);
+    expect(log.latest(CHAIN)).toMatchObject({ seq: 4n, at: at(30) });
+    // A check running on this clock signs the chain again where the rebase put it: dated before it, so passed over.
+    log.keep(anchorAt(CHAIN, 4n, new Date(at(30).getTime() - 10 * SECOND), 104));
+    expect(log.latest(CHAIN)).toMatchObject({ seq: 4n, at: at(30) });
+    // Once this clock is past it, the check's anchor stands.
+    log.keep(anchorAt(CHAIN, 5n, new Date(at(30).getTime() + 5 * SECOND)));
+    expect(log.latest(CHAIN)?.seq).toBe(5n);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('E11 review: more than 20 s ahead of this clock it waits, the alarm each read, then stands once its time comes', async () => {
+    const fake = anchoredAtTen();
+    stored(fake, rebaseOf(CHAIN, 4n, 30));
+    const { log, lines, advance } = logOver(fake, 1, keys, new Date(at(30).getTime() - 25 * SECOND));
+    await log.read();
+    advance(seconds(4));
     await log.read();
     expect(log.latest(CHAIN)?.seq).toBe(10n);
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ reason: 'rebase', problem: 'future', orgId: ORG }),
       expect.objectContaining({ reason: 'rebase', problem: 'future', orgId: ORG }),
     ]);
-    advance(1);
+    advance(seconds(2));
     await log.read();
     expect(log.latest(CHAIN)?.seq).toBe(4n);
+  });
+
+  it('E11 review: dated by a database clock behind this one, it stands, and only what is older than it is set aside', async () => {
+    const fake = anchoredAtTen();
+    stored(fake, rebaseOf(CHAIN, 4n, 30));
+    // This clock ten minutes ahead: an anchor of the old chain it signed meanwhile, on its own clock, after the rebase's time.
+    fake.files.set(nameOf('deltas', 38), fileOf(nameOf('deltas', 38), anchorAt(CHAIN, 3n, at(38))));
+    const { log, lines } = logOver(fake, 1, keys, at(40));
+    await log.read();
+    // The highest place since the rebase's time wins: the rebase's own.
+    expect(log.latest(CHAIN)).toMatchObject({ seq: 4n, at: at(30) });
+    log.keep(anchorAt(CHAIN, 6n, at(41)));
+    expect(log.latest(CHAIN)?.seq).toBe(6n);
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
   it("the chain's newest rebase stands, in any order read; one older than an anchor held sets aside only what is older", async () => {

@@ -34,6 +34,7 @@ const UNSIGNED = {
   at: new Date('2026-11-05T10:00:00.000Z'),
   reason: 'repaired' as const,
   evidence: 'INC-2026-11-05',
+  from: 900n,
 };
 const NAME = rebaseFileName(1, ID);
 
@@ -51,6 +52,7 @@ const LINE = (signing = keys, epoch = 1): Record<string, unknown> => {
     at: UNSIGNED.at.toISOString(),
     why: 'repaired',
     ev: UNSIGNED.evidence,
+    fr: '900',
     kv: signed.keyVersion,
     sig: signed.signature.toString('base64'),
   };
@@ -74,7 +76,12 @@ describe('a rebase line (4D2e E11)', () => {
       '2026-11-05T10:00:00.000Z',
       'repaired',
       'INC-2026-11-05',
+      '900',
     ]);
+    // A chain with no anchor before: nothing it moves on from.
+    const fresh = signRebase(keys, 1, { ...UNSIGNED, from: null });
+    expect(await readRebaseFile(keys, { bytes: rebaseFile(fresh), name: NAME, epoch: 1 })).toEqual({ rebase: fresh });
+    expect(rebaseMessage(1, { ...UNSIGNED, from: null }).at(-1)).toBe('');
   });
 
   it('SEC-DB-11 refuses one signed with another key, with the anchor key, unsigned, or for another epoch', async () => {
@@ -91,6 +98,8 @@ describe('a rebase line (4D2e E11)', () => {
       { ...LINE(), seq: '813' },
       { ...LINE(), why: 'recovered' },
       { ...LINE(), ev: 'INC-other' },
+      { ...LINE(), fr: '901' },
+      { ...LINE(), fr: null },
     ];
     for (const line of lines) {
       expect(await readRebaseFile(keys, { bytes: fileOfLine(line), name: NAME, epoch: 1 })).toEqual({
@@ -120,6 +129,9 @@ describe('a rebase line (4D2e E11)', () => {
         { sig: 5 },
         { why: 'because' },
         { ev: 'a b' },
+        { fr: 900 },
+        { fr: '-1' },
+        { fr: undefined },
         { at: '2026-11-05T10:00:00Z' },
       ].map((change) => fileOfLine({ ...good, ...change })),
     ];

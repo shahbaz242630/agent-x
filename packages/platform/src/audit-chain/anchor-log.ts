@@ -140,6 +140,12 @@ const LATER_KINDS: ReadonlySet<unknown> = new Set(['r']);
 /** How many rebase files a list asks: there are a handful in an epoch. */
 const REBASES_A_PAGE = 100;
 
+/**
+ * How far past this process's clock a rebase may be dated (E11 review): it is dated by the database's clock, which this
+ * one keeps near, and a rebase dated ahead sets aside this process's own anchors of the chain until its time comes.
+ */
+const REBASE_MOST_AHEAD_MS = 20_000;
+
 /** A rebase file's name after its folder: its ID. */
 const REBASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -667,7 +673,7 @@ export function createAnchorLog({
       alarm('rebase', { problem: read.problem, file: name });
       return;
     }
-    if (read.rebase.at.getTime() > now().getTime() + MOST_AHEAD_MS) {
+    if (read.rebase.at.getTime() > now().getTime() + REBASE_MOST_AHEAD_MS) {
       alarm('rebase', { problem: 'future', file: name, rebaseAt: read.rebase.at.toISOString() }, read.rebase.chain);
       return;
     }

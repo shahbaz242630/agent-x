@@ -90,7 +90,7 @@ import {
 } from '@agentx/platform/storage';
 
 import { type ActivityExportTables, exportActivityLog } from './activity-export.ts';
-import { rebaseChain, type RebaseTables } from './chain-rebase.ts';
+import { rebaseChain, type RebaseOutcome, type RebaseTables } from './chain-rebase.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
@@ -219,6 +219,9 @@ type Request =
   | {
       readonly command: typeof CHAIN_REBASE;
       readonly chain: Chain;
+      /** The place the repair ended at: the chain's head must be exactly this. */
+      readonly seq: bigint;
+      readonly hash: Buffer;
       readonly reason: RebaseReason;
       /** The incident's reference, kept in the store's line; never logged, nor repeated in a problem. */
       readonly evidence: string;
@@ -376,30 +379,45 @@ function chainNamed(named: string | undefined): Chain | undefined {
   return named !== undefined && UUID_V7.test(named) ? { kind: 'organisation', orgId: named } : undefined;
 }
 
-/** A chain's rebase (4D2e E11): only from a file, the chain, why, the incident's reference and the rebase's ID named. */
+/** A rebase request's flags, in their order, each followed by its value. */
+const REBASE_FLAGS = ['--chain', '--seq', '--hash', '--reason', '--evidence', '--id'] as const;
+
+/** A chain's head as a request names it: its number, and its hash in lower-case hex. */
+const HEAD_SEQ = /^[1-9]\d{0,18}$/;
+const HEAD_HASH = /^[0-9a-f]{64}$/;
+
+/**
+ * A chain's rebase (4D2e E11): only from a file, naming the chain, the place the repair ended at (its head's number and
+ * hash), why, the incident's reference and the rebase's ID.
+ */
 function chainRebaseAsked(words: readonly string[], fromFile: boolean): Request | Problems {
-  const [, chainFlag, named, reasonFlag, reason, evidenceFlag, evidence, idFlag, id, ...more] = words;
   if (!fromFile) return problem(`${CHAIN_REBASE} runs only from a request file: ${CHAIN_REBASE_USAGE}`);
   const shaped =
-    chainFlag === '--chain' &&
-    reasonFlag === '--reason' &&
-    evidenceFlag === '--evidence' &&
-    idFlag === '--id' &&
-    id !== undefined &&
-    more.length === 0;
+    words.length === 1 + 2 * REBASE_FLAGS.length && REBASE_FLAGS.every((flag, index) => words[1 + 2 * index] === flag);
   if (!shaped) return problem(`the request file holds ${CHAIN_REBASE_USAGE} as a JSON list, and nothing else`);
+  const [named, seq, hash, reason, evidence, id] = REBASE_FLAGS.map((_flag, index) => String(words[2 + 2 * index]));
   const chain = chainNamed(named);
   const why = REBASE_REASONS.find((each) => each === reason);
   const problems = [
     ...(chain === undefined ? ["the chain must be platform or an organisation's ID, a UUIDv7 in lower case"] : []),
+    ...(HEAD_SEQ.test(String(seq)) ? [] : ["the head's number must be a whole number from 1"]),
+    ...(HEAD_HASH.test(String(hash)) ? [] : ["the head's hash must be 64 lower-case hex digits"]),
     ...(why === undefined ? [`the reason must be one of ${REBASE_REASONS.join(', ')}`] : []),
     ...(EVIDENCE_REFERENCE.test(String(evidence))
       ? []
       : ['the incident reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
-    ...(UUID_V7.test(id) ? [] : ["the rebase's ID must be a UUIDv7, in lower case"]),
+    ...(UUID_V7.test(String(id)) ? [] : ["the rebase's ID must be a UUIDv7, in lower case"]),
   ];
   if (chain === undefined || why === undefined || problems.length > 0) return { problems };
-  return { command: CHAIN_REBASE, chain, reason: why, evidence: String(evidence), id };
+  return {
+    command: CHAIN_REBASE,
+    chain,
+    seq: BigInt(String(seq)),
+    hash: Buffer.from(String(hash), 'hex'),
+    reason: why,
+    evidence: String(evidence),
+    id: String(id),
+  };
 }
 
 /**
@@ -853,9 +871,37 @@ async function chainRecovery(
   });
 }
 
+/** What a rebase came to, said on its own line: the exit code, 0 once the rebase is in the store and on its chain. */
+function rebaseSaid(log: Logger, outcome: RebaseOutcome, rebaseId: string, chain: Chain): number {
+  if (!outcome.ok) {
+    const { reason, problem: why, seq } = outcome;
+    if (reason === 'done_before') {
+      log.error('operator.done_before', { command: CHAIN_REBASE, rebaseId, recorded: outcome.recorded ?? null });
+    } else {
+      log.error('operator.chain_rebase_refused', { rebaseId, reason, problem: why ?? null, seq: seq ?? null });
+    }
+    return 1;
+  }
+  const { rebase, shorterBy, recorded } = outcome;
+  log.info('operator.chain_rebased', {
+    rebaseId,
+    chain: chain.kind,
+    seq: rebase.seq,
+    headHash: rebase.hash.toString('hex'),
+    anchorSeq: rebase.from,
+    shorterBy,
+    reason: rebase.reason,
+    at: rebase.at.toISOString(),
+    keyVersion: rebase.keyVersion,
+    recorded,
+  });
+  return recorded === 'failed' ? 1 : 0;
+}
+
 /**
  * Moves a chain's anchor on after a sanctioned change to it (4D2e E11): the exit code, 0 once the rebase is in the
- * anchors' store. Read-only on the live server. The incident's reference is never logged.
+ * anchors' store and its event on the chain. Read-only on the live server but for that event, written on a connection
+ * of its own. The incident's reference is never logged.
  */
 async function chainRebase(
   config: OperatorConfig,
@@ -873,41 +919,29 @@ async function chainRebase(
   }
   const live = await connect(config, logger, { host: config.db.host, readOnly: true });
   if (live === undefined) return 1;
+  const writer = await connect(config, logger);
   try {
+    if (writer === undefined) return 1;
     if (!(await transactionsReadOnly(live))) {
       log.error('operator.refused', { problems: ['the connection is not read-only, so nothing was read'] });
       return 1;
     }
     const outcome = await rebaseChain({
       live,
-      keys,
+      writer,
+      services: { keys, ids: uuidV7Ids, logger: log },
       store,
       anchors,
       chain,
-      asked: request,
-      now: () => systemClock.now(),
+      asked: { ...request, release: config.release, run: config.run },
     });
-    if (!outcome.ok) {
-      const { reason, problem: why, seq } = outcome;
-      if (reason === 'done_before') log.error('operator.done_before', { command: CHAIN_REBASE, rebaseId });
-      else log.error('operator.chain_rebase_refused', { rebaseId, reason, problem: why ?? null, seq: seq ?? null });
-      return 1;
-    }
-    log.info('operator.chain_rebased', {
-      rebaseId,
-      chain: chain.kind,
-      seq: outcome.rebase.seq,
-      headHash: outcome.rebase.hash.toString('hex'),
-      anchorSeq: outcome.anchorSeq ?? null,
-      reason: outcome.rebase.reason,
-      keyVersion: outcome.rebase.keyVersion,
-    });
-    return 0;
+    return rebaseSaid(log, outcome, rebaseId, chain);
   } catch (error) {
     log.error('operator.failed', { command: CHAIN_REBASE, err: error });
     return 1;
   } finally {
     await live.destroy();
+    await writer?.destroy();
   }
 }
 

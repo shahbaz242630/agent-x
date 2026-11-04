@@ -47,15 +47,17 @@ export interface Rebase extends CheckedPoint {
   readonly reason: RebaseReason;
   /** The incident's reference, where the evidence is kept. */
   readonly evidence: string;
+  /** The anchor it moves on from, if the chain had one: shorter than it where `seq` is lower. */
+  readonly from: bigint | null;
   readonly keyVersion: number;
   /** Ed25519 with `audit-rebase` over rebaseMessage. */
   readonly signature: Buffer;
 }
 
-/** What a rebase signs: its epoch, ID, chain, place, time, reason and evidence. Its own label and key. */
+/** What a rebase signs: its epoch, ID, chain, place, time, reason, evidence and the anchor before. Its own label and key. */
 export const rebaseMessage = (
   epoch: number,
-  { id, chain, seq, hash, macKeyVersion, at, reason, evidence }: Omit<Rebase, 'keyVersion' | 'signature'>,
+  { id, chain, seq, hash, macKeyVersion, at, reason, evidence, from }: Omit<Rebase, 'keyVersion' | 'signature'>,
 ): Message => [
   'audit-rebase',
   String(epoch),
@@ -67,6 +69,7 @@ export const rebaseMessage = (
   at.toISOString(),
   reason,
   evidence,
+  from === null ? '' : from.toString(),
 ];
 
 /** Where a rebase's file goes in the store: its epoch's folder, by its ID. */
@@ -98,6 +101,7 @@ export function rebaseFile(rebase: Rebase): Buffer {
     at: rebase.at.toISOString(),
     why: rebase.reason,
     ev: rebase.evidence,
+    fr: rebase.from === null ? null : rebase.from.toString(),
     kv: rebase.keyVersion,
     sig: rebase.signature.toString('base64'),
   });
@@ -122,12 +126,13 @@ const isReason = (value: unknown): value is RebaseReason => (REBASE_REASONS as r
 
 /** The rebase a parsed line says, if it is one in every field; its signature is checked after. */
 function rebaseFrom(fields: Record<string, unknown>): Rebase | undefined {
-  const { k, id, chain, seq, hash, mk, at, why, ev, kv, sig } = fields;
+  const { k, id, chain, seq, hash, mk, at, why, ev, fr, kv, sig } = fields;
   if (k !== 'r' || typeof id !== 'string' || !UUID.test(id)) return undefined;
   if (typeof chain !== 'string' || !CHAIN.test(chain)) return undefined;
   if (typeof seq !== 'string' || !SEQ.test(seq) || typeof hash !== 'string' || !HASH.test(hash)) return undefined;
   if (!isCount(mk) || !isCount(kv) || typeof sig !== 'string' || !isReason(why)) return undefined;
   if (typeof ev !== 'string' || !EVIDENCE_REFERENCE.test(ev)) return undefined;
+  if (fr !== null && (typeof fr !== 'string' || !SEQ.test(fr))) return undefined;
   const when = timeIn(at);
   if (when === undefined) return undefined;
   return {
@@ -139,6 +144,7 @@ function rebaseFrom(fields: Record<string, unknown>): Rebase | undefined {
     at: when,
     reason: why,
     evidence: ev,
+    from: fr === null ? null : BigInt(fr),
     keyVersion: kv,
     signature: Buffer.from(sig, 'base64'),
   };
