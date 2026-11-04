@@ -274,6 +274,11 @@ export const PLAIN_WORDS = {
     broke: 'An old audit record edited there is found later than promised; backups can still undo it. Nobody is held.',
     next: 'See whether the database is slow or the tamper check runs out of time, and add capacity.',
   },
+  'audit.full_pass_restarted': {
+    happened: "An organisation's full read of its audit history could not go on from where it had stopped.",
+    broke: 'The record it had stopped at no longer matches what was read, so the read starts again from the beginning.',
+    next: 'Nothing if no tamper alarm follows; the read itself raises one if a record was changed.',
+  },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',
     broke: 'That record was left off the list; the rest of the list was shown.',

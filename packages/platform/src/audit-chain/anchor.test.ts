@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { encodeMessage } from '../keys/message.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
-import { createMemoryAnchorStore, createMemoryPassRecord, signAnchor, signPass } from './anchor.ts';
+import { createMemoryAnchorStore, createMemoryPassRecord, signAnchor, signPass, signProgress } from './anchor.ts';
 import type { Chain } from './chain.ts';
 
 const keys = createKeyProvider(
@@ -112,5 +112,16 @@ describe('a finished full pass (4D2e E7)', () => {
 
     expect(record.lastPass(PLATFORM)).toBe(later);
     expect(record.lastPass(orgChain)).toBeUndefined();
+  });
+
+  it("keeps each chain's place under way until its pass finishes, signed under a label of its own", () => {
+    const record = createMemoryPassRecord();
+    const place = signProgress(keys, PLATFORM, POINT, AT, 1);
+    record.keepProgress(place);
+    expect(record.lastProgress(PLATFORM)).toBe(place);
+    expect(place.signature).not.toEqual(signPass(keys, PLATFORM, POINT, AT, 1).signature);
+    expect(place.signature).not.toEqual(signAnchor(keys, PLATFORM, POINT, AT, 1).signature);
+    record.keepPass(signPass(keys, PLATFORM, POINT, AT));
+    expect(record.lastProgress(PLATFORM)).toBeUndefined();
   });
 });

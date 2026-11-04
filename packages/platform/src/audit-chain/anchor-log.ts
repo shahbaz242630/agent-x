@@ -32,8 +32,10 @@
 // is the alarm, so it can't hide later files. Every chain in the store counts as
 // seen, so an organisation taken off the list and the record is still missed.
 //
-// A chain's finished full pass is a line of its own (`k:"p"`, 4D2e E7), signed under its own label: the newest
-// kept, written with what moved and in every snapshot, so a restart goes on with the chains passed longest ago.
+// A chain's finished full pass is a line of its own (`k:"p"`, 4D2e E7), and so is the place a pass under way has
+// reached (`k:"u"`), each signed under its own label: the newest of each kept, written with what moved and in every
+// snapshot, so a restart goes on with the chains passed longest ago, and from where a pass had got to. A place reached
+// is dropped once its chain's pass finishes after it.
 //
 // Signed lines stand, and the highest place wins, so they count as they are read. A chain
 // this process holds moves on at once, even if the read then fails, or the file turns out
@@ -56,7 +58,14 @@ import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import { OverwriteRefused, type WriteOnceStore } from '../storage/write-once.ts';
 import type { Message } from '../keys/message.ts';
-import { type Anchor, type AnchorStore, anchorMessage, passMessage, type PassRecord } from './anchor.ts';
+import {
+  type Anchor,
+  type AnchorStore,
+  anchorMessage,
+  passMessage,
+  type PassRecord,
+  progressMessage,
+} from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
 
 /** How often every chain's anchor is written whole, where something moved. */
@@ -114,10 +123,16 @@ const ORGANISATION = 'organisation:';
 const LATER_KINDS: ReadonlySet<unknown> = new Set(['r']);
 
 /** A line's kind: an anchor, or a finished full pass. */
-type LineKind = 'a' | 'p';
+type LineKind = 'a' | SideKind;
+
+/** The lines kept beside the anchors: a finished full pass, and a pass's place reached. */
+type SideKind = 'p' | 'u';
+const SIDE_KINDS: readonly SideKind[] = ['p', 'u'];
 
 /** What each kind's signature covers. */
-const MESSAGE_OF = { a: anchorMessage, p: passMessage } as const;
+const MESSAGE_OF = { a: anchorMessage, p: passMessage, u: progressMessage } as const;
+
+const isLineKind = (kind: unknown): kind is LineKind => kind === 'a' || kind === 'p' || kind === 'u';
 
 type Kind = 'deltas' | 'snapshots';
 
@@ -158,6 +173,8 @@ export interface AnchorLog extends AnchorStore, PassRecord {
   flush(): Promise<void>;
   /** Says a write failed, or ran out of time: what `flush` says of its own failures. */
   writeFailed(error: unknown): void;
+  /** When the newest file this process has read or written was named: where another process last left off. */
+  lastFileAt(): Date | undefined;
 }
 
 /** A file made, not yet known to be in the store. Tried again under the same name, with the same bytes. */
@@ -166,7 +183,7 @@ interface Unsent {
   readonly name: string;
   readonly bytes: Buffer;
   readonly lines: readonly Anchor[];
-  readonly passes: readonly Anchor[];
+  readonly sides: readonly (readonly [SideKind, Anchor])[];
 }
 
 const tooManySpoiled = (spoiled: number): string =>
@@ -293,7 +310,7 @@ async function readFile(
     body += 1;
     const kind = kindOf(fields);
     if (LATER_KINDS.has(kind)) return;
-    const lineKind = kind === 'a' || kind === 'p' ? kind : undefined;
+    const lineKind = isLineKind(kind) ? kind : undefined;
     const line = lineKind === undefined ? undefined : anchorFrom(fields as Record<string, unknown>);
     if (
       lineKind === undefined ||
@@ -358,11 +375,16 @@ export function createAnchorLog({
   const anchors = new Map<string, Anchor>();
   // What has moved since it was last written: one line a chain at most, however long the store stays away.
   const pending = new Map<string, Anchor>();
-  // Each chain's last finished full pass, and those not written yet, the same way.
-  const passes = new Map<string, Anchor>();
-  const pendingPasses = new Map<string, Anchor>();
-  /** How many lines this process holds, against what it can: anchors and passes alike. */
-  const linesHeld = (): number => anchors.size + passes.size;
+  // Each chain's newest line of each side kind, and those not written yet, the same way.
+  const sides = { p: new Map<string, Anchor>(), u: new Map<string, Anchor>() };
+  const pendingSides = { p: new Map<string, Anchor>(), u: new Map<string, Anchor>() };
+  /** How many lines this process holds, against what it can: anchors and the side lines alike. */
+  const linesHeld = (): number => anchors.size + sides.p.size + sides.u.size;
+  /** A place reached that its chain's pass has finished after, which nothing goes on from. */
+  const overtaken = (line: Anchor): boolean => {
+    const pass = sides.p.get(line.chain);
+    return pass !== undefined && pass.at >= line.at;
+  };
   let unsent: Unsent | undefined;
 
   let state: 'unread' | 'read' | 'unreadable' = 'unread';
@@ -420,8 +442,8 @@ export function createAnchorLog({
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
       file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line, lineKind) => {
-        if (lineKind === 'p') passed(stage, line, kind, fileAt);
-        else staged(stage, line, kind, fileAt);
+        if (lineKind === 'a') staged(stage, line, kind, fileAt);
+        else sideLine(lineKind, stage, line, kind, fileAt);
       });
     } catch (error) {
       if (error instanceof BeyondMemory) throw error;
@@ -473,13 +495,13 @@ export function createAnchorLog({
   };
 
   /**
-   * A finished pass as it is read: the newest kept, at once, as a pass line moves nothing a check compares with. Counted
+   * A side line as it is read: the newest of its kind kept, at once, as it moves nothing a check compares with. Counted
    * against memory with the rest.
    */
-  const passed = (stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
-    const kept = passes.get(line.chain);
+  const sideLine = (side: SideKind, stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
+    const kept = sides[side].get(line.chain);
     if (kept !== undefined && kept.at >= line.at) return;
-    passes.set(line.chain, line);
+    sides[side].set(line.chain, line);
     if ((linesHeld() + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
   };
 
@@ -595,7 +617,8 @@ export function createAnchorLog({
         alarm('overwrite', { kind: file.kind });
         // They go again under a new name, unless a later line of the chain is waiting already.
         for (const line of file.lines) if (!pending.has(line.chain)) pending.set(line.chain, line);
-        for (const line of file.passes) if (!pendingPasses.has(line.chain)) pendingPasses.set(line.chain, line);
+        for (const [side, line] of file.sides)
+          if (!pendingSides[side].has(line.chain)) pendingSides[side].set(line.chain, line);
         unsent = undefined;
         return;
       }
@@ -605,7 +628,7 @@ export function createAnchorLog({
     else {
       snapshotFrom = countdownOf('snapshots', file.name);
     }
-    logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines.length, passes: file.passes.length });
+    logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines.length, sides: file.sides.length });
   };
 
   /** The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. */
@@ -614,8 +637,12 @@ export function createAnchorLog({
     const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
     const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
     const lines = kind === 'snapshots' ? [...anchors.values()] : [...pending.values()];
-    const passLines = kind === 'snapshots' ? [...passes.values()] : [...pendingPasses.values()];
-    const count = lines.length + passLines.length;
+    const sideLines = SIDE_KINDS.flatMap((side) =>
+      [...(kind === 'snapshots' ? sides : pendingSides)[side].values()]
+        .filter((line) => kind === 'deltas' || side === 'p' || !overtaken(line))
+        .map((line) => [side, line] as const),
+    );
+    const count = lines.length + sideLines.length;
     const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
     const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, count));
     const closing = JSON.stringify({
@@ -629,7 +656,7 @@ export function createAnchorLog({
     const bytes = await gzippedLines(
       (function* lined() {
         for (const line of lines) yield `${lineOf(line, 'a')}\n`;
-        for (const line of passLines) yield `${lineOf(line, 'p')}\n`;
+        for (const [side, line] of sideLines) yield `${lineOf(line, side)}\n`;
         yield `${closing}\n`;
       })(),
     );
@@ -640,14 +667,15 @@ export function createAnchorLog({
     }
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);
-    for (const line of passLines) if (pendingPasses.get(line.chain) === line) pendingPasses.delete(line.chain);
-    return { kind, name, bytes, lines, passes: passLines };
+    for (const [side, line] of sideLines)
+      if (pendingSides[side].get(line.chain) === line) pendingSides[side].delete(line.chain);
+    return { kind, name, bytes, lines, sides: sideLines };
   };
 
   const writeDue = async (): Promise<void> => {
     try {
       if (unsent !== undefined) await send(unsent);
-      if (unsent === undefined && pending.size + pendingPasses.size > 0) {
+      if (unsent === undefined && pending.size + pendingSides.p.size + pendingSides.u.size > 0) {
         unsent = await madeFile();
         await send(unsent);
       }
@@ -673,10 +701,27 @@ export function createAnchorLog({
       anchors.set(anchor.chain, anchor);
       pending.set(anchor.chain, anchor);
     },
-    lastPass: (chain: Chain) => passes.get(chainName(chain)),
+    lastPass: (chain: Chain) => sides.p.get(chainName(chain)),
     keepPass(line: Anchor) {
-      passes.set(line.chain, line);
-      pendingPasses.set(line.chain, line);
+      sides.p.set(line.chain, line);
+      pendingSides.p.set(line.chain, line);
+      // Finished: its place reached goes on to nothing, and is no longer written.
+      sides.u.delete(line.chain);
+      pendingSides.u.delete(line.chain);
+    },
+    lastProgress(chain: Chain) {
+      const line = sides.u.get(chainName(chain));
+      return line === undefined || overtaken(line) ? undefined : line;
+    },
+    keepProgress(line: Anchor) {
+      sides.u.set(line.chain, line);
+      pendingSides.u.set(line.chain, line);
+    },
+    lastFileAt() {
+      const times = [deltasFrom === undefined ? undefined : countdownOf('deltas', deltasFrom), snapshotFrom]
+        .filter((countdown) => countdown !== undefined)
+        .map((countdown) => LAST_MS - Number(countdown));
+      return times.length === 0 ? undefined : new Date(Math.max(...times));
     },
     read(): Promise<void> {
       reading ??= catchUp().finally(() => {

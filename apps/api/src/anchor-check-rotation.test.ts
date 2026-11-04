@@ -8,6 +8,7 @@ import {
   ChainStoreError,
   createAnchorLog,
   createMemoryAnchorStore,
+  signAnchor,
 } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createFakeWriteOnceStore, FixedClock, LogCapture, testLogger } from '@agentx/testing';
@@ -229,14 +230,19 @@ describe('the rotation in a run (4D2e E7)', () => {
     await settled();
     await vi.advanceTimersByTimeAsync(DEADLINE_MS);
     await first;
-    expect(lines('audit.anchor_check_failed')).toEqual([expect.objectContaining({ check: 'count' })]);
+    // The count past its deadline, then the pass's read refused while it still runs: no second connection.
+    const notFinished = (index: number) =>
+      String((lines('audit.anchor_check_failed')[index]?.err as { message?: unknown }).message);
+    expect(lines('audit.anchor_check_failed')).toEqual([
+      expect.objectContaining({ check: 'count' }),
+      expect.objectContaining({ check: 'pass' }),
+    ]);
+    expect(notFinished(1)).toContain('has not finished');
 
     clock.advanceBy(300_000);
     await check.run();
-    expect(lines('audit.anchor_check_failed')).toHaveLength(2);
-    expect(String((lines('audit.anchor_check_failed')[1]?.err as { message?: unknown }).message)).toContain(
-      'has not finished',
-    );
+    expect(lines('audit.anchor_check_failed')).toHaveLength(4);
+    expect(notFinished(2)).toContain('has not finished');
     expect(calls).toEqual([`count ${orgId} 0-10`]);
     letGo(undefined);
   });
@@ -279,5 +285,45 @@ describe('the rotation in a run (4D2e E7)', () => {
     });
     await restarted.read();
     expect(restarted.lastPass({ kind: 'organisation', orgId })?.seq).toBe(10n);
+  });
+
+  it("a first run looks back to the store's newest file, where the last process left off", async () => {
+    const inOutage = orgInSlot(80);
+    const { organizations } = directory([inOutage]);
+    const { reads, calls } = rotationReads();
+    const fake = createFakeWriteOnceStore();
+    const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
+    const durable = createAnchorLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(new LogCapture()),
+      now: () => clock.now(),
+      epoch: 3,
+      alertAfterMs: 120_000,
+    });
+    // The last process: it writes and goes, three hours before this one starts.
+    await durable.read();
+    durable.keep(
+      signAnchor(
+        keys,
+        { kind: 'organisation', orgId: inOutage },
+        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
+        clock.now(),
+        3,
+      ),
+    );
+    await durable.flush();
+    clock.advanceBy(3 * 3_600_000);
+    const restarted = createAnchorLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(new LogCapture()),
+      now: () => clock.now(),
+      epoch: 3,
+      alertAfterMs: 120_000,
+    });
+    const { check } = checking(organizations, { rotation: reads, durable: restarted, anchors: restarted, clock });
+    await check.run();
+    expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
   });
 });

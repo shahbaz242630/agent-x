@@ -200,6 +200,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     ...(anchorLog === undefined ? {} : { durable: anchorLog }),
     // Old events' counts, walks and full pass (4D2e E7), beside the whole reads until E8 switches them off.
     rotation: rotatedChecksOf(trail, database),
+    // Staging sleeps when unused: a woken process says nothing of a pass late for the time it slept.
+    sleeps: config.environment !== 'production',
   });
   // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
   // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.

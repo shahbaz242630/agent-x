@@ -184,6 +184,8 @@ export interface AnchorCheckOptions {
   readonly writeEveryMs?: number;
   /** The organisations' chains' reads for the rotation (4D2e E7): none, and a run has no rotation. */
   readonly rotation?: RotatedChecks;
+  /** Whether this environment sleeps when unused (staging), so a full pass's lateness counts from a process's start. */
+  readonly sleeps?: boolean;
 }
 
 /** See `stopFlushMs`. */
@@ -283,6 +285,7 @@ export function createAnchorCheck({
   runWithinMs = RUN_WITHIN_MS,
   writeEveryMs = WRITE_EVERY_MS,
   rotation: rotatedChecks,
+  sleeps = false,
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
@@ -920,6 +923,8 @@ export function createAnchorCheck({
           logger,
           epoch: durable?.epoch,
           lateAfterMs: reachWithinMs,
+          lastRanAt: () => durable?.lastFileAt(),
+          sleeps,
           bounded: async (work, signal) => {
             // Within the lanes' share, as a turn: never a hand-off's connection.
             while (inFlight.size >= lanes && !signal.aborted) await roomOrEnd(signal);

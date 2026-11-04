@@ -6,6 +6,7 @@ export {
   type PassRecord,
   signAnchor,
   signPass,
+  signProgress,
 } from './anchor.ts';
 export { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 export { OLD_EDIT_DAYS } from './limits.ts';

@@ -75,24 +75,46 @@ export const passMessage = (chain: string, point: CheckedPoint, at: Date, epoch:
   ...anchorMessage(chain, point, at, epoch).slice(1),
 ];
 
+/** What a pass under way's line signs (4D2e E7): read from the chain's first event to this place, at `at`. Its own label. */
+export const progressMessage = (chain: string, point: CheckedPoint, at: Date, epoch: number): Message => [
+  'audit-anchor-progress',
+  ...anchorMessage(chain, point, at, epoch).slice(1),
+];
+
+/** Signs the place a chain's full pass has reached, for the store's epoch, so a restart goes on from it. */
+export function signProgress(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date, epoch = NO_EPOCH): Anchor {
+  return signedLine(keys, chain, point, at, epoch, progressMessage);
+}
+
 /** Signs a chain's finished full pass, to the place it set out for, for the store's epoch. */
 export function signPass(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date, epoch = NO_EPOCH): Anchor {
   return signedLine(keys, chain, point, at, epoch, passMessage);
 }
 
-/** Where each chain's last finished full pass is kept: its line, as signPass made it. */
+/**
+ * Where each chain's last finished full pass is kept, as signPass made it, and the place a pass under way has reached,
+ * as signProgress made it: none once a pass finishes after it.
+ */
 export interface PassRecord {
   lastPass(chain: Chain): Anchor | undefined;
   keepPass(line: Anchor): void;
+  lastProgress(chain: Chain): Anchor | undefined;
+  keepProgress(line: Anchor): void;
 }
 
 /** The last full pass of each chain, in this process's memory, where no store keeps them. */
 export function createMemoryPassRecord(): PassRecord {
   const passes = new Map<string, Anchor>();
+  const progress = new Map<string, Anchor>();
   return Object.freeze({
     lastPass: (chain: Chain) => passes.get(chainName(chain)),
     keepPass: (line: Anchor) => {
       passes.set(line.chain, line);
+      progress.delete(line.chain);
+    },
+    lastProgress: (chain: Chain) => progress.get(chainName(chain)),
+    keepProgress: (line: Anchor) => {
+      progress.set(line.chain, line);
     },
   });
 }
