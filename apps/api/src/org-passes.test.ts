@@ -42,8 +42,9 @@ describe('an organisation’s slot', () => {
   });
 
   it('is its ID’s hash: the first four bytes of its SHA-256, by the slots', () => {
-    // sha256('a') begins ca978112: 3398926610, which is 2 by 12.
-    expect(slotOf('a', SLOTS)).toBe(3_398_926_610 % SLOTS);
+    // sha256('a') begins ca978112, 3398926610; sha256('b') 3e23e816, 1042540566; sha256('c') 2e7d2c03, 779955203.
+    expect(['a', 'b', 'c'].map((id) => slotOf(id, SLOTS))).toEqual([2, 6, 11]);
+    expect(slotOf('c', 7)).toBe(779_955_203 % 7);
   });
 });
 
