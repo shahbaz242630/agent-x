@@ -28,7 +28,7 @@ import {
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { type Clock, HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { createMemoryAnchorStore } from '@agentx/platform/audit-chain';
+import { CHAIN_START, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
@@ -37,6 +37,7 @@ import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
 import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
+import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
 import { anchorLogOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
@@ -79,9 +80,9 @@ import { createWaitingRequests } from './waiting-requests.ts';
 import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejectionsDue } from './waiting-rejections.ts';
 
 /**
- * How long the anchor check of one chain may hold its lane before it counts as
- * not completed (anchor-check.ts). Each of its statements has 10 seconds at most
- * (verifyAlone), and it may go on past this, its result still compared.
+ * How long the anchor check of one chain, or its probe of every head, may hold its
+ * lane before it counts as not completed (anchor-check.ts). Each of its statements
+ * has 10 seconds at most, and it may go on past this, its result still compared.
  */
 const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
@@ -236,11 +237,27 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
-    chains: [{ chain: { kind: 'platform' }, verify: (anchor) => platform.verifyAlone(database, anchor) }],
+    chains: [
+      {
+        chain: { kind: 'platform' },
+        // From its anchor, and whole once a day (4D2e E8).
+        verify: platformChainCheck({
+          fromAnchor: (from) => platform.checkFromAnchor(database, from),
+          whole: (anchor) => platform.verifyAlone(database, anchor),
+          clock: systemClock,
+        }),
+      },
+    ],
     organizations: {
       list: () => listedOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
-      recorded: () => platform.createdOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
-      verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
+      // Only those recorded since the last read, up to where the platform chain's check has reached (4D2e E8).
+      recorded: recordedSince({
+        since: (afterSeq, upTo) => platform.createdOrganizationsSince(database, afterSeq, upTo, JOB_ANSWER_WITHIN_MS),
+        checkedTo: () => anchorStore.latest({ kind: 'platform' })?.seq,
+      }),
+      // No organisation's chain read whole (4D2e E8): every head probed each run, those moved read from their anchors.
+      probe: (chains, signal, pagesAtOnce) => trail.probeHeads(database, chains, signal, pagesAtOnce),
+      verify: (orgId, anchor) => trail.checkFromAnchor(database, orgId, anchor ?? CHAIN_START),
       // The run's own logger: the hold's lines name the organisation themselves.
       hold: (orgId, failure) =>
         holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure, JOB_ANSWER_WITHIN_MS),
@@ -255,6 +272,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     mostOrganisations: config.audit.mostOrganisations,
     anchors: anchorStore,
     ...(anchorLog === undefined ? {} : { durable: anchorLog }),
+    // Old events' counts, walks and full pass (4D2e E7): what finds an old event deleted or edited.
+    rotation: rotatedChecksOf(trail, database),
+    // Staging sleeps when unused: a woken process says nothing of a pass late for the time it slept.
+    sleeps: config.environment !== 'production',
   });
   // The bank breaker the hand-off holds to, reopened by the bank check's own lookups, and the transactions both share
   // (4D2e Stage F): only where there is a rail, so a small pool with none starts as it did.
@@ -279,6 +300,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         ...railWork,
         list: handOffMarks.list,
         sweepList: sweepMarks.list,
+        unfinished: handOffMarks.unfinished,
+        waitsAsAWhole: handOffMarks.waitsAsAWhole,
         outbox,
         // The anchor check starts before the hand-off's first run: this list's order.
         anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
@@ -295,9 +318,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         ...clocked,
         ...railWork,
         list: checkMarks.list,
-        unfinished: (orgId) => {
-          checkMarks.keep(orgId);
-        },
+        unfinished: checkMarks.unfinished,
         nextTurn: (orgId, at) => {
           checkMarks.dueBy(orgId, at);
         },

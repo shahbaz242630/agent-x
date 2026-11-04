@@ -146,6 +146,7 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ['the database name', { AGENTX_DB_NAME: 'agentx_uae' }],
     ['the database role', { AGENTX_DB_USER: 'agentx_app_uae' }],
     ['the pool size', { AGENTX_DB_POOL_MAX: '20' }],
+    ['the web copies', { AGENTX_WEB_COPIES: '3' }],
     ["the gate's whole limit", { AGENTX_DECISION_GATE_ACTIVE: '5' }],
     ["the gate's limit per organisation", { AGENTX_DECISION_GATE_PER_ORGANISATION: '2' }],
     ["the gate's waiting list", { AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: '8' }],
@@ -192,6 +193,18 @@ describe('SEC-OPS-05 the config fingerprint', () => {
       AGENTX_LIVE_MONEY_GATE_REF: undefined,
     };
     expect(hashOf({ ...staging, AGENTX_ROLE: 'jobs' })).not.toBe(hashOf(staging));
+  });
+
+  it("changes with the jobs' pool where it is the pool opened, and not where it isn't (4D2e D12)", () => {
+    const staging = {
+      ...SETTINGS,
+      AGENTX_ENV: 'staging',
+      AGENTX_PARTNER_MODE: 'fake',
+      AGENTX_LIVE_MONEY_GATE_REF: undefined,
+    };
+    const jobs = { ...staging, AGENTX_ROLE: 'jobs' };
+    expect(hashOf({ ...jobs, AGENTX_DB_JOBS_POOL_MAX: '6' })).not.toBe(hashOf(jobs));
+    expect(hashOf({ ...staging, AGENTX_DB_JOBS_POOL_MAX: '6' })).toBe(hashOf(staging));
   });
 
   it('changes when the TLS mode changes (in test, where disable is allowed)', () => {

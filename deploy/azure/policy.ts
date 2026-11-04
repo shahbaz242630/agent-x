@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
 import { APP_KEYS } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
@@ -35,10 +36,14 @@ export type RuleId =
   | 'database-zone'
   | 'database-measures'
   | 'load-run'
+  | 'connections'
   | 'vault'
   | 'evidence-store'
+  | 'anchor-epoch'
   | 'activity-downloads'
   | 'workspace'
+  | 'login-workspace'
+  | 'workbook'
   | 'log-quota-alerts'
   | 'alert-counts-only'
   | 'alert-window'
@@ -64,10 +69,14 @@ export type RuleId =
   | 'handoff-queue-alert'
   | 'platform-full-alert'
   | 'anchor-store-alert'
+  | 'daily-check-alert'
+  | 'full-pass-alert'
   | 'integrity-runs-alert'
+  | 'records-filling-alert'
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
+  | 'decisions-suppressed-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -131,6 +140,7 @@ const TYPES = {
   vault: 'Microsoft.KeyVault/vaults',
   vaultSecret: 'Microsoft.KeyVault/vaults/secrets',
   workspace: 'Microsoft.OperationalInsights/workspaces',
+  workbook: 'Microsoft.Insights/workbooks',
 } as const;
 
 /**
@@ -313,12 +323,34 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 const ANCHOR_STORE_LINES =
   'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
 
+/**
+ * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass
+ * may take to find an old audit event edited (4D2e E7, decision 3), so the clean rows are still there to restore when it is.
+ * Staging's few days are no recovery path.
+ */
+export const leastRestoreDays = (
+  environment: Expectations['environment'],
+  oldEditDays: number = OLD_EDIT_DAYS,
+): number => (environment === 'production' ? Math.max(35, 2 * oldEditDays) : 7);
+
+/** The anchor check's daily count and walk of older events late (4D2e E7, decisions 1 and 2b). */
+const DAILY_CHECK_LATE = 'audit.daily_check_overdue';
+
+/** The full pass of every chain late (4D2e E7, decision 3). */
+const FULL_PASS_LATE = 'audit.full_pass_overdue';
+
 /** An agent's decision turned away with the whole platform full (4D2e C, PL-63): calm organisations are being slowed. */
 const PLATFORM_FULL_LINES =
   'where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out")';
 
 /** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
 const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
+
+/** Decision lines past their budget, counted in one line (4D2e F8, PL-52): the denial-surge alert undercounts that minute. */
+const DECISIONS_SUPPRESSED_LINES = [
+  'where tostring(parse_json(Log).event) == "log.suppressed"',
+  'where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided"',
+] as const;
 
 /**
  * An integrity job that skipped a whole run, its organisation list unread
@@ -327,6 +359,12 @@ const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "han
  */
 const INTEGRITY_RUN_FAILED_LINES =
   'where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed")';
+
+/**
+ * An organisation's records past what a list reads well, or a hold clearing reading thousands of one kind
+ * (`identity.records_filling`, partner S170): nothing breaks yet, but a list past its limit stops working.
+ */
+const RECORDS_FILLING_LINES = 'where tostring(parse_json(Log).event) == "identity.records_filling"';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -340,6 +378,15 @@ const OTHER_DESTINATIONS = [
   'marketplacePartnerId',
   'serviceBusRuleId',
 ] as const;
+
+/**
+ * The login alerts' own workspace (4D2e Stage F, PR 9), by its name: the main one's cap reached stops its collecting,
+ * so the alerts on Postgres's logins read a small workspace of their own, holding only what they need, its cap 1 GB.
+ */
+const LOGIN_WORKSPACE = /^log-agentx-(?:stg|prd)-logins$/;
+const LOGIN_WORKSPACE_CAP_GB = 1;
+/** What the login workspace holds: Postgres's server log and the platform's lines, for the owner-login pairing. */
+const LOGIN_LOG_CATEGORIES: readonly unknown[] = ['PostgreSQLLogs', 'ContainerAppSystemLogs'];
 
 /** The environment's logs that reach the workspace: every container's console, and the platform's own events. */
 const APP_LOG_CATEGORIES: readonly unknown[] = ['ContainerAppConsoleLogs', 'ContainerAppSystemLogs'];
@@ -458,6 +505,9 @@ const HELD: Readonly<
   ),
 };
 
+/** The load size's max_connections (postgres.bicep, `measured`); `apps --load-run` reads the live server's against it (deploy.ts). */
+export const LOAD_SERVER_CONNECTIONS = 100;
+
 /**
  * The load test's run (D2c, PL-38; apps.bicep `loadRun`): staging's alone,
  * and all of it or none. Its three jobs run the load image, as the API's
@@ -479,6 +529,9 @@ const LOAD_RUN = {
   // Staging's small server has 35 for everyone, so out of a load run its API keeps to ten (PL-63).
   apiPool: '20',
   stagingPool: 10,
+  // The larger server's max_connections (postgres.bicep, `measured`). The apps' snapshot can't show it: the foundation
+  // sizes the server, and a plain foundation's numbers are what an apps run's snapshot holds.
+  serverConnections: LOAD_SERVER_CONNECTIONS,
   apiSettings: {
     AGENTX_RATE_LIMIT_PER_MINUTE: '50000',
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '50000',
@@ -502,16 +555,26 @@ const isLoadJob = (workload: string): boolean => LOAD_RUN.jobs.includes(workload
 const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
 
 /**
- * The apps whose replicas must stay at one, with why. The API's rate limit
- * counts each client's requests in memory (ADR-011 §4), so a second replica
- * would give every client two allowances; Zitadel's projections and cache are
- * one replica's, and a second would take ten more of the server's 35 user
- * connections (ADR-002 Amendment G1).
+ * The apps whose replicas must stay at one, with why: Zitadel's projections and
+ * cache are one replica's, and a second would take ten more of the server's 35
+ * user connections (ADR-002 Amendment G1). An app running the API is held by
+ * its role instead (`roleScaleProblems`).
  */
 const ONE_REPLICA: Readonly<Record<string, string>> = {
-  api: "the rate limit's counts are one replica's, in memory",
   zitadel: "its projections are one replica's, and a second would take ten more database connections",
 };
+
+/** What Azure keeps of a server's max_connections for itself: 35 of 50 left for everyone (postgres.bicep, S167). */
+const AZURE_RESERVED_CONNECTIONS = 15;
+
+/**
+ * Zitadel's pool where it sets none: ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS's default, 10, read from the pinned
+ * image's own binary (v4.17.3, 4D2e D12), not from its documentation.
+ */
+const ZITADEL_POOL = { setting: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', unset: 10 } as const;
+
+/** Beside the apps: one job's connection (they are run one at a time, Azure.md "The jobs"), and one to spare. */
+const ONE_JOB_AND_ONE_MORE = 2;
 
 /**
  * The public doors (ADR-002 Amendment G2e), by the part of the name `doorName`
@@ -739,6 +802,12 @@ const ANCHOR_ACTIONS = [
 
 /** The anchors' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors');
+
+/** The operator's role on the anchors (4D2e E9): Get Blob and List Blobs alone, for a chain recovery plan. */
+const ANCHOR_READ_ACTIONS = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'] as const;
+
+/** The operator's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
+const anchorReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors-reader');
 
 /** The audit exports' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-writer');
@@ -990,6 +1059,23 @@ const settingsOf = (snapshot: Snapshot, resource: PredictedResource): readonly P
 const workspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
   new Set(ofType(snapshot, TYPES.workspace).map((workspace) => workspace.id));
 
+/** The ids of the login alerts' own workspace: only the one this deployment creates under its name. */
+const loginWorkspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
+  new Set(
+    ofType(snapshot, TYPES.workspace)
+      .filter((workspace) => LOGIN_WORKSPACE.test(workspace.name))
+      .map((workspace) => workspace.id),
+  );
+
+/**
+ * The ids of the main workspace: every workspace of this deployment but the login alerts' own, which takes no
+ * console lines, so an alert or a workbook on the apps' lines there would never see one.
+ */
+const mainWorkspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> => {
+  const logins = loginWorkspaceIds(snapshot);
+  return new Set([...workspaceIds(snapshot)].filter((id) => !logins.has(id)));
+};
+
 /** An action group of this deployment that is switched on and reaches someone. */
 const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   ofType(snapshot, TYPES.actionGroup).some(
@@ -1001,16 +1087,17 @@ const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   );
 
 /**
- * Whether an enabled alert on this deployment's workspace has a condition
- * `matches` takes. A `stateless SEV-1` one is severity 1 and never resolves
- * itself (autoMitigate false), so it notifies on every window, not once.
+ * Whether an enabled alert on this deployment's main workspace (or on those
+ * given) has a condition `matches` takes. A `stateless SEV-1` one is severity 1
+ * and never resolves itself (autoMitigate false), so it notifies on every
+ * window, not once.
  */
 const workspaceAlerted = (
   snapshot: Snapshot,
   kind: 'any' | 'stateless SEV-1',
   matches: (criterion: unknown, alert: PredictedResource) => boolean,
+  workspaces: ReadonlySet<unknown> = mainWorkspaceIds(snapshot),
 ): boolean => {
-  const workspaces = workspaceIds(snapshot);
   return ofType(snapshot, TYPES.alert).some(
     (alert) =>
       at(alert.properties, 'enabled') === true &&
@@ -1033,7 +1120,8 @@ const complete: Check = (snapshot, _expected, add) => {
 /** The protections exist at all: a rule that checks each resource of a type passes when there are none. */
 const required: Check = (snapshot, _expected, add) => {
   const counts: readonly (readonly [string, string, number, number])[] = [
-    ['the log workspace', TYPES.workspace, 1, 1],
+    // The main one and the login alerts' own (rule login-workspace).
+    ["log workspaces, the main one and the login alerts' own", TYPES.workspace, 2, 2],
     ['an action group', TYPES.actionGroup, 1, Infinity],
     ['the network', TYPES.network, 1, 1],
     ['the DNS policy', TYPES.dnsPolicy, 1, 1],
@@ -1380,9 +1468,12 @@ const database: Check = (snapshot, expected, add) => {
       problem('database-logins', 'takes password logins only, never Microsoft Entra ones (ADR-002, ADR-010)');
     }
     const retention = at(properties, 'backup', 'backupRetentionDays');
-    const minimum = expected.environment === 'production' ? 35 : 7;
+    const minimum = leastRestoreDays(expected.environment);
     if (typeof retention !== 'number' || retention < minimum) {
-      problem('database-backup', `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002)`);
+      problem(
+        'database-backup',
+        `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002; in production, twice the days an old audit event edited may go unfound, 4D2e decision 3)`,
+      );
     }
     const settings = serverSettings(snapshot, server);
     if (settings.get('require_secure_transport') !== 'on' || settings.get('ssl_min_protocol_version') !== 'TLSv1.3') {
@@ -1400,11 +1491,12 @@ const database: Check = (snapshot, expected, add) => {
       (criterion, alert) =>
         queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
         watchesEveryWindow(alert, criterion),
+      loginWorkspaceIds(snapshot),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }
@@ -1856,9 +1948,12 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * custom role, assignable in the resource group alone, given once on that
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
- * a new file and reads, to the API's, which alone is told where they are
- * (`storeSettingsProblems`). Neither can overwrite or delete. The account's
- * immutability covers both. Its logs are `resource-logs`'s.
+ * a new file and reads, to the API's. The anchors container has a second role,
+ * reading alone, to the operator's identity, for a chain recovery plan (4D2e E9).
+ * The API and the operator's job alone are told where the anchors are, each as
+ * the identity its role is given to (`storeSettingsProblems`). None can
+ * overwrite or delete. The account's immutability covers both. Its logs are
+ * `resource-logs`'s.
  */
 const evidenceStore: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
@@ -1913,11 +2008,10 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_EVIDENCE_CLIENT_ID',
       accounts,
       container: EVIDENCE_CONTAINER,
-      holds: (workload) => workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator',
+      holders: (workload) => (isOperatorJob(workload) ? writers : undefined),
       holder: "the operator's job writes to the store",
       store: 'store',
     },
-    writers,
     problem,
   );
   const keepers = storeRoleProblems(
@@ -1932,6 +2026,18 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     },
     problem,
   );
+  const readers = storeRoleProblems(
+    snapshot,
+    {
+      name: anchorReaderRoleName(groupOf(snapshot)),
+      dataActions: ANCHOR_READ_ACTIONS,
+      containers: containersNamed(snapshot, ANCHOR_CONTAINER),
+      workload: 'operator',
+      called: "the operator's read of the anchors",
+      on: 'the anchors container',
+    },
+    problem,
+  );
   storeSettingsProblems(
     snapshot,
     {
@@ -1940,13 +2046,58 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
       accounts,
       container: ANCHOR_CONTAINER,
-      holds: (workload) => workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api',
-      holder: "the API keeps the chains' anchors",
+      holders: (workload) => {
+        if (isApiApp(workload)) return keepers;
+        return isOperatorJob(workload) ? readers : undefined;
+      },
+      holder: "the API keeps the chains' anchors and the operator's job reads them",
       store: 'store',
     },
-    keepers,
     problem,
   );
+};
+
+/** The API, as an app. */
+const isApiApp = (workload: PredictedResource): boolean =>
+  workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api';
+
+/** The operator's job. */
+const isOperatorJob = (workload: PredictedResource): boolean =>
+  workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator';
+
+/**
+ * The anchors' epoch (AGENTX_ANCHOR_EPOCH, 4D2e E9): the API, which signs for it,
+ * and the operator's job, which reads the anchors for a chain recovery plan, each
+ * set it once, to the same value, and nothing else sets it. Apart, the operator
+ * would read another epoch's files, or none, and plan against the wrong anchors.
+ */
+const anchorEpoch: Check = (snapshot, _expected, add) => {
+  const values = new Map<string, readonly string[]>();
+  for (const workload of workloadsIn(snapshot)) {
+    const set = containersOf(workload).flatMap((container) =>
+      list(at(container, 'env'))
+        .filter((entry) => at(entry, 'name') === 'AGENTX_ANCHOR_EPOCH')
+        .map((entry) => text(at(entry, 'value'))),
+    );
+    if (isApiApp(workload) || isOperatorJob(workload)) {
+      values.set(workload.name, set);
+    } else if (set.length > 0) {
+      add({
+        rule: 'anchor-epoch',
+        resource: workload.name,
+        message: "sets AGENTX_ANCHOR_EPOCH: only the API and the operator's job",
+      });
+    }
+  }
+  const said = [...values.values()];
+  const first = said[0]?.[0];
+  if (said.length !== 2 || said.some((set) => set.length !== 1 || set[0] !== first)) {
+    add({
+      rule: 'anchor-epoch',
+      resource: 'the deployment',
+      message: "must set AGENTX_ANCHOR_EPOCH once on the API and once on the operator's job, to the same value",
+    });
+  }
 };
 
 /** One of the write-once store's containers, by its name: a role is given on it alone. */
@@ -2085,7 +2236,8 @@ interface StoreSettings {
   /** The store's account by name; the URL must name the one there is. */
   readonly accounts: readonly PredictedResource[];
   readonly container: string;
-  readonly holds: (workload: PredictedResource) => boolean;
+  /** The identities a workload may name, those its store's role is given to; undefined for one never told of the store. */
+  readonly holders: (workload: PredictedResource) => readonly PredictedResource[] | undefined;
   /** Who alone is told, and what a problem calls the store. */
   readonly holder: string;
   readonly store: string;
@@ -2101,14 +2253,14 @@ interface StoreSettings {
 function storeSettingsProblems(
   snapshot: Snapshot,
   wanted: StoreSettings,
-  holders: readonly PredictedResource[],
   problem: (resource: string, message: string) => void,
 ): void {
   for (const workload of workloadsIn(snapshot)) {
+    const holders = wanted.holders(workload);
     for (const container of containersOf(workload)) {
       const settings = list(at(container, 'env')).filter((entry) => text(at(entry, 'name')).startsWith(wanted.prefix));
       const names = settings.map((entry) => text(at(entry, 'name')));
-      if (!wanted.holds(workload)) {
+      if (holders === undefined) {
         if (names.length > 0) problem(workload.name, `sets ${names.join(', ')}: only ${wanted.holder}`);
         continue;
       }
@@ -2272,11 +2424,10 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
       clientId: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
       accounts,
       container: DOWNLOADS_CONTAINER,
-      holds: (workload) => workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api',
+      holders: (workload) => (isApiApp(workload) ? keepers : undefined),
       holder: 'the API keeps the activity downloads',
       store: 'downloads store',
     },
-    keepers,
     problem,
   );
 };
@@ -2329,6 +2480,112 @@ const workspaceAndQuota: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** The categories one diagnostic setting sends, switched on. */
+const sentCategories = (setting: PredictedResource): readonly unknown[] =>
+  list(at(setting.properties, 'logs'))
+    .filter((log) => at(log, 'enabled') === true)
+    .map((log) => at(log, 'category') ?? at(log, 'categoryGroup'));
+
+/** Whether every resource of the type, and at least one, sends the category to the workspace, in its own table. */
+const sendsTo = (snapshot: Snapshot, type: string, category: string, workspace: string): boolean => {
+  const resources = ofType(snapshot, type);
+  return (
+    resources.length > 0 &&
+    resources.every((resource) =>
+      settingsOf(snapshot, resource).some(
+        (setting) =>
+          at(setting.properties, 'workspaceId') === workspace &&
+          at(setting.properties, 'logAnalyticsDestinationType') === 'Dedicated' &&
+          sentCategories(setting).includes(category),
+      ),
+    )
+  );
+};
+
+/**
+ * The login alerts' own workspace (4D2e Stage F, PR 9): exactly one, its cap 1 GB; the server's log and the
+ * platform's lines reach it, and nothing else does, so the apps' volume can never fill it; its cap reached is a
+ * stateless SEV-1. Rules database-logins and owner-login-alert hold the login alerts to it.
+ */
+const loginWorkspace: Check = (snapshot, _expected, add) => {
+  const found = ofType(snapshot, TYPES.workspace).filter((workspace) => LOGIN_WORKSPACE.test(workspace.name));
+  const [workspace] = found;
+  if (workspace === undefined || found.length > 1) {
+    add({
+      rule: 'login-workspace',
+      resource: 'the deployment',
+      message: `needs exactly one workspace for the login alerts (log-agentx-<env>-logins); the snapshot has ${String(found.length)}`,
+    });
+    return;
+  }
+  const missing: string[] = [];
+  if (at(workspace.properties, 'workspaceCapping', 'dailyQuotaGb') !== LOGIN_WORKSPACE_CAP_GB) {
+    missing.push(`a daily cap of ${String(LOGIN_WORKSPACE_CAP_GB)} GB`);
+  }
+  if (
+    !sendsTo(snapshot, TYPES.server, 'PostgreSQLLogs', workspace.id) ||
+    !sendsTo(snapshot, TYPES.environment, 'ContainerAppSystemLogs', workspace.id)
+  ) {
+    missing.push("the database server's log and the platform's lines, in resource-specific tables");
+  }
+  const others = ofType(snapshot, TYPES.diagnostics).filter(
+    (setting) =>
+      at(setting.properties, 'workspaceId') === workspace.id &&
+      sentCategories(setting).some((category) => !LOGIN_LOG_CATEGORIES.includes(category)),
+  );
+  if (others.length > 0) missing.push(`no other logs (${others.map((setting) => setting.name).join(', ')} sends some)`);
+  const capAlerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion) =>
+      queryIs(
+        at(criterion, 'query'),
+        '_LogOperation',
+        ['where Category =~ "Ingestion"', 'where Detail contains "OverQuota"'],
+        'count()',
+      ),
+    new Set([workspace.id]),
+  );
+  if (!capAlerted) missing.push('a stateless SEV-1 alert when its cap is reached');
+  for (const what of missing) add({ rule: 'login-workspace', resource: workspace.name, message: `must have ${what}` });
+};
+
+/** Every Azure resource ID a workbook's content names: its fallback workspaces and any it reads across. */
+const resourceIdsIn = (content: unknown): readonly string[] => {
+  if (typeof content === 'string') return content.startsWith('/subscriptions/') ? [content] : [];
+  if (typeof content !== 'object' || content === null) return [];
+  return Object.values(content).flatMap(resourceIdsIn);
+};
+
+/** The fields that name who: a workbook shows how much, never which organisation, agent, key or request. */
+const WHO_FIELDS = /\b(?:orgId|agentId|agentKeyId|correlationId|userId)\b/;
+
+/**
+ * A workbook (4D2e Stage F, PR 10) reads only this deployment's workspaces, keeps its content in Azure's own store
+ * in the region rather than a storage account of anyone's, and counts without naming who.
+ */
+const workbooks: Check = (snapshot, _expected, add) => {
+  const workspaces = mainWorkspaceIds(snapshot);
+  for (const workbook of ofType(snapshot, TYPES.workbook)) {
+    const problem = (message: string): void => {
+      add({ rule: 'workbook', resource: workbook.name, message });
+    };
+    let content: unknown;
+    try {
+      content = JSON.parse(text(at(workbook.properties, 'serializedData')));
+    } catch {
+      problem('needs its content as JSON the snapshot can read');
+      continue;
+    }
+    const read = [at(workbook.properties, 'sourceId'), ...resourceIdsIn(content)];
+    if (!read.every((id) => workspaces.has(id))) problem("must read this deployment's main workspace only");
+    if (!isEmpty(at(workbook.properties, 'storageUri')))
+      problem("keeps its content in Azure's own store, not storageUri");
+    if (WHO_FIELDS.test(JSON.stringify(content)))
+      problem('counts only: names no organisation, agent, key, person or request');
+  }
+};
+
 /**
  * The rules that fire on the jobs' lines missing (4D2e D, PL-33): what stands behind a process that can say nothing.
  * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
@@ -2349,7 +2606,7 @@ const isDeadMan = (alert: PredictedResource): boolean =>
   );
 
 const deadManAlerts: Check = (snapshot, expected, add) => {
-  const workspaces = workspaceIds(snapshot);
+  const workspaces = mainWorkspaceIds(snapshot);
   for (const { event, windowSize, severity, autoMitigate } of DEAD_MEN) {
     const found = ofType(snapshot, TYPES.alert).some(
       (alert) =>
@@ -2421,7 +2678,7 @@ const alertRules: Check = (snapshot, expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-R]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-S]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -2636,7 +2893,8 @@ const appsEnvironment: Check = (snapshot, _expected, add) => {
  * (ADR-011 §7).
  */
 const appsLogs: Check = (snapshot, _expected, add) => {
-  const workspaces = workspaceIds(snapshot);
+  // The main workspace: the login alerts' own holds a copy of the platform's lines, never instead of it.
+  const workspaces = mainWorkspaceIds(snapshot);
   for (const environment of ofType(snapshot, TYPES.environment)) {
     const enabledLogs = (setting: PredictedResource): readonly unknown[] =>
       list(at(setting.properties, 'logs')).filter((log) => at(log, 'enabled') === true);
@@ -2657,7 +2915,7 @@ const appsLogs: Check = (snapshot, _expected, add) => {
         rule: 'apps-logs',
         resource: environment.name,
         message:
-          "must send its console and system logs, and no other, to this deployment's workspace in resource-specific tables: never its HTTP log or a category group (client addresses, ADR-011 §7)",
+          "must send its console and system logs, and no other, to this deployment's main workspace in resource-specific tables: never its HTTP log or a category group (client addresses, ADR-011 §7)",
       });
     }
   }
@@ -2853,6 +3111,30 @@ const agentCancelCapAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on any count of decision lines held back (4D2e F8, PL-52), in any window. */
+const decisionsSuppressedAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DECISIONS_SUPPRESSED_LINES, 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'decisions-suppressed-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any log.suppressed line for spend_request.decided, in any window",
+      });
+    }
+  }
+};
+
 /**
  * An enabled alert on the workspace fires on any page of the holdings check
  * that failed (Phase 2 E1b's review): one line is enough, in any window.
@@ -2953,6 +3235,47 @@ const anchorStoreAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * An enabled alert on the workspace fires on any one of these lines, watching every window and firing on the first:
+ * the shape of the five checks above it, for the alerts added since. Those five stay as written while open pull
+ * requests change the lines around them.
+ */
+const anyLineAlert =
+  (rule: RuleId, lines: string, what: string): Check =>
+  (snapshot, _expected, add) => {
+    for (const environment of ofType(snapshot, TYPES.environment)) {
+      const alerted = workspaceAlerted(
+        snapshot,
+        'any',
+        (criterion, alert) =>
+          queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [lines], 'count()') &&
+          totals(criterion) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === 0 &&
+          watchesEveryWindow(alert, criterion),
+      );
+      if (!alerted) {
+        add({
+          rule,
+          resource: environment.name,
+          message: `needs an enabled alert on this deployment's workspace that fires on any ${what} line, watching every window and firing on the first`,
+        });
+      }
+    }
+  };
+
+/** The anchor check's lateness, each its own alert (4D2e E7): a deletion found past 24 hours, an old edit past 7 days. */
+const dailyCheckAlert = anyLineAlert(
+  'daily-check-alert',
+  `where tostring(parse_json(Log).event) == "${DAILY_CHECK_LATE}"`,
+  DAILY_CHECK_LATE,
+);
+const fullPassAlert = anyLineAlert(
+  'full-pass-alert',
+  `where tostring(parse_json(Log).event) == "${FULL_PASS_LATE}"`,
+  FULL_PASS_LATE,
+);
+
+/**
  * An enabled alert on the workspace fires on any run of the integrity jobs
  * skipped whole (Phase 2 E2c; request expiry, D7), or of the activity log's
  * daily seal stopped early (L6b): one line is enough, in any window.
@@ -2980,6 +3303,9 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on any organisation's records filling (partner S170). */
+const recordsFillingAlert = anyLineAlert('records-filling-alert', RECORDS_FILLING_LINES, 'identity.records_filling');
+
 /**
  * An enabled, stateless SEV-1 alert on the workspace fires when the owner role
  * logs in other than as the migration job starting (ADR-012 §2, Phase 1
@@ -3006,12 +3332,13 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
           at(criterion, 'operator') === 'GreaterThan' &&
           at(criterion, 'threshold') === 0 &&
           watchesEveryWindow(alert, criterion),
+        loginWorkspaceIds(snapshot),
       );
     if (!alerted) {
       add({
         rule: 'owner-login-alert',
         resource: server.name,
-        message: `needs an enabled, stateless SEV-1 alert on this deployment's workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
       });
     }
   }
@@ -3186,10 +3513,12 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const evidence = customRoleId(groupOf(snapshot), evidenceRoleName(groupOf(snapshot)));
   const downloads = customRoleId(groupOf(snapshot), downloadsRoleName(groupOf(snapshot)));
   const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
+  const readAnchors = customRoleId(groupOf(snapshot), anchorReaderRoleName(groupOf(snapshot)));
+  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors]);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
-    if (role === release || role === evidence || role === downloads || role === keptAnchors) continue;
+    if (stores.has(role)) continue;
     const secret = secrets.get(scopeOf(assignment));
     const identity = principalOf(snapshot, assignment);
     if (
@@ -3289,6 +3618,7 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
   const stores = new Set([
     evidenceRoleName(groupOf(snapshot)),
     anchorRoleName(groupOf(snapshot)),
+    anchorReaderRoleName(groupOf(snapshot)),
     downloadsRoleName(groupOf(snapshot)),
   ]);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));
@@ -3487,13 +3817,138 @@ function scaleProblems(scale: unknown, only: string | undefined, problem: (messa
   }
 }
 
+/** An app's one container's settings where it runs the API (every API process is told AGENTX_ENV), or nothing. */
+function apiSettingsOf(app: PredictedResource): ReadonlyMap<string, unknown> | undefined {
+  const [container] = containersOf(app);
+  const settings = settingsIn(container);
+  return settings.has('AGENTX_ENV') ? settings : undefined;
+}
+
+/** The API's role, as its process reads it: `all` where none is set (settings.ts). */
+const roleIn = (settings: ReadonlyMap<string, unknown>): unknown => settings.get('AGENTX_ROLE') ?? 'all';
+
+/**
+ * A whole-number setting as a count: `unset` where it isn't given, nothing where it's given as anything but digits (a
+ * secret's reference carries no value), so a count that can't be read is said, never summed as NaN.
+ */
+function countIn(settings: ReadonlyMap<string, unknown>, name: string, unset?: number): number | undefined {
+  if (!settings.has(name)) return unset;
+  const value = settings.get(name);
+  return typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : undefined;
+}
+
+/** How many `web` copies the API counts its limits for: one where none is set (settings.ts). */
+const copiesIn = (settings: ReadonlyMap<string, unknown>): number | undefined =>
+  countIn(settings, 'AGENTX_WEB_COPIES', 1);
+
+/**
+ * The apps that may run the API, by workload: `api`, and the `jobs` app D13 adds. D13 must keep this list to the apps
+ * it makes: an API app nothing names could hold the jobs, or a pool nobody counted on.
+ */
+const API_APPS: readonly string[] = ['api', 'jobs'];
+
+/** A size as Container Apps writes one (`1Gi`, `512Mi`), in MiB; nothing for anything else. */
+function mebibytesOf(size: unknown): number | undefined {
+  const [, amount = '', unit = ''] = /^([0-9]+(?:[.][0-9]+)?)(Gi|Mi)$/.exec(text(size)) ?? [];
+  return amount === '' ? undefined : Number(amount) * (unit === 'Gi' ? 1024 : 1);
+}
+
+/** The flag that sets Node's heap, as the API's command gives it. */
+const HEAP_FLAG = '--max-old-space-size=';
+
+/**
+ * The API's heap, set by its command (4D2e D12): between half and three quarters of its container's memory, so its
+ * counters (rate-limit.ts, about 92 MB with all four full) fit with room, and Node's own default (560 MiB under 1 GiB,
+ * measured on the pinned base image) isn't left to decide it.
+ */
+function heapProblems(container: unknown, problem: (message: string) => void): void {
+  const flag = list(at(container, 'command'))
+    .map(text)
+    .find((part) => part.startsWith(HEAP_FLAG));
+  const heap = Number(flag?.slice(HEAP_FLAG.length));
+  const memory = mebibytesOf(at(container, 'resources', 'memory'));
+  if (memory === undefined || !Number.isInteger(heap) || heap < memory / 2 || heap > (memory * 3) / 4) {
+    problem(
+      `must start node with ${HEAP_FLAG}<MiB> between half and three quarters of its memory (${String(memory)} MiB), so its rate limits' counters fit with room; it says ${String(flag)}`,
+    );
+  }
+}
+
+/**
+ * Across the apps running the API (4D2e D12): each one listed in API_APPS, exactly one holding the jobs (`jobs` or
+ * `all`: two would run the copier twice, none would run no job), and never `all` beside `web`, as `all` counts its
+ * rate limits as the only copy.
+ */
+function apiAppsProblems(found: readonly PredictedResource[], add: (problem: Problem) => void): void {
+  const apis = found.flatMap((app) => {
+    const settings = apiSettingsOf(app);
+    return settings === undefined ? [] : [{ app, role: roleIn(settings) }];
+  });
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'apps', resource, message });
+  };
+  for (const { app } of apis.filter((api) => !API_APPS.includes(jobWorkloadOf(api.app.name)))) {
+    problem(
+      app.name,
+      `runs the API, which only ${API_APPS.join(' and ')} may: an app nothing names could hold the jobs`,
+    );
+  }
+  const holders = apis.filter(({ role }) => role === 'jobs' || role === 'all').length;
+  if (apis.length > 0 && holders !== 1) {
+    problem(
+      'the deployment',
+      `needs exactly one app holding the jobs (AGENTX_ROLE jobs or all); it has ${String(holders)}`,
+    );
+  }
+  const roles = new Set(apis.map(({ role }) => role));
+  if (roles.has('all') && roles.has('web')) {
+    problem('the deployment', 'runs AGENTX_ROLE all beside web: all counts its rate limits as the only copy');
+  }
+}
+
+/**
+ * An app running the API, scaled as its role (4D2e D12): `web` runs exactly the copies it counts its rate limits for,
+ * so each allows its share and no more; `jobs` exactly one, as the lease makes a second safe for most jobs but not the
+ * copier; `all` holds the jobs and counts its limits as one copy, so at most one, and none while staging sleeps.
+ */
+function roleScaleProblems(
+  settings: ReadonlyMap<string, unknown>,
+  scale: unknown,
+  problem: (message: string) => void,
+): void {
+  const role = roleIn(settings);
+  const most = at(scale, 'maxReplicas');
+  const fewest = at(scale, 'minReplicas');
+  const exactly = (count: number, why: string): void => {
+    if (most !== count || fewest !== count) {
+      problem(
+        `must run exactly ${String(count)} (minReplicas and maxReplicas ${String(count)}): ${why}; it says ${String(fewest)} to ${String(most)}`,
+      );
+    }
+  };
+  if (role === 'web') {
+    const copies = copiesIn(settings);
+    if (copies === undefined) problem('must give AGENTX_WEB_COPIES as a whole number, which its replicas are held to');
+    else exactly(copies, 'AGENTX_WEB_COPIES, which each copy shares its rate limits by');
+  } else if (role === 'jobs') {
+    exactly(1, "the jobs keep to one copy, which the lease alone doesn't make safe for the copier");
+  } else if (role === 'all') {
+    if (most !== 1) {
+      problem(`must run at most one replica (maxReplicas 1): AGENTX_ROLE all holds the jobs; it says ${String(most)}`);
+    }
+  } else {
+    problem(`sets AGENTX_ROLE to ${String(role)}, which the API doesn't take: all, web or jobs`);
+  }
+}
+
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): in this deployment's
  * environment, on Consumption, running the exact image it names, and **never a
  * public door** — the doors are the route configs (G2e), so an app whose ingress
  * is external is one reachable from the internet that nothing decided to
  * publish. Plain http is refused even inside the environment. The apps that
- * hold something one replica's keep to one (`ONE_REPLICA`), and every app can
+ * hold something one replica's keep to one (`ONE_REPLICA`), the API scales as
+ * its role (`roleScaleProblems`), and every app can
  * run at least one. Together they are the three apps a deployment needs, so a
  * dropped one is caught here rather than at the first deployment.
  */
@@ -3521,9 +3976,16 @@ const apps: Check = (snapshot, _expected, add) => {
     if (at(ingress, 'allowInsecure') !== false) {
       problem('must refuse plain http (allowInsecure false), which peer-to-peer encryption already covers');
     }
-    scaleProblems(at(app.properties, 'template', 'scale'), ONE_REPLICA[workload], problem);
+    const scale = at(app.properties, 'template', 'scale');
+    scaleProblems(scale, ONE_REPLICA[workload], problem);
+    const api = apiSettingsOf(app);
+    if (api !== undefined) {
+      roleScaleProblems(api, scale, problem);
+      heapProblems(containersOf(app)[0], problem);
+    }
     containerProblems(app, problem);
   }
+  apiAppsProblems(found, add);
   for (const workload of APP_WORKLOADS) {
     const count = found.filter((app) => jobWorkloadOf(app.name) === workload).length;
     if (count !== 1) {
@@ -3625,6 +4087,60 @@ const loadTest: Check = (snapshot, expected, add) => {
     apiLoadProblems(api, { loadRun: found.length > 0, staging }, (message) => {
       problem(api.name, message);
     });
+  }
+};
+
+/** The connections an app running the API may hold, by its role: two of each copy's pool, for a deploy's overlap. */
+function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, unknown>): number | string {
+  const role = roleIn(settings);
+  const name = role === 'jobs' ? 'AGENTX_DB_JOBS_POOL_MAX' : 'AGENTX_DB_POOL_MAX';
+  const pool = countIn(settings, name);
+  const copies = role === 'web' ? copiesIn(settings) : 1;
+  if (pool === undefined) return `${app.name} must state ${name} as a whole number, so its connections can be counted`;
+  if (copies === undefined) {
+    return `${app.name} must state AGENTX_WEB_COPIES as a whole number, so its connections can be counted`;
+  }
+  return 2 * copies * pool;
+}
+
+/**
+ * Every connection the apps may hold fits the server's (4D2e D12): two of each API copy's pool (a deploy runs the old
+ * revision beside the new one), Zitadel's pool, one job and one to spare, within max_connections less what Azure keeps.
+ * In a load run, the larger server's; otherwise the one this deployment states. Zitadel's overlap isn't counted: it
+ * runs one replica and isn't redeployed with each release.
+ */
+const connections: Check = (snapshot, _expected, add) => {
+  const [server] = ofType(snapshot, TYPES.server);
+  if (server === undefined) return;
+  const problem = (message: string): void => {
+    add({ rule: 'connections', resource: server.name, message });
+  };
+  const loadRun = loadJobsIn(snapshot).length > 0;
+  const stated = loadRun ? LOAD_RUN.serverConnections : Number(serverSettings(snapshot, server).get('max_connections'));
+  if (!Number.isInteger(stated)) {
+    problem("must state max_connections, which every app's connections are counted against");
+    return;
+  }
+  const counts = ofType(snapshot, TYPES.app).flatMap((app) => {
+    const settings = apiSettingsOf(app);
+    if (settings !== undefined) return [apiConnections(app, settings)];
+    if (jobWorkloadOf(app.name) !== 'zitadel') return [];
+    const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
+    return [
+      pool ??
+        `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`,
+    ];
+  });
+  for (const unstated of counts.filter((count) => typeof count === 'string')) problem(unstated);
+  const needed = [...counts.filter((count) => typeof count === 'number'), ONE_JOB_AND_ONE_MORE].reduce(
+    (sum, count) => sum + count,
+    0,
+  );
+  const forUsers = stated - AZURE_RESERVED_CONNECTIONS;
+  if (needed > forUsers) {
+    problem(
+      `has ${String(forUsers)} connections for users (max_connections ${String(stated)} less Azure's ${String(AZURE_RESERVED_CONNECTIONS)}), but the apps may hold ${String(needed)}: two of each API copy's pool, Zitadel's, one job and one to spare`,
+    );
   }
 };
 
@@ -4027,8 +4543,11 @@ const CHECKS: readonly Check[] = [
   dnsAllow,
   vault,
   evidenceStore,
+  anchorEpoch,
   activityDownloads,
   workspaceAndQuota,
+  loginWorkspace,
+  workbooks,
   alertRules,
   resourceLogs,
   logDestinations,
@@ -4046,10 +4565,14 @@ const CHECKS: readonly Check[] = [
   handoffQueueAlert,
   platformFullAlert,
   anchorStoreAlert,
+  dailyCheckAlert,
+  fullPassAlert,
   integrityRunsAlert,
+  recordsFillingAlert,
   deadManAlerts,
   agentCancelsAlert,
   agentCancelCapAlert,
+  decisionsSuppressedAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,
@@ -4059,6 +4582,7 @@ const CHECKS: readonly Check[] = [
   jobs,
   apps,
   loadTest,
+  connections,
   publicDoors,
   doorCertificates,
   workloadSecrets,

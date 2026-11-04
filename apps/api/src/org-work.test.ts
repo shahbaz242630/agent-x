@@ -4,7 +4,7 @@ import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import { settleReadsGate } from './handoff.ts';
-import { type MarkedOrganisations, movesOf, withOrgWork, withWholePasses } from './org-work.ts';
+import { type MarkedOrganisations, movesOf, WAITING_AS_A_WHOLE_MS, withOrgWork, withWholePasses } from './org-work.ts';
 
 const NOW = new Date('2026-11-02T10:00:00.000Z');
 const mark = (marks: string, dueAt = NOW) => ({ job: 'hand_off', due_at: dueAt, marks }) as const;
@@ -78,6 +78,16 @@ describe('one look at an organisation', () => {
     ]);
   });
 
+  it('a mark settled as a whole, its rows due now, is no miss to the hourly look', () => {
+    const waiting = mark('5', later(WAITING_AS_A_WHOLE_MS));
+    expect(movesOf({ before: [waiting], due: due(NOW), after: [waiting] }, NOW)).toEqual([]);
+  });
+
+  it("settled a few seconds after the look's own now: still no miss", () => {
+    const waiting = mark('5', later(4_000 + WAITING_AS_A_WHOLE_MS));
+    expect(movesOf({ before: [waiting], due: due(NOW), after: [waiting] }, NOW)).toEqual([]);
+  });
+
   it("a mark for one job says nothing about another's", () => {
     const other = { job: 'payment_check', due_at: NOW, marks: '1' } as const;
     expect(movesOf({ before: [other], due: due(NOW), after: [other] }, NOW)).toEqual([
@@ -117,7 +127,8 @@ function stubMarks(listed: readonly string[]) {
   const settled: (AbortSignal | undefined)[] = [];
   const marks: MarkedOrganisations = {
     list: () => Promise.resolve(listed),
-    keep: () => undefined,
+    unfinished: () => undefined,
+    waitsAsAWhole: () => undefined,
     dueBy: () => undefined,
     settle: (signal) => {
       settled.push(signal);

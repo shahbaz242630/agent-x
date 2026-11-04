@@ -23,7 +23,9 @@
 // - the operator's identity may only add a new file to `audit-exports`
 //   (`blobs/add/action`): it can't read, overwrite or list. The API's may add a
 //   new file to `audit-anchors` and read and list what is there (`blobs/read`, as
-//   a restart must), and can't overwrite or delete. No one else is given anything
+//   a restart must), and can't overwrite or delete. The operator's may read and
+//   list `audit-anchors` alone (`blobs/read`), which a chain's recovery plan is
+//   checked against (4D2e E9): it can add nothing there. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -53,6 +55,9 @@ param anchorKeeperIdentityName string
 
 @description('As `writerRoleName`, for the anchors\' role.')
 param anchorRoleName string
+
+@description('As `writerRoleName`, for the role the operator reads the anchors with (4D2e E9).')
+param anchorReaderRoleName string
 
 @description('How many days each file is kept unchangeable.')
 @minValue(1)
@@ -230,6 +235,42 @@ resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     principalId: anchorKeeper.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// Get Blob and List Blobs (both `blobs/read`), and nothing else: the operator's
+// chain recovery plan (4D2e E9) is checked against the anchors and adds none.
+// Given to the operator's identity, the exports' writer above.
+resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, 'audit-anchors-reader')
+  properties: {
+    roleName: anchorReaderRoleName
+    description: 'The operator\'s chain recovery plan: read and list the anchors container. Nothing else.'
+    type: 'CustomRole'
+    assignableScopes: [
+      resourceGroup().id
+    ]
+    permissions: [
+      {
+        actions: []
+        notActions: []
+        dataActions: [
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
+        ]
+        notDataActions: []
+      }
+    ]
+  }
+}
+
+resource readsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: anchorContainer
+  name: guid(anchorContainer.id, writer.id, anchorReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    principalId: writer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'operator reads audit anchors (deploy/azure/modules/evidence.bicep)'
   }
 }
 

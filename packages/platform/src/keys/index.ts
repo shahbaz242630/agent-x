@@ -10,6 +10,7 @@ export {
   type Signature,
 } from './key-provider.ts';
 export { loadKeys, type KeySettings } from './load.ts';
+export { publicKeyChecker } from './public-checker.ts';
 export type { Message, MessagePart } from './message.ts';
 export {
   type AeadPurpose,

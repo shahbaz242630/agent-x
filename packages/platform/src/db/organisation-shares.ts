@@ -4,7 +4,9 @@
 // all the others wait (the neighbours phase, S166: a calm organisation's decision
 // p95 100 ms to 16 s, most of its requests failing). Past its share, only that
 // organisation waits, holding no connection, and past a bound is answered busy.
-// Counted per API process, so the real limit grows with replicas, as the pool does.
+// Counted per API process: 30% of each copy's pool, so across N `web` copies an
+// organisation may hold 30% of N pools, as the pool itself grows (4D2e D12). The
+// policy's connections rule counts every copy's whole pool, so that still fits.
 //
 // Agents' requests alone count against it (asAgentTraffic), their key's check
 // too: they are what can arrive by the thousand and pile up on a held row. Only
