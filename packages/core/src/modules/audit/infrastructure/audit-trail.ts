@@ -258,13 +258,13 @@ export class TooManyEventsAboutObject extends Error {
 }
 
 /** One organisation's chain to probe, and the place it is probed against: its anchor. */
-export interface ProbeAsked {
+interface ProbeAsked {
   readonly orgId: string;
   readonly from: CheckedPoint;
 }
 
 /** What the probe found of one chain, or that its read failed. */
-export type HeadProbe = ChainProbe | { readonly kind: 'missed'; readonly error: unknown };
+type HeadProbe = ChainProbe | { readonly kind: 'missed'; readonly error: unknown };
 
 /**
  * How many organisations one transaction of the probe reads, all on one trip: two statements each. 500 keeps a page's

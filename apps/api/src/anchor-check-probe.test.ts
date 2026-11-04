@@ -25,7 +25,12 @@ const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
 const AT = new Date('2026-11-04T09:00:00.000Z');
 
-const ok = (seq: bigint): ChainReport => ({ ok: true, seq, hash: Buffer.alloc(32, Number(seq)), macKeyVersion: 1 });
+const point = (seq: bigint, fill = Number(seq)): CheckedPoint => ({
+  seq,
+  hash: Buffer.alloc(32, fill),
+  macKeyVersion: 1,
+});
+const ok = (seq: bigint): ChainReport => ({ ok: true, ...point(seq) });
 
 type Probing = (
   chains: readonly { readonly orgId: string; readonly from: CheckedPoint }[],
@@ -152,12 +157,12 @@ describe('the probe at the start of a run (4D2e E8)', () => {
     let anchorsOf: ReturnType<typeof probing>['anchors'] | undefined;
     const { check, steps, anchors } = probing((chains) => {
       // A hand-off anchors the organisation while the probe runs.
-      anchorsOf?.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, ok(1n), new Date(AT.getTime() + 1)));
+      anchorsOf?.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n), new Date(AT.getTime() + 1)));
       return Promise.resolve(new Map(chains.map(({ orgId }) => [orgId, { kind: 'same' } as const])));
     });
     anchorsOf = anchors;
     await check.run();
-    anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, { ...ok(1n), hash: Buffer.alloc(32, 9) }, AT));
+    anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n, 9), AT));
     await check.run();
 
     expect(steps.slice(2)).toEqual([`verify ${ORG} 1`]);
