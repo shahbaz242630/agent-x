@@ -33,7 +33,7 @@ const logger = createLogger({
 });
 const samples = ${JSON.stringify(SAMPLES)};
 for (const sample of samples) logger.info('check.sample', { note: 'seen ' + sample, password: sample });
-for (let i = 0; i < ${FLOOD}; i++) logger.info('check.flood');
+for (let i = 0; i < ${FLOOD}; i++) logger.warn('check.flood');
 logger.error('check.failed', { err: new Error('failed for ' + samples.join(' ')) });
 logger.flush();
 console.log('stray output ' + samples.join(' '));
@@ -68,7 +68,7 @@ describe('ADR-013 stdout and stderr carry only redacted output', () => {
     expect(events.filter((event) => event === 'check.sample')).toHaveLength(SAMPLES.length);
     expect(events.filter((event) => event === 'check.flood')).toHaveLength(CAP);
     expect(lines.find((line) => line.event === 'log.suppressed')).toMatchObject({
-      level: 'info',
+      level: 'warn',
       suppressedCount: FLOOD - CAP,
     });
     expect(lines.find((line) => line.event === 'check.failed')?.err).toMatchObject({ type: 'Error' });

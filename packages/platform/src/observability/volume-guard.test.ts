@@ -32,11 +32,10 @@ function manualClock(): { now: () => number; advance: (ms: number) => void } {
 /** The start of the nth minute after START. */
 const minute = (n: number): number => START + n * MINUTE_MS;
 
-// Warnings and errors are never held back (4D2e F8), so these use info and debug lines.
 describe('SEC-AV-09 each event is capped per minute, and nothing is dropped silently', () => {
   it('admits lines up to the cap, then holds the rest back', () => {
     const guard = createVolumeGuard(3, manualClock().now);
-    const admitted = Array.from({ length: 5 }, () => guard.admit('http.request_completed', INFO));
+    const admitted = Array.from({ length: 5 }, () => guard.admit('auth.failed', WARN));
     expect(admitted).toEqual([true, true, true, false, false]);
   });
 
@@ -52,33 +51,33 @@ describe('SEC-AV-09 each event is capped per minute, and nothing is dropped sile
   it('reports the exact count held back, and its minute, once, after the minute ends', () => {
     const clock = manualClock();
     const guard = createVolumeGuard(2, clock.now);
-    for (let i = 0; i < 7; i++) guard.admit('busy.event', INFO);
+    for (let i = 0; i < 7; i++) guard.admit('auth.failed', WARN);
     guard.admit('quiet.event', INFO);
     expect(guard.takeSuppressed()).toEqual([]);
 
     clock.advance(MINUTE_MS);
-    expect(guard.takeSuppressed()).toEqual([{ event: 'busy.event', count: 5, level: INFO, minuteStart: minute(0) }]);
+    expect(guard.takeSuppressed()).toEqual([{ event: 'auth.failed', count: 5, level: WARN, minuteStart: minute(0) }]);
     expect(guard.takeSuppressed()).toEqual([]);
   });
 
   it('reports the most severe level among the lines held back, so a level filter never hides the count', () => {
     const clock = manualClock();
     const guard = createVolumeGuard(1, clock.now);
-    guard.admit('db.read', INFO);
-    guard.admit('db.read', DEBUG);
-    guard.admit('db.read', INFO);
-    guard.admit('db.read', DEBUG);
+    guard.admit('db.failed', ERROR);
+    guard.admit('db.failed', INFO);
+    guard.admit('db.failed', ERROR);
+    guard.admit('db.failed', WARN);
     clock.advance(MINUTE_MS);
-    expect(guard.takeSuppressed()).toEqual([{ event: 'db.read', count: 3, level: INFO, minuteStart: minute(0) }]);
+    expect(guard.takeSuppressed()).toEqual([{ event: 'db.failed', count: 3, level: ERROR, minuteStart: minute(0) }]);
   });
 
   it('takes the level from the lines held back only, not from the lines written', () => {
     const clock = manualClock();
     const guard = createVolumeGuard(1, clock.now);
+    guard.admit('mixed.event', ERROR);
     guard.admit('mixed.event', INFO);
-    guard.admit('mixed.event', DEBUG);
     clock.advance(MINUTE_MS);
-    expect(guard.takeSuppressed()).toEqual([{ event: 'mixed.event', count: 1, level: DEBUG, minuteStart: minute(0) }]);
+    expect(guard.takeSuppressed()).toEqual([{ event: 'mixed.event', count: 1, level: INFO, minuteStart: minute(0) }]);
   });
 
   it('starts each minute afresh', () => {
@@ -117,30 +116,30 @@ describe('SEC-AV-09 each event is capped per minute, and nothing is dropped sile
     guard.admit('x.y', INFO);
     guard.admit('x.y', INFO);
     clock.advance(MINUTE_MS);
-    guard.admit('x.y', DEBUG);
-    guard.admit('x.y', DEBUG);
+    guard.admit('x.y', WARN);
+    guard.admit('x.y', WARN);
     clock.advance(MINUTE_MS);
     expect(guard.takeSuppressed()).toEqual([
       { event: 'x.y', count: 1, level: INFO, minuteStart: minute(0) },
-      { event: 'x.y', count: 1, level: DEBUG, minuteStart: minute(1) },
+      { event: 'x.y', count: 1, level: WARN, minuteStart: minute(1) },
     ]);
   });
 
   it('can report the current minute too, as at shutdown, without counting a line twice', () => {
     const clock = manualClock();
     const guard = createVolumeGuard(2, clock.now);
-    for (let i = 0; i < 5; i++) guard.admit('busy.event', INFO);
+    for (let i = 0; i < 5; i++) guard.admit('auth.failed', WARN);
     guard.admit('quiet.event', INFO);
     expect(guard.takeSuppressed(true)).toEqual([
-      { event: 'busy.event', count: 3, level: INFO, minuteStart: minute(0) },
+      { event: 'auth.failed', count: 3, level: WARN, minuteStart: minute(0) },
     ]);
     expect(guard.takeSuppressed(true)).toEqual([]);
 
     // The rest of the minute is still capped, and counted from where the report left off.
-    expect(guard.admit('busy.event', DEBUG)).toBe(false);
+    expect(guard.admit('auth.failed', INFO)).toBe(false);
     clock.advance(MINUTE_MS);
     // Its level is the level of the lines this report counts, not of those reported before.
-    expect(guard.takeSuppressed()).toEqual([{ event: 'busy.event', count: 1, level: DEBUG, minuteStart: minute(0) }]);
+    expect(guard.takeSuppressed()).toEqual([{ event: 'auth.failed', count: 1, level: INFO, minuteStart: minute(0) }]);
   });
 
   it('shares one bucket among events past the memory bound, so a flood of names cannot use up memory', () => {
@@ -158,7 +157,7 @@ describe('SEC-AV-09 each event is capped per minute, and nothing is dropped sile
   });
 });
 
-describe('4D2e F8 each event has its budget; the evidence is never held back (PL-52)', () => {
+describe('4D2e F8 each event has its budget; money and audit lines are never held back (PL-52)', () => {
   const FLOOD = 50;
   const flood = (event: string, level: number, cap = 2) => {
     const clock = manualClock();
@@ -168,24 +167,23 @@ describe('4D2e F8 each event has its budget; the evidence is never held back (PL
     return { admitted, suppressed: guard.takeSuppressed() };
   };
 
-  it.each([WARN, ERROR])('never holds back a warning or an error (level %i), of any event', (level) => {
-    for (const event of ['db.transaction_retried', 'http.request_completed', DECISION_EVENT]) {
-      expect(flood(event, level)).toEqual({ admitted: FLOOD, suppressed: [] });
-    }
-  });
-
   it.each(NEVER_HELD_BACK.map((family) => `${family}some_line`))(
-    'never holds back %s, a money or security line, even at info or debug',
+    'never holds back %s, a money or audit line, at any level',
     (event) => {
-      expect(flood(event, INFO)).toEqual({ admitted: FLOOD, suppressed: [] });
-      expect(flood(event, DEBUG)).toEqual({ admitted: FLOOD, suppressed: [] });
+      for (const level of [DEBUG, INFO, WARN, ERROR])
+        expect(flood(event, level)).toEqual({ admitted: FLOOD, suppressed: [] });
     },
   );
 
-  it('names the families the design names: hand-off, payment moves, audit, security and the activity log', () => {
-    expect(NEVER_HELD_BACK).toEqual(
-      expect.arrayContaining(['handoff.', 'payment.', 'payment_check.', 'audit.', 'security.', 'access_log.']),
-    );
+  it('keeps the cap on warnings, errors and the security and activity-log lines an outsider can drive', () => {
+    for (const [event, level] of [
+      ['db.transaction_retried', WARN],
+      ['http.request_failed', ERROR],
+      ['security.events_written', INFO],
+      ['access_log.write_failed', WARN],
+    ] as const) {
+      expect(flood(event, level).suppressed).toEqual([{ event, count: FLOOD - 2, level, minuteStart: minute(0) }]);
+    }
   });
 
   it('holds back a line only by its whole family name, never one that merely starts alike', () => {
@@ -204,9 +202,9 @@ describe('4D2e F8 each event has its budget; the evidence is never held back (PL
   });
 
   it('gives a decision line 20,000 a minute a process, the configured cap for the rest', () => {
-    expect(budgetOf(DECISION_EVENT, INFO, 600)).toBe(DECISION_BUDGET_PER_MINUTE);
+    expect(budgetOf(DECISION_EVENT, 600)).toBe(DECISION_BUDGET_PER_MINUTE);
     expect(DECISION_BUDGET_PER_MINUTE).toBe(20_000);
-    expect(budgetOf('http.request_completed', INFO, 600)).toBe(600);
+    expect(budgetOf('http.request_completed', 600)).toBe(600);
     const clock = manualClock();
     const guard = createVolumeGuard(600, clock.now);
     let admitted = 0;
@@ -218,13 +216,13 @@ describe('4D2e F8 each event has its budget; the evidence is never held back (PL
   });
 
   it('keeps a configured cap above the decision budget for decisions too, as in a load run', () => {
-    expect(budgetOf(DECISION_EVENT, INFO, 200_000)).toBe(200_000);
+    expect(budgetOf(DECISION_EVENT, 200_000)).toBe(200_000);
     expect(flood(DECISION_EVENT, INFO, 100).admitted).toBe(FLOOD);
   });
 
   it('writes the count of other events at their own level, not raised to a warning', () => {
-    expect(flood('busy.event', INFO).suppressed).toEqual([
-      { event: 'busy.event', count: FLOOD - 2, level: INFO, minuteStart: minute(0) },
+    expect(flood('busy.event', DEBUG).suppressed).toEqual([
+      { event: 'busy.event', count: FLOOD - 2, level: DEBUG, minuteStart: minute(0) },
     ]);
   });
 });

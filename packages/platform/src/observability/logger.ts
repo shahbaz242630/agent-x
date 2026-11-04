@@ -7,8 +7,8 @@
 // them, so nothing unredacted reaches pino, or anything listening to it (pino
 // publishes each line on a diagnostics channel before writing it). On the way
 // out, pino hooks hold back each event past its budget a minute, never a
-// warning, an error or a money or security line (volume-guard.ts), and redact
-// the finished line again (redact.ts), for every logger made from this one.
+// money or audit line (volume-guard.ts), and redact the finished line again
+// (redact.ts), for every logger made from this one.
 //
 // Every line says what work it belongs to, whichever logger writes it (4D2e
 // Stage F, level 4): a request's correlation ID or a job's run ID, carried by
