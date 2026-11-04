@@ -4541,6 +4541,25 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
+  it("apps.bicep reads the jobs app's identity only where the API is split, so a plain apps before the foundation works (4D2e D13)", () => {
+    const template = bicepFile('apps.bicep').template;
+    // A condition on the existing node: ARM never reads it, and drops what depends on it, when there is no jobs app.
+    expect(at(template, 'resources', 'jobsIdentity')).toMatchObject({
+      condition: "[variables('split')]",
+      existing: true,
+    });
+    // Every read of it sits in the branch for the jobs app alone, which ARM's if() evaluates only when taken.
+    const compiled = JSON.stringify(template);
+    const reads = [...compiled.matchAll(/reference\('jobsIdentity'\)/g)].map((match) => match.index);
+    expect(reads.length).toBeGreaterThan(0);
+    const branch = "if(equals(variables('apps')[copyIndex()].workload, 'jobs'), createArray(";
+    for (const index of reads) {
+      const before = compiled.slice(0, index);
+      expect(before.lastIndexOf(branch)).toBeGreaterThan(-1);
+      expect(index - before.lastIndexOf(branch)).toBeLessThan(400);
+    }
+  });
+
   it('apps: the jobs app reachable, or production not split (4D2e D13)', () => {
     const production = { region: 'uaenorth', environment: 'production' } as const;
     const appsProblems = (snapshotted: Snapshot, expected: Expectations = production): string[] =>

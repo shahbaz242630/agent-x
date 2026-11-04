@@ -534,8 +534,9 @@ resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-3
   name: identityName(environment, 'api')
 }
 
-// The API's jobs' own identity, where they run apart from it (4D2e D13).
-resource jobsIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+// The API's jobs' own identity, where they run apart from it (4D2e D13): read only
+// then, so an apps run with no jobs app never asks Azure for it (it may not exist yet).
+resource jobsIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = if (split) {
   name: identityName(environment, 'jobs')
 }
 
@@ -563,7 +564,7 @@ var jobsDownloadsSettings = [
   }
   {
     name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
-    value: jobsIdentity.properties.clientId
+    value: jobsIdentity!.properties.clientId
   }
 ]
 
@@ -600,7 +601,7 @@ var jobsAnchorSettings = [
   }
   {
     name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
-    value: jobsIdentity.properties.clientId
+    value: jobsIdentity!.properties.clientId
   }
 ]
 
