@@ -895,7 +895,11 @@ describe(`each organisation's read under its own wall, in one trip (4D2e E8, Pos
       return { ...node, sqlFragments: [text.replace("'app.org_id', ''", "'app.org_id', 'left'")] };
     });
 
-    expect(rowsOf(await each([ORG_B], leftSet))).toEqual([[ORG_B, await seenBy(ORG_B)]]);
+    const times = noStatementTimes();
+    const answers = await timingStatements(times, () => each([ORG_B], leftSet));
+    expect(rowsOf(answers)).toEqual([[ORG_B, await seenBy(ORG_B)]]);
     expect(twistedOnce).toBe(true);
+    // Refused and read again: the page's three trips, then the retry's own.
+    expect(times.trips).toBeGreaterThan(3);
   });
 });

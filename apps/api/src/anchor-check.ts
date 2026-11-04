@@ -707,7 +707,7 @@ export function createAnchorCheck({
    * Every listed chain with an anchor probed at the run's start (4D2e E8): its head against its anchor and its last
    * events counted, a page of organisations a trip, on one of the lanes' connections. A chain found unmoved, or
    * failing, takes its turn with no read of its own; one moved, never anchored or not answered for is read from its
-   * anchor in its turn, as is one whose check from the last run is still under way.
+   * anchor in its turn. One whose check from the last run is still under way meets that in its turn, as ever.
    */
   const probeAll = async (
     from: OrganisationChains,
@@ -717,7 +717,7 @@ export function createAnchorCheck({
     const { probe } = from;
     const asked = orgIds.flatMap((orgId) => {
       const anchor = anchors.latest({ kind: 'organisation', orgId });
-      return anchor === undefined || inFlight.has(orgId) ? [] : [{ orgId, from: anchor }];
+      return anchor === undefined ? [] : [{ orgId, from: anchor }];
     });
     if (probe === undefined || asked.length === 0) return new Map();
     let answers: ReadonlyMap<string, ProbeAnswer>;
