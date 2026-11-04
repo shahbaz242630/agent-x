@@ -939,7 +939,8 @@ describe('the runner and the deployment agree', () => {
       created
         .filter((resource) => resource.type === 'Microsoft.OperationalInsights/workspaces')
         .map((resource) => resource.name),
-    ).toEqual([WORKSPACE]);
+      // The login alerts' own workspace holds no job's lines: the runner reads the main one.
+    ).toEqual([WORKSPACE, `${WORKSPACE}-logins`]);
     // The clean-up run is started with the API version the jobs are deployed with.
     expect(
       new Set(

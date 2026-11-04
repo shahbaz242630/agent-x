@@ -39,6 +39,7 @@ export type RuleId =
   | 'evidence-store'
   | 'activity-downloads'
   | 'workspace'
+  | 'login-workspace'
   | 'log-quota-alerts'
   | 'alert-counts-only'
   | 'alert-window'
@@ -340,6 +341,15 @@ const OTHER_DESTINATIONS = [
   'marketplacePartnerId',
   'serviceBusRuleId',
 ] as const;
+
+/**
+ * The login alerts' own workspace (4D2e Stage F, PR 9), by its name: the main one's cap reached stops its collecting,
+ * so the alerts on Postgres's logins read a small workspace of their own, holding only what they need, its cap 1 GB.
+ */
+const LOGIN_WORKSPACE = /^log-agentx-(?:stg|prd)-logins$/;
+const LOGIN_WORKSPACE_CAP_GB = 1;
+/** What the login workspace holds: Postgres's server log and the platform's lines, for the owner-login pairing. */
+const LOGIN_LOG_CATEGORIES: readonly unknown[] = ['PostgreSQLLogs', 'ContainerAppSystemLogs'];
 
 /** The environment's logs that reach the workspace: every container's console, and the platform's own events. */
 const APP_LOG_CATEGORIES: readonly unknown[] = ['ContainerAppConsoleLogs', 'ContainerAppSystemLogs'];
@@ -990,6 +1000,14 @@ const settingsOf = (snapshot: Snapshot, resource: PredictedResource): readonly P
 const workspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
   new Set(ofType(snapshot, TYPES.workspace).map((workspace) => workspace.id));
 
+/** The ids of the login alerts' own workspace: only the one this deployment creates under its name. */
+const loginWorkspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
+  new Set(
+    ofType(snapshot, TYPES.workspace)
+      .filter((workspace) => LOGIN_WORKSPACE.test(workspace.name))
+      .map((workspace) => workspace.id),
+  );
+
 /** An action group of this deployment that is switched on and reaches someone. */
 const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   ofType(snapshot, TYPES.actionGroup).some(
@@ -1001,16 +1019,17 @@ const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
   );
 
 /**
- * Whether an enabled alert on this deployment's workspace has a condition
- * `matches` takes. A `stateless SEV-1` one is severity 1 and never resolves
- * itself (autoMitigate false), so it notifies on every window, not once.
+ * Whether an enabled alert on one of this deployment's workspaces (or of those
+ * given) has a condition `matches` takes. A `stateless SEV-1` one is severity 1
+ * and never resolves itself (autoMitigate false), so it notifies on every
+ * window, not once.
  */
 const workspaceAlerted = (
   snapshot: Snapshot,
   kind: 'any' | 'stateless SEV-1',
   matches: (criterion: unknown, alert: PredictedResource) => boolean,
+  workspaces: ReadonlySet<unknown> = workspaceIds(snapshot),
 ): boolean => {
-  const workspaces = workspaceIds(snapshot);
   return ofType(snapshot, TYPES.alert).some(
     (alert) =>
       at(alert.properties, 'enabled') === true &&
@@ -1033,7 +1052,8 @@ const complete: Check = (snapshot, _expected, add) => {
 /** The protections exist at all: a rule that checks each resource of a type passes when there are none. */
 const required: Check = (snapshot, _expected, add) => {
   const counts: readonly (readonly [string, string, number, number])[] = [
-    ['the log workspace', TYPES.workspace, 1, 1],
+    // The main one and the login alerts' own (rule login-workspace).
+    ["log workspaces, the main one and the login alerts' own", TYPES.workspace, 2, 2],
     ['an action group', TYPES.actionGroup, 1, Infinity],
     ['the network', TYPES.network, 1, 1],
     ['the DNS policy', TYPES.dnsPolicy, 1, 1],
@@ -1400,11 +1420,12 @@ const database: Check = (snapshot, expected, add) => {
       (criterion, alert) =>
         queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
         watchesEveryWindow(alert, criterion),
+      loginWorkspaceIds(snapshot),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }
@@ -2329,6 +2350,76 @@ const workspaceAndQuota: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** The categories one diagnostic setting sends, switched on. */
+const sentCategories = (setting: PredictedResource): readonly unknown[] =>
+  list(at(setting.properties, 'logs'))
+    .filter((log) => at(log, 'enabled') === true)
+    .map((log) => at(log, 'category') ?? at(log, 'categoryGroup'));
+
+/** Whether every resource of the type, and at least one, sends the category to the workspace, in its own table. */
+const sendsTo = (snapshot: Snapshot, type: string, category: string, workspace: string): boolean => {
+  const resources = ofType(snapshot, type);
+  return (
+    resources.length > 0 &&
+    resources.every((resource) =>
+      settingsOf(snapshot, resource).some(
+        (setting) =>
+          at(setting.properties, 'workspaceId') === workspace &&
+          at(setting.properties, 'logAnalyticsDestinationType') === 'Dedicated' &&
+          sentCategories(setting).includes(category),
+      ),
+    )
+  );
+};
+
+/**
+ * The login alerts' own workspace (4D2e Stage F, PR 9): exactly one, its cap 1 GB; the server's log and the
+ * platform's lines reach it, and nothing else does, so the apps' volume can never fill it; its cap reached is a
+ * stateless SEV-1. Rules database-logins and owner-login-alert hold the login alerts to it.
+ */
+const loginWorkspace: Check = (snapshot, _expected, add) => {
+  const found = ofType(snapshot, TYPES.workspace).filter((workspace) => LOGIN_WORKSPACE.test(workspace.name));
+  const [workspace] = found;
+  if (workspace === undefined || found.length > 1) {
+    add({
+      rule: 'login-workspace',
+      resource: 'the deployment',
+      message: `needs exactly one workspace for the login alerts (log-agentx-<env>-logins); the snapshot has ${String(found.length)}`,
+    });
+    return;
+  }
+  const missing: string[] = [];
+  if (at(workspace.properties, 'workspaceCapping', 'dailyQuotaGb') !== LOGIN_WORKSPACE_CAP_GB) {
+    missing.push(`a daily cap of ${String(LOGIN_WORKSPACE_CAP_GB)} GB`);
+  }
+  if (
+    !sendsTo(snapshot, TYPES.server, 'PostgreSQLLogs', workspace.id) ||
+    !sendsTo(snapshot, TYPES.environment, 'ContainerAppSystemLogs', workspace.id)
+  ) {
+    missing.push("the database server's log and the platform's lines, in resource-specific tables");
+  }
+  const others = ofType(snapshot, TYPES.diagnostics).filter(
+    (setting) =>
+      at(setting.properties, 'workspaceId') === workspace.id &&
+      sentCategories(setting).some((category) => !LOGIN_LOG_CATEGORIES.includes(category)),
+  );
+  if (others.length > 0) missing.push(`no other logs (${others.map((setting) => setting.name).join(', ')} sends some)`);
+  const capAlerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion) =>
+      queryIs(
+        at(criterion, 'query'),
+        '_LogOperation',
+        ['where Category =~ "Ingestion"', 'where Detail contains "OverQuota"'],
+        'count()',
+      ),
+    new Set([workspace.id]),
+  );
+  if (!capAlerted) missing.push('a stateless SEV-1 alert when its cap is reached');
+  for (const what of missing) add({ rule: 'login-workspace', resource: workspace.name, message: `must have ${what}` });
+};
+
 /**
  * The rules that fire on the jobs' lines missing (4D2e D, PL-33): what stands behind a process that can say nothing.
  * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
@@ -2636,7 +2727,9 @@ const appsEnvironment: Check = (snapshot, _expected, add) => {
  * (ADR-011 §7).
  */
 const appsLogs: Check = (snapshot, _expected, add) => {
-  const workspaces = workspaceIds(snapshot);
+  // The main workspace: the login alerts' own holds a copy of the platform's lines, never instead of it.
+  const logins = loginWorkspaceIds(snapshot);
+  const workspaces = new Set([...workspaceIds(snapshot)].filter((id) => !logins.has(id)));
   for (const environment of ofType(snapshot, TYPES.environment)) {
     const enabledLogs = (setting: PredictedResource): readonly unknown[] =>
       list(at(setting.properties, 'logs')).filter((log) => at(log, 'enabled') === true);
@@ -2657,7 +2750,7 @@ const appsLogs: Check = (snapshot, _expected, add) => {
         rule: 'apps-logs',
         resource: environment.name,
         message:
-          "must send its console and system logs, and no other, to this deployment's workspace in resource-specific tables: never its HTTP log or a category group (client addresses, ADR-011 §7)",
+          "must send its console and system logs, and no other, to this deployment's main workspace in resource-specific tables: never its HTTP log or a category group (client addresses, ADR-011 §7)",
       });
     }
   }
@@ -3006,12 +3099,13 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
           at(criterion, 'operator') === 'GreaterThan' &&
           at(criterion, 'threshold') === 0 &&
           watchesEveryWindow(alert, criterion),
+        loginWorkspaceIds(snapshot),
       );
     if (!alerted) {
       add({
         rule: 'owner-login-alert',
         resource: server.name,
-        message: `needs an enabled, stateless SEV-1 alert on this deployment's workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
       });
     }
   }
@@ -4029,6 +4123,7 @@ const CHECKS: readonly Check[] = [
   evidenceStore,
   activityDownloads,
   workspaceAndQuota,
+  loginWorkspace,
   alertRules,
   resourceLogs,
   logDestinations,

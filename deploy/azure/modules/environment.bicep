@@ -27,6 +27,8 @@ param zoneRedundant bool
 param identityNames array
 param workspaceName string
 param workspaceId string
+@description('The login alerts\' own workspace (monitoring.bicep), which takes a copy of the platform\'s lines.')
+param loginWorkspaceId string
 param actionGroupId string
 param errorAlertName string
 param errorAlertThreshold int
@@ -92,6 +94,25 @@ resource appLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
         category: 'ContainerAppConsoleLogs'
         enabled: true
       }
+      {
+        category: 'ContainerAppSystemLogs'
+        enabled: true
+      }
+    ]
+  }
+}
+
+// A copy of the platform's lines for the login alerts' own workspace, where the
+// owner-login alert pairs the migration job's starts with the owner's logins
+// (postgres.bicep). Two workspaces take two settings (Microsoft allows five a
+// resource); the main one keeps its own copy for jobs.ts and the saved queries.
+resource systemLogsForLogins 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  scope: environment
+  name: 'system-logs-to-login-workspace'
+  properties: {
+    workspaceId: loginWorkspaceId
+    logAnalyticsDestinationType: 'Dedicated'
+    logs: [
       {
         category: 'ContainerAppSystemLogs'
         enabled: true

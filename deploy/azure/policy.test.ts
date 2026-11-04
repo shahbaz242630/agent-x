@@ -255,6 +255,11 @@ const named = (pattern: RegExp) => (resource: PredictedResource) => pattern.test
 const SERVER = type('Microsoft.DBforPostgreSQL/flexibleServers');
 const VAULT = type('Microsoft.KeyVault/vaults');
 const WORKSPACE = type('Microsoft.OperationalInsights/workspaces');
+const MAIN_WORKSPACE = (resource: PredictedResource) =>
+  WORKSPACE(resource) && /^log-agentx-[a-z]+$/.test(resource.name);
+const LOGIN_WORKSPACE = (resource: PredictedResource) => WORKSPACE(resource) && resource.name.endsWith('-logins');
+const LOGIN_CAP_ALERT = named(/-login-logs-cap-reached$/);
+const SYSTEM_LOGS_COPY = named(/^system-logs-to-login-workspace$/);
 const RULES = type('Microsoft.Network/networkSecurityGroups');
 const DATABASE_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-database');
 const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-apps');
@@ -491,9 +496,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     ).toEqual([
       'Microsoft.Resources/resourceGroups rg-agentx-staging',
       'Microsoft.OperationalInsights/workspaces log-agentx-stg',
+      'Microsoft.OperationalInsights/workspaces log-agentx-stg-logins',
       'Microsoft.Insights/actionGroups ag-agentx-stg',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-log-quota',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-quota',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-log-cap-reached',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-cap-reached',
       'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
       'Microsoft.Consumption/budgets budget-agentx-staging',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
@@ -528,6 +536,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/^Microsoft\.Insights\/metricAlerts alert-psql-agentx-stg-[a-z0-9]{6}-disk$/),
       'Microsoft.App/managedEnvironments cae-agentx-staging',
       'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
+      'Microsoft.Insights/diagnosticSettings system-logs-to-login-workspace',
       ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'].map(
         (workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`,
       ),
@@ -779,9 +788,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
             resource.type.startsWith('Microsoft.DBforPostgreSQL') || /psql|^logs-to-workspace$/.test(resource.name),
         ),
       ),
-    ).toEqual(['required']);
+      // With no server, no server's log reaches the login alerts' workspace either.
+    ).toEqual(['required', 'login-workspace']);
     expect(brokenRules(without((resource) => NETWORK(resource) || RULES(resource)))).toContain('required');
     expect(brokenRules(without(WORKSPACE))).toContain('required');
+    expect(brokenRules(without(MAIN_WORKSPACE))).toContain('required');
     // Without the policy, no rule of ours judges the network's lookups.
     expect(
       brokenRules(
@@ -799,6 +810,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // their certificates belong to no environment of ours.
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
+      'login-workspace',
       'owner-login-alert',
       'jobs',
       'apps',
@@ -1927,20 +1939,34 @@ describe('SEC-OPS-09 each rule can fail', () => {
         changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'features').disableLocalAuth = false)),
       ),
     ).toEqual(['workspace']);
-    expect(brokenRules(changed(WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual([
+    expect(brokenRules(changed(MAIN_WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual([
       'workspace',
     ]);
     expect(
       brokenRules(
-        changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 0)),
+        changed(MAIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 0)),
       ),
     ).toEqual(['workspace']);
+    // The login alerts' workspace is held to the same, and to its own 1 GB besides.
+    expect(brokenRules(changed(LOGIN_WORKSPACE, (workspace) => (properties(workspace).retentionInDays = 90)))).toEqual([
+      'workspace',
+    ]);
+    expect(brokenRules(changed(LOGIN_WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual(
+      ['workspace', 'login-workspace'],
+    );
   });
 
   it('SEC-AV-09 log-quota-alerts: the 80% alert off its threshold or its query, or the cap alert inverted or gone', () => {
+    // Either workspace's cap moved without its alert.
     expect(
       brokenRules(
-        changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
+        changed(LOGIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
+      ),
+    ).toEqual(['log-quota-alerts', 'login-workspace']);
+    expect(brokenRules(without(LOGIN_CAP_ALERT))).toEqual(['log-quota-alerts', 'login-workspace']);
+    expect(
+      brokenRules(
+        changed(MAIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
       ),
     ).toEqual(['log-quota-alerts']);
     expect(brokenRules(without(CAP_ALERT))).toEqual(['log-quota-alerts']);
@@ -2137,7 +2163,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (entry: Mutable) => (first(at(entry, 'properties', 'logs')).enabled = false),
       (entry: Mutable) => (first(at(entry, 'properties', 'logs')).category = 'PostgreSQLFlexSessions'),
     ]) {
-      expect(brokenRules(changed(named(/^logs-to-workspace$/), change))).toEqual(['resource-logs']);
+      // The server's log is what the login alerts' workspace is for, so its rule objects too.
+      expect(brokenRules(changed(named(/^logs-to-workspace$/), change))).toEqual(['login-workspace', 'resource-logs']);
     }
     for (const change of [
       (entry: Mutable) => (inside(entry, 'properties').logAnalyticsDestinationType = 'AzureDiagnostics'),
@@ -2149,7 +2176,77 @@ describe('SEC-OPS-09 each rule can fail', () => {
       brokenRules(
         changed(named(/^logs-to-workspace$/), (entry) => (inside(entry, 'properties').workspaceId = elsewhere)),
       ),
-    ).toEqual(['resource-logs', 'log-destinations']);
+    ).toEqual(['login-workspace', 'resource-logs', 'log-destinations']);
+  });
+
+  it("login-workspace: the login alerts' workspace missing, doubled, over its cap, without what they read, holding more, or its cap reached told quietly", () => {
+    const properties = (entry: Mutable): Mutable => inside(entry, 'properties');
+    const logs = (setting: Mutable): Mutable[] => at(setting, 'properties', 'logs') as Mutable[];
+    const loginWorkspace = staging.predictedResources.find(LOGIN_WORKSPACE);
+    // Gone, every login alert goes with it; two, and which one do the alerts read?
+    expect(brokenRules(without(LOGIN_WORKSPACE))).toEqual(
+      expect.arrayContaining(['required', 'login-workspace', 'database-logins', 'owner-login-alert']),
+    );
+    expect(
+      brokenRules(withExtra({ ...structuredClone(loginWorkspace), id: `${String(loginWorkspace?.id)}-second` })),
+    ).toEqual(expect.arrayContaining(['required', 'login-workspace']));
+    // A larger cap costs more on a flood's day, and a smaller one fills sooner.
+    for (const cap of [2, 0.5]) {
+      expect(
+        brokenRules(
+          changed(LOGIN_WORKSPACE, (workspace) => {
+            inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = cap;
+          }),
+        ),
+      ).toContain('login-workspace');
+    }
+    // The server's log sent to the main workspace instead: the main cap blinds the login alerts again.
+    const mainId = String(staging.predictedResources.find(MAIN_WORKSPACE)?.id);
+    expect(
+      brokenRules(changed(named(/^logs-to-workspace$/), (setting) => (properties(setting).workspaceId = mainId))),
+    ).toEqual(['login-workspace']);
+    // The platform's lines missing, sent to the shared table, or switched off: the owner-login pairing can't see starts.
+    for (const change of [
+      (setting: Mutable) => (properties(setting).workspaceId = mainId),
+      (setting: Mutable) => (properties(setting).logAnalyticsDestinationType = 'AzureDiagnostics'),
+      (setting: Mutable) => (first(logs(setting)).enabled = false),
+    ]) {
+      expect(brokenRules(changed(SYSTEM_LOGS_COPY, change))).toEqual(['login-workspace']);
+    }
+    expect(brokenRules(without(SYSTEM_LOGS_COPY))).toEqual(['login-workspace']);
+    // The apps' console sent there too: their volume could fill its cap.
+    expect(
+      brokenRules(
+        changed(SYSTEM_LOGS_COPY, (setting) =>
+          logs(setting).push({ category: 'ContainerAppConsoleLogs', enabled: true }),
+        ),
+      ),
+    ).toEqual(['login-workspace']);
+    // A category group brings every category: the apps' rule refuses it on the environment too.
+    expect(
+      brokenRules(
+        changed(SYSTEM_LOGS_COPY, (setting) => logs(setting).push({ categoryGroup: 'allLogs', enabled: true })),
+      ),
+    ).toEqual(['login-workspace', 'apps-logs']);
+    expect(
+      brokenRules(changed(DNS_LOGS, (setting) => (properties(setting).workspaceId = String(loginWorkspace?.id)))),
+    ).toEqual(['login-workspace']);
+    // Its cap reached only a SEV-2, or one that resolves itself and stays quiet: each refused.
+    expect(brokenRules(changed(LOGIN_CAP_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'login-workspace',
+      'alert-runbook',
+    ]);
+    expect(brokenRules(changed(LOGIN_CAP_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'login-workspace',
+      'alert-delivery',
+    ]);
+  });
+
+  it('database-logins and owner-login-alert: either login alert reading the main workspace, which its cap can blind', () => {
+    const mainId = String(staging.predictedResources.find(MAIN_WORKSPACE)?.id);
+    const onMain = (alert: Mutable) => (inside(alert, 'properties').scopes = [mainId]);
+    expect(brokenRules(changed(LOGIN_ALERT, onMain))).toEqual(['database-logins']);
+    expect(brokenRules(changed(OWNER_ALERT, onMain))).toEqual(['owner-login-alert']);
   });
 
   it('dns-watch: a network no policy of ours watches, or whose every-name rule is off, allows, or covers less', () => {
