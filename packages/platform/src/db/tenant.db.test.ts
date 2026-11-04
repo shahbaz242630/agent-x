@@ -849,7 +849,9 @@ describe(`each organisation's read under its own wall, in one trip (4D2e E8, Pos
       const [first, second, third] = answers.map(({ read }) => read);
 
       expect(first).toMatchObject({ rows: [{ one: 1 }] });
-      expect(second).toEqual({ failed: expect.objectContaining({ message: expect.stringMatching(/read timeout/i) }) });
+      expect(second).toEqual({
+        failed: expect.objectContaining({ message: expect.stringMatching(/read timeout/i) as unknown }) as unknown,
+      });
       // The same failure, the read never sent.
       expect(third && 'failed' in third ? third.failed : undefined).toBe(
         second && 'failed' in second ? second.failed : 0,
@@ -864,7 +866,7 @@ describe(`each organisation's read under its own wall, in one trip (4D2e E8, Pos
   /** The app's pool, each statement's text or values changed on the way, as a database that broke a setting would. */
   const twisted = (rewrite: (node: RawNode) => RawNode) =>
     app.withPlugin({
-      transformQuery: ({ node }) => (node.kind === 'RawNode' ? rewrite(node as RawNode) : node),
+      transformQuery: ({ node }) => (node.kind === 'RawNode' ? rewrite(node) : node),
       transformResult: ({ result }) => Promise.resolve(result),
     });
 

@@ -84,7 +84,7 @@ const answering =
   () =>
     Promise.resolve(new Map(Object.entries(answers)));
 
-const probeWarning = (chains: number) =>
+const probeWarning = (chains: number): unknown =>
   expect.objectContaining({ level: 'warn', event: 'audit.anchor_check_failed', check: 'probe', chains });
 
 describe('the probe at the start of a run (4D2e E8)', () => {
@@ -154,13 +154,15 @@ describe('the probe at the start of a run (4D2e E8)', () => {
   });
 
   it('reads a chain anchored again since the probe compared it: the answer was for another anchor', async () => {
-    let anchorsOf: ReturnType<typeof probing>['anchors'] | undefined;
+    const later: { anchors?: ReturnType<typeof probing>['anchors'] } = {};
     const { check, steps, anchors } = probing((chains) => {
       // A hand-off anchors the organisation while the probe runs.
-      anchorsOf?.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n), new Date(AT.getTime() + 1)));
+      later.anchors?.keep(
+        signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n), new Date(AT.getTime() + 1)),
+      );
       return Promise.resolve(new Map(chains.map(({ orgId }) => [orgId, { kind: 'same' } as const])));
     });
-    anchorsOf = anchors;
+    later.anchors = anchors;
     await check.run();
     anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(1n, 9), AT));
     await check.run();

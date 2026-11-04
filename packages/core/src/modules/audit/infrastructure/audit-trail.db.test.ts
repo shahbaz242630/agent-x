@@ -1190,8 +1190,8 @@ describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
       await record(other, event(1));
       const from = await checked(other);
       // A row of that organisation's divides by zero as it is read. A policy takes no bound value; the ID is newOrg's.
+      // eslint-disable-next-line agentx/no-string-built-sql -- the ID is a UUID this test made, as the line above says.
       await attacker.query(
-        // eslint-disable-next-line agentx/no-string-built-sql -- the ID is a UUID this test made, as the line above says.
         `create policy probe_fails on audit.events as restrictive
          using (1 / (case when org_id = '${failing}'::uuid then 0 else 1 end) = 1)`,
       );
@@ -1201,7 +1201,7 @@ describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
           { orgId: other, from },
         ]);
         expect(answers).toEqual({
-          [failing]: { kind: 'missed', error: expect.objectContaining({ code: '22012' }) },
+          [failing]: { kind: 'missed', error: expect.objectContaining({ code: '22012' }) as unknown },
           [other]: { kind: 'same' },
         });
       } finally {

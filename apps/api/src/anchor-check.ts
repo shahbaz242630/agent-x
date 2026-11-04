@@ -714,7 +714,7 @@ export function createAnchorCheck({
     orgIds: readonly string[],
     signal: AbortSignal,
   ): Promise<ReadonlyMap<string, Probed>> => {
-    const { probe } = from;
+    const probe = from.probe?.bind(from);
     if (probe === undefined) return new Map();
     const asked = orgIds.flatMap((orgId) => {
       const anchor = anchors.latest({ kind: 'organisation', orgId });
