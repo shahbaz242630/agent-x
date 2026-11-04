@@ -216,29 +216,64 @@ describe('a trigger a coming migration adds to a table already built', () => {
   });
 });
 
-describe("0073's triggers, made as its migration will make them, read by this image (4D2e D8)", () => {
-  // Word for word as db/migrations/0073 writes them: this image must know each exactly before that migration runs.
-  const MADE = `create constraint trigger marks_request_expiry after insert or update on spend_requests.requests
+describe("0075's triggers, made as its migration will make them, read by this image (4D2e D9)", () => {
+  // Word for word as db/migrations/0075 writes them: this image must know each exactly before that migration runs.
+  const MADE = `create constraint trigger marks_request_voids after update on organizations.organizations
       deferrable initially deferred for each row
-      when (new.status = 'APPROVAL_REQUIRED')
-      execute function directory.mark_org_work('request_expiry', '24 hours');
-    create constraint trigger marks_mandate_expiry after insert or update on mandates.mandates
+      when (new.status <> 'ACTIVE' or old.status <> 'ACTIVE')
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on agents.agents
       deferrable initially deferred for each row
-      when (new.status in ('ACTIVE', 'SUSPENDED'))
-      execute function directory.mark_org_work('mandate_expiry', '0 seconds')`;
-  const DROPPED = `drop trigger if exists marks_request_expiry on spend_requests.requests;
-    drop trigger if exists marks_mandate_expiry on mandates.mandates`;
+      when (new.status <> 'ACTIVE')
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on mandates.mandates
+      deferrable initially deferred for each row
+      when (new.status <> 'ACTIVE' or new.current_version_id is distinct from old.current_version_id)
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on funding_sources.sources
+      deferrable initially deferred for each row
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on suppliers.suppliers
+      deferrable initially deferred for each row
+      when (new.status <> 'VERIFIED' or old.status <> 'VERIFIED')
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_waiting_rejections after update on mandates.policies
+      deferrable initially deferred for each row
+      execute function directory.mark_org_work('waiting_rejections', '0 seconds');
+    create constraint trigger marks_carry_rest after update on mandates.mandates
+      deferrable initially deferred for each row
+      when (new.current_version_id is distinct from old.current_version_id)
+      execute function directory.mark_org_work('carry_rest', '0 seconds')`;
+  const DROPPED = `drop trigger if exists marks_request_voids on organizations.organizations;
+    drop trigger if exists marks_request_voids on agents.agents;
+    drop trigger if exists marks_request_voids on mandates.mandates;
+    drop trigger if exists marks_request_voids on funding_sources.sources;
+    drop trigger if exists marks_request_voids on suppliers.suppliers;
+    drop trigger if exists marks_waiting_rejections on mandates.policies;
+    drop trigger if exists marks_carry_rest on mandates.mandates`;
+  /** Each trigger 0075 makes, as `table name`. */
+  const NAMED = [
+    'agents.agents marks_request_voids',
+    'funding_sources.sources marks_request_voids',
+    'mandates.mandates marks_carry_rest',
+    'mandates.mandates marks_request_voids',
+    'mandates.policies marks_waiting_rejections',
+    'organizations.organizations marks_request_voids',
+    'suppliers.suppliers marks_request_voids',
+  ];
+  const each = (says: (table: string, name: string) => string) =>
+    NAMED.map((named) => {
+      const [table = '', name = ''] = named.split(' ');
+      return says(table, name);
+    });
 
   it('are each a coming trigger, and nothing is the alarm at once', async () => {
     await owner.query(MADE);
     try {
-      expect(COMING_TRIGGERS.map(({ name }) => name)).toEqual(['marks_request_expiry', 'marks_mandate_expiry']);
+      expect(COMING_TRIGGERS.map(({ table, name }) => `${table} ${name}`).toSorted()).toEqual(NAMED);
       expect(await liveSchemaDrift(app, ROLES)).toEqual({
         atOnce: [],
-        releaseShaped: [
-          'mandates.mandates carries "marks_mandate_expiry", a coming trigger',
-          'spend_requests.requests carries "marks_request_expiry", a coming trigger',
-        ],
+        releaseShaped: each((table, name) => `${table} carries "${name}", a coming trigger`),
       });
     } finally {
       await owner.query(DROPPED);
@@ -248,13 +283,68 @@ describe("0073's triggers, made as its migration will make them, read by this im
   it('to the image before this one, are the false alarm at once', async () => {
     await owner.query(MADE);
     try {
-      expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual([
-        'mandates.mandates carries the trigger "marks_mandate_expiry"',
-        'spend_requests.requests carries the trigger "marks_request_expiry"',
+      expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual(
+        each((table, name) => `${table} carries the trigger "${name}"`),
+      );
+    } finally {
+      await owner.query(DROPPED);
+    }
+  });
+
+  it('one written otherwise, firing on more or on less, is the alarm at once', async () => {
+    await owner.query(MADE);
+    await owner.query(`drop trigger marks_carry_rest on mandates.mandates;
+      create constraint trigger marks_carry_rest after update on mandates.mandates
+        deferrable initially deferred for each row
+        when (new.current_version_id is distinct from old.current_version_id or new.status <> 'ACTIVE')
+        execute function directory.mark_org_work('carry_rest', '0 seconds');
+      drop trigger marks_request_voids on funding_sources.sources;
+      create constraint trigger marks_request_voids after insert or update on funding_sources.sources
+        deferrable initially deferred for each row
+        execute function directory.mark_org_work('request_voids', '0 seconds')`);
+    try {
+      expect((await liveSchemaDrift(app, ROLES)).atOnce).toEqual([
+        'funding_sources.sources carries the trigger "marks_request_voids"',
+        'mandates.mandates carries the trigger "marks_carry_rest"',
       ]);
     } finally {
       await owner.query(DROPPED);
     }
+  });
+});
+
+describe('0073, read as the image before it would read it (4D2e D8)', () => {
+  const EXPIRY = ['marks_request_expiry', 'marks_mandate_expiry'];
+  // The image before knew 0072's three triggers as written, these two as coming, and the job CHECK as 0072 made it.
+  const before = {
+    triggers: MARK_TRIGGERS.filter(({ name }) => !EXPIRY.includes(name)),
+    tables: BUILT_TABLES,
+    checks: BUILT_CHECKS.map((one) =>
+      one.name === 'org_work_job_check'
+        ? { ...one, expression: "(job = ANY (ARRAY['hand_off'::text, 'hand_off_sweep'::text, 'payment_check'::text]))" }
+        : one,
+    ),
+  };
+  const coming = MARK_TRIGGERS.filter(({ name }) => EXPIRY.includes(name));
+
+  it('knowing its triggers as coming: nothing is the alarm at once, and all of it warns first', async () => {
+    expect(coming.map(({ name }) => name)).toEqual(EXPIRY);
+    expect(await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: coming })).toEqual({
+      atOnce: [],
+      releaseShaped: [
+        `directory.org_work's CHECK constraint "org_work_job_check" reads differently`,
+        'mandates.mandates carries "marks_mandate_expiry", a coming trigger',
+        'spend_requests.requests carries "marks_request_expiry", a coming trigger',
+      ],
+    });
+  });
+
+  it('not knowing them: the false alarm D8a landed first to prevent, on those two alone', async () => {
+    const { atOnce } = await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: [] });
+    expect(atOnce).toEqual([
+      'mandates.mandates carries the trigger "marks_mandate_expiry"',
+      'spend_requests.requests carries the trigger "marks_request_expiry"',
+    ]);
   });
 });
 
@@ -287,10 +377,13 @@ describe('0072, read as the image before it would read it', () => {
     );
   });
 
-  it('not knowing them: the false alarm this all exists to prevent, on those three alone', async () => {
+  it('not knowing them: the false alarm this all exists to prevent, on the triggers alone', async () => {
     const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: [] });
+    // The migrated database holds 0073's two as well, which that image knew no more of.
     expect(atOnce).toEqual([
+      'mandates.mandates carries the trigger "marks_mandate_expiry"',
       'spend_requests.requests carries the trigger "marks_hand_off"',
+      'spend_requests.requests carries the trigger "marks_request_expiry"',
       'transactions.transactions carries the trigger "marks_hand_off_sweep"',
       'transactions.transactions carries the trigger "marks_payment_check"',
     ]);

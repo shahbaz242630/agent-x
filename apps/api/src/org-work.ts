@@ -1,6 +1,6 @@
-// The marks (directory.org_work, 0072), kept honest and followed (4D2e D6, D7).
+// The marks (directory.org_work, 0072, 0073), kept honest and followed (4D2e D6-D8).
 //
-// Followed: the hand-off, its sweep and the payment checks visit only the
+// Followed: the hand-off, its sweep, the payment checks and the two expiries visit only the
 // organisations whose marks are due by their clock, at most ORG_WORK_MOST a run,
 // those due longest first, instead of every organisation in the directory. Each
 // one's due time is when its work is next really needed, so with more due than a
@@ -43,7 +43,8 @@ import {
   settleOrgWorkPage,
 } from '@agentx/core/modules/directory';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { mandateExpiryDue, type MandatesTables } from '@agentx/core/modules/mandates';
+import { requestExpiryDue, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { type Clock, HOUR_MS, systemClock } from '@agentx/core/shared-kernel';
 import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import { type Database, type DatabaseTransaction, sendTogether, withTenant } from '@agentx/platform/db';
@@ -59,7 +60,7 @@ export const ORG_WORK_REDISCOVERY_EVERY_MS = HOUR_MS;
 /** How far past what is due a mark may read before it counts as late: a mark's time and its row's differ by a transaction. */
 const LATE_BY_MS = 60_000;
 
-type OrgWorkTables = DirectoryTables & SpendRequestsTables & TransactionsTables & AuditTables;
+type OrgWorkTables = DirectoryTables & SpendRequestsTables & TransactionsTables & AuditTables & MandatesTables;
 
 /** How many organisations a job takes from its marks a run: its list stays this size however many have work. */
 const ORG_WORK_MOST = 1_000;
@@ -126,11 +127,18 @@ export function markedOrganisations({
   let listed = new Map<string, string>();
   let dueBy = new Map<string, number>();
 
-  /** When the organisation is next due: what its rows say, no later than a time the job gave; nothing, none. */
+  /**
+   * When the organisation is next due: what its rows say, no later than a time the job gave; nothing, none. Work due
+   * already (left by the visit: refused, past its share, a moment early) is due now, behind those due before it: kept
+   * at its old time, it would be listed ahead of every other for ever, and with more such than a run takes, the rest
+   * never.
+   */
   const dueOf = async (orgId: string, given: ReadonlyMap<string, number>): Promise<Date | null> => {
-    const rows = await nextDueOf(database, orgId, nextDue, clock.now());
+    const now = clock.now();
+    const rows = await nextDueOf(database, orgId, nextDue, now);
     const by = given.get(orgId);
-    return rows === null || by === undefined || rows.getTime() <= by ? rows : new Date(by);
+    const due = rows === null || by === undefined || rows.getTime() <= by ? rows : new Date(by);
+    return due !== null && due < now ? now : due;
   };
 
   /**
@@ -206,6 +214,8 @@ const DUE_READS = [
   ['hand_off', handOffDue],
   ['hand_off_sweep', handOffSweepDue],
   ['payment_check', paymentCheckDue],
+  ['request_expiry', requestExpiryDue],
+  ['mandate_expiry', mandateExpiryDue],
 ] as const satisfies readonly (readonly [OrgWorkJob, unknown])[];
 
 /** What the organisation's rows and marks said on one trip. */
@@ -221,12 +231,18 @@ type Move =
   | { readonly kind: 'late'; readonly job: OrgWorkJob; readonly dueAt: Date; readonly marks: string }
   | { readonly kind: 'cleared'; readonly job: OrgWorkJob; readonly marks: string };
 
-export function movesOf({ before, due, after }: Looked): Move[] {
+/**
+ * What one look calls for, at `now` (the jobs' clock). Work due already is due now, as a settle stores it (dueOf): a
+ * mark is late only past the later of its rows' time and now, so one settled at a visit for work still due (refused,
+ * stuck, a request made before 0073) is no miss, and is left where the settle put it, behind those due before it.
+ */
+export function movesOf({ before, due, after }: Looked, now: Date): Move[] {
   return due.flatMap(({ job, dueAt }): Move[] => {
     const standing = before.find((mark) => mark.job === job);
     if (dueAt === null) return standing === undefined ? [] : [{ kind: 'cleared', job, marks: standing.marks }];
     if (!after.some((mark) => mark.job === job)) return [{ kind: 'unmarked', job, dueAt }];
-    if (standing === undefined || standing.due_at.getTime() - dueAt.getTime() <= LATE_BY_MS) return [];
+    const neededBy = Math.max(dueAt.getTime(), now.getTime());
+    if (standing === undefined || standing.due_at.getTime() - neededBy <= LATE_BY_MS) return [];
     return [{ kind: 'late', job, dueAt, marks: standing.marks }];
   });
 }
@@ -298,7 +314,8 @@ export function createOrgWorkRediscovery({
         const log = logger.child({ orgId });
         counts.organisations += 1;
         try {
-          for (const move of movesOf(await lookedAt(database, orgId, clock.now()))) {
+          const now = clock.now();
+          for (const move of movesOf(await lookedAt(database, orgId, now), now)) {
             if (await carriedOut(database, orgId, move, log)) counts[move.kind] += 1;
           }
         } catch (error) {

@@ -62,9 +62,11 @@ const { ready } = handoffWorld({ app: () => app, clock: () => clock, ids, regist
 const admin = () => database.as('admin');
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
+/** The organisation's marks of the hand-off's and the checks' jobs: those 0073 adds for the expiries are their tests'. */
 async function marksOf(w: World): Promise<Record<string, { due_at: Date; marks: string }>> {
   const rows = await admin().query<{ job: string; due_at: Date; marks: string }>(
-    'select job, due_at, marks from directory.org_work where org_id = $1',
+    `select job, due_at, marks from directory.org_work
+      where org_id = $1 and job in ('hand_off', 'hand_off_sweep', 'payment_check')`,
     [w.org],
   );
   return Object.fromEntries(rows.map(({ job, ...rest }) => [job, rest]));

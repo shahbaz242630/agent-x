@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { loadMigrations, MigrationRefused } from './migrate.ts';
+import { loadMigrations, MigrationRefused, NO_TRANSACTION } from './migrate.ts';
 
 let folder: string;
 
@@ -108,5 +108,57 @@ describe('loadMigrations', () => {
     await write('0003_third.sql', 'select 3;');
     await write('notes.txt', 'x');
     expect(await refusal()).toHaveLength(3);
+  });
+
+  describe('a file that runs outside a transaction (its first line NO_TRANSACTION)', () => {
+    const BUILD = 'create index concurrently if not exists one_id on demo.one (id)';
+    const DROP = 'drop index concurrently if exists demo.old_id';
+
+    it('may hold concurrent builds and drops of named indexes on qualified tables, comments between them', async () => {
+      await write(
+        '0001_first.sql',
+        `${NO_TRANSACTION}
+-- why
+${BUILD};
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS two_id ON ONLY demo.two (id) WHERE id > 0;
+${DROP};
+`,
+      );
+      expect(await loadMigrations(folder)).toHaveLength(1);
+    });
+
+    it.each([
+      ['a table made', 'create table demo.three (id int)'],
+      ['an index built in a transaction', 'create index one_id on demo.one (id)'],
+      ['a build that would stop at one already there, not valid', 'create index concurrently one_id on demo.one (id)'],
+      ['an unnamed index', 'create index concurrently if not exists on demo.one (id)'],
+      ['a table not qualified', 'create index concurrently if not exists one_id on one (id)'],
+      ['a drop that would fail on none', 'drop index concurrently demo.old_id'],
+      ['a drop not qualified', 'drop index concurrently if exists old_id'],
+      ['two drops in one statement', 'drop index concurrently if exists demo.a, demo.b'],
+      ['a drop that cascades', 'drop index concurrently if exists demo.old_id cascade'],
+    ])('refuses %s, naming the statement', async (_what, statement) => {
+      await write(
+        '0001_first.sql',
+        `${NO_TRANSACTION}
+${BUILD};
+${statement};
+`,
+      );
+      expect(await refusal()).toEqual([
+        `0001_first.sql runs outside a transaction, so it may hold only CREATE INDEX CONCURRENTLY IF NOT EXISTS and DROP INDEX CONCURRENTLY IF EXISTS statements on schema-qualified names, one per statement: "${statement.slice(0, 80)}" is neither`,
+      ]);
+    });
+
+    it('is only such a file with that line first: anywhere else it is a comment, and the file runs in a transaction', async () => {
+      await write(
+        '0001_first.sql',
+        `-- first
+${NO_TRANSACTION}
+create table demo.three (id int);
+`,
+      );
+      expect(await loadMigrations(folder)).toHaveLength(1);
+    });
   });
 });

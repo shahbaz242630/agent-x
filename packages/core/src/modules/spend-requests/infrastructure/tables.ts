@@ -1,6 +1,6 @@
 import type { Generated, GeneratedAlways } from 'kysely';
 
-/** The spend_requests schema's tables (db/migrations/0039_spend_requests.sql), as Kysely sees them. */
+/** The spend_requests schema's tables (db/migrations/0039_spend_requests.sql, 0073_expiry_marks.sql), as Kysely sees them. */
 export interface SpendRequestsTables {
   'spend_requests.requests': RequestsTable;
   'spend_requests.order_claims': OrderClaimsTable;
@@ -40,6 +40,11 @@ interface RequestsTable {
   reason_codes: string | null;
   status: string;
   created_at: Date;
+  /**
+   * When a request waiting for approval may expire, by the database's clock, as its decision's insert writes it (0073):
+   * unsealed, it only chooses when to look. Null for any other decision, and for one made before 0073.
+   */
+  waits_until: Date | null;
   /** These two are written by the signed state's steps alone (the audit module's record). */
   state_version: Generated<number>;
   state_event_id: Generated<string | null>;

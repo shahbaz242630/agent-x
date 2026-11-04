@@ -8,7 +8,7 @@
 // status flipped) is caught by every verified read of it, and a spend checks
 // the version's end itself, so an end the job hasn't reached yet never
 // authorises anything (SEC-AG-12).
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 
 import { MANDATE_VERSIONS, MANDATES } from './mandates.ts';
 import type { MandatesTables } from './tables.ts';
@@ -44,3 +44,20 @@ export async function mandatesPastTheirEnd(
     .execute();
   return rows.map(({ id }) => id);
 }
+
+/**
+ * When the organisation's soonest ACTIVE or SUSPENDED mandate's version in force ends, or null where none has an end;
+ * not run: the mandate expiry's mark is settled to it (0073). The rows mandatesPastTheirEnd reads, so a mark is never
+ * settled past one it would take. One row always.
+ */
+export const mandateExpiryDue = (tx: Transaction<MandatesTables>, orgId: string) =>
+  tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, for choosing when to look
+    .selectFrom(`${MANDATES.table} as m`)
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same
+    .innerJoin(`${MANDATE_VERSIONS.table} as v`, (join) =>
+      join.onRef('v.org_id', '=', 'm.org_id').onRef('v.id', '=', 'm.current_version_id'),
+    )
+    .select(sql<Date | null>`pg_catalog.min(v.ends_at)`.as('due'))
+    .where('m.org_id', '=', orgId)
+    .where('m.status', 'in', ['ACTIVE', 'SUSPENDED']);
