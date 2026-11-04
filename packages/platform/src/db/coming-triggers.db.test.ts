@@ -220,7 +220,7 @@ describe("0075's triggers, made as its migration will make them, read by this im
   // Word for word as db/migrations/0075 writes them: this image must know each exactly before that migration runs.
   const MADE = `create constraint trigger marks_request_voids after update on organizations.organizations
       deferrable initially deferred for each row
-      when (new.status <> 'ACTIVE')
+      when (new.status <> 'ACTIVE' or old.status <> 'ACTIVE')
       execute function directory.mark_org_work('request_voids', '0 seconds');
     create constraint trigger marks_request_voids after update on agents.agents
       deferrable initially deferred for each row
@@ -235,7 +235,7 @@ describe("0075's triggers, made as its migration will make them, read by this im
       execute function directory.mark_org_work('request_voids', '0 seconds');
     create constraint trigger marks_request_voids after update on suppliers.suppliers
       deferrable initially deferred for each row
-      when (new.status <> 'VERIFIED')
+      when (new.status <> 'VERIFIED' or old.status <> 'VERIFIED')
       execute function directory.mark_org_work('request_voids', '0 seconds');
     create constraint trigger marks_waiting_rejections after update on mandates.policies
       deferrable initially deferred for each row
