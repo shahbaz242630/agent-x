@@ -1677,7 +1677,7 @@ async function verifiedLoadImage(steps: Steps, images: Images, release: string):
 }
 
 /** The app the API's jobs run in apart from it (apps.bicep `jobsApp`, 4D2e D13): staging has it in a load run alone. */
-export const JOBS_APP = 'ca-agentx-stg-jobs';
+const JOBS_APP = 'ca-agentx-stg-jobs';
 
 /** Says what Azure left of every app and job after an apps deploy, and the load test's jobs when a plain one left them; the apps' names. */
 function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean): readonly string[] {
