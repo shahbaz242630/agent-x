@@ -628,27 +628,30 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
     });
   });
 
-  describe('0075 against the app writing the tables it adds triggers to (4D2e D9)', () => {
-    /** Every file before 0075 run; 0075 then copied in, for the next run to take. */
-    async function upTo0075() {
-      for (const name of (await readdir(REPO_MIGRATIONS)).filter((file) => file < '0075')) {
-        await copyFile(path.join(REPO_MIGRATIONS, name), path.join(folder, name));
-      }
-      await run();
-      await copyFile(path.join(REPO_MIGRATIONS, '0075_void_marks.sql'), path.join(folder, '0075_void_marks.sql'));
+  /** Every file before `file` run; `file` then copied in, for the next run to take. */
+  async function upTo(file: string) {
+    for (const name of (await readdir(REPO_MIGRATIONS)).filter((one) => one < file)) {
+      await copyFile(path.join(REPO_MIGRATIONS, name), path.join(folder, name));
     }
+    await run();
+    await copyFile(path.join(REPO_MIGRATIONS, file), path.join(folder, file));
+  }
 
-    const migrating = (pauseMs: number) =>
-      runMigrations({
-        connection: database.connection('owner'),
-        directory: folder,
-        logger: createLogger({
-          service: 'migrate',
-          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
-          destination: capture,
-        }),
-        lockWait: { timeoutMs: 8000, pauseMs },
-      });
+  /** The migrations run as the owner, each lock waited for up to 8 s in all, `pauseMs` between tries. */
+  const migrating = (pauseMs: number) =>
+    runMigrations({
+      connection: database.connection('owner'),
+      directory: folder,
+      logger: createLogger({
+        service: 'migrate',
+        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+        destination: capture,
+      }),
+      lockWait: { timeoutMs: 8000, pauseMs },
+    });
+
+  describe('0075 against the app writing the tables it adds triggers to (4D2e D9)', () => {
+    const upTo0075 = () => upTo('0075_void_marks.sql');
 
     it('waits for a writer marking its work as it commits, and both go through: org_work is taken last', async () => {
       await upTo0075();
@@ -705,26 +708,7 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
   describe('0077 against the app writing the tables it adds triggers to (4D2e D10)', () => {
     const FILE = '0077_reset_download_hold_marks.sql';
 
-    /** Every file before 0077 run; 0077 then copied in, for the next run to take. */
-    async function upTo0077() {
-      for (const name of (await readdir(REPO_MIGRATIONS)).filter((file) => file < '0077')) {
-        await copyFile(path.join(REPO_MIGRATIONS, name), path.join(folder, name));
-      }
-      await run();
-      await copyFile(path.join(REPO_MIGRATIONS, FILE), path.join(folder, FILE));
-    }
-
-    const migrating = (pauseMs: number) =>
-      runMigrations({
-        connection: database.connection('owner'),
-        directory: folder,
-        logger: createLogger({
-          service: 'migrate',
-          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
-          destination: capture,
-        }),
-        lockWait: { timeoutMs: 8000, pauseMs },
-      });
+    const upTo0077 = () => upTo(FILE);
 
     it('waits for a writer marking its work as it commits, and both go through: org_work is taken last', async () => {
       await upTo0077();

@@ -210,14 +210,17 @@ describe('a trigger a coming migration adds to a table already built', () => {
   });
 });
 
+/** What `says` makes of each trigger named as `table name`, in the list's order. */
+const eachNamed = (named: readonly string[], says: (table: string, name: string) => string) =>
+  named.map((one) => {
+    const [table = '', name = ''] = one.split(' ');
+    return says(table, name);
+  });
+
 describe('0077, read as the image before it would read it (4D2e D10)', () => {
   const NAMED = ['activity_exports.files marks_background_downloads', 'identity.factor_resets marks_factor_removals'];
   const ours = ({ table, name }: WrittenTrigger) => NAMED.includes(`${table} ${name}`);
-  const each = (says: (table: string, name: string) => string) =>
-    NAMED.map((named) => {
-      const [table = '', name = ''] = named.split(' ');
-      return says(table, name);
-    });
+  const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
   // The image before knew every trigger before 0077's as written, these two as coming, and the job CHECK as 0075 made it.
   const before = {
     triggers: MARK_TRIGGERS.filter((one) => !ours(one)),
@@ -309,11 +312,7 @@ describe('0075, read as the image before it would read it (4D2e D9)', () => {
     'suppliers.suppliers marks_request_voids',
   ];
   const ours = ({ table, name }: WrittenTrigger) => NAMED.includes(`${table} ${name}`);
-  const each = (says: (table: string, name: string) => string) =>
-    NAMED.map((named) => {
-      const [table = '', name = ''] = named.split(' ');
-      return says(table, name);
-    });
+  const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
   // The image before knew 0072's and 0073's triggers as written, these seven as coming, and the job CHECK as 0073 made it.
   const before = {
     triggers: MARK_TRIGGERS.filter((one) => !ours(one)),
