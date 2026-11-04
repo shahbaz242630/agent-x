@@ -59,6 +59,9 @@ param anchorRoleName string
 @description('As `writerRoleName`, for the role the operator reads the anchors with (4D2e E9).')
 param anchorReaderRoleName string
 
+@description('The chain repair\'s identity (4D2e E10): it adds its records as the writer does and reads the anchors as the operator does. Created by the foundation under this name.')
+param restorerIdentityName string
+
 @description('How many days each file is kept unchangeable.')
 @minValue(1)
 param retentionDays int
@@ -271,6 +274,35 @@ resource readsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     principalId: writer.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'operator reads audit anchors (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// The chain repair (4D2e E10, PL-29): its own identity, as its job alone holds
+// the owner's login. It adds the records of each repair beside the plans, and
+// reads the anchors a repair is checked against; the same two roles, no more.
+resource restorer 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: restorerIdentityName
+}
+
+resource restorerWrites 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: container
+  name: guid(container.id, restorer.id, writerRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', writerRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore adds chain repair records (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+resource restorerReadsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: anchorContainer
+  name: guid(anchorContainer.id, restorer.id, anchorReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore reads audit anchors (deploy/azure/modules/evidence.bicep)'
   }
 }
 

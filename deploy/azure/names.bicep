@@ -16,8 +16,9 @@ var appWorkloads = [
 
 // Every job, each with an identity of its own: the jobs that set up a server's
 // roles and databases, migrate the app's database, and build Zitadel's (init,
-// then setup), and the operator's command (B1c). Each is started by hand, never
-// on a schedule (apps.bicep).
+// then setup), the operator's command (B1c), and the chain repair (4D2e E10),
+// the one job besides the migration that logs in as the owner. Each is started
+// by hand, never on a schedule (apps.bicep).
 @export()
 var jobWorkloads = [
   'db-setup'
@@ -25,6 +26,7 @@ var jobWorkloads = [
   'zitadel-init'
   'zitadel-setup'
   'operator'
+  'chain-restore'
 ]
 
 // Everything that runs, so each can be given only its own secrets (G2c).
@@ -58,6 +60,16 @@ var operatorOnlyKeys = ['key-operator-signing-v']
 // Whether only the operator's command holds this key.
 @export()
 func operatorOnly(key string) bool => length(filter(operatorOnlyKeys, prefix => startsWith(key, prefix))) > 0
+
+// The keys the chain repair holds (4D2e E10, PL-29): every version of the audit
+// chains' MAC, to check a chain with, and no other; the operator's signatures
+// it checks with their public halves alone.
+@export()
+var restoreKeys = ['key-audit-mac-v']
+
+// Whether the chain repair holds this key.
+@export()
+func restoreHolds(key string) bool => length(filter(restoreKeys, prefix => startsWith(key, prefix))) > 0
 
 // Each operator-only key's public half, a secret of its own the API reads
 // (`public-<purpose>-v<version>`), made by the deploy tool from the same value

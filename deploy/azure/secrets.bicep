@@ -23,7 +23,7 @@
 //   holds the same list
 // - every value comes from the shell that deploys, never from this repository
 //   (Rule Book §7), and none is ever an output
-import { appKeys, operatorHolds, operatorOnly, publicHalves, resourceNames, uniqueSuffix } from 'names.bicep'
+import { appKeys, operatorHolds, operatorOnly, publicHalves, resourceNames, restoreHolds, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -111,7 +111,8 @@ var secrets = [
   {
     name: 'db-owner-password'
     value: dbOwnerPassword
-    readers: ['db-setup', 'migrate']
+    // The chain repair writes as the owner (4D2e E10), the one job besides the migration.
+    readers: ['db-setup', 'migrate', 'chain-restore']
   }
   {
     name: 'db-app-password'
@@ -188,14 +189,18 @@ var access = concat(
   [masterKey, copiedKey],
   // The API reads every key but the operator's own, whose public half it reads
   // instead (PL-57); the operator's command the audit chains' MAC, the field
-  // encryption and its own key alone, each version of them (ADR-011 §3, B4-6b).
+  // encryption and its own key alone, each version of them (ADR-011 §3, B4-6b);
+  // the chain repair the MAC alone and the public halves (4D2e E10).
   map(appKeys, key => {
     name: key
-    readers: operatorOnly(key) ? ['operator'] : operatorHolds(key) ? ['api', 'operator'] : ['api']
+    readers: concat(
+      operatorOnly(key) ? ['operator'] : operatorHolds(key) ? ['api', 'operator'] : ['api'],
+      restoreHolds(key) ? ['chain-restore'] : []
+    )
   }),
   map(publicHalves, half => {
     name: half
-    readers: ['api']
+    readers: ['api', 'chain-restore']
   })
 )
 
