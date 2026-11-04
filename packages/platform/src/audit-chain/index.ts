@@ -13,6 +13,16 @@ export { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 export { OLD_EDIT_DAYS } from './limits.ts';
 export { OPERATOR_ID, operatorSignature, sealedSigned } from './operator-signature.ts';
 export {
+  EVIDENCE_REFERENCE,
+  type Rebase,
+  REBASE_REASONS,
+  type RebaseReason,
+  rebaseFile,
+  rebaseFileName,
+  readRebaseFile,
+  signRebase,
+} from './rebase.ts';
+export {
   type AnchorPoint,
   type Chain,
   CHAIN_START,

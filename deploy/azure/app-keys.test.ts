@@ -49,15 +49,20 @@ describe("ADR-011 §2: the app's keys on Azure are the ones the API starts with"
   });
 });
 
-describe("the operator's key's public half (PL-57)", () => {
+describe("the operator's keys' public halves (PL-57, E11)", () => {
   it('names one for each operator-only key, and makes it from the same bytes in the same run', () => {
-    expect([...PUBLIC_HALVES]).toEqual([['key-operator-signing-v1', 'public-operator-signing-v1']]);
-    const values = JSON.parse(newAppKeys()) as Record<string, string>;
-    expect(Object.keys(values).sort()).toEqual([...APP_KEYS, 'public-operator-signing-v1'].sort());
-    const seed = Buffer.from(values['key-operator-signing-v1'] ?? '', 'base64url');
-    const own = createKeyProvider({ 'operator-signing': { current: 1, versions: new Map([[1, seed]]) } }, [
-      'operator-signing',
+    expect([...PUBLIC_HALVES].sort()).toEqual([
+      ['key-audit-rebase-v1', 'public-audit-rebase-v1'],
+      ['key-operator-signing-v1', 'public-operator-signing-v1'],
     ]);
-    expect(own.describe()[0]?.versions[0]?.publicKey).toBe(values['public-operator-signing-v1']);
+    const values = JSON.parse(newAppKeys()) as Record<string, string>;
+    expect(Object.keys(values).sort()).toEqual(
+      [...APP_KEYS, 'public-operator-signing-v1', 'public-audit-rebase-v1'].sort(),
+    );
+    for (const purpose of ['operator-signing', 'audit-rebase'] as const) {
+      const seed = Buffer.from(values[`key-${purpose}-v1`] ?? '', 'base64url');
+      const own = createKeyProvider({ [purpose]: { current: 1, versions: new Map([[1, seed]]) } }, [purpose]);
+      expect(own.describe()[0]?.versions[0]?.publicKey).toBe(values[`public-${purpose}-v1`]);
+    }
   });
 });

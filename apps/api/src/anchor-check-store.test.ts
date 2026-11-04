@@ -3,7 +3,14 @@
 // The real chains, with the real Tx A, are in handoff.db.test.ts.
 import { gunzipSync, gzipSync } from 'node:zlib';
 
-import { type ChainReport, createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
+import {
+  type ChainReport,
+  createAnchorLog,
+  rebaseFile,
+  rebaseFileName,
+  signAnchor,
+  signRebase,
+} from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createFakeWriteOnceStore, type FakeWriteOnceStore, FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -423,7 +430,8 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
 
       await Promise.all([after.check.run(), after.check.anchorOrganisation(ORG)]);
 
-      expect(fake.calls.lists).toBe(2);
+      // One read: its rebases' list (E11), its snapshots' and its deltas'.
+      expect(fake.calls.lists).toBe(3);
       expect(chains.given[ORG]).toEqual([undefined, 3n, 3n]);
     });
 
@@ -869,5 +877,96 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
 
     expect(chains.given[ORG]).toEqual([undefined, 3n]);
     expect(capture.lines().filter((line) => String(line.event).startsWith('audit.anchor_store'))).toEqual([]);
+  });
+});
+
+describe('a rebase moves the check on (4D2e E11)', () => {
+  /** A chain repaired from 9 to another 4: the check finds it wound back against 9, whole from the rebase's 4. */
+  function repairedChains() {
+    const chains = chainsHolding({ [ORG]: ok(9n), [OTHER_ORG]: ok(2n) });
+    const repaired = { value: false };
+    const organizations: OrganisationChains = {
+      ...chains.organizations,
+      verify: async (orgId, anchor) => {
+        const report = await chains.organizations.verify(orgId, anchor);
+        if (orgId !== ORG || !repaired.value) return report;
+        return anchor?.seq === 9n ? { ok: false, problem: { reason: 'anchor', seq: 9n } } : ok(4n, 40);
+      },
+    };
+    return { ...chains, organizations, repaired };
+  }
+
+  /** A rebase of ORG's chain to 4 as the operator writes it, signed with `signing`'s `audit-rebase`. */
+  const rebaseFileOf = (signing = keys, at = new Date(AT.getTime() + 60_000), orgId = ORG) => {
+    const rebase = signRebase(signing, 1, {
+      id: '0199a0f0-0000-7000-8000-0000000000aa',
+      chain: `organisation:${orgId}`,
+      seq: 4n,
+      hash: Buffer.alloc(32, 40),
+      macKeyVersion: 1,
+      at,
+      reason: 'repaired',
+      evidence: 'INC-2026-11-05',
+    });
+    return { name: rebaseFileName(1, rebase.id), bytes: rebaseFile(rebase) };
+  };
+
+  it('SEC-DB-11 a signed rebase moves the check on with no alarm, and a restart keeps it', async () => {
+    const fake = createFakeWriteOnceStore();
+    const chains = repairedChains();
+    const before = process(fake, chains.organizations);
+    await before.check.run();
+    chains.repaired.value = true;
+    await before.check.run();
+    expect(before.lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'anchor', orgId: ORG })]);
+
+    const { name, bytes } = rebaseFileOf();
+    fake.files.set(name, bytes);
+    before.clock.advanceBy(120_000);
+    await before.check.run();
+    expect(chains.given[ORG]?.at(-1)).toBe(4n);
+    expect(before.lines('audit.integrity_failed')).toHaveLength(1);
+    expect(before.lines('audit.rebased')).toEqual([expect.objectContaining({ orgId: ORG, seq: '4', anchorSeq: '9' })]);
+    // Another organisation's chain is compared with its own anchor still.
+    expect(chains.given[OTHER_ORG]?.at(-1)).toBe(2n);
+
+    const after = process(fake, chains.organizations);
+    after.clock.advanceBy(180_000);
+    await after.check.run();
+    expect(chains.given[ORG]?.at(-1)).toBe(4n);
+    expect(after.lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it("SEC-DB-11 a rebase signed with any key but the operator's rebase key is refused: the alarm, and the check alarms on", async () => {
+    const fake = createFakeWriteOnceStore();
+    const chains = repairedChains();
+    const api = process(fake, chains.organizations);
+    await api.check.run();
+    chains.repaired.value = true;
+    const { name, bytes } = rebaseFileOf(keysFilled(50));
+    fake.files.set(name, bytes);
+    api.clock.advanceBy(120_000);
+    await api.check.run();
+
+    expect(chains.given[ORG]?.at(-1)).toBe(9n);
+    expect(api.lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ check: 'anchor_store', reason: 'rebase', problem: 'signature' }),
+      expect.objectContaining({ check: 'anchor', reason: 'anchor', orgId: ORG }),
+    ]);
+    expect(api.log.latest(CHAIN)?.seq).toBe(9n);
+  });
+
+  it("a rebase of one organisation's chain never moves another's", async () => {
+    const fake = createFakeWriteOnceStore();
+    const chains = repairedChains();
+    const api = process(fake, chains.organizations);
+    await api.check.run();
+    const { name, bytes } = rebaseFileOf(keys, new Date(AT.getTime() + 60_000), OTHER_ORG);
+    fake.files.set(name, bytes);
+    api.clock.advanceBy(120_000);
+    await api.check.run();
+    expect(api.log.latest(CHAIN)?.seq).toBe(9n);
+    expect(api.log.latest({ kind: 'organisation', orgId: OTHER_ORG })?.seq).toBe(4n);
+    expect(chains.given[ORG]?.at(-1)).toBe(9n);
   });
 });

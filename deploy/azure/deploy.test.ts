@@ -1275,8 +1275,8 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      // Twenty secrets, three a page: the last one part full.
-      ...Array<string>(7).fill('rest --method get'),
+      // Twenty-two secrets, three a page: the last one part full.
+      ...Array<string>(8).fill('rest --method get'),
       ...RECORDING,
     ]);
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);

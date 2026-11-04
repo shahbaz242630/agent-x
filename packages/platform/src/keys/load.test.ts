@@ -272,7 +272,7 @@ describe("the API, which checks the operator's signatures with its public half a
       if (error instanceof ConfigError) problems = error.problems;
     }
     expect(problems).toEqual([
-      'public-audit-anchor-v1 is not a public half this process checks with: only public-<purpose>-v<version> for operator-signing',
+      'public-audit-anchor-v1 is not a public half this process checks with: only public-<purpose>-v<version> for operator-signing, audit-rebase',
       'public-operator-signing-v1 must hold one key: 32 random bytes written as base64url, 43 characters',
     ]);
     const held = keysDirectory({ ...everyPurpose(), 'public-operator-signing-v1': `${half}\n` });

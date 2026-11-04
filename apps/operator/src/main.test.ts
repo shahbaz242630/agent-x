@@ -19,11 +19,14 @@ import {
   activityExportRequest,
   AUDIT_EXPORT_USAGE,
   auditExportRequest,
+  CHAIN_REBASE_USAGE,
+  chainRebaseRequest,
   createOrganizationRequest,
   FIRST_ADMIN_USAGE,
   firstAdminRequest,
   handoffRequest,
   handoffUsage,
+  NO_ANCHORS_PROBLEM,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
   RESTORE_CHECK,
@@ -77,7 +80,7 @@ afterEach(() => {
 });
 
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 /** Every key, mounted where the command holds only one. */
 const everyKey = writeTestKeys(PURPOSES);
 
@@ -197,7 +200,7 @@ describe("B1c what the operator's command refuses before it connects", () => {
         .toSorted()
         .map(
           (purpose) =>
-            `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac, field-encryption, operator-signing may be mounted for it`,
+            `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac, field-encryption, operator-signing, audit-rebase may be mounted for it`,
         ),
     );
   });
@@ -280,6 +283,8 @@ describe("B1c what the operator's command refuses before it connects", () => {
           current: 1,
           versions: [expect.objectContaining({ publicKey: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown })],
         }),
+        // The rebase key, its public half the API checks a rebase with (E11).
+        expect.objectContaining({ purpose: 'audit-rebase', current: 1 }),
       ],
     });
     expect(text).not.toContain(NAME);
@@ -795,5 +800,108 @@ describe("S78 the restore drill's check, only ever from a file", () => {
         "AGENTX_DB_DRILL_HOST must name the drill's copy, a server other than AGENTX_DB_HOST",
       ]);
     }
+  });
+});
+
+describe("4D2e E11 a chain's rebase, only ever from a file", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-rebase-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const EVIDENCE = 'INC-2026/0042';
+  const ORG = '0199a0f0-0000-7000-8000-000000000001';
+  const WITH_ANCHORS = {
+    ...ENV,
+    AGENTX_AUDIT_ANCHORS_DIR: path.join(folder, 'anchors'),
+    AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${'A'.repeat(43)}`,
+  };
+
+  it.each([ORG, 'platform'])(
+    'reads a well-formed rebase of %s, then connects, never repeating the reference',
+    async (chain) => {
+      const { events, line, text } = await run(
+        ['--request', requestFile(chainRebaseRequest(chain, 'repaired', EVIDENCE, NEW_ID))],
+        WITH_ANCHORS,
+      );
+
+      expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+      expect(line('operator.starting')).toMatchObject({ command: 'chain-rebase' });
+      expect(text).not.toContain(EVIDENCE);
+    },
+  );
+
+  it("refuses with no anchors' store or no public keys to read it with, before it connects", async () => {
+    const asked = requestFile(chainRebaseRequest(ORG, 'recovered', EVIDENCE, NEW_ID));
+    const { AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: _keys, ...keyless } = WITH_ANCHORS;
+    for (const env of [ENV, keyless]) {
+      const { code, events, line } = await run(['--request', asked], env);
+      expect(code).toBe(1);
+      expect(events).toEqual(['operator.starting', 'operator.refused']);
+      expect(line('operator.refused')).toMatchObject({ orgId: ORG, problems: [NO_ANCHORS_PROBLEM] });
+    }
+  });
+
+  it('refuses it typed', async () => {
+    const { events, line, text } = await run(
+      JSON.parse(chainRebaseRequest(ORG, 'repaired', EVIDENCE, NEW_ID)) as string[],
+      WITH_ANCHORS,
+    );
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `chain-rebase runs only from a request file: ${CHAIN_REBASE_USAGE}`,
+    ]);
+    expect(text).not.toContain(EVIDENCE);
+  });
+
+  it.each([
+    ['its evidence missing', ['chain-rebase', '--chain', ORG, '--reason', 'repaired', '--id', NEW_ID]],
+    [
+      'its ID flag with no ID',
+      ['chain-rebase', '--chain', ORG, '--reason', 'repaired', '--evidence', EVIDENCE, '--id'],
+    ],
+    [
+      'a word more',
+      ['chain-rebase', '--chain', ORG, '--reason', 'repaired', '--evidence', EVIDENCE, '--id', NEW_ID, 'x'],
+    ],
+    ['a flag misnamed', ['chain-rebase', '--org', ORG, '--reason', 'repaired', '--evidence', EVIDENCE, '--id', NEW_ID]],
+    [
+      'its reason flag misnamed',
+      ['chain-rebase', '--chain', ORG, '--why', 'repaired', '--evidence', EVIDENCE, '--id', NEW_ID],
+    ],
+    [
+      'its evidence flag misnamed',
+      ['chain-rebase', '--chain', ORG, '--reason', 'repaired', '--case', EVIDENCE, '--id', NEW_ID],
+    ],
+  ])('refuses %s, naming the shape', async (_what, words) => {
+    const { events, line, text } = await run(['--request', requestFile(JSON.stringify(words))], WITH_ANCHORS);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `the request file holds ${CHAIN_REBASE_USAGE} as a JSON list, and nothing else`,
+    ]);
+    expect(text).not.toContain(EVIDENCE);
+  });
+
+  it('names each word that isn’t one it takes, never repeating the reference', async () => {
+    const evidence = 'a note about the incident';
+    for (const chain of ['organisation', ORG.toUpperCase()]) {
+      const { line, text } = await run(
+        ['--request', requestFile(chainRebaseRequest(chain, 'because', evidence, NEW_ID.toUpperCase()))],
+        WITH_ANCHORS,
+      );
+      expect(line('operator.refused')?.problems).toEqual([
+        "the chain must be platform or an organisation's ID, a UUIDv7 in lower case",
+        'the reason must be one of repaired, recovered',
+        'the incident reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+        "the rebase's ID must be a UUIDv7, in lower case",
+      ]);
+      expect(text).not.toContain(evidence);
+    }
+    const { line } = await run(
+      ['--request', requestFile(chainRebaseRequest(ORG, 'repaired', EVIDENCE, NEW_ID.toUpperCase()))],
+      WITH_ANCHORS,
+    );
+    expect(line('operator.refused')?.problems).toEqual(["the rebase's ID must be a UUIDv7, in lower case"]);
   });
 });

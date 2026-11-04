@@ -119,6 +119,11 @@ export interface PassRecord {
   keepPass(line: Anchor): void;
   lastProgress(chain: Chain): Progress | undefined;
   keepProgress(line: Progress): void;
+  /**
+   * Whether a rebase (rebase.ts, 4D2e E11) moved the chain's anchor on after `at`: a pass that began before it reached
+   * places on the chain as it was, which nothing goes on from.
+   */
+  rebasedAfter(chain: Chain, at: Date): boolean;
 }
 
 /** The last full pass of each chain, in this process's memory, where no store keeps them. */
@@ -135,6 +140,8 @@ export function createMemoryPassRecord(): PassRecord {
     keepProgress: (line: Progress) => {
       progress.set(line.chain, line);
     },
+    // Only the store reads rebases: in memory alone nothing moves a chain on.
+    rebasedAfter: () => false,
   });
 }
 

@@ -656,7 +656,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
-      // PL-57: the operator's key's public half, created once with it.
+      // PL-57, E11: the operator's keys' public halves, each created once with its key, in the keys' order.
+      'public-audit-rebase-v1 once',
       'public-operator-signing-v1 once',
       ...[
         'db-setup reads db-admin-password',
@@ -681,13 +682,16 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel reads zitadel-masterkey',
         'api reads acs-access-key',
         // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each
-        // version; its own signing key it alone reads, and the API its public half (PL-57).
+        // version; its own signing key and the rebase key it alone reads, and the API their public halves (PL-57, E11).
         ...APP_KEYS.flatMap((key) => {
-          if (key.startsWith('key-operator-signing-v')) return [`operator reads ${key}`];
+          if (key.startsWith('key-operator-signing-v') || key.startsWith('key-audit-rebase-v')) {
+            return [`operator reads ${key}`];
+          }
           return key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')
             ? [`api reads ${key}`, `operator reads ${key}`]
             : [`api reads ${key}`];
         }),
+        'api reads public-audit-rebase-v1',
         'api reads public-operator-signing-v1',
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
@@ -705,8 +709,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      // Fourteen written when given, each key, and the operator's key's public half (PL-57).
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(14 + APP_KEYS.length + 1);
+      // Fourteen written when given, each key, and the operator's keys' public halves (PL-57, E11).
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(14 + APP_KEYS.length + 2);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
@@ -1694,7 +1698,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ]);
     });
 
-    describe("the operator's read of it, for a chain recovery plan (4D2e E9)", () => {
+    describe("the operator's read of it, for a chain recovery plan (4D2e E9), and its rebases (E11)", () => {
       const READER = (resource: PredictedResource) =>
         ROLE_DEFINITIONS(resource) &&
         resource.name ===
@@ -1714,12 +1718,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
           )?.id,
         );
 
-      it('its role reads and lists, and can add, overwrite or delete nothing', () => {
+      it('its role reads and lists, and adds a new file (a rebase), and can overwrite or delete nothing', () => {
         expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
-          { actions: [], notActions: [], dataActions: [`${ACTIONS_OF}/read`], notDataActions: [] },
+          {
+            actions: [],
+            notActions: [],
+            dataActions: [`${ACTIONS_OF}/add/action`, `${ACTIONS_OF}/read`],
+            notDataActions: [],
+          },
         ]);
         for (const change of [
-          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/add/action`),
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).splice(0, 1),
           (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
           (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
           (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
@@ -4861,7 +4870,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual([
-      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[4].value must come from a @secure() parameter, never a value in the code',
+      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[5].value must come from a @secure() parameter, never a value in the code',
       holdOnce,
     ]);
     // Held twice, held as a vault secret too, or not held at all (with its file gone, so nothing else objects).

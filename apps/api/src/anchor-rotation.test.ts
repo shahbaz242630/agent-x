@@ -987,6 +987,36 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     expect(made.calls.filter((call) => call.orgId === failing)).toHaveLength(1);
   });
 
+  it('E11 a pass under way when a rebase moves its chain on starts again from the first event, raising nothing', async () => {
+    const rebased: { at?: Date } = {};
+    const memory = createMemoryPassRecord();
+    const rebasedAfter = (began: Date): boolean => rebased.at !== undefined && rebased.at > began;
+    // As the store's log has it: a place reached before the rebase is gone.
+    const passes: PassRecord = {
+      ...memory,
+      lastProgress: (chain) => {
+        const line = memory.lastProgress(chain);
+        return line !== undefined && rebasedAfter(line.began) ? undefined : line;
+      },
+      rebasedAfter: (_chain, began) => rebasedAfter(began),
+    };
+    const made = rotating({ after: { anchors: createMemoryAnchorStore(), passes } });
+    const orgId = orgInSlot(1);
+    made.anchor(orgId, 1728n);
+    await made.run([orgId]);
+    await made.run([orgId]);
+    expect(made.calls.at(-1)).toEqual({ check: 'pass', orgId, from: 2n, to: 1728n, most: 2 });
+
+    // The rebase, a second after the pass began, to a chain 900 events long.
+    rebased.at = new Date(AT.getTime() + 1000);
+    made.clock.advanceBy(2000);
+    made.anchor(orgId, 900n);
+    made.calls.length = 0;
+    await made.run([orgId]);
+    expect(made.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 900n, most: 2 }]);
+    expect(made.failed).toEqual([]);
+  });
+
   it("a place whose pass began more than 7 days ago isn't gone on from: that pass starts again, its lateness kept", async () => {
     const before = rotating();
     const orgId = orgInSlot(1);

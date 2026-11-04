@@ -289,6 +289,11 @@ export const PLAIN_WORDS = {
     broke: 'An old audit record edited there is found later than promised; backups can still undo it. Nobody is held.',
     next: 'See whether the database is slow or the tamper check runs out of time, and add capacity.',
   },
+  'audit.rebased': {
+    happened: "An audit chain's trusted point was moved on by a rebase the operator's job signed.",
+    broke: 'Nothing: the tamper check now compares that chain with the new point.',
+    next: 'Check an incident on record asked for it. If nobody on the team ran one, treat it as a break-in.',
+  },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',
     broke: 'That record was left off the list; the rest of the list was shown.',
@@ -941,6 +946,11 @@ export const PLAIN_WORDS = {
     broke:
       'Nothing was changed, and the organisation stays on hold: its copy cannot mend the chain with original records.',
     next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
+  },
+  'operator.chain_rebase_refused': {
+    happened: "The operator's job refused to move an audit chain's trusted point on.",
+    broke: 'Nothing was changed. The chain still holds its point, fails its own check, or the store was unreadable.',
+    next: 'Read the reason in the line. A chain failing its own check needs playbook H, not a rebase.',
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',

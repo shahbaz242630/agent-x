@@ -806,8 +806,11 @@ const ANCHOR_ACTIONS = [
 /** The anchors' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors');
 
-/** The operator's role on the anchors (4D2e E9): Get Blob and List Blobs alone, for a chain recovery plan. */
-const ANCHOR_READ_ACTIONS = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'] as const;
+/**
+ * The operator's role on the anchors: Get Blob and List Blobs, for a chain recovery plan (4D2e E9), and Put Blob of a
+ * file not there yet, for a chain's rebase (E11), as the API's. Never overwrite or delete.
+ */
+const ANCHOR_READ_ACTIONS = ANCHOR_ACTIONS;
 
 /** The operator's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors-reader');

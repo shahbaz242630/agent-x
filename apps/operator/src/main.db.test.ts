@@ -4,7 +4,7 @@
 // walls, and a failure anywhere leaves nothing behind. What it refuses before
 // it connects is main.test.ts.
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -12,7 +12,13 @@ import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createPlatformChain, HEAD_WAIT_SECONDS } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
-import { type CheckedPoint, createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
+import {
+  type Chain,
+  type CheckedPoint,
+  createAnchorLog,
+  readRebaseFile,
+  signAnchor,
+} from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { type Output } from '@agentx/platform/observability';
@@ -33,6 +39,7 @@ import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
 import {
   auditExportRequest,
+  chainRebaseRequest,
   chainRecoveryRequest,
   firstAdminRequest,
   handoffRequest,
@@ -75,12 +82,13 @@ afterEach(() => {
 
 const server = inject('postgres');
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 /** The same key the command holds, to check what it wrote. */
 const auditKeys = loadKeys({ directory: keys.directory, current: {} }, [
   'audit-mac',
   'field-encryption',
   'operator-signing',
+  'audit-rebase',
 ]);
 let database: TestDatabase;
 let app: Database<OperatorTables>;
@@ -191,6 +199,7 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
         expect.objectContaining({ purpose: 'audit-mac', current: 1 }),
         expect.objectContaining({ purpose: 'field-encryption', current: 1 }),
         expect.objectContaining({ purpose: 'operator-signing', current: 1 }),
+        expect.objectContaining({ purpose: 'audit-rebase', current: 1 }),
       ],
     });
     const created = line('operator.organization_created');
@@ -933,3 +942,161 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
     });
   });
 });
+
+describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-rebase-'));
+  const anchorKeyFiles = writeTestKeys(['audit-anchor']);
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+    anchorKeyFiles.remove();
+  });
+  const anchors = path.join(folder, 'anchors');
+  const apiAnchorKey = loadKeys({ directory: anchorKeyFiles.directory, current: {} }, ['audit-anchor']);
+  const env = (store = anchors) =>
+    envFor('operator', {
+      AGENTX_AUDIT_ANCHORS_DIR: store,
+      AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${String(apiAnchorKey.describe()[0]?.versions[0]?.publicKey)}`,
+    });
+  const EVIDENCE = 'INC-2026/0042';
+
+  /** The chains' anchors as the API holds them: its own anchor key, and the rebase key's public half alone. */
+  const apiLog = () =>
+    createAnchorLog({
+      store: folderWriteOnceStore(anchors),
+      keys: {
+        ...apiAnchorKey,
+        verifySignature: (purpose, version, message, signature) =>
+          (purpose === 'audit-rebase' ? auditKeys : apiAnchorKey).verifySignature(purpose, version, message, signature),
+      },
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+    });
+
+  /** The chain anchored `ahead` events past its head, as a chain wound back from there reads. */
+  async function anchoredAhead(chain: Chain, ahead: bigint): Promise<CheckedPoint> {
+    const report =
+      chain.kind === 'platform'
+        ? await createPlatformChain({ keys: auditKeys, ids: uuidV7Ids }).verifyAlone(app, undefined)
+        : await createAuditTrail({ keys: auditKeys, ids: uuidV7Ids }).verifyAlone(app, chain.orgId, undefined);
+    if (!report.ok) throw new Error('The chain should check out');
+    const log = apiLog();
+    await log.read();
+    log.keep(signAnchor(apiAnchorKey, chain, { ...report, seq: report.seq + ahead }, new Date(), 1));
+    await log.flush();
+    return report;
+  }
+
+  async function madeOrganisation(): Promise<string> {
+    const orgId = uuidV7Ids.next();
+    const asked = path.join(folder, `create-${orgId}`);
+    writeFileSync(asked, JSON.stringify(['create-organization', '--name', NAME, '--id', orgId]));
+    expect((await run(['--request', asked])).code).toBe(0);
+    return orgId;
+  }
+
+  function rebase(chain: string, id = uuidV7Ids.next(), store = anchors) {
+    const asked = path.join(folder, `rebase-${id}`);
+    writeFileSync(asked, chainRebaseRequest(chain, 'repaired', EVIDENCE, id));
+    return { id, running: run(['--request', asked], env(store)) };
+  }
+
+  it("SEC-DB-11 moves an organisation's chain on to its head, checked whole, signed with the rebase key; the API takes it in", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 3n);
+    const { id, running } = rebase(orgId);
+
+    const { code, events, line, text } = await running;
+
+    expect(code).toBe(0);
+    expect(events).toEqual(['operator.starting', 'audit.anchors_read', 'operator.chain_rebased']);
+    expect(line('operator.chain_rebased')).toMatchObject({
+      orgId,
+      rebaseId: id,
+      chain: 'organisation',
+      seq: String(head.seq),
+      headHash: head.hash.toString('hex'),
+      anchorSeq: String(head.seq + 3n),
+      reason: 'repaired',
+    });
+    expect(text).not.toContain(EVIDENCE);
+    const read = await readRebaseFile(auditKeys, {
+      bytes: readFileSync(path.join(anchors, 'e1', 'rebases', id)),
+      name: `e1/rebases/${id}`,
+      epoch: 1,
+    });
+    expect(read).toMatchObject({ rebase: { chain: `organisation:${orgId}`, seq: head.seq, evidence: EVIDENCE } });
+
+    const api = apiLog();
+    await api.read();
+    expect(api.latest({ kind: 'organisation', orgId })).toMatchObject({ seq: head.seq, hash: head.hash });
+
+    // Run again, the chain holds its point: nothing to do.
+    const again = await rebase(orgId).running;
+    expect(again.code).toBe(1);
+    expect(again.line('operator.chain_rebase_refused')).toMatchObject({ reason: 'not_needed', seq: String(head.seq) });
+  });
+
+  it('moves the platform chain on, as after it was begun again', async () => {
+    const head = await anchoredAhead({ kind: 'platform' }, 5n);
+    const { code, line } = await rebase('platform').running;
+    expect(code).toBe(0);
+    expect(line('operator.chain_rebased')).toMatchObject({ chain: 'platform', anchorSeq: String(head.seq + 5n) });
+    expect(line('operator.chain_rebased')).not.toHaveProperty('orgId');
+  });
+
+  it('refuses a chain that holds its anchor, or has none: nothing to move', async () => {
+    const orgId = await madeOrganisation();
+    const { id, running } = rebase(orgId);
+    const { code, line } = await running;
+    expect(code).toBe(1);
+    expect(line('operator.chain_rebase_refused')).toMatchObject({ orgId, reason: 'not_needed', seq: null });
+    expect(readdirOrNone(path.join(anchors, 'e1', 'rebases'))).not.toContain(id);
+  });
+
+  it('SEC-DB-11 refuses a chain that fails its own check: a rebase never blesses what the app did not write', async () => {
+    const orgId = await madeOrganisation();
+    await anchoredAhead({ kind: 'organisation', orgId }, 3n);
+    await database
+      .as('admin')
+      .query(`update audit.events set details = '{"forged":1}' where org_id = $1 and seq = 1`, [orgId]);
+
+    const { id, running } = rebase(orgId);
+    const { code, line } = await running;
+
+    expect(code).toBe(1);
+    expect(line('operator.chain_rebase_refused')).toMatchObject({ rebaseId: id, reason: 'broken', seq: '1' });
+    expect(readdirOrNone(path.join(anchors, 'e1', 'rebases'))).not.toContain(id);
+  });
+
+  it('refuses a rebase whose ID is taken in the store, and one the store cannot be read for', async () => {
+    const orgId = await madeOrganisation();
+    await anchoredAhead({ kind: 'organisation', orgId }, 3n);
+    const id = uuidV7Ids.next();
+    await folderWriteOnceStore(anchors).put(`e1/rebases/${id}`, Buffer.from('taken'));
+    const taken = await rebase(orgId, id).running;
+    expect(taken.code).toBe(1);
+    expect(taken.line('operator.done_before')).toMatchObject({ command: 'chain-rebase', rebaseId: id });
+
+    const notAFolder = path.join(folder, 'not-a-folder');
+    writeFileSync(notAFolder, '');
+    const unread = await rebase(orgId, uuidV7Ids.next(), notAFolder).running;
+    expect(unread.code).toBe(1);
+    expect(unread.line('operator.chain_rebase_refused')).toMatchObject({ reason: 'store' });
+  });
+
+  it('reads nothing when the live server does not prove itself read-only', async () => {
+    faults.readOnly.push(false);
+    const { code, line } = await rebase('platform').running;
+    expect(code).toBe(1);
+    expect(line('operator.refused')).toMatchObject({
+      problems: ['the connection is not read-only, so nothing was read'],
+    });
+  });
+});
+
+/** A folder's names, or none where it isn't there yet. */
+function readdirOrNone(folder: string): string[] {
+  return existsSync(folder) ? readdirSync(folder) : [];
+}

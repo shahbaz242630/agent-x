@@ -138,6 +138,8 @@ export function recordedSince({
   const recorded = new Set<string>();
   return async () => {
     const upTo = checkedTo();
+    // Only a rebase moves the platform chain's anchor back (E11): the chain begun again, read again from its start.
+    if (upTo !== undefined && upTo < readTo) readTo = 0n;
     if (upTo !== undefined && upTo > readTo) {
       const { orgIds } = await since(readTo, upTo);
       for (const orgId of orgIds) recorded.add(orgId);
@@ -449,7 +451,9 @@ export function createRotation({
     signal: AbortSignal,
   ): Promise<Passing | typeof MISSED | typeof FAILED | undefined> => {
     const held = underWay.get(orgId);
-    if (held !== undefined) return held;
+    if (held !== undefined && !passes.rebasedAfter(chainOf(orgId), new Date(held.began))) return held;
+    // A pass under way when a rebase moved the chain on (E11) read the chain as it was: it starts again.
+    underWay.delete(orgId);
     const target = anchors.latest(chainOf(orgId));
     if (target === undefined) return undefined;
     const now = clock.now().getTime();

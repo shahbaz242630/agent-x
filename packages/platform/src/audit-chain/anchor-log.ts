@@ -45,10 +45,19 @@
 // for the whole read, as a part read could look like one never anchored; and the read's marks
 // move only with a whole read. What's held and what waits count against memory together.
 //
+// A rebase (rebase.ts, 4D2e E11) is a file of its own, under `e<epoch>/rebases/`, signed with the
+// operator's `audit-rebase` key, which this process checks with the public half alone. Every read
+// takes the rebases first, all of them each read, as they are few: the newest of a chain stands in
+// for its anchor where that is older, and every anchor or pass place of that chain dated before it is
+// passed over, here and in every file read after, so a restart can't bring the old one back. A
+// snapshot leaves a chain still at its rebase out, as the rebase's own file holds it; the check then
+// signs it again as its own (anchor-check.ts). One badly signed, or not a rebase file, is the alarm,
+// once a process; one dated past the clock waits, the alarm each read until its time.
+//
 // So the API identity's token alone (add and read) can raise alarms and, with enough
 // spoiled files before a restart, make payments wait, but can't move an anchor back.
 // Whoever also holds the `audit-anchor` signing key can write anything a file may
-// hold: nothing here guards against them.
+// hold: nothing here guards against them; nor against whoever holds `audit-rebase`.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -69,6 +78,7 @@ import {
   progressMessage,
 } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
+import { isCount, type Rebase, rebaseFolder, readRebaseFile, timeIn } from './rebase.ts';
 
 /** How often every chain's anchor is written whole, where something moved. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -121,8 +131,17 @@ const SEQ = /^(?:0|[1-9]\d{0,18})$/;
 const HASH = /^[0-9a-f]{64}$/;
 const ORGANISATION = 'organisation:';
 
-/** Line kinds a later piece writes (a rebase), passed over here, so going back a release raises nothing. */
+/**
+ * Line kinds passed over in a delta or snapshot: a rebase's line, which only ever stands in a file of its own (E11), so
+ * one here is no rebase and moves nothing; as before E11, it raises nothing.
+ */
 const LATER_KINDS: ReadonlySet<unknown> = new Set(['r']);
+
+/** How many rebase files a list asks: there are a handful in an epoch. */
+const REBASES_A_PAGE = 100;
+
+/** A rebase file's name after its folder: its ID. */
+const REBASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** A line's kind: an anchor, or a finished full pass. */
 type LineKind = 'a' | 'p' | 'u';
@@ -207,13 +226,6 @@ const lineOf = (anchor: Anchor | Progress, k: LineKind): string =>
 /** Whether a line read is a pass's place, which says when its pass began. */
 const isPlace = (line: Anchor | Progress): line is Progress => 'began' in line && line.began instanceof Date;
 
-/** A time as a line writes it, or nothing if it isn't one exactly. */
-const timeIn = (value: unknown): Date | undefined => {
-  if (typeof value !== 'string') return undefined;
-  const when = new Date(value);
-  return Number.isNaN(when.getTime()) || when.toISOString() !== value ? undefined : when;
-};
-
 /** A parsed line of a kind, if it is one in every field, and the message its signature must cover. */
 function signedLineOf(
   kind: LineKind,
@@ -231,9 +243,6 @@ function signedLineOf(
     message: progressMessage(anchor.chain, anchor, anchor.at, epoch, began),
   };
 }
-
-const isCount = (value: unknown): value is number =>
-  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
 /** The anchor a parsed line says, if it is one in every field; its signature is checked after. */
 function anchorFrom(line: Record<string, unknown>): Anchor | undefined {
@@ -404,8 +413,17 @@ export function createAnchorLog({
   // Each chain's newest line of each side kind, and those not written yet, the same way.
   const sides = { p: new Map<string, Anchor>(), u: new Map<string, Progress>() };
   const pendingSides = { p: new Map<string, Anchor>(), u: new Map<string, Progress>() };
+  // Each chain's newest rebase, the rebase files read already, and the anchors that are a rebase's, not signed here.
+  const rebases = new Map<string, Rebase>();
+  const rebaseFilesRead = new Set<string>();
+  const fromRebase = new WeakSet<Anchor>();
+  /** Whether the chain's newest rebase is later than `at`: whatever was dated then is passed over. */
+  const rebasedAfter = (chain: string, at: Date): boolean => {
+    const rebase = rebases.get(chain);
+    return rebase !== undefined && rebase.at > at;
+  };
   /** How many lines this process holds, against what it can: anchors and the side lines alike. */
-  const linesHeld = (): number => anchors.size + sides.p.size + sides.u.size;
+  const linesHeld = (): number => anchors.size + sides.p.size + sides.u.size + rebases.size;
   /** A place reached by a pass no later than the chain's last finished one: nothing goes on from it. */
   const overtaken = (line: Progress): boolean => {
     const pass = sides.p.get(line.chain);
@@ -468,9 +486,12 @@ export function createAnchorLog({
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
       file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line, lineKind) => {
-        if (lineKind === 'a') staged(stage, line, kind, fileAt);
-        else if (isPlace(line)) placeLine(stage, line, kind, fileAt);
-        else passLine(stage, line, kind, fileAt);
+        // Dated before the chain's rebase: the chain as it was, passed over.
+        if (lineKind === 'a') {
+          if (!rebasedAfter(line.chain, line.at)) staged(stage, line, kind, fileAt);
+        } else if (isPlace(line)) {
+          if (!rebasedAfter(line.chain, line.began)) placeLine(stage, line, kind, fileAt);
+        } else passLine(stage, line, kind, fileAt);
       });
     } catch (error) {
       if (error instanceof BeyondMemory) throw error;
@@ -603,10 +624,81 @@ export function createAnchorLog({
     logger.error('audit.anchor_store_unreadable', { err: error });
   };
 
+  /**
+   * A rebase taken in: the chain's newest, so it stands in for an anchor older than it, and a place a pass reached
+   * before it goes, or the next resume would find the chain moved and raise the alarm. Said on a line of its own.
+   */
+  const rebased = (rebase: Rebase): void => {
+    const before = rebases.get(rebase.chain);
+    if (before !== undefined && before.at >= rebase.at) return;
+    rebases.set(rebase.chain, rebase);
+    const held = anchors.get(rebase.chain);
+    const moved = held === undefined || held.at < rebase.at;
+    if (moved) {
+      const { chain, seq, hash, macKeyVersion, at, keyVersion, signature } = rebase;
+      const anchor: Anchor = Object.freeze({ chain, seq, hash, macKeyVersion, at, keyVersion, signature });
+      fromRebase.add(anchor);
+      anchors.set(chain, anchor);
+    }
+    const waiting = pending.get(rebase.chain);
+    if (waiting !== undefined && waiting.at < rebase.at) pending.delete(rebase.chain);
+    for (const places of [sides.u, pendingSides.u]) {
+      const place = places.get(rebase.chain);
+      if (place !== undefined && place.began < rebase.at) places.delete(rebase.chain);
+    }
+    const organisation = rebase.chain.startsWith(ORGANISATION);
+    const log = organisation ? logger.child({ orgId: rebase.chain.slice(ORGANISATION.length) }) : logger;
+    log.warn('audit.rebased', {
+      chain: organisation ? 'organisation' : 'platform',
+      rebaseId: rebase.id,
+      seq: rebase.seq,
+      anchorSeq: held?.seq ?? null,
+      moved,
+      reason: rebase.reason,
+      at: rebase.at.toISOString(),
+    });
+  };
+
+  /** One rebase file: taken in, or the alarm; one dated ahead of the clock is read again next time. */
+  const rebaseRead = async (name: string): Promise<void> => {
+    const read = await readRebaseFile(keys, { bytes: await store.get(name), name, epoch });
+    if ('problem' in read) {
+      rebaseFilesRead.add(name);
+      alarm('rebase', { problem: read.problem, file: name });
+      return;
+    }
+    if (read.rebase.at.getTime() > now().getTime() + MOST_AHEAD_MS) {
+      alarm('rebase', { problem: 'future', file: name, rebaseAt: read.rebase.at.toISOString() }, read.rebase.chain);
+      return;
+    }
+    rebaseFilesRead.add(name);
+    rebased(read.rebase);
+  };
+
+  /**
+   * Every rebase file not read yet, each taken in as it is read: a chain's rebase is signed alone, so it stands whether
+   * the rest of the read does or not. A failed call to the store is thrown, as the read's own.
+   */
+  const readRebases = async (foreign: { count: number }): Promise<void> => {
+    const start = rebaseFolder(epoch);
+    let after: string | undefined;
+    do {
+      const page = await store.list(start, REBASES_A_PAGE, after);
+      foreign.count += page.foreign;
+      for (const name of page.names) {
+        if (!REBASE_ID.test(name.slice(start.length))) foreign.count += 1;
+        else if (!rebaseFilesRead.has(name)) await rebaseRead(name);
+      }
+      after = page.next;
+    } while (after !== undefined);
+  };
+
   const catchUp = async (): Promise<void> => {
     try {
       const foreign = { count: 0 };
       const stage = new Map<string, Anchor>();
+      // First, so every line read after is judged against them.
+      await readRebases(foreign);
       const snapshots = await newerSnapshots(foreign, stage);
       const deltas = await newerDeltas(snapshots.base, foreign, stage);
       // Only now, with every call answered: a part read could look like a chain never anchored, or settle a fork.
@@ -693,7 +785,9 @@ export function createAnchorLog({
     const at = now().getTime();
     const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
     const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
-    const lines = kind === 'snapshots' ? [...anchors.values()] : [...pending.values()];
+    // A chain still at its rebase is left to the rebase's own file: its anchor isn't signed with this key.
+    const lines =
+      kind === 'snapshots' ? [...anchors.values()].filter((line) => !fromRebase.has(line)) : [...pending.values()];
     const from = kind === 'snapshots' ? sides : pendingSides;
     const passLines = [...from.p.values()];
     const placeLines = [...from.u.values()].filter((line) => kind === 'deltas' || !overtaken(line));
@@ -745,6 +839,8 @@ export function createAnchorLog({
     epoch,
     latest: (chain: Chain) => anchors.get(chainName(chain)),
     keep(anchor: Anchor) {
+      // Signed before the chain's rebase, by a check that began on the chain as it was: nothing to keep.
+      if (rebasedAfter(anchor.chain, anchor.at)) return;
       // The check reads the anchor again first; this holds should a caller not, as a wound-back head must never replace it.
       const held = anchors.get(anchor.chain);
       if (
@@ -770,9 +866,12 @@ export function createAnchorLog({
       return line === undefined || overtaken(line) ? undefined : line;
     },
     keepProgress(line: Progress) {
+      // A pass that began before the chain's rebase read the chain as it was: its place goes nowhere.
+      if (rebasedAfter(line.chain, line.began)) return;
       sides.u.set(line.chain, line);
       pendingSides.u.set(line.chain, line);
     },
+    rebasedAfter: (chain: Chain, at: Date) => rebasedAfter(chainName(chain), at),
     lastFileAt() {
       const times = [deltasFrom === undefined ? undefined : countdownOf('deltas', deltasFrom), snapshotFrom]
         .filter((countdown) => countdown !== undefined)

@@ -36,6 +36,12 @@ export const KEY_PURPOSES = {
    * them: a foothold in the API can't sign an operator's act.
    */
   'operator-signing': { kind: 'signing', rotates: true },
+  /**
+   * 4D2e E11: signs a rebase, which moves a chain's anchor on after a sanctioned
+   * change to the chain (rebase.ts), held by the operator's job alone. The API
+   * checks it with the public half: a foothold in the API can't move an anchor.
+   */
+  'audit-rebase': { kind: 'signing', rotates: true },
 } as const satisfies Readonly<Record<string, { readonly kind: KeyKind; readonly rotates: boolean }>>;
 
 export type KeyPurpose = keyof typeof KEY_PURPOSES;
@@ -51,8 +57,8 @@ export type SigningPurpose = PurposeOf<'signing'>;
 /** Every purpose, in a fixed order. */
 export const PURPOSES = Object.keys(KEY_PURPOSES) as readonly KeyPurpose[];
 
-/** The keys the operator's command holds and the API never does (PL-57): the API checks with their public halves. */
-export const OPERATOR_ONLY: readonly SigningPurpose[] = ['operator-signing'];
+/** The keys the operator's command holds and the API never does (PL-57, E11): the API checks with their public halves. */
+export const OPERATOR_ONLY: readonly SigningPurpose[] = ['operator-signing', 'audit-rebase'];
 
 /** Every purpose the API holds: all but the operator's own. */
 export const API_PURPOSES: readonly KeyPurpose[] = PURPOSES.filter(

@@ -7,7 +7,8 @@ import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import { type Anchor, type Progress, signAnchor, signPass, signProgress } from './anchor.ts';
 import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
-import type { Chain } from './chain.ts';
+import { type Chain, chainName } from './chain.ts';
+import { type Rebase, rebaseFile, rebaseFileName, signRebase } from './rebase.ts';
 
 const keyMaterial = (fill: number): KeyMaterial =>
   byPurpose((purpose) => ({
@@ -248,7 +249,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
   });
 
   describe('a restart', () => {
-    it('reads the newest snapshot and the deltas since: 2 lists and at most 13 gets at the default interval', async () => {
+    it('reads the newest snapshot and the deltas since: 3 lists and at most 13 gets at the default interval', async () => {
       const fake = createFakeWriteOnceStore();
       const first = await started(fake);
       for (let run = 1; run <= 12; run += 1) {
@@ -267,7 +268,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(log.latest(CHAIN)).toBeUndefined();
       await log.read();
 
-      expect(fake.calls).toMatchObject({ lists: 2, gets: 13 });
+      // The rebases' list (E11), the snapshots' and the deltas'.
+      expect(fake.calls).toMatchObject({ lists: 3, gets: 13 });
       expect(log.state()).toBe('read');
       expect(log.latest(CHAIN)).toMatchObject({ seq: 12n, macKeyVersion: 2, keyVersion: 1 });
       expect(log.latest(CHAIN)?.hash).toEqual(Buffer.alloc(32, 12));
@@ -315,7 +317,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const { log } = logOver(fake);
       await log.read();
 
-      expect(fake.calls).toMatchObject({ lists: 3, gets: 101 });
+      // The rebases' list (E11), then the snapshots' and two pages of deltas.
+      expect(fake.calls).toMatchObject({ lists: 4, gets: 101 });
       expect(log.latest(CHAIN)?.seq).toBe(101n);
     });
 
@@ -371,9 +374,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const fake = createFakeWriteOnceStore();
       const { log } = logOver(fake);
       await Promise.all([log.read(), log.read()]);
-      expect(fake.calls.lists).toBe(2);
+      // Rebases (E11), snapshots and deltas: once for both calls.
+      expect(fake.calls.lists).toBe(3);
       await log.read();
-      expect(fake.calls.lists).toBe(4);
+      expect(fake.calls.lists).toBe(6);
     });
   });
 
@@ -2147,3 +2151,268 @@ describe('the place a pass under way has reached, kept beside the passes (4D2e E
 function signedFileOf(name: string, passes: readonly Anchor[]): Buffer {
   return fileOf(name, ...passes.map((pass) => lineOf(pass, 'p')));
 }
+
+describe('a rebase moves a chain on (4D2e E11)', () => {
+  const at = (minutes: number): Date => new Date(START.getTime() + minutes * MINUTE);
+  const rebaseOf = (chain: Chain, seq: bigint, minutes: number, id = 1, signing = keys): Rebase =>
+    signRebase(signing, 1, {
+      id: `0199a0f0-0000-7000-8000-${String(id).padStart(12, '0')}`,
+      chain: chainName(chain),
+      seq,
+      hash: Buffer.alloc(32, Number(seq) + 100),
+      macKeyVersion: 2,
+      at: at(minutes),
+      reason: 'repaired',
+      evidence: 'INC-2026-11-05',
+    });
+  const stored = (fake: FakeWriteOnceStore, rebase: Rebase): void => {
+    fake.files.set(rebaseFileName(1, rebase.id), rebaseFile(rebase));
+  };
+  const placeOf = (chain: Chain, seq: bigint, began: number): Progress =>
+    signProgress(
+      keys,
+      chain,
+      { seq, hash: Buffer.alloc(32, Number(seq)), macKeyVersion: 2 },
+      { at: START, began: at(began) },
+      1,
+    );
+  /** A store holding CHAIN anchored at 10 and OTHER_CHAIN at 7, in a snapshot at START. */
+  const anchoredAtTen = (): FakeWriteOnceStore => {
+    const fake = createFakeWriteOnceStore();
+    const name = nameOf('snapshots', 0);
+    fake.files.set(name, fileOf(name, anchorAt(CHAIN, 10n), anchorAt(OTHER_CHAIN, 7n)));
+    return fake;
+  };
+  const chainsIn = (fake: FakeWriteOnceStore, names: readonly string[]): string[] =>
+    names.flatMap((name) => linesIn(fake.files.get(name))).map((line) => `${String(line.chain)}@${String(line.seq)}`);
+
+  it('SEC-DB-11 a signed rebase stands in for an older anchor, says so, and moves no other chain', async () => {
+    const fake = anchoredAtTen();
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(10n);
+    // Written while the process runs: its next read takes it in.
+    stored(fake, rebaseOf(CHAIN, 4n, 30));
+    await log.read();
+
+    expect(log.latest(CHAIN)).toMatchObject({ seq: 4n, hash: Buffer.alloc(32, 104), at: at(30) });
+    expect(log.latest(OTHER_CHAIN)?.seq).toBe(7n);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('audit.rebased')).toEqual([
+      expect.objectContaining({
+        level: 'warn',
+        orgId: ORG,
+        chain: 'organisation',
+        seq: '4',
+        anchorSeq: '10',
+        moved: true,
+        reason: 'repaired',
+      }),
+    ]);
+    expect(log.organisations().toSorted()).toEqual([ORG, OTHER_ORG]);
+
+    // A restart takes it in again, and reads no file twice in a process.
+    const after = logOver(fake);
+    await after.log.read();
+    expect(after.log.latest(CHAIN)?.seq).toBe(4n);
+    fake.calls.gets = 0;
+    await after.log.read();
+    expect(fake.calls.gets).toBe(0);
+  });
+
+  it("the platform chain's rebase is said without an organisation", async () => {
+    const fake = createFakeWriteOnceStore();
+    stored(fake, rebaseOf(PLATFORM, 1n, 30));
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(log.latest(PLATFORM)?.seq).toBe(1n);
+    expect(lines('audit.rebased')).toEqual([
+      expect.objectContaining({ chain: 'platform', seq: '1', anchorSeq: null, moved: true }),
+    ]);
+    expect(lines('audit.rebased')[0]).not.toHaveProperty('orgId');
+  });
+
+  it('every line of the chain dated before it is passed over, across restarts; those after it count', async () => {
+    const fake = anchoredAtTen();
+    stored(fake, rebaseOf(CHAIN, 4n, 30));
+    // Signed before the rebase, higher: the chain as it was.
+    fake.files.set(nameOf('deltas', 20), fileOf(nameOf('deltas', 20), anchorAt(CHAIN, 12n, at(20))));
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(4n);
+
+    fake.files.set(nameOf('deltas', 40), fileOf(nameOf('deltas', 40), anchorAt(CHAIN, 6n, at(40))));
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(6n);
+    // A check that began on the chain as it was: its anchor is passed over, and no alarm.
+    log.keep(anchorAt(CHAIN, 20n, at(29)));
+    expect(log.latest(CHAIN)?.seq).toBe(6n);
+    log.keep(anchorAt(CHAIN, 7n, at(50)));
+    expect(log.latest(CHAIN)?.seq).toBe(7n);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+
+    const after = logOver(fake);
+    await after.log.read();
+    expect(after.log.latest(CHAIN)?.seq).toBe(6n);
+  });
+
+  it('a snapshot leaves a chain still at its rebase out, as the rebase file holds it; a later anchor goes in', async () => {
+    const fake = createFakeWriteOnceStore();
+    stored(fake, rebaseOf(CHAIN, 4n, 30));
+    const { log } = logOver(fake);
+    await log.read();
+    // Before the rebase, waiting to be written: it goes too.
+    log.keep(anchorAt(OTHER_CHAIN, 1n, LATER));
+    await log.flush();
+    expect(chainsIn(fake, files(fake, 'snapshots'))).toEqual([`${chainName(OTHER_CHAIN)}@1`]);
+
+    const after = logOver(fake);
+    await after.log.read();
+    expect(after.log.latest(CHAIN)).toMatchObject({ seq: 4n, at: at(30) });
+
+    // Signed again as this process's own, it is written as any anchor.
+    after.log.keep(anchorAt(CHAIN, 4n, LATER, 104));
+    after.advance(61);
+    after.log.keep(anchorAt(OTHER_CHAIN, 2n, LATER));
+    await after.log.flush();
+    const newest = files(fake, 'snapshots').toSorted()[0] ?? '';
+    expect(chainsIn(fake, [newest]).toSorted()).toEqual([`${chainName(CHAIN)}@4`, `${chainName(OTHER_CHAIN)}@2`]);
+  });
+
+  it('an anchor of the chain waiting to be written, from before the rebase, is never written', async () => {
+    const fake = createFakeWriteOnceStore();
+    const { log, advance } = logOver(fake, 1, keys, at(0));
+    await log.read();
+    log.keep(anchorAt(OTHER_CHAIN, 1n, at(0)));
+    await log.flush();
+    log.keep(anchorAt(CHAIN, 9n, at(1)));
+    stored(fake, rebaseOf(CHAIN, 4n, 2));
+    advance(3);
+    await log.read();
+    log.keep(anchorAt(OTHER_CHAIN, 2n, at(3)));
+    await log.flush();
+    expect(chainsIn(fake, files(fake, 'deltas'))).toEqual([`${chainName(OTHER_CHAIN)}@2`]);
+  });
+
+  it("clears the chain's place a pass reached before it, so the next resume starts again; places after it stand", async () => {
+    const fake = createFakeWriteOnceStore();
+    fake.files.set(nameOf('deltas', 10), fileOf(nameOf('deltas', 10), lineOf(placeOf(CHAIN, 50n, 10), 'u')));
+    const { log, lines, advance } = logOver(fake);
+    await log.read();
+    expect(log.lastProgress(CHAIN)?.seq).toBe(50n);
+    // Kept here, not written yet: the chain's goes too, the other's stays.
+    log.keepProgress(placeOf(OTHER_CHAIN, 3n, 12));
+    log.keepProgress(placeOf(CHAIN, 60n, 15));
+
+    stored(fake, rebaseOf(CHAIN, 4n, 30));
+    await log.read();
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+    expect(log.lastProgress(OTHER_CHAIN)?.seq).toBe(3n);
+    expect(log.rebasedAfter(CHAIN, at(10))).toBe(true);
+    expect(log.rebasedAfter(CHAIN, at(30))).toBe(false);
+    expect(log.rebasedAfter(OTHER_CHAIN, at(10))).toBe(false);
+    // A pass that began before it, under way still: its place goes nowhere.
+    log.keepProgress(placeOf(CHAIN, 70n, 20));
+    expect(log.lastProgress(CHAIN)).toBeUndefined();
+    await log.flush();
+    expect(chainsIn(fake, files(fake, 'snapshots'))).toEqual([`${chainName(OTHER_CHAIN)}@3`]);
+
+    log.keepProgress(placeOf(CHAIN, 2n, 40));
+    expect(log.lastProgress(CHAIN)?.seq).toBe(2n);
+    advance(1);
+    await log.flush();
+    const after = logOver(fake);
+    await after.log.read();
+    expect(after.log.lastProgress(CHAIN)?.seq).toBe(2n);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('SEC-DB-11 a forged or unsigned rebase, or no rebase file at all, is refused: the alarm, once a process', async () => {
+    const fake = anchoredAtTen();
+    stored(fake, rebaseOf(CHAIN, 4n, 30, 1, otherKeys));
+    stored(fake, { ...rebaseOf(CHAIN, 3n, 31, 2), signature: Buffer.alloc(0) });
+    fake.files.set(rebaseFileName(1, '0199a0f0-0000-7000-8000-000000000003'), gzipSync('not a rebase\n'));
+    fake.files.set('e1/rebases/not-ours', Buffer.from('x'));
+    const { log, lines } = logOver(fake);
+    await log.read();
+
+    expect(log.latest(CHAIN)?.seq).toBe(10n);
+    expect(lines('audit.rebased')).toEqual([]);
+    expect(lines('audit.integrity_failed').map((line) => [line.check, line.reason, line.problem])).toEqual([
+      ['anchor_store', 'rebase', 'signature'],
+      ['anchor_store', 'rebase', 'signature'],
+      ['anchor_store', 'rebase', 'file'],
+    ]);
+    expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ files: 1 })]);
+    await log.read();
+    expect(lines('audit.integrity_failed')).toHaveLength(3);
+  });
+
+  it('one dated ahead of the clock waits, the alarm each read, then stands once its time comes', async () => {
+    const fake = anchoredAtTen();
+    stored(fake, rebaseOf(CHAIN, 4n, 30));
+    const { log, lines, advance } = logOver(fake, 1, keys, at(20));
+    await log.read();
+    advance(4);
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(10n);
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'rebase', problem: 'future', orgId: ORG }),
+      expect.objectContaining({ reason: 'rebase', problem: 'future', orgId: ORG }),
+    ]);
+    advance(1);
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(4n);
+  });
+
+  it("the chain's newest rebase stands, in any order read; one older than an anchor held sets aside only what is older", async () => {
+    const fake = anchoredAtTen();
+    stored(fake, rebaseOf(CHAIN, 4n, 30, 1));
+    stored(fake, rebaseOf(CHAIN, 2n, 20, 2));
+    stored(fake, rebaseOf(CHAIN, 5n, 30, 3));
+    const { log } = logOver(fake);
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(4n);
+
+    const held = createFakeWriteOnceStore();
+    held.files.set(nameOf('deltas', 50), fileOf(nameOf('deltas', 50), anchorAt(CHAIN, 11n, at(50))));
+    const later = logOver(held);
+    await later.log.read();
+    stored(held, rebaseOf(CHAIN, 4n, 30));
+    await later.log.read();
+    expect(later.log.latest(CHAIN)?.seq).toBe(11n);
+    expect(later.lines('audit.rebased')).toEqual([expect.objectContaining({ moved: false, anchorSeq: '11' })]);
+  });
+
+  it('a rebase line in a delta is no rebase: passed over, moving nothing and raising nothing', async () => {
+    const fake = anchoredAtTen();
+    const line = gunzipSync(rebaseFile(rebaseOf(CHAIN, 4n, 30)))
+      .toString('utf8')
+      .trim();
+    fake.files.set(nameOf('deltas', 40), fileOf(nameOf('deltas', 40), line));
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(10n);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('audit.rebased')).toEqual([]);
+  });
+
+  it('a failed list of the rebases is a failed read: nothing of it taken in', async () => {
+    const fake = anchoredAtTen();
+    fake.instead.list = (start, most, after) =>
+      start.includes('/rebases/') ? failing() : fake.real.list(start, most, after);
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(log.state()).toBe('unreadable');
+    expect(lines('audit.anchor_store_unreadable')).toHaveLength(1);
+  });
+
+  it('lists the rebases a page at a time', async () => {
+    const fake = createFakeWriteOnceStore();
+    for (let id = 1; id <= 101; id += 1) stored(fake, rebaseOf(id % 2 === 0 ? CHAIN : OTHER_CHAIN, BigInt(id), id, id));
+    const { log } = logOver(fake, 1, keys, at(200));
+    await log.read();
+    expect(log.latest(CHAIN)?.seq).toBe(100n);
+    expect(log.latest(OTHER_CHAIN)?.seq).toBe(101n);
+  });
+});

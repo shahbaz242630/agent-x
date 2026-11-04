@@ -24,8 +24,11 @@
 //   (`blobs/add/action`): it can't read, overwrite or list. The API's may add a
 //   new file to `audit-anchors` and read and list what is there (`blobs/read`, as
 //   a restart must), and can't overwrite or delete. The operator's may read and
-//   list `audit-anchors` alone (`blobs/read`), which a chain's recovery plan is
-//   checked against (4D2e E9): it can add nothing there. No one else is given anything
+//   list `audit-anchors` (`blobs/read`), which a chain's recovery plan is
+//   checked against (4D2e E9), and add a new file there (`blobs/add/action`):
+//   a chain's rebase (4D2e E11), which the API believes only signed with the
+//   operator's own `audit-rebase` key; anything else it adds is a file the API
+//   reads as spoiled, the alarm. Neither can overwrite or delete. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -238,14 +241,15 @@ resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// Get Blob and List Blobs (both `blobs/read`), and nothing else: the operator's
-// chain recovery plan (4D2e E9) is checked against the anchors and adds none.
-// Given to the operator's identity, the exports' writer above.
+// Get Blob and List Blobs (both `blobs/read`): the operator's chain recovery
+// plan (4D2e E9) is checked against the anchors; and Put Blob of a file not there
+// yet, a chain's rebase (4D2e E11). Never overwrite or delete. Given to the
+// operator's identity, the exports' writer above.
 resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   name: guid(resourceGroup().id, 'audit-anchors-reader')
   properties: {
     roleName: anchorReaderRoleName
-    description: 'The operator\'s chain recovery plan: read and list the anchors container. Nothing else.'
+    description: 'The operator\'s chain recovery plan and rebases: read and list the anchors container, and add a new file. Nothing else.'
     type: 'CustomRole'
     assignableScopes: [
       resourceGroup().id
@@ -255,6 +259,7 @@ resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' =
         actions: []
         notActions: []
         dataActions: [
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'
           'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
         ]
         notDataActions: []

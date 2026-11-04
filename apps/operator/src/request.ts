@@ -51,6 +51,14 @@ export const NO_ANCHORS_PROBLEM =
 export const chainRecoveryRequest = (orgId: string, id: string): string =>
   JSON.stringify(['chain-recovery-plan', '--org', orgId, '--id', id]);
 
+/** What a request file holds to move a chain's anchor on after a sanctioned change to it (4D2e E11): only ever a file. */
+export const CHAIN_REBASE_USAGE =
+  'chain-rebase --chain <platform | organisation ID> --reason <repaired | recovered> --evidence <incident reference> --id <new rebase ID>';
+
+/** The request for a chain's rebase, as its file holds it. */
+export const chainRebaseRequest = (chain: string, reason: string, evidence: string, id: string): string =>
+  JSON.stringify(['chain-rebase', '--chain', chain, '--reason', reason, '--evidence', evidence, '--id', id]);
+
 /** What a request file holds to export an organisation's audit log for a case (Phase 3 E10c, ADR-005 §6): only ever a file. */
 export const AUDIT_EXPORT_USAGE =
   'audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> --id <new export ID>';

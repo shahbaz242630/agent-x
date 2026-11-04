@@ -16,11 +16,12 @@ import { planChainRecovery, type PlannedRow, planFile, type RecoverySides } from
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
 
 const server = inject('postgres');
-const keyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 const keys = loadKeys({ directory: keyFiles.directory, current: {} }, [
   'audit-mac',
   'field-encryption',
   'operator-signing',
+  'audit-rebase',
 ]);
 const trail = createAuditTrail({ keys, ids: uuidV7Ids });
 

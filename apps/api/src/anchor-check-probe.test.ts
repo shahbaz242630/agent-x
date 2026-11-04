@@ -401,6 +401,10 @@ describe('the organisations the platform chain records, read past the last read 
     anchored = 9n;
     expect(await recorded()).toEqual([ORG, OTHER_ORG]);
     expect(reads).toEqual(['0-4', '4-9']);
+    // A rebase moved the platform chain's anchor back (E11): the chain begun again is read from its start.
+    anchored = 2n;
+    expect(await recorded()).toEqual([ORG, OTHER_ORG]);
+    expect(reads).toEqual(['0-4', '4-9', '0-2']);
   });
 
   it('keeps its place where a read fails, and reads that stretch again', async () => {
