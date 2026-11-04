@@ -78,9 +78,11 @@ const written = (w: World, at: string, recordedAt = at) =>
       .execute(),
   );
 
-const sealFor = (w: World) =>
+/** The seal of `w` alone; each organisation it says is done, into `done` where given (4D2e D11). */
+const sealFor = (w: World, done: string[] = []) =>
   createActivitySeal({
     list: () => Promise.resolve([w.org]),
+    done: (orgId) => done.push(orgId),
     database: app,
     keys,
     ids,
@@ -128,8 +130,11 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     await written(w, '2026-10-19T10:00:00.000Z');
     await written(w, '2026-10-20T23:00:00.000Z');
 
-    await sealFor(w).run();
+    const done: string[] = [];
+    await sealFor(w, done).run();
     const seals = await sealsOf(w);
+    // Every day it can seal sealed: finished, the 20th the next day's pass's.
+    expect(done).toEqual([w.org]);
 
     // The 20th closed 14 minutes ago: inside the grace, so not yet.
     expect(seals.map((seal) => [seal.day, seal.requests])).toEqual([
@@ -180,22 +185,27 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     expect((await sealsOf(w)).map((seal) => seal.day)).toEqual(['2026-10-19']);
   });
 
-  it('seals nothing for an organisation with no rows', async () => {
+  it('seals nothing for an organisation with no rows, and is finished with it', async () => {
     const w = await world();
+    const done: string[] = [];
 
-    await sealFor(w).run();
+    await sealFor(w, done).run();
 
     expect(await sealsOf(w)).toEqual([]);
+    expect(done).toEqual([w.org]);
   });
 
-  it('seals at most 31 days a run, catching up over the next', async () => {
+  it('seals at most 31 days a run, catching up over the next, finished only once caught up', async () => {
     const w = await world();
     await written(w, '2026-08-01T09:00:00.000Z');
+    const done: string[] = [];
 
-    await sealFor(w).run();
+    await sealFor(w, done).run();
     expect(await sealsOf(w)).toHaveLength(31);
-    await sealFor(w).run();
-    await sealFor(w).run();
+    await sealFor(w, done).run();
+    expect(done).toEqual([]);
+    await sealFor(w, done).run();
+    expect(done).toEqual([w.org]);
 
     const days = (await sealsOf(w)).map((seal) => seal.day);
     expect(days[0]).toBe('2026-08-01');
@@ -246,7 +256,8 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
       await gate;
     });
     await held;
-    const run = within(20_000, sealFor(w).run(), 'the run');
+    const done: string[] = [];
+    const run = within(20_000, sealFor(w, done).run(), 'the run');
     await waitUntilQueued(database.as('admin'), 1);
     await written(w, '2026-10-19T10:00:00.000Z');
     open(undefined);
@@ -254,6 +265,7 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     await other;
     await run;
     expect(await sealsOf(w)).toEqual([]);
+    expect(done).toEqual([]);
     expect(capture.lines().filter((line) => line.event === 'access_log_seal.moved')).toEqual([
       expect.objectContaining({ level: 'error', day: '2026-10-19', digested: 1, counted: 2 }),
     ]);
@@ -296,8 +308,10 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
     await written(w, '2026-10-19T09:00:00.000Z');
     const stopping = new AbortController();
     stopping.abort();
-    await sealFor(w).run(stopping.signal);
+    const done: string[] = [];
+    await sealFor(w, done).run(stopping.signal);
     expect(await sealsOf(w)).toEqual([]);
+    expect(done).toEqual([]);
 
     const both = createActivitySeal({
       list: () => Promise.resolve(['not-an-organisation', w.org]),
@@ -327,10 +341,13 @@ describe('L6 the daily seal (decision 26, ADR-011 §7)', () => {
         [ACTIVITY_SEALED, w.org],
       );
     clock.advanceBy(86_400_000);
+    const done: string[] = [];
 
-    await sealFor(w).run();
+    await sealFor(w, done).run();
 
     expect(await sealsOf(w)).toHaveLength(2);
+    // Finished: the alarm and the hold set, nothing past them to seal (4D2e D11).
+    expect(done).toEqual([w.org]);
     expect(capture.lines().map((line) => line.event)).toEqual(
       expect.arrayContaining(['audit.integrity_failed', 'audit.integrity_hold_set']),
     );
@@ -569,10 +586,12 @@ describe('L6c the seals checked (decision 26, ADR-012 §2)', () => {
     expect(held()).toBe(true);
   });
 
-  it('logs an organisation it can’t check, going on, and a run whose list fails', async () => {
+  it('logs an organisation it can’t check, going on, and a run whose list fails; only one checked is done (4D2e D11)', async () => {
     const w = await sealed();
+    const done: string[] = [];
     const both = createActivitySealCheck({
       list: () => Promise.resolve(['not-an-organisation', w.org]),
+      done: (orgId) => done.push(orgId),
       database: app,
       keys,
       ids,
@@ -581,6 +600,9 @@ describe('L6c the seals checked (decision 26, ADR-012 §2)', () => {
     await both.run();
     expect(capture.lines().filter((line) => line.event === 'access_log_seal_check.failed')).toHaveLength(1);
     expect(alarms()).toEqual([]);
+    expect(done).toEqual([w.org]);
+    await both.run(AbortSignal.abort());
+    expect(done).toEqual([w.org]);
 
     const none = createActivitySealCheck({
       list: () => Promise.reject(new Error('the directory is down')),

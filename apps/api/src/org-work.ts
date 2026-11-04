@@ -80,7 +80,7 @@ type OrgWorkTables = DirectoryTables &
   ActivityExportTables;
 
 /** How many organisations a job takes from its marks a run: its list stays this size however many have work. */
-const ORG_WORK_MOST = 1_000;
+export const ORG_WORK_MOST = 1_000;
 
 /** How many organisations' marks one statement settles: their reads first, then the page's one write. */
 const SETTLE_PAGE = 100;
@@ -236,7 +236,7 @@ export function withOrgWork<Job extends { run(signal?: AbortSignal): Promise<unk
  * sees). Those the marks gave first, so a pass never holds up work that is due; each once.
  */
 export function withWholePasses(
-  marked: MarkedOrganisations,
+  marked: Pick<MarkedOrganisations, 'list'>,
   {
     everyMs,
     all,

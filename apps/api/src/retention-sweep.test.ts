@@ -20,9 +20,11 @@ function sweeping(
   const capture = new LogCapture();
   const logger = testLogger(capture);
   const calls: string[] = [];
+  const finished: string[] = [];
   const turns = new Map<string, number>();
   const sweep = createRetentionSweep({
     list: typeof organizations === 'function' ? organizations : () => Promise.resolve(organizations),
+    done: (orgId) => finished.push(orgId),
     sweep: (orgId, most) => {
       calls.push(`${orgId} ${String(most)}`);
       const turn = turns.get(orgId) ?? 0;
@@ -50,7 +52,7 @@ function sweeping(
         ...(failed === undefined ? {} : { failed }),
         ...(check === undefined ? {} : { check }),
       }));
-  return { sweep, calls, lines, capture };
+  return { sweep, calls, finished, lines, capture };
 }
 
 const done = (organizations: number, keys: number, failed = 0) => ({
@@ -67,29 +69,37 @@ describe("the idempotency keys' retention sweep (B1e-3)", () => {
   });
 
   it('sweeps each listed organisation a batch at a time until a batch comes back short, and says so', async () => {
-    const { sweep, calls, lines } = sweeping([ORG, OTHER_ORG], { [ORG]: [BATCH, BATCH, 3], [OTHER_ORG]: [0] });
+    const { sweep, calls, finished, lines } = sweeping([ORG, OTHER_ORG], {
+      [ORG]: [BATCH, BATCH, 3],
+      [OTHER_ORG]: [0],
+    });
     await sweep.run();
 
     expect(calls).toEqual([`${ORG} 10`, `${ORG} 10`, `${ORG} 10`, `${OTHER_ORG} 10`]);
+    // Each swept to its last batch: done (4D2e D11).
+    expect(finished).toEqual([ORG, OTHER_ORG]);
     expect(lines()).toEqual([{ level: 'info', event: 'idempotency.swept', orgId: ORG, keys: 23 }, done(2, 23)]);
   });
 
   it('gives an organisation at most its batches a run, leaving the rest for the next', async () => {
-    const { sweep, calls, lines } = sweeping([ORG, OTHER_ORG], { [ORG]: Array<number>(9).fill(BATCH) });
+    const { sweep, calls, finished, lines } = sweeping([ORG, OTHER_ORG], { [ORG]: Array<number>(9).fill(BATCH) });
     await sweep.run();
 
     expect(calls.filter((call) => call.startsWith(ORG))).toHaveLength(5);
+    // The rest owed: not done.
+    expect(finished).toEqual([OTHER_ORG]);
     expect(lines()).toEqual([{ level: 'info', event: 'idempotency.swept', orgId: ORG, keys: 50 }, done(2, 50)]);
   });
 
   it('warns for an organisation whose sweep fails, keeps what it deleted before, and goes on to the next', async () => {
-    const { sweep, calls, lines } = sweeping([ORG, OTHER_ORG], {
+    const { sweep, calls, finished, lines } = sweeping([ORG, OTHER_ORG], {
       [ORG]: [BATCH, new Error('connect ECONNREFUSED')],
       [OTHER_ORG]: [2],
     });
     await sweep.run();
 
     expect(calls).toEqual([`${ORG} 10`, `${ORG} 10`, `${OTHER_ORG} 10`]);
+    expect(finished).toEqual([OTHER_ORG]);
     expect(lines()).toEqual([
       { level: 'warn', event: 'idempotency.sweep_failed', orgId: ORG },
       { level: 'info', event: 'idempotency.swept', orgId: OTHER_ORG, keys: 2 },
@@ -183,7 +193,7 @@ describe("the idempotency keys' retention sweep (B1e-3)", () => {
 
   it('sweeps no further organisation once stopped during a batch that still ends, and closes with no line', async () => {
     const stopping = new AbortController();
-    const { sweep, calls, lines } = sweeping(
+    const { sweep, calls, finished, lines } = sweeping(
       [ORG, OTHER_ORG],
       {},
       {
@@ -196,8 +206,9 @@ describe("the idempotency keys' retention sweep (B1e-3)", () => {
     );
     await sweep.run(stopping.signal);
 
-    // The stop wins over the batch's answer: its keys are deleted, but not counted.
+    // The stop wins over the batch's answer: its keys are deleted, but not counted, and nothing is done.
     expect(calls).toEqual([ORG]);
+    expect(finished).toEqual([]);
     expect(lines()).toEqual([]);
   });
 
