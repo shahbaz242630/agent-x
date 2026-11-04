@@ -106,6 +106,27 @@ function parseKeyVersion(entry: string): readonly [KeyPurpose, number] | undefin
   return isKeyPurpose(purpose) ? [purpose, Number(version)] : undefined;
 }
 
+/** One signing key's public half, as `<version>:<the JWK x, base64url>`. */
+const PUBLIC_KEY = /^([1-9][0-9]{0,5}):([A-Za-z0-9_-]{43})$/;
+
+/** Public keys by version, comma-separated: each version once. */
+const publicKeyList = text.transform((raw, ctx): ReadonlyMap<number, string> => {
+  const entries = raw.split(',').map((entry) => PUBLIC_KEY.exec(entry));
+  const keys = new Map(
+    entries.flatMap((found) => (found === null ? [] : [[Number(found[1]), String(found[2])] as const])),
+  );
+  if (keys.size < entries.length) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        'must list each public key as <version>:<key>, the key 43 base64url characters as the start-up log shows it, ' +
+        'comma-separated with no spaces, each version once',
+    });
+    return z.NEVER;
+  }
+  return keys;
+});
+
 const keyVersionList = text.transform((raw, ctx): Partial<Record<KeyPurpose, number>> => {
   const entries = raw.split(',').map(parseKeyVersion);
   const bad = entries.flatMap((entry, index) => (entry === undefined ? [index + 1] : []));
@@ -326,6 +347,9 @@ const SETTINGS = {
   AGENTX_AUDIT_ANCHORS_CLIENT_ID: { schema: clientId.optional() },
   // Moves on only for a sanctioned restore of the whole database: anchors of an earlier epoch are no longer held to.
   AGENTX_ANCHOR_EPOCH: { schema: wholeNumber({ min: 1, max: 1_000_000 }), default: '1' },
+  // The anchors' public keys (4D2e E9, PL-29), as the API logs them at start (`api.starting`, keys): the operator's chain
+  // recovery plan checks the store's lines with them alone, so it never holds the signing key.
+  AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: { schema: publicKeyList.optional() },
   // The app's keys (ADR-011 §2): one file per key version, mounted by the
   // platform, and each key's current version where it isn't 1.
   AGENTX_KEYS_DIR: { schema: mountedFolder },
@@ -500,6 +524,11 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_KEYS_CURRENT',
       ...LOCATION,
       'AGENTX_DB_DRILL_HOST',
+      'AGENTX_AUDIT_ANCHORS_DIR',
+      'AGENTX_AUDIT_ANCHORS_URL',
+      'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+      'AGENTX_ANCHOR_EPOCH',
+      'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS',
       'AGENTX_EVIDENCE_DIR',
       'AGENTX_EVIDENCE_CONTAINER_URL',
       'AGENTX_EVIDENCE_CLIENT_ID',

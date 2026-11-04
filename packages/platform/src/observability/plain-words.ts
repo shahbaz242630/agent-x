@@ -915,6 +915,13 @@ export const PLAIN_WORDS = {
     broke: 'The job stopped before doing anything, so nothing was changed.',
     next: 'Check the database is up and reachable, then run the job again.',
   },
+  'operator.chain_recovery_refused': {
+    happened:
+      "An organisation's audit chain recovery plan was refused: the restored copy can't mend the chain with its original records alone.",
+    broke:
+      'Nothing was changed. The organisation stays on its integrity hold. The reason says why: a copy that fails its own check, events written after the damage (a fork), records the copy does not hold, or a copy older than the last anchor.',
+    next: "Read the reason and the plan's file in the evidence store, then restore a copy from another point and plan again, or follow playbook H.",
+  },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
     broke: "Nothing was changed: the organisation or its first admin's invitation already exists from an earlier run.",
