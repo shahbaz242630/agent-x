@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { settleReadsGate } from './handoff.ts';
-import { movesOf } from './org-work.ts';
+import { movesOf, WAITING_AS_A_WHOLE_MS } from './org-work.ts';
 
 const NOW = new Date('2026-11-02T10:00:00.000Z');
 const mark = (marks: string, dueAt = NOW) => ({ job: 'hand_off', due_at: dueAt, marks }) as const;
@@ -75,6 +75,11 @@ describe('one look at an organisation', () => {
     expect(movesOf({ before: [mark('5', later(3_660_001))], due: due(rows), after: [mark('5')] }, NOW)).toEqual([
       { kind: 'late', job: 'hand_off', dueAt: rows, marks: '5' },
     ]);
+  });
+
+  it('a mark settled as a whole, its rows due now, is no miss to the hourly look', () => {
+    const waiting = mark('5', later(WAITING_AS_A_WHOLE_MS));
+    expect(movesOf({ before: [waiting], due: due(NOW), after: [waiting] }, NOW)).toEqual([]);
   });
 
   it("a mark for one job says nothing about another's", () => {
