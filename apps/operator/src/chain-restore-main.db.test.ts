@@ -32,7 +32,7 @@ import { chainRestoreRequest } from './request.ts';
 const faults = vi.hoisted(() => ({
   readOnly: [] as boolean[],
   roles: [] as string[][],
-  planRead: undefined as unknown,
+  planRead: undefined as Error | undefined,
 }));
 
 // A read of the plan's file that fails as the network or a timeout would, in place of the folder's own read.
