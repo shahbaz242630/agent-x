@@ -4,6 +4,7 @@
 // are, calling the real function, as the app role: real rows in the real tables are
 // org-work.db.test.ts's in apps/api. Every race is forced with a held transaction.
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { sql } from 'kysely';
 import {
   createTestDatabase,
   FixedClock,
@@ -590,11 +591,10 @@ describe('which organisations have marks of any job (4D2e D11)', () => {
         [first, ORG_WORK_JOBS],
       );
       await owner.query('analyze directory.org_work');
-      const { sql: text, parameters } = organisationsWithMarksRead(1_000).compile(app);
-      const [{ 'QUERY PLAN': [plan] = [] } = { 'QUERY PLAN': [] }] = await owner.query<{
-        'QUERY PLAN': { Plan: unknown; 'Execution Time': number }[];
-      }>(`explain (analyze, format json) ${text}`, [...parameters]);
-      const nodes = JSON.stringify(plan?.Plan);
+      const { rows } = await sql<{ 'QUERY PLAN': { Plan: unknown }[] }>`
+        explain (analyze, format json) ${organisationsWithMarksRead(1_000)}
+      `.execute(app);
+      const nodes = JSON.stringify(rows[0]?.['QUERY PLAN'][0]?.Plan);
       expect(nodes).toContain('"Index Name":"org_work_due"');
       expect(nodes).not.toContain('Seq Scan');
       // The same as grouping the whole table, in the same order.

@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import type { Leadership } from './background.ts';
 import { type Booted, sharedParts } from './boot.ts';
 import { integrityPasses, oneCopyJobs } from './job-list.ts';
+import type { OwedPasses } from './org-passes.ts';
 
 const BASE = {
   AGENTX_ENV: 'test',
@@ -90,9 +91,9 @@ const passesAt = (start: string) => {
 };
 
 /** What the passes list, each organisation then finished. */
-const listedOnce = async ({ list, done }: { list(): Promise<readonly string[]>; done(orgId: string): void }) => {
-  const listed = await list();
-  for (const orgId of listed) done(orgId);
+const listedOnce = async (passes: OwedPasses) => {
+  const listed = await passes.list();
+  for (const orgId of listed) passes.done(orgId);
   return listed;
 };
 
