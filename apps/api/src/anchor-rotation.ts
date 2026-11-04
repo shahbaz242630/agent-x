@@ -15,8 +15,10 @@
 //   go on. Any still waiting an hour past its five minutes is `audit.daily_check_overdue`.
 // - The full pass (decision 3): every chain read from its first event to its anchor
 //   as it stood when the pass reached it, the chains passed longest ago first. A
-//   run's share is the sum of every chain's length over 1,728 runs (six days at five
-//   minutes), at most 150 seconds of it, 2,000 events a step.
+//   run's share is the sum of every chain's length over 864 runs (three days at five
+//   minutes), at most 150 seconds of it, 2,000 events a step. Three, not six: a pass is
+//   dated when it began, so a chain's lateness is the time between two passes' starts
+//   and the second's own length, two rounds at worst, and that must stay within 7 days.
 //   Each chain's pass finished is a signed line in the store, dated when that pass began
 //   (so it says when its first event was read), and so is the place a pass under way has
 //   reached, written each run it moves, with when its pass began and since when one was
@@ -92,8 +94,8 @@ const WALKED = 1000;
 /** How many events one statement of a day's count counts. */
 export const COUNTED_AT_ONCE = 1_000_000n;
 
-/** The runs a full pass is spread over: six days at the default five minutes. */
-const PASS_RUNS = 1728n;
+/** The runs a full pass is spread over: three days at the default five minutes, so two rounds stay within 7 days. */
+const PASS_RUNS = 864n;
 
 /** How long a run's pass steps may take. */
 export const PASS_WITHIN_MS = 150_000;
@@ -179,6 +181,9 @@ interface PassRun {
 
 /** A read that didn't come back. */
 const MISSED = Symbol('missed');
+
+/** A chain found failing: its alarm raised, and nothing more of it this run. */
+const FAILED = Symbol('failed');
 
 const chainOf = (orgId: string) => ({ kind: 'organisation', orgId }) as const;
 
@@ -352,7 +357,10 @@ export function createRotation({
    * still holds what was signed and its pass began within the last 7 days; otherwise its first event. An event that no
    * longer holds what was signed is tampering. MISSED where that read didn't come back.
    */
-  const passFrom = async (orgId: string, signal: AbortSignal): Promise<Passing | typeof MISSED | undefined> => {
+  const passFrom = async (
+    orgId: string,
+    signal: AbortSignal,
+  ): Promise<Passing | typeof MISSED | typeof FAILED | undefined> => {
     const held = underWay.get(orgId);
     if (held !== undefined) return held;
     const target = anchors.latest(chainOf(orgId));
@@ -368,11 +376,13 @@ export function createRotation({
     if (still.ok)
       return { cursor: { seq, hash, macKeyVersion }, target, began: line.began.getTime(), owed: line.at.getTime() };
     // Nothing honest seals an event again: only a rebase moves a chain's anchors, and it clears the place too (E11).
+    retryFirst.delete(orgId);
     await failed(orgId, 'pass', still.problem);
-    return startAgain(orgId, target);
+    startAgain(orgId, target);
+    return FAILED;
   };
 
-  /** One step of a chain's pass, or its pass finished: what of the budget it took, or MISSED. */
+  /** One step of a chain's pass, or its pass finished: what of the budget it took, MISSED or FAILED. */
   const passStep = async (orgId: string, passing: Passing, budget: bigint, signal: AbortSignal) => {
     const { cursor, target } = passing;
     if (cursor.seq < target.seq) {
@@ -385,7 +395,7 @@ export function createRotation({
         await failed(orgId, 'pass', step.problem);
         // The next round reads it whole: nothing goes on from a place below what failed.
         startAgain(orgId, target);
-        return 0n;
+        return FAILED;
       }
       const { seq, hash, macKeyVersion } = step;
       underWay.set(orgId, { ...passing, cursor: { seq, hash, macKeyVersion } });
@@ -439,8 +449,13 @@ export function createRotation({
         const orgId = nextChain(listed, listedNow, run);
         if (orgId === undefined) break;
         const from = await passFrom(orgId, slices.signal);
+        const took = typeof from === 'object' ? await passStep(orgId, from, left, slices.signal) : (from ?? MISSED);
+        // Found failing: its one alarm and hold this run, and its pass starts again next round.
+        if (took === FAILED) {
+          run.tried.add(orgId);
+          continue;
+        }
         // A read that didn't come back: this chain waits for next run, its place kept, and the rest go on.
-        const took = from === undefined || from === MISSED ? MISSED : await passStep(orgId, from, left, slices.signal);
         if (took === MISSED) {
           run.tried.add(orgId);
           // Not under way yet, so not first next run by that: it must not wait for the round to come round.

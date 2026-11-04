@@ -425,4 +425,51 @@ describe('the rotation in a run (4D2e E7)', () => {
     await check.run();
     expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
   });
+
+  it("runs no rotation while the store is unread: an outage's days wait for where the last process left off", async () => {
+    const inOutage = orgInSlot(80);
+    const { organizations } = directory([inOutage]);
+    const { reads, calls } = rotationReads();
+    const fake = createFakeWriteOnceStore();
+    const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
+    const logOn = () =>
+      createAnchorLog({
+        store: fake.store,
+        keys,
+        logger: testLogger(new LogCapture()),
+        now: () => clock.now(),
+        epoch: 3,
+        alertAfterMs: 120_000,
+      });
+    const last = logOn();
+    await last.read();
+    last.keep(
+      signAnchor(
+        keys,
+        { kind: 'organisation', orgId: inOutage },
+        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
+        clock.now(),
+        3,
+      ),
+    );
+    await last.flush();
+    clock.advanceBy(3 * 3_600_000);
+    const restarted = logOn();
+    fake.instead.list = () => Promise.reject(new Error('the store is away'));
+    const { check, lines } = checking(organizations, {
+      rotation: reads,
+      durable: restarted,
+      anchors: restarted,
+      clock,
+    });
+    // The store unread, the list read: no rotation, so no first look back from now.
+    await check.run();
+    expect(restarted.state()).toBe('unreadable');
+    expect(calls).toEqual([]);
+    expect(lines('audit.anchor_rotation_done')).toEqual([]);
+    delete fake.instead.list;
+    clock.advanceBy(300_000);
+    await check.run();
+    expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
+  });
 });

@@ -965,7 +965,9 @@ export function createAnchorCheck({
       try {
         // Not spread into a call: past about 120,000, that is out of stack.
         for (const outcome of await checkOrganizations(organizations, cap, stop)) outcomes.push(outcome);
-        if (inUse !== undefined) await rotation?.run([...inUse, ...pastCap], cap);
+        // Not while a store kept is unread: its first look back must go to where the last process left off (E7).
+        if (inUse !== undefined && (durable === undefined || leftOffTaken))
+          await rotation?.run([...inUse, ...pastCap], cap);
       } catch (error) {
         // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
         logger.error('audit.anchor_check_crashed', { chain: 'organisation', err: error });

@@ -188,12 +188,12 @@ describe("an organisation's five minutes of the day", () => {
 });
 
 describe('the full pass share', () => {
-  it("is the chains' lengths over 1,728 runs, rounded up", () => {
+  it("is the chains' lengths over 864 runs, rounded up: three days at five minutes", () => {
     expect(passBudget(0n)).toBe(0n);
     expect(passBudget(1n)).toBe(1n);
-    expect(passBudget(1728n)).toBe(1n);
-    expect(passBudget(1729n)).toBe(2n);
-    expect(passBudget(4_000_000_000n)).toBe(2_314_815n);
+    expect(passBudget(864n)).toBe(1n);
+    expect(passBudget(865n)).toBe(2n);
+    expect(passBudget(4_000_000_000n)).toBe(4_629_630n);
   });
 });
 
@@ -317,7 +317,7 @@ describe("each organisation's day: the count and the walk (decisions 1 and 2b)",
     const failing = orgInSlot(108);
     const other = orgInSlot(108, 1);
     made.anchor(failing, 50n);
-    made.anchor(other, 3456n);
+    made.anchor(other, 1728n);
     const away = new Error('the database is away for one organisation');
     made.answer.count = (orgId) => (orgId === failing ? Promise.reject(away) : Promise.resolve(undefined));
     await made.run([failing, other]);
@@ -433,13 +433,13 @@ describe('the full pass (decision 3)', () => {
   it("reads each chain from its first event to its anchor, a share a run, and signs its end in the store's epoch", async () => {
     const made = rotating({ epoch: 4 });
     const orgId = orgInSlot(5);
-    const target = made.anchor(orgId, 3456n);
-    // 3,456 events over 1,728 runs: 2 a run.
+    const target = made.anchor(orgId, 1728n);
+    // 1,728 events over 864 runs: 2 a run.
     await made.run([orgId]);
     await made.run([orgId]);
     expect(made.calls).toEqual([
-      { check: 'pass', orgId, from: 0n, to: 3456n, most: 2 },
-      { check: 'pass', orgId, from: 2n, to: 3456n, most: 2 },
+      { check: 'pass', orgId, from: 0n, to: 1728n, most: 2 },
+      { check: 'pass', orgId, from: 2n, to: 1728n, most: 2 },
     ]);
     expect(made.lines('audit.anchor_rotation_done').at(-1)).toMatchObject({ budget: '2', passed: '2', finished: 0 });
 
@@ -459,22 +459,22 @@ describe('the full pass (decision 3)', () => {
   it('takes at most 2,000 events a step, the passed longest ago first, and a new round at most once a run', async () => {
     const made = rotating();
     const [never, old, recent] = [orgInSlot(1), orgInSlot(2), orgInSlot(3)];
-    for (const orgId of [never, old, recent]) made.anchor(orgId, 2_000_000n);
+    for (const orgId of [never, old, recent]) made.anchor(orgId, 1_000_000n);
     made.passes.keepPass(signPass(keys, chainOf(recent), point(5n), new Date(AT.getTime() - 1000)));
     made.passes.keepPass(signPass(keys, chainOf(old), point(5n), new Date(AT.getTime() - DAY)));
     await made.run([recent, old, never]);
 
-    // 6,000,000 over 1,728 runs: 3,473 a run, so a step of 2,000 and one of 1,473.
+    // 3,000,000 over 864 runs: 3,473 a run, so a step of 2,000 and one of 1,473.
     expect(made.calls).toEqual([
-      { check: 'pass', orgId: never, from: 0n, to: 2_000_000n, most: 2000 },
-      { check: 'pass', orgId: never, from: 2000n, to: 2_000_000n, most: 1473 },
+      { check: 'pass', orgId: never, from: 0n, to: 1_000_000n, most: 2000 },
+      { check: 'pass', orgId: never, from: 2000n, to: 1_000_000n, most: 1473 },
     ]);
   });
 
   it('begins a new round at most once a run: chains that all fail are each tried once, whatever share is left', async () => {
     const made = rotating();
     const orgs = [orgInSlot(1), orgInSlot(2)];
-    for (const orgId of orgs) made.anchor(orgId, 1728n * 100n);
+    for (const orgId of orgs) made.anchor(orgId, 864n * 100n);
     made.answer.pass = () => Promise.resolve({ ok: false, problem: { reason: 'mac', seq: 1n } });
     await made.run(orgs);
     expect(made.calls.map(({ orgId }) => orgId)).toEqual(orgs);
@@ -499,19 +499,19 @@ describe('the full pass (decision 3)', () => {
   it('a chain under way that leaves the list is dropped, and the next one taken', async () => {
     const made = rotating();
     const [leaving, staying] = [orgInSlot(1), orgInSlot(2)];
-    made.anchor(leaving, 3456n);
-    made.anchor(staying, 3456n);
+    made.anchor(leaving, 1728n);
+    made.anchor(staying, 1728n);
     await made.run([leaving, staying]);
     made.calls.length = 0;
     await made.run([staying]);
-    expect(made.calls).toEqual([{ check: 'pass', orgId: staying, from: 0n, to: 3456n, most: 2 }]);
+    expect(made.calls).toEqual([{ check: 'pass', orgId: staying, from: 0n, to: 1728n, most: 2 }]);
   });
 
   it('a step that fails is the alarm, and the pass goes on to the next chain', async () => {
     const made = rotating();
     const [edited, next] = [orgInSlot(1), orgInSlot(2)];
-    made.anchor(edited, 1728n * 3n);
-    made.anchor(next, 1728n * 3n);
+    made.anchor(edited, 864n * 3n);
+    made.anchor(next, 864n * 3n);
     made.answer.pass = (orgId, _cursor, to, most) =>
       Promise.resolve(
         orgId === edited ? { ok: false, problem: { reason: 'hash', seq: 2n } } : stepTo(BigInt(most), to.seq),
@@ -520,16 +520,16 @@ describe('the full pass (decision 3)', () => {
 
     expect(made.failed).toEqual([[edited, 'pass', { reason: 'hash', seq: 2n }]]);
     expect(made.calls).toEqual([
-      { check: 'pass', orgId: edited, from: 0n, to: 5184n, most: 6 },
-      { check: 'pass', orgId: next, from: 0n, to: 5184n, most: 6 },
+      { check: 'pass', orgId: edited, from: 0n, to: 2592n, most: 6 },
+      { check: 'pass', orgId: next, from: 0n, to: 2592n, most: 6 },
     ]);
   });
 
   it("a step that doesn't come back is said, that chain waits for next run at its place, and the others go on", async () => {
     const made = rotating();
     const [failing, other] = [orgInSlot(1), orgInSlot(2)];
-    made.anchor(failing, 3456n);
-    made.anchor(other, 3456n);
+    made.anchor(failing, 1728n);
+    made.anchor(other, 1728n);
     // One run: the first is under way at 4; then its reads fail.
     await made.run([failing, other]);
     const away = new Error('the database is away');
@@ -542,21 +542,21 @@ describe('the full pass (decision 3)', () => {
     await made.run([failing, other]);
     expect(made.missed).toEqual([[failing, 'pass', away]]);
     expect(made.calls).toEqual([
-      { check: 'pass', orgId: failing, from: 4n, to: 3456n, most: 4 },
-      { check: 'pass', orgId: other, from: 0n, to: 3456n, most: 4 },
+      { check: 'pass', orgId: failing, from: 4n, to: 1728n, most: 4 },
+      { check: 'pass', orgId: other, from: 0n, to: 1728n, most: 4 },
     ]);
 
     delete made.answer.pass;
     made.calls.length = 0;
     await made.run([failing, other]);
-    expect(made.calls[0]).toEqual({ check: 'pass', orgId: failing, from: 4n, to: 3456n, most: 4 });
+    expect(made.calls[0]).toEqual({ check: 'pass', orgId: failing, from: 4n, to: 1728n, most: 4 });
   });
 
   it('stops at 150 seconds, the step under way left to end, nothing said for it', async () => {
     vi.useFakeTimers();
     const made = rotating();
     const orgId = orgInSlot(1);
-    made.anchor(orgId, 1728n * 10_000n);
+    made.anchor(orgId, 864n * 10_000n);
     const { promise: held, resolve: letGo } = Promise.withResolvers<ChainStep>();
     made.answer.pass = () => held;
     const running = made.run([orgId]);
@@ -567,13 +567,13 @@ describe('the full pass (decision 3)', () => {
     await running;
     expect(made.missed).toEqual([]);
     expect(made.lines('audit.anchor_rotation_done')).toEqual([expect.objectContaining({ passed: '0' })]);
-    letGo(stepTo(2000n, 1728n * 10_000n));
+    letGo(stepTo(2000n, 864n * 10_000n));
   });
 
   it('takes no step in a run already ended', async () => {
     const made = rotating();
     const orgId = orgInSlot(1);
-    made.anchor(orgId, 1728n * 10_000n);
+    made.anchor(orgId, 864n * 10_000n);
     const ended = new AbortController();
     ended.abort();
     await made.run([orgId], ended.signal);
@@ -583,7 +583,7 @@ describe('the full pass (decision 3)', () => {
   it('stops when the run does', async () => {
     const made = rotating();
     const orgId = orgInSlot(1);
-    made.anchor(orgId, 1728n * 10_000n);
+    made.anchor(orgId, 864n * 10_000n);
     const ending = new AbortController();
     made.answer.pass = (_orgId, cursor, to, most) => {
       ending.abort();
@@ -598,7 +598,7 @@ describe('the full pass (decision 3)', () => {
     it('a chain whose last pass is older is late; one finished this run, or never anchored, is not', async () => {
       const made = rotating({ started: new Date(AT.getTime() - PASS_LATE_MS) });
       const [late, finishing, unanchored] = [orgInSlot(1), orgInSlot(2), orgInSlot(3)];
-      made.anchor(late, 1728n * 4000n);
+      made.anchor(late, 864n * 4000n);
       made.anchor(finishing, 0n);
       made.passes.keepPass(signPass(keys, chainOf(late), point(1n), new Date(AT.getTime() - PASS_LATE_MS)));
       made.clock.advanceBy(PASS_LATE_MS);
@@ -613,7 +613,7 @@ describe('the full pass (decision 3)', () => {
     it('in production a restart never moves the 7 days on: last passed 6.9 days ago, late within 0.1 days', async () => {
       const before = rotating();
       const orgId = orgInSlot(1);
-      before.anchor(orgId, 1728n * 4000n);
+      before.anchor(orgId, 864n * 4000n);
       before.passes.keepPass(signPass(keys, chainOf(orgId), point(1n), new Date(AT.getTime() - 6.9 * DAY)));
       await before.run([orgId]);
       expect(before.lines('audit.full_pass_overdue')).toEqual([]);
@@ -626,10 +626,40 @@ describe('the full pass (decision 3)', () => {
       expect(after.lines('audit.full_pass_overdue')).toHaveLength(1);
     });
 
+    it('a big chain passed round after round at five-minute runs is never late: two rounds stay within 7 days', async () => {
+      const made = rotating();
+      const orgId = orgInSlot(1);
+      // 864 events, a share of 1 a run: a round is 864 runs, three days. Nine days of runs, three rounds.
+      made.anchor(orgId, 864n);
+      const passedAt = new Set<number>();
+      for (let run = 0; run < 3 * 864; run += 1) {
+        await made.run([orgId]);
+        made.clock.advanceBy(5 * 60_000);
+        const last = made.passes.lastPass(chainOf(orgId))?.at.getTime();
+        if (last !== undefined) passedAt.add(last);
+      }
+      expect(passedAt.size).toBe(3);
+      expect(made.lines('audit.full_pass_overdue')).toEqual([]);
+    }, 60_000); // 2,592 runs: measured near 4 s alone, more under load.
+
+    it('a chain whose pass stalls is late, 7 days after its pass began', async () => {
+      const made = rotating();
+      const orgId = orgInSlot(1);
+      made.anchor(orgId, 864n * 10n);
+      await made.run([orgId]);
+      made.answer.pass = () => Promise.reject(new Error('the database is away'));
+      made.clock.advanceBy(PASS_LATE_MS - 1);
+      await made.run([orgId]);
+      expect(made.lines('audit.full_pass_overdue')).toEqual([]);
+      made.clock.advanceBy(1);
+      await made.run([orgId]);
+      expect(made.lines('audit.full_pass_overdue')).toEqual([expect.objectContaining({ firstFew: [orgId] })]);
+    });
+
     it('never passed: late 7 days from when it was first owed one, a place line in the store', async () => {
       const made = rotating();
       const orgId = orgInSlot(1);
-      made.anchor(orgId, 1728n * 4000n);
+      made.anchor(orgId, 864n * 4000n);
       await made.run([orgId]);
       made.clock.advanceBy(PASS_LATE_MS - 1);
       await made.run([orgId]);
@@ -642,7 +672,7 @@ describe('the full pass (decision 3)', () => {
     it('where the environment sleeps, a process woken after a long sleep says nothing for the time it slept', async () => {
       const made = rotating({ sleeps: true });
       const orgId = orgInSlot(1);
-      made.anchor(orgId, 1728n * 4000n);
+      made.anchor(orgId, 864n * 4000n);
       made.passes.keepPass(signPass(keys, chainOf(orgId), point(1n), new Date(AT.getTime() - 30 * DAY)));
       await made.run([orgId]);
       expect(made.lines('audit.full_pass_overdue')).toEqual([]);
@@ -661,7 +691,7 @@ describe('a run of the rotation', () => {
   it('days first, then the pass, and one line with what it did', async () => {
     const made = rotating();
     const orgId = orgInSlot(108);
-    made.anchor(orgId, 1728n);
+    made.anchor(orgId, 864n);
     await made.run([orgId]);
 
     expect(made.calls.map(({ check }) => check)).toEqual(['count', 'walk', 'pass']);
@@ -670,8 +700,8 @@ describe('a run of the rotation', () => {
         level: 'info',
         due: 1,
         left: 0,
-        counted: '1728',
-        walked: 1000,
+        counted: '864',
+        walked: 864,
         budget: '1',
         passed: '1',
         finished: 0,
@@ -762,7 +792,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
   it('writes the place a pass reached each run it moved, and none once it finishes', async () => {
     const made = rotating({ epoch: 2 });
     const orgId = orgInSlot(1);
-    made.anchor(orgId, 3456n);
+    made.anchor(orgId, 1728n);
     await made.run([orgId]);
     expect(made.passes.lastProgress(chainOf(orgId))).toEqual(
       signProgress(keys, chainOf(orgId), point(2n), { at: AT, began: AT }, 2),
@@ -770,7 +800,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     made.answer.pass = (_orgId, _cursor, to) => Promise.resolve({ ok: true, ...to, to: to.seq });
     await made.run([orgId]);
     expect(made.passes.lastProgress(chainOf(orgId))).toBeUndefined();
-    expect(made.passes.lastPass(chainOf(orgId))?.seq).toBe(3456n);
+    expect(made.passes.lastPass(chainOf(orgId))?.seq).toBe(1728n);
   });
 
   it('a restart goes on from the place the store holds, once the event there still holds it: no slower than unbroken', async () => {
@@ -807,7 +837,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
   it("SEC-DB-11 a place whose event no longer holds what was signed is tampering: the alarm and the hold, and the chain's pass starts again", async () => {
     const before = rotating();
     const orgId = orgInSlot(1);
-    before.anchor(orgId, 3456n);
+    before.anchor(orgId, 1728n);
     await before.run([orgId]);
     await before.run([orgId]);
 
@@ -815,16 +845,36 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     after.answer.walk = () => Promise.resolve({ ok: false, problem: { reason: 'hash', seq: 4n } });
     await after.run([orgId]);
     expect(after.failed).toEqual([[orgId, 'pass', { reason: 'hash', seq: 4n }]]);
-    expect(after.calls).toEqual([
-      { check: 'walk', orgId, to: 4n, most: 1 },
-      { check: 'pass', orgId, from: 0n, to: 3456n, most: 2 },
-    ]);
+    // Nothing more of it this run; the next starts from its first event.
+    expect(after.calls).toEqual([{ check: 'walk', orgId, to: 4n, most: 1 }]);
+    after.calls.length = 0;
+    await after.run([orgId]);
+    expect(after.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 1728n, most: 2 }]);
+  });
+
+  it('one alarm and one hold a chain a run: a chain that failed is not taken again by a round begun the same run', async () => {
+    const made = rotating();
+    const [small, failing] = [orgInSlot(1), orgInSlot(2)];
+    made.anchor(small, 1n);
+    made.anchor(failing, 864n * 10n);
+    // The first run: the small chain passed, the other under way.
+    await made.run([small, failing]);
+    expect(made.passes.lastPass(chainOf(small))).toBeDefined();
+    made.answer.pass = (orgId, cursor, to, most) =>
+      orgId === failing
+        ? Promise.resolve({ ok: false, problem: { reason: 'mac', seq: 1n } })
+        : Promise.resolve(stepTo(cursor.seq + BigInt(most), to.seq));
+    made.calls.length = 0;
+    await made.run([small, failing]);
+    // It fails under way; the round begun again then puts it first, never passed: it is not taken again.
+    expect(made.failed).toEqual([[failing, 'pass', { reason: 'mac', seq: 1n }]]);
+    expect(made.calls.filter((call) => call.orgId === failing)).toHaveLength(1);
   });
 
   it("a place whose pass began more than 7 days ago isn't gone on from: that pass starts again, its lateness kept", async () => {
     const before = rotating();
     const orgId = orgInSlot(1);
-    before.anchor(orgId, 1728n * 4000n);
+    before.anchor(orgId, 864n * 4000n);
     await before.run([orgId]);
     const owed = before.passes.lastProgress(chainOf(orgId))?.at;
 
@@ -842,7 +892,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
   it('a step that fails leaves a place at the start: the next round reads the chain whole', async () => {
     const made = rotating();
     const orgId = orgInSlot(1);
-    made.anchor(orgId, 3456n);
+    made.anchor(orgId, 1728n);
     await made.run([orgId]);
     await made.run([orgId]);
     made.answer.pass = () => Promise.resolve({ ok: false, problem: { reason: 'mac', seq: 5n } });
@@ -852,13 +902,13 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     // A restart: nothing goes on from below what failed.
     const after = rotating({ after: made });
     await after.run([orgId]);
-    expect(after.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 3456n, most: 2 }]);
+    expect(after.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 1728n, most: 2 }]);
   });
 
   describe("a chain whose read didn't come back is tried first next run, not a round later", () => {
     const three = (made: ReturnType<typeof rotating>) => {
       const orgs = [orgInSlot(1), orgInSlot(2), orgInSlot(3)];
-      for (const orgId of orgs) made.anchor(orgId, 1728n * 2n);
+      for (const orgId of orgs) made.anchor(orgId, 864n * 2n);
       return orgs;
     };
 
@@ -924,8 +974,8 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
   it('a chain never reached is owed a pass from when it was first seen anchored, across restarts', async () => {
     const before = rotating();
     const [reached, waiting] = [orgInSlot(1), orgInSlot(2)];
-    before.anchor(reached, 1728n * 4000n);
-    before.anchor(waiting, 1728n * 4000n);
+    before.anchor(reached, 864n * 4000n);
+    before.anchor(waiting, 864n * 4000n);
     await before.run([reached, waiting]);
     expect(new Set(before.calls.map(({ orgId }) => orgId))).toEqual(new Set([reached]));
     expect(before.passes.lastProgress(chainOf(waiting))).toMatchObject({ seq: 0n, at: AT });
@@ -943,10 +993,10 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
   it("a place past the chain's anchor, or a check of it that doesn't come back, goes on safely", async () => {
     const before = rotating();
     const orgId = orgInSlot(1);
-    before.anchor(orgId, 3456n);
+    before.anchor(orgId, 1728n);
     before.passes.keepProgress(signProgress(keys, chainOf(orgId), point(5000n), { at: AT, began: AT }));
     await before.run([orgId]);
-    expect(before.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 3456n, most: 2 }]);
+    expect(before.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 1728n, most: 2 }]);
 
     const after = rotating({ after: before });
     const away = new Error('the database is away');
