@@ -17,12 +17,14 @@ import {
   type CheckedPoint,
   createAnchorLog,
   readRebaseFile,
+  rebaseFile,
   signAnchor,
+  signRebase,
 } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, databaseNow, lockName, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { type Output } from '@agentx/platform/observability';
-import { folderWriteOnceStore } from '@agentx/platform/storage';
+import { folderWriteOnceStore, OverwriteRefused } from '@agentx/platform/storage';
 import {
   createTestDatabase,
   holdNamedLock,
@@ -55,7 +57,47 @@ const faults = vi.hoisted(() => ({
   readOnly: [] as boolean[],
   /** Fails the next work through the signed states once (a rebase's event, E11). */
   signedStates: undefined as Error | undefined,
+  /** Fails the next platform event recorded on its own once (a rebase's event, E11). */
+  platformRecord: undefined as Error | undefined,
+  /** Fails the next file written to a folder store once (a rebase's file, E11). */
+  storePut: undefined as Error | undefined,
 }));
+
+vi.mock('@agentx/core/modules/platform-controls', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/core/modules/platform-controls')>();
+  return {
+    ...actual,
+    createPlatformChain: (...args: Parameters<typeof actual.createPlatformChain>) => {
+      const chain = actual.createPlatformChain(...args);
+      return {
+        ...chain,
+        recordAlone: (...more: Parameters<typeof chain.recordAlone>) => {
+          const fault = faults.platformRecord;
+          faults.platformRecord = undefined;
+          return fault === undefined ? chain.recordAlone(...more) : Promise.reject(fault);
+        },
+      };
+    },
+  };
+});
+
+vi.mock('@agentx/platform/storage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/platform/storage')>();
+  return {
+    ...actual,
+    folderWriteOnceStore: (...args: Parameters<typeof actual.folderWriteOnceStore>) => {
+      const store = actual.folderWriteOnceStore(...args);
+      return {
+        ...store,
+        put: (...more: Parameters<typeof store.put>) => {
+          const fault = faults.storePut;
+          faults.storePut = undefined;
+          return fault === undefined ? store.put(...more) : Promise.reject(fault);
+        },
+      };
+    },
+  };
+});
 
 vi.mock('@agentx/core/modules/audit', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/core/modules/audit')>();
@@ -96,6 +138,8 @@ afterEach(() => {
   faults.create = undefined;
   faults.readOnly = [];
   faults.signedStates = undefined;
+  faults.platformRecord = undefined;
+  faults.storePut = undefined;
 });
 
 const server = inject('postgres');
@@ -1252,6 +1296,105 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
     const at = Date.parse(String(done.line('operator.chain_rebased')?.at));
     expect(at).toBeGreaterThanOrEqual(before.getTime());
     expect(at).toBeLessThanOrEqual((await databaseNow(app)).getTime());
+  });
+
+  /** An organisation whose chain holds two events, its first anchored with another hash: wound back and grown again. */
+  async function grownAgainOnAWoundBackHead(): Promise<{ orgId: string; head: CheckedPoint }> {
+    const orgId = await madeOrganisation();
+    await withTenant(app, orgId, (tx) =>
+      createAuditTrail({ keys: auditKeys, ids: uuidV7Ids }).record(tx, orgId, {
+        actor: { type: 'system', id: 'api' },
+        action: 'probe.noted',
+        subject: { type: 'probe', id: orgId, version: 1 },
+        details: { n: 1 },
+      }),
+    );
+    const head = await headOf({ kind: 'organisation', orgId });
+    const log = apiLog();
+    await log.read();
+    const first = { seq: 1n, hash: Buffer.alloc(32, 9), macKeyVersion: head.macKeyVersion };
+    log.keep(signAnchor(apiAnchorKey, { kind: 'organisation', orgId }, first, new Date(), 1));
+    await log.flush();
+    return { orgId, head };
+  }
+
+  it('moves a chain grown again past a wound-back anchor on to its head, giving up nothing', async () => {
+    const { orgId, head } = await grownAgainOnAWoundBackHead();
+    const { code, events, line } = await rebase(orgId, head).running;
+    expect(code).toBe(0);
+    expect(events).not.toContain('operator.chain_rebase_shorter');
+    expect(line('operator.chain_rebased')).toMatchObject({ seq: String(head.seq), anchorSeq: '1', shorterBy: '0' });
+  });
+
+  it('SEC-DB-11 refuses a chain that fails its own check past where it fails its anchor', async () => {
+    const { orgId, head } = await grownAgainOnAWoundBackHead();
+    await database
+      .as('admin')
+      .query(`update audit.events set details = '{"forged":1}' where org_id = $1 and seq = 2`, [orgId]);
+    const { code, line } = await rebase(orgId, head).running;
+    expect(code).toBe(1);
+    expect(line('operator.chain_rebase_refused')).toMatchObject({ reason: 'broken', seq: '2' });
+  });
+
+  it('finishes a rebase found in the store for a chain that had no anchor before, its record naming none', async () => {
+    const orgId = await madeOrganisation();
+    const head = await headOf({ kind: 'organisation', orgId });
+    const id = uuidV7Ids.next();
+    const fresh = signRebase(auditKeys, 1, {
+      id,
+      chain: `organisation:${orgId}`,
+      seq: head.seq,
+      hash: head.hash,
+      macKeyVersion: head.macKeyVersion,
+      at: await databaseNow(app),
+      reason: 'recovered',
+      evidence: EVIDENCE,
+      from: null,
+    });
+    await folderWriteOnceStore(anchors).put(`e1/rebases/${id}`, rebaseFile(fresh));
+    const { code, line } = await rebase(orgId, head, { id }).running;
+    expect(code).toBe(0);
+    expect(line('operator.rebase_recorded')).toMatchObject({ rebaseId: id });
+    expect(JSON.parse(String((await newestEvent(orgId))?.details))).toMatchObject({ rebaseId: id, fromSeq: null });
+  });
+
+  it("says the record failed when the organisation's audit log about the rebase can't be verified", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 1n);
+    const { id, asked, running } = rebase(orgId, head);
+    expect((await running).code).toBe(0);
+    await database
+      .as('admin')
+      .query(`update audit.events set details = '{"forged":1}' where org_id = $1 and subject_id = $2`, [orgId, id]);
+    const again = await run(['--request', asked], env());
+    expect(again.code).toBe(1);
+    expect(again.line('operator.rebase_not_recorded')).toMatchObject({ rebaseId: id });
+    expect(again.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: 'failed' });
+  });
+
+  it("says the platform chain's record failed, for any refusal but its own event there already", async () => {
+    const head = await anchoredAhead({ kind: 'platform' }, 2n);
+    faults.platformRecord = new Error('the database went away');
+    const { id, running } = rebase('platform', head);
+    const { code, line } = await running;
+    expect(code).toBe(1);
+    expect(line('operator.rebase_not_recorded')).toMatchObject({ rebaseId: id });
+    expect(line('operator.chain_rebased')).toMatchObject({ recorded: 'failed' });
+  });
+
+  it("refuses a rebase whose file another run wrote first, and fails on any other failure of the store's write", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 1n);
+    faults.storePut = new OverwriteRefused();
+    const raced = await rebase(orgId, head).running;
+    expect(raced.code).toBe(1);
+    expect(raced.line('operator.done_before')).toMatchObject({ command: 'chain-rebase', recorded: null });
+
+    faults.storePut = new Error('the store went away');
+    const failed = await rebase(orgId, head).running;
+    expect(failed.code).toBe(1);
+    expect(failed.line('operator.failed')).toMatchObject({ command: 'chain-rebase' });
+    expect((await headOf({ kind: 'organisation', orgId })).seq).toBe(head.seq);
   });
 
   it('refuses a chain that holds its anchor, or has none: nothing to move', async () => {

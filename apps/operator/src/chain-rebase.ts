@@ -236,7 +236,8 @@ export async function rebaseChain({
   const anchor = anchors.latest(chain);
   const held = await checkWhole(live, keys, chain, anchor);
   if (held.ok) return { ok: false, reason: 'not_needed', ...(anchor === undefined ? {} : { seq: anchor.seq }) };
-  if (held.problem.reason !== 'anchor') {
+  // Only a chain failing against its anchor is what a rebase is for: with no anchor, a failure is the chain's own.
+  if (held.problem.reason !== 'anchor' || anchor === undefined) {
     return { ok: false, reason: 'broken', problem: held.problem.reason, seq: held.problem.seq };
   }
   // Whole but for the anchor: checked again without it, for the head it reaches, which must be the place asked.
@@ -245,12 +246,12 @@ export async function rebaseChain({
   if (whole.seq !== asked.seq || !whole.hash.equals(asked.hash)) {
     return { ok: false, reason: 'head_differs', seq: whole.seq };
   }
-  const shorterBy = anchor !== undefined && anchor.seq > whole.seq ? anchor.seq - whole.seq : 0n;
+  const shorterBy = anchor.seq > whole.seq ? anchor.seq - whole.seq : 0n;
   if (shorterBy > 0n) {
     logger.warn('operator.chain_rebase_shorter', {
       rebaseId: asked.id,
       seq: whole.seq,
-      anchorSeq: anchor?.seq ?? null,
+      anchorSeq: anchor.seq,
       shorterBy,
     });
   }
@@ -265,7 +266,7 @@ export async function rebaseChain({
     at: await databaseNow(live),
     reason: asked.reason,
     evidence: asked.evidence,
-    from: anchor?.seq ?? null,
+    from: anchor.seq,
   });
   try {
     await store.put(rebaseFileName(anchors.epoch, asked.id), rebaseFile(rebase));
