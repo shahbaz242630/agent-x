@@ -77,9 +77,9 @@ interface HeadRow {
 async function headOf(database: TestDatabase): Promise<HeadRow> {
   let row: HeadRow | undefined;
   await tamper(database, async (admin) => {
-    [row] = (await admin.query('select seq, hash, mac, mac_key_version from audit.heads where org_id = $1', [
+    [row] = await admin.query<HeadRow>('select seq, hash, mac, mac_key_version from audit.heads where org_id = $1', [
       orgId,
-    ])) as HeadRow[];
+    ]);
   });
   if (row === undefined) throw new Error('The chain has no head');
   return row;

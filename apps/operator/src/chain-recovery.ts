@@ -120,8 +120,8 @@ async function* sideBySide(
   while (onCopy.done !== true || onLive.done !== true) {
     const c = onCopy.done === true ? undefined : onCopy.value;
     const l = onLive.done === true ? undefined : onLive.value;
-    // The lower number first; both where they share one.
-    const seq = c === undefined || (l !== undefined && l.seq < c.seq) ? (l as StoredRow).seq : c.seq;
+    // The lower number first; both where they share one. One side at least has a row, or the loop has ended.
+    const seq = [c, l].flatMap((row) => (row === undefined ? [] : [row.seq])).reduce((a, b) => (b < a ? b : a));
     const takeCopy = c?.seq === seq;
     const takeLive = l?.seq === seq;
     yield { seq, ...(takeCopy ? { copy: c } : {}), ...(takeLive ? { live: l } : {}) };
@@ -209,9 +209,11 @@ function createPlanner(
   };
 
   /** A live row in the copy's stretch: the same, missing, damaged, or another sealed by us. */
-  const inCopy = (seq: bigint, copy: StoredRow, live: StoredRow | undefined): Refused | undefined => {
-    // The copy's whole check read every row up to its head, so each one here is read and sealed.
-    const { entry, columns } = copy.read as NonNullable<StoredRow['read']>;
+  const inCopy = (
+    seq: bigint,
+    { entry, columns }: NonNullable<StoredRow['read']>,
+    live: StoredRow | undefined,
+  ): Refused | undefined => {
     if (seq === anchor?.seq) atAnchor = entry;
     if (live === undefined) return plan({ action: 'put_back', seq, columns });
     if (isOriginal(live, entry)) return undefined;
@@ -245,7 +247,8 @@ function createPlanner(
     take(seq: bigint, copy: StoredRow | undefined, live: StoredRow | undefined): Refused | undefined {
       // The copy holds nothing below 1 (its whole check counted every row), so a row there is live and never the app's.
       if (seq < 1n) return plan({ action: 'remove', seq });
-      if (copy !== undefined) return inCopy(seq, copy, live);
+      // The copy's whole check read every row up to its head, so each of its rows here is read and sealed.
+      if (copy?.read !== undefined) return inCopy(seq, copy.read, live);
       return live === undefined ? undefined : pastCopy(seq, live);
     },
 
@@ -257,7 +260,7 @@ function createPlanner(
       if (end.seq === copied.seq) {
         const live = liveHeads.first;
         replaceHead = live !== undefined && sameHead(live, copyHead) ? undefined : copyHead;
-      } else if (head === undefined || !head.hash.equals(end.hash)) {
+      } else if (head?.hash.equals(end.hash) !== true) {
         // Grown on past the copy, but no original head row stands at its end (a hash names its event's number too).
         return refused('new_seal', end.seq);
       }

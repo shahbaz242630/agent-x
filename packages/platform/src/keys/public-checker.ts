@@ -18,6 +18,8 @@ export function publicKeyChecker(purpose: SigningPurpose, publicKeys: ReadonlyMa
       throw new KeyError(`${purpose}'s public key version ${String(version)} isn't an Ed25519 public key`);
     }
   }
+  // By purpose, so another signing purpose's signature is never checked with these.
+  const byPurpose = new Map<SigningPurpose, ReadonlyMap<number, KeyObject>>([[purpose, keys]]);
   const refuse = (): never => {
     throw new KeyError(`This process holds only ${purpose}'s public keys: it checks a signature, and nothing more`);
   };
@@ -28,7 +30,7 @@ export function publicKeyChecker(purpose: SigningPurpose, publicKeys: ReadonlyMa
     decrypt: refuse,
     sign: refuse,
     verifySignature(asked, version, message, signature) {
-      const key = asked === purpose ? keys.get(version) : undefined;
+      const key = byPurpose.get(asked)?.get(version);
       return key !== undefined && verify(null, encodeMessage(message), key, signature);
     },
     describe: () => [],
