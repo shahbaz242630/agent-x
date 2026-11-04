@@ -120,7 +120,19 @@ export interface ChainEdges {
   readonly headEventHash: Buffer | undefined;
   /** The event at the number asked, whole; undefined if there is none or its row can't be read. */
   readonly anchored: StoredEntry | undefined;
+  /** How many events are stored among the last LAST_COUNTED numbered up to the head: 0 with no head. */
+  readonly lastStored: bigint;
 }
+
+/**
+ * How many of a chain's last events every read of its edges counts (4D2e decision 1): one deleted among them is seen
+ * the next run, which no read of a signed state can see. Older ones are the day's count's (anchor-rotation.ts).
+ */
+export const LAST_COUNTED = 1000;
+
+/** What the probe makes of a chain's edges against its anchor (probeEdges): no read of an event between. */
+export type ChainProbe =
+  { readonly kind: 'same' } | { readonly kind: 'moved' } | { readonly kind: 'failed'; readonly problem: ChainProblem };
 
 /** What checking from an anchor needs: nothing that reads a whole chain. */
 export interface ChainEdgeReader extends Pick<ChainReader, 'events'> {
@@ -343,6 +355,47 @@ function edgeProblem(
   return nothingStored || headEventHash?.equals(head.hash) === true ? undefined : atHead;
 }
 
+/** Whether every one of the last LAST_COUNTED events up to the head is stored: a count can't say which is gone, so where the stretch starts. */
+function lastCountProblem({ lastStored }: ChainEdges, head: ChainHead): ChainProblem | undefined {
+  const counted = head.seq < BigInt(LAST_COUNTED) ? head.seq : BigInt(LAST_COUNTED);
+  return lastStored === counted ? undefined : { reason: 'gap', seq: head.seq - counted + 1n };
+}
+
+/**
+ * What the edges show against the place a check starts from: the problem, the chain with no head and nothing in it
+ * (only from the start), or its head, sealed, not behind `from`, with the event at `from` the one signed.
+ */
+function fromEdges(
+  keys: KeyProvider,
+  chain: Chain,
+  edges: ChainEdges,
+  from: CheckedPoint,
+): ChainRefusal | { readonly head: ChainHead | undefined } {
+  const { head } = edges;
+  if (head === 'none') {
+    const report = headlessReport(edges.highest === null ? 0n : 1n, from);
+    return report.ok ? { head: undefined } : report;
+  }
+  if (head === 'unreadable') return NO_HEAD;
+  const problem = edgeProblem(keys, chain, edges, head, from);
+  if (problem !== undefined) return { ok: false, problem };
+  return holdsPoint(keys, chain, from, edges.anchored) ? { head } : refused('anchor', from.seq);
+}
+
+/**
+ * The probe of one chain (4D2e E8): its edges, read in one statement, against its anchor. `same` is a chain that
+ * hasn't moved, whole at its edges, its anchored event the one signed and none of its last LAST_COUNTED gone; `moved`
+ * one whose events past the anchor are for verifyFromAnchor to walk, the count with them.
+ */
+export function probeEdges(keys: KeyProvider, chain: Chain, edges: ChainEdges, from: CheckedPoint): ChainProbe {
+  const found = fromEdges(keys, chain, edges, from);
+  if ('ok' in found) return { kind: 'failed', problem: found.problem };
+  if (found.head === undefined) return { kind: 'same' };
+  if (found.head.seq > from.seq) return { kind: 'moved' };
+  const problem = lastCountProblem(edges, found.head);
+  return problem === undefined ? { kind: 'same' } : { kind: 'failed', problem };
+}
+
 /**
  * Whether the chain still holds the place it is checked from: the event there
  * whole, sealed, with the hash and the MAC key's version `from` was signed with.
@@ -383,10 +436,11 @@ function checkedMost(most: number): number {
 /**
  * Checks a chain from its last anchor (4D2e E): the edges in one read, then only
  * the events past the anchor, at most `most` of them. Takes a chain that hasn't
- * moved in one read. What it can't see is an event edited or deleted below the
- * anchor: passStep and countStep are for those. verifyChain stays whole, for
- * clearing a hold and for the restore check. A report short of the head (`seq`
- * below `to`) is good as far as it went, and the anchor can move on to it.
+ * moved in one read. What it can't see is an event edited below the anchor, or
+ * deleted below the last LAST_COUNTED: passStep, walkLast and countStep are for
+ * those. verifyChain stays whole, for clearing a hold and for the restore check.
+ * A report short of the head (`seq` below `to`) is good as far as it went, and
+ * the anchor can move on to it.
  */
 export async function verifyFromAnchor(
   keys: KeyProvider,
@@ -397,22 +451,19 @@ export async function verifyFromAnchor(
 ): Promise<ChainStep> {
   checkedMost(most);
   const edges = await reader.edges(from.seq);
-  const { head } = edges;
-  if (head === 'none') {
-    const report = headlessReport(edges.highest === null ? 0n : 1n, from);
-    return report.ok ? { ...report, to: 0n } : report;
-  }
-  if (head === 'unreadable') return NO_HEAD;
-  const problem = edgeProblem(keys, chain, edges, head, from);
-  if (problem !== undefined) return { ok: false, problem };
-  if (!holdsPoint(keys, chain, from, edges.anchored)) return refused('anchor', from.seq);
+  const found = fromEdges(keys, chain, edges, from);
+  if ('ok' in found) return found;
+  const { head } = found;
+  if (head === undefined) return { ok: true, ...CHAIN_START, to: 0n };
 
   const upTo = head.seq < from.seq + BigInt(most) ? head.seq : from.seq + BigInt(most);
   const report = await walkTo(keys, chain, reader, from, upTo);
   if (!report.ok) return report;
   // The events read after the edges must end at the hash the head holds: the edges alone only compare the stored row.
   if (report.seq === head.seq && !report.hash.equals(head.hash)) return refused('head', head.seq);
-  return { ...report, to: head.seq };
+  // After the walk, which says where an event past the anchor is missing; the count alone says only where it starts.
+  const missing = lastCountProblem(edges, head);
+  return missing === undefined ? { ...report, to: head.seq } : { ok: false, problem: missing };
 }
 
 /**
@@ -492,16 +543,16 @@ const numberIn = (value: unknown): bigint | null | undefined =>
 
 /**
  * A chain's edges from the one row a store's edges() read: the head's columns
- * as `head_*`, how many heads there are as `heads`, `lowest`, `highest` and
- * `head_event_hash`, and the anchored event's as sealedFields reads them, with
- * its content made by the store. A column of the wrong type reads as a head
- * that can't be read: the database owner could have changed any of them.
+ * as `head_*`, how many heads there are as `heads`, `lowest`, `highest`,
+ * `head_event_hash` and `last_stored`, and the anchored event's as sealedFields
+ * reads them, with its content made by the store. A column of the wrong type
+ * reads as a head that can't be read: the database owner could have changed any of them.
  */
 export function edgesIn(
   row: Readonly<Record<string, unknown>>,
   content: StoredEntry['content'] | undefined,
 ): ChainEdges {
-  const { heads, lowest, highest, head_event_hash: headEventHash } = row;
+  const { heads, lowest, highest, head_event_hash: headEventHash, last_stored: lastStored } = row;
   const [low, high] = [numberIn(lowest), numberIn(highest)];
   const sealed = sealedFields(row);
   const shared = {
@@ -509,8 +560,10 @@ export function edgesIn(
     highest: high ?? null,
     headEventHash: isBytes(headEventHash) ? headEventHash : undefined,
     anchored: sealed === undefined || content === undefined ? undefined : { ...sealed, content },
+    lastStored: typeof lastStored === 'bigint' ? lastStored : 0n,
   };
-  if (low === undefined || high === undefined) return { ...shared, head: 'unreadable' };
+  if (low === undefined || high === undefined || typeof lastStored !== 'bigint')
+    return { ...shared, head: 'unreadable' };
   if (heads === 0n) return { ...shared, head: 'none' };
   const head = headFields({
     seq: row.head_seq,

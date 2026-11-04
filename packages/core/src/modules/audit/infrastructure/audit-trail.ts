@@ -56,7 +56,9 @@ import {
   type Chain,
   type ChainBatchWriter,
   type ChainEdgeReader,
+  type ChainEdges,
   type ChainHead,
+  type ChainProbe,
   type ChainProblem,
   type ChainReader,
   type ChainReport,
@@ -69,7 +71,9 @@ import {
   entryIsSealed,
   headFields,
   headIsSealed,
+  LAST_COUNTED,
   passStep,
+  probeEdges,
   sealedFields,
   type StateSeal,
   stateSealIn,
@@ -84,6 +88,7 @@ import {
   type GatheredRead,
   timedLock,
   JOB_ANSWER_WITHIN_MS,
+  readEachTenant,
   sendTogether,
   type SentTogether,
   withTenant,
@@ -252,6 +257,21 @@ export class TooManyEventsAboutObject extends Error {
   }
 }
 
+/** One organisation's chain to probe, and the place it is probed against: its anchor. */
+export interface ProbeAsked {
+  readonly orgId: string;
+  readonly from: CheckedPoint;
+}
+
+/** What the probe found of one chain, or that its read failed. */
+export type HeadProbe = ChainProbe | { readonly kind: 'missed'; readonly error: unknown };
+
+/**
+ * How many organisations one transaction of the probe reads, all on one trip: two statements each. 500 keeps a page's
+ * answers inside a trip's limit on a slow day (measured, 4D2e E8).
+ */
+const PROBE_PAGE = 500;
+
 export interface AuditTrail {
   /**
    * Adds the event to the organisation's chain, in the caller's transaction:
@@ -301,6 +321,17 @@ export interface AuditTrail {
   countStep(db: Kysely<AuditTables>, orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
   /** The chain's last `most` events up to `target` walked (walkLast, 4D2e E7), in a transaction as passStep's. */
   walkLast(db: Kysely<AuditTables>, orgId: string, target: CheckedPoint, most: number): Promise<ChainStep>;
+  /**
+   * Each organisation's chain probed against the place given (probeEdges, 4D2e E8): its edges and its last events
+   * counted, one statement each under that organisation's own wall, PROBE_PAGE of them a transaction and a trip
+   * (readEachTenant). Stops between pages once `signal` aborts: those not reached are not in the answer. One whose
+   * read failed is `missed`, with why.
+   */
+  probeHeads(
+    db: Kysely<AuditTables>,
+    chains: readonly ProbeAsked[],
+    signal?: AbortSignal,
+  ): Promise<ReadonlyMap<string, HeadProbe>>;
   /**
    * Whether the organisation's chain still holds its last anchor, in one read:
    * its head not behind it, and the event anchored there the one anchored (not
@@ -903,26 +934,36 @@ interface Along {
   rows?: readonly Readonly<Record<string, unknown>>[] | undefined;
 }
 
+/**
+ * A chain's edges and the event numbered `anchored` (ChainEdgeReader.edges), in one statement, so all of it comes from
+ * one moment; each on the events' key, whatever the chain's length. The probe sends it for each organisation in turn.
+ */
+const edgesRead = (orgId: string, anchored: bigint) => sql<Record<string, unknown>>`
+  select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${orgId}) as heads,
+         h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
+         (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${orgId}) as lowest,
+         (select pg_catalog.max(p.seq) from audit.events p where p.org_id = ${orgId}) as highest,
+         (select p.hash from audit.events p where p.org_id = ${orgId} and p.seq = h.seq limit 1) as head_event_hash,
+         (select pg_catalog.count(*) from audit.events p
+          where p.org_id = ${orgId} and p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
+         ${EVENT_COLUMNS}
+  from (values (1)) as one (x)
+  left join (select * from audit.heads a where a.org_id = ${orgId} limit 1) as h on true
+  left join audit.events e on e.org_id = ${orgId} and e.seq = ${anchored}
+`;
+
+/** The edges from edgesRead's rows: one always (`values` and left joins), but two where two events share a number, the table's key gone, and neither is the one anchored. */
+function edgesOf(rows: readonly Readonly<Record<string, unknown>>[]): ChainEdges {
+  const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
+  return edgesIn(row, contentOf(row));
+}
+
 /** Checking's reads of the audit tables, for one organisation. */
 function readerFor(tx: AuditTransaction, orgId: string): ChainReader & ChainEdgeReader {
   return {
     async edges(anchored) {
-      // One statement, so all of it comes from one moment. Each on the events' key, whatever the chain's length.
-      const { rows } = await sql<Record<string, unknown>>`
-        select (select pg_catalog.count(*) from audit.heads c where c.org_id = ${orgId}) as heads,
-               h.seq as head_seq, h.hash as head_hash, h.mac as head_mac, h.mac_key_version as head_mac_key_version,
-               (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${orgId}) as lowest,
-               (select pg_catalog.max(p.seq) from audit.events p where p.org_id = ${orgId}) as highest,
-               (select p.hash from audit.events p where p.org_id = ${orgId} and p.seq = h.seq limit 1) as head_event_hash,
-               ${EVENT_COLUMNS}
-        from (values (1)) as one (x)
-        left join (select * from audit.heads a where a.org_id = ${orgId} limit 1) as h on true
-        left join audit.events e on e.org_id = ${orgId} and e.seq = ${anchored}
-      `.execute(tx);
-      // One row always (`values` and left joins), but two where two events share a number, the table's key
-      // gone: neither is the one anchored.
-      const row = rows.length > 1 ? { ...rows[0], seq: null } : { ...rows[0] };
-      return edgesIn(row, contentOf(row));
+      const { rows } = await edgesRead(orgId, anchored).execute(tx);
+      return edgesOf(rows);
     },
 
     async countBetween(after, upTo) {
@@ -1307,9 +1348,7 @@ export function createAuditTrail({
         db,
         chain.orgId,
         (tx) => verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId), from, most),
-        {
-          limited: true,
-        },
+        JOB_LIMITS,
       );
     },
 
@@ -1347,6 +1386,39 @@ export function createAuditTrail({
         (tx) => walkLast(keys, chain, readerFor(tx, chain.orgId), target, most),
         JOB_LIMITS,
       );
+    },
+
+    async probeHeads(
+      db: Kysely<AuditTables>,
+      chains: readonly ProbeAsked[],
+      signal?: AbortSignal,
+    ): Promise<ReadonlyMap<string, HeadProbe>> {
+      // Once each, in lower case, as the wall and the anchors name them.
+      const byOrganisation = new Map<string, ProbeAsked>();
+      for (const { orgId, from } of chains) {
+        const id = chainOf(orgId).orgId;
+        byOrganisation.set(id, { orgId: id, from });
+      }
+      const asked = [...byOrganisation.values()];
+      const found = new Map<string, HeadProbe>();
+      for (let at = 0; at < asked.length && signal?.aborted !== true; at += PROBE_PAGE) {
+        const reads = await readEachTenant(
+          db,
+          asked.slice(at, at + PROBE_PAGE),
+          ({ orgId, from }) => edgesRead(orgId, from.seq),
+          { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
+        );
+        for (const { item, read } of reads) {
+          const { orgId, from } = item;
+          found.set(
+            orgId,
+            'failed' in read
+              ? { kind: 'missed', error: read.failed }
+              : probeEdges(keys, chainOf(orgId), edgesOf(read.rows), from),
+          );
+        }
+      }
+      return found;
     },
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {

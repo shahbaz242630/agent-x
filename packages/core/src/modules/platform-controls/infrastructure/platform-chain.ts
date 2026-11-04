@@ -24,6 +24,7 @@ import {
   edgesIn,
   entryIsSealed,
   headFields,
+  LAST_COUNTED,
   passStep,
   sealedFields,
   type StoredEntry,
@@ -220,6 +221,8 @@ function readerFor(tx: PlatformTransaction): ChainReader & ChainEdgeReader {
                (select pg_catalog.min(p.seq) from platform_controls.audit_events p) as lowest,
                (select pg_catalog.max(p.seq) from platform_controls.audit_events p) as highest,
                (select p.hash from platform_controls.audit_events p where p.seq = h.seq limit 1) as head_event_hash,
+               (select pg_catalog.count(*) from platform_controls.audit_events p
+                where p.seq > h.seq - ${LAST_COUNTED} and p.seq <= h.seq) as last_stored,
                e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
         from (values (1)) as one (x)
         left join (select * from platform_controls.audit_head limit 1) as h on true
@@ -368,7 +371,9 @@ export function createPlatformChain({
     },
 
     checkFromAnchor(db: Kysely<PlatformControlsTables>, from: CheckedPoint, most?: number): Promise<ChainStep> {
-      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx), from, most));
+      return limitedTransaction(db, (tx) => verifyFromAnchor(keys, CHAIN, readerFor(tx), from, most), {
+        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+      });
     },
 
     passStep(
