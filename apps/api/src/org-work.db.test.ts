@@ -418,7 +418,7 @@ describe('the hourly look', () => {
     await ask(acting, w, { amount: ALLOWED() });
     // The jobs' clock a day on: the payment's ten minutes long past, its mark settled then, as a visit leaves one stuck.
     const lookClock = new FixedClock(new Date(Date.now() + 24 * 60 * 60_000));
-    let settled: Awaited<ReturnType<typeof marksOf>>['hand_off_sweep'];
+    let settled: { due_at: Date; marks: string } | undefined;
     await handoffOf(w, {
       ...w.rail,
       submitApprovedIntent: async (intent) => {
