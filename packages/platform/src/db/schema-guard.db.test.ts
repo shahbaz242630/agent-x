@@ -1765,6 +1765,12 @@ describe('a primary key or unique constraint, held to what the migrations built 
       `${EVENTS} drop constraint planted`,
       `audit.events's key "planted" is not one the migrations built`,
     ],
+    [
+      'planted as a unique index alone, which makes no constraint (round 2 review)',
+      'create unique index planted on audit.events (org_id, id, seq)',
+      'drop index audit.planted',
+      `audit.events's key "planted" is not one the migrations built`,
+    ],
   ])('names one %s', async (_what, tamper, undo, problem) => {
     // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, written above.
     await owner.query(tamper);

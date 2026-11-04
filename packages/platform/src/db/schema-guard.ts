@@ -622,7 +622,10 @@ export interface CheckConstraint {
   readonly validated: boolean;
 }
 
-/** A primary key or unique constraint, as pg_get_constraintdef prints it: its kind and columns. */
+/**
+ * A primary key or unique constraint, as pg_get_constraintdef prints it (its kind and columns), or a unique index no
+ * constraint stands on, as pg_get_indexdef prints it.
+ */
 export interface KeyConstraint {
   readonly table: string;
   readonly name: string;
@@ -987,6 +990,9 @@ export async function checkConstraints<Schema>(db: Kysely<Schema>): Promise<Chec
 
 /** Every primary key and unique constraint in our schemas, as Postgres prints it. */
 export async function keyConstraints<Schema>(db: Kysely<Schema>): Promise<KeyConstraint[]> {
+  // And every whole unique index no constraint stands on (a planted `create unique index` makes no constraint), as
+  // pg_get_indexdef prints it: one a constraint stands on is that constraint's, named once. A partial one is the
+  // schema policy's (partialUniqueIndexes), held there whole; plain indexes aren't keys.
   const { rows } = await sql<KeyConstraint>`
     select ${QUALIFIED} as table,
            con.conname as name,
@@ -995,6 +1001,16 @@ export async function keyConstraints<Schema>(db: Kysely<Schema>): Promise<KeyCon
     join pg_catalog.pg_class c on c.oid = con.conrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     where ${OURS} and con.contype in ('p', 'u')
+    union all
+    select ${QUALIFIED} as table,
+           ic.relname as name,
+           pg_catalog.pg_get_indexdef(i.indexrelid) as definition
+    from pg_catalog.pg_index i
+    join pg_catalog.pg_class ic on ic.oid = i.indexrelid
+    join pg_catalog.pg_class c on c.oid = i.indrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS} and i.indisunique and i.indpred is null
+      and not exists (select from pg_catalog.pg_constraint k where k.conindid = i.indexrelid and k.conrelid = i.indrelid)
     order by 1, 2
   `.execute(db);
   return [...rows];
@@ -1233,8 +1249,11 @@ function builtKeyProblems(
   live: readonly KeyConstraint[],
   built: readonly KeyConstraint[],
   builtTables: ReadonlySet<string>,
+  partial: SchemaPolicy['partialUniqueIndexes'],
 ): SchemaProblem[] {
-  const id = ({ table, name }: KeyConstraint): string => JSON.stringify([table, name]);
+  const id = ({ table, name }: Pick<KeyConstraint, 'table' | 'name'>): string => JSON.stringify([table, name]);
+  // A listed partial index's name is the policy's to hold, whatever stands under it: said once, there.
+  const policyHolds = new Set(partial.map(id));
   const named = ({ table, name }: KeyConstraint): string => `${table}'s key ${quoted(name)}`;
   const liveById = new Map(live.map((one) => [id(one), one]));
   const builtIds = new Set(built.map(id));
@@ -1245,7 +1264,7 @@ function builtKeyProblems(
       return found.definition === one.definition ? [] : [`${named(one)} reads differently`];
     }),
     ...live
-      .filter((one) => builtTables.has(one.table) && !builtIds.has(id(one)))
+      .filter((one) => builtTables.has(one.table) && !builtIds.has(id(one)) && !policyHolds.has(id(one)))
       .map((one) => `${named(one)} is not one the migrations built`),
   ];
 }
@@ -1929,7 +1948,7 @@ export async function liveSchemaDrift<Schema>(
     atOnce: inOrder(problems),
     releaseShaped: inOrder([
       ...builtCheckProblems(allChecks, builtChecks),
-      ...builtKeyProblems(allKeys, builtKeys, new Set(builtTables)),
+      ...builtKeyProblems(allKeys, builtKeys, new Set(builtTables), policy.partialUniqueIndexes),
       ...unknownFunctionProblems(allFunctions, bodies),
       ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),
