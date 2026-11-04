@@ -40,6 +40,17 @@ export const RESTORE_CHECK = 'restore-check';
 /** The request for the restore drill's check, as its file holds it. */
 export const restoreCheckRequest = (): string => JSON.stringify([RESTORE_CHECK]);
 
+/** What a request file holds to plan an organisation's chain recovery from the drill's copy (4D2e E9, PL-29): only ever a file. */
+export const CHAIN_RECOVERY_USAGE = 'chain-recovery-plan --org <organisation ID> --id <new plan ID>';
+
+/** Why a chain recovery plan can't be made without the anchors' store and the public keys its lines are checked with. */
+export const NO_ANCHORS_PROBLEM =
+  "no store of the chains' anchors is set to check a plan against: AGENTX_AUDIT_ANCHORS_URL deployed, or AGENTX_AUDIT_ANCHORS_DIR in development and test, each with AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS";
+
+/** The request for a chain recovery plan, as its file holds it. */
+export const chainRecoveryRequest = (orgId: string, id: string): string =>
+  JSON.stringify(['chain-recovery-plan', '--org', orgId, '--id', id]);
+
 /** What a request file holds to export an organisation's audit log for a case (Phase 3 E10c, ADR-005 §6): only ever a file. */
 export const AUDIT_EXPORT_USAGE =
   'audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> --id <new export ID>';

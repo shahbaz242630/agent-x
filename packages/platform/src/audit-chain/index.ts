@@ -23,6 +23,7 @@ export {
   type ChainReport,
   ChainSealError,
   type CheckedPoint,
+  createChainWalker,
   entryIsSealed,
   GENESIS_HASH,
   headIsSealed,

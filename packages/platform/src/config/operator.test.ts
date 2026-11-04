@@ -26,6 +26,9 @@ const DEPLOYED: Env = {
   AGENTX_KEYS_DIR: KEYS_DIR,
   [RUN_VARIABLE]: RUN,
 };
+/** Two public keys as the API's start-up line shows them: 43 base64url characters each. */
+const PUBLIC_KEY = 'A'.repeat(42) + 'Q';
+const OTHER_KEY = 'b_-'.repeat(14) + 'c';
 const RUN_RULE = `${RUN_VARIABLE}: must be a job run's name as Azure gives it, at most 64 characters: two or more lower-case words of letters and digits joined by single hyphens, the first starting with a letter`;
 
 function problemsWith(env: Env): readonly string[] {
@@ -56,6 +59,7 @@ describe("the operator's command's config loads", () => {
       },
       keys: { directory: KEYS_DIR, current: {} },
       evidence: { directory: null, container: null },
+      anchors: { directory: null, container: null, epoch: 1, publicKeys: null },
     });
   });
 
@@ -76,6 +80,9 @@ describe("the operator's command's config loads", () => {
         AGENTX_DB_USER: 'agentx_app_uae',
         AGENTX_DB_PASSWORD: APP_LOGIN,
         AGENTX_EVIDENCE_DIR: '/var/agentx/evidence',
+        AGENTX_AUDIT_ANCHORS_DIR: '/var/agentx/anchors',
+        AGENTX_ANCHOR_EPOCH: '3',
+        AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${PUBLIC_KEY},2:${OTHER_KEY}`,
         [RUN_VARIABLE]: RUN,
       }),
     ).toEqual({
@@ -94,16 +101,25 @@ describe("the operator's command's config loads", () => {
       },
       keys: { directory: '/mnt/other-keys', current: { 'audit-mac': 2 } },
       evidence: { directory: '/var/agentx/evidence', container: null },
+      anchors: {
+        directory: '/var/agentx/anchors',
+        container: null,
+        epoch: 3,
+        publicKeys: new Map([
+          [1, PUBLIC_KEY],
+          [2, OTHER_KEY],
+        ]),
+      },
     });
   });
 
   it('returns a config nothing can change afterwards', () => {
     const config = loadOperatorConfig({ ...DEPLOYED, AGENTX_KEYS_CURRENT: 'audit-mac:2' });
     expect(
-      [config, config.log, config.db, config.keys, config.keys.current, config.evidence].map((part) =>
+      [config, config.log, config.db, config.keys, config.keys.current, config.evidence, config.anchors].map((part) =>
         Object.isFrozen(part),
       ),
-    ).toEqual([true, true, true, true, true, true]);
+    ).toEqual([true, true, true, true, true, true, true]);
   });
 
   it("ignores every variable but the AGENTX_ and PG settings and the run's name, Azure's others among them", () => {
@@ -379,5 +395,57 @@ describe("SEC-AV-03 the operator's command refuses to start on a bad config", ()
     // Every variable but the app's login, which any text may be. The migration login is refused by name.
     expect(problems).toHaveLength(15);
     expect(problems.filter((problem) => problem.toLowerCase().includes(misplaced))).toEqual([]);
+  });
+});
+
+describe("4D2e E9 the operator reads the anchors' store for a chain's recovery plan", () => {
+  const CONTAINER = 'https://stagentxstg01.blob.core.windows.net/audit-anchors';
+  const CLIENT_ID = '0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b';
+  /** Plain words, so secret scanners ignore it. */
+  const HEADER = 'identity header for these tests';
+
+  it('reads the container as the job, its epoch and the public keys', () => {
+    const { anchors } = loadOperatorConfig({
+      ...DEPLOYED,
+      AGENTX_AUDIT_ANCHORS_URL: CONTAINER,
+      AGENTX_AUDIT_ANCHORS_CLIENT_ID: CLIENT_ID,
+      AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${PUBLIC_KEY}`,
+      IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+      IDENTITY_HEADER: HEADER,
+    });
+    expect(anchors).toEqual({
+      directory: null,
+      container: {
+        url: CONTAINER,
+        clientId: CLIENT_ID,
+        identityEndpoint: 'http://localhost:42356/msi/token',
+        identityHeader: HEADER,
+      },
+      epoch: 1,
+      publicKeys: new Map([[1, PUBLIC_KEY]]),
+    });
+  });
+
+  it("refuses the API's folder deployed, and the container without its identity", () => {
+    expect(problemsWith({ ...DEPLOYED, AGENTX_AUDIT_ANCHORS_DIR: '/var/agentx/anchors' })).toEqual([
+      "AGENTX_AUDIT_ANCHORS_DIR: is allowed only in development and test; production reads the chains' anchors from their write-once container",
+    ]);
+    expect(problemsWith({ ...DEPLOYED, AGENTX_AUDIT_ANCHORS_URL: CONTAINER })).toEqual([
+      'AGENTX_AUDIT_ANCHORS_URL and AGENTX_AUDIT_ANCHORS_CLIENT_ID: set both, or neither',
+      'IDENTITY_ENDPOINT: is required with the container (Azure sets it where the job has a managed identity)',
+      'IDENTITY_HEADER: is required with the container (Azure sets it where the job has a managed identity)',
+    ]);
+  });
+
+  it.each([
+    ['no version', PUBLIC_KEY],
+    ['a key too short', `1:${PUBLIC_KEY.slice(1)}`],
+    ['a version named twice', `1:${PUBLIC_KEY},1:${OTHER_KEY}`],
+    ['a space', `1:${PUBLIC_KEY}, 2:${OTHER_KEY}`],
+    ['version 0', `0:${PUBLIC_KEY}`],
+  ])('refuses public keys with %s, never repeating them', (_what, value) => {
+    expect(problemsWith({ ...DEPLOYED, AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: value })).toEqual([
+      'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: must list each public key as <version>:<key>, the key 43 base64url characters as the start-up log shows it, comma-separated with no spaces, each version once',
+    ]);
   });
 });

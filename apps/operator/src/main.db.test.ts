@@ -12,9 +12,11 @@ import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createPlatformChain, HEAD_WAIT_SECONDS } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { type CheckedPoint, createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { type Output } from '@agentx/platform/observability';
+import { folderWriteOnceStore } from '@agentx/platform/storage';
 import {
   createTestDatabase,
   LogCapture,
@@ -29,7 +31,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
-import { auditExportRequest, firstAdminRequest, handoffRequest, restoreCheckRequest } from './request.ts';
+import {
+  auditExportRequest,
+  chainRecoveryRequest,
+  firstAdminRequest,
+  handoffRequest,
+  restoreCheckRequest,
+} from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({
@@ -750,5 +758,173 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
       problems: ['a connection is not read-only, so nothing was read'],
     });
     expect(faults.readOnly).toEqual([]);
+  });
+});
+
+describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-recovery-'));
+  const signingFiles = writeTestKeys(['audit-anchor']);
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+    signingFiles.remove();
+  });
+  const evidence = path.join(folder, 'evidence');
+  const anchorsFolder = path.join(folder, 'anchors');
+  /** The API's anchor key, which signs what the store holds; the command gets its public half alone. */
+  const signing = loadKeys({ directory: signingFiles.directory, current: {} }, ['audit-anchor']);
+  const publicKey = String(signing.describe()[0]?.versions[0]?.publicKey);
+  const recoveryEnv = (overrides: Record<string, string> = {}) =>
+    envFor('app', {
+      // The copy is this same database by another name, as for the restore check: a copy the live server is.
+      AGENTX_DB_DRILL_HOST: 'localhost',
+      AGENTX_EVIDENCE_DIR: evidence,
+      AGENTX_AUDIT_ANCHORS_DIR: anchorsFolder,
+      AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${publicKey}`,
+      ...overrides,
+    });
+
+  /** A new organisation, made by the command, and its chain's head. */
+  async function organisation(): Promise<{ orgId: string; head: CheckedPoint }> {
+    const orgId = uuidV7Ids.next();
+    const created = path.join(folder, `create-${orgId}`);
+    writeFileSync(created, JSON.stringify(['create-organization', '--name', NAME, '--id', orgId]));
+    expect((await run(['--request', created])).code).toBe(0);
+    const report = await createAuditTrail({ keys: auditKeys, ids: uuidV7Ids }).verifyAlone(app, orgId, undefined);
+    if (!report.ok) throw new Error('A new chain should check out');
+    return { orgId, head: report };
+  }
+
+  /** Keeps an anchor in the store as the API does, signed with its key. */
+  async function anchored(orgId: string, point: CheckedPoint): Promise<void> {
+    const log = createAnchorLog({
+      store: folderWriteOnceStore(anchorsFolder),
+      keys: signing,
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+    });
+    await log.read();
+    log.keep(signAnchor(signing, { kind: 'organisation', orgId }, point, new Date(), 1));
+    await log.flush();
+  }
+
+  function plan(orgId: string, env = recoveryEnv()) {
+    const planId = uuidV7Ids.next();
+    const asked = path.join(folder, `plan-${planId}`);
+    writeFileSync(asked, chainRecoveryRequest(orgId, planId));
+    return { planId, asked, running: run(['--request', asked], env) };
+  }
+
+  const planLines = (orgId: string, planId: string) =>
+    readFileSync(path.join(evidence, orgId, `chain-recovery-${planId}.ndjson`), 'utf8')
+      .trimEnd()
+      .split('\n')
+      .map((text) => JSON.parse(text) as Record<string, unknown>);
+
+  it("plans from the copy against the store's anchor, keeps the plan as evidence, and never makes it twice", async () => {
+    const { orgId, head } = await organisation();
+    await anchored(orgId, head);
+    const { planId, asked, running } = plan(orgId);
+
+    const { code, events, line } = await running;
+
+    expect(events).toEqual(['operator.starting', 'audit.anchors_read', 'operator.chain_recovery_planned']);
+    expect(code).toBe(0);
+    expect(line('operator.chain_recovery_planned')).toMatchObject({
+      orgId,
+      planId,
+      putBack: 0,
+      replaced: 0,
+      removed: 0,
+      headReplaced: false,
+      anchorSeq: String(head.seq),
+    });
+    expect(planLines(orgId, planId)).toEqual([
+      expect.objectContaining({ k: 'plan', ok: true, planId, orgId, rows: 0, release: 'r-operator' }),
+    ]);
+
+    const again = await run(['--request', asked], recoveryEnv());
+    expect(again.code).toBe(1);
+    expect(again.line('operator.done_before')).toMatchObject({ command: 'chain-recovery-plan', planId });
+  });
+
+  it('keeps a refused plan too, and says why', async () => {
+    const { orgId, head } = await organisation();
+    await anchored(orgId, { ...head, seq: head.seq + 3n });
+    const { planId, running } = plan(orgId);
+
+    const { code, events, line } = await running;
+
+    expect(code).toBe(1);
+    expect(events).toEqual(['operator.starting', 'audit.anchors_read', 'operator.chain_recovery_refused']);
+    expect(line('operator.chain_recovery_refused')).toMatchObject({
+      planId,
+      reason: 'behind_anchor',
+      seq: String(head.seq + 3n),
+      problem: null,
+    });
+    expect(planLines(orgId, planId)).toEqual([
+      expect.objectContaining({ k: 'plan', ok: false, reason: 'behind_anchor' }),
+    ]);
+  });
+
+  it("refuses without the evidence store, the anchors' store or their public keys, before it connects", async () => {
+    const bare = await plan(uuidV7Ids.next(), envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' })).running;
+    expect(bare.code).toBe(1);
+    expect(bare.line('operator.refused')).toMatchObject({
+      problems: [
+        expect.stringMatching(/^no store for an audit export/),
+        expect.stringMatching(/^no store of the chains' anchors/),
+      ],
+    });
+    const keyless = await plan(
+      uuidV7Ids.next(),
+      envFor('app', { AGENTX_EVIDENCE_DIR: evidence, AGENTX_AUDIT_ANCHORS_DIR: anchorsFolder }),
+    ).running;
+    expect(keyless.line('operator.refused')).toMatchObject({
+      problems: [expect.stringMatching(/^no store of the chains' anchors/)],
+    });
+    const storeless = await plan(
+      uuidV7Ids.next(),
+      envFor('app', { AGENTX_EVIDENCE_DIR: evidence, AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${publicKey}` }),
+    ).running;
+    expect(storeless.line('operator.refused')).toMatchObject({
+      problems: [expect.stringMatching(/^no store of the chains' anchors/)],
+    });
+  });
+
+  it("refuses when the anchors' store can't be read whole", async () => {
+    // A file where the store's folder should be: no listing of it can be made.
+    const notAFolder = path.join(folder, 'not-a-folder');
+    writeFileSync(notAFolder, '');
+    const { code, line } = await plan(uuidV7Ids.next(), recoveryEnv({ AGENTX_AUDIT_ANCHORS_DIR: notAFolder })).running;
+    expect(code).toBe(1);
+    expect(line('operator.refused')).toMatchObject({
+      problems: ["the chains' anchors' store couldn't be read whole, so no plan can be checked against it"],
+    });
+  });
+
+  it('runs only from a request file, naming the organisation and the plan by UUIDv7', async () => {
+    const typed = await run(['chain-recovery-plan', '--org', uuidV7Ids.next(), '--id', uuidV7Ids.next()]);
+    expect(typed.line('operator.refused')).toMatchObject({
+      problems: [
+        'chain-recovery-plan runs only from a request file: chain-recovery-plan --org <organisation ID> --id <new plan ID>',
+      ],
+    });
+    const asked = path.join(folder, 'badly-asked');
+    writeFileSync(asked, JSON.stringify(['chain-recovery-plan', '--org', 'ORG', '--id', 'ID']));
+    expect((await run(['--request', asked])).line('operator.refused')).toMatchObject({
+      problems: [
+        "the organisation's ID must be a UUIDv7, in lower case",
+        "the plan's ID must be a UUIDv7, in lower case",
+      ],
+    });
+    writeFileSync(asked, JSON.stringify(['chain-recovery-plan', '--org', uuidV7Ids.next()]));
+    expect((await run(['--request', asked])).line('operator.refused')).toMatchObject({
+      problems: [
+        'the request file holds chain-recovery-plan --org <organisation ID> --id <new plan ID> as a JSON list, and nothing else',
+      ],
+    });
   });
 });

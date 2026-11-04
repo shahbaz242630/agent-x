@@ -875,7 +875,8 @@ export const PLAIN_WORDS = {
   },
   'log.suppressed': {
     happened: 'One kind of log line came too often in a minute, so further copies were held back and counted.',
-    broke: 'The count is exact, but the details of the held-back lines are not in the log.',
+    broke:
+      'The count is exact, but their details are not in the log; held-back payment decisions stay in the audit trail.',
     next: 'Look at the kind of line it names: a flood usually means something is failing over and over.',
   },
   'mandate_expiry.failed': {
@@ -934,6 +935,12 @@ export const PLAIN_WORDS = {
     happened: 'An operator job could not reach the database.',
     broke: 'The job stopped before doing anything, so nothing was changed.',
     next: 'Check the database is up and reachable, then run the job again.',
+  },
+  'operator.chain_recovery_refused': {
+    happened: "An organisation's audit chain recovery plan was refused.",
+    broke:
+      'Nothing was changed, and the organisation stays on hold: its copy cannot mend the chain with original records.',
+    next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
