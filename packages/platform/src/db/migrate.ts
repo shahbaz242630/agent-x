@@ -201,26 +201,33 @@ export async function loadMigrations(directory: string): Promise<Migration[]> {
       problems.push(`${entry.name} is out of sequence: the next file must be numbered ${expected}`);
     }
     const raw = await readFile(path.join(directory, entry.name), 'utf8');
-    if (raw.startsWith(BYTE_ORDER_MARK)) problems.push(`${entry.name} starts with a byte-order mark`);
     const sql = raw.replaceAll('\r\n', '\n');
-    if (sql.trim() === '') problems.push(`${entry.name} is empty`);
-    const control = transactionControl(sql);
-    const { refused } = runsAlone(sql) ? concurrentStatements(sql) : {};
-    if (refused !== undefined) {
-      problems.push(
-        `${entry.name} runs outside a transaction, so it may hold only CREATE INDEX CONCURRENTLY IF NOT EXISTS and DROP INDEX CONCURRENTLY IF EXISTS statements on schema-qualified names, one per statement: "${refused}" is neither`,
-      );
-    }
-    if (control.length > 0) {
-      problems.push(
-        `${entry.name} has ${control.join(', ')}: each file already runs in one transaction, so it must not begin or end one (write function bodies in $$ quotes, not BEGIN ATOMIC)`,
-      );
-    }
+    problems.push(...contentProblems(entry.name, raw, sql));
     migrations.push({ name: entry.name, sql, checksum: createHash('sha256').update(sql).digest('hex') });
   }
 
   if (problems.length > 0) throw new MigrationRefused(problems);
   return migrations;
+}
+
+/** What is wrong inside one migration file's text, apart from its name and place. */
+function contentProblems(name: string, raw: string, sql: string): string[] {
+  const problems: string[] = [];
+  if (raw.startsWith(BYTE_ORDER_MARK)) problems.push(`${name} starts with a byte-order mark`);
+  if (sql.trim() === '') problems.push(`${name} is empty`);
+  const control = transactionControl(sql);
+  const { refused } = runsAlone(sql) ? concurrentStatements(sql) : {};
+  if (refused !== undefined) {
+    problems.push(
+      `${name} runs outside a transaction, so it may hold only CREATE INDEX CONCURRENTLY IF NOT EXISTS and DROP INDEX CONCURRENTLY IF EXISTS statements on schema-qualified names, one per statement: "${refused}" is neither`,
+    );
+  }
+  if (control.length > 0) {
+    problems.push(
+      `${name} has ${control.join(', ')}: each file already runs in one transaction, so it must not begin or end one (write function bodies in $$ quotes, not BEGIN ATOMIC)`,
+    );
+  }
+  return problems;
 }
 
 /** Problems with the ledger: every applied migration must be this build's file of the same place and content. */
