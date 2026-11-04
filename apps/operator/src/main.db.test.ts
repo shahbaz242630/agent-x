@@ -19,23 +19,26 @@ import {
   readRebaseFile,
   signAnchor,
 } from '@agentx/platform/audit-chain';
-import { createDatabase, type Database, databaseNow, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, databaseNow, lockName, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { type Output } from '@agentx/platform/observability';
 import { folderWriteOnceStore } from '@agentx/platform/storage';
 import {
   createTestDatabase,
+  holdNamedLock,
   LogCapture,
   tamperAsOwner,
   type TestDatabase,
   testLogger,
   type TestRole,
   within,
+  waitUntilQueued,
   writeTestKeys,
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import type { OperatorTables } from './create-organization.ts';
+import { REBASE_LOCK } from './chain-rebase.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
 import {
   auditExportRequest,
@@ -1147,7 +1150,7 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
 
   it('moves the platform chain on, as after it was begun again, and records it there', async () => {
     const head = await anchoredAhead({ kind: 'platform' }, 5n);
-    const { id, running } = rebase('platform', head);
+    const { id, asked, running } = rebase('platform', head);
     const { code, line } = await running;
     expect(code).toBe(0);
     expect(line('operator.chain_rebased')).toMatchObject({
@@ -1161,6 +1164,11 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
       .as('admin')
       .query('select seq, actor_id, action from platform_controls.audit_events where id = $1', [id]);
     expect(rows).toEqual([{ seq: String(head.seq + 1n), actor_id: 'operator', action: 'audit_chain.rebased' }]);
+
+    // Its rebase found again: the platform chain holds its event under the rebase's ID already, and refuses a second.
+    const again = await run(['--request', asked], env());
+    expect(again.code).toBe(1);
+    expect(again.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: 'already' });
   });
 
   it('a run whose event was not written says so; the same request run again writes only the event', async () => {
@@ -1177,9 +1185,73 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
     expect((await headOf({ kind: 'organisation', orgId })).seq).toBe(head.seq);
 
     const again = await run(['--request', asked], env());
-    expect(again.code).toBe(1);
-    expect(again.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: 'recorded' });
+    expect(again.code).toBe(0);
+    // Every rebase in the store is said as it is read (audit.rebased), this one's among them.
+    expect(again.events.filter((event) => event !== 'audit.rebased')).toEqual([
+      'operator.starting',
+      'audit.anchors_read',
+      'operator.rebase_recorded',
+    ]);
+    expect(again.line('operator.rebase_recorded')).toMatchObject({
+      rebaseId: id,
+      note: "The rebase was already written; its record on the chain's audit log is now written too.",
+    });
     expect(await newestEvent(orgId)).toMatchObject({ action: 'audit_chain.rebased', subject_id: id });
+  });
+
+  it("two runs finishing one rebase's record at once write it once: each waits for the rebase's lock before it looks", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 2n);
+    faults.signedStates = new Error('the database went away');
+    const { id, asked, running } = rebase(orgId, head);
+    expect((await running).line('operator.rebase_not_recorded')).toMatchObject({ rebaseId: id });
+
+    // A third party part-way through, holding the rebase's lock: both runs queue behind it, then go one after the other.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holdNamedLock(holder, lockName(REBASE_LOCK, id));
+      const both = within(
+        30_000,
+        Promise.all([run(['--request', asked], env()), run(['--request', asked], env())]),
+        'the two runs',
+      );
+      await waitUntilQueued(database.as('admin'), 2);
+      await holder.query('commit');
+      const outcomes = (await both).map((done) => [done.code, done.events.at(-1)]);
+      expect(outcomes.toSorted()).toEqual([
+        [0, 'operator.rebase_recorded'],
+        [1, 'operator.done_before'],
+      ]);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    const written = await database
+      .as('admin')
+      .query("select count(*)::int as n from audit.events where org_id = $1 and action = 'audit_chain.rebased'", [
+        orgId,
+      ]);
+    expect(written).toEqual([{ n: 1 }]);
+  });
+
+  it("dates the rebase by the database's clock, whatever the job's own says", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 1n);
+    const before = await databaseNow(app);
+    // The job's clock a year ahead: only Date is faked, so the database and its timers go on as they are.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 365 * 86_400_000));
+    let done: Awaited<ReturnType<typeof run>>;
+    try {
+      done = await rebase(orgId, head).running;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(done.code).toBe(0);
+    const at = Date.parse(String(done.line('operator.chain_rebased')?.at));
+    expect(at).toBeGreaterThanOrEqual(before.getTime());
+    expect(at).toBeLessThanOrEqual((await databaseNow(app)).getTime());
   });
 
   it('refuses a chain that holds its anchor, or has none: nothing to move', async () => {

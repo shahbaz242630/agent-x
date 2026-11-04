@@ -52,7 +52,7 @@ import {
   readRebaseFile,
   signRebase,
 } from '@agentx/platform/audit-chain';
-import { type Database, databaseNow } from '@agentx/platform/db';
+import { type Database, databaseNow, holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { OverwriteRefused, type WriteOnceStore } from '@agentx/platform/storage';
@@ -101,6 +101,9 @@ export type RebaseTables = AuditTables & PlatformControlsTables;
 
 /** The event a rebase records on the chain it moved. */
 const REBASED = 'audit_chain.rebased';
+
+/** The lock two runs of one rebase take before looking for its event, so only one writes it (lockName's scope). */
+export const REBASE_LOCK = 'audit-chain-rebase';
 
 /** The chain's whole check, from its first event, against `anchor` where given. */
 function checkWhole(
@@ -157,6 +160,8 @@ async function recordRebase(
   }
   const trail = createAuditTrail({ keys: services.keys, ids: services.ids });
   return withSignedStates(writer, chain.orgId, services, async (tx, states) => {
+    // Before the look, not only the head's lock in record: two runs could each find no event and each write one.
+    await holdTransactionLock(tx, REBASE_LOCK, rebase.id);
     const subject = { type: 'audit_chain', id: rebase.id };
     const before = await states.eventOf(tx, chain.orgId, { onlyAbout: subject });
     if (before.outcome === 'tampered') throw new Error("the organisation's audit log can't be verified");

@@ -875,6 +875,14 @@ async function chainRecovery(
 function rebaseSaid(log: Logger, outcome: RebaseOutcome, rebaseId: string, chain: Chain): number {
   if (!outcome.ok) {
     const { reason, problem: why, seq } = outcome;
+    if (reason === 'done_before' && outcome.recorded === 'recorded') {
+      // The run before stopped between the two: this one finished it, so the request is done.
+      log.info('operator.rebase_recorded', {
+        rebaseId,
+        note: "The rebase was already written; its record on the chain's audit log is now written too.",
+      });
+      return 0;
+    }
     if (reason === 'done_before') {
       log.error('operator.done_before', { command: CHAIN_REBASE, rebaseId, recorded: outcome.recorded ?? null });
     } else {
