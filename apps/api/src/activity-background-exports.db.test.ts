@@ -566,22 +566,29 @@ describe('the background downloads on their marks (4D2e D10, 0077)', () => {
     expect(await dueOf(w, NOW)).toBeNull();
   });
 
-  it('a month under a builder’s lease is due as its lease runs out; a download given up, never', async () => {
+  it('a month under a builder’s lease is due as its lease runs out; one of a download given up, never', async () => {
     const w = await world();
-    downloadOf(await ask(w, { to: new Date('2026-09-01T00:00:00.000Z') }));
-    // A builder that claimed the month and stopped before it gave it back.
+    downloadOf(await ask(w, { to: new Date('2026-10-01T00:00:00.000Z') }));
+    // A builder that claimed August and stopped before it gave it back.
     const claim = await withTenant(app, w.org, (tx) => claimFile(tx, w.org, { leaseMs: 900_000, mostTries: 3 }));
     if (claim.outcome !== 'claimed') throw new Error(`not claimed: ${claim.outcome}`);
-    expect(await dueOf(w, NOW)).toEqual(claim.file.lease);
+    expect(claim.file.month).toBe('2026-08-01');
+    // September still waits: due now.
+    expect(await dueOf(w, NOW)).toEqual(NOW);
 
-    // Tried too often: the download given up, its month failed.
-    await admin().query(
-      `update activity_exports.files set building_until = pg_catalog.clock_timestamp() - interval '1 second'
-        where org_id = $1`,
-      [w.org],
-    );
-    const given = await withTenant(app, w.org, (tx) => claimFile(tx, w.org, { leaseMs: 900_000, mostTries: 1 }));
-    expect(given.outcome).toBe('given_up');
+    // September tried too often: the download given up, September failed, August left building under its lease.
+    const given = await withTenant(app, w.org, (tx) => claimFile(tx, w.org, { leaseMs: 900_000, mostTries: 0 }));
+    expect(given).toMatchObject({ outcome: 'given_up', month: '2026-09-01' });
+    expect(
+      await admin().query<{ month: string; state: string }>(
+        'select month::text, state from activity_exports.files where org_id = $1 order by month',
+        [w.org],
+      ),
+    ).toEqual([
+      { month: '2026-08-01', state: 'building' },
+      { month: '2026-09-01', state: 'failed' },
+    ]);
+    // No claim takes August on again once its lease runs out, so its lease is never work.
     expect(await dueOf(w, NOW)).toBeNull();
   });
 
