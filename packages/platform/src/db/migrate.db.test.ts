@@ -479,6 +479,27 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
       ]);
     });
 
+    it('waits for an open transaction no longer than the lock limit, tries again, then builds once it ends', async () => {
+      const holder = await database.connect('owner');
+      await holder.query('begin');
+      await holder.query('insert into demo.one values (3)');
+      await write(
+        '0002_index.sql',
+        `${NO_TRANSACTION}\ncreate index concurrently if not exists one_id on demo.one (id);\n`,
+      );
+      try {
+        const error = await runWaiting(200).catch((caught: unknown) => caught);
+        expect(isLockTimeout(error)).toBe(true);
+        expect(logged('db.migration.lock_wait_ran_out')).toHaveLength(LOCK_TRIES - 1);
+      } finally {
+        await holder.query('commit');
+        await holder.end();
+      }
+      expect((await ledger()).map(({ name }) => name)).toEqual(['0001_first.sql']);
+      expect(await runWaiting(2000)).toEqual(['0002_index.sql']);
+      expect(await indexValid('one_id')).toEqual([true]);
+    });
+
     it('drops concurrently too, and a run again does nothing more', async () => {
       await owner().query('create index old_id on demo.one (id)');
       await write('0002_index.sql', `${NO_TRANSACTION}\ndrop index concurrently if exists demo.old_id;\n`);
