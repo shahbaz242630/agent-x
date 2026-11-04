@@ -32,6 +32,9 @@
 // is the alarm, so it can't hide later files. Every chain in the store counts as
 // seen, so an organisation taken off the list and the record is still missed.
 //
+// A chain's finished full pass is a line of its own (`k:"p"`, 4D2e E7), signed under its own label: the newest
+// kept, written with what moved and in every snapshot, so a restart goes on with the chains passed longest ago.
+//
 // Signed lines stand, and the highest place wins, so they count as they are read. A chain
 // this process holds moves on at once, even if the read then fails, or the file turns out
 // broken: its line is signed and higher. A check under way as that happens can't be compared
@@ -53,7 +56,7 @@ import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import { OverwriteRefused, type WriteOnceStore } from '../storage/write-once.ts';
 import type { Message } from '../keys/message.ts';
-import { type Anchor, type AnchorStore, anchorMessage } from './anchor.ts';
+import { type Anchor, type AnchorStore, anchorMessage, passMessage, type PassRecord } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
 
 /** How often every chain's anchor is written whole, where something moved. */
@@ -107,8 +110,14 @@ const SEQ = /^(?:0|[1-9]\d{0,18})$/;
 const HASH = /^[0-9a-f]{64}$/;
 const ORGANISATION = 'organisation:';
 
-/** Line kinds a later piece writes (a finished pass, a rebase), passed over here, so going back a release raises nothing. */
-const LATER_KINDS: ReadonlySet<unknown> = new Set(['p', 'r']);
+/** Line kinds a later piece writes (a rebase), passed over here, so going back a release raises nothing. */
+const LATER_KINDS: ReadonlySet<unknown> = new Set(['r']);
+
+/** A line's kind: an anchor, or a finished full pass. */
+type LineKind = 'a' | 'p';
+
+/** What each kind's signature covers. */
+const MESSAGE_OF = { a: anchorMessage, p: passMessage } as const;
 
 type Kind = 'deltas' | 'snapshots';
 
@@ -127,7 +136,7 @@ class BeyondMemory extends Error {
   }
 }
 
-export interface AnchorLog extends AnchorStore {
+export interface AnchorLog extends AnchorStore, PassRecord {
   /** The epoch anchors kept here must be signed for. */
   readonly epoch: number;
   /**
@@ -157,6 +166,7 @@ interface Unsent {
   readonly name: string;
   readonly bytes: Buffer;
   readonly lines: readonly Anchor[];
+  readonly passes: readonly Anchor[];
 }
 
 const tooManySpoiled = (spoiled: number): string =>
@@ -167,9 +177,9 @@ const countedDown = (ms: number): string => String(LAST_MS - ms).padStart(13, '0
 /** The time a file's name counts down from, as a time a person can look for in the store's own logs. */
 const whenNamed = (countdown: string): string => new Date(LAST_MS - Number(countdown)).toISOString();
 
-const lineOf = (anchor: Anchor): string =>
+const lineOf = (anchor: Anchor, k: LineKind): string =>
   JSON.stringify({
-    k: 'a',
+    k,
     chain: anchor.chain,
     seq: anchor.seq.toString(),
     hash: anchor.hash.toString('hex'),
@@ -274,7 +284,7 @@ async function* linesIn(bytes: Buffer, opened: { bytes: number }): AsyncGenerato
 async function readFile(
   keys: KeyProvider,
   { bytes, name, epoch, mostBytes }: { bytes: Buffer; name: string; epoch: number; mostBytes: number },
-  keep: (anchor: Anchor) => void,
+  keep: (anchor: Anchor, kind: LineKind) => void,
 ) {
   const opened = { bytes: 0 };
   let bad = 0;
@@ -283,14 +293,16 @@ async function readFile(
     body += 1;
     const kind = kindOf(fields);
     if (LATER_KINDS.has(kind)) return;
-    const anchor = kind === 'a' ? anchorFrom(fields as Record<string, unknown>) : undefined;
+    const lineKind = kind === 'a' || kind === 'p' ? kind : undefined;
+    const line = lineKind === undefined ? undefined : anchorFrom(fields as Record<string, unknown>);
     if (
-      anchor === undefined ||
-      !isSigned(keys, anchor.keyVersion, anchorMessage(anchor.chain, anchor, anchor.at, epoch), anchor.signature)
+      lineKind === undefined ||
+      line === undefined ||
+      !isSigned(keys, line.keyVersion, MESSAGE_OF[lineKind](line.chain, line, line.at, epoch), line.signature)
     ) {
       bad += 1;
     } else if (opened.bytes <= mostBytes) {
-      keep(anchor);
+      keep(line, lineKind);
     }
   };
   let last: unknown;
@@ -346,6 +358,11 @@ export function createAnchorLog({
   const anchors = new Map<string, Anchor>();
   // What has moved since it was last written: one line a chain at most, however long the store stays away.
   const pending = new Map<string, Anchor>();
+  // Each chain's last finished full pass, and those not written yet, the same way.
+  const passes = new Map<string, Anchor>();
+  const pendingPasses = new Map<string, Anchor>();
+  /** How many lines this process holds, against what it can: anchors and passes alike. */
+  const linesHeld = (): number => anchors.size + passes.size;
   let unsent: Unsent | undefined;
 
   let state: 'unread' | 'read' | 'unreadable' = 'unread';
@@ -402,8 +419,9 @@ export function createAnchorLog({
     const fileAt = whenNamed(countdownOf(kind, name));
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
-      file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line) => {
-        staged(stage, line, kind, fileAt);
+      file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line, lineKind) => {
+        if (lineKind === 'p') passed(stage, line, kind, fileAt);
+        else staged(stage, line, kind, fileAt);
       });
     } catch (error) {
       if (error instanceof BeyondMemory) throw error;
@@ -451,7 +469,18 @@ export function createAnchorLog({
       return;
     }
     merge(stage, line);
-    if ((anchors.size + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
+    if ((linesHeld() + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
+  };
+
+  /**
+   * A finished pass as it is read: the newest kept, at once, as a pass line moves nothing a check compares with. Counted
+   * against memory with the rest.
+   */
+  const passed = (stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
+    const kept = passes.get(line.chain);
+    if (kept !== undefined && kept.at >= line.at) return;
+    passes.set(line.chain, line);
+    if ((linesHeld() + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
   };
 
   /**
@@ -564,8 +593,9 @@ export function createAnchorLog({
       if (!(error instanceof OverwriteRefused)) throw error;
       if (!(await store.get(file.name)).equals(file.bytes)) {
         alarm('overwrite', { kind: file.kind });
-        // They go again under a new name, unless a later anchor of the chain is waiting already.
+        // They go again under a new name, unless a later line of the chain is waiting already.
         for (const line of file.lines) if (!pending.has(line.chain)) pending.set(line.chain, line);
+        for (const line of file.passes) if (!pendingPasses.has(line.chain)) pendingPasses.set(line.chain, line);
         unsent = undefined;
         return;
       }
@@ -575,7 +605,7 @@ export function createAnchorLog({
     else {
       snapshotFrom = countdownOf('snapshots', file.name);
     }
-    logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines.length });
+    logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines.length, passes: file.passes.length });
   };
 
   /** The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. */
@@ -584,36 +614,40 @@ export function createAnchorLog({
     const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
     const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
     const lines = kind === 'snapshots' ? [...anchors.values()] : [...pending.values()];
+    const passLines = kind === 'snapshots' ? [...passes.values()] : [...pendingPasses.values()];
+    const count = lines.length + passLines.length;
     const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
-    const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, lines.length));
+    const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, count));
     const closing = JSON.stringify({
       k: 'c',
       name,
       epoch,
-      lines: lines.length,
+      lines: count,
       kv: keyVersion,
       sig: signature.toString('base64'),
     });
     const bytes = await gzippedLines(
       (function* lined() {
-        for (const line of lines) yield `${lineOf(line)}\n`;
+        for (const line of lines) yield `${lineOf(line, 'a')}\n`;
+        for (const line of passLines) yield `${lineOf(line, 'p')}\n`;
         yield `${closing}\n`;
       })(),
     );
     // In the budget's own count, so it is said before a read of this many would be refused.
-    const size = anchors.size * KEPT_LINE_BYTES;
+    const size = linesHeld() * KEPT_LINE_BYTES;
     if (size > mostFileBytes * NEAR_MEMORY) {
       logger.error('audit.anchor_store_near_memory', { kind, bytes: size, mostBytes: mostFileBytes });
     }
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);
-    return { kind, name, bytes, lines };
+    for (const line of passLines) if (pendingPasses.get(line.chain) === line) pendingPasses.delete(line.chain);
+    return { kind, name, bytes, lines, passes: passLines };
   };
 
   const writeDue = async (): Promise<void> => {
     try {
       if (unsent !== undefined) await send(unsent);
-      if (unsent === undefined && pending.size > 0) {
+      if (unsent === undefined && pending.size + pendingPasses.size > 0) {
         unsent = await madeFile();
         await send(unsent);
       }
@@ -638,6 +672,11 @@ export function createAnchorLog({
       }
       anchors.set(anchor.chain, anchor);
       pending.set(anchor.chain, anchor);
+    },
+    lastPass: (chain: Chain) => passes.get(chainName(chain)),
+    keepPass(line: Anchor) {
+      passes.set(line.chain, line);
+      pendingPasses.set(line.chain, line);
     },
     read(): Promise<void> {
       reading ??= catchUp().finally(() => {

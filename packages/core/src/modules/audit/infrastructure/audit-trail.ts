@@ -76,6 +76,7 @@ import {
   type StoredEntry,
   verifyChain,
   verifyFromAnchor,
+  walkLast,
 } from '@agentx/platform/audit-chain';
 import {
   type AnswersOf,
@@ -285,7 +286,10 @@ export interface AuditTrail {
    * organisation alone, so a chain it can't see reads as empty, never another's.
    */
   checkFromAnchor(db: Kysely<AuditTables>, orgId: string, from: CheckedPoint, most?: number): Promise<ChainStep>;
-  /** One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  /**
+   * One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's,
+   * each trip's answer limited as verifyAlone's: the anchor check runs it (E7).
+   */
   passStep(
     db: Kysely<AuditTables>,
     orgId: string,
@@ -293,8 +297,10 @@ export interface AuditTrail {
     target: CheckedPoint,
     most: number,
   ): Promise<ChainStep>;
-  /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as checkFromAnchor's. */
+  /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as passStep's. */
   countStep(db: Kysely<AuditTables>, orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
+  /** The chain's last `most` events up to `target` walked (walkLast, 4D2e E7), in a transaction as passStep's. */
+  walkLast(db: Kysely<AuditTables>, orgId: string, target: CheckedPoint, most: number): Promise<ChainStep>;
   /**
    * Whether the organisation's chain still holds its last anchor, in one read:
    * its head not behind it, and the event anchored there the one anchored (not
@@ -1038,6 +1044,9 @@ export async function lockChainHeadSeeingWaiting(tx: AuditTransaction, orgId: st
  */
 const CORRELATION_DETAIL = 'correlationId';
 
+/** A job's transaction: each statement limited, each trip's answer too (verifyAlone's). */
+const JOB_LIMITS = { limited: true, answeredWithinMs: JOB_ANSWER_WITHIN_MS } as const;
+
 export function createAuditTrail({
   keys,
   ids,
@@ -1284,10 +1293,7 @@ export function createAuditTrail({
     },
 
     verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
-      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), {
-        limited: true,
-        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
-      });
+      return withTenant(db, orgId, (tx) => trail.verify(tx, orgId, anchor), JOB_LIMITS);
     },
 
     async checkFromAnchor(
@@ -1319,9 +1325,7 @@ export function createAuditTrail({
         db,
         chain.orgId,
         (tx) => passStep(keys, chain, readerFor(tx, chain.orgId), cursor, target, most),
-        {
-          limited: true,
-        },
+        JOB_LIMITS,
       );
     },
 
@@ -1332,7 +1336,17 @@ export function createAuditTrail({
       upTo: bigint,
     ): Promise<ChainProblem | undefined> {
       const chain = chainOf(orgId);
-      return withTenant(db, chain.orgId, (tx) => countStep(readerFor(tx, chain.orgId), after, upTo), { limited: true });
+      return withTenant(db, chain.orgId, (tx) => countStep(readerFor(tx, chain.orgId), after, upTo), JOB_LIMITS);
+    },
+
+    async walkLast(db: Kysely<AuditTables>, orgId: string, target: CheckedPoint, most: number): Promise<ChainStep> {
+      const chain = chainOf(orgId);
+      return withTenant(
+        db,
+        chain.orgId,
+        (tx) => walkLast(keys, chain, readerFor(tx, chain.orgId), target, most),
+        JOB_LIMITS,
+      );
     },
 
     async keepsAnchor(tx: AuditTransaction, orgId: string, anchor: AnchorPoint): Promise<boolean> {

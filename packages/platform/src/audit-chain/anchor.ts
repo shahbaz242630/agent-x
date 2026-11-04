@@ -46,12 +46,55 @@ export const anchorMessage = (chain: string, point: CheckedPoint, at: Date, epoc
   at.toISOString(),
 ];
 
-/** Signs a chain's checked head as its new anchor, for the store's epoch where it will be kept there. */
-export function signAnchor(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date, epoch = NO_EPOCH): Anchor {
+/** A place in a chain signed with the `audit-anchor` key, over the message `messageOf` makes for it. */
+function signedLine(
+  keys: KeyProvider,
+  chain: Chain,
+  point: CheckedPoint,
+  at: Date,
+  epoch: number,
+  messageOf: typeof anchorMessage,
+): Anchor {
   const name = chainName(chain);
-  const { signature, keyVersion } = keys.sign('audit-anchor', anchorMessage(name, point, at, epoch));
+  const { signature, keyVersion } = keys.sign('audit-anchor', messageOf(name, point, at, epoch));
   const { seq, hash, macKeyVersion } = point;
   return Object.freeze({ chain: name, seq, hash, macKeyVersion, at, keyVersion, signature });
+}
+
+/** Signs a chain's checked head as its new anchor, for the store's epoch where it will be kept there. */
+export function signAnchor(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date, epoch = NO_EPOCH): Anchor {
+  return signedLine(keys, chain, point, at, epoch, anchorMessage);
+}
+
+/**
+ * What a finished full pass's line signs (4D2e E7): a chain read whole from its first event to this place, at `at`.
+ * Its own label, so a pass line can never stand for an anchor, nor an anchor for a pass.
+ */
+export const passMessage = (chain: string, point: CheckedPoint, at: Date, epoch: number): Message => [
+  'audit-anchor-pass',
+  ...anchorMessage(chain, point, at, epoch).slice(1),
+];
+
+/** Signs a chain's finished full pass, to the place it set out for, for the store's epoch. */
+export function signPass(keys: KeyProvider, chain: Chain, point: CheckedPoint, at: Date, epoch = NO_EPOCH): Anchor {
+  return signedLine(keys, chain, point, at, epoch, passMessage);
+}
+
+/** Where each chain's last finished full pass is kept: its line, as signPass made it. */
+export interface PassRecord {
+  lastPass(chain: Chain): Anchor | undefined;
+  keepPass(line: Anchor): void;
+}
+
+/** The last full pass of each chain, in this process's memory, where no store keeps them. */
+export function createMemoryPassRecord(): PassRecord {
+  const passes = new Map<string, Anchor>();
+  return Object.freeze({
+    lastPass: (chain: Chain) => passes.get(chainName(chain)),
+    keepPass: (line: Anchor) => {
+      passes.set(line.chain, line);
+    },
+  });
 }
 
 /** The last anchor of each chain, in this process's memory. */

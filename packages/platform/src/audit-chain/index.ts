@@ -1,5 +1,14 @@
-export { type Anchor, type AnchorStore, createMemoryAnchorStore, signAnchor } from './anchor.ts';
+export {
+  type Anchor,
+  type AnchorStore,
+  createMemoryAnchorStore,
+  createMemoryPassRecord,
+  type PassRecord,
+  signAnchor,
+  signPass,
+} from './anchor.ts';
 export { type AnchorLog, createAnchorLog } from './anchor-log.ts';
+export { OLD_EDIT_DAYS } from './limits.ts';
 export {
   type AnchorPoint,
   type Chain,
@@ -40,6 +49,7 @@ export {
   sealedFields,
   verifyChain,
   verifyFromAnchor,
+  walkLast,
 } from './store.ts';
 export {
   sealState,
