@@ -85,18 +85,24 @@ async function headOf(database: TestDatabase): Promise<HeadRow> {
   return row;
 }
 
-/** Winds the live chain back: every event past the earlier head deleted, and the head set to it. */
-function windBack(earlier: HeadRow): Promise<void> {
-  return tamper(live, async (admin) => {
-    await admin.query('delete from audit.events where org_id = $1 and seq > $2', [orgId, earlier.seq]);
-    await admin.query('update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1', [
+/** Sets the live head to an earlier sealed one, the events left as they are. */
+const setHead = (earlier: HeadRow): Promise<void> =>
+  tamper(live, (admin) =>
+    admin.query('update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1', [
       orgId,
       earlier.seq,
       earlier.hash,
       earlier.mac,
       earlier.mac_key_version,
-    ]);
-  });
+    ]),
+  );
+
+/** Winds the live chain back: every event past the earlier head deleted, and the head set to it. */
+async function windBack(earlier: HeadRow): Promise<void> {
+  await tamper(live, (admin) =>
+    admin.query('delete from audit.events where org_id = $1 and seq > $2', [orgId, earlier.seq]),
+  );
+  await setHead(earlier);
 }
 
 const deleteEvent = (database: TestDatabase, seq: bigint) =>
@@ -218,10 +224,22 @@ describe('PL-29 the chain recovery plan puts back only original rows', () => {
     expect(planned.ok && actions(planned.rows)).toEqual([['replace', 2n]]);
   });
 
-  it("the head deleted, or of the wrong type: the copy's head in its place", async () => {
+  it("the head deleted, its MAC spoiled, or of the wrong type: the copy's head in its place", async () => {
     const head = await copied(2);
     await tamper(live, (admin) => admin.query('delete from audit.heads where org_id = $1', [orgId]));
     expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head } });
+    // Put back, then its MAC alone spoiled: the same number and hash, but no longer sealed.
+    const copyHead = await headOf(theCopy());
+    await tamper(live, (admin) =>
+      admin.query('insert into audit.heads (org_id, seq, hash, mac, mac_key_version) values ($1, $2, $3, $4, $5)', [
+        orgId,
+        copyHead.seq,
+        copyHead.hash,
+        Buffer.alloc(32),
+        copyHead.mac_key_version,
+      ]),
+    );
+    expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head, mac: copyHead.mac } });
     await tamper(live, (admin) => admin.query('alter table audit.heads alter column mac_key_version type bigint'));
     expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head } });
   });
@@ -307,6 +325,26 @@ describe('PL-29 the plan refuses what original rows cannot mend', () => {
     expect(await plan()).toEqual({ ok: false, reason: 'new_seal', seq: head + 1n });
   });
 
+  it('an event past the copy edited behind a head wound back below the copy: refused, never removed', async () => {
+    await record(live, 1);
+    const earlier = await headOf(live);
+    const head = await copied(1);
+    await record(live, 1);
+    await setHead(earlier);
+    await editEvent(live, head + 1n);
+    expect(await plan()).toEqual({ ok: false, reason: 'new_seal', seq: head + 1n });
+  });
+
+  it('a sealed event past a head wound back onto the chain grown past the copy: refused, never removed', async () => {
+    const head = await copied(1);
+    await record(live, 1);
+    const grown = await headOf(live);
+    await record(live, 2);
+    await deleteEvent(live, head + 2n);
+    await setHead(grown);
+    expect(await plan()).toEqual({ ok: false, reason: 'new_seal', seq: head + 2n });
+  });
+
   it("an event past the copy whose row can't be read", async () => {
     const head = await copied(2);
     await record(live, 2);
@@ -334,9 +372,22 @@ describe('PL-29 the plan refuses what original rows cannot mend', () => {
     expect(await plan()).toEqual({ ok: false, reason: 'new_seal', seq: head + 2n });
   });
 
+  it('a sealed head at the end of the chain grown past the copy, but for another event there', async () => {
+    const head = await copied(1);
+    const atCopy = await headOf(live);
+    await record(live, 1);
+    const other = await headOf(live);
+    // The event past the copy written again: the same number, another event, and the first one's head put back.
+    await windBack(atCopy);
+    await record(live, 1);
+    await setHead(other);
+    expect(await plan()).toEqual({ ok: false, reason: 'new_seal', seq: head + 1n });
+  });
+
   it('the live tail past the copy deleted under its sealed head: those events are lost', async () => {
     const head = await copied(2);
-    await record(live, 2);
+    // One event lost is enough: the head one past where the plan could end.
+    await record(live, 1);
     await tamper(live, (admin) =>
       admin.query('delete from audit.events where org_id = $1 and seq > $2', [orgId, head]),
     );

@@ -49,9 +49,9 @@ import type { Database } from '@agentx/platform/db';
 const PAGE = 1000;
 
 /** The most rows one plan writes: its file is made in memory, and a chain lost wider than this is past one plan. */
-export const MOST_PLANNED_ROWS = 100_000;
+const MOST_PLANNED_ROWS = 100_000;
 
-export type RecoveryRefusal = 'copy_broken' | 'fork' | 'new_seal' | 'behind_anchor' | 'anchor' | 'moved' | 'too_large';
+type RecoveryRefusal = 'copy_broken' | 'fork' | 'new_seal' | 'behind_anchor' | 'anchor' | 'moved' | 'too_large';
 
 /** A row the plan writes: the copy's original put back where it is missing, or in place of a damaged one; or one removed. */
 export type PlannedRow =
@@ -179,14 +179,16 @@ function createPlanner(
 ) {
   const chain: Chain = { kind: 'organisation', orgId };
   const sealedHere = (row: StoredRow): boolean => row.read !== undefined && entryIsSealed(keys, chain, row.read.entry);
-  /** Whether a live row is the copy's own: sealed, and hashing the same, so the same in every column the hash covers. */
+  /**
+   * Whether a live row is the copy's own: sealed, hashing the same, so the same in every column the hash covers, under
+   * the same key version, so its MAC is the same bytes too (a MAC is the same for the same message and key).
+   */
   const isOriginal = (live: StoredRow, copy: StoredEntry): boolean => {
     const entry = live.read?.entry;
     return (
       entry !== undefined &&
       entryIsSealed(keys, chain, entry) &&
       entry.hash.equals(copy.hash) &&
-      entry.mac.equals(copy.mac) &&
       entry.macKeyVersion === copy.macKeyVersion
     );
   };
@@ -231,8 +233,9 @@ function createPlanner(
       if (problem.reason === 'link' && sealedHere(live)) return refused('fork', seq);
     }
     const head = liveHead();
-    // Never the app's: past a sealed head that stands exactly where the plan ends, and not sealed by us.
-    if (!sealedHere(live) && head !== undefined && head.seq === end.seq && seq > head.seq) {
+    // Never the app's: not sealed by us, and past a sealed head that stands exactly where the plan ends (every row
+    // here is past that end).
+    if (!sealedHere(live) && head?.seq === end.seq) {
       return plan({ action: 'remove', seq });
     }
     return refused('new_seal', end.seq + 1n);
@@ -254,8 +257,8 @@ function createPlanner(
       if (end.seq === copied.seq) {
         const live = liveHeads.first;
         replaceHead = live !== undefined && sameHead(live, copyHead) ? undefined : copyHead;
-      } else if (head?.seq !== end.seq || !head.hash.equals(end.hash)) {
-        // Grown on past the copy, but no original head row stands at its end.
+      } else if (head === undefined || !head.hash.equals(end.hash)) {
+        // Grown on past the copy, but no original head row stands at its end (a hash names its event's number too).
         return refused('new_seal', end.seq);
       }
       if (anchor !== undefined && anchor.seq > end.seq) return refused('behind_anchor', anchor.seq);
