@@ -255,7 +255,8 @@ export async function limitStatementsTo<Schema>(
  * Runs `work` in the caller's transaction inside a savepoint named `name`, its statements and lock waits limited to
  * these milliseconds for it alone, the transaction's own limits put back after either way. A failure rolls back to the
  * savepoint alone and is thrown, the transaction still usable: for a step that must never undo what came before it (a
- * hold's mark). On success the savepoint is left for the commit to end, a trip fewer.
+ * hold's mark). On success the savepoint is left for the commit to end, a trip fewer. Never nested: an inner call
+ * overwrites the saved limits, so the outer one would put back the inner bounds.
  */
 export async function inBoundedSavepoint<Schema, Result>(
   tx: Transaction<Schema>,
