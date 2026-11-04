@@ -279,6 +279,7 @@ const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
 const AGENT_CANCELS_ALERT = named(/^alert-agentx-.+-agent-cancels$/);
 const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
+const DECISIONS_SUPPRESSED_ALERT = named(/^alert-agentx-.+-decisions-suppressed$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
@@ -549,6 +550,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-decisions-suppressed',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxstg[a-z0-9]{6}$/),
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxstg[a-z0-9]{6}\/default$/),
       expect.stringMatching(
@@ -2926,6 +2928,34 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // Its runbook is the playbook's section N.
     expect(String(at(staging.predictedResources.find(HOLDINGS_CHECK_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section N\.$/,
+    );
+  });
+
+  it("decisions-suppressed-alert: no alert on decision lines held back (PL-52), or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(DECISIONS_SUPPRESSED_ALERT))).toEqual(['decisions-suppressed-alert']);
+    for (const change of [
+      // Any held-back count, not the decision line's.
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.created" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided" | summarize Events = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(DECISIONS_SUPPRESSED_ALERT, change))).toEqual(['decisions-suppressed-alert']);
+    }
+    expect(String(at(staging.predictedResources.find(DECISIONS_SUPPRESSED_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section J\.$/,
     );
   });
 
