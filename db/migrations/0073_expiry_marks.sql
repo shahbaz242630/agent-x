@@ -1,0 +1,48 @@
+-- 4D2e D8: the request expiry and the mandate expiry follow marks (0072) instead of
+-- visiting every organisation every five minutes. Runs only once the image before it
+-- knows its two triggers exactly (D8a, schema-guard.ts COMING_TRIGGERS).
+
+-- Two more jobs a mark may name.
+ALTER TABLE directory.org_work DROP CONSTRAINT org_work_job_check,
+  ADD CONSTRAINT org_work_job_check
+    CHECK (job IN ('hand_off', 'hand_off_sweep', 'payment_check', 'request_expiry', 'mandate_expiry'));
+
+-- When a request waiting for approval may expire, written by its decision's own insert
+-- (the database's clock then, plus the wait it seals): its decision's sealed time comes
+-- a moment later, so this is never after the time it expires by. Unsealed: it only
+-- chooses when to look, and each request is judged by its sealed decision before it
+-- moves. One moved later past the app would hide it, so the holdings check holds it to
+-- the sealed wait. Null for every other decision, and for a request made before this
+-- migration or by the image before it, read by created_at as before; those drain within
+-- 72 hours. No CHECK: one on a column added would read the whole table under its lock.
+ALTER TABLE spend_requests.requests ADD COLUMN waits_until timestamptz;
+
+-- The expiry's two reads, both of the requests still waiting: the soonest of those due
+-- and the candidates due by now; nulls, the older rows, sort last in it. It replaces
+-- 0042's, which read by created_at alone.
+CREATE INDEX requests_waiting_until ON spend_requests.requests (org_id, waits_until)
+  WHERE status = 'APPROVAL_REQUIRED';
+DROP INDEX spend_requests.waiting_for_approval;
+
+-- A request waiting: due a day on, the shortest wait; the job's visit then moves the
+-- mark to when the request's own wait ends, read from waits_until.
+CREATE CONSTRAINT TRIGGER marks_request_expiry AFTER INSERT OR UPDATE ON spend_requests.requests
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN (NEW.status = 'APPROVAL_REQUIRED')
+  EXECUTE FUNCTION directory.mark_org_work('request_expiry', '24 hours');
+
+-- A mandate open or suspended, its version in force made or changed: due at once; the
+-- visit moves the mark to the soonest end of a version in force, or takes it away.
+CREATE CONSTRAINT TRIGGER marks_mandate_expiry AFTER INSERT OR UPDATE ON mandates.mandates
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN (NEW.status IN ('ACTIVE', 'SUSPENDED'))
+  EXECUTE FUNCTION directory.mark_org_work('mandate_expiry', '0 seconds');
+
+-- Rows from before these triggers have no mark, and the tenant wall keeps their rows
+-- from this owner. So every organisation is marked due now for both jobs: the first
+-- runs visit each once, as every run did before, and settle it to what its rows say.
+-- directory.orgs is global, IDs only.
+INSERT INTO directory.org_work (org_id, job, due_at)
+SELECT o.org_id, j.job, pg_catalog.now()
+FROM directory.orgs o CROSS JOIN (VALUES ('request_expiry'), ('mandate_expiry')) AS j (job)
+ON CONFLICT (org_id, job) DO NOTHING;

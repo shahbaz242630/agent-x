@@ -1,4 +1,4 @@
-// directory.org_work (0072): which organisation has work of which kind, written by
+// directory.org_work (0072, 0073): which organisation has work of which kind, written by
 // deferred triggers as the work's own row commits. A row chooses when to look, and
 // nothing is believed from it: whoever looks reads and acts inside withTenant.
 //
@@ -11,10 +11,9 @@ import { limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { readAlone } from './read-alone.ts';
-import type { DirectoryTables } from './tables.ts';
+import type { DirectoryTables, OrgWorkJob } from './tables.ts';
 
-/** The work the marks follow so far. */
-export type OrgWorkJob = 'hand_off' | 'hand_off_sweep' | 'payment_check';
+export type { OrgWorkJob } from './tables.ts';
 
 /** One mark. `marks` moves with every mark made, and is only ever compared. */
 export interface OrgWorkMark {

@@ -12,13 +12,7 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
-import {
-  COMING_TRIGGERS,
-  liveSchemaDrift,
-  liveSchemaProblems,
-  MARK_TRIGGERS,
-  type WrittenTrigger,
-} from './schema-guard.ts';
+import { liveSchemaDrift, liveSchemaProblems, MARK_TRIGGERS, type WrittenTrigger } from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 
 const server = inject('postgres');
@@ -216,45 +210,38 @@ describe('a trigger a coming migration adds to a table already built', () => {
   });
 });
 
-describe("0073's triggers, made as its migration will make them, read by this image (4D2e D8)", () => {
-  // Word for word as db/migrations/0073 writes them: this image must know each exactly before that migration runs.
-  const MADE = `create constraint trigger marks_request_expiry after insert or update on spend_requests.requests
-      deferrable initially deferred for each row
-      when (new.status = 'APPROVAL_REQUIRED')
-      execute function directory.mark_org_work('request_expiry', '24 hours');
-    create constraint trigger marks_mandate_expiry after insert or update on mandates.mandates
-      deferrable initially deferred for each row
-      when (new.status in ('ACTIVE', 'SUSPENDED'))
-      execute function directory.mark_org_work('mandate_expiry', '0 seconds')`;
-  const DROPPED = `drop trigger if exists marks_request_expiry on spend_requests.requests;
-    drop trigger if exists marks_mandate_expiry on mandates.mandates`;
+describe('0073, read as the image before it would read it (4D2e D8)', () => {
+  const EXPIRY = ['marks_request_expiry', 'marks_mandate_expiry'];
+  // The image before knew 0072's three triggers as written, these two as coming, and the job CHECK as 0072 made it.
+  const before = {
+    triggers: MARK_TRIGGERS.filter(({ name }) => !EXPIRY.includes(name)),
+    tables: BUILT_TABLES,
+    checks: BUILT_CHECKS.map((one) =>
+      one.name === 'org_work_job_check'
+        ? { ...one, expression: "(job = ANY (ARRAY['hand_off'::text, 'hand_off_sweep'::text, 'payment_check'::text]))" }
+        : one,
+    ),
+  };
+  const coming = MARK_TRIGGERS.filter(({ name }) => EXPIRY.includes(name));
 
-  it('are each a coming trigger, and nothing is the alarm at once', async () => {
-    await owner.query(MADE);
-    try {
-      expect(COMING_TRIGGERS.map(({ name }) => name)).toEqual(['marks_request_expiry', 'marks_mandate_expiry']);
-      expect(await liveSchemaDrift(app, ROLES)).toEqual({
-        atOnce: [],
-        releaseShaped: [
-          'mandates.mandates carries "marks_mandate_expiry", a coming trigger',
-          'spend_requests.requests carries "marks_request_expiry", a coming trigger',
-        ],
-      });
-    } finally {
-      await owner.query(DROPPED);
-    }
+  it('knowing its triggers as coming: nothing is the alarm at once, and all of it warns first', async () => {
+    expect(coming.map(({ name }) => name)).toEqual(EXPIRY);
+    expect(await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: coming })).toEqual({
+      atOnce: [],
+      releaseShaped: [
+        `directory.org_work's CHECK constraint "org_work_job_check" reads differently`,
+        'mandates.mandates carries "marks_mandate_expiry", a coming trigger',
+        'spend_requests.requests carries "marks_request_expiry", a coming trigger',
+      ],
+    });
   });
 
-  it('to the image before this one, are the false alarm at once', async () => {
-    await owner.query(MADE);
-    try {
-      expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual([
-        'mandates.mandates carries the trigger "marks_mandate_expiry"',
-        'spend_requests.requests carries the trigger "marks_request_expiry"',
-      ]);
-    } finally {
-      await owner.query(DROPPED);
-    }
+  it('not knowing them: the false alarm D8a landed first to prevent, on those two alone', async () => {
+    const { atOnce } = await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: [] });
+    expect(atOnce).toEqual([
+      'mandates.mandates carries the trigger "marks_mandate_expiry"',
+      'spend_requests.requests carries the trigger "marks_request_expiry"',
+    ]);
   });
 });
 
@@ -287,10 +274,13 @@ describe('0072, read as the image before it would read it', () => {
     );
   });
 
-  it('not knowing them: the false alarm this all exists to prevent, on those three alone', async () => {
+  it('not knowing them: the false alarm this all exists to prevent, on the triggers alone', async () => {
     const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: [] });
+    // The migrated database holds 0073's two as well, which that image knew no more of.
     expect(atOnce).toEqual([
+      'mandates.mandates carries the trigger "marks_mandate_expiry"',
       'spend_requests.requests carries the trigger "marks_hand_off"',
+      'spend_requests.requests carries the trigger "marks_request_expiry"',
       'transactions.transactions carries the trigger "marks_hand_off_sweep"',
       'transactions.transactions carries the trigger "marks_payment_check"',
     ]);

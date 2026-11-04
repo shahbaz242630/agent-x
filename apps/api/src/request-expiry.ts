@@ -5,15 +5,18 @@
 // in the same transaction, so the agent's monthly budget, the split total and
 // the order are free again. No one is emailed yet (Phase 3's approvals).
 //
-// For each organisation the directory lists, the candidates are found by
-// their rows (`requestsWaitingSince`, 0042's index: waiting at least the
-// shortest wait), a page at a time, each page after the last, so requests
+// For each organisation its marks list (4D2e D8: those whose soonest wait is
+// due, `requestExpiryDue`), the candidates are found by their rows
+// (`requestsDueToExpire`, 0073's index: `waits_until` passed, or, made before
+// it, waiting the shortest wait), a page at a time, each page after the last, so requests
 // refused on every run (tampered with) can't fill a page and keep the rest
 // waiting; each page kept to those whose sealed wait has run out, read in the
 // page's one transaction (`duePage`), so one not yet due takes no lock and no
 // transaction of its own every run; then each in a transaction of its own,
 // judged again under its lock (`expireRequest`). A request
-// approved, denied or cancelled meanwhile is left as it is.
+// approved, denied or cancelled meanwhile is left as it is. One left due (it
+// failed, it was past the run's share, or its sealed time is a moment after
+// its row's) keeps its organisation's mark due, so the next run comes back.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // request, and the run goes on to the next. A run that can't read the
@@ -29,8 +32,7 @@ import {
   type Decided,
   decisionsOf,
   expireRequest,
-  requestsWaitingSince,
-  SHORTEST_APPROVAL_WAIT_MS,
+  requestsDueToExpire,
   type SpendRequestsTables,
   waitedOut,
 } from '@agentx/core/modules/spend-requests';
@@ -61,7 +63,7 @@ export function createRequestExpiry({
   logger,
   most = MOST_EXPIRED_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those its marks say are due, which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<SpendRequestsTables & LimitReservationsTables & AuditTables>;
   readonly keys: KeyProvider;
@@ -122,7 +124,7 @@ export function createRequestExpiry({
 
 /**
  * The IDs of the organisation's requests due to expire, in order of ID after
- * `after`, at most `left`: its rows waiting at least the shortest wait, read
+ * `after`, at most `left`: its rows due by now (requestsDueToExpire), read
  * `left` at a time, each kept once the wait its decision sealed has run out
  * (their decisions read in one statement a page), until `left` are kept or
  * the rows run out. Their order is the rows', so the job's next page, after
@@ -137,11 +139,10 @@ async function duePage(
   states: SignedStates,
   { orgId, now, left, after }: { orgId: string; now: Date; left: number; after: string | undefined },
 ): Promise<readonly string[]> {
-  const before = new Date(now.getTime() - SHORTEST_APPROVAL_WAIT_MS);
   const due: string[] = [];
   let from = after;
   for (;;) {
-    const rows = await requestsWaitingSince(tx, orgId, before, left, from);
+    const rows = await requestsDueToExpire(tx, orgId, now, left, from);
     let decided: ReadonlyMap<string, Decided>;
     try {
       decided = await decisionsOf(tx, states, orgId, rows);

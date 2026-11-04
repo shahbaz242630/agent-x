@@ -50,7 +50,8 @@ export const PLAIN_WORDS = {
   },
   'org_work.unmarked': {
     happened: 'An organisation had work due for a background job with no mark saying so, or a mark saying too late.',
-    broke: 'The hand-off or the payment checks skipped that work since then (up to an hour); it is due again now.',
+    broke:
+      'The job it names (the hand-off, the payment checks or an expiry) skipped that work since then (up to an hour); it is due again now.',
     next: 'The mark is now right. One after a release is older work; more means a write misses its mark.',
   },
   'org_work.rediscovery_failed': {

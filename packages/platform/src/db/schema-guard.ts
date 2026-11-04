@@ -251,7 +251,7 @@ const markTrigger = (table: string, name: string, condition: string, job: string
   body: MARK_BODY,
 });
 
-/** The marks' triggers (0072): on the tables they name, and each as written. */
+/** The marks' triggers (0072, 0073): on the tables they name, and each as written. */
 export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
   markTrigger(
     'spend_requests.requests',
@@ -274,15 +274,8 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
     'payment_check',
     '0 seconds',
   ),
-];
-
-/**
- * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
- * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * Now 0073's (4D2e D8): a request waiting for approval marks its expiry a day on, the shortest wait; a mandate open
- * or suspended marks its expiry's look at once, which reads its version's end.
- */
-export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  // 0073 (4D2e D8): a request waiting for approval marks its expiry a day on, the shortest wait; a mandate open or
+  // suspended marks its expiry's look at once, which reads its version's end.
   markTrigger(
     'spend_requests.requests',
     'marks_request_expiry',
@@ -298,6 +291,13 @@ export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
     '0 seconds',
   ),
 ];
+
+/**
+ * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
+ * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
+ * None now.
+ */
+const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
