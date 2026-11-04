@@ -715,11 +715,12 @@ export function createAnchorCheck({
     signal: AbortSignal,
   ): Promise<ReadonlyMap<string, Probed>> => {
     const { probe } = from;
+    if (probe === undefined) return new Map();
     const asked = orgIds.flatMap((orgId) => {
       const anchor = anchors.latest({ kind: 'organisation', orgId });
       return anchor === undefined ? [] : [{ orgId, from: anchor }];
     });
-    if (probe === undefined || asked.length === 0) return new Map();
+    if (asked.length === 0) return new Map();
     let answers: ReadonlyMap<string, ProbeAnswer>;
     try {
       answers = await tracked(PROBE, 'the last probe has not finished', () => probe(asked, signal), signal);
