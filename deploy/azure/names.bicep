@@ -6,12 +6,14 @@
 // them imports it.
 
 // Every app, each with an identity of its own: the API, Zitadel and its login
-// pages. The worker joins in Phase 4.
+// pages, and the API's jobs where they run apart from it (`jobs`, 4D2e D13:
+// production and staging's load run; out of a load run staging's API holds them).
 @export()
 var appWorkloads = [
   'api'
   'zitadel'
   'login'
+  'jobs'
 ]
 
 // Every job, each with an identity of its own: the jobs that set up a server's

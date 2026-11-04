@@ -98,6 +98,10 @@ var names = resourceNames(environment, nameSuffix)
 
 // Every secret a run writes when given a value, and who reads each. The
 // set-up job reads every database login, since each of its runs sets them all.
+// The API's jobs, where they run apart from it (`jobs`, 4D2e D13), read what the
+// API does: the same process at another role, whose settings are checked alike
+// (sign-in's three together, email's four together), and whose jobs send the
+// notices, copy the login service's events and carry out the factor resets.
 var secrets = [
   {
     name: 'db-admin-password'
@@ -112,7 +116,7 @@ var secrets = [
   {
     name: 'db-app-password'
     value: dbAppPassword
-    readers: ['db-setup', 'api', 'operator']
+    readers: ['db-setup', 'api', 'jobs', 'operator']
   }
   {
     name: 'db-backup-password'
@@ -142,17 +146,17 @@ var secrets = [
   {
     name: 'api-oidc-client-secret'
     value: apiOidcClientSecret
-    readers: ['api']
+    readers: ['api', 'jobs']
   }
   {
     name: 'zitadel-directory-token'
     value: directoryToken
-    readers: ['api']
+    readers: ['api', 'jobs']
   }
   {
     name: 'zitadel-reset-token'
     value: resetToken
-    readers: ['api']
+    readers: ['api', 'jobs']
   }
 ]
 
@@ -161,7 +165,7 @@ var secrets = [
 // is rotated in Azure brings the new one.
 var copiedKey = {
   name: 'acs-access-key'
-  readers: ['api']
+  readers: ['api', 'jobs']
 }
 
 // The one secret no run writes twice.
@@ -177,12 +181,12 @@ var access = concat(
     readers: secret.readers
   }),
   [masterKey, copiedKey],
-  // The API reads every key; the operator's command the audit chains' MAC and
+  // The API and its jobs read every key; the operator's command the audit chains' MAC and
   // the field encryption alone, each version of them, as the API does
   // (ADR-011 §3, B4-6b).
   map(appKeys, key => {
     name: key
-    readers: operatorHolds(key) ? ['api', 'operator'] : ['api']
+    readers: operatorHolds(key) ? ['api', 'jobs', 'operator'] : ['api', 'jobs']
   })
 )
 

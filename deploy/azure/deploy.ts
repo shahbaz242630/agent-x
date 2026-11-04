@@ -1647,7 +1647,11 @@ async function verifiedLoadImage(steps: Steps, images: Images, release: string):
 }
 
 /** The apps and jobs as Azure left them after an apps deploy, and the load test's jobs when a plain one left them. */
-function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean): void {
+/** The app the API's jobs run in apart from it (apps.bicep `jobsApp`, 4D2e D13): staging has it in a load run alone. */
+export const JOBS_APP = 'ca-agentx-stg-jobs';
+
+/** Says what Azure left of every app and job after a deploy; the apps' names. */
+function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean): readonly string[] {
   const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
     const found = azJson(steps.az, [
       ...kind.split(' '),
@@ -1673,6 +1677,25 @@ function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean)
       "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
     );
   }
+  return appsLeft.map((each) => text(each.name));
+}
+
+/**
+ * After a plain apps, the jobs app a load run left (4D2e D13): a deployment only adds and changes, and staging's API
+ * now holds the jobs again (AGENTX_ROLE all), so a jobs app left running would be a second holder of them, always
+ * billed. Removed only once the deployment that put the API back has succeeded: the two overlap no longer than a
+ * deploy's revisions do, and the lease keeps one leading.
+ */
+function removeLeftJobsApp(steps: Steps, subscription: string, appsLeft: readonly string[], loadRun: boolean): void {
+  if (loadRun || !appsLeft.includes(JOBS_APP)) return;
+  const url = `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${JOBS_APP}?api-version=${ENVIRONMENT_API}`;
+  const done = steps.az.run(['rest', '--method', 'delete', '--url', url]);
+  if (done.status !== 0) {
+    throw new Error(
+      `Deployed, but Azure refused to remove ${JOBS_APP}, which a load run left beside the API, now holding the jobs again: two hold them until it goes. Remove it in the Azure portal (Container Apps, ${JOBS_APP}, Delete), or run apps again.`,
+    );
+  }
+  steps.terminal.say(`Removed ${JOBS_APP}, which the load run left: the API holds the jobs again (4D2e D13).`);
 }
 
 async function deployApps(
@@ -1736,7 +1759,8 @@ async function deployApps(
   };
   checkPolicy(steps, values);
   if (sendWithWhatIf(steps, subscription, 'apps', values) === undefined) return 1;
-  sayWhatIsDeployed(steps, subscription, loadRun);
+  const appsLeft = sayWhatIsDeployed(steps, subscription, loadRun);
+  removeLeftJobsApp(steps, subscription, appsLeft, loadRun);
   steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");
   // Most deploys need no job (S21): only a first one needs all four.
   steps.terminal.say(

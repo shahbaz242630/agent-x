@@ -983,6 +983,15 @@ function revisionName(name: unknown): string {
 }
 
 /**
+ * Why /health may never answer 200 where the API runs as `web` copies (4D2e D13): a copy answers 503 while the jobs'
+ * heartbeat, which the jobs app beats, is older than five minutes (handoff.ts HEARTBEAT_STALE_MS). So a release while
+ * the jobs have been down that long stops red, once traffic has switched to the new revision: the release updates the
+ * API alone and can't start them, and the old revision would answer the same.
+ */
+const JOBS_DOWN =
+  " Its copies run as AGENTX_ROLE web, which answer 503 while the jobs' heartbeat is over 5 minutes old: look at ca-agentx-stg-jobs and its log first.";
+
+/**
  * Waits until the API serves the release: a new revision is the ready one;
  * it holds this image and build, is provisioned, active, takes all traffic and
  * is healthy; and the door answers /health while it does (which starts a
@@ -992,7 +1001,7 @@ async function served(
   steps: ReleaseSteps,
   subscription: string,
   before: string,
-  target: { readonly origin: string; readonly image: string; readonly commit: string },
+  target: { readonly origin: string; readonly image: string; readonly commit: string; readonly web: boolean },
 ): Promise<string> {
   const deadline = steps.now().getTime() + SERVE_WAIT_MS;
   const late = (what: string): Error =>
@@ -1029,7 +1038,10 @@ async function served(
   steps.say(`The API's new revision ${revision} takes all traffic; asking the door for /health...`);
   for (;;) {
     if ((await steps.probe(`${target.origin}/health`)) === 200) break;
-    if (steps.now().getTime() >= deadline) throw late('answering /health');
+    if (steps.now().getTime() >= deadline) {
+      const error = late('answering /health');
+      throw target.web ? new Error(`${error.message}${JOBS_DOWN}`) : error;
+    }
     await wait();
   }
   await serving(true);
@@ -1121,7 +1133,12 @@ export async function release(request: Request, steps: ReleaseSteps): Promise<nu
     `migrate ran ${commit}; the API's template holds ${commit}, and until a new revision serves it the old one does.`,
     async () => {
       await settledUpdate(steps, subscription, 'api', apiAfter);
-      return served(steps, subscription, String(before.properties.latestRevisionName), { origin, image, commit });
+      return served(steps, subscription, String(before.properties.latestRevisionName), {
+        origin,
+        image,
+        commit,
+        web: settingValue(api.running.container, 'AGENTX_ROLE') === 'web',
+      });
     },
   );
   steps.say(

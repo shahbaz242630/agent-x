@@ -648,7 +648,9 @@ async function finish(steps: LoadSteps): Promise<number> {
     if (done.status !== 0) throw new Error(`Azure refused to remove ${jobName(job)}: run load.ts finish again.`);
     steps.say(`Removed ${jobName(job)}.`);
   }
-  steps.say('Next: apps (without --load-run) puts the API back, then foundation (without --load-size) the database.');
+  steps.say(
+    'Next: apps (without --load-run) puts the API back and removes the jobs app, then foundation (without --load-size) the database.',
+  );
   return 0;
 }
 

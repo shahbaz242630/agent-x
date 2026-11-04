@@ -13,8 +13,8 @@
 //   each overwrite would outlive the lifecycle rule, which deletes the file only
 // - one copy in both environments (LRS): a file lost is asked for again, and
 //   nothing here is the only copy of anything (the activity log is in Postgres)
-// - the API's identity may read and write a file in the one container and
-//   nothing else: it can't delete one, or change the account or its rules
+// - the identity of each app that runs the API (the API's, and the jobs', 4D2e
+//   D13) may read and write a file in the one container and nothing else: it can't delete one, or change the account or its rules
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -30,7 +30,8 @@ param name string
 param tags object
 param appsSubnetId string
 param workspaceId string
-param apiIdentityName string
+@description('Who keeps the downloads, each `{ workload, identity }`: every app that runs the API (4D2e D13), a `web` copy handing a file out and the jobs building one, created by the foundation (environment.bicep) under that name.')
+param keepers array
 
 @description('A custom role\'s name is the whole directory\'s, so it carries the environment and the suffix.')
 param roleName string
@@ -141,10 +142,11 @@ resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2025-01
   }
 }
 
-// Created by the foundation (environment.bicep) under this name.
-resource api 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
-  name: apiIdentityName
-}
+resource keeper 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = [
+  for each in keepers: {
+    name: each.identity
+  }
+]
 
 // Read a part of a file (Get Blob), and write one a block at a time (Put
 // Block, Put Block List), over a file of the same name; nothing else.
@@ -171,16 +173,18 @@ resource downloadsRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   }
 }
 
-resource keeps 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: container
-  name: guid(container.id, api.id, downloadsRole.id)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', downloadsRole.name)
-    principalId: api.properties.principalId
-    principalType: 'ServicePrincipal'
-    description: 'api keeps activity downloads (deploy/azure/modules/activity-downloads.bicep)'
+resource keeps 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (each, index) in keepers: {
+    scope: container
+    name: guid(container.id, keeper[index].id, downloadsRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', downloadsRole.name)
+      principalId: keeper[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${each.workload} keeps activity downloads (deploy/azure/modules/activity-downloads.bicep)'
+    }
   }
-}
+]
 
 resource audit 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   scope: blobs

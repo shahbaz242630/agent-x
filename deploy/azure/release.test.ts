@@ -1936,6 +1936,25 @@ describe('release', () => {
       expect(methods(azure)).toEqual(['patch', 'post', 'patch']);
     }
   });
+
+  it("stops red when the API's web copies never answer /health, the jobs down over five minutes, once traffic has switched (4D2e D13)", async () => {
+    const web = (azure: Staging): void => {
+      azure.app = { ...azure.app, env: [...azure.app.env, { name: 'AGENTX_ROLE', value: 'web' }] };
+    };
+    const azure = new Staging();
+    web(azure);
+    azure.probes = [503];
+    expect((await outcome(azure)).message).toBe(
+      `The API's new revision wasn't answering /health 5 minutes after its update. Its copies run as AGENTX_ROLE web, which answer 503 while the jobs' heartbeat is over 5 minutes old: look at ca-agentx-stg-jobs and its log first.\nLeft: migrate ran ${NEW}; the API's template holds ${NEW}, and until a new revision serves it the old one does.`,
+    );
+    // The API was updated first: its new revision took all traffic before /health was asked.
+    expect(methods(azure)).toEqual(['patch', 'post', 'patch']);
+    // Copies that answer once the jobs beat again are released.
+    const recovered = new Staging();
+    web(recovered);
+    recovered.probes = [503, 503, 200];
+    expect((await outcome(recovered)).status).toBe(0);
+  });
 });
 
 describe('main', () => {

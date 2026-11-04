@@ -582,6 +582,10 @@ interface AzAnswers {
   readonly apps?: readonly { readonly name: string; readonly fewest?: unknown }[];
   /** The jobs Azure lists after an apps deploy, by name (default the set-up job alone). */
   readonly jobs?: readonly string[];
+  /** The apps Azure lists after an apps deploy, by name (default the API alone). */
+  readonly listedApps?: readonly string[];
+  /** Whether Azure refuses to remove an app. */
+  readonly removeRefused?: boolean;
   /** The environment's certificates after the deployment. */
   readonly certificates?: readonly unknown[];
   /**
@@ -732,7 +736,7 @@ class RecordingAz implements Az {
         return json(this.options.vaults ?? ['kv-agentx-stg-abcdef']);
       case 'containerapp list':
         if (args.some((arg) => arg.includes('fewest'))) return json(this.options.apps ?? KEPT_RUNNING);
-        return json([{ name: 'ca-agentx-stg-api', state: 'Succeeded' }]);
+        return json((this.options.listedApps ?? ['ca-agentx-stg-api']).map((name) => ({ name, state: 'Succeeded' })));
       case 'containerapp job':
         return json((this.options.jobs ?? ['job-agentx-stg-db-setup']).map((name) => ({ name, state: 'Succeeded' })));
       case 'tag update':
@@ -740,6 +744,11 @@ class RecordingAz implements Az {
       case 'tag list':
         return json({ properties: { tags: this.tags } });
       case 'rest --method':
+        if (args[2] === 'delete') {
+          return this.options.removeRefused === true
+            ? { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"AuthorizationFailed"}})' }
+            : { status: 0, stdout: '', stderr: '' };
+        }
         return this.#rest(args[args.indexOf('--url') + 1] ?? '');
       default:
         throw new Error(`unexpected az ${args.join(' ')}`);
@@ -1761,6 +1770,48 @@ describe('deploy apps', () => {
       az: new RecordingAz({ jobs }),
     });
     expect(loadRun.terminal.said.join('\n')).not.toContain('load.ts finish');
+  });
+
+  it('removes the jobs app a load run left once a plain apps has put the API back, and keeps it in a load run (4D2e D13)', async () => {
+    const listedApps = ['ca-agentx-stg-api', 'ca-agentx-stg-jobs'];
+    const removed = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/containerApps/ca-agentx-stg-jobs?api-version=2026-01-01`;
+    const deletes = (az: RecordingAz) =>
+      az.calls.filter((call) => call.args[2] === 'delete').map((call) => call.args[call.args.indexOf('--url') + 1]);
+    const plain = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ listedApps }) });
+    expect(plain.status).toBe(0);
+    expect(deletes(plain.az)).toEqual([removed]);
+    // Only once the deployment that put the API back has gone.
+    expect(plain.az.calls.findIndex((call) => call.args[2] === 'delete')).toBeGreaterThan(
+      plain.az.calls.findIndex((call) => call.values !== undefined),
+    );
+    expect(plain.terminal.said).toContain(
+      'Removed ca-agentx-stg-jobs, which the load run left: the API holds the jobs again (4D2e D13).',
+    );
+    // A load run keeps it, and a plain apps with none left removes nothing.
+    const loadRun = await run(['apps', '--load-run'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ listedApps }),
+    });
+    expect(deletes(loadRun.az)).toEqual([]);
+    const none = await run(['apps'], { answers, images: recordingImages() });
+    expect(deletes(none.az)).toEqual([]);
+    // A deployment that didn't go removes nothing either.
+    const declined = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ listedApps, ended: 'Declined' }),
+    });
+    expect(deletes(declined.az)).toEqual([]);
+    const refused = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ listedApps, removeRefused: true }),
+    });
+    expect(refused.error).toMatchObject({
+      message:
+        'Deployed, but Azure refused to remove ca-agentx-stg-jobs, which a load run left beside the API, now holding the jobs again: two hold them until it goes. Remove it in the Azure portal (Container Apps, ca-agentx-stg-jobs, Delete), or run apps again.',
+    });
   });
 
   it('says nothing about a running replica when a kept-running deployment fails', async () => {

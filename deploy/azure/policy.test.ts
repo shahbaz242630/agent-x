@@ -167,15 +167,61 @@ const withExtra = (resource: Mutable): Snapshot => ({
   diagnostics: [],
 });
 
+/** A setting of an app's one container, put in or changed. */
+const setSetting = (app: Mutable, name: string, value: string): void => {
+  const entries = settingsOf(app);
+  const entry = entries.find((each) => each.name === name);
+  if (entry === undefined) entries.push({ name, value });
+  else entry.value = value;
+};
+
+/**
+ * Staging's API split as production runs it (4D2e D13): `web` copies (one, sized to staging's server)
+ * beside a `jobs` app, the API's own copy at AGENTX_ROLE jobs as its own identity, with no ingress, keeping the
+ * anchors, which the API's identity is no longer given.
+ */
+function splitTheApi(from: Snapshot): Snapshot {
+  const resources = from.predictedResources as unknown as Mutable[];
+  const api = resources.find((resource) => APP('api')(resource as unknown as PredictedResource));
+  if (api === undefined) throw new Error('no API app');
+  const jobs = JSON.parse(
+    JSON.stringify(api)
+      .replaceAll('id-agentx-stg-api', 'id-agentx-stg-jobs')
+      .replaceAll('ca-agentx-stg-api', 'ca-agentx-stg-jobs'),
+  ) as Mutable;
+  for (const [app, role] of [
+    [api, 'web'],
+    [jobs, 'jobs'],
+  ] as const) {
+    setSetting(app, 'AGENTX_ROLE', role);
+    Object.assign(scaleOf(app), { minReplicas: 1, maxReplicas: 1 });
+  }
+  setSetting(api, 'AGENTX_WEB_COPIES', '1');
+  setSetting(api, 'AGENTX_DB_POOL_MAX', '5');
+  setSetting(jobs, 'AGENTX_DB_JOBS_POOL_MAX', '6');
+  containerOf(api).env = settingsOf(api).filter(
+    ({ name }) => !/^AGENTX_(?:ANCHOR_EPOCH|AUDIT_ANCHORS_)/.test(String(name)),
+  );
+  containerOf(jobs).name = 'jobs';
+  delete inside(jobs, 'properties', 'configuration').ingress;
+  const kept = [...resources, jobs].filter(
+    (resource) =>
+      at(resource, 'properties', 'description') !== 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)',
+  );
+  return { ...from, predictedResources: kept as unknown as PredictedResource[] };
+}
+
 /**
  * Staging's resources as production's would name them: their tags and CI's
  * identity (where it is and whom its role is given to), and (unless a test
- * wants it left) CI's GitHub subject.
+ * wants it left) CI's GitHub subject. Its API runs split, as production's must (4D2e D13).
  */
 function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
-  const copy = changed(
-    (resource) => resource.tags !== undefined,
-    (resource) => (inside(resource, 'tags').environment = 'production'),
+  const copy = splitTheApi(
+    changed(
+      (resource) => resource.tags !== undefined,
+      (resource) => (inside(resource, 'tags').environment = 'production'),
+    ),
   );
   for (const resource of copy.predictedResources as unknown as Mutable[]) {
     resource.id = String(resource.id).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
@@ -543,7 +589,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.App/managedEnvironments cae-agentx-staging',
       'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
       'Microsoft.Insights/diagnosticSettings system-logs-to-login-workspace',
-      ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'].map(
+      // The API's jobs apart from it (4D2e D13) have their own, unused on staging out of a load run.
+      ...['api', 'zitadel', 'login', 'jobs', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'].map(
         (workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`,
       ),
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
@@ -585,6 +632,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
+      // The anchors' role to the API's and the jobs' identities on staging (4D2e D13).
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
@@ -605,6 +656,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      // The downloads' role to the API's and the jobs' identities (4D2e D13).
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -660,6 +715,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'migrate reads db-owner-password',
         'db-setup reads db-app-password',
         'api reads db-app-password',
+        // The API's jobs apart from it read what the API reads (4D2e D13).
+        'jobs reads db-app-password',
         'operator reads db-app-password',
         'db-setup reads db-backup-password',
         'db-setup reads db-zitadel-password',
@@ -670,16 +727,20 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'login reads login-client-private-key',
         'zitadel reads login-client-public-key',
         'api reads api-oidc-client-secret',
+        'jobs reads api-oidc-client-secret',
         'api reads zitadel-directory-token',
+        'jobs reads zitadel-directory-token',
         'api reads zitadel-reset-token',
+        'jobs reads zitadel-reset-token',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
         'api reads acs-access-key',
+        'jobs reads acs-access-key',
         // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each version.
         ...APP_KEYS.flatMap((key) =>
           key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')
-            ? [`api reads ${key}`, `operator reads ${key}`]
-            : [`api reads ${key}`],
+            ? [`api reads ${key}`, `jobs reads ${key}`, `operator reads ${key}`]
+            : [`api reads ${key}`, `jobs reads ${key}`],
         ),
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
@@ -1643,7 +1704,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ).toEqual(['evidence-store']);
     });
 
-    it('the API alone is told of it, with its own identity', () => {
+    it('the app holding the jobs alone is told of it, with its own identity (4D2e D13)', () => {
       const STORE_NAME = String(staging.predictedResources.find(EVIDENCE_STORE)?.name);
       const anchorSettings = (app: Mutable): Mutable[] =>
         settingsOf(app).filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHORS_'));
@@ -1680,7 +1741,75 @@ describe('SEC-OPS-09 each rule can fail', () => {
           rule: 'evidence-store',
           resource: 'job-agentx-stg-migrate',
           message:
-            "sets AGENTX_AUDIT_ANCHORS_URL: only the API keeps the chains' anchors and the operator's job reads them",
+            "sets AGENTX_AUDIT_ANCHORS_URL: only the app that holds the jobs keeps the chains' anchors and the operator's job reads them",
+        },
+      ]);
+    });
+
+    it("in production the jobs app's identity alone keeps them, and a web copy is never told of them (4D2e D13)", () => {
+      const production = { region: 'uaenorth', environment: 'production' } as const;
+      const split = productionLike({ subject: true });
+      const anchorRules = (snapshotted: Snapshot) =>
+        policyProblems(snapshotted, production).filter(({ rule }) => rule === 'evidence-store');
+      expect(anchorRules(split)).toEqual([]);
+      const jobsKeeps = (resource: PredictedResource) =>
+        ASSIGNMENTS(resource) &&
+        at(resource.properties, 'description') === 'jobs keeps audit anchors (deploy/azure/modules/evidence.bicep)';
+      const apiId = String(
+        split.predictedResources.find(
+          (resource) =>
+            resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' && resource.name.endsWith('-api'),
+        )?.id,
+      );
+      // The API's identity given the role beside the jobs', as staging's is: production's web copies may not hold it.
+      const apiKeeps = structuredClone(split.predictedResources.find(jobsKeeps)) as unknown as Mutable;
+      apiKeeps.id = `${String(apiKeeps.id)}-api`;
+      inside(apiKeeps, 'properties').principalId = String(at(apiKeeps, 'properties', 'principalId')).replace(
+        'id-agentx-stg-jobs',
+        'id-agentx-stg-api',
+      );
+      expect(
+        anchorRules({
+          ...split,
+          predictedResources: [...split.predictedResources, apiKeeps as unknown as PredictedResource],
+        }),
+      ).not.toEqual([]);
+      // Its role taken from the jobs app's identity, or the jobs app told the API's identity.
+      expect(
+        anchorRules({
+          ...split,
+          predictedResources: split.predictedResources.filter((resource) => !jobsKeeps(resource)),
+        }),
+      ).not.toEqual([]);
+      const asApi = changed(
+        APP('jobs'),
+        (app) => {
+          const clientId = settingsOf(app).find((entry) => entry.name === 'AGENTX_AUDIT_ANCHORS_CLIENT_ID') ?? {};
+          clientId.value = `[reference('${apiId}', '2024-11-30').clientId]`;
+        },
+        split,
+      );
+      expect(anchorRules(asApi).map(({ resource }) => resource)).toEqual(['ca-agentx-stg-jobs']);
+      // A web copy told where they are, even as its own identity, which has no role there in production.
+      const webTold = changed(
+        APP('api'),
+        (app) =>
+          settingsOf(app).push(
+            ...settingsOf(split.predictedResources.find(APP('jobs')) as unknown as Mutable)
+              .filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHORS_'))
+              .map((entry) => ({
+                ...entry,
+                value: String(entry.value).replace('id-agentx-stg-jobs', 'id-agentx-stg-api'),
+              })),
+          ),
+        split,
+      );
+      expect(anchorRules(webTold)).toEqual([
+        {
+          rule: 'evidence-store',
+          resource: 'ca-agentx-stg-api',
+          message:
+            "sets AGENTX_AUDIT_ANCHORS_URL, AGENTX_AUDIT_ANCHORS_CLIENT_ID: only the app that holds the jobs keeps the chains' anchors and the operator's job reads them",
         },
       ]);
     });
@@ -1788,7 +1917,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       {
         rule: 'anchor-epoch',
         resource: 'job-agentx-stg-migrate',
-        message: "sets AGENTX_ANCHOR_EPOCH: only the API and the operator's job",
+        message: "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs and the operator's job",
       },
     ]);
   });
@@ -2012,6 +2141,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (app: Mutable) => (url(app).value = String(url(app).value).replace("'activity-downloads'", "'audit-exports'")),
       (app: Mutable) => (url(app).value = 'https://stagentxother.blob.core.windows.net/activity-downloads'),
       (app: Mutable) => (client(app).value = String(client(app).value).replace('-api', '-operator')),
+      // The jobs' identity, which the role is given to too, but which the API doesn't run as (4D2e D13).
+      (app: Mutable) => (client(app).value = String(client(app).value).replace('-api', '-jobs')),
       (app: Mutable) => (client(app).value = '00000000-0000-0000-0000-000000000002'),
       (app: Mutable) =>
         (url(app).value = String(url(app).value).replace('environment().suffixes.storage', "'example.com'")),
@@ -2055,7 +2186,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       {
         rule: 'activity-downloads',
         resource: 'job-agentx-stg-operator',
-        message: 'sets AGENTX_ACTIVITY_DOWNLOADS_DIR: only the API keeps the activity downloads',
+        message: 'sets AGENTX_ACTIVITY_DOWNLOADS_DIR: only the apps that run the API keep the activity downloads',
       },
     ]);
   });
@@ -4324,16 +4455,23 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // One copy where none is said.
     const oneWeb = asRole({ AGENTX_ROLE: 'web' }, { minReplicas: 1, maxReplicas: 1 });
     expect(appProblems(changed(APP('api'), oneWeb))).toEqual([]);
-    const jobs = { AGENTX_ROLE: 'jobs' };
-    expect(appProblems(changed(APP('api'), asRole(jobs, { minReplicas: 1, maxReplicas: 1 })))).toEqual([]);
-    for (const scale of [
-      { minReplicas: 0, maxReplicas: 1 },
-      { minReplicas: 1, maxReplicas: 2 },
-    ]) {
-      expect(appProblems(changed(APP('api'), asRole(jobs, scale)))).toEqual([
-        `must run exactly 1 (minReplicas and maxReplicas 1): the jobs keep to one copy, which the lease alone doesn't make safe for the copier; it says ${String(scale.minReplicas)} to ${String(scale.maxReplicas)}`,
-      ]);
-    }
+    // The jobs app (4D2e D13): the API's own copy at `jobs`, renamed, with no ingress.
+    const asJobs = (scale: Record<string, number>) => (app: Mutable) => {
+      app.name = 'ca-agentx-stg-jobs';
+      delete inside(app, 'properties', 'configuration').ingress;
+      asRole({ AGENTX_ROLE: 'jobs' }, scale)(app);
+    };
+    expect(appProblems(changed(APP('api'), asJobs({ minReplicas: 1, maxReplicas: 1 })))).toEqual([]);
+    const exactlyOne = (scale: { minReplicas: number; maxReplicas: number }): string =>
+      `must run exactly 1 (minReplicas and maxReplicas 1): the jobs keep to one copy, which the lease alone doesn't make safe for the copier; it says ${String(scale.minReplicas)} to ${String(scale.maxReplicas)}`;
+    expect(appProblems(changed(APP('api'), asJobs({ minReplicas: 0, maxReplicas: 1 })))).toEqual([
+      exactlyOne({ minReplicas: 0, maxReplicas: 1 }),
+    ]);
+    // Past one, the jobs app is ONE_REPLICA's too.
+    expect(appProblems(changed(APP('api'), asJobs({ minReplicas: 1, maxReplicas: 2 })))).toEqual([
+      "must run at most one replica (maxReplicas 1): the API's jobs keep to one copy, which the lease alone doesn't make safe for the copier; it says 2",
+      exactlyOne({ minReplicas: 1, maxReplicas: 2 }),
+    ]);
     // `all`, said or not, holds the jobs: at most one, and none while staging sleeps.
     expect(
       appProblems(changed(APP('api'), asRole({ AGENTX_ROLE: 'all' }, { minReplicas: 0, maxReplicas: 1 }))),
@@ -4358,10 +4496,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const role = (value: string) => (app: Mutable) => {
       settingsOf(app).push({ name: 'AGENTX_ROLE', value });
     };
-    /** Staging with a second API app beside its own, named for `workload`, in `role`. */
+    /** Staging with a second API app beside its own, named for `workload`, in `role`: at `jobs`, with no ingress. */
     const beside = (workload: string, value: string, from: Snapshot = staging): Snapshot => {
       const second = structuredClone(from.predictedResources.find(APP('api'))) as unknown as Mutable;
       second.name = `ca-agentx-stg-${workload}`;
+      if (value === 'jobs') delete inside(second, 'properties', 'configuration').ingress;
       role(value)(second);
       Object.assign(scaleOf(second), { minReplicas: 1, maxReplicas: 1 });
       return { ...from, predictedResources: [...from.predictedResources, second as unknown as PredictedResource] };
@@ -4381,9 +4520,64 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
     expect(deploymentProblems(beside('jobs', 'web'))).toEqual([
       'the deployment: runs AGENTX_ROLE all beside web: all counts its rate limits as the only copy',
+      'ca-agentx-stg-jobs: runs AGENTX_ROLE web: the jobs app runs AGENTX_ROLE jobs, and only it, as the one with no ingress',
     ]);
     expect(deploymentProblems(beside('worker', 'jobs', webbed))).toEqual([
       'ca-agentx-stg-worker: runs the API, which only api and jobs may: an app nothing names could hold the jobs',
+      'ca-agentx-stg-worker: runs AGENTX_ROLE jobs: the jobs app runs AGENTX_ROLE jobs, and only it, as the one with no ingress',
+    ]);
+    // Each at its own role (4D2e D13): the API, which the doors reach, never at `jobs`; the jobs app never `all`.
+    const apiAtJobs = changed(APP('api'), (app) => {
+      role('jobs')(app);
+      Object.assign(scaleOf(app), { minReplicas: 1, maxReplicas: 1 });
+    });
+    expect(deploymentProblems(apiAtJobs)).toEqual([
+      'ca-agentx-stg-api: must have no ingress: AGENTX_ROLE jobs serves nothing, so neither a door nor a neighbour may reach it',
+      'ca-agentx-stg-api: runs AGENTX_ROLE jobs: the jobs app runs AGENTX_ROLE jobs, and only it, as the one with no ingress',
+    ]);
+    const allJobs = beside('jobs', 'all', webbed);
+    expect(deploymentProblems(allJobs)).toContain(
+      'ca-agentx-stg-jobs: runs AGENTX_ROLE all: the jobs app runs AGENTX_ROLE jobs, and only it, as the one with no ingress',
+    );
+  });
+
+  it('apps: the jobs app reachable, or production not split (4D2e D13)', () => {
+    const production = { region: 'uaenorth', environment: 'production' } as const;
+    const appsProblems = (snapshotted: Snapshot, expected: Expectations = production): string[] =>
+      policyProblems(snapshotted, expected)
+        .filter(({ rule }) => rule === 'apps')
+        .map(({ resource, message }) => `${resource}: ${message}`);
+    const split = productionLike({ subject: true });
+    expect(appsProblems(split)).toEqual([]);
+    expect(at(split.predictedResources.find(APP('jobs'))?.properties, 'configuration', 'ingress')).toBeUndefined();
+    const noIngress =
+      'ca-agentx-stg-jobs: must have no ingress: AGENTX_ROLE jobs serves nothing, so neither a door nor a neighbour may reach it';
+    // An ingress of any kind, internal and refusing plain http among them, or one said as nothing at all is fine.
+    const withIngress = (ingress: unknown) =>
+      changed(
+        APP('jobs'),
+        (app) => {
+          inside(app, 'properties', 'configuration').ingress = ingress;
+        },
+        split,
+      );
+    expect(
+      appsProblems(
+        withIngress(at(staging.predictedResources.find(APP('api'))?.properties, 'configuration', 'ingress')),
+      ),
+    ).toEqual([noIngress]);
+    expect(appsProblems(withIngress({}))).toEqual([noIngress]);
+    expect(appsProblems(withIngress(null))).toEqual([]);
+    // Production's API at `all`, as staging's is out of a load run.
+    expect(appsProblems(productionLike({ subject: true }), STAGING)).toEqual([]);
+    const unsplit = {
+      ...staging,
+      predictedResources: staging.predictedResources.map((resource) =>
+        resource.tags === undefined ? resource : { ...resource, tags: { ...resource.tags, environment: 'production' } },
+      ),
+    };
+    expect(appsProblems(unsplit)).toEqual([
+      'the deployment: must run the API split in production, web copies beside the jobs app (4D2e D13), whose identity alone keeps the anchors there',
     ]);
   });
 
@@ -5305,7 +5499,7 @@ describe('the load run (D2c, PL-38)', () => {
   const settingNames = (resource: PredictedResource): string[] =>
     settingsOf(resource as unknown as Mutable).map((entry) => String(entry.name));
 
-  it('compiles: every rule holds, the API is at its load size and limits without email, and the three jobs are added', () => {
+  it('compiles: every rule holds, the API is at its load size and limits without email, split from its jobs, and the three jobs are added', () => {
     expect(policyProblems(load.together, STAGING).map(describeProblem)).toEqual([]);
     const api = found(load.together, APP('api'));
     expect(at(containerIn(api), 'resources')).toEqual({ cpu: 2, memory: '4Gi' });
@@ -5322,9 +5516,34 @@ describe('the load run (D2c, PL-38)', () => {
     expect(settingNames(api).filter((name) => /EMAIL|DIRECTORY/.test(name))).toEqual([]);
     const pool = (resource: PredictedResource) =>
       settingsOf(resource as unknown as Mutable).find(({ name }) => name === 'AGENTX_DB_POOL_MAX')?.value;
-    expect(pool(api)).toBe('20');
+    expect(pool(api)).toBe('8');
     expect(pool(found(staging, APP('api')))).toBe('10');
     expect(at(containerIn(found(staging, APP('api'))), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
+    // Split (4D2e D13): three web copies, each its third of the gate, beside the jobs app, which keeps the anchors.
+    const value = (resource: PredictedResource, name: string) =>
+      settingsOf(resource as unknown as Mutable).find((entry) => entry.name === name)?.value;
+    expect(['AGENTX_ROLE', 'AGENTX_WEB_COPIES', 'AGENTX_DECISION_GATE_ACTIVE'].map((name) => value(api, name))).toEqual(
+      ['web', '3', '7'],
+    );
+    expect(at(api.properties, 'template', 'scale')).toEqual({ minReplicas: 3, maxReplicas: 3 });
+    expect(settingNames(api).filter((name) => name.includes('ANCHOR'))).toEqual([]);
+    expect(settingNames(found(staging, APP('api')))).not.toContain('AGENTX_ROLE');
+    const jobsApp = found(load.together, APP('jobs'));
+    expect(Object.keys(at(jobsApp.identity, 'userAssignedIdentities') as Mutable)).toEqual([
+      expect.stringMatching(/\/id-agentx-stg-jobs$/) as unknown as string,
+    ]);
+    expect(at(jobsApp.properties, 'configuration', 'ingress')).toBeNull();
+    expect(at(jobsApp.properties, 'template', 'scale')).toEqual({ minReplicas: 1, maxReplicas: 1 });
+    expect(at(containerIn(jobsApp), 'resources')).toEqual({ cpu: 1, memory: '2Gi' });
+    expect(
+      ['AGENTX_ROLE', 'AGENTX_DB_JOBS_POOL_MAX', 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'].map((name) => value(jobsApp, name)),
+    ).toEqual(['jobs', '6', '200000']);
+    expect(settingNames(jobsApp)).toEqual(
+      expect.arrayContaining(['AGENTX_ANCHOR_EPOCH', 'AGENTX_AUDIT_ANCHORS_URL', 'AGENTX_ACTIVITY_DOWNLOADS_URL']),
+    );
+    expect(settingNames(jobsApp).filter((name) => /EMAIL|DIRECTORY|HTTP_|RATE_LIMIT|DB_POOL_MAX/.test(name))).toEqual(
+      [],
+    );
     for (const workload of LOAD_JOBS) {
       const job = found(load.together, JOB(workload));
       expect(Object.keys(at(job.identity, 'userAssignedIdentities') as Mutable)).toEqual([
@@ -5334,9 +5553,12 @@ describe('the load run (D2c, PL-38)', () => {
     }
     expect(settingNames(found(load.together, JOB('load-first')))).toContain('AGENTX_LOAD_API');
     expect(settingNames(found(load.together, JOB('load-cleanup')))).not.toContain('AGENTX_LOAD_API');
-    // Nothing else changes: the same resources, but the three jobs.
+    // Nothing else changes: the same resources, but the three jobs and the jobs app.
     const names = (snapshotted: Snapshot) => snapshotted.predictedResources.map((resource) => resource.name).sort();
-    expect(names(load.together).filter((name) => !name.includes('-load-'))).toEqual(names(staging));
+    expect(names(load.together).filter((name) => !name.includes('-load-') && name !== 'ca-agentx-stg-jobs')).toEqual(
+      names(staging),
+    );
+    expect(staging.predictedResources.filter(APPS).map((app) => app.name)).not.toContain('ca-agentx-stg-jobs');
     expect(staging.predictedResources.filter(JOBS).map((job) => job.name)).not.toContain('job-agentx-stg-load-first');
   });
 
@@ -5353,12 +5575,12 @@ describe('the load run (D2c, PL-38)', () => {
     ).toEqual(['load-run']);
   });
 
-  it('load-run: the API off twenty connections in a load run, or over ten on staging out of one', () => {
+  it('load-run: the API off eight connections a copy in a load run, or over ten on staging out of one', () => {
     const api = APP('api');
     const poolAt = (value: string) => (app: Mutable) => {
       for (const entry of settingsOf(app).filter(({ name }) => name === 'AGENTX_DB_POOL_MAX')) entry.value = value;
     };
-    expect(brokenRules(loadChanged(api, poolAt('10')))).toEqual(['load-run']);
+    expect(brokenRules(loadChanged(api, poolAt('7')))).toEqual(['load-run']);
     expect(brokenRules(changed(api, poolAt('11')))).toEqual(['load-run']);
     expect(brokenRules(changed(api, poolAt('10')))).toEqual([]);
     // Production's own server sizes its pool: PL-63 wants twenty or more there.
@@ -5419,29 +5641,18 @@ describe('the load run (D2c, PL-38)', () => {
         }),
       ),
     ).toEqual(['ca-agentx-stg-api must state AGENTX_DB_POOL_MAX as a whole number, so its connections can be counted']);
-    // The load run, on the larger server's 85: its one API of twenty is 52.
+    // The load run on the larger server's 85, split as apps.bicep makes it (4D2e D13): three web copies of eight and
+    // the jobs app's six are 72; four web copies, 88; the jobs' pool at twelve, 84; at thirteen, 86.
     expect(connectionProblems(load.together)).toEqual([]);
-    // The split's load size (Stage D): three web copies of eight and one jobs copy of six are 72; four web copies, 88.
-    const split = (copies: string): Snapshot => {
-      const webbed = loadChanged(api, (app) => {
-        for (const [name, value] of [
-          ['AGENTX_ROLE', 'web'],
-          ['AGENTX_WEB_COPIES', copies],
-          ['AGENTX_DB_POOL_MAX', '8'],
-        ] as const) {
-          setting(name, value)(app);
-        }
-      });
-      const jobs = structuredClone(found(load.together, api)) as unknown as Mutable;
-      jobs.name = 'ca-agentx-stg-jobs';
-      setting('AGENTX_ROLE', 'jobs')(jobs);
-      setting('AGENTX_DB_JOBS_POOL_MAX', '6')(jobs);
-      return { ...webbed, predictedResources: [...webbed.predictedResources, jobs as unknown as PredictedResource] };
+    const copies = (count: string) => (app: Mutable) => {
+      setting('AGENTX_WEB_COPIES', count)(app);
+      Object.assign(scaleOf(app), { minReplicas: Number(count), maxReplicas: Number(count) });
     };
-    expect(connectionProblems(split('3'))).toEqual([]);
-    expect(connectionProblems(split('4'))).toEqual([
-      "has 85 connections for users (max_connections 100 less Azure's 15), but the apps may hold 88: two of each API copy's pool, Zitadel's, one job and one to spare",
-    ]);
+    const over = (holds: number) =>
+      `has 85 connections for users (max_connections 100 less Azure's 15), but the apps may hold ${String(holds)}: two of each API copy's pool, Zitadel's, one job and one to spare`;
+    expect(connectionProblems(loadChanged(api, copies('4')))).toEqual([over(88)]);
+    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '12')))).toEqual([]);
+    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '13')))).toEqual([over(86)]);
   });
 
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {
@@ -5469,6 +5680,113 @@ describe('the load run (D2c, PL-38)', () => {
       ),
     ).toEqual(['load-run']);
     expect(brokenRules(changed(api, (app) => (inside(containerOf(app), 'resources').cpu = 2)))).toEqual(['load-run']);
+  });
+
+  it('load-run: the API not split as three web copies, or its jobs app off its size, connections, cap or email, in a load run or out of one (4D2e D13)', () => {
+    const loadRunProblems = (snapshotted: Snapshot, expected: Expectations = STAGING): string[] =>
+      policyProblems(snapshotted, expected)
+        .filter(({ rule }) => rule === 'load-run')
+        .map(({ resource, message }) => `${resource}: ${message}`);
+    const notSplit =
+      'ca-agentx-stg-api: must run as 3 web copies in the load run (4D2e D13: AGENTX_ROLE web, AGENTX_WEB_COPIES 3), beside the jobs app, the split it is measured as';
+    const unset = (name: string) => (app: Mutable) => {
+      containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== name);
+    };
+    expect(loadRunProblems(loadChanged(APP('api'), unset('AGENTX_ROLE')))).toEqual([notSplit]);
+    expect(
+      loadRunProblems(
+        loadChanged(APP('api'), (app) => {
+          setSetting(app, 'AGENTX_WEB_COPIES', '2');
+          Object.assign(scaleOf(app), { minReplicas: 2, maxReplicas: 2 });
+        }),
+      ),
+    ).toEqual([notSplit]);
+    const jobs = APP('jobs');
+    expect(loadRunProblems(loadChanged(jobs, (app) => (inside(containerOf(app), 'resources').cpu = 0.5)))).toEqual([
+      'ca-agentx-stg-jobs: must run at 1 CPU and 2Gi in the load run (4D2e D13), the size it is measured at',
+    ]);
+    expect(
+      loadRunProblems(
+        loadChanged(jobs, (app) => {
+          setSetting(app, 'AGENTX_DB_JOBS_POOL_MAX', '10');
+        }),
+      ),
+    ).toEqual(['ca-agentx-stg-jobs: must keep 6 connections in the load run (4D2e D13), the size it is measured at']);
+    expect(loadRunProblems(loadChanged(jobs, unset('AGENTX_LOG_EVENT_CAP_PER_MINUTE')))).toEqual([
+      "ca-agentx-stg-jobs: must set AGENTX_LOG_EVENT_CAP_PER_MINUTE to 200000 in the load run (4D2e D13), as the API's, since they log for the same run",
+    ]);
+    expect(
+      loadRunProblems(
+        loadChanged(jobs, (app) => {
+          setSetting(app, 'AGENTX_EMAIL_SENDER', 'DoNotReply@example.invalid');
+        }),
+      ),
+    ).toEqual([
+      'ca-agentx-stg-jobs: sets AGENTX_EMAIL_SENDER in the load run (D2c): its seeded admins have no address, so it sends no email',
+    ]);
+    expect(
+      loadRunProblems({
+        ...load.together,
+        predictedResources: load.together.predictedResources.filter((r) => !jobs(r)),
+      }),
+    ).toEqual(['the deployment: needs the jobs app once in a load run (4D2e D13); the snapshot has 0']);
+    // Staging out of a load run runs no jobs app: its one API holds the jobs and sleeps.
+    const jobsApp = structuredClone(found(load.together, jobs));
+    expect(loadRunProblems({ ...staging, predictedResources: [...staging.predictedResources, jobsApp] })).toContain(
+      'the deployment: runs the jobs app on staging out of a load run: its one API holds the jobs and sleeps (4D2e D13), and a jobs app always running passes the $60 alarm',
+    );
+    // Production's jobs app keeps none of the load run's size or cap.
+    const production = { region: 'uaenorth', environment: 'production' } as const;
+    const split = productionLike({ subject: true });
+    expect(loadRunProblems(split, production)).toEqual([]);
+    expect(
+      loadRunProblems(
+        changed(
+          jobs,
+          (app) => {
+            setSetting(app, 'AGENTX_LOG_EVENT_CAP_PER_MINUTE', '200000');
+          },
+          split,
+        ),
+        production,
+      ),
+    ).toEqual([
+      "ca-agentx-stg-jobs: sets AGENTX_LOG_EVENT_CAP_PER_MINUTE, which only the load run's jobs do (4D2e D13): out of it they keep their own",
+    ]);
+    expect(
+      loadRunProblems(
+        changed(jobs, (app) => Object.assign(inside(containerOf(app), 'resources'), { cpu: 1, memory: '2Gi' }), split),
+        production,
+      ),
+    ).toEqual([
+      "ca-agentx-stg-jobs: runs at the load run's size out of a load run (4D2e D13): apps --load-run alone sets it",
+    ]);
+  });
+
+  it("workload-secrets and stores in the load run: the jobs app given the email key, or told of a store as the API's identity (4D2e D13)", () => {
+    const jobs = APP('jobs');
+    const rulesFor = (snapshotted: Snapshot) =>
+      policyProblems(snapshotted, STAGING).map(({ rule, resource }) => `${rule} ${resource}`);
+    const withKey = loadChanged(jobs, (app) => {
+      declaredSecrets(app).push({ ...secretNamed(app, 'db-app-password'), name: 'acs-access-key' });
+    });
+    expect(rulesFor(withKey)).toContain('workload-secrets ca-agentx-stg-jobs');
+    const asApi = (prefix: string) =>
+      loadChanged(jobs, (app) => {
+        for (const entry of settingsOf(app).filter((each) => String(each.name).startsWith(prefix))) {
+          entry.value = String(entry.value).replace('id-agentx-stg-jobs', 'id-agentx-stg-api');
+        }
+      });
+    expect(rulesFor(asApi('AGENTX_AUDIT_ANCHORS_'))).toEqual(['evidence-store ca-agentx-stg-jobs']);
+    expect(rulesFor(asApi('AGENTX_ACTIVITY_DOWNLOADS_'))).toEqual(['activity-downloads ca-agentx-stg-jobs']);
+    // The web copies, which hold no jobs, are told nothing of the anchors, nor their epoch.
+    const anchorsOf = settingsOf(found(load.together, jobs) as unknown as Mutable).filter((entry) =>
+      /^AGENTX_(?:ANCHOR_EPOCH|AUDIT_ANCHORS_)/.test(String(entry.name)),
+    );
+    const webTold = loadChanged(APP('api'), (app) => settingsOf(app).push(...structuredClone(anchorsOf)));
+    expect(rulesFor(webTold)).toEqual(
+      expect.arrayContaining(['evidence-store ca-agentx-stg-api', 'anchor-epoch ca-agentx-stg-api']),
+    );
   });
 
   it("workload-secrets: a load job given anything of the API's but its login and keys, as another identity, or with its request changed", () => {

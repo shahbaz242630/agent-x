@@ -261,8 +261,8 @@ const PROBLEM_LINES = 'where tostring(parse_json(Log).level) in~ ("warn", "warni
  */
 const SAYS_FROM_OWN =
   /^extend Says = iff\(coalesce\(ContainerAppName, JobName\) in \(((?:"[a-z0-9-]+", )*"[a-z0-9-]+")\), substring\(tostring\(parse_json\(Log\)\.says\), 0, 300\), ""\)$/;
-/** Our logger's containers: the API and the three jobs built on it. */
-const OWN_CONTAINER = /^"(?:ca-agentx-(?:stg|prd)-api|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator))"$/;
+/** Our logger's containers: the API, its jobs where they run apart from it (4D2e D13), and the three jobs built on it. */
+const OWN_CONTAINER = /^"(?:ca-agentx-(?:stg|prd)-(?:api|jobs)|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator))"$/;
 const NO_WORDS =
   'A warning or error with no plain words, from the login service or another part: open the saved query What broke, in plain words.';
 const SAYS_FALLBACK = `extend Says = iff(isempty(Says), "${NO_WORDS}", Says)`;
@@ -413,10 +413,19 @@ const TELEMETRY_SETTINGS = [
  * login, since each of its runs sets them all. The API reads each of the app's
  * keys (ADR-011 §2), from the one list of them (app-keys.json); the operator's
  * command, the app's login and every version of the audit chains' MAC and of
- * the field encryption alone (ADR-011 §3, B1c, B4-6b).
+ * the field encryption alone (ADR-011 §3, B1c, B4-6b). The API's jobs, where
+ * they run apart from it (`jobs`, 4D2e D13), read what the API reads: the same
+ * process at another role, its sign-in's three settings and email's four taken
+ * together, whose jobs send the notices and carry out the factor resets.
  */
 const GRANTS: ReadonlySet<string> = new Set([
   ...APP_KEYS.map((key) => `api reads ${key}`),
+  ...APP_KEYS.map((key) => `jobs reads ${key}`),
+  'jobs reads db-app-password',
+  'jobs reads api-oidc-client-secret',
+  'jobs reads acs-access-key',
+  'jobs reads zitadel-directory-token',
+  'jobs reads zitadel-reset-token',
   ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')).map(
     (key) => `operator reads ${key}`,
   ),
@@ -516,7 +525,8 @@ export const LOAD_SERVER_CONNECTIONS = 100;
  * they are there and only then, runs at the size it is measured at, with its
  * limits out of k6's way and without the email service's key and the
  * directory token, so it sends no email (the four email settings are all or
- * none).
+ * none). It runs split (4D2e D13): three `web` copies of eight connections
+ * beside one `jobs` app of six, which goes without them too.
  */
 const LOAD_RUN = {
   jobs: LOAD_PARTS.map((part) => `load-${part}`),
@@ -525,9 +535,13 @@ const LOAD_RUN = {
   reads: new Set(['db-app-password', ...APP_KEYS]),
   apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
-  // Twenty connections, on the larger server `foundation --load-size` gives, whose limit postgres.bicep states.
-  // Staging's small server has 35 for everyone, so out of a load run its API keeps to ten (PL-63).
-  apiPool: '20',
+  // Three `web` copies of eight connections, and the jobs' six, on the larger server `foundation --load-size` gives,
+  // whose limit postgres.bicep states: 72 of its 85 (4D2e D13). Staging's small server has 35 for everyone, so out of
+  // a load run its one API keeps to ten (PL-63).
+  apiPool: '8',
+  webCopies: '3',
+  jobsPool: '6',
+  jobsSize: { cpu: 1, memory: '2Gi' },
   stagingPool: 10,
   // The larger server's max_connections (postgres.bicep, `measured`). The apps' snapshot can't show it: the foundation
   // sizes the server, and a plain foundation's numbers are what an apps run's snapshot holds.
@@ -538,12 +552,15 @@ const LOAD_RUN = {
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '50000',
     AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: '50000',
     AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000',
-    // The fair gate's numbers it is measured at (tooling/load/plan.ts's LOAD_GATE).
-    AGENTX_DECISION_GATE_ACTIVE: '20',
-    AGENTX_DECISION_GATE_PER_ORGANISATION: '6',
-    AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: '100',
+    // The fair gate's numbers it is measured at (tooling/load/plan.ts's LOAD_GATE: 20, 6, 100), each copy its third
+    // rounded up, as the rate limits are shared (4D2e D13): each copy keeps its own gate.
+    AGENTX_DECISION_GATE_ACTIVE: '7',
+    AGENTX_DECISION_GATE_PER_ORGANISATION: '2',
+    AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: '34',
     AGENTX_DECISION_GATE_WAIT_MS: '10000',
   } as Readonly<Record<string, string>>,
+  // The jobs log for the same run, so they take the API's cap.
+  jobsSettings: { AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000' } as Readonly<Record<string, string>>,
 };
 
 const isLoadJob = (workload: string): boolean => LOAD_RUN.jobs.includes(workload);
@@ -557,11 +574,13 @@ const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
 /**
  * The apps whose replicas must stay at one, with why: Zitadel's projections and
  * cache are one replica's, and a second would take ten more of the server's 35
- * user connections (ADR-002 Amendment G1). An app running the API is held by
- * its role instead (`roleScaleProblems`).
+ * user connections (ADR-002 Amendment G1); the API's jobs apart from it (4D2e
+ * D13) keep to one copy, as the lease alone doesn't make a second safe for the
+ * copier. An app running the API is held by its role besides (`roleScaleProblems`).
  */
 const ONE_REPLICA: Readonly<Record<string, string>> = {
   zitadel: "its projections are one replica's, and a second would take ten more database connections",
+  jobs: "the API's jobs keep to one copy, which the lease alone doesn't make safe for the copier",
 };
 
 /** What Azure keeps of a server's max_connections for itself: 35 of 50 left for everyone (postgres.bicep, S167). */
@@ -1945,13 +1964,14 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * other Storage resource (a lifecycle rule, a file share, a local user) but the
  * activity downloads' store's, which is `activity-downloads`'s; the apps subnet
  * keeps the service endpoint its network rule needs. Each container has one
- * custom role, assignable in the resource group alone, given once on that
+ * custom role, assignable in the resource group alone, given on that
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
- * a new file and reads, to the API's. The anchors container has a second role,
+ * a new file and reads, to the identities of the apps that may hold the jobs
+ * (`ANCHOR_KEEPERS`, 4D2e D13). The anchors container has a second role,
  * reading alone, to the operator's identity, for a chain recovery plan (4D2e E9).
- * The API and the operator's job alone are told where the anchors are, each as
- * the identity its role is given to (`storeSettingsProblems`). None can
+ * The app that holds the jobs and the operator's job alone are told where the
+ * anchors are, each as its own identity, which its role is given to (`storeSettingsProblems`). None can
  * overwrite or delete. The account's immutability covers both. Its logs are
  * `resource-logs`'s.
  */
@@ -1994,7 +2014,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: evidenceRoleName(groupOf(snapshot)),
       dataActions: [EVIDENCE_WRITE],
       containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
-      workload: 'operator',
+      workloads: ['operator'],
       called: "the audit exports' role",
       on: 'the export container',
     },
@@ -2020,7 +2040,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workload: 'api',
+      workloads: ANCHOR_KEEPERS[expected.environment],
       called: "the anchors' role",
       on: 'the anchors container',
     },
@@ -2032,7 +2052,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorReaderRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_READ_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workload: 'operator',
+      workloads: ['operator'],
       called: "the operator's read of the anchors",
       on: 'the anchors container',
     },
@@ -2047,19 +2067,41 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       accounts,
       container: ANCHOR_CONTAINER,
       holders: (workload) => {
-        if (isApiApp(workload)) return keepers;
+        if (holdsJobs(workload)) return ownOf(workload, keepers);
         return isOperatorJob(workload) ? readers : undefined;
       },
-      holder: "the API keeps the chains' anchors and the operator's job reads them",
+      holder: "the app that holds the jobs keeps the chains' anchors and the operator's job reads them",
       store: 'store',
     },
     problem,
   );
 };
 
-/** The API, as an app. */
-const isApiApp = (workload: PredictedResource): boolean =>
-  workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api';
+/** An app that runs the API (4D2e D13): `api`, or the `jobs` app apart from it (every API process is told AGENTX_ENV). */
+const runsApi = (workload: PredictedResource): boolean =>
+  workload.type === TYPES.app && apiSettingsOf(workload) !== undefined;
+
+/** The app that holds the API's jobs (4D2e D13): at AGENTX_ROLE all, or jobs; never a `web` copy. */
+function holdsJobs(workload: PredictedResource): boolean {
+  if (workload.type !== TYPES.app) return false;
+  const settings = apiSettingsOf(workload);
+  const role = settings === undefined ? undefined : roleIn(settings);
+  return role === 'all' || role === 'jobs';
+}
+
+/** Of a store's identities, the workload's own: a workload is told only the identity it runs as, its role given to it. */
+const ownOf = (workload: PredictedResource, identities: readonly PredictedResource[]): readonly PredictedResource[] =>
+  identities.filter((identity) => workloadOf(identity.name) === jobWorkloadOf(workload.name));
+
+/**
+ * Who keeps the chains' anchors, by environment (main.bicep `anchorKeepers`, 4D2e D13): the identity of the app that
+ * holds the jobs. Production always runs them apart, in `jobs`; staging's one API holds them out of a load run and the
+ * `jobs` app in one, so both are given the role there, and only the one holding the jobs is told where the store is.
+ */
+const ANCHOR_KEEPERS: Readonly<Record<Expectations['environment'], readonly string[]>> = {
+  production: ['jobs'],
+  staging: ['api', 'jobs'],
+};
 
 /** The operator's job. */
 const isOperatorJob = (workload: PredictedResource): boolean =>
@@ -2079,13 +2121,13 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
         .filter((entry) => at(entry, 'name') === 'AGENTX_ANCHOR_EPOCH')
         .map((entry) => text(at(entry, 'value'))),
     );
-    if (isApiApp(workload) || isOperatorJob(workload)) {
+    if (holdsJobs(workload) || isOperatorJob(workload)) {
       values.set(workload.name, set);
     } else if (set.length > 0) {
       add({
         rule: 'anchor-epoch',
         resource: workload.name,
-        message: "sets AGENTX_ANCHOR_EPOCH: only the API and the operator's job",
+        message: "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs and the operator's job",
       });
     }
   }
@@ -2095,7 +2137,8 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
     add({
       rule: 'anchor-epoch',
       resource: 'the deployment',
-      message: "must set AGENTX_ANCHOR_EPOCH once on the API and once on the operator's job, to the same value",
+      message:
+        "must set AGENTX_ANCHOR_EPOCH once on the app that holds the jobs and once on the operator's job, to the same value",
     });
   }
 };
@@ -2149,18 +2192,18 @@ interface StoreRole {
   readonly dataActions: readonly string[];
   /** The containers it may be given on. */
   readonly containers: readonly PredictedResource[];
-  /** The one app or job whose identity it is given to. */
-  readonly workload: string;
+  /** The apps or jobs whose identities it is given to, once each. */
+  readonly workloads: readonly string[];
   /** What a problem calls it, and the container it is given on. */
   readonly called: string;
   readonly on: string;
 }
 
 /**
- * A store's custom role and its one assignment, a part of `evidence-store` and
+ * A store's custom role and its assignments, a part of `evidence-store` and
  * `activity-downloads`: exactly its data actions, no action, assignable in the
- * resource group alone, given once on the container to its workload's
- * identity. Returns the identities it is given to.
+ * resource group alone, given on the container once to each of its workloads'
+ * identities and to no one else. Returns the identities it is given to.
  */
 function storeRoleProblems(
   snapshot: Snapshot,
@@ -2189,26 +2232,31 @@ function storeRoleProblems(
   }
   const role = customRoleId(group, wanted.name);
   const assignments = ofType(snapshot, TYPES.roleAssignment).filter((assignment) => roleOf(assignment) === role);
-  for (const assignment of assignments) {
-    const identity = principalOf(snapshot, assignment);
+  const whose = wanted.workloads.join(' and ');
+  const given = assignments.map((assignment) => principalOf(snapshot, assignment));
+  for (const [index, assignment] of assignments.entries()) {
+    const identity = given[index];
     if (
       !wanted.containers.some((container) => container.id === scopeOf(assignment)) ||
       identity === undefined ||
-      workloadOf(identity.name) !== wanted.workload
+      !wanted.workloads.includes(workloadOf(identity.name))
     ) {
       problem(
         assignment.name,
-        `must give ${wanted.called} on ${wanted.on} alone, to the ${wanted.workload}'s identity (principalType ServicePrincipal)`,
+        `must give ${wanted.called} on ${wanted.on} alone, to the ${whose}'s identity (principalType ServicePrincipal)`,
       );
     }
   }
-  if (assignments.length !== 1) {
-    problem(
-      'the deployment',
-      `must give ${wanted.called} once, to the ${wanted.workload}; it gives it ${String(assignments.length)} times`,
-    );
+  for (const workload of wanted.workloads) {
+    const times = given.filter((identity) => identity !== undefined && workloadOf(identity.name) === workload).length;
+    if (times !== 1 || assignments.length !== wanted.workloads.length) {
+      problem(
+        'the deployment',
+        `must give ${wanted.called} once to each of the ${whose}, and to no one else; it gives it ${String(assignments.length)} times, ${String(times)} to the ${workload}`,
+      );
+    }
   }
-  return assignments.flatMap((assignment) => principalOf(snapshot, assignment) ?? []);
+  return given.flatMap((identity) => identity ?? []);
 }
 
 /** How the operator's job is told where to write an audit export (apps.bicep `evidenceSettings`). */
@@ -2384,8 +2432,9 @@ function downloadsPartsProblems(
  * its parts as `downloadsPartsProblems` says, every file deleted within a
  * week and a day. Its one custom role allows reading and writing a file and
  * nothing else, assignable in the resource group alone, and is given once,
- * on the container, to the API's identity; the API alone is told where the
- * store is. Its logs are `resource-logs`'s, and the subnet's Storage endpoint
+ * on the container, to the identity of each app that runs the API (4D2e D13:
+ * a `web` copy hands a file out, the jobs build it); they alone are told where
+ * the store is, each as its own identity. Its logs are `resource-logs`'s, and the subnet's Storage endpoint
  * `evidence-store`'s.
  */
 const activityDownloads: Check = (snapshot, _expected, add) => {
@@ -2410,7 +2459,7 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
       name: downloadsRoleName(groupOf(snapshot)),
       dataActions: DOWNLOADS_ACTIONS,
       containers: ofType(snapshot, TYPES.container).filter((container) => inDownloadsStore(snapshot, container)),
-      workload: 'api',
+      workloads: API_APPS,
       called: "the activity downloads' role",
       on: 'the downloads container',
     },
@@ -2424,8 +2473,8 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
       clientId: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
       accounts,
       container: DOWNLOADS_CONTAINER,
-      holders: (workload) => (isApiApp(workload) ? keepers : undefined),
-      holder: 'the API keeps the activity downloads',
+      holders: (workload) => (runsApi(workload) ? ownOf(workload, keepers) : undefined),
+      holder: 'the apps that run the API keep the activity downloads',
       store: 'downloads store',
     },
     problem,
@@ -3802,6 +3851,26 @@ const jobs: Check = (snapshot, _expected, add) => {
   }
 };
 
+/**
+ * An app's ingress: internal, refusing plain http. An ingress left out is caught by the same two conditions: nothing
+ * said is nothing that says false, and what isn't said here is Azure's to decide (a mutation pass showed a branch of its
+ * own adds nothing). The API's jobs (4D2e D13) have none at all: they serve nothing, so nothing should reach them.
+ */
+function ingressProblems(ingress: unknown, servesNothing: boolean, problem: (message: string) => void): void {
+  if (servesNothing) {
+    if (ingress !== undefined && ingress !== null) {
+      problem('must have no ingress: AGENTX_ROLE jobs serves nothing, so neither a door nor a neighbour may reach it');
+    }
+    return;
+  }
+  if (at(ingress, 'external') !== false) {
+    problem('must say its ingress is internal (external false): the public doors are the route configs (G2e)');
+  }
+  if (at(ingress, 'allowInsecure') !== false) {
+    problem('must refuse plain http (allowInsecure false), which peer-to-peer encryption already covers');
+  }
+}
+
 /** An app's scale: at most one replica when `only` says why, at least one it may run, and no more kept than that. */
 function scaleProblems(scale: unknown, only: string | undefined, problem: (message: string) => void): void {
   const most = at(scale, 'maxReplicas');
@@ -3842,8 +3911,8 @@ const copiesIn = (settings: ReadonlyMap<string, unknown>): number | undefined =>
   countIn(settings, 'AGENTX_WEB_COPIES', 1);
 
 /**
- * The apps that may run the API, by workload: `api`, and the `jobs` app D13 adds. D13 must keep this list to the apps
- * it makes: an API app nothing names could hold the jobs, or a pool nobody counted on.
+ * The apps that may run the API, by workload: `api`, and the `jobs` app (apps.bicep `jobsApp`, 4D2e D13). Only the
+ * apps apps.bicep makes: an API app nothing names could hold the jobs, or a pool nobody counted on.
  */
 const API_APPS: readonly string[] = ['api', 'jobs'];
 
@@ -3877,9 +3946,15 @@ function heapProblems(container: unknown, problem: (message: string) => void): v
 /**
  * Across the apps running the API (4D2e D12): each one listed in API_APPS, exactly one holding the jobs (`jobs` or
  * `all`: two would run the copier twice, none would run no job), and never `all` beside `web`, as `all` counts its
- * rate limits as the only copy.
+ * rate limits as the only copy. Each at its own role (D13): the `jobs` app at AGENTX_ROLE jobs and no other, so the
+ * app the doors reach always serves, and the one with no ingress never has to. Production runs split, `web` copies
+ * beside the `jobs` app (StageD-Design: roles), which is what its anchors' keeper is given to (main.bicep).
  */
-function apiAppsProblems(found: readonly PredictedResource[], add: (problem: Problem) => void): void {
+function apiAppsProblems(
+  found: readonly PredictedResource[],
+  environment: Expectations['environment'],
+  add: (problem: Problem) => void,
+): void {
   const apis = found.flatMap((app) => {
     const settings = apiSettingsOf(app);
     return settings === undefined ? [] : [{ app, role: roleIn(settings) }];
@@ -3903,6 +3978,20 @@ function apiAppsProblems(found: readonly PredictedResource[], add: (problem: Pro
   const roles = new Set(apis.map(({ role }) => role));
   if (roles.has('all') && roles.has('web')) {
     problem('the deployment', 'runs AGENTX_ROLE all beside web: all counts its rate limits as the only copy');
+  }
+  for (const { app, role } of apis.filter(
+    ({ app, role }) => (jobWorkloadOf(app.name) === 'jobs') !== (role === 'jobs'),
+  )) {
+    problem(
+      app.name,
+      `runs AGENTX_ROLE ${String(role)}: the jobs app runs AGENTX_ROLE jobs, and only it, as the one with no ingress`,
+    );
+  }
+  if (environment === 'production' && apis.length > 0 && !(roles.has('web') && roles.has('jobs'))) {
+    problem(
+      'the deployment',
+      'must run the API split in production, web copies beside the jobs app (4D2e D13), whose identity alone keeps the anchors there',
+    );
   }
 }
 
@@ -3952,7 +4041,7 @@ function roleScaleProblems(
  * run at least one. Together they are the three apps a deployment needs, so a
  * dropped one is caught here rather than at the first deployment.
  */
-const apps: Check = (snapshot, _expected, add) => {
+const apps: Check = (snapshot, expected, add) => {
   const environments = new Set<unknown>(ofType(snapshot, TYPES.environment).map((resource) => resource.id));
   const found = ofType(snapshot, TYPES.app);
   for (const app of found) {
@@ -3966,26 +4055,21 @@ const apps: Check = (snapshot, _expected, add) => {
     if (at(app.properties, 'workloadProfileName') !== WORKLOAD_PROFILE) {
       problem(`must run on the ${WORKLOAD_PROFILE} workload profile, the only one the environment offers`);
     }
-    // An ingress left out is caught by the same two conditions: nothing said is
-    // nothing that says false, and what isn't said here is Azure's to decide
-    // (a mutation pass showed a branch of its own adds nothing).
-    const ingress = at(app.properties, 'configuration', 'ingress');
-    if (at(ingress, 'external') !== false) {
-      problem('must say its ingress is internal (external false): the public doors are the route configs (G2e)');
-    }
-    if (at(ingress, 'allowInsecure') !== false) {
-      problem('must refuse plain http (allowInsecure false), which peer-to-peer encryption already covers');
-    }
+    const api = apiSettingsOf(app);
+    ingressProblems(
+      at(app.properties, 'configuration', 'ingress'),
+      api !== undefined && roleIn(api) === 'jobs',
+      problem,
+    );
     const scale = at(app.properties, 'template', 'scale');
     scaleProblems(scale, ONE_REPLICA[workload], problem);
-    const api = apiSettingsOf(app);
     if (api !== undefined) {
       roleScaleProblems(api, scale, problem);
       heapProblems(containersOf(app)[0], problem);
     }
     containerProblems(app, problem);
   }
-  apiAppsProblems(found, add);
+  apiAppsProblems(found, expected.environment, add);
   for (const workload of APP_WORKLOADS) {
     const count = found.filter((app) => jobWorkloadOf(app.name) === workload).length;
     if (count !== 1) {
@@ -4018,9 +4102,21 @@ function apiOutOfLoadRunProblems(container: unknown, staging: boolean, problem: 
   }
 }
 
-/** The API in a load run: exactly its size, connections and limits, and no email. */
+/** Email's settings in a load run (D2c): its seeded admins have no address, so neither the API nor its jobs send any. */
+function noEmailProblems(settings: ReadonlyMap<string, unknown>, problem: (message: string) => void): void {
+  for (const name of [...settings.keys()].filter((setting) => setting.startsWith('AGENTX_EMAIL_'))) {
+    problem(`sets ${name} in the load run (D2c): its seeded admins have no address, so it sends no email`);
+  }
+}
+
+/** The API in a load run: exactly its size, connections and limits, as three `web` copies (4D2e D13), and no email. */
 function apiInLoadRunProblems(container: unknown, problem: (message: string) => void): void {
   const settings = settingsIn(container);
+  if (settings.get('AGENTX_ROLE') !== 'web' || settings.get('AGENTX_WEB_COPIES') !== LOAD_RUN.webCopies) {
+    problem(
+      `must run as ${LOAD_RUN.webCopies} web copies in the load run (4D2e D13: AGENTX_ROLE web, AGENTX_WEB_COPIES ${LOAD_RUN.webCopies}), beside the jobs app, the split it is measured as`,
+    );
+  }
   if (
     at(container, 'resources', 'cpu') !== LOAD_RUN.apiSize.cpu ||
     at(container, 'resources', 'memory') !== LOAD_RUN.apiSize.memory
@@ -4037,19 +4133,52 @@ function apiInLoadRunProblems(container: unknown, problem: (message: string) => 
   )) {
     problem(`must set ${name} to ${wanted} in the load run (D2c), so k6 meets the API rather than its limits`);
   }
-  for (const name of [...settings.keys()].filter((setting) => setting.startsWith('AGENTX_EMAIL_'))) {
-    problem(`sets ${name} in the load run (D2c): its seeded admins have no address, so it sends no email`);
-  }
+  noEmailProblems(settings, problem);
 }
 
-/** The API's containers, in a load run or out of one. */
+/**
+ * The API's jobs apart from it (4D2e D13): in a load run, at their size with their six connections, the log's cap
+ * the API's, and no email; out of one, none of those.
+ */
+function jobsLoadProblems(container: unknown, loadRun: boolean, problem: (message: string) => void): void {
+  const settings = settingsIn(container);
+  if (!loadRun) {
+    for (const name of Object.keys(LOAD_RUN.jobsSettings).filter((setting) => settings.has(setting))) {
+      problem(`sets ${name}, which only the load run's jobs do (4D2e D13): out of it they keep their own`);
+    }
+    if (at(container, 'resources', 'cpu') === LOAD_RUN.jobsSize.cpu) {
+      problem("runs at the load run's size out of a load run (4D2e D13): apps --load-run alone sets it");
+    }
+    return;
+  }
+  if (
+    at(container, 'resources', 'cpu') !== LOAD_RUN.jobsSize.cpu ||
+    at(container, 'resources', 'memory') !== LOAD_RUN.jobsSize.memory
+  ) {
+    problem(
+      `must run at ${String(LOAD_RUN.jobsSize.cpu)} CPU and ${LOAD_RUN.jobsSize.memory} in the load run (4D2e D13), the size it is measured at`,
+    );
+  }
+  if (settings.get('AGENTX_DB_JOBS_POOL_MAX') !== LOAD_RUN.jobsPool) {
+    problem(`must keep ${LOAD_RUN.jobsPool} connections in the load run (4D2e D13), the size it is measured at`);
+  }
+  for (const [name, wanted] of Object.entries(LOAD_RUN.jobsSettings).filter(
+    ([setting, value]) => settings.get(setting) !== value,
+  )) {
+    problem(`must set ${name} to ${wanted} in the load run (4D2e D13), as the API's, since they log for the same run`);
+  }
+  noEmailProblems(settings, problem);
+}
+
+/** The API's and its jobs' containers, in a load run or out of one. */
 function apiLoadProblems(
-  api: PredictedResource,
+  app: PredictedResource,
   { loadRun, staging }: { readonly loadRun: boolean; readonly staging: boolean },
   problem: (message: string) => void,
 ): void {
-  for (const container of containersOf(api)) {
-    if (loadRun) apiInLoadRunProblems(container, problem);
+  for (const container of containersOf(app)) {
+    if (jobWorkloadOf(app.name) === 'jobs') jobsLoadProblems(container, loadRun, problem);
+    else if (loadRun) apiInLoadRunProblems(container, problem);
     else apiOutOfLoadRunProblems(container, staging, problem);
   }
 }
@@ -4058,6 +4187,9 @@ function apiLoadProblems(
  * The load test's run (D2c, PL-38), as `LOAD_RUN` says: on staging alone,
  * its three jobs together or none, each on the load image, and the API at the
  * load run's size and limits exactly while they are there, never otherwise.
+ * The API runs split while they are there (4D2e D13), its jobs in the `jobs`
+ * app; on staging out of one there is no `jobs` app, as its one API holds the
+ * jobs and sleeps (StageD-Design: a `jobs` app would pass the $60 alarm).
  * Who the jobs run as and what they are given is `workload-secrets`'s, with
  * their commands and request (`HELD`).
  */
@@ -4083,12 +4215,37 @@ const loadTest: Check = (snapshot, expected, add) => {
     }
   }
   const staging = expected.environment === 'staging';
-  for (const api of ofType(snapshot, TYPES.app).filter((app) => jobWorkloadOf(app.name) === LOAD_RUN.runsAs)) {
-    apiLoadProblems(api, { loadRun: found.length > 0, staging }, (message) => {
+  const loadRun = found.length > 0;
+  const apis = ofType(snapshot, TYPES.app).filter((app) => API_APPS.includes(jobWorkloadOf(app.name)));
+  for (const api of apis) {
+    apiLoadProblems(api, { loadRun, staging }, (message) => {
       problem(api.name, message);
     });
   }
+  jobsAppCountProblems(
+    apis.filter((app) => jobWorkloadOf(app.name) === 'jobs').length,
+    { loadRun, staging },
+    (message) => {
+      problem('the deployment', message);
+    },
+  );
 };
+
+/** The jobs app once in a load run (4D2e D13), and never on staging out of one, where its one API holds the jobs. */
+function jobsAppCountProblems(
+  count: number,
+  { loadRun, staging }: { readonly loadRun: boolean; readonly staging: boolean },
+  problem: (message: string) => void,
+): void {
+  if (loadRun && count !== 1) {
+    problem(`needs the jobs app once in a load run (4D2e D13); the snapshot has ${String(count)}`);
+  }
+  if (!loadRun && staging && count > 0) {
+    problem(
+      'runs the jobs app on staging out of a load run: its one API holds the jobs and sleeps (4D2e D13), and a jobs app always running passes the $60 alarm',
+    );
+  }
+}
 
 /** The connections an app running the API may hold, by its role: two of each copy's pool, for a deploy's overlap. */
 function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, unknown>): number | string {
@@ -4359,11 +4516,11 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
   }
 };
 
-/** What a workload is given (GRANTS), but a load job's (`LOAD_RUN.reads`) and the API's in a load run. */
+/** What a workload is given (GRANTS), but a load job's (`LOAD_RUN.reads`) and the API's and its jobs' in a load run. */
 function secretsNeeded(workload: string, loadRun: boolean): ReadonlySet<string> {
   if (isLoadJob(workload)) return LOAD_RUN.reads;
   const read = secretsRead(workload);
-  if (!loadRun || workload !== LOAD_RUN.runsAs) return read;
+  if (!loadRun || !API_APPS.includes(workload)) return read;
   return new Set([...read].filter((secret) => !LOAD_RUN.apiLeavesOut.has(secret)));
 }
 
