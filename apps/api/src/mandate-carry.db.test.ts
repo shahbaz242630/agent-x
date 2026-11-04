@@ -57,7 +57,8 @@ import {
   REDRAFT_OPERATION,
 } from './mandate-registry.ts';
 import { AED, askedFor, draftedOf, keys, type World } from './mandate-world.helper.test.ts';
-import { createCarryRest } from './mandate-carry-rest.ts';
+import { carryRestDue, createCarryRest } from './mandate-carry-rest.ts';
+import { markedOrganisations, withOrgWork } from './org-work.ts';
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRequestVoids } from './request-voids.ts';
@@ -766,5 +767,63 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     expect(await versionOf(w, pending[20]?.id ?? '')).not.toBe(versionId);
     await voids(w).run();
     for (const { id } of pending) expect(await statusOf(w, id)).toBe('DENIED');
+  });
+});
+
+describe('the carry rest follows its marks (4D2e D9)', () => {
+  /** The organisation's carry mark, if any. */
+  const markOf = async (w: World) =>
+    (
+      await database
+        .as('admin')
+        .query<{ due_at: Date }>(`select due_at from directory.org_work where org_id = $1 and job = 'carry_rest'`, [
+          w.org,
+        ])
+    )[0];
+
+  /** The carry rest as job-list.ts makes it: its organisations from its marks, settled after each run. */
+  const followed = () => {
+    const marks = markedOrganisations({
+      job: 'carry_rest',
+      nextDue: carryRestDue,
+      database: app,
+      logger: logger(),
+      clock,
+    });
+    return withOrgWork(
+      [marks],
+      createCarryRest({ list: marks.list, database: app, keys, ids, clock, logger: logger() }),
+    );
+  };
+
+  it('an acceptance that carried past 20 marks it at once; visited, the rest is carried, and the mark goes', async () => {
+    const { w, acting, mandateId } = await ready();
+    const pending = await askedInTurn(acting, w, 21);
+    // The marks are read across organisations: this one's alone, so no other test's is visited.
+    await database.as('admin').query(`delete from directory.org_work where job = 'carry_rest'`);
+
+    const { versionId } = await carried(w, mandateId);
+    expect(await markOf(w)).toBeDefined();
+    await followed().run();
+
+    for (const { id } of pending) expect(await versionOf(w, id)).toBe(versionId);
+    expect(await markOf(w)).toBeUndefined();
+  });
+
+  it('one left while its agent is suspended keeps the organisation due, and is carried once it is back', async () => {
+    const { w, acting, mandateId } = await ready();
+    const pending = await askedInTurn(acting, w, 21);
+    await database.as('admin').query(`delete from directory.org_work where job = 'carry_rest'`);
+    const { versionId } = await carried(w, mandateId);
+    await agentMoved(w, 'suspend');
+
+    await followed().run();
+    expect(await versionOf(w, pending[20]?.id ?? '')).not.toBe(versionId);
+    expect((await markOf(w))?.due_at.getTime()).toBeLessThanOrEqual(clock.now().getTime());
+
+    await agentMoved(w, 'reactivate');
+    await followed().run();
+    expect(await versionOf(w, pending[20]?.id ?? '')).toBe(versionId);
+    expect(await markOf(w)).toBeUndefined();
   });
 });

@@ -88,6 +88,8 @@ export {
   PENDING_CHOICES,
   PENDING_STATUSES,
   type PendingChoice,
+  VOID_CAUSES,
+  type VoidCause,
 } from './domain/voids.ts';
 export {
   claimAnswered,
