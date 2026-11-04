@@ -452,7 +452,6 @@ export function createRotation({
     }
   };
 
-  /** The run's share of the full pass, within its own time and the run's. */
   /**
    * Steps through the chains until the share is read, the time is up or no chain is left: what of the share is left. A chain
    * found failing or whose read didn't come back is done for the run; the others go on.
