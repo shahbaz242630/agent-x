@@ -15,9 +15,10 @@ import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
 import {
-  type ActivityExportTables,
   type ActivityTables,
   addBackgroundExport,
+  backgroundDownloadsDue,
+  claimFile,
   createActivityLog as createActivityRecorder,
   storedName,
 } from '@agentx/core/modules/activity';
@@ -54,9 +55,12 @@ import {
 import { createDownloadFiles, FILE_DOWNLOAD_OPERATION } from './activity-download-files.ts';
 import { createActivityExportBuilder } from './activity-export-builder.ts';
 import { ACTIVITY_EXPORT_OPERATION, createActivityLogExports } from './activity-log-exports.ts';
-import { keys, mandateWorld, type MandateWorldTables, refused, type World } from './mandate-world.helper.test.ts';
+import type { HandoffWorldTables } from './handoff-world.helper.test.ts';
+import { keys, mandateWorld, refused, type World } from './mandate-world.helper.test.ts';
+import { createOrgWorkRediscovery, markedOrganisations, withOrgWork } from './org-work.ts';
 
-type Tables = MandateWorldTables & ActivityTables & ActivityExportTables;
+/** With every table the marks' hourly look reads (org-work.ts). */
+type Tables = HandoffWorldTables & ActivityTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -512,6 +516,90 @@ describe('L5c a background download built (decision 31)', () => {
     expect(capture.lines().filter((line) => line.event === 'access_log.export_run_failed')).toEqual([
       expect.objectContaining({ level: 'error' }),
     ]);
+  });
+});
+
+describe('the background downloads on their marks (4D2e D10, 0077)', () => {
+  const admin = () => database.as('admin');
+  const markOf = async (w: World) =>
+    (
+      await admin().query<{ due_at: Date; marks: string }>(
+        `select due_at, marks from directory.org_work where org_id = $1 and job = 'background_downloads'`,
+        [w.org],
+      )
+    )[0];
+  const dueOf = async (w: World, now: Date) =>
+    (await withTenant(app, w.org, (tx) => backgroundDownloadsDue(tx, w.org, now).executeTakeFirst()))?.due ?? null;
+  const serverNow = async () =>
+    (await admin().query<{ now: Date }>('select pg_catalog.now() as now'))[0]?.now.getTime() ?? 0;
+  const NOW = new Date('2026-10-19T12:00:00.000Z');
+
+  /** The builder as job-list.ts makes it: its organisations from its marks, settled after each run. */
+  const onMarks = (w: World) => {
+    const marks = markedOrganisations({
+      job: 'background_downloads',
+      nextDue: backgroundDownloadsDue,
+      database: app,
+      logger: testLogger(capture),
+    });
+    return withOrgWork([marks], builderFor(w, { list: marks.list }));
+  };
+
+  it('a download asked marks the builder at once, one row for its every month; built, the mark goes', async () => {
+    const w = await world();
+    await requested(w, '2026-08-20T09:00:00.000Z');
+    expect(await markOf(w)).toBeUndefined();
+
+    const before = await serverNow();
+    const download = downloadOf(await ask(w));
+    expect(download.files).toHaveLength(3);
+    const mark = await markOf(w);
+    expect(mark?.due_at.getTime()).toBeGreaterThanOrEqual(before);
+    expect(mark?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
+    expect(await dueOf(w, NOW)).toEqual(NOW);
+
+    // Four a run (MOST_A_RUN): the three months in one.
+    await onMarks(w).run();
+
+    expect(await oneOf(w, download.id)).toMatchObject({ state: 'ready' });
+    expect(await markOf(w)).toBeUndefined();
+    expect(await dueOf(w, NOW)).toBeNull();
+  });
+
+  it('a month under a builder’s lease is due as its lease runs out; a download given up, never', async () => {
+    const w = await world();
+    downloadOf(await ask(w, { to: new Date('2026-09-01T00:00:00.000Z') }));
+    // A builder that claimed the month and stopped before it gave it back.
+    const claim = await withTenant(app, w.org, (tx) => claimFile(tx, w.org, { leaseMs: 900_000, mostTries: 3 }));
+    if (claim.outcome !== 'claimed') throw new Error(`not claimed: ${claim.outcome}`);
+    expect(await dueOf(w, NOW)).toEqual(claim.file.lease);
+
+    // Tried too often: the download given up, its month failed.
+    await admin().query(
+      `update activity_exports.files set building_until = pg_catalog.clock_timestamp() - interval '1 second'
+        where org_id = $1`,
+      [w.org],
+    );
+    const given = await withTenant(app, w.org, (tx) => claimFile(tx, w.org, { leaseMs: 900_000, mostTries: 1 }));
+    expect(given.outcome).toBe('given_up');
+    expect(await dueOf(w, NOW)).toBeNull();
+  });
+
+  it('a mark lost is written by the hourly look and said', async () => {
+    const w = await world();
+    downloadOf(await ask(w));
+    await admin().query(`delete from directory.org_work where org_id = $1 and job = 'background_downloads'`, [w.org]);
+
+    await createOrgWorkRediscovery({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      logger: testLogger(capture),
+    }).run();
+
+    expect(capture.lines().filter((line) => line.event === 'org_work.unmarked')).toEqual([
+      expect.objectContaining({ job: 'background_downloads', late: false }),
+    ]);
+    expect(await markOf(w)).toBeDefined();
   });
 });
 

@@ -1,7 +1,8 @@
-// The marks (directory.org_work, 0072, 0073, 0075), kept honest and followed (4D2e D6-D9).
+// The marks (directory.org_work, 0072, 0073, 0075, 0077), kept honest and followed (4D2e D6-D10).
 //
 // Followed: the hand-off, its sweep, the payment checks, the two expiries, the request
-// voids, the waiting rejections and the carry rest visit only the
+// voids, the waiting rejections, the carry rest, the factor removals, the background
+// downloads and the hold history visit only the
 // organisations whose marks are due by their clock, at most ORG_WORK_MOST a run,
 // those due longest first, instead of every organisation in the directory. Each
 // one's due time is when its work is next really needed, so with more due than a
@@ -18,6 +19,9 @@
 // since moves `marks` and stands; a stopped or crashed run settles nothing, and
 // its marks are read again; a visit that failed leaves its rows due, so their mark
 // too; one a job says it didn't finish (`keep`) stays as it was, first next run.
+// A job whose visit also checks what no mark can point at (the factor removals'
+// every reset verified, decision 3) visits every organisation besides, every few
+// hours (`withWholePasses`).
 //
 // Kept honest: each hour, every organisation's marks held to what its own rows say
 // is due. A mark the triggers should have made and didn't is written and said
@@ -32,7 +36,8 @@
 // is a real miss, unless a job settled it between (a false `unmarked`, rare, and only
 // a visit more). And a mark is only cleared by its value in the earlier read, so one
 // made while looking has moved it, and the clearing does nothing.
-import type { AuditTables } from '@agentx/core/modules/audit';
+import { backgroundDownloadsDue, type ActivityExportTables } from '@agentx/core/modules/activity';
+import { type AuditTables, holdHistoryDue } from '@agentx/core/modules/audit';
 import {
   dueOrgWork,
   markOrgWork,
@@ -44,6 +49,7 @@ import {
   settleOrgWorkPage,
 } from '@agentx/core/modules/directory';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
+import { factorRemovalsDue, type IdentityTables } from '@agentx/core/modules/identity';
 import { mandateExpiryDue } from '@agentx/core/modules/mandates';
 import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import { type Clock, HOUR_MS, systemClock } from '@agentx/core/shared-kernel';
@@ -65,7 +71,13 @@ export const ORG_WORK_REDISCOVERY_EVERY_MS = HOUR_MS;
 /** How far past what is due a mark may read before it counts as late: a mark's time and its row's differ by a transaction. */
 const LATE_BY_MS = 60_000;
 
-type OrgWorkTables = DirectoryTables & VoidTables & DecisionTables & TransactionsTables & AuditTables;
+type OrgWorkTables = DirectoryTables &
+  VoidTables &
+  DecisionTables &
+  TransactionsTables &
+  AuditTables &
+  IdentityTables &
+  ActivityExportTables;
 
 /** How many organisations a job takes from its marks a run: its list stays this size however many have work. */
 const ORG_WORK_MOST = 1_000;
@@ -200,17 +212,50 @@ export function markedOrganisations({
   };
 }
 
-/** The job with its organisations from the marks: those each run listed are settled after it, unless it was stopped. */
-export function withOrgWork<Job extends { run(signal?: AbortSignal): Promise<void> }>(
+/**
+ * The job with its organisations from the marks: those each run listed are settled after it, unless it was stopped.
+ * What its run says (a skip) comes back as it said it.
+ */
+export function withOrgWork<Job extends { run(signal?: AbortSignal): Promise<unknown> }>(
   marked: readonly MarkedOrganisations[],
   job: Job,
 ): Job {
   return {
     ...job,
     async run(signal?: AbortSignal) {
-      await job.run(signal);
+      const ran = await job.run(signal);
       for (const each of marked) await each.settle(signal);
+      return ran;
     },
+  };
+}
+
+/**
+ * A job's list from its marks, and at its first run and once every `everyMs` after, every organisation `all` lists
+ * besides: for a visit that also checks what no mark can point at (a record changed past the app, which no trigger
+ * sees). Those the marks gave first, so a pass never holds up work that is due; each once.
+ */
+export function withWholePasses(
+  marked: MarkedOrganisations,
+  {
+    everyMs,
+    all,
+    clock = systemClock,
+  }: {
+    readonly everyMs: number;
+    readonly all: () => Promise<readonly string[]>;
+    /** The job's own. */
+    readonly clock?: Clock;
+  },
+): () => Promise<readonly string[]> {
+  let lastWhole: number | undefined;
+  return async () => {
+    const listed = await marked.list();
+    const at = clock.now().getTime();
+    if (lastWhole !== undefined && at - lastWhole < everyMs) return listed;
+    const whole = await all();
+    lastWhole = at;
+    return [...new Set([...listed, ...whole])];
   };
 }
 
@@ -224,6 +269,9 @@ const DUE_READS = [
   ['request_voids', requestVoidsDue],
   ['waiting_rejections', waitingRejectionsDue],
   ['carry_rest', carryRestDue],
+  ['factor_removals', factorRemovalsDue],
+  ['background_downloads', backgroundDownloadsDue],
+  ['hold_history', holdHistoryDue],
 ] as const satisfies readonly (readonly [OrgWorkJob, unknown])[];
 
 /** What the organisation's rows and marks said on one trip. */

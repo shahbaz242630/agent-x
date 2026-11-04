@@ -59,7 +59,7 @@ export function createHoldHistoryCheck({
   batch = HOLD_HISTORY_BATCH,
   batchesARun = HOLD_HISTORY_BATCHES_A_RUN,
 }: {
-  /** The organisations to look in: the directory's list, which job-list.ts passes. */
+  /** The organisations to look in: those its marks say may be held (4D2e D10), which job-list.ts passes. */
   readonly list: () => Promise<readonly string[]>;
   readonly database: Database<UseCaseTables>;
   readonly keys: KeyProvider;

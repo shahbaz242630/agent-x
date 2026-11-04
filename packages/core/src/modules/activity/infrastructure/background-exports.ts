@@ -26,7 +26,7 @@ import type { ActivityExportTables, ActivityTables } from './tables.ts';
 type ExportTx = Transaction<ActivityExportTables & ActivityTables>;
 
 /** The months table as `f`, as the claim and the under-way check read it. */
-type FilesAsF = ActivityExportTables & ActivityTables & { f: ActivityExportTables['activity_exports.files'] };
+type FilesAsF = ActivityExportTables & { f: ActivityExportTables['activity_exports.files'] };
 
 /**
  * The lock a download's ends are taken under (ADR-006 §6, 2c): a month made
@@ -183,6 +183,30 @@ export async function downloadUnderWay(tx: ExportTx, orgId: string): Promise<boo
     .executeTakeFirst();
   return found !== undefined;
 }
+
+/**
+ * When the builder next has work in the organisation (4D2e D10): now while a month waits, else as the soonest lease
+ * on one being built runs out (its builder stopped, the next claim takes it on), of a download not given up; none
+ * without one. Not run: a statement for the caller's trip, on 0053's files_to_build, read as a claim reads them.
+ */
+export const backgroundDownloadsDue = (tx: Transaction<ActivityExportTables>, orgId: string, now: Date) =>
+  tx
+    .selectFrom('activity_exports.files as f')
+    .select((eb) =>
+      eb.fn
+        .min<Date | null>(
+          eb
+            .case()
+            .when('f.state', '=', 'waiting')
+            .then(eb.cast<Date>(eb.val(now), 'timestamptz'))
+            .else(eb.ref('f.building_until'))
+            .end(),
+        )
+        .as('due'),
+    )
+    .where('f.org_id', '=', orgId)
+    .where('f.state', 'in', ['waiting', 'building'])
+    .where(noMonthFailed);
 
 /** Adds the download and its months, waiting, in the caller's transaction (the one recording its event). */
 export async function addBackgroundExport(tx: ExportTx, orgId: string, asked: BackgroundExportAsked): Promise<void> {

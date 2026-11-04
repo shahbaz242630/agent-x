@@ -83,6 +83,12 @@
 // A work whose recording meets a chain that refuses new events has met
 // tampering too, and raises the alarm (`check: record`) before its error goes
 // back.
+//
+// A hold set marks the hold history's work for its organisation (4D2e D10), in
+// the hold's own transaction, last: so the mark commits with the hold or not at
+// all. No trigger can do it, as none goes on the audit tables, and this module
+// doesn't know the marks: the process gives it how (`markHoldsWith`, at boot).
+// One given none marks nothing, and the hourly look finds the hold unmarked.
 import { ChainBroken } from '@agentx/platform/audit-chain';
 import { withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -163,6 +169,16 @@ const unrecorded = new Map<string, Map<string, Found>>();
  * one is tried only while none is, so by one request at a time.
  */
 const recording = new Map<string, number>();
+/** How a hold set marks the hold history's work, in the hold's transaction (the header): none until a process gives it. */
+let markHold: ((tx: Transaction<AuditTables>, orgId: string) => Promise<void>) | undefined;
+
+/** How this process marks a hold set from now on, or (undefined) that it marks none: once, at boot. */
+export function markHoldsWith(
+  mark: ((tx: Transaction<AuditTables>, orgId: string) => Promise<void>) | undefined,
+): void {
+  markHold = mark;
+}
+
 /** The organisation a poll last tried: the next starts after it, so no organisation is always the last reached. */
 let lastTried = '';
 /** Whether a finding of this process's own was left to its row since the last poll: a burst of them says so once. */
@@ -306,6 +322,8 @@ async function setHold(
         // Clearing won't check this record: a row stays to be the next hold, and a finding of this process's own that
         // has none writes one now. One known from its row alone never does: an operator's delete of a forged row stands.
         else if (found.fromRow !== true) await keepHoldWaitingHere(tx, finding, finding.sign);
+        // Last, after the head: the hold history's work, which only a hold set makes (the header).
+        if (recorded === 'set') await markHold?.(tx, held);
         return recorded;
       },
       // Never in line behind the work it stops: bounded by the head's lock and each statement's time, as above.

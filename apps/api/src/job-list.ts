@@ -6,8 +6,10 @@
 // Nothing here starts until start-jobs.ts starts it: the anchor check's order
 // (it must start before the hand-off's first run) is this list's.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
+import { backgroundDownloadsDue } from '@agentx/core/modules/activity';
 import {
   createAuditTrail,
+  holdHistoryDue,
   holdOrganisation,
   HOLDS_WAITING_EVERY_MS,
   pollHoldsWaiting,
@@ -19,6 +21,7 @@ import {
   activeContactsFor,
   contactAddressFor,
   countingContactsFor,
+  factorRemovalsDue,
   membersFor,
   resetLinkFor,
 } from '@agentx/core/modules/identity';
@@ -38,7 +41,7 @@ import { anchorLogOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
-import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
+import { FACTOR_REMOVALS_EVERY_MS, FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import {
   createHandoff,
   HANDOFF_EVERY_MS,
@@ -60,6 +63,7 @@ import {
   markedOrganisations,
   ORG_WORK_REDISCOVERY_EVERY_MS,
   withOrgWork,
+  withWholePasses,
 } from './org-work.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
@@ -269,6 +273,16 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   const voidsMarks = markedOrganisations({ job: 'request_voids', nextDue: requestVoidsDue, ...marking });
   const rejectionMarks = markedOrganisations({ job: 'waiting_rejections', nextDue: waitingRejectionsDue, ...marking });
   const carryMarks = markedOrganisations({ job: 'carry_rest', nextDue: carryRestDue, ...marking });
+  // The factor removals, the background downloads and the hold history, each visiting only the organisations its marks
+  // say have work (4D2e D10). The removals' visit verifies every reset of the organisation, which no mark can point
+  // at, so they visit every one besides every few hours (decision 3).
+  const resetMarks = markedOrganisations({ job: 'factor_removals', nextDue: factorRemovalsDue, ...marking });
+  const downloadMarks = markedOrganisations({
+    job: 'background_downloads',
+    nextDue: backgroundDownloadsDue,
+    ...marking,
+  });
+  const holdMarks = markedOrganisations({ job: 'hold_history', nextDue: holdHistoryDue, ...marking });
   // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
   const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
@@ -277,6 +291,16 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The one allowlisted fetch the notices, the login service's events and the resets send with.
   const outboundFetch = createOutboundFetch(config.outbound.allowedOrigins);
   const logged = { keys, ids: uuidV7Ids, logger };
+  const removals = resetRemovalsFrom({
+    list: withWholePasses(resetMarks, { everyMs: FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS, all: list }),
+    config,
+    database,
+    ...logged,
+    clock: systemClock,
+    outbox,
+    fetch: outboundFetch,
+  });
+  const builder = downloads.builderFor?.(downloadMarks.list);
   // A table's own sweep on a timer of its own, each batch within the anchor check's deadline.
   const sweepRows = (rows: SweptRows, sweep: (most: number) => Promise<number>): Job =>
     job(
@@ -387,7 +411,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Resets of lost second factors carried out once cooled off (B6-3c).
     job(
       'factor_resets',
-      resetRemovalsFrom({ config, database, ...logged, clock: systemClock, outbox, fetch: outboundFetch }),
+      removals && withOrgWork([resetMarks], removals),
       FACTOR_REMOVALS_EVERY_MS,
       HOUR_MS,
       (running) => {
@@ -404,7 +428,10 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // A held organisation's whole history checked in batches before its clearing is confirmed (Phase 2 D1c).
     job(
       'hold_history',
-      createHoldHistoryCheck({ ...organisationJob, tables: AUTHORITY_TABLES }),
+      withOrgWork(
+        [holdMarks],
+        createHoldHistoryCheck({ ...organisationJob, list: holdMarks.list, tables: AUTHORITY_TABLES }),
+      ),
       HOLD_HISTORY_EVERY_MS,
       HOUR_MS,
     ),
@@ -449,9 +476,15 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Each closed day of every organisation's activity log sealed on its audit chain (Phase 3 L6).
     job('activity_seal', createActivitySeal(clocked), ACTIVITY_SEAL_EVERY_MS, LONG_MS),
     // The activity log's background downloads built, a month a file (Phase 3 L5c).
-    job('background_downloads', downloads.builder, ACTIVITY_EXPORTS_EVERY_MS, HOUR_MS, (running) => {
-      logger.info('api.background_downloads', { building: running });
-    }),
+    job(
+      'background_downloads',
+      builder && withOrgWork([downloadMarks], builder),
+      ACTIVITY_EXPORTS_EVERY_MS,
+      HOUR_MS,
+      (running) => {
+        logger.info('api.background_downloads', { building: running });
+      },
+    ),
     // Each sealed day digested again and held to its seal, a few a run (Phase 3 L6c).
     job('activity_seal_check', createActivitySealCheck(organisationJob), ACTIVITY_SEAL_CHECK_EVERY_MS, LONG_MS),
     // Every organisation's marks of work held to what its own rows say (4D2e D6).
