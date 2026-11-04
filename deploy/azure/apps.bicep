@@ -133,6 +133,10 @@ param loadImageRepository string
 @maxLength(71)
 param loadImageDigest string
 
+@description('The anchor key\'s public halves, `<version>:<key>` comma-separated, as the API\'s `api.starting` line shows them (4D2e E9): the operator checks the anchors\' store with them alone. Empty until set: a chain recovery plan is then refused.')
+@maxLength(1000)
+param anchorPublicKeys string = ''
+
 var names = resourceNames(environment, nameSuffix)
 
 // The restore drill's copy (S78): a point-in-time restore made under this name,
@@ -537,6 +541,30 @@ var anchorStoreSettings = [
   }
 ]
 
+// Where the operator reads the chains' anchors for a chain recovery plan (4D2e
+// E9): the same container, as the operator's own identity, which may only read
+// it (modules/evidence.bicep), and the public keys the lines are checked with.
+var operatorAnchorSettings = concat(
+  [
+    {
+      name: 'AGENTX_AUDIT_ANCHORS_URL'
+      value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
+    }
+    {
+      name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
+      value: operatorIdentity.properties.clientId
+    }
+  ],
+  empty(anchorPublicKeys)
+    ? []
+    : [
+        {
+          name: 'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS'
+          value: anchorPublicKeys
+        }
+      ]
+)
+
 // Every job: the work it does (its identity and its name come from that), the
 // image and command, how long one run may take, what it reads as a mounted file
 // with the setting that names each file, what it holds itself rather than reads
@@ -660,6 +688,8 @@ var jobs = concat([
     timeoutSeconds: 900
     // Writes an audit export to the write-once store as its own identity (E10c).
     evidence: true
+    // Reads the chains' anchors for a chain recovery plan (4D2e E9).
+    readsAnchors: true
     files: concat(
       [
         {
@@ -1136,6 +1166,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 value: '${secretsPath}/${file.reads}'
               }),
               job.evidence ? evidenceSettings : [],
+              (job.?readsAnchors ?? false) ? operatorAnchorSettings : [],
               (job.?callsApi ?? false) ? [loadApiSetting] : []
             )
             volumeMounts: empty(concat(job.files, job.held))

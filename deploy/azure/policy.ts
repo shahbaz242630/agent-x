@@ -740,6 +740,12 @@ const ANCHOR_ACTIONS = [
 /** The anchors' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors');
 
+/** The operator's role on the anchors (4D2e E9): Get Blob and List Blobs alone, for a chain recovery plan. */
+const ANCHOR_READ_ACTIONS = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'] as const;
+
+/** The operator's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
+const anchorReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors-reader');
+
 /** The audit exports' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-writer');
 
@@ -1856,9 +1862,12 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * custom role, assignable in the resource group alone, given once on that
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
- * a new file and reads, to the API's, which alone is told where they are
- * (`storeSettingsProblems`). Neither can overwrite or delete. The account's
- * immutability covers both. Its logs are `resource-logs`'s.
+ * a new file and reads, to the API's. The anchors container has a second role,
+ * reading alone, to the operator's identity, for a chain recovery plan (4D2e E9).
+ * The API and the operator's job alone are told where the anchors are, each as
+ * the identity its role is given to (`storeSettingsProblems`). None can
+ * overwrite or delete. The account's immutability covers both. Its logs are
+ * `resource-logs`'s.
  */
 const evidenceStore: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
@@ -1913,11 +1922,10 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_EVIDENCE_CLIENT_ID',
       accounts,
       container: EVIDENCE_CONTAINER,
-      holds: (workload) => workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator',
+      holders: (workload) => (isOperatorJob(workload) ? writers : undefined),
       holder: "the operator's job writes to the store",
       store: 'store',
     },
-    writers,
     problem,
   );
   const keepers = storeRoleProblems(
@@ -1932,6 +1940,18 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     },
     problem,
   );
+  const readers = storeRoleProblems(
+    snapshot,
+    {
+      name: anchorReaderRoleName(groupOf(snapshot)),
+      dataActions: ANCHOR_READ_ACTIONS,
+      containers: containersNamed(snapshot, ANCHOR_CONTAINER),
+      workload: 'operator',
+      called: "the operator's read of the anchors",
+      on: 'the anchors container',
+    },
+    problem,
+  );
   storeSettingsProblems(
     snapshot,
     {
@@ -1940,14 +1960,24 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
       accounts,
       container: ANCHOR_CONTAINER,
-      holds: (workload) => workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api',
-      holder: "the API keeps the chains' anchors",
+      holders: (workload) => {
+        if (isApiApp(workload)) return keepers;
+        return isOperatorJob(workload) ? readers : undefined;
+      },
+      holder: "the API keeps the chains' anchors and the operator's job reads them",
       store: 'store',
     },
-    keepers,
     problem,
   );
 };
+
+/** The API, as an app. */
+const isApiApp = (workload: PredictedResource): boolean =>
+  workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api';
+
+/** The operator's job. */
+const isOperatorJob = (workload: PredictedResource): boolean =>
+  workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator';
 
 /** One of the write-once store's containers, by its name: a role is given on it alone. */
 const containersNamed = (snapshot: Snapshot, name: string): readonly PredictedResource[] =>
@@ -2085,7 +2115,8 @@ interface StoreSettings {
   /** The store's account by name; the URL must name the one there is. */
   readonly accounts: readonly PredictedResource[];
   readonly container: string;
-  readonly holds: (workload: PredictedResource) => boolean;
+  /** The identities a workload may name, those its store's role is given to; undefined for one never told of the store. */
+  readonly holders: (workload: PredictedResource) => readonly PredictedResource[] | undefined;
   /** Who alone is told, and what a problem calls the store. */
   readonly holder: string;
   readonly store: string;
@@ -2101,14 +2132,14 @@ interface StoreSettings {
 function storeSettingsProblems(
   snapshot: Snapshot,
   wanted: StoreSettings,
-  holders: readonly PredictedResource[],
   problem: (resource: string, message: string) => void,
 ): void {
   for (const workload of workloadsIn(snapshot)) {
+    const holders = wanted.holders(workload);
     for (const container of containersOf(workload)) {
       const settings = list(at(container, 'env')).filter((entry) => text(at(entry, 'name')).startsWith(wanted.prefix));
       const names = settings.map((entry) => text(at(entry, 'name')));
-      if (!wanted.holds(workload)) {
+      if (holders === undefined) {
         if (names.length > 0) problem(workload.name, `sets ${names.join(', ')}: only ${wanted.holder}`);
         continue;
       }
@@ -2272,11 +2303,10 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
       clientId: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
       accounts,
       container: DOWNLOADS_CONTAINER,
-      holds: (workload) => workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api',
+      holders: (workload) => (isApiApp(workload) ? keepers : undefined),
       holder: 'the API keeps the activity downloads',
       store: 'downloads store',
     },
-    keepers,
     problem,
   );
 };
@@ -3186,10 +3216,12 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const evidence = customRoleId(groupOf(snapshot), evidenceRoleName(groupOf(snapshot)));
   const downloads = customRoleId(groupOf(snapshot), downloadsRoleName(groupOf(snapshot)));
   const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
+  const readAnchors = customRoleId(groupOf(snapshot), anchorReaderRoleName(groupOf(snapshot)));
+  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors]);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
-    if (role === release || role === evidence || role === downloads || role === keptAnchors) continue;
+    if (stores.has(role)) continue;
     const secret = secrets.get(scopeOf(assignment));
     const identity = principalOf(snapshot, assignment);
     if (
@@ -3289,6 +3321,7 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
   const stores = new Set([
     evidenceRoleName(groupOf(snapshot)),
     anchorRoleName(groupOf(snapshot)),
+    anchorReaderRoleName(groupOf(snapshot)),
     downloadsRoleName(groupOf(snapshot)),
   ]);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));

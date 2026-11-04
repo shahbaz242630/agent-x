@@ -56,3 +56,8 @@ param appMinReplicas = int(readEnvironmentVariable('AGENTX_AZURE_APP_MIN_REPLICA
 param loadRun = bool(readEnvironmentVariable('AGENTX_AZURE_LOAD_RUN', 'false'))
 param loadImageRepository = 'ghcr.io/shahbaz242630/agent-x-load'
 param loadImageDigest = readEnvironmentVariable('AGENTX_AZURE_LOAD_IMAGE_DIGEST', '')
+
+// The anchor key's public halves (4D2e E9), as staging's API logs them at start
+// (`api.starting`, keys: audit-anchor), `<version>:<key>`: public, so kept here.
+// Empty until copied in: the operator's chain recovery plan is refused until then.
+param anchorPublicKeys = ''
