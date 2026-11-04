@@ -2018,9 +2018,14 @@ describe('the place a pass under way has reached, kept beside the passes (4D2e E
     const third = logOver(fake);
     await third.log.read();
     expect(third.log.lastProgress(CHAIN)).toBeUndefined();
+    // And its next snapshot leaves the overtaken place out.
+    third.log.keep(anchorAt(OTHER_CHAIN, 3n));
+    await third.log.flush();
+    const [newest] = files(fake, 'snapshots').toSorted();
+    expect(linesIn(fake.files.get(String(newest))).map((line) => line.k)).toEqual(['a', 'a', 'p']);
   });
 
-  it("keepPass drops the chain's place: no snapshot after holds it", async () => {
+  it("keepPass drops the chain's place: no file after holds it", async () => {
     const fake = createFakeWriteOnceStore();
     const { log, advance } = await started(fake);
     log.keepProgress(placeAt(CHAIN, 40n));
@@ -2028,7 +2033,16 @@ describe('the place a pass under way has reached, kept beside the passes (4D2e E
     log.keepPass(signPass(keys, CHAIN, { seq: 90n, hash: Buffer.alloc(32, 90), macKeyVersion: 2 }, START, 1));
     expect(log.lastProgress(CHAIN)).toBeUndefined();
     expect(log.lastProgress(OTHER_CHAIN)?.seq).toBe(7n);
+    // Nor the delta written now: the dropped place is not even sent.
+    advance(1);
+    await log.flush();
+    expect(
+      linesIn(fake.files.get(String(files(fake, 'deltas')[0]))).map(
+        (line) => `${String(line.k)} ${String(line.chain)}`,
+      ),
+    ).toEqual([`p organisation:${ORG}`, `u organisation:${OTHER_ORG}`]);
     advance(60);
+    log.keepProgress(placeAt(OTHER_CHAIN, 8n));
     await log.flush();
     const [newest] = files(fake, 'snapshots').toSorted();
     expect(
@@ -2036,6 +2050,18 @@ describe('the place a pass under way has reached, kept beside the passes (4D2e E
         .map((line) => `${String(line.k)} ${String(line.chain)}`)
         .toSorted(),
     ).toEqual(['a platform', `p organisation:${ORG}`, `u organisation:${OTHER_ORG}`].toSorted());
+  });
+
+  it('a place dropped by its pass no longer counts against memory', async () => {
+    const fake = createFakeWriteOnceStore();
+    // Room for two lines and a little: an anchor and a pass are under 80% of it, a dropped place kept as well is not.
+    const { log, capture } = limited(fake, 1000);
+    await log.read();
+    log.keep(anchorAt(CHAIN, 1n));
+    log.keepProgress(placeAt(CHAIN, 1n));
+    log.keepPass(signPass(keys, CHAIN, { seq: 1n, hash: Buffer.alloc(32, 1), macKeyVersion: 2 }, START, 1));
+    await log.flush();
+    expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_near_memory')).toEqual([]);
   });
 
   it('SEC-DB-11 a place signed as a pass, or as an anchor, is a line that fails', async () => {

@@ -533,7 +533,10 @@ describe('the full pass (decision 3)', () => {
     await made.run([failing, other]);
     const away = new Error('the database is away');
     made.answer.pass = (orgId, cursor, to, most) =>
-      orgId === failing ? Promise.reject(away) : Promise.resolve(stepTo(cursor.seq + BigInt(most), to.seq));
+      // Failing on a later turn of the event loop, as a database does: a pass that kept retrying it would spin until the test's limit.
+      orgId === failing
+        ? new Promise((_resolve, reject) => setImmediate(() => reject(away)))
+        : Promise.resolve(stepTo(cursor.seq + BigInt(most), to.seq));
     made.calls.length = 0;
     await made.run([failing, other]);
     expect(made.missed).toEqual([[failing, 'pass', away]]);
@@ -773,7 +776,8 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     const orgId = orgInSlot(1);
     steady.anchor(orgId, 1728n * 5n);
     let runs = 0;
-    while (steady.passes.lastPass(chainOf(orgId)) === undefined) {
+    // Bounded, so a pass that never finishes fails here rather than spinning: 1,728 runs unbroken.
+    while (steady.passes.lastPass(chainOf(orgId)) === undefined && runs < 2000) {
       await steady.run([orgId]);
       runs += 1;
     }
@@ -782,7 +786,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     process.anchor(orgId, 1728n * 5n);
     let restarted = 0;
     const verified: Call[] = [];
-    while (process.passes.lastPass(chainOf(orgId)) === undefined) {
+    while (process.passes.lastPass(chainOf(orgId)) === undefined && restarted < 4000) {
       await process.run([orgId]);
       restarted += 1;
       // A restart after every run: memory gone but the store's lines.

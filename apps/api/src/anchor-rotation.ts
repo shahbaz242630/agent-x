@@ -229,7 +229,8 @@ export function createRotation({
   /** Where a process's first run looks back to: where the last left off, an hour at least and a day at most. */
   const firstLook = (now: number): number => {
     const left = lastRanAt()?.getTime() ?? now;
-    return Math.max(now - DAY_MS, Math.min(left, now - lateAfterMs));
+    // A day at most: slotsBetween holds no more than a day's slots.
+    return Math.min(left, now - lateAfterMs);
   };
 
   /** Those whose five minutes came since the last run, added to the days waiting, each due from its five minutes. */
