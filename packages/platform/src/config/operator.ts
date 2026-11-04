@@ -2,9 +2,11 @@
 // actions, recorded on the platform audit chain). It connects as the app's own
 // role, never the owner, so it is held to the same tenant walls as the API,
 // and it holds only the keys its commands use. The API's HTTP, pool and
-// anchor settings are refused here by name: the command reads only what it
-// needs, and a typo is still caught. It also reads the name Azure gives each
-// run of its job, which its platform event records (B1c-2b).
+// anchor check settings are refused here by name: the command reads only what
+// it needs, and a typo is still caught. Of the anchors it reads only their
+// store, their epoch and their public keys, for a chain's recovery plan (4D2e
+// E9). It also reads the name Azure gives each run of its job, which its
+// platform event records (B1c-2b).
 import type { KeySettings } from '../keys/load.ts';
 import {
   type BlobContainer,
@@ -68,6 +70,15 @@ const EVIDENCE: BlobContainerSettings = {
   holder: 'the job',
 };
 
+/** The settings the anchors' store is read by (4D2e E9): as the API keeps it, read as the job's own identity. */
+const ANCHORS: BlobContainerSettings = {
+  directory: 'AGENTX_AUDIT_ANCHORS_DIR',
+  url: 'AGENTX_AUDIT_ANCHORS_URL',
+  clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+  deployedDoes: "reads the chains' anchors from their write-once container",
+  holder: 'the job',
+};
+
 export interface OperatorConfig {
   readonly environment: Environment;
   readonly release: string;
@@ -98,6 +109,17 @@ export interface OperatorConfig {
    * for each not set.
    */
   readonly evidence: { readonly directory: string | null; readonly container: BlobContainer | null };
+  /**
+   * Where the chains' anchors are read for a recovery plan (4D2e E9): the API's
+   * local folder or its write-once container, the epoch they are signed for, and
+   * the public keys their signatures are checked with; null for each not set.
+   */
+  readonly anchors: {
+    readonly directory: string | null;
+    readonly container: BlobContainer | null;
+    readonly epoch: number;
+    readonly publicKeys: ReadonlyMap<number, string> | null;
+  };
 }
 
 /** Reads and checks the operator's command's settings, or throws a ConfigError listing every problem. */
@@ -116,6 +138,11 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
     evidenceDirectory: setting(env, 'AGENTX_EVIDENCE_DIR'),
     evidenceContainer: setting(env, 'AGENTX_EVIDENCE_CONTAINER_URL'),
     evidenceClientId: setting(env, 'AGENTX_EVIDENCE_CLIENT_ID'),
+    anchorsDirectory: setting(env, 'AGENTX_AUDIT_ANCHORS_DIR'),
+    anchorsContainer: setting(env, 'AGENTX_AUDIT_ANCHORS_URL'),
+    anchorsClientId: setting(env, 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'),
+    anchorEpoch: setting(env, 'AGENTX_ANCHOR_EPOCH'),
+    anchorPublicKeys: setting(env, 'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS'),
     dbPort: location.port,
     dbName: location.database,
     dbTls: location.tls,
@@ -123,6 +150,7 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
     password: secretSetting(env, 'AGENTX_DB_PASSWORD'),
   };
   const { environment, release, run, logLevel, evidenceDirectory, evidenceContainer, evidenceClientId } = checks;
+  const { anchorsDirectory, anchorsContainer, anchorsClientId } = checks;
 
   const problems = [
     ...startProblems(env, 'operator', checks),
@@ -134,6 +162,13 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
           directory: evidenceDirectory.value,
           container: evidenceContainer.value,
           clientId: evidenceClientId.value,
+        })
+      : []),
+    ...(environment.ok && anchorsDirectory.ok && anchorsContainer.ok && anchorsClientId.ok
+      ? blobContainerProblems(env, environment.value, ANCHORS, {
+          directory: anchorsDirectory.value,
+          container: anchorsContainer.value,
+          clientId: anchorsClientId.value,
         })
       : []),
     ...deployedProblems(env, environment, location.tls),
@@ -162,6 +197,12 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
     evidence: Object.freeze({
       directory: checks.evidenceDirectory.value ?? null,
       container: blobContainerOf(env, checks.evidenceContainer.value, checks.evidenceClientId.value),
+    }),
+    anchors: Object.freeze({
+      directory: checks.anchorsDirectory.value ?? null,
+      container: blobContainerOf(env, checks.anchorsContainer.value, checks.anchorsClientId.value),
+      epoch: checks.anchorEpoch.value,
+      publicKeys: checks.anchorPublicKeys.value ?? null,
     }),
   });
 }

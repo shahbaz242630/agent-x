@@ -931,6 +931,12 @@ export const PLAIN_WORDS = {
     broke: 'The job stopped before doing anything, so nothing was changed.',
     next: 'Check the database is up and reachable, then run the job again.',
   },
+  'operator.chain_recovery_refused': {
+    happened: "An organisation's audit chain recovery plan was refused.",
+    broke:
+      'Nothing was changed, and the organisation stays on hold: its copy cannot mend the chain with original records.',
+    next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
+  },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
     broke: "Nothing was changed: the organisation or its first admin's invitation already exists from an earlier run.",

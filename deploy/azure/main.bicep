@@ -319,6 +319,7 @@ module evidence 'modules/evidence.bicep' = {
     writerRoleName: 'Agent X evidence writer (${environment} ${nameSuffix})'
     anchorKeeperIdentityName: identityName(environment, 'api')
     anchorRoleName: 'Agent X audit anchors (${environment} ${nameSuffix})'
+    anchorReaderRoleName: 'Agent X audit anchors reader (${environment} ${nameSuffix})'
     retentionDays: evidenceRetentionDays
     immutability: evidenceImmutability
     redundancy: evidenceRedundancy
