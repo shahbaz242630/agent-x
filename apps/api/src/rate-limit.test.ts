@@ -1,4 +1,4 @@
-import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -75,7 +75,7 @@ describe('the callers a counter remembers', () => {
   /** Past the plugin's own default of 5,000, which would forget the first caller. */
   const OTHERS = 6000;
   const reply = { headers: () => reply, header: () => reply } as unknown as FastifyReply;
-  const requestFrom = (app: ReturnType<typeof Fastify>, address: string, orgId: string) =>
+  const requestFrom = (app: FastifyInstance, address: string, orgId: string) =>
     ({
       server: app,
       agent: { orgId },
