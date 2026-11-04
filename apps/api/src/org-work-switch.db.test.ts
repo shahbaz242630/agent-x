@@ -311,18 +311,20 @@ describe('the hand-off follows its marks', () => {
     const request = await ask(acting, w, { amount: ALLOWED() });
     const before = (await marksOf(w)).hand_off;
     const real = createRailHealth({ clock, logger: testLogger(capture) });
-    // The budget spent while it waited for the gate: inside, it starts nothing.
+    // The budget (a millisecond, so the job's clock stays behind Postgres's) spent while it waited for the gate.
     const health: RailHealth = {
       ...real,
       enter: (orgId) => {
-        clock.advanceBy(RUN_BUDGET_MS);
+        clock.advanceBy(1);
         return real.enter(orgId);
       },
     };
 
-    await switchedHandoff(w, { health }).job.run();
+    await switchedHandoff(w, { health, runBudgetMs: 1 }).job.run();
 
     expect(await statusOf(w, request.id)).toBe('APPROVED');
+    // Its rows, read, would have said Postgres's now, later.
+    expect(clock.now().getTime()).toBeLessThan(await serverNow());
     expect((await marksOf(w)).hand_off).toEqual({ marks: before?.marks, due_at: clock.now() });
   });
 
@@ -391,6 +393,22 @@ describe('the hand-off follows its marks', () => {
     expect(entered).toBe(2);
     for (const { id } of requests) expect(await statusOf(w, id)).toBe('APPROVED');
     expect((await marksOf(w)).hand_off?.due_at.getTime()).toBe(clock.now().getTime() + WAITING_AS_A_WHOLE_MS);
+  });
+
+  it('one frozen beside another in the same run: only the frozen one waits its minute', async () => {
+    const frozen = await ready();
+    await ask(frozen.acting, frozen.w, { amount: ALLOWED() });
+    const mandateId = await shared.mandateIdOf(frozen.w);
+    await shared.moved(frozen.w, mandateId, 'organization', 'pause');
+    const other = await ready();
+    // Waiting for its supplier's payee: a reason of its own request's.
+    await ask(other.acting, other.w, { amount: ALLOWED(), supplierId: other.w.suppliers[1] ?? '' });
+
+    await switchedHandoff(frozen.w).job.run();
+
+    const waitsUntil = clock.now().getTime() + WAITING_AS_A_WHOLE_MS;
+    expect((await marksOf(frozen.w)).hand_off?.due_at.getTime()).toBe(waitsUntil);
+    expect((await marksOf(other.w)).hand_off?.due_at.getTime()).toBeLessThan(waitsUntil);
   });
 
   it('a whole organisation lifted: a run after that ends its turn on its own request settles by its rows again', async () => {
