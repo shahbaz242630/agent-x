@@ -125,6 +125,15 @@ function settingsProblems(config: OperatorConfig, store: unknown, anchors: unkno
 }
 
 /**
+ * Whether the store said the file isn't there: Azure's 404, or the folder's
+ * own refusal (development and test). BlobStoreFailed carries its answer in
+ * these fixed words alone (packages/platform/src/storage/write-once.ts).
+ */
+const missingFile = (error: unknown): boolean =>
+  error instanceof BlobStoreFailed &&
+  (error.message.includes('the blob service answered 404 ') || error.message.endsWith('no file of that name'));
+
+/**
  * Why the plan asked for can't be applied, from its own file in the evidence
  * store (chain-recovery-plan's): none there, not this organisation's plan of
  * that ID, a plan that was refused, or another digest than the one asked. Its
@@ -147,10 +156,8 @@ async function storedPlanProblems({ evidence }: OperatorConfig, asked: Asked): P
     const parsed: unknown = JSON.parse(text.slice(0, text.indexOf('\n')));
     summary = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
   } catch (error) {
-    // None there, a folder's own refusal (development and test), or a first line that isn't JSON; anything else is a bug.
-    const unreadable =
-      error instanceof BlobStoreFailed || error instanceof SyntaxError || (error instanceof Error && 'code' in error);
-    if (!unreadable) throw error;
+    // No such file, or a first line that isn't JSON. Anything else (the network, a timeout) is the caller's failure.
+    if (!(missingFile(error) || error instanceof SyntaxError)) throw error;
     return [
       `the plan ${asked.planId} has no readable file in the evidence store (${name}): make the plan first, or check its ID`,
     ];
@@ -198,15 +205,16 @@ async function restoreRun(config: OperatorConfig, keys: KeyProvider, argv: reado
     log.error('operator.refused', { problems: refused });
     return 1;
   }
-  const planProblems = await storedPlanProblems(config, asked);
-  if (planProblems.length > 0) {
-    log.error('operator.refused', { restoreId, problems: planProblems });
-    return 1;
-  }
   const copy = ownerOn(config, logger, { host: config.db.drillHost, readOnly: true });
   const live = ownerOn(config, logger, { host: config.db.host, readOnly: false });
   const facts = { restoreId, planId, orgId, digest, discardFork, release: config.release, run: config.run };
   try {
+    // Before either connection is used: a repair applies only the plan kept as evidence.
+    const planProblems = await storedPlanProblems(config, asked);
+    if (planProblems.length > 0) {
+      log.error('operator.refused', { restoreId, problems: planProblems });
+      return 1;
+    }
     const problems = await connectionProblems(copy, live);
     if (problems.length > 0) {
       log.error('operator.refused', { problems });

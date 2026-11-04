@@ -29,7 +29,26 @@ import type { OperatorProcess } from './main.ts';
 import { chainRestoreRequest } from './request.ts';
 
 /** Each answer pushed overrides one read-only proof, in the order the command asks. */
-const faults = vi.hoisted(() => ({ readOnly: [] as boolean[], roles: [] as string[][] }));
+const faults = vi.hoisted(() => ({
+  readOnly: [] as boolean[],
+  roles: [] as string[][],
+  planRead: undefined as unknown,
+}));
+
+// A read of the plan's file that fails as the network or a timeout would, in place of the folder's own read.
+vi.mock('@agentx/platform/storage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/platform/storage')>();
+  return {
+    ...actual,
+    folderWriteOnceStore: (...args: Parameters<typeof actual.folderWriteOnceStore>) => {
+      const store = actual.folderWriteOnceStore(...args);
+      return {
+        ...store,
+        get: (name: string) => (faults.planRead === undefined ? store.get(name) : Promise.reject(faults.planRead)),
+      };
+    },
+  };
+});
 
 // Each answer pushed overrides one role check, in the order the command asks: the copy's, then the live server's.
 vi.mock('@agentx/core/modules/audit', async (importOriginal) => {
@@ -59,6 +78,7 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 afterEach(() => {
   faults.readOnly = [];
   faults.roles = [];
+  faults.planRead = undefined;
 });
 
 const server = inject('postgres');
@@ -307,6 +327,26 @@ describe('4D2e E10 the chain repair, run as its job runs it', () => {
     expect(line('operator.refused')).toMatchObject({
       problems: [expect.stringMatching(/^the chains' anchors' store couldn't be read whole/)],
     });
+  });
+
+  it("a plan's file that can't be read for the network or a timeout is a failure said, not a missing plan", async () => {
+    for (const failure of [
+      new TypeError('fetch failed'),
+      new DOMException('The operation timed out.', 'TimeoutError'),
+    ]) {
+      faults.planRead = failure;
+      const restoreId = uuidV7Ids.next();
+      const asked = requested(
+        chainRestoreRequest({ orgId, planId: stored('6'.repeat(64)), digest: '6'.repeat(64), id: restoreId }),
+      );
+      const { code, events, line } = await run(['--request', asked]);
+      expect({ failure: failure.name, code, events }).toEqual({
+        failure: failure.name,
+        code: 1,
+        events: ['operator.starting', 'operator.chain_restore_owner_login', 'operator.failed'],
+      });
+      expect(line('operator.failed')).toMatchObject({ command: 'chain-restore', restoreId });
+    }
   });
 
   it('a failure part-way is said, the run fails', async () => {
