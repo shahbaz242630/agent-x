@@ -43,6 +43,7 @@ const HTTP: Config['http'] = {
   rateLimitPerUserPerMinute: 100,
   rateLimitPerAgentPerMinute: 100,
   rateLimitPerOrganisationPerMinute: 100_000,
+  webCopies: 1,
 };
 const LOG: Config['log'] = { level: 'debug', eventCapPerMinute: 10_000 };
 

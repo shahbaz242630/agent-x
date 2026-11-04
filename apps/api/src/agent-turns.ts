@@ -4,9 +4,10 @@
 // lock by design (ADR-006 §6, level 7); waiting there, each held one of the
 // pool's ten connections, so every other organisation's requests waited for a
 // connection behind it (S160: other organisations' p95 2 s during a 50-request
-// spike, 250–290 ms either side). The lock stays the guarantee: other replicas
+// spike, 250–290 ms either side). The lock stays the guarantee: other copies
 // and every other writer still serialise on it. This only stops one agent
-// holding the pool.
+// holding the pool. Turns are each copy's own: across N `web` copies an agent
+// may have 2N decisions at once (4D2e D12), each holding its copy's connection.
 //
 // A wait is bounded as the pool's own is (10 s for a connection): past it the
 // decision is answered busy (503 AGENT_BUSY, with Retry-After), with nothing

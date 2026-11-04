@@ -124,6 +124,7 @@ async function server(
       rateLimitPerUserPerMinute: options.perUser ?? 100,
       rateLimitPerAgentPerMinute: options.perUser ?? 100,
       rateLimitPerOrganisationPerMinute: 100_000,
+      webCopies: 1,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };

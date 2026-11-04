@@ -46,7 +46,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
-async function server({ perAddress = 100, perAgent = 10, perOrganisation = 100_000 } = {}) {
+async function server({ perAddress = 100, perAgent = 10, perOrganisation = 100_000, copies = 1 } = {}) {
   const config = {
     http: {
       host: '127.0.0.1',
@@ -57,6 +57,7 @@ async function server({ perAddress = 100, perAgent = 10, perOrganisation = 100_0
       rateLimitPerUserPerMinute: 100,
       rateLimitPerAgentPerMinute: perAgent,
       rateLimitPerOrganisationPerMinute: perOrganisation,
+      webCopies: copies,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
@@ -112,6 +113,25 @@ const asAgent = (letter: string, remoteAddress = '198.51.100.1') => ({
   url: '/v1/agent',
   headers: { authorization: `Bearer ${KEY_TEXT(letter)}` },
   remoteAddress,
+});
+
+describe('several web copies: each allows its share of every limit, rounded up (4D2e D12)', () => {
+  const ask = (letter: string, remoteAddress?: string) => ({
+    ...asAgent(letter, remoteAddress),
+    url: '/test/supplier',
+  });
+
+  it.each([
+    ["an address's", { perAddress: 10, perAgent: 1000, perOrganisation: 1000 }, ['a', 'd', 'k']],
+    ["an agent's", { perAddress: 1000, perAgent: 10, perOrganisation: 1000 }, ['a', 'c', 'a']],
+    ["an organisation's", { perAddress: 1000, perAgent: 1000, perOrganisation: 10 }, ['a', 'd', 'a']],
+  ])('holds %s limit of ten at four a copy of three', async (_whose, limits, letters) => {
+    const { app } = await server({ ...limits, copies: 3 });
+    for (const letter of [...letters, 'a']) expect((await app.inject(ask(letter))).statusCode).toBe(200);
+    const refused = await app.inject(ask('a'));
+    expect(refused.statusCode).toBe(429);
+    expect(refused.headers['x-ratelimit-limit']).toBe('4');
+  });
 });
 
 describe("each organisation's own rate limit, beside its agents' (PL-63)", () => {
