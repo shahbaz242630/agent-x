@@ -12,7 +12,13 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
-import { liveSchemaDrift, liveSchemaProblems, MARK_TRIGGERS, type WrittenTrigger } from './schema-guard.ts';
+import {
+  COMING_TRIGGERS,
+  liveSchemaDrift,
+  liveSchemaProblems,
+  MARK_TRIGGERS,
+  type WrittenTrigger,
+} from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 
 const server = inject('postgres');
@@ -206,6 +212,103 @@ describe('a trigger a coming migration adds to a table already built', () => {
       });
     } finally {
       await owner.query('alter table spend_requests.requests force row level security');
+    }
+  });
+});
+
+describe("0075's triggers, made as its migration will make them, read by this image (4D2e D9)", () => {
+  // Word for word as db/migrations/0075 writes them: this image must know each exactly before that migration runs.
+  const MADE = `create constraint trigger marks_request_voids after update on organizations.organizations
+      deferrable initially deferred for each row
+      when (new.status <> 'ACTIVE')
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on agents.agents
+      deferrable initially deferred for each row
+      when (new.status <> 'ACTIVE')
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on mandates.mandates
+      deferrable initially deferred for each row
+      when (new.status <> 'ACTIVE' or new.current_version_id is distinct from old.current_version_id)
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on funding_sources.sources
+      deferrable initially deferred for each row
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_request_voids after update on suppliers.suppliers
+      deferrable initially deferred for each row
+      when (new.status <> 'VERIFIED')
+      execute function directory.mark_org_work('request_voids', '0 seconds');
+    create constraint trigger marks_waiting_rejections after update on mandates.policies
+      deferrable initially deferred for each row
+      execute function directory.mark_org_work('waiting_rejections', '0 seconds');
+    create constraint trigger marks_carry_rest after update on mandates.mandates
+      deferrable initially deferred for each row
+      when (new.current_version_id is distinct from old.current_version_id)
+      execute function directory.mark_org_work('carry_rest', '0 seconds')`;
+  const DROPPED = `drop trigger if exists marks_request_voids on organizations.organizations;
+    drop trigger if exists marks_request_voids on agents.agents;
+    drop trigger if exists marks_request_voids on mandates.mandates;
+    drop trigger if exists marks_request_voids on funding_sources.sources;
+    drop trigger if exists marks_request_voids on suppliers.suppliers;
+    drop trigger if exists marks_waiting_rejections on mandates.policies;
+    drop trigger if exists marks_carry_rest on mandates.mandates`;
+  /** Each trigger 0075 makes, as `table name`. */
+  const NAMED = [
+    'agents.agents marks_request_voids',
+    'funding_sources.sources marks_request_voids',
+    'mandates.mandates marks_carry_rest',
+    'mandates.mandates marks_request_voids',
+    'mandates.policies marks_waiting_rejections',
+    'organizations.organizations marks_request_voids',
+    'suppliers.suppliers marks_request_voids',
+  ];
+  const each = (says: (table: string, name: string) => string) =>
+    NAMED.map((named) => {
+      const [table = '', name = ''] = named.split(' ');
+      return says(table, name);
+    });
+
+  it('are each a coming trigger, and nothing is the alarm at once', async () => {
+    await owner.query(MADE);
+    try {
+      expect(COMING_TRIGGERS.map(({ table, name }) => `${table} ${name}`).toSorted()).toEqual(NAMED);
+      expect(await liveSchemaDrift(app, ROLES)).toEqual({
+        atOnce: [],
+        releaseShaped: each((table, name) => `${table} carries "${name}", a coming trigger`),
+      });
+    } finally {
+      await owner.query(DROPPED);
+    }
+  });
+
+  it('to the image before this one, are the false alarm at once', async () => {
+    await owner.query(MADE);
+    try {
+      expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual(
+        each((table, name) => `${table} carries the trigger "${name}"`),
+      );
+    } finally {
+      await owner.query(DROPPED);
+    }
+  });
+
+  it('one written otherwise, firing on more or on less, is the alarm at once', async () => {
+    await owner.query(MADE);
+    await owner.query(`drop trigger marks_carry_rest on mandates.mandates;
+      create constraint trigger marks_carry_rest after update on mandates.mandates
+        deferrable initially deferred for each row
+        when (new.current_version_id is distinct from old.current_version_id or new.status <> 'ACTIVE')
+        execute function directory.mark_org_work('carry_rest', '0 seconds');
+      drop trigger marks_request_voids on funding_sources.sources;
+      create constraint trigger marks_request_voids after insert or update on funding_sources.sources
+        deferrable initially deferred for each row
+        execute function directory.mark_org_work('request_voids', '0 seconds')`);
+    try {
+      expect((await liveSchemaDrift(app, ROLES)).atOnce).toEqual([
+        'funding_sources.sources carries the trigger "marks_request_voids"',
+        'mandates.mandates carries the trigger "marks_carry_rest"',
+      ]);
+    } finally {
+      await owner.query(DROPPED);
     }
   });
 });
