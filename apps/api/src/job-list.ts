@@ -35,7 +35,6 @@ import { createOutboundFetch } from '@agentx/platform/outbound';
 import { ACTIVITY_EXPORTS_EVERY_MS } from './activity-export-builder.ts';
 import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activity-seal-check.ts';
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
-import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { anchorLogOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
@@ -186,8 +185,7 @@ export function eachProcessJobs({ keys, logger, database }: Booted, { recorder, 
 
 /**
  * The `jobs` side, made but not started. The hand-off and the payment checks
- * come back too, for /health; the zones' sealing, whose first pass comes before
- * a process at `all` answers.
+ * come back too, for /health.
  */
 export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
   const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch } = parts;
@@ -307,8 +305,6 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   );
   const sealPasses = owedPasses(eachDay({ all: list, startsAfterMs: SEAL_GRACE_MS }));
   const sweepPasses = owedPasses(eachDay({ all: list }));
-  // The agents' zones kept before 0054 sealed before any decision reads one (PL-40); then on a timer of its own.
-  const zoneSealing = createZoneSealing(organisationJob);
   // A server with every connection in use is the alarm only past the time a chain may go unchecked (decision 3).
   const fullServer = createFullServerWatch(config.audit.anchorSeconds * 3 * 1000, () => systemClock.now().getTime());
   const releaseDrift = createReleaseDriftWatch();
@@ -459,7 +455,6 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       HOLD_HISTORY_EVERY_MS,
       HOUR_MS,
     ),
-    job('zone_sealing', zoneSealing, ZONE_SEALING_EVERY_MS, HOUR_MS),
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
     job(
       'holdings_check',
@@ -529,5 +524,5 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       LONG_MS,
     ),
   ];
-  return { jobs, handoff, paymentChecks, zoneSealing };
+  return { jobs, handoff, paymentChecks };
 }

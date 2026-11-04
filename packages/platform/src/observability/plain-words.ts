@@ -89,16 +89,7 @@ export const PLAIN_WORDS = {
     broke: 'Requests left to carry stay on the old version for now.',
     next: 'It is tried again in about 5 minutes. If it keeps failing, check the database.',
   },
-  'agent_zones.run_failed': {
-    happened: "The list of organisations could not be read, so no agent's old month time zone was sealed.",
-    broke: 'An agent whose zone is still unsealed has its spend requests refused.',
-    next: 'It is tried again in about 15 minutes. If it keeps failing, check the database.',
-  },
-  'agent_zones.seal_failed': {
-    happened: "Sealing an organisation's old agent month time zones failed.",
-    broke: 'An agent of that organisation whose zone is still unsealed has its spend requests refused.',
-    next: 'It is tried again in about 15 minutes. If it keeps failing, a developer should read the error.',
-  },
+
   'access_log.write_failed': {
     happened: "A request's activity-log row could not be saved.",
     broke:
