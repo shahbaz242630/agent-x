@@ -75,7 +75,7 @@ const SLOT_MS = DAY_MS / SLOTS;
 export const WALKED = 1000;
 
 /** How many events one statement of a day's count counts. */
-export const COUNTED_A_STATEMENT = 1_000_000n;
+export const COUNTED_AT_ONCE = 1_000_000n;
 
 /** The runs a full pass is spread over: six days at the default five minutes. */
 export const PASS_RUNS = 1728n;
@@ -228,7 +228,7 @@ export function createRotation({
     while (day.countedTo < target.seq) {
       if (signal.aborted) return false;
       const after = day.countedTo;
-      const upTo = smallest(after + COUNTED_A_STATEMENT, target.seq);
+      const upTo = smallest(after + COUNTED_AT_ONCE, target.seq);
       const problem = await read(orgId, 'count', () => checks.count(orgId, after, upTo), signal);
       if (problem === MISSED) return false;
       if (problem !== undefined) {

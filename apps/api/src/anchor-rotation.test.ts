@@ -15,7 +15,7 @@ import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  COUNTED_A_STATEMENT,
+  COUNTED_AT_ONCE,
   createRotation,
   PASS_LATE_MS,
   PASS_WITHIN_MS,
@@ -225,16 +225,16 @@ describe("each organisation's day: the count and the walk (decisions 1 and 2b)",
   it('counts a long chain a million events a statement, and walks no more than the chain holds', async () => {
     const made = rotating();
     const orgId = orgInSlot(108);
-    const long = 2n * COUNTED_A_STATEMENT + 500n;
+    const long = 2n * COUNTED_AT_ONCE + 500n;
     made.anchor(orgId, long);
     const short = orgInSlot(108, 1);
     made.anchor(short, 40n);
     await made.run([orgId, short]);
 
     expect(onlyDays(made.calls)).toEqual([
-      { check: 'count', orgId, after: 0n, upTo: COUNTED_A_STATEMENT },
-      { check: 'count', orgId, after: COUNTED_A_STATEMENT, upTo: 2n * COUNTED_A_STATEMENT },
-      { check: 'count', orgId, after: 2n * COUNTED_A_STATEMENT, upTo: long },
+      { check: 'count', orgId, after: 0n, upTo: COUNTED_AT_ONCE },
+      { check: 'count', orgId, after: COUNTED_AT_ONCE, upTo: 2n * COUNTED_AT_ONCE },
+      { check: 'count', orgId, after: 2n * COUNTED_AT_ONCE, upTo: long },
       { check: 'walk', orgId, to: long, most: 1000 },
       { check: 'count', orgId: short, after: 0n, upTo: 40n },
       { check: 'walk', orgId: short, to: 40n, most: 40 },
@@ -330,22 +330,22 @@ describe("each organisation's day: the count and the walk (decisions 1 and 2b)",
   it('a count cut off by the run goes on next run from the statement it reached, to the anchor it began with', async () => {
     const made = rotating();
     const orgId = orgInSlot(108);
-    made.anchor(orgId, 3n * COUNTED_A_STATEMENT);
+    made.anchor(orgId, 3n * COUNTED_AT_ONCE);
     const ending = new AbortController();
     made.answer.count = (_orgId, after) => {
-      if (after === COUNTED_A_STATEMENT) ending.abort();
+      if (after === COUNTED_AT_ONCE) ending.abort();
       return Promise.resolve(undefined);
     };
     await made.run([orgId], ending.signal);
-    made.anchor(orgId, 4n * COUNTED_A_STATEMENT);
+    made.anchor(orgId, 4n * COUNTED_AT_ONCE);
     delete made.answer.count;
     made.calls.length = 0;
     made.clock.advanceBy(SLOT_MS);
     await made.run([orgId]);
 
     expect(onlyDays(made.calls)).toEqual([
-      { check: 'count', orgId, after: 2n * COUNTED_A_STATEMENT, upTo: 3n * COUNTED_A_STATEMENT },
-      { check: 'walk', orgId, to: 3n * COUNTED_A_STATEMENT, most: 1000 },
+      { check: 'count', orgId, after: 2n * COUNTED_AT_ONCE, upTo: 3n * COUNTED_AT_ONCE },
+      { check: 'walk', orgId, to: 3n * COUNTED_AT_ONCE, most: 1000 },
     ]);
     expect(made.missed).toEqual([]);
   });
