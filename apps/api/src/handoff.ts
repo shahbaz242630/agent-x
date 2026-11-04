@@ -12,10 +12,11 @@
 // one an organisation a pass), each organisation's oldest first, a page at a
 // time, each page after the last and the place kept between runs, so a page of
 // requests left waiting never keeps a younger one from its turn; a reason that
-// is the whole organisation's ends its turn. Up to 24 at once, 4 an organisation,
-// in this order: a bank slot, the database gate (2 at once), Tx A's commit, the
-// gate let go, the bank's call, the gate again, ahead of any new Tx A, Tx B,
-// both let go. A run starts new work for 30 s, then waits for what it started.
+// is the whole organisation's ends its turn, and its next visit waits a minute
+// (org-work.ts); one the budget cut short is due again at once. Up to 24 at
+// once, 4 an organisation, in this order: a bank slot, the database gate (2 at
+// once), Tx A's commit, the gate let go, the bank's call, the gate again, ahead
+// of any new Tx A, Tx B, both let go. A run starts new work for 30 s, then waits for what it started.
 // A stop leaves up to 24 SUBMISSION_PENDING, as a crash would; the bank check
 // settles them. No SKIP LOCKED: the page takes no locks, one copy of this job
 // runs, and skipping at Tx A would break ADR-006's order; what keeps a request
@@ -344,11 +345,17 @@ export function createHandoff({
   databaseGate,
   stopWaitMs = STOP_WAIT_MS,
   anchoring,
+  unfinished,
+  waitsAsAWhole,
 }: {
   /** The organisations to hand off in: those marked (org-work.ts), which job-list.ts passes; read only while not held. */
   readonly list: () => Promise<readonly string[]>;
   /** The organisations to sweep, read only on a run that sweeps: their own marks; `list` unless given. */
   readonly sweepList?: () => Promise<readonly string[]>;
+  /** Told each organisation whose turn the run's budget cut short, in its lane or at the gate: its mark is due now. */
+  readonly unfinished?: (orgId: string) => void;
+  /** Told each whose turn ended on a reason its whole organisation's: its mark waits a while (org-work.ts). */
+  readonly waitsAsAWhole?: (orgId: string) => void;
   readonly database: Database<HandoffTables>;
   readonly rail: FinancialRailAdapter;
   /** Where a denial is written for the admins: an approved payment stopped before the bank (B4b, decision 3). */
@@ -417,6 +424,8 @@ export function createHandoff({
   const staleSaid = new Map<string, number>();
   const staleRead = new Map<string, number>();
   const cutAtTheGate = new Set<string>();
+  // Those whose turn this run ended on a reason the whole organisation's, a hold of the bank's among them.
+  const endedAsAWhole = new Set<string>();
   // When each was last seen waiting as a whole. Kept between runs, so a run the budget cuts before reaching it says
   // nothing either; for one age only, as under lasting overload a run may never reach it to see it moved.
   const waitingAsAWhole = new Map<string, number>();
@@ -800,6 +809,7 @@ export function createHandoff({
     const whole = done.outcome === 'waiting' && isOrganisationWide(done.why);
     if (whole) waitingAsAWhole.set(orgId, clock.now().getTime());
     else if (done.outcome !== 'stopped' && done.outcome !== 'held') waitingAsAWhole.delete(orgId);
+    if (whole || done.outcome === 'held') endedAsAWhole.add(orgId);
     if (done.outcome === 'handed_off') await sent(orgId, id, done, log);
     if (done.outcome === 'stopped') {
       // At the default limits a backlogged lane usually ends here, not cut by the lanes themselves: still counted (review).
@@ -897,6 +907,7 @@ export function createHandoff({
     stopping = signal;
     gaveUpWaiting = false;
     cutAtTheGate.clear();
+    endedAsAWhole.clear();
     budgetEnds = clock.now().getTime() + runBudgetMs;
     const outcomes = await finishedWithinStop(lanes.run(orgs, runSpent), signal, stopWaitMs);
     if (outcomes === undefined) {
@@ -906,6 +917,9 @@ export function createHandoff({
     for (const [orgId, outcome] of outcomes) {
       const lane = waitingOf(orgId);
       const cut = outcome === 'cut' || cutAtTheGate.has(orgId);
+      // As a whole first: cut at the gate beside it, its rows still can't move until that is lifted.
+      if (endedAsAWhole.has(orgId)) waitsAsAWhole?.(orgId);
+      else if (cut) unfinished?.(orgId);
       // A frozen or held organisation's rows wait for that, whichever of them the run reached (review).
       const counted = outcome === 'whole' || (cut && !seenWaitingLately(orgId) && health.heldFor(orgId) === undefined);
       // A pass that read no rows has nothing to count: a trip saved for each idle organisation.
