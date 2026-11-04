@@ -15,8 +15,9 @@
 // anchor are the rotation's (below). The platform's chain is read from its anchor
 // each run and whole once a day (anchor-rotation.ts's platformChainCheck).
 //
-// The probe reads up to four pages at once (`probePages`), never more than the lanes,
-// and holds that many of the lanes' places until it ends, so it takes no hand-off's
+// The probe reads up to four pages at once (`probePages`), never more than the lanes'
+// places free (it waits for one, as a turn does: checks from the last run may hold
+// them), and holds those it takes until it ends, so it takes no hand-off's
 // connection and turns wait for it. It is cut short by the run's time like any step,
 // keeping what it reached. The trade: an organisation the probe didn't reach takes no
 // turn that run, so a chain wound back there is seen at its next probe, which comes
@@ -747,7 +748,10 @@ export function createAnchorCheck({
       return anchor === undefined ? [] : [{ orgId, from: anchor }];
     });
     if (asked.length === 0) return new Map();
-    const pages = Math.max(1, Math.min(probePages, lanes));
+    // Within the lanes' share, as a turn and the rotation: checks from the last run may still hold some of it.
+    while (inFlight.size >= lanes && !cap.aborted) await roomOrEnd(cap);
+    if (cap.aborted) return new Map();
+    const pages = Math.max(1, Math.min(probePages, lanes - inFlight.size));
     let answers: ReadonlyMap<string, ProbeAnswer>;
     try {
       // The run's time ends the probe between pages, and what it reached is kept; only the stop ends the wait at once.

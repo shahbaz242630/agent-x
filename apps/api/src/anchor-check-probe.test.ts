@@ -50,19 +50,30 @@ function probing(
   lanes = 1,
   {
     orgs = [ORG, OTHER_ORG],
+    held = new Set<string>(),
     ...more
-  }: { readonly orgs?: readonly string[] } & Pick<AnchorCheckOptions, 'runWithinMs' | 'probePages'> = {},
+  }: {
+    readonly orgs?: readonly string[];
+    /** Organisations whose checks go on until released. */
+    readonly held?: ReadonlySet<string>;
+  } & Pick<AnchorCheckOptions, 'runWithinMs' | 'probePages'> = {},
 ) {
   const steps: string[] = [];
   const asked: { orgId: string; seq: bigint }[][] = [];
   const pagesGiven: number[] = [];
   const clock = new FixedClock(AT);
+  const releases: (() => void)[] = [];
   const organizations: OrganisationChains = {
     list: () => Promise.resolve(orgs),
     recorded: () => Promise.resolve(orgs),
     verify: (orgId, anchor) => {
       steps.push(`verify ${orgId} ${anchor?.seq.toString() ?? '-'}`);
-      return Promise.resolve(ok(1n));
+      if (!held.has(orgId)) return Promise.resolve(ok(1n));
+      return new Promise((resolve) => {
+        releases.push(() => {
+          resolve(ok(1n));
+        });
+      });
     },
     hold: (orgId, failure) => {
       if (failure !== undefined) steps.push(`hold ${orgId} ${failure}`);
@@ -94,7 +105,10 @@ function probing(
     ...more,
   });
   const lines = (event: string) => capture.lines().filter((line) => line.event === event);
-  return { check, steps, asked, anchors, lines, pagesGiven, clock };
+  const release = (): void => {
+    for (const each of releases.splice(0)) each();
+  };
+  return { check, steps, asked, anchors, lines, pagesGiven, clock, release };
 }
 
 const answering =
@@ -261,6 +275,26 @@ describe("the probe's pages and its time (4D2e E8 follow-up)", () => {
       await check.run();
       expect(pagesGiven).toEqual([given]);
     }
+  });
+
+  it('takes only the lanes free: a check from the last run still under way leaves it the rest, and full, it waits', async () => {
+    const answer: Probing = (chains) =>
+      Promise.resolve(new Map(chains.map(({ orgId }) => [orgId, { kind: 'same' } as const])));
+    // Two lanes, one held by ORG's check past its deadline: the probe reads one page at a time, not four.
+    const partly = probing(answer, 50, 2, { held: new Set([ORG]) });
+    await partly.check.run();
+    await partly.check.run();
+    expect(partly.pagesGiven).toEqual([1]);
+    partly.release();
+
+    // One lane, held: the probe waits for it, never starting beside it, until the run's time is up; then takes it.
+    const full = probing(answer, 50, 1, { held: new Set([ORG]), runWithinMs: 200 });
+    await full.check.run();
+    await full.check.run();
+    expect(full.pagesGiven).toEqual([]);
+    full.release();
+    await full.check.run();
+    expect(full.pagesGiven).toEqual([1]);
   });
 
   it('holds as many of the lanes as it reads pages: past its deadline no turn starts until it ends', async () => {
