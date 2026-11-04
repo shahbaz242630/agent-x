@@ -147,7 +147,8 @@ function rotating(more: Rotating = {}) {
     anchors.keep(signed);
     return signed;
   };
-  const run = (listed: readonly string[], signal = new AbortController().signal) => rotation.run(listed, signal);
+  const run = (listed: readonly string[], signal = new AbortController().signal, stopping?: AbortSignal) =>
+    rotation.run(listed, signal, stopping);
   const lines = (event: string) => capture.lines().filter((line) => line.event === event);
   return { rotation, run, clock, anchors, passes, calls, answer, failed, missed, anchor, lines, capture };
 }
@@ -547,7 +548,11 @@ describe('the full pass (decision 3)', () => {
     made.answer.pass = (orgId, cursor, to, most) =>
       // Failing on a later turn of the event loop, as a database does: a pass that kept retrying it would spin until the test's limit.
       orgId === failing
-        ? new Promise((_resolve, reject) => setImmediate(() => reject(away)))
+        ? new Promise((_resolve, reject) => {
+            setImmediate(() => {
+              reject(away);
+            });
+          })
         : Promise.resolve(stepTo(cursor.seq + BigInt(most), to.seq));
     made.calls.length = 0;
     await made.run([failing, other]);
@@ -667,9 +672,77 @@ describe('the full pass (decision 3)', () => {
       await vi.advanceTimersByTimeAsync(PASS_WITHIN_MS);
       await running;
       expect(made.lines('audit.full_pass_behind')).toEqual([
-        expect.objectContaining({ level: 'warn', share: '10000', left: '10000', withinMs: PASS_WITHIN_MS }),
+        expect.objectContaining({ level: 'warn', by: 'pass', share: '10000', left: '10000', withinMs: PASS_WITHIN_MS }),
       ]);
       letGo(stepTo(2000n, 864n * 10_000n));
+    });
+
+    describe("a share cut short by the run's own time is said, and carried into the next run's", () => {
+      const ended = (): AbortSignal => {
+        const controller = new AbortController();
+        controller.abort();
+        return controller.signal;
+      };
+      const budgets = (made: ReturnType<typeof rotating>) =>
+        made.lines('audit.anchor_rotation_done').map((line) => line.budget);
+
+      it('the run out of time before the pass began: none of it read, all of it carried', async () => {
+        const made = rotating();
+        const orgId = orgInSlot(1);
+        made.anchor(orgId, 864n * 10n);
+        await made.run([orgId], ended());
+        expect(made.calls).toEqual([]);
+        expect(made.lines('audit.full_pass_behind')).toEqual([
+          expect.objectContaining({ level: 'warn', by: 'run', share: '10', left: '10' }),
+        ]);
+        made.clock.advanceBy(5 * 60_000);
+        await made.run([orgId]);
+        expect(made.calls).toEqual([{ check: 'pass', orgId, from: 0n, to: 8640n, most: 20 }]);
+        expect(budgets(made)).toEqual(['10', '20']);
+      });
+
+      it('the run out of time part way through: what was left carried', async () => {
+        const made = rotating();
+        const orgId = orgInSlot(1);
+        made.anchor(orgId, 864n * 10_000n);
+        const run = new AbortController();
+        made.answer.pass = (_orgId, cursor, to, most) => {
+          run.abort();
+          return Promise.resolve(stepTo(cursor.seq + BigInt(most), to.seq));
+        };
+        await made.run([orgId], run.signal);
+        expect(made.lines('audit.full_pass_behind')).toEqual([
+          expect.objectContaining({ by: 'run', share: '10000', left: '8000' }),
+        ]);
+        delete made.answer.pass;
+        made.clock.advanceBy(5 * 60_000);
+        await made.run([orgId]);
+        expect(budgets(made)).toEqual(['10000', '18000']);
+      });
+
+      it("a round's worth at most, carried part and all", async () => {
+        const made = rotating();
+        const orgId = orgInSlot(1);
+        made.anchor(orgId, 20n);
+        await made.run([orgId], ended());
+        made.clock.advanceBy(3 * DAY);
+        await made.run([orgId], ended());
+        made.clock.advanceBy(5 * 60_000);
+        await made.run([orgId]);
+        expect(budgets(made)).toEqual(['1', '20', '20']);
+      });
+
+      it('nothing said, nothing carried, as the process stops', async () => {
+        const made = rotating();
+        const orgId = orgInSlot(1);
+        made.anchor(orgId, 864n * 10n);
+        const stopping = ended();
+        await made.run([orgId], stopping, stopping);
+        expect(made.lines('audit.full_pass_behind')).toEqual([]);
+        made.clock.advanceBy(5 * 60_000);
+        await made.run([orgId]);
+        expect(budgets(made)).toEqual(['10', '10']);
+      });
     });
 
     it('says nothing when its share was read, or nothing was left to read', async () => {
@@ -874,7 +947,7 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     }
     expect(runs).toBe(100);
     expect(restarted).toBe(runs);
-    expect(verified.length).toBe(runs - 1);
+    expect(verified).toHaveLength(runs - 1);
   });
 
   it("SEC-DB-11 a place whose event no longer holds what was signed is tampering: the alarm and the hold, and the chain's pass starts again", async () => {

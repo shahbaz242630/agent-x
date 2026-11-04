@@ -20,8 +20,10 @@
 //   three days of wall time whatever the runs' cadence; at most 150 seconds of it, 2,000
 //   events a step. Three, not six: a pass is dated when it began, so a chain's lateness
 //   is the time between two passes' starts and the second's own length, two rounds at
-//   worst, and that must stay within 7 days. A share not read within its 150 seconds is
-//   capacity, said as `audit.full_pass_behind`; `audit.full_pass_overdue` stays the alarm.
+//   worst, and that must stay within 7 days. A share cut short by its 150 seconds or by
+//   the run's own time is capacity, said as `audit.full_pass_behind` (`by: pass | run`),
+//   and what was left unread is carried into the next run's share, a round's worth at
+//   most, so the round stays three days; `audit.full_pass_overdue` stays the alarm.
 //   Each chain's pass finished is a signed line in the store, dated when that pass began
 //   (so it says when its first event was read), and so is the place a pass under way has
 //   reached, written each run it moves, with when its pass began and since when one was
@@ -166,8 +168,11 @@ export interface RotationOptions {
 }
 
 export interface Rotation {
-  /** A run's days and pass steps for these organisations, until `signal` aborts; its lines after. Never throws. */
-  run(listed: readonly string[], signal: AbortSignal): Promise<void>;
+  /**
+   * A run's days and pass steps for these organisations, until `signal` aborts (the run's time, or `stopping`, the process
+   * stopping); its lines after. Never throws.
+   */
+  run(listed: readonly string[], signal: AbortSignal, stopping?: AbortSignal): Promise<void>;
 }
 
 /** An organisation's day: due since `dueAt`, counted so far up to `countedTo` of `target`, its anchor when it began. */
@@ -194,6 +199,9 @@ interface PassRun {
 
 /** A read that didn't come back. */
 const MISSED = Symbol('missed');
+
+/** Why a run's pass stopped when its own 150 seconds ran out. */
+const PASS_TIME_UP = Symbol('pass time up');
 
 /** A chain found failing: its alarm raised, and nothing more of it this run. */
 const FAILED = Symbol('failed');
@@ -232,6 +240,8 @@ export function createRotation({
   let finished = 0;
   // When the last run's pass began, so the next run's share covers the time since.
   let lastPassAt: number | undefined;
+  // A share cut short by time, still owed: read on top of the next run's.
+  let carried = 0n;
 
   const slotFor = (orgId: string): number => {
     let slot = slots.get(orgId);
@@ -443,55 +453,82 @@ export function createRotation({
   };
 
   /** The run's share of the full pass, within its own time and the run's. */
-  const takePass = async (listed: readonly string[], listedNow: ReadonlySet<string>, signal: AbortSignal) => {
+  /**
+   * Steps through the chains until the share is read, the time is up or no chain is left: what of the share is left. A chain
+   * found failing or whose read didn't come back is done for the run; the others go on.
+   */
+  const stepChains = async (
+    listed: readonly string[],
+    listedNow: ReadonlySet<string>,
+    share: bigint,
+    signal: AbortSignal,
+  ) => {
+    const run: PassRun = { roundBegun: false, tried: new Set() };
+    const moved = new Set<string>();
+    let left = share;
+    try {
+      while (left > 0n && !signal.aborted) {
+        const orgId = nextChain(listed, listedNow, run);
+        if (orgId === undefined) break;
+        const from = await passFrom(orgId, signal);
+        const took = typeof from === 'object' ? await passStep(orgId, from, left, signal) : (from ?? MISSED);
+        if (typeof took === 'bigint') {
+          moved.add(orgId);
+          left -= took;
+          continue;
+        }
+        // Found failing (its one alarm and hold this run), or a read that didn't come back: done for this run.
+        run.tried.add(orgId);
+        // One not under way yet whose read didn't come back must not wait for the round to come round.
+        if (took === MISSED && from !== undefined && !underWay.has(orgId)) retryFirst.add(orgId);
+      }
+    } finally {
+      keepPlaces(moved);
+    }
+    return left;
+  };
+
+  /** The run's share of the full pass, within its own 150 seconds and the run's time. */
+  const takePass = async (
+    listed: readonly string[],
+    listedNow: ReadonlySet<string>,
+    signal: AbortSignal,
+    stopping: AbortSignal | undefined,
+  ) => {
     const total = listed.reduce((sum, orgId) => sum + (anchors.latest(chainOf(orgId))?.seq ?? 0n), 0n);
     const at = clock.now().getTime();
-    const budget = passBudget(total, at - (lastPassAt ?? at));
+    // A round's worth at most, carried part and all: past that a whole round is being asked for in one run anyway.
+    const budget = smallest(passBudget(total, at - (lastPassAt ?? at)) + carried, total);
     lastPassAt = at;
     const slices = new AbortController();
     const end = (): void => {
       slices.abort();
     };
-    let timedOut = false;
     const timer = setTimeout(() => {
-      timedOut = true;
-      end();
+      slices.abort(PASS_TIME_UP);
     }, PASS_WITHIN_MS);
     timer.unref();
     signal.addEventListener('abort', end, { once: true });
     if (signal.aborted) end();
     const began = performance.now();
-    const run: PassRun = { roundBegun: false, tried: new Set() };
-    const moved = new Set<string>();
-    let left = budget;
+    let left: bigint;
     try {
-      while (left > 0n && !slices.signal.aborted) {
-        const orgId = nextChain(listed, listedNow, run);
-        if (orgId === undefined) break;
-        const from = await passFrom(orgId, slices.signal);
-        const took = typeof from === 'object' ? await passStep(orgId, from, left, slices.signal) : (from ?? MISSED);
-        // Found failing: its one alarm and hold this run, and its pass starts again next round.
-        if (took === FAILED) {
-          run.tried.add(orgId);
-          continue;
-        }
-        // A read that didn't come back: this chain waits for next run, its place kept, and the rest go on.
-        if (took === MISSED) {
-          run.tried.add(orgId);
-          // Not under way yet, so not first next run by that: it must not wait for the round to come round.
-          if (from !== undefined && !underWay.has(orgId)) retryFirst.add(orgId);
-          continue;
-        }
-        moved.add(orgId);
-        left -= took;
-      }
+      left = await stepChains(listed, listedNow, budget, slices.signal);
     } finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', end);
-      keepPlaces(moved);
     }
-    // The share not read in the pass's own time: capacity, before it is late.
-    if (timedOut && left > 0n) logger.warn('audit.full_pass_behind', { share: budget, left, withinMs: PASS_WITHIN_MS });
+    // Cut short by time, its own or the run's, with some unread: capacity, carried, said before it is late. Not as the
+    // process stops: the next process starts afresh.
+    carried = slices.signal.aborted && stopping?.aborted !== true ? left : 0n;
+    if (carried > 0n) {
+      logger.warn('audit.full_pass_behind', {
+        by: slices.signal.reason === PASS_TIME_UP ? 'pass' : 'run',
+        share: budget,
+        left,
+        withinMs: PASS_WITHIN_MS,
+      });
+    }
     return { budget, slicesMs: Math.round(performance.now() - began) };
   };
 
@@ -524,7 +561,7 @@ export function createRotation({
   };
 
   return Object.freeze({
-    async run(listed: readonly string[], signal: AbortSignal): Promise<void> {
+    async run(listed: readonly string[], signal: AbortSignal, stopping?: AbortSignal): Promise<void> {
       counted = 0n;
       walked = 0;
       passed = 0n;
@@ -536,7 +573,7 @@ export function createRotation({
         const due = days.size;
         await takeDays(listedNow, signal);
         const daysMs = Math.round(performance.now() - began);
-        const { budget, slicesMs } = await takePass(listed, listedNow, signal);
+        const { budget, slicesMs } = await takePass(listed, listedNow, signal, stopping);
         markOwed(listed);
         sayLate(listed);
         logger.info('audit.anchor_rotation_done', {

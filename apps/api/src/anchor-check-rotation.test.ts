@@ -89,6 +89,42 @@ function rotationReads() {
   return { reads, calls, answer };
 }
 
+/** An anchors' log over the fake store, in epoch 3, at this clock: a process's, each call a new process's. */
+const anchorLogOver = (fake: ReturnType<typeof createFakeWriteOnceStore>, clock: FixedClock) =>
+  createAnchorLog({
+    store: fake.store,
+    keys,
+    logger: testLogger(new LogCapture()),
+    now: () => clock.now(),
+    epoch: 3,
+    alertAfterMs: 120_000,
+  });
+
+/**
+ * The last process: it reads the store, anchors the organisation at 10 and writes it, three hours before this one
+ * starts. The new process's log, the clock moved on.
+ */
+async function leftThreeHoursAgo(
+  fake: ReturnType<typeof createFakeWriteOnceStore>,
+  clock: FixedClock,
+  orgId: string,
+): Promise<ReturnType<typeof anchorLogOver>> {
+  const last = anchorLogOver(fake, clock);
+  await last.read();
+  last.keep(
+    signAnchor(
+      keys,
+      { kind: 'organisation', orgId },
+      { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
+      clock.now(),
+      3,
+    ),
+  );
+  await last.flush();
+  clock.advanceBy(3 * 3_600_000);
+  return anchorLogOver(fake, clock);
+}
+
 function checking(organizations: OrganisationChains, more: Partial<AnchorCheckOptions> = {}) {
   const capture = new LogCapture();
   const clock = new FixedClock(AT);
@@ -253,14 +289,7 @@ describe('the rotation in a run (4D2e E7)', () => {
     const { reads } = rotationReads();
     const fake = createFakeWriteOnceStore();
     const clock = new FixedClock(AT);
-    const durable = createAnchorLog({
-      store: fake.store,
-      keys,
-      logger: testLogger(new LogCapture()),
-      now: () => clock.now(),
-      epoch: 3,
-      alertAfterMs: 120_000,
-    });
+    const durable = anchorLogOver(fake, clock);
     const { check } = checking(organizations, { rotation: reads, durable, anchors: durable, clock });
     await check.run();
     await check.finish();
@@ -275,14 +304,7 @@ describe('the rotation in a run (4D2e E7)', () => {
     expect(written.filter((line) => line.k === 'p')).toEqual([
       expect.objectContaining({ chain: `organisation:${orgId}`, seq: '10' }),
     ]);
-    const restarted = createAnchorLog({
-      store: fake.store,
-      keys,
-      logger: testLogger(new LogCapture()),
-      now: () => clock.now(),
-      epoch: 3,
-      alertAfterMs: 120_000,
-    });
+    const restarted = anchorLogOver(fake, clock);
     await restarted.read();
     expect(restarted.lastPass({ kind: 'organisation', orgId })?.seq).toBe(10n);
   });
@@ -293,35 +315,8 @@ describe('the rotation in a run (4D2e E7)', () => {
     const { reads, calls } = rotationReads();
     const fake = createFakeWriteOnceStore();
     const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
-    const durable = createAnchorLog({
-      store: fake.store,
-      keys,
-      logger: testLogger(new LogCapture()),
-      now: () => clock.now(),
-      epoch: 3,
-      alertAfterMs: 120_000,
-    });
     // The last process: it writes and goes, three hours before this one starts.
-    await durable.read();
-    durable.keep(
-      signAnchor(
-        keys,
-        { kind: 'organisation', orgId: inOutage },
-        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
-        clock.now(),
-        3,
-      ),
-    );
-    await durable.flush();
-    clock.advanceBy(3 * 3_600_000);
-    const restarted = createAnchorLog({
-      store: fake.store,
-      keys,
-      logger: testLogger(new LogCapture()),
-      now: () => clock.now(),
-      epoch: 3,
-      alertAfterMs: 120_000,
-    });
+    const restarted = await leftThreeHoursAgo(fake, clock, inOutage);
     const { check } = checking(organizations, { rotation: reads, durable: restarted, anchors: restarted, clock });
     await check.run();
     expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
@@ -335,29 +330,7 @@ describe('the rotation in a run (4D2e E7)', () => {
     const { reads, calls } = rotationReads();
     const fake = createFakeWriteOnceStore();
     const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
-    const logOn = () =>
-      createAnchorLog({
-        store: fake.store,
-        keys,
-        logger: testLogger(new LogCapture()),
-        now: () => clock.now(),
-        epoch: 3,
-        alertAfterMs: 120_000,
-      });
-    const last = logOn();
-    await last.read();
-    last.keep(
-      signAnchor(
-        keys,
-        { kind: 'organisation', orgId: inOutage },
-        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
-        clock.now(),
-        3,
-      ),
-    );
-    await last.flush();
-    clock.advanceBy(3 * 3_600_000);
-    const restarted = logOn();
+    const restarted = await leftThreeHoursAgo(fake, clock, inOutage);
     const { check } = checking(organizations, {
       rotation: reads,
       durable: restarted,
@@ -386,29 +359,7 @@ describe('the rotation in a run (4D2e E7)', () => {
     const { reads, calls } = rotationReads();
     const fake = createFakeWriteOnceStore();
     const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
-    const logOn = () =>
-      createAnchorLog({
-        store: fake.store,
-        keys,
-        logger: testLogger(new LogCapture()),
-        now: () => clock.now(),
-        epoch: 3,
-        alertAfterMs: 120_000,
-      });
-    const last = logOn();
-    await last.read();
-    last.keep(
-      signAnchor(
-        keys,
-        { kind: 'organisation', orgId: inOutage },
-        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
-        clock.now(),
-        3,
-      ),
-    );
-    await last.flush();
-    clock.advanceBy(3 * 3_600_000);
-    const restarted = logOn();
+    const restarted = await leftThreeHoursAgo(fake, clock, inOutage);
     const { check } = checking(listing, {
       chains: [{ chain: { kind: 'platform' }, verify: () => Promise.resolve(ok(5n)) }],
       rotation: reads,
@@ -432,29 +383,7 @@ describe('the rotation in a run (4D2e E7)', () => {
     const { reads, calls } = rotationReads();
     const fake = createFakeWriteOnceStore();
     const clock = new FixedClock(new Date(AT.getTime() - 3 * 3_600_000));
-    const logOn = () =>
-      createAnchorLog({
-        store: fake.store,
-        keys,
-        logger: testLogger(new LogCapture()),
-        now: () => clock.now(),
-        epoch: 3,
-        alertAfterMs: 120_000,
-      });
-    const last = logOn();
-    await last.read();
-    last.keep(
-      signAnchor(
-        keys,
-        { kind: 'organisation', orgId: inOutage },
-        { seq: 10n, hash: Buffer.alloc(32, 10), macKeyVersion: 1 },
-        clock.now(),
-        3,
-      ),
-    );
-    await last.flush();
-    clock.advanceBy(3 * 3_600_000);
-    const restarted = logOn();
+    const restarted = await leftThreeHoursAgo(fake, clock, inOutage);
     fake.instead.list = () => Promise.reject(new Error('the store is away'));
     const { check, lines } = checking(organizations, {
       rotation: reads,
@@ -471,5 +400,29 @@ describe('the rotation in a run (4D2e E7)', () => {
     clock.advanceBy(300_000);
     await check.run();
     expect(calls.slice(0, 2)).toEqual([`count ${inOutage} 0-10`, `walk ${inOutage}`]);
+  });
+
+  it('tells the rotation the process is stopping, so a pass cut short then is no capacity warning', async () => {
+    const [due, slow] = [orgInSlot(108), orgInSlot(5)];
+    const { organizations, held, hanging } = directory([due, slow]);
+    const { reads } = rotationReads();
+    const { check, lines } = checking(organizations, { rotation: reads });
+    // A first run anchors both, so the next has a pass to take.
+    await check.run();
+    hanging.add(slow);
+    const stopping = new AbortController();
+    const run = check.run(stopping.signal);
+    await settled();
+    stopping.abort();
+    held.get(slow)?.();
+    await run;
+    expect(lines('audit.full_pass_behind')).toEqual([]);
+
+    // Cut short by the run's own time instead: said.
+    const timed = checking(organizations, { rotation: reads, runWithinMs: 1_000 });
+    // The slow one still held: the run's second is up while it waits, and the pass gets none of its time.
+    await timed.check.run();
+    held.get(slow)?.();
+    expect(timed.lines('audit.full_pass_behind')).toEqual([expect.objectContaining({ by: 'run' })]);
   });
 });

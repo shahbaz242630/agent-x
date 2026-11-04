@@ -967,7 +967,7 @@ export function createAnchorCheck({
         for (const outcome of await checkOrganizations(organizations, cap, stop)) outcomes.push(outcome);
         // Not while a store kept is unread: its first look back must go to where the last process left off (E7).
         if (inUse !== undefined && (durable === undefined || leftOffTaken))
-          await rotation?.run([...inUse, ...pastCap], cap);
+          await rotation?.run([...inUse, ...pastCap], cap, stop);
       } catch (error) {
         // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
         logger.error('audit.anchor_check_crashed', { chain: 'organisation', err: error });

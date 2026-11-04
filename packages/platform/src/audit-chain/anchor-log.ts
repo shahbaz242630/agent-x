@@ -648,6 +648,32 @@ export function createAnchorLog({
     }
   };
 
+  /** Lines back into what waits to be written, unless a later line of the chain is waiting already. */
+  const waitAgain = <T extends Anchor>(into: Map<string, T>, lines: readonly T[]): void => {
+    for (const line of lines) if (!into.has(line.chain)) into.set(line.chain, line);
+  };
+
+  /** A name taken by other bytes: the alarm, and the file's lines go again under a new name. */
+  const overwritten = (file: Unsent): void => {
+    alarm('overwrite', { kind: file.kind });
+    waitAgain(pending, file.lines);
+    waitAgain(pendingSides.p, file.passes);
+    waitAgain(pendingSides.u, file.places);
+    unsent = undefined;
+  };
+
+  /** A file in the store: nothing to read in a delta of ours, and a snapshot is the newest. */
+  const stored = (file: Unsent): void => {
+    unsent = undefined;
+    if (file.kind === 'deltas') written.add(file.name);
+    else snapshotFrom = countdownOf('snapshots', file.name);
+    logger.info('audit.anchors_written', {
+      kind: file.kind,
+      lines: file.lines.length,
+      sides: file.passes.length + file.places.length,
+    });
+  };
+
   /** Into the store, or thrown. A name taken already holds this file if an answer was lost; if it holds anything else, that is the alarm. */
   const send = async (file: Unsent): Promise<void> => {
     try {
@@ -655,25 +681,11 @@ export function createAnchorLog({
     } catch (error) {
       if (!(error instanceof OverwriteRefused)) throw error;
       if (!(await store.get(file.name)).equals(file.bytes)) {
-        alarm('overwrite', { kind: file.kind });
-        // They go again under a new name, unless a later line of the chain is waiting already.
-        for (const line of file.lines) if (!pending.has(line.chain)) pending.set(line.chain, line);
-        for (const line of file.passes) if (!pendingSides.p.has(line.chain)) pendingSides.p.set(line.chain, line);
-        for (const line of file.places) if (!pendingSides.u.has(line.chain)) pendingSides.u.set(line.chain, line);
-        unsent = undefined;
+        overwritten(file);
         return;
       }
     }
-    unsent = undefined;
-    if (file.kind === 'deltas') written.add(file.name);
-    else {
-      snapshotFrom = countdownOf('snapshots', file.name);
-    }
-    logger.info('audit.anchors_written', {
-      kind: file.kind,
-      lines: file.lines.length,
-      sides: file.passes.length + file.places.length,
-    });
+    stored(file);
   };
 
   /** The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. */
