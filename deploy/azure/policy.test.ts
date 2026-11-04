@@ -12,6 +12,7 @@ import {
   DNS_ALLOWED,
   type Expectations,
   kqlStages,
+  leastRestoreDays,
   paramsFileProblems,
   policyProblems,
   PREVIEW_API_EXCEPTIONS,
@@ -284,6 +285,8 @@ const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
 const ANCHOR_STORE_ALERT = named(/^alert-agentx-.+-anchor-store$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
+const DAILY_CHECK_ALERT = named(/^alert-agentx-.+-daily-check$/);
+const FULL_PASS_ALERT = named(/^alert-agentx-.+-full-pass$/);
 const ANCHOR_STOPPED_ALERT = named(/^alert-agentx-.+-anchor-stopped$/);
 const JOBS_STOPPED_ALERT = named(/^alert-agentx-.+-jobs-stopped$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
@@ -543,6 +546,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-handoff-queue',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-platform-full',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-store',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-daily-check',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-full-pass',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-stopped',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-jobs-stopped',
@@ -2993,6 +2998,44 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const description = String(at(staging.predictedResources.find(ANCHOR_STORE_ALERT)?.properties, 'description'));
     expect(description).toMatch(/^SEV-2\. /);
     expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section H\.$/);
+  });
+
+  it.each([
+    ['daily-check-alert', DAILY_CHECK_ALERT, 'audit.daily_check_overdue', 'audit.full_pass_overdue'],
+    ['full-pass-alert', FULL_PASS_ALERT, 'audit.full_pass_overdue', 'audit.daily_check_overdue'],
+  ] as const)(
+    "%s: no alert on the anchor check's rotation running late (4D2e E7), or one that counts something else, can't fire or fires too late",
+    (rule, alert, event, other) => {
+      const properties = (found: Mutable): Mutable => inside(found, 'properties');
+      const query = (text: string) => (found: Mutable) => (criterion(found).query = text);
+      expect(brokenRules(without(alert))).toEqual([rule]);
+      for (const change of [
+        query(
+          `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${other}" | summarize Events = count()`,
+        ),
+        query(
+          `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize Events = count()`,
+        ),
+        (found: Mutable) => (criterion(found).threshold = 1),
+        ...LATE_OR_BLIND,
+        (found: Mutable) => (criterion(found).operator = 'LessThan'),
+        (found: Mutable) => (criterion(found).timeAggregation = 'Count'),
+        (found: Mutable) => (properties(found).scopes = ['/subscriptions/x/workspaces/y']),
+      ]) {
+        expect(brokenRules(changed(alert, change))).toEqual([rule]);
+      }
+      const description = String(at(staging.predictedResources.find(alert)?.properties, 'description'));
+      expect(description).toMatch(/^SEV-2\. /);
+      expect(description).toContain(event);
+      expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section H\.$/);
+    },
+  );
+
+  it('database-backup: production keeps twice the days an old audit edit may go unfound, 35 at least (4D2e decision 3)', () => {
+    expect(leastRestoreDays('production')).toBe(35);
+    expect(leastRestoreDays('production', 20)).toBe(40);
+    expect(leastRestoreDays('production', 17)).toBe(35);
+    expect(leastRestoreDays('staging', 20)).toBe(7);
   });
 
   it("handoff-queue-alert: no alert on approved payments left standing (gate H8), or one that counts something else, can't fire or fires too late", () => {

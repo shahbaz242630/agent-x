@@ -269,6 +269,21 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet: they stay in memory and payments go on.',
     next: 'It is tried again at the next check. If this was at a stop, the next start reads the last ones written.',
   },
+  'audit.daily_check_overdue': {
+    happened: "Some organisations' daily check of their older audit history waited over an hour past its turn.",
+    broke: 'An old audit record deleted or hidden there is found later than the 24 hours promised. Nobody is held.',
+    next: 'See whether the database is slow or the tamper check runs out of time; add capacity if it stays.',
+  },
+  'audit.full_pass_behind': {
+    happened: "The regular full read of the audit history ran out of time before reading this run's share.",
+    broke: 'Nothing yet: what was left is read next time. If it goes on, old records are read later than promised.',
+    next: 'If it repeats, add capacity: a faster database, or more time for the check.',
+  },
+  'audit.full_pass_overdue': {
+    happened: "Some organisations' whole audit history has not been read through in 7 days, as promised.",
+    broke: 'An old audit record edited there is found later than promised; backups can still undo it. Nobody is held.',
+    next: 'See whether the database is slow or the tamper check runs out of time, and add capacity.',
+  },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',
     broke: 'That record was left off the list; the rest of the list was shown.',

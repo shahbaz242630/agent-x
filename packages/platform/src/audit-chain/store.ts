@@ -30,6 +30,7 @@ import {
   GENESIS_HASH,
   genesisHead,
   headIsSealed,
+  linkHash,
   sealNext,
   type StoredEntry,
 } from './chain.ts';
@@ -441,6 +442,31 @@ export async function passStep(
     return refused('anchor', target.seq);
   }
   return { ...report, to: target.seq };
+}
+
+/**
+ * The last `most` events up to `target` walked (4D2e E7, decision 2b): an old revocation
+ * or `HELD` event edited so a signed-state read passes it over leaves the count whole,
+ * and only a walk sees it. Two trips: the event `most` before the target read whole with
+ * the edges (its own seal is where the walk starts, so a forged one fails its MAC), then
+ * one pass step from it to the target, which must end at the hash and MAC version signed.
+ */
+export async function walkLast(
+  keys: KeyProvider,
+  chain: Chain,
+  reader: Pick<ChainEdgeReader, 'edges' | 'events'>,
+  target: CheckedPoint,
+  most: number,
+): Promise<ChainStep> {
+  if (checkedMost(most) > MOST_A_PASS_STEP) throw new RangeError(`A walk reads at most ${MOST_A_PASS_STEP} events`);
+  if (target.seq <= BigInt(most)) return passStep(keys, chain, reader, CHAIN_START, target, most);
+  const start = target.seq - BigInt(most);
+  const { anchored } = await reader.edges(start);
+  if (anchored?.seq !== start) return refused('unreadable', start);
+  if (!linkHash(chain, anchored.prevHash, anchored).equals(anchored.hash)) return refused('hash', start);
+  if (!entryIsSealed(keys, chain, anchored)) return refused('mac', start);
+  const { seq, hash, macKeyVersion } = anchored;
+  return passStep(keys, chain, reader, { seq, hash, macKeyVersion }, target, most);
 }
 
 /**

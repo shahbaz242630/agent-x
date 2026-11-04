@@ -54,6 +54,10 @@
 // unseen until the chain's next turn: up to a round, 63 minutes or more at that size,
 // not 9, until E8's probe reads every head each run.
 //
+// After the organisations' turns, the rotation (anchor-rotation.ts, 4D2e E7): each
+// organisation's daily count and walk, and the full pass's share, within what is left
+// of the run, one read at a time, inside the lanes' share of the connections.
+//
 // A chain that fails raises the integrity alarm (`audit.integrity_failed`; its
 // SEV-1 alert rule is A2c-2) and keeps its last good anchor, so the alarm
 // repeats every run until someone looks. Someone with the database's keys can
@@ -92,11 +96,13 @@ import {
   ChainStoreError,
   type CheckedPoint,
   createMemoryAnchorStore,
+  createMemoryPassRecord,
   signAnchor,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { createRotation, type RotatedChecks, type RotationCheck } from './anchor-rotation.ts';
 import { createTurns, shuffledAfresh, startAnywhere } from './anchor-turns.ts';
 import { PastDeadline, scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
@@ -176,6 +182,10 @@ export interface AnchorCheckOptions {
   readonly runWithinMs?: number;
   /** How often a run writes what has moved so far. */
   readonly writeEveryMs?: number;
+  /** The organisations' chains' reads for the rotation (4D2e E7): none, and a run has no rotation. */
+  readonly rotation?: RotatedChecks;
+  /** Whether this environment sleeps when unused (staging), so a full pass's lateness counts from a process's start. */
+  readonly sleeps?: boolean;
 }
 
 /** See `stopFlushMs`. */
@@ -253,6 +263,9 @@ type Outcome = 'anchored' | 'unchanged' | 'unanchored' | 'failed' | 'unchecked';
 /** The in-flight key of the organisations' list, which no chain's key can be. */
 const LIST = 'list';
 
+/** The in-flight key of the rotation's read: one at a time. */
+const ROTATION = 'rotation';
+
 export function createAnchorCheck({
   chains,
   organizations,
@@ -271,6 +284,8 @@ export function createAnchorCheck({
   lanes = LANES,
   runWithinMs = RUN_WITHIN_MS,
   writeEveryMs = WRITE_EVERY_MS,
+  rotation: rotatedChecks,
+  sleeps = false,
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
@@ -291,6 +306,24 @@ export function createAnchorCheck({
     turns.ended(key);
     for (const wake of waitingForRoom) wake();
     waitingForRoom.clear();
+  };
+  /**
+   * Work that holds a connection, one at a time under `key`, within the deadline: past it, it stays in flight until it
+   * ends, so a hung database can't take a connection every run.
+   */
+  const tracked = <T>(key: string, busy: string, start: () => Promise<T>, signal: AbortSignal | undefined) => {
+    if (inFlight.has(key)) throw new Error(busy);
+    inFlight.add(key);
+    const work = Promise.resolve().then(start);
+    void work.then(
+      () => {
+        ended(key);
+      },
+      () => {
+        ended(key);
+      },
+    );
+    return withinDeadline(work, deadlineMs, signal);
   };
   // Every organisation this process has seen listed or recorded, so one that leaves the list is noticed.
   const seen = new Set<string>();
@@ -553,24 +586,19 @@ export function createAnchorCheck({
     };
     let answers: readonly [unknown, unknown];
     try {
-      if (inFlight.has(LIST)) throw new Error('the last read of the list has not finished');
-      inFlight.add(LIST);
       // The record first, then the list: an organisation is recorded and listed
       // in one transaction, so any recorded before the list is read is in it,
       // and one created between the two reads can't be taken for one unlisted.
       // One after the other, so the guard holds until both have ended.
-      const reading = Promise.resolve()
-        .then(() => from.recorded())
-        .then(async (recorded): Promise<readonly [unknown, unknown]> => [await from.list(), recorded]);
-      void reading.then(
-        () => {
-          ended(LIST);
+      answers = await tracked(
+        LIST,
+        'the last read of the list has not finished',
+        async (): Promise<readonly [unknown, unknown]> => {
+          const recorded = await from.recorded();
+          return [await from.list(), recorded];
         },
-        () => {
-          ended(LIST);
-        },
+        signal,
       );
-      answers = await withinDeadline(reading, deadlineMs, signal);
     } catch (error) {
       if (error instanceof Stopped) return 'stopped';
       if (error instanceof ChainStoreError || refusedByDatabase(error)) return refused();
@@ -611,20 +639,13 @@ export function createAnchorCheck({
     failures.delete(orgId);
     if (signal?.aborted === true) return;
     const failure = reason === 'unchecked' ? undefined : reason;
-    const key = `hold|${orgId}`;
     try {
-      if (inFlight.has(key)) throw new Error('the last hold of this organisation has not finished');
-      inFlight.add(key);
-      const holding = Promise.resolve().then(() => from.hold(orgId, failure));
-      void holding.then(
-        () => {
-          ended(key);
-        },
-        () => {
-          ended(key);
-        },
+      await tracked(
+        `hold|${orgId}`,
+        'the last hold of this organisation has not finished',
+        () => from.hold(orgId, failure),
+        signal,
       );
-      await withinDeadline(holding, deadlineMs, signal);
     } catch (error) {
       if (error instanceof Stopped) return;
       logger
@@ -825,6 +846,13 @@ export function createAnchorCheck({
     sayLate();
   };
 
+  /**
+   * Where the last process left off: the newest file in the store at this process's first whole read, taken before this
+   * process writes any, so the rotation's first look back sees the whole outage (4D2e E7).
+   */
+  let leftOffAt: Date | undefined;
+  let leftOffTaken = false;
+
   /** What the store holds that this process hasn't read, and every organisation in it as seen. Never throws. */
   const readStore = async (from: AnchorLog, signal: AbortSignal | undefined): Promise<void> => {
     try {
@@ -832,6 +860,10 @@ export function createAnchorCheck({
     } catch (error) {
       if (error instanceof Stopped) return;
       from.readFailed(error);
+    }
+    if (!leftOffTaken && from.state() === 'read') {
+      leftOffTaken = true;
+      leftOffAt = from.lastFileAt();
     }
     for (const orgId of from.organisations()) remember(orgId);
   };
@@ -874,6 +906,54 @@ export function createAnchorCheck({
     };
   };
 
+  /** A chain the rotation found failing: the alarm, naming which read, and its hold. */
+  const rotationFailed = async (
+    from: OrganisationChains,
+    orgId: string,
+    check: RotationCheck,
+    reason: string,
+    seq?: bigint,
+  ): Promise<void> => {
+    failures.set(orgId, reason);
+    logger
+      .child({ orgId })
+      .error('audit.integrity_failed', { chain: 'organisation', check, reason, ...(seq === undefined ? {} : { seq }) });
+    await settle(from, orgId, undefined);
+  };
+
+  /** The rotation, where it has reads: its own memory of what is due, kept across runs. */
+  const rotationOf = (from: OrganisationChains | undefined) =>
+    from === undefined || rotatedChecks === undefined
+      ? undefined
+      : createRotation({
+          checks: rotatedChecks,
+          anchors,
+          passes: durable ?? createMemoryPassRecord(),
+          keys,
+          clock,
+          logger,
+          epoch: durable?.epoch,
+          lateAfterMs: reachWithinMs,
+          lastRanAt: () => leftOffAt,
+          sleeps,
+          bounded: async (work, signal) => {
+            // Within the lanes' share, as a turn: never a hand-off's connection.
+            while (inFlight.size >= lanes && !signal.aborted) await roomOrEnd(signal);
+            if (signal.aborted) throw new Stopped('the run has ended');
+            return tracked(ROTATION, 'the last read of the rotation has not finished', work, signal);
+          },
+          failed: (orgId, check, { reason, seq }) => rotationFailed(from, orgId, check, reason, seq),
+          missed: async (orgId, check, error) => {
+            // A database that refuses the read is the alarm, as for any check; anything else a warning, and next run.
+            if (error instanceof ChainStoreError || refusedByDatabase(error)) {
+              await rotationFailed(from, orgId, check, 'store');
+              return;
+            }
+            logger.child({ orgId }).warn('audit.anchor_check_failed', { chain: 'organisation', check, err: error });
+          },
+        });
+  const rotation = rotationOf(organizations);
+
   /** Everything a run does up to its last write, each step cut off by `cap`: the run's time, or the stop. */
   const checkAll = async (cap: AbortSignal, stop: AbortSignal | undefined): Promise<Outcome[]> => {
     const outcomes: Outcome[] = [];
@@ -885,6 +965,9 @@ export function createAnchorCheck({
       try {
         // Not spread into a call: past about 120,000, that is out of stack.
         for (const outcome of await checkOrganizations(organizations, cap, stop)) outcomes.push(outcome);
+        // Not while a store kept is unread: its first look back must go to where the last process left off (E7).
+        if (inUse !== undefined && (durable === undefined || leftOffTaken))
+          await rotation?.run([...inUse, ...pastCap], cap, stop);
       } catch (error) {
         // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
         logger.error('audit.anchor_check_crashed', { chain: 'organisation', err: error });
