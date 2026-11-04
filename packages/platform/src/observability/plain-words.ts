@@ -870,7 +870,8 @@ export const PLAIN_WORDS = {
   },
   'log.suppressed': {
     happened: 'One kind of log line came too often in a minute, so further copies were held back and counted.',
-    broke: 'The count is exact, but the details of the held-back lines are not in the log.',
+    broke:
+      'The count is exact, but their details are not in the log; held-back payment decisions stay in the audit trail.',
     next: 'Look at the kind of line it names: a flood usually means something is failing over and over.',
   },
   'mandate_expiry.failed': {

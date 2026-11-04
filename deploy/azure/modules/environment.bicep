@@ -39,6 +39,7 @@ param holdingsCheckAlertName string
 param integrityRunsAlertName string
 param agentCancelsAlertName string
 param agentCancelCapAlertName string
+param decisionsSuppressedAlertName string
 param dailyWordsAlertName string
 param handoffQueueAlertName string
 param platformFullAlertName string
@@ -881,6 +882,49 @@ resource agentCancelCapAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// Decision lines held back (4D2e F8, PL-52): past its budget of 20,000 a
+// minute a process, the logger counts the rest in one `log.suppressed` line
+// naming `spend_request.decided`, so the denial-surge alert undercounts that
+// minute. Each decision is still in the audit trail. Any one line tells
+// someone. Stateful, as above.
+resource decisionsSuppressedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: decisionsSuppressedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Logs: payment decision lines held back'
+    description: 'SEV-2. More payment decisions came in a minute than one copy of the API logs, so the rest were counted, not written: each is still in the audit trail, but the log and the denial-surge alert undercount that minute. Runbook: Incident-Response-Playbook.md section J.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

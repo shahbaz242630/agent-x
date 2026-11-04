@@ -71,6 +71,7 @@ export type RuleId =
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
+  | 'decisions-suppressed-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -338,6 +339,12 @@ const PLATFORM_FULL_LINES =
 
 /** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
 const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
+
+/** Decision lines past their budget, counted in one line (4D2e F8, PL-52): the denial-surge alert undercounts that minute. */
+const DECISIONS_SUPPRESSED_LINES = [
+  'where tostring(parse_json(Log).event) == "log.suppressed"',
+  'where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided"',
+] as const;
 
 /**
  * An integrity job that skipped a whole run, its organisation list unread
@@ -2875,6 +2882,30 @@ const agentCancelCapAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An enabled alert on the workspace fires on any count of decision lines held back (4D2e F8, PL-52), in any window. */
+const decisionsSuppressedAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DECISIONS_SUPPRESSED_LINES, 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'decisions-suppressed-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any log.suppressed line for spend_request.decided, in any window",
+      });
+    }
+  }
+};
+
 /**
  * An enabled alert on the workspace fires on any page of the holdings check
  * that failed (Phase 2 E1b's review): one line is enough, in any window.
@@ -4108,6 +4139,7 @@ const CHECKS: readonly Check[] = [
   deadManAlerts,
   agentCancelsAlert,
   agentCancelCapAlert,
+  decisionsSuppressedAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,

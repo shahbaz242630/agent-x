@@ -276,6 +276,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     integrityRunsAlertName: 'alert-agentx-${short}-integrity-runs'
     agentCancelsAlertName: 'alert-agentx-${short}-agent-cancels'
     agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
+    decisionsSuppressedAlertName: 'alert-agentx-${short}-decisions-suppressed'
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
     platformFullAlertName: 'alert-agentx-${short}-platform-full'
