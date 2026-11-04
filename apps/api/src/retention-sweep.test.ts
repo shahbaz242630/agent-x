@@ -225,6 +225,22 @@ describe("the idempotency keys' retention sweep (B1e-3)", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('sweeps with no one told what it finished, where no one asks', async () => {
+    const swept: string[] = [];
+    await createRetentionSweep({
+      list: () => Promise.resolve([ORG]),
+      sweep: (orgId) => {
+        swept.push(orgId);
+        return Promise.resolve(0);
+      },
+      logger: testLogger(new LogCapture()),
+      deadlineMs: DEADLINE_MS,
+      batch: BATCH,
+      mostBatches: 5,
+    }).run();
+    expect(swept).toEqual([ORG]);
+  });
+
   it('contains a run that crashes: logs it, and runs again next time', async () => {
     const { sweep, lines } = sweeping(() => Promise.resolve(null as unknown as readonly string[]));
     await sweep.run();
