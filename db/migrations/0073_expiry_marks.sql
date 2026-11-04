@@ -3,11 +3,16 @@
 -- knows its two triggers exactly (D8a, schema-guard.ts COMING_TRIGGERS). The expiry's
 -- index is 0074's, so nothing here reads the requests' table whole.
 --
--- What it locks, each until this file commits, none for longer than a moment: org_work
--- whole while its CHECK is replaced (it scans org_work, a row an organisation a job), so
--- a commit marking work waits that long; spend_requests.requests and mandates.mandates
--- whole for a column and a trigger added, which read no rows. The first marks read
--- directory.orgs and write a row an organisation a job.
+-- Its locks, in the order the app's transactions take them, so it can't deadlock with
+-- one: mandates, then requests (ADR-006's levels 4 and 8), both whole, then org_work,
+-- which a transaction marks only as it commits (0072's deferred triggers). Taken the
+-- other way, a request transaction committing would wait for org_work behind this file
+-- while this file waited for that transaction: one of them aborted. Each wait is the
+-- runner's lock limit, tried again after a pause; while it waits, new reads and writes
+-- of a table it waits for queue behind it, for that limit at most. Once it has them,
+-- it holds all three until it commits: no table is read whole but org_work (its CHECK)
+-- and directory.orgs (the first marks), so a few milliseconds.
+LOCK TABLE mandates.mandates, spend_requests.requests IN ACCESS EXCLUSIVE MODE;
 
 -- Two more jobs a mark may name.
 ALTER TABLE directory.org_work DROP CONSTRAINT org_work_job_check,

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -27,6 +27,7 @@ import {
   MigrationFailed,
   MigrationNotAtomic,
   MigrationRefused,
+  NO_TRANSACTION,
   runMigrations,
 } from './migrate.ts';
 import { TenantContextError } from './tenant.ts';
@@ -402,6 +403,172 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
       ]);
       expect(await stamped()).toEqual(before);
       expect(await tables()).toEqual(['two']);
+    });
+  });
+
+  describe('a file run outside a transaction, building concurrently (4D2e D8)', () => {
+    const runWaiting = (timeoutMs: number): Promise<string[]> =>
+      runMigrations({
+        connection: database.connection('owner'),
+        directory: folder,
+        logger: createLogger({
+          service: 'migrate',
+          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+          destination: capture,
+        }),
+        lockWait: { timeoutMs, pauseMs: 10 },
+      });
+    const owner = () => database.as('owner');
+    const indexValid = async (name: string) =>
+      (
+        await owner().query<{ valid: boolean }>(
+          `select i.indisvalid as valid from pg_catalog.pg_index i
+             join pg_catalog.pg_class c on c.oid = i.indexrelid where c.relname = $1`,
+          [name],
+        )
+      ).map(({ valid }) => valid);
+    const logged = (event: string) => capture.lines().filter((line) => line.event === event);
+
+    beforeEach(async () => {
+      await write(
+        '0001_first.sql',
+        'create schema demo;\ncreate table demo.one (id int);\ninsert into demo.one values (1), (2);\n',
+      );
+      await run();
+    });
+
+    it('lets writes go on while it builds: it waits only for transactions already open, and holds back none', async () => {
+      // A writer part-way: the build waits for it to end, as Postgres's concurrent build does.
+      const holder = await database.connect('owner');
+      await holder.query('begin');
+      await holder.query('insert into demo.one values (3)');
+      await write(
+        '0002_index.sql',
+        `${NO_TRANSACTION}\ncreate index concurrently if not exists one_id on demo.one (id);\n`,
+      );
+      const running = runWaiting(10_000);
+      try {
+        await waitUntilQueued(database.as('admin'), 1);
+        // A write while the build waits: through at once, where a build in a transaction would hold it to its end.
+        await within(5000, owner().query('insert into demo.one values (4)'), 'a write during the build');
+      } finally {
+        await holder.query('commit');
+        await holder.end();
+      }
+      expect(await running).toEqual(['0002_index.sql']);
+      expect(await indexValid('one_id')).toEqual([true]);
+      expect((await ledger()).map(({ name }) => name)).toEqual(['0001_first.sql', '0002_index.sql']);
+    });
+
+    it('a build that failed leaves its index not valid and no ledger row; the next run drops it and builds it again', async () => {
+      await owner().query('insert into demo.one values (7), (7)');
+      await write(
+        '0002_index.sql',
+        `${NO_TRANSACTION}\ncreate unique index concurrently if not exists one_id on demo.one (id);\n`,
+      );
+      const error = await runWaiting(2000).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(MigrationFailed);
+      expect(await indexValid('one_id')).toEqual([false]);
+      expect((await ledger()).map(({ name }) => name)).toEqual(['0001_first.sql']);
+
+      await owner().query('delete from demo.one where id = 7');
+      expect(await runWaiting(2000)).toEqual(['0002_index.sql']);
+      expect(await indexValid('one_id')).toEqual([true]);
+      expect(logged('db.migration.invalid_index_dropped')).toEqual([
+        expect.objectContaining({ migration: '0002_index.sql', index: 'demo.one_id' }),
+      ]);
+    });
+
+    it('drops concurrently too, and a run again does nothing more', async () => {
+      await owner().query('create index old_id on demo.one (id)');
+      await write('0002_index.sql', `${NO_TRANSACTION}\ndrop index concurrently if exists demo.old_id;\n`);
+      expect(await runWaiting(2000)).toEqual(['0002_index.sql']);
+      expect(await indexValid('old_id')).toEqual([]);
+      expect(await runWaiting(2000)).toEqual([]);
+    });
+  });
+
+  describe('a file aborted to break a deadlock (4D2e D8)', () => {
+    it('is tried again, its first try rolled back whole, and said', async () => {
+      await write(
+        '0001_first.sql',
+        'create schema demo;\ncreate table demo.one (id int);\ncreate table demo.two (id int);\n',
+      );
+      await run();
+      await write(
+        '0002_second.sql',
+        'lock table demo.one in access exclusive mode;\nlock table demo.two in access exclusive mode;\nalter table demo.one add column note text;\n',
+      );
+      // Holds demo.two, then reaches for demo.one, which the file holds while it waits for demo.two: a deadlock. Its
+      // own check waits 10 s, the file's the server's 1 s, so the file is the one aborted.
+      const holder = await database.connect('admin');
+      await holder.query("set deadlock_timeout = '10s'");
+      await holder.query('begin');
+      await holder.query('select * from demo.two');
+      const running = runMigrations({
+        connection: database.connection('owner'),
+        directory: folder,
+        logger: createLogger({
+          service: 'migrate',
+          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+          destination: capture,
+        }),
+        lockWait: { timeoutMs: 8000, pauseMs: 10 },
+      });
+      try {
+        await waitUntilQueued(database.as('admin'), 1);
+        await within(8000, holder.query('select * from demo.one'), 'the holder reaching for demo.one');
+      } finally {
+        await holder.query('commit');
+        await holder.end();
+      }
+      expect(await running).toEqual(['0002_second.sql']);
+      expect(capture.lines().filter((line) => line.event === 'db.migration.deadlocked')).toEqual([
+        expect.objectContaining({ migration: '0002_second.sql', try: 1 }),
+      ]);
+    });
+  });
+
+  describe('0073 against a request transaction committing as it runs (4D2e D8)', () => {
+    it('waits for it, and both go through: its locks are taken in the order commits take them', async () => {
+      for (const name of (await readdir(REPO_MIGRATIONS)).filter((file) => file < '0073')) {
+        await copyFile(path.join(REPO_MIGRATIONS, name), path.join(folder, name));
+      }
+      await run();
+      await copyFile(path.join(REPO_MIGRATIONS, '0073_expiry_marks.sql'), path.join(folder, '0073_expiry_marks.sql'));
+      await database.as('admin').query('insert into directory.orgs (org_id) values ($1)', [ORG_A]);
+      // As a request's transaction part-way: it has the requests' table, and marks its work at its commit (0072).
+      const writer = await database.connect('admin');
+      await writer.query("set deadlock_timeout = '10s'");
+      await writer.query('begin');
+      await writer.query('select 1 from spend_requests.requests limit 1');
+      const running = runMigrations({
+        connection: database.connection('owner'),
+        directory: folder,
+        logger: createLogger({
+          service: 'migrate',
+          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+          destination: capture,
+        }),
+        lockWait: { timeoutMs: 8000, pauseMs: 10 },
+      });
+      try {
+        await waitUntilQueued(database.as('admin'), 1);
+        // Its mark, as 0072's deferred trigger writes it at commit: org_work is not yet the file's, so it goes through.
+        await within(
+          5000,
+          writer.query(
+            `insert into directory.org_work (org_id, job, due_at) values ($1, 'hand_off', pg_catalog.now())`,
+            [ORG_A],
+          ),
+          'the commit marking its work',
+        );
+        await writer.query('commit');
+      } finally {
+        await writer.end();
+      }
+      expect(await running).toEqual(['0073_expiry_marks.sql']);
+      expect(capture.lines().filter((line) => line.event === 'db.migration.deadlocked')).toEqual([]);
     });
   });
 });

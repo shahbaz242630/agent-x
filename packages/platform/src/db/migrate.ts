@@ -22,6 +22,18 @@
 //   The wait is short so the stall is too; one that runs out rolls the file
 //   back, and it is tried again after a pause, LOCK_TRIES in all. A file's
 //   own SET LOCAL lock_timeout replaces the limit for that file (0005 waits 5 s).
+//   A file Postgres aborted to break a deadlock is tried again the same way:
+//   its transaction was rolled back whole, as a lock wait's is.
+// - One kind of file runs outside a transaction (4D2e D8): one whose first line
+//   is NO_TRANSACTION, holding only CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT
+//   EXISTS and DROP INDEX CONCURRENTLY IF EXISTS statements, each on a
+//   schema-qualified table or index. An index built in a transaction holds its
+//   table's writes for the whole build; built concurrently it holds none, and
+//   Postgres refuses that inside a transaction. Its statements run one at a
+//   time under the same lock limit, and its ledger row is written once all
+//   have run. One that fails is not undone, but each statement is safe to run
+//   again: an index a failed build left not valid is dropped before it is
+//   built again, and IF [NOT] EXISTS skips what is already done.
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -31,7 +43,7 @@ import pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
 import { type DatabaseConnectionOptions, poolConfig } from './database.ts';
-import { transactionControl } from './sql-statements.ts';
+import { splitStatements, transactionControl } from './sql-statements.ts';
 import { refuseTenantPreset } from './tenant.ts';
 
 const FILE_NAME = /^(\d{4})_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/;
@@ -72,6 +84,43 @@ const LOCK_RETRY_PAUSE_MS = 5000;
 
 /** Postgres's `lock_not_available`: a lock wait ran out. */
 const LOCK_NOT_AVAILABLE = '55P03';
+/** Postgres's `deadlock_detected`: this file's transaction was aborted to break a deadlock. */
+const DEADLOCK_DETECTED = '40P01';
+
+/** The first line of a file the runner runs outside a transaction: concurrent index statements alone. */
+export const NO_TRANSACTION = '-- agentx: no transaction (concurrent index)';
+
+/** The one statement such a file may build with: its index named, its table schema-qualified. */
+const CONCURRENT_BUILD =
+  /^create\s+(?:unique\s+)?index\s+concurrently\s+if\s+not\s+exists\s+([a-z_][a-z0-9_]*)\s+on\s+(?:only\s+)?([a-z_][a-z0-9_]*)\.[a-z_][a-z0-9_]*[\s(]/i;
+/** And the one it may drop with: one schema-qualified index, nothing more. */
+const CONCURRENT_DROP = /^drop\s+index\s+concurrently\s+if\s+exists\s+[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/i;
+
+/** A statement of a NO_TRANSACTION file, and the index it builds, if it builds one. */
+interface ConcurrentStatement {
+  readonly sql: string;
+  readonly builds?: { readonly schema: string; readonly name: string };
+}
+
+/** Whether the file runs outside a transaction. */
+const runsAlone = (sql: string): boolean => sql.startsWith(`${NO_TRANSACTION}\n`);
+
+/** A NO_TRANSACTION file's statements, in order, or the first that is neither kind it may hold. */
+function concurrentStatements(sql: string): { statements: ConcurrentStatement[]; refused?: string } {
+  const statements: ConcurrentStatement[] = [];
+  for (const statement of splitStatements(sql)) {
+    const text = statement.trim();
+    const built = CONCURRENT_BUILD.exec(text);
+    if (built?.[1] !== undefined && built[2] !== undefined) {
+      statements.push({ sql: text, builds: { schema: built[2].toLowerCase(), name: built[1].toLowerCase() } });
+    } else if (CONCURRENT_DROP.test(text)) {
+      statements.push({ sql: text });
+    } else {
+      return { statements, refused: text.slice(0, 80) };
+    }
+  }
+  return { statements };
+}
 
 export interface Migration {
   readonly name: string;
@@ -119,10 +168,20 @@ export class MigrationNotAtomic extends Error {
   }
 }
 
+/** The Postgres error code a migration failed with, if it failed with one. */
+function failedWith(error: unknown): unknown {
+  const cause = error instanceof MigrationFailed ? error.cause : undefined;
+  return typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined;
+}
+
 /** Whether a migration failed only because a lock wait ran out, so it may be tried again. */
 export function isLockTimeout(error: unknown): error is MigrationFailed {
-  const cause = error instanceof MigrationFailed ? error.cause : undefined;
-  return typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === LOCK_NOT_AVAILABLE;
+  return failedWith(error) === LOCK_NOT_AVAILABLE;
+}
+
+/** Whether a migration was aborted to break a deadlock: rolled back whole, so it may be tried again. */
+export function isDeadlock(error: unknown): error is MigrationFailed {
+  return failedWith(error) === DEADLOCK_DETECTED;
 }
 
 /** Reads and checks every migration file in the folder, in order. Throws MigrationRefused listing every problem. */
@@ -146,6 +205,12 @@ export async function loadMigrations(directory: string): Promise<Migration[]> {
     const sql = raw.replaceAll('\r\n', '\n');
     if (sql.trim() === '') problems.push(`${entry.name} is empty`);
     const control = transactionControl(sql);
+    const { refused } = runsAlone(sql) ? concurrentStatements(sql) : {};
+    if (refused !== undefined) {
+      problems.push(
+        `${entry.name} runs outside a transaction, so it may hold only CREATE INDEX CONCURRENTLY IF NOT EXISTS and DROP INDEX CONCURRENTLY IF EXISTS statements on schema-qualified names, one per statement: "${refused}" is neither`,
+      );
+    }
     if (control.length > 0) {
       problems.push(
         `${entry.name} has ${control.join(', ')}: each file already runs in one transaction, so it must not begin or end one (write function bodies in $$ quotes, not BEGIN ATOMIC)`,
@@ -250,8 +315,12 @@ async function applyWithLockRetries(
       await applyMigration(client, migration, logger, lockWait.timeoutMs);
       return;
     } catch (error) {
-      if (tryNumber >= LOCK_TRIES || !isLockTimeout(error)) throw error;
-      logger.warn('db.migration.lock_wait_ran_out', { migration: migration.name, try: tryNumber });
+      const deadlock = isDeadlock(error);
+      if (tryNumber >= LOCK_TRIES || !(deadlock || isLockTimeout(error))) throw error;
+      logger.warn(deadlock ? 'db.migration.deadlocked' : 'db.migration.lock_wait_ran_out', {
+        migration: migration.name,
+        try: tryNumber,
+      });
       await sleep(lockWait.pauseMs);
     }
   }
@@ -267,6 +336,10 @@ export async function applyMigration(
   logger: Logger,
   lockTimeoutMs: number,
 ): Promise<void> {
+  if (runsAlone(migration.sql)) {
+    await applyOutsideTransaction(client, migration, logger, lockTimeoutMs);
+    return;
+  }
   let stillInOurTransaction: boolean;
   try {
     // Inside the try, so a retry on a connection a failed rollback lost still names its file.
@@ -296,4 +369,55 @@ export async function applyMigration(
   // loadMigrations refuses files that would do this; this check backs it up.
   if (!stillInOurTransaction) throw new MigrationNotAtomic(migration.name);
   await client.query(RESET_SESSION);
+}
+
+/**
+ * A NO_TRANSACTION file: each statement on its own, so Postgres may build concurrently, then its ledger row. Before an
+ * index is built, one of its name a failed build left not valid is dropped, as IF NOT EXISTS would keep it, not valid,
+ * for good. The lock limit is set for the session, as there is no transaction to hold it; it stays for the rest of
+ * the run, where each later file and the ledger's count set their own.
+ */
+async function applyOutsideTransaction(
+  client: pg.Client,
+  migration: Migration,
+  logger: Logger,
+  lockTimeoutMs: number,
+): Promise<void> {
+  try {
+    // eslint-disable-next-line agentx/tenant-setting-only-in-with-tenant -- The runner's own unpooled client: a lock limit, no tenant.
+    await client.query("select pg_catalog.set_config('lock_timeout', $1, false)", [`${lockTimeoutMs}ms`]);
+    for (const statement of concurrentStatements(migration.sql).statements) {
+      if (statement.builds !== undefined) await dropIfNotValid(client, statement.builds, migration, logger);
+      // eslint-disable-next-line agentx/no-string-built-sql -- A statement of a checksummed migration file from the repository, held by loadMigrations to the two kinds such a file may have.
+      await client.query(statement.sql);
+    }
+    await client.query('insert into migrations.applied (name, checksum) values ($1, $2)', [
+      migration.name,
+      migration.checksum,
+    ]);
+  } catch (error) {
+    throw new MigrationFailed(migration.name, error);
+  }
+}
+
+/** Drops the index of that name in that schema if a failed concurrent build left it not valid, and says so. */
+async function dropIfNotValid(
+  client: pg.Client,
+  index: { readonly schema: string; readonly name: string },
+  migration: Migration,
+  logger: Logger,
+): Promise<void> {
+  const { rows } = await client.query<{ qualified: string }>(
+    `select pg_catalog.format('%I.%I', n.nspname, c.relname) as qualified
+       from pg_catalog.pg_index i
+       join pg_catalog.pg_class c on c.oid = i.indexrelid
+       join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = $1 and c.relname = $2 and not i.indisvalid`,
+    [index.schema, index.name],
+  );
+  for (const { qualified } of rows) {
+    logger.warn('db.migration.invalid_index_dropped', { migration: migration.name, index: qualified });
+    // eslint-disable-next-line agentx/no-string-built-sql -- An index name the catalogue gave, quoted by format('%I.%I'); DROP takes no parameter.
+    await client.query(`drop index concurrently if exists ${qualified}`);
+  }
 }

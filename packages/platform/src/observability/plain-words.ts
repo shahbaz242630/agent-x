@@ -362,6 +362,17 @@ export const PLAIN_WORDS = {
     broke: 'Nothing changed yet: that update was undone and is tried again after a short pause, up to 5 tries.',
     next: 'Nothing to do. If all 5 tries fail, the job stops: run it again at a quieter time.',
   },
+  'db.migration.deadlocked': {
+    happened:
+      'A database update and the app each waited for a table the other held, so the database stopped the update.',
+    broke: 'Nothing changed yet: that update was undone whole and is tried again after a short pause, up to 5 tries.',
+    next: 'Nothing to do. If all 5 tries fail, the job stops: run it again at a quieter time.',
+  },
+  'db.migration.invalid_index_dropped': {
+    happened: 'A database update found an index an earlier try of it had left half built.',
+    broke: 'Nothing: that index only made some reads faster. It was removed and is being built again now.',
+    next: 'Nothing to do, unless the update fails again: then read its own error.',
+  },
   'db.migration.ledger_not_counted': {
     happened: 'The database update job applied its changes but could not count its list of applied changes.',
     broke: 'Nothing: the changes are in. An older copy starting during this release raises the integrity alarm.',
