@@ -107,12 +107,13 @@ export interface PlatformChain {
    * hasn't reached is neither believed nor moves the number on, or one planted
    * far past the head and deleted after a single alarm would leave every later
    * organisation unread. An event's number moves on even where its details give
-   * no organisation. Limited as checkFromAnchor's.
+   * no organisation. Limited as checkFromAnchor's, each trip's answer within `answeredWithinMs` where given.
    */
   createdOrganizationsSince(
     db: Kysely<PlatformControlsTables>,
     afterSeq: bigint,
     upTo: bigint,
+    answeredWithinMs?: number,
   ): Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
 }
 
@@ -389,16 +390,24 @@ export function createPlatformChain({
       return limitedTransaction(db, (tx) => countStep(readerFor(tx), after, upTo));
     },
 
-    async createdOrganizationsSince(db: Kysely<PlatformControlsTables>, afterSeq: bigint, upTo: bigint) {
-      const rows = await limitedTransaction(db, (tx) =>
-        tx
-          .selectFrom('platform_controls.audit_events')
-          .select(['seq', 'details'])
-          .where('action', '=', ORGANIZATION_CREATED)
-          .where('seq', '>', afterSeq)
-          .where('seq', '<=', upTo)
-          .orderBy('seq')
-          .execute(),
+    async createdOrganizationsSince(
+      db: Kysely<PlatformControlsTables>,
+      afterSeq: bigint,
+      upTo: bigint,
+      answeredWithinMs?: number,
+    ) {
+      const rows = await limitedTransaction(
+        db,
+        (tx) =>
+          tx
+            .selectFrom('platform_controls.audit_events')
+            .select(['seq', 'details'])
+            .where('action', '=', ORGANIZATION_CREATED)
+            .where('seq', '>', afterSeq)
+            .where('seq', '<=', upTo)
+            .orderBy('seq')
+            .execute(),
+        answeredWithinMs === undefined ? {} : { answeredWithinMs },
       );
       return Object.freeze({
         orgIds: rows.map((row) => orgIdIn(row.details)).filter((id) => id !== undefined),

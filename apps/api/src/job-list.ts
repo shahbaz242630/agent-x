@@ -32,7 +32,7 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createZoneSealing, ZONE_SEALING_EVERY_MS } from './agent-zone-seals.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
-import { platformChainCheck, rotatedChecksOf } from './anchor-rotation.ts';
+import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
 import { anchorLogOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
@@ -192,9 +192,13 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     ],
     organizations: {
       list: () => listedOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
-      recorded: () => platform.createdOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
+      // Only those recorded since the last read, up to where the platform chain's check has reached (4D2e E8).
+      recorded: recordedSince({
+        since: (afterSeq, upTo) => platform.createdOrganizationsSince(database, afterSeq, upTo, JOB_ANSWER_WITHIN_MS),
+        checkedTo: () => anchorStore.latest({ kind: 'platform' })?.seq,
+      }),
       // No organisation's chain read whole (4D2e E8): every head probed each run, those moved read from their anchors.
-      probe: (chains, signal) => trail.probeHeads(database, chains, signal),
+      probe: (chains, signal, pagesAtOnce) => trail.probeHeads(database, chains, signal, pagesAtOnce),
       verify: (orgId, anchor) => trail.checkFromAnchor(database, orgId, anchor ?? CHAIN_START),
       // The run's own logger: the hold's lines name the organisation themselves.
       hold: (orgId, failure) =>

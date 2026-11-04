@@ -15,6 +15,15 @@
 // anchor are the rotation's (below). The platform's chain is read from its anchor
 // each run and whole once a day (anchor-rotation.ts's platformChainCheck).
 //
+// The probe reads up to four pages at once (`probePages`), never more than the lanes,
+// and holds that many of the lanes' places until it ends, so it takes no hand-off's
+// connection and turns wait for it. It is cut short by the run's time like any step,
+// keeping what it reached. The trade: an organisation the probe didn't reach takes no
+// turn that run, so a chain wound back there is seen at its next probe, which comes
+// first next run (those left over go first, so the tail never starves);
+// `audit.probe_unfinished` says how many were reached, and one unprobed past the
+// stale limit is the `unchecked` alarm, no hold.
+//
 // A run first reads the store, then checks, writing what moved each minute and
 // at its end. A store that
 // can't be read after a restart means no chain is anchored for the first time,
@@ -161,6 +170,7 @@ export interface OrganisationChains {
   probe?(
     chains: readonly { readonly orgId: string; readonly from: CheckedPoint }[],
     signal: AbortSignal,
+    pagesAtOnce: number,
   ): Promise<ReadonlyMap<string, ProbeAnswer>>;
   /**
    * Puts the organisation on its integrity hold for how its chain failed (the
@@ -209,6 +219,8 @@ export interface AnchorCheckOptions {
   readonly rotation?: RotatedChecks;
   /** Whether this environment sleeps when unused (staging), so a full pass's lateness counts from a process's start. */
   readonly sleeps?: boolean;
+  /** How many of the probe's pages are read at once, each on a connection of its own: never more than the lanes. */
+  readonly probePages?: number;
 }
 
 /** See `stopFlushMs`. */
@@ -216,6 +228,9 @@ const STOP_FLUSH_MS = 5_000;
 
 /** See `lanes`. Each holds a connection for a check, and none across a call to the store. */
 const LANES = 4;
+
+/** See `probePages`: 10,000 organisations in 3.6 s at four, 9.4 s at one (measured locally, 4D2e E8); 100,000 about 36 s. */
+const PROBE_PAGES = 4;
 
 /**
  * See `runWithinMs`. Not the interval's double: lines are up to 9 minutes late, so 10 minutes of run and 5 between would
@@ -327,6 +342,7 @@ export function createAnchorCheck({
   writeEveryMs = WRITE_EVERY_MS,
   rotation: rotatedChecks,
   sleeps = false,
+  probePages = PROBE_PAGES,
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
@@ -352,18 +368,23 @@ export function createAnchorCheck({
    * Work that holds a connection, one at a time under `key`, within the deadline: past it, it stays in flight until it
    * ends, so a hung database can't take a connection every run.
    */
-  const tracked = <T>(key: string, busy: string, start: () => Promise<T>, signal: AbortSignal | undefined) => {
+  const tracked = <T>(
+    key: string,
+    busy: string,
+    start: () => Promise<T>,
+    signal: AbortSignal | undefined,
+    connections = 1,
+  ) => {
     if (inFlight.has(key)) throw new Error(busy);
-    inFlight.add(key);
+    // Work on several connections at once holds as many of the lanes' places, each until the whole of it ends.
+    const held = [key, ...Array.from({ length: connections - 1 }, (_, place) => `${key}#${String(place + 1)}`)];
+    for (const each of held) inFlight.add(each);
     const work = Promise.resolve().then(start);
-    void work.then(
-      () => {
-        ended(key);
-      },
-      () => {
-        ended(key);
-      },
-    );
+    const end = (): void => {
+      for (const each of held.slice(1)) inFlight.delete(each);
+      ended(key);
+    };
+    void work.then(end, end);
     return withinDeadline(work, deadlineMs, signal);
   };
   // Every organisation this process has seen listed or recorded, so one that leaves the list is noticed.
@@ -697,6 +718,8 @@ export function createAnchorCheck({
 
   // What this run's probe found, by organisation: those it didn't answer for are read in their turns.
   let probed: ReadonlyMap<string, Probed> = new Map();
+  // Those the last run's time left unprobed, probed first next run.
+  let unprobed: ReadonlySet<string> = new Set();
 
   /** The probe's misses, in one line: their turns read them as before, so a warning, never the alarm. */
   const sayProbeMissed = (count: number, error: unknown): void => {
@@ -712,22 +735,31 @@ export function createAnchorCheck({
   const probeAll = async (
     from: OrganisationChains,
     orgIds: readonly string[],
-    signal: AbortSignal,
+    cap: AbortSignal,
+    stop: AbortSignal | undefined,
   ): Promise<ReadonlyMap<string, Probed>> => {
     const probe = from.probe?.bind(from);
     if (probe === undefined) return new Map();
-    const asked = orgIds.flatMap((orgId) => {
+    // Those the last run's time left unprobed first, so a tail never starves.
+    const order = [...orgIds.filter((orgId) => unprobed.has(orgId)), ...orgIds.filter((orgId) => !unprobed.has(orgId))];
+    const asked = order.flatMap((orgId) => {
       const anchor = anchors.latest({ kind: 'organisation', orgId });
       return anchor === undefined ? [] : [{ orgId, from: anchor }];
     });
     if (asked.length === 0) return new Map();
+    const pages = Math.max(1, Math.min(probePages, lanes));
     let answers: ReadonlyMap<string, ProbeAnswer>;
     try {
-      answers = await tracked(PROBE, 'the last probe has not finished', () => probe(asked, signal), signal);
+      // The run's time ends the probe between pages, and what it reached is kept; only the stop ends the wait at once.
+      answers = await tracked(PROBE, 'the last probe has not finished', () => probe(asked, cap, pages), stop, pages);
     } catch (error) {
       if (!(error instanceof Stopped)) sayProbeMissed(asked.length, error);
       return new Map();
     }
+    sayUnprobed(
+      asked.filter(({ orgId }) => !answers.has(orgId)).map(({ orgId }) => orgId),
+      asked.length,
+    );
     const found = new Map<string, Probed>();
     const missed: unknown[] = [];
     for (const { orgId, from: anchor } of asked) {
@@ -737,6 +769,39 @@ export function createAnchorCheck({
     }
     if (missed.length > 0) sayProbeMissed(missed.length, missed[0]);
     return found;
+  };
+
+  /** What the probe found, each as a check completed in its turn would count, for a run with no time left for turns. */
+  const landProbed = async (from: OrganisationChains): Promise<Outcome[]> => {
+    const outcomes: Outcome[] = [];
+    for (const [orgId, found] of probed) {
+      const chain = { kind: 'organisation', orgId } as const;
+      const outcome = compared(chain, logger.child({ orgId }), reportOf(found), anchors.latest(chain), false);
+      if (outcome === 'failed') await settle(from, orgId, undefined);
+      outcomes.push(outcome);
+    }
+    return outcomes;
+  };
+
+  /**
+   * Those the run's time left unprobed: first next run, a warning, and past the stale limit unchecked the alarm, no hold,
+   * as for any chain unchecked. They take no turn this run either: the time is gone.
+   */
+  const sayUnprobed = (left: readonly string[], total: number): void => {
+    unprobed = new Set(left);
+    if (left.length === 0) return;
+    logger.warn('audit.probe_unfinished', { reached: total - left.length, total });
+    const now = clock.now().getTime();
+    const stale = left.filter((orgId) => now - since(orgId) >= staleAfterMs);
+    if (stale.length > 0) {
+      logger.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'anchor',
+        reason: 'unchecked',
+        organisations: stale.length,
+        firstFew: stale.slice(0, NAMED_ON_A_LINE),
+      });
+    }
   };
 
   /** A chain's report from this run's probe, where it compared the very anchor its turn holds: none, and it is read. */
@@ -875,7 +940,9 @@ export function createAnchorCheck({
     const listed = inUse ?? [...seen];
     turns.begin(listed, fresh, gone, pastCap);
     if (turns.pastCapStarts()) pastCapSince = clock.now().getTime();
-    probed = await probeAll(from, [...listed, ...pastCap], cap);
+    probed = await probeAll(from, [...listed, ...pastCap], cap, stop);
+    // The run's time gone during the probe: no turn follows, so what it found counts now, alarms and holds as ever.
+    if (cap.aborted) return landProbed(from);
     return takeTurns(from, new Set([...listed, ...pastCap]), cap);
   };
 

@@ -141,7 +141,7 @@ describe(`the probe on the real schema (4D2e E8, Postgres ${server.version})`, (
     const organizations: OrganisationChains = {
       list: () => Promise.resolve(mine),
       recorded: () => Promise.resolve(mine),
-      probe: (chains, signal) => trail.probeHeads(app, chains, signal),
+      probe: (chains, signal, pagesAtOnce) => trail.probeHeads(app, chains, signal, pagesAtOnce),
       verify: (orgId, anchor) => {
         verified.push(orgId);
         return trail.checkFromAnchor(app, orgId, anchor ?? CHAIN_START);

@@ -324,13 +324,14 @@ export interface AuditTrail {
   /**
    * Each organisation's chain probed against the place given (probeEdges, 4D2e E8): its edges and its last events
    * counted, one statement each under that organisation's own wall, PROBE_PAGE of them a transaction and a trip
-   * (readEachTenant). Stops between pages once `signal` aborts: those not reached are not in the answer. One whose
-   * read failed is `missed`, with why.
+   * (readEachTenant), `pagesAtOnce` pages at a time, each on a connection of its own. In the order given; stops
+   * between pages once `signal` aborts: those not reached are not in the answer. One whose read failed is `missed`.
    */
   probeHeads(
     db: Kysely<AuditTables>,
     chains: readonly ProbeAsked[],
     signal?: AbortSignal,
+    pagesAtOnce?: number,
   ): Promise<ReadonlyMap<string, HeadProbe>>;
   /**
    * Whether the organisation's chain still holds its last anchor, in one read:
@@ -1392,6 +1393,7 @@ export function createAuditTrail({
       db: Kysely<AuditTables>,
       chains: readonly ProbeAsked[],
       signal?: AbortSignal,
+      pagesAtOnce = 1,
     ): Promise<ReadonlyMap<string, HeadProbe>> {
       // Once each, in lower case, as the wall and the anchors name them.
       const byOrganisation = new Map<string, ProbeAsked>();
@@ -1401,23 +1403,27 @@ export function createAuditTrail({
       }
       const asked = [...byOrganisation.values()];
       const found = new Map<string, HeadProbe>();
-      for (let at = 0; at < asked.length && signal?.aborted !== true; at += PROBE_PAGE) {
-        const reads = await readEachTenant(
-          db,
-          asked.slice(at, at + PROBE_PAGE),
-          ({ orgId, from }) => edgesRead(orgId, from.seq),
-          { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
-        );
-        for (const { item, read } of reads) {
-          const { orgId, from } = item;
-          found.set(
-            orgId,
-            'failed' in read
-              ? { kind: 'missed', error: read.failed }
-              : probeEdges(keys, chainOf(orgId), edgesOf(read.rows), from),
-          );
+      let next = 0;
+      // Each of `pagesAtOnce` takes the next page as it ends one, each page a transaction and a connection of its own.
+      const pages = async (): Promise<void> => {
+        while (next < asked.length && signal?.aborted !== true) {
+          const page = asked.slice(next, next + PROBE_PAGE);
+          next += PROBE_PAGE;
+          const reads = await readEachTenant(db, page, ({ orgId, from }) => edgesRead(orgId, from.seq), {
+            answeredWithinMs: JOB_ANSWER_WITHIN_MS,
+          });
+          for (const { item, read } of reads) {
+            const { orgId, from } = item;
+            found.set(
+              orgId,
+              'failed' in read
+                ? { kind: 'missed', error: read.failed }
+                : probeEdges(keys, chainOf(orgId), edgesOf(read.rows), from),
+            );
+          }
         }
-      }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, pagesAtOnce) }, pages));
       return found;
     },
 

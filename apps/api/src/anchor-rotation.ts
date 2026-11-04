@@ -118,6 +118,36 @@ export function platformChainCheck({
   };
 }
 
+/**
+ * The organisations the platform chain records as created (4D2e E8, "Each run" step 2), for the check to hold the
+ * directory's list to: read only past the last event read, and only as far as the chain's own check has reached (its
+ * anchor), so a row past it is neither believed nor moves the place on. All of them so far each run; a process's first
+ * read takes every one, then only those new. None before the platform chain is anchored. Kept in memory, an ID each.
+ */
+export function recordedSince({
+  since,
+  checkedTo,
+}: {
+  readonly since: (
+    afterSeq: bigint,
+    upTo: bigint,
+  ) => Promise<{ readonly orgIds: readonly string[]; readonly seq: bigint }>;
+  readonly checkedTo: () => bigint | undefined;
+}): () => Promise<readonly string[]> {
+  let readTo = 0n;
+  const recorded = new Set<string>();
+  return async () => {
+    const upTo = checkedTo();
+    if (upTo !== undefined && upTo > readTo) {
+      const { orgIds } = await since(readTo, upTo);
+      for (const orgId of orgIds) recorded.add(orgId);
+      // Every row up to it has been read, whether or not one recorded an organisation.
+      readTo = upTo;
+    }
+    return [...recorded];
+  };
+}
+
 /** Which of the rotation's reads found a chain failing, or didn't come back. */
 export type RotationCheck = 'count' | 'walk' | 'pass';
 

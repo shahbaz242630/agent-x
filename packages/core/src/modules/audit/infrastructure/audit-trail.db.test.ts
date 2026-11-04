@@ -1182,6 +1182,26 @@ describe('checking a chain from its anchor, under the wall (4D2e E2)', () => {
       stop.abort();
       expect((await trail.probeHeads(counting, asked, stop.signal)).size).toBe(0);
       expect(pages).toHaveLength(3);
+
+      // Three pages at once, each its own transaction: every one answered, and no page read twice.
+      const together = await trail.probeHeads(counting, asked, undefined, 3);
+      expect([...together.keys()].toSorted()).toEqual(asked.map(({ orgId }) => orgId).toSorted());
+      expect(pages).toHaveLength(6);
+    });
+
+    it('begins its pages at once, and each stops between pages once told', async () => {
+      // Told to stop as the first page is sent: one page a time would read that page alone.
+      const stop = new AbortController();
+      const stopping = app.withPlugin({
+        transformQuery: ({ node }) => {
+          if (node.kind === 'RawNode' && node.sqlFragments.join('').includes("'app.org_id', '', true")) stop.abort();
+          return node;
+        },
+        transformResult: ({ result }) => Promise.resolve(result),
+      });
+      const asked = Array.from({ length: 2500 }, () => ({ orgId: newOrg(), from: CHAIN_START }));
+
+      expect((await trail.probeHeads(stopping, asked, stop.signal, 2)).size).toBe(1000);
     });
 
     it("answers the others when one organisation's read fails, and says that one missed, with why", async () => {

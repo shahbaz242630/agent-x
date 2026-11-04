@@ -208,6 +208,12 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet: the next check goes on from where this one stopped.',
     next: 'Nothing if it is rare. If it stays, see whether the database is slow.',
   },
+  'audit.probe_unfinished': {
+    happened:
+      "The tamper check ran out of time before it had looked at every organisation's audit history; the line says how many it reached.",
+    broke: 'Those it missed were not checked this time. Nothing is held and payments go on.',
+    next: 'The next check looks at those first. If one goes unchecked too long the integrity alarm says so; if this keeps happening, see whether the database is slow.',
+  },
   'audit.anchor_check_behind': {
     happened: 'Tamper checks are working, but some organisations waited too long for their turn.',
     broke: 'Those audit histories are checked late, so a change goes unseen for longer. Nobody is held.',

@@ -13,8 +13,13 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createAnchorCheck, type OrganisationChains, type ProbeAnswer } from './anchor-check.ts';
-import { platformChainCheck } from './anchor-rotation.ts';
+import {
+  type AnchorCheckOptions,
+  createAnchorCheck,
+  type OrganisationChains,
+  type ProbeAnswer,
+} from './anchor-check.ts';
+import { platformChainCheck, recordedSince } from './anchor-rotation.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -35,15 +40,26 @@ const ok = (seq: bigint): ChainReport => ({ ok: true, ...point(seq) });
 type Probing = (
   chains: readonly { readonly orgId: string; readonly from: CheckedPoint }[],
   signal: AbortSignal,
+  pagesAtOnce: number,
 ) => Promise<ReadonlyMap<string, ProbeAnswer>>;
 
-/** Two organisations whose chains check out at seq 1, the probe as given, every read, probe and hold recorded. */
-function probing(probe: Probing | undefined, deadlineMs = 120_000, lanes = 1) {
+/** Two organisations (or `orgs`) whose chains check out at seq 1, the probe as given, every read, probe and hold recorded. */
+function probing(
+  probe: Probing | undefined,
+  deadlineMs = 120_000,
+  lanes = 1,
+  {
+    orgs = [ORG, OTHER_ORG],
+    ...more
+  }: { readonly orgs?: readonly string[] } & Pick<AnchorCheckOptions, 'runWithinMs' | 'probePages'> = {},
+) {
   const steps: string[] = [];
   const asked: { orgId: string; seq: bigint }[][] = [];
+  const pagesGiven: number[] = [];
+  const clock = new FixedClock(AT);
   const organizations: OrganisationChains = {
-    list: () => Promise.resolve([ORG, OTHER_ORG]),
-    recorded: () => Promise.resolve([ORG, OTHER_ORG]),
+    list: () => Promise.resolve(orgs),
+    recorded: () => Promise.resolve(orgs),
     verify: (orgId, anchor) => {
       steps.push(`verify ${orgId} ${anchor?.seq.toString() ?? '-'}`);
       return Promise.resolve(ok(1n));
@@ -55,9 +71,10 @@ function probing(probe: Probing | undefined, deadlineMs = 120_000, lanes = 1) {
     ...(probe === undefined
       ? {}
       : {
-          probe: (chains, signal) => {
+          probe: (chains, signal, pagesAtOnce) => {
             asked.push(chains.map(({ orgId, from }) => ({ orgId, seq: from.seq })));
-            return probe(chains, signal);
+            pagesGiven.push(pagesAtOnce);
+            return probe(chains, signal, pagesAtOnce);
           },
         }),
   };
@@ -67,16 +84,17 @@ function probing(probe: Probing | undefined, deadlineMs = 120_000, lanes = 1) {
     chains: [],
     organizations,
     keys,
-    clock: new FixedClock(AT),
+    clock,
     logger: testLogger(capture),
     staleAfterMs: 900_000,
     deadlineMs,
     anchors,
     shuffled: (orgIds) => orgIds,
     lanes,
+    ...more,
   });
   const lines = (event: string) => capture.lines().filter((line) => line.event === event);
-  return { check, steps, asked, anchors, lines };
+  return { check, steps, asked, anchors, lines, pagesGiven, clock };
 }
 
 const answering =
@@ -180,8 +198,9 @@ describe('the probe at the start of a run (4D2e E8)', () => {
           };
         }),
       50,
-      // The probe past its deadline holds a lane until it ends, as any check does: the other lane takes the turns.
+      // The probe past its deadline holds its lane until it ends, as any check does: the other lane takes the turns.
       2,
+      { probePages: 1 },
     );
     await check.run();
     await check.run();
@@ -213,6 +232,151 @@ describe('the probe at the start of a run (4D2e E8)', () => {
 
     expect(steps).toHaveLength(2);
     expect(lines('audit.anchor_check_failed')).toEqual([]);
+  });
+});
+
+describe("the probe's pages and its time (4D2e E8 follow-up)", () => {
+  const ORGS = Array.from({ length: 6 }, (_, n) => `0199a0f0-0000-7000-8000-${String(n + 10).padStart(12, '0')}`);
+
+  /** A probe that answers the first half of what it is asked, then waits for the run's time to end it: what it reached. */
+  const halfThenTimeUp: Probing = (chains, signal) => {
+    const answered = new Map(chains.slice(0, chains.length / 2).map(({ orgId }) => [orgId, { kind: 'same' } as const]));
+    return new Promise((resolve) => {
+      signal.addEventListener('abort', () => {
+        resolve(answered);
+      });
+    });
+  };
+
+  it('reads up to four pages at once, never more than the lanes', async () => {
+    const answer: Probing = (chains) =>
+      Promise.resolve(new Map(chains.map(({ orgId }) => [orgId, { kind: 'same' } as const])));
+    for (const [lanes, probePages, given] of [
+      [4, undefined, 4],
+      [2, undefined, 2],
+      [4, 1, 1],
+    ] as const) {
+      const { check, pagesGiven } = probing(answer, 120_000, lanes, probePages === undefined ? {} : { probePages });
+      await check.run();
+      await check.run();
+      expect(pagesGiven).toEqual([given]);
+    }
+  });
+
+  it('holds as many of the lanes as it reads pages: past its deadline no turn starts until it ends', async () => {
+    let finish: (() => void) | undefined;
+    const { check, steps } = probing(
+      () =>
+        new Promise((resolve) => {
+          finish = () => {
+            resolve(new Map());
+          };
+        }),
+      50,
+      2,
+      { runWithinMs: 300 },
+    );
+    await check.run();
+    await check.run();
+
+    expect(steps.slice(2)).toEqual([]);
+    finish?.();
+  });
+
+  it('cut short by the run, probes first next run those it did not reach: two runs of half cover every one', async () => {
+    const { check, asked, lines } = probing(halfThenTimeUp, 120_000, 2, { orgs: ORGS, runWithinMs: 80 });
+    await check.run();
+    await check.run();
+    await check.run();
+
+    const [first = [], second = []] = asked.map((each) => each.map(({ orgId }) => orgId));
+    expect(first).toEqual(ORGS);
+    expect(second).toEqual([...ORGS.slice(3), ...ORGS.slice(0, 3)]);
+    expect(new Set([...first.slice(0, 3), ...second.slice(0, 3)])).toEqual(new Set(ORGS));
+    expect(lines('audit.probe_unfinished')).toEqual([
+      expect.objectContaining({ level: 'warn', reached: 3, total: 6 }),
+      expect.objectContaining({ level: 'warn', reached: 3, total: 6 }),
+    ]);
+  });
+
+  it('counts what a probe cut short found: unmoved ones checked, a failing one the alarm and its hold', async () => {
+    const { check, steps, lines } = probing(
+      (chains, signal) => {
+        const [first] = chains;
+        const answered = new Map<string, ProbeAnswer>([
+          [first?.orgId ?? '', { kind: 'failed', problem: { reason: 'head', seq: 1n } }],
+          ...chains.slice(1, 3).map(({ orgId }) => [orgId, { kind: 'same' }] as const),
+        ]);
+        return new Promise((resolve) => {
+          signal.addEventListener('abort', () => {
+            resolve(answered);
+          });
+        });
+      },
+      120_000,
+      2,
+      { orgs: ORGS, runWithinMs: 80 },
+    );
+    await check.run();
+    await check.run();
+
+    expect(steps.filter((step) => step.startsWith('hold'))).toEqual([`hold ${ORGS[0] ?? ''} head`]);
+    expect(lines('audit.anchor_check_done').at(-1)).toMatchObject({ chains: 3, unchanged: 2, failed: 1 });
+  });
+
+  it('raises the unchecked alarm, no hold, for one left unprobed past the stale limit', async () => {
+    const { check, clock, steps, lines } = probing(halfThenTimeUp, 120_000, 2, { orgs: ORGS, runWithinMs: 80 });
+    await check.run();
+    await check.run();
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    clock.advanceBy(900_000);
+    await check.run();
+
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', reason: 'unchecked', organisations: 3, firstFew: ORGS.slice(0, 3) }),
+    ]);
+    expect(steps.filter((step) => step.startsWith('hold'))).toEqual([]);
+  });
+});
+
+describe('the organisations the platform chain records, read past the last read (4D2e E8, step 2)', () => {
+  it('reads none before the chain is anchored, then all to its anchor, then only past the last read', async () => {
+    const reads: string[] = [];
+    let anchored: bigint | undefined;
+    const rows: Record<string, string[]> = { '0-4': [ORG], '4-9': [OTHER_ORG] };
+    const recorded = recordedSince({
+      since: (afterSeq, upTo) => {
+        const stretch = `${afterSeq.toString()}-${upTo.toString()}`;
+        reads.push(stretch);
+        return Promise.resolve({ orgIds: rows[stretch] ?? [], seq: afterSeq });
+      },
+      checkedTo: () => anchored,
+    });
+
+    expect(await recorded()).toEqual([]);
+    anchored = 4n;
+    expect(await recorded()).toEqual([ORG]);
+    expect(await recorded()).toEqual([ORG]);
+    anchored = 9n;
+    expect(await recorded()).toEqual([ORG, OTHER_ORG]);
+    expect(reads).toEqual(['0-4', '4-9']);
+  });
+
+  it('keeps its place where a read fails, and reads that stretch again', async () => {
+    const reads: string[] = [];
+    let fail = true;
+    const recorded = recordedSince({
+      since: (afterSeq, upTo) => {
+        reads.push(`${afterSeq.toString()}-${upTo.toString()}`);
+        return fail ? Promise.reject(new Error('read timeout')) : Promise.resolve({ orgIds: [ORG], seq: upTo });
+      },
+      checkedTo: () => 3n,
+    });
+
+    await expect(recorded()).rejects.toThrow('read timeout');
+    fail = false;
+    expect(await recorded()).toEqual([ORG]);
+    expect(reads).toEqual(['0-3', '0-3']);
   });
 });
 
