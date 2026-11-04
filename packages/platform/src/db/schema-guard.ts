@@ -243,8 +243,8 @@ const MARK_FUNCTION = 'directory.mark_org_work';
 const MARK_BODY = '6cae37308679fd17975fca6e78aa25f031395080196fb037e0d947ae2b868229';
 
 /**
- * Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. On every write, or
- * (`UPDATE`) on a row already made alone; while its condition holds, or (null) on each one.
+ * Which organisation has which job waiting (0072, 4D2e D6): deferred, so each fires inside COMMIT. On every write, on a
+ * row already made alone (`UPDATE`), or on a new row alone (`INSERT`); while its condition holds, or (null) on each one.
  */
 const markTrigger = (
   table: string,
@@ -252,7 +252,7 @@ const markTrigger = (
   condition: string | null,
   job: string,
   wait: string,
-  on: 'INSERT OR UPDATE' | 'UPDATE' = 'INSERT OR UPDATE',
+  on: 'INSERT OR UPDATE' | 'UPDATE' | 'INSERT' = 'INSERT OR UPDATE',
 ): WrittenTrigger => {
   const when = condition === null ? '' : ` WHEN (${condition})`;
   return {
@@ -328,9 +328,28 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * None now.
+ * Now 0077's (4D2e D10). The factor removals' a day on, the cooling-off's length, as a reset comes to cool off: only an
+ * update does, as a reset is born a draft. The background downloads' at once as a month is asked for: a month is born
+ * waiting, and every other move of it is the builder's own, which settles the mark after its run.
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
+export const COMING_TRIGGERS: readonly WrittenTrigger[] = [
+  markTrigger(
+    'identity.factor_resets',
+    'marks_factor_removals',
+    "(new.status = 'COOLING_OFF'::text)",
+    'factor_removals',
+    '24 hours',
+    'UPDATE',
+  ),
+  markTrigger(
+    'activity_exports.files',
+    'marks_background_downloads',
+    null,
+    'background_downloads',
+    '0 seconds',
+    'INSERT',
+  ),
+];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
