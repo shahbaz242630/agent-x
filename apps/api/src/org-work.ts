@@ -231,12 +231,18 @@ type Move =
   | { readonly kind: 'late'; readonly job: OrgWorkJob; readonly dueAt: Date; readonly marks: string }
   | { readonly kind: 'cleared'; readonly job: OrgWorkJob; readonly marks: string };
 
-export function movesOf({ before, due, after }: Looked): Move[] {
+/**
+ * What one look calls for, at `now` (the jobs' clock). Work due already is due now, as a settle stores it (dueOf): a
+ * mark is late only past the later of its rows' time and now, so one settled at a visit for work still due (refused,
+ * stuck, a request made before 0073) is no miss, and is left where the settle put it, behind those due before it.
+ */
+export function movesOf({ before, due, after }: Looked, now: Date): Move[] {
   return due.flatMap(({ job, dueAt }): Move[] => {
     const standing = before.find((mark) => mark.job === job);
     if (dueAt === null) return standing === undefined ? [] : [{ kind: 'cleared', job, marks: standing.marks }];
     if (!after.some((mark) => mark.job === job)) return [{ kind: 'unmarked', job, dueAt }];
-    if (standing === undefined || standing.due_at.getTime() - dueAt.getTime() <= LATE_BY_MS) return [];
+    const neededBy = Math.max(dueAt.getTime(), now.getTime());
+    if (standing === undefined || standing.due_at.getTime() - neededBy <= LATE_BY_MS) return [];
     return [{ kind: 'late', job, dueAt, marks: standing.marks }];
   });
 }
@@ -308,7 +314,8 @@ export function createOrgWorkRediscovery({
         const log = logger.child({ orgId });
         counts.organisations += 1;
         try {
-          for (const move of movesOf(await lookedAt(database, orgId, clock.now()))) {
+          const now = clock.now();
+          for (const move of movesOf(await lookedAt(database, orgId, now), now)) {
             if (await carriedOut(database, orgId, move, log)) counts[move.kind] += 1;
           }
         } catch (error) {

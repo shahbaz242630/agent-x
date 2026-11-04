@@ -413,6 +413,36 @@ describe('the hourly look', () => {
     expect(lines('org_work.unmarked').map(({ job }) => job as string)).toEqual(['hand_off_sweep', 'payment_check']);
   });
 
+  it("a sweep's work due since long ago, its mark settled at a visit since: no miss said, the mark left", async () => {
+    const { w, acting } = await readyToLook();
+    await ask(acting, w, { amount: ALLOWED() });
+    // The jobs' clock a day on: the payment's ten minutes long past, its mark settled then, as a visit leaves one stuck.
+    const lookClock = new FixedClock(new Date(Date.now() + 24 * 60 * 60_000));
+    let settled: Awaited<ReturnType<typeof marksOf>>['hand_off_sweep'];
+    await handoffOf(w, {
+      ...w.rail,
+      submitApprovedIntent: async (intent) => {
+        await admin().query(`update directory.org_work set due_at = $2 where org_id = $1 and job = 'hand_off_sweep'`, [
+          w.org,
+          lookClock.now(),
+        ]);
+        settled = (await marksOf(w)).hand_off_sweep;
+        lookClock.advanceBy(60 * 60_000);
+        await createOrgWorkRediscovery({
+          list: () => Promise.resolve([w.org]),
+          database: app,
+          logger: testLogger(capture),
+          clock: lookClock,
+        }).run();
+        expect((await marksOf(w)).hand_off_sweep).toEqual(settled);
+        return w.rail.submitApprovedIntent(intent);
+      },
+    }).run();
+
+    expect(settled).toBeDefined();
+    expect(lines('org_work.unmarked')).toEqual([]);
+  });
+
   describe('a commit landing between its reads, forced', () => {
     // The look reads the marks, then the requests, then the transactions, then the marks again: each its own statement
     // on one trip. A session holding the requests' table stops it after its first read of the marks, until let go.
