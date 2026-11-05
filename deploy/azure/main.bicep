@@ -142,6 +142,22 @@ var names = resourceNames(environment, nameSuffix)
 // only the foundation uses it, and a change there asks every hand deploy to run again.
 var loginWorkspaceName = 'log-agentx-${short}-logins'
 
+// The apps that run the API (4D2e D13), each by its work and identity: `api`, and
+// `jobs`, which holds the API's jobs where they run apart from it.
+var apiKeeper = {
+  workload: 'api'
+  identity: identityName(environment, 'api')
+}
+var jobsKeeper = {
+  workload: 'jobs'
+  identity: identityName(environment, 'jobs')
+}
+
+// Who keeps the chains' anchors: the app that holds the jobs. Production always
+// runs them apart, in `jobs`; staging's API holds them out of a load run and
+// `jobs` in one (apps --load-run), so both may keep them there.
+var anchorKeepers = environment == 'production' ? [jobsKeeper] : [apiKeeper, jobsKeeper]
+
 resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   name: names.group
   location: location
@@ -272,6 +288,8 @@ module appsEnvironment 'modules/environment.bicep' = {
     errorAlertThreshold: appErrorAlertThreshold
     ownLogNames: [
       appName(environment, 'api')
+      // The API's jobs where they run apart from it (4D2e D13): the same logger.
+      appName(environment, 'jobs')
       jobName(environment, 'db-setup')
       jobName(environment, 'migrate')
       jobName(environment, 'operator')
@@ -318,7 +336,7 @@ module evidence 'modules/evidence.bicep' = {
     workspaceId: ids.workspace
     writerIdentityName: identityName(environment, 'operator')
     writerRoleName: 'Agent X evidence writer (${environment} ${nameSuffix})'
-    anchorKeeperIdentityName: identityName(environment, 'api')
+    anchorKeepers: anchorKeepers
     anchorRoleName: 'Agent X audit anchors (${environment} ${nameSuffix})'
     anchorReaderRoleName: 'Agent X audit anchors reader (${environment} ${nameSuffix})'
     restorerIdentityName: identityName(environment, 'chain-restore')
@@ -327,7 +345,7 @@ module evidence 'modules/evidence.bicep' = {
     immutability: evidenceImmutability
     redundancy: evidenceRedundancy
   }
-  // The subnet's Storage endpoint, the workspace and the operator's and the API's identities must exist first.
+  // The subnet's Storage endpoint, the workspace and the operator's and the anchors' keepers' identities must exist first.
   dependsOn: [
     network
     monitoring
@@ -336,7 +354,7 @@ module evidence 'modules/evidence.bicep' = {
 }
 
 // Where the activity log's background downloads are kept a week (Phase 3 L5c,
-// decision 31), read and written by the API alone. Named in its module, as
+// decision 31), read and written by the apps that run the API alone. Named in its module, as
 // the evidence store is, so a change to it asks for no secrets or
 // certificates deploy.
 module activityDownloads 'modules/activity-downloads.bicep' = {
@@ -347,10 +365,10 @@ module activityDownloads 'modules/activity-downloads.bicep' = {
     tags: tags
     appsSubnetId: ids.appsSubnet
     workspaceId: ids.workspace
-    apiIdentityName: identityName(environment, 'api')
+    keepers: [apiKeeper, jobsKeeper]
     roleName: 'Agent X activity downloads (${environment} ${nameSuffix})'
   }
-  // The subnet's Storage endpoint, the workspace and the API's identity must exist first.
+  // The subnet's Storage endpoint, the workspace and the keepers' identities must exist first.
   dependsOn: [
     network
     monitoring

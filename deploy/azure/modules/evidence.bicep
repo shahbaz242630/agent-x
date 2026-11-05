@@ -21,14 +21,15 @@
 //   export from a laptop or the portal: how one is handed over is decided
 //   separately (decision 28)
 // - the operator's identity may only add a new file to `audit-exports`
-//   (`blobs/add/action`): it can't read, overwrite or list. The API's may add a
-//   new file to `audit-anchors` and read and list what is there (`blobs/read`, as
-//   a restart must), and can't overwrite or delete. The operator's may read and
+//   (`blobs/add/action`): it can't read, overwrite or list. The identity of the
+//   app that holds the jobs (`anchorKeepers`, 4D2e D13) may add a new file to
+//   `audit-anchors` and read and list what is there (`blobs/read`, as a restart
+//   must), and can't overwrite or delete. The operator's may read and
 //   list `audit-anchors` (`blobs/read`), which a chain's recovery plan is
 //   checked against (4D2e E9), and add a new file there (`blobs/add/action`):
 //   a chain's rebase (4D2e E11), which the API believes only signed with the
 //   operator's own `audit-rebase` key; anything else it adds is a file the API
-//   reads as spoiled, the alarm: it holds the API's own role there. Neither can
+//   reads as spoiled, the alarm: it holds the keepers' own role there. Neither can
 //   overwrite or delete. The chain repair's (4D2e E10) may read and list
 //   `audit-anchors` alone: it adds nothing there. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
@@ -55,8 +56,8 @@ param writerIdentityName string
 @description('A custom role\'s name is the whole directory\'s, so it carries the environment and the suffix.')
 param writerRoleName string
 
-@description('The identity that keeps the anchors: the API\'s. Created by the foundation under this name, as the writer\'s is.')
-param anchorKeeperIdentityName string
+@description('Who keeps the anchors, each `{ workload, identity }`: the identity of the app that holds the jobs (4D2e D13), created by the foundation under that name, as the writer\'s is.')
+param anchorKeepers array
 
 @description('As `writerRoleName`, for the anchors\' role.')
 param anchorRoleName string
@@ -208,9 +209,11 @@ resource writes 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-resource anchorKeeper 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
-  name: anchorKeeperIdentityName
-}
+resource anchorKeeper 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = [
+  for keeper in anchorKeepers: {
+    name: keeper.identity
+  }
+]
 
 // Put Blob of a file that isn't there yet; Get Blob and List Blobs, which a
 // restart needs (Microsoft: both are `blobs/read`). Never `blobs/write`, which
@@ -238,16 +241,18 @@ resource anchorRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   }
 }
 
-resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: anchorContainer
-  name: guid(anchorContainer.id, anchorKeeper.id, anchorRole.id)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorRole.name)
-    principalId: anchorKeeper.properties.principalId
-    principalType: 'ServicePrincipal'
-    description: 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)'
+resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (keeper, index) in anchorKeepers: {
+    scope: anchorContainer
+    name: guid(anchorContainer.id, anchorKeeper[index].id, anchorRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorRole.name)
+      principalId: anchorKeeper[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${keeper.workload} keeps audit anchors (deploy/azure/modules/evidence.bicep)'
+    }
   }
-}
+]
 
 // Get Blob and List Blobs (both `blobs/read`), and nothing else: the chain
 // repair (4D2e E10) checks a repair against the anchors and adds none.
@@ -273,7 +278,7 @@ resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' =
   }
 }
 
-// The operator's identity, the exports' writer above, holds the API's own role
+// The operator's identity, the exports' writer above, holds the keepers' own role
 // on the anchors: Get Blob and List Blobs for a chain recovery plan (4D2e E9),
 // and Put Blob of a file not there yet for a chain's rebase (4D2e E11). Never
 // overwrite or delete.

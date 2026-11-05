@@ -102,6 +102,10 @@ var names = resourceNames(environment, nameSuffix)
 
 // Every secret a run writes when given a value, and who reads each. The
 // set-up job reads every database login, since each of its runs sets them all.
+// The API's jobs, where they run apart from it (`jobs`, 4D2e D13), read what the
+// API does: the same process at another role, whose settings are checked alike
+// (sign-in's three together, email's four together), and whose jobs send the
+// notices, copy the login service's events and carry out the factor resets.
 var secrets = [
   {
     name: 'db-admin-password'
@@ -117,7 +121,7 @@ var secrets = [
   {
     name: 'db-app-password'
     value: dbAppPassword
-    readers: ['db-setup', 'api']
+    readers: ['db-setup', 'api', 'jobs']
   }
   {
     name: 'db-backup-password'
@@ -152,17 +156,17 @@ var secrets = [
   {
     name: 'api-oidc-client-secret'
     value: apiOidcClientSecret
-    readers: ['api']
+    readers: ['api', 'jobs']
   }
   {
     name: 'zitadel-directory-token'
     value: directoryToken
-    readers: ['api']
+    readers: ['api', 'jobs']
   }
   {
     name: 'zitadel-reset-token'
     value: resetToken
-    readers: ['api']
+    readers: ['api', 'jobs']
   }
 ]
 
@@ -171,7 +175,7 @@ var secrets = [
 // is rotated in Azure brings the new one.
 var copiedKey = {
   name: 'acs-access-key'
-  readers: ['api']
+  readers: ['api', 'jobs']
 }
 
 // The one secret no run writes twice.
@@ -187,20 +191,21 @@ var access = concat(
     readers: secret.readers
   }),
   [masterKey, copiedKey],
-  // The API reads every key but the operator's own, whose public half it reads
-  // instead (PL-57); the operator's command the audit chains' MAC, the field
-  // encryption and its own key alone, each version of them (ADR-011 §3, B4-6b);
-  // the chain repair the MAC alone and the public halves (4D2e E10).
+  // The API and its jobs read every key but the operator's own, whose public
+  // half they read instead (PL-57); the operator's command the audit chains'
+  // MAC, the field encryption and its own keys alone, each version of them
+  // (ADR-011 §3, B4-6b); the chain repair the MAC alone and the public halves
+  // (4D2e E10).
   map(appKeys, key => {
     name: key
     readers: concat(
-      operatorOnly(key) ? ['operator'] : operatorHolds(key) ? ['api', 'operator'] : ['api'],
+      operatorOnly(key) ? ['operator'] : operatorHolds(key) ? ['api', 'jobs', 'operator'] : ['api', 'jobs'],
       restoreHolds(key) ? ['chain-restore'] : []
     )
   }),
   map(publicHalves, half => {
     name: half
-    readers: ['api', 'chain-restore']
+    readers: ['api', 'jobs', 'chain-restore']
   })
 )
 
