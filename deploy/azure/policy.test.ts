@@ -1712,6 +1712,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
         (app: Mutable) => {
           containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== 'AGENTX_AUDIT_ANCHORS_CLIENT_ID');
         },
+        // The operator holds the same role (E11): the API told of the operator's identity is still refused.
+        (app: Mutable) => {
+          const clientId = anchorSettings(app).find((entry) => entry.name === 'AGENTX_AUDIT_ANCHORS_CLIENT_ID') ?? {};
+          clientId.value = String(clientId.value).replace(apiId, apiId.replace(/-api$/, '-operator'));
+        },
       ]) {
         expect(brokenRules(changed(APP('api'), change))).toEqual(['evidence-store']);
       }

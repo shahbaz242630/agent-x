@@ -1977,10 +1977,11 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * custom role, assignable in the resource group alone, given once on that
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
- * a new file and reads, to the API's. The anchors container has a second role,
- * reading alone, to the operator's identity, for a chain recovery plan (4D2e E9).
- * The API and the operator's job alone are told where the anchors are, each as
- * the identity its role is given to (`storeSettingsProblems`). None can
+ * a new file and reads, to the API's and the operator's (a chain recovery plan,
+ * 4D2e E9, and a rebase, E11). The anchors container has a second role, reading
+ * alone, to the chain repair's identity (4D2e E10). The API, the operator's job
+ * and the chain repair's job alone are told where the anchors are, each as its
+ * own identity its role is given to (`storeSettingsProblems`). None can
  * overwrite or delete. The account's immutability covers both. Its logs are
  * `resource-logs`'s.
  */
