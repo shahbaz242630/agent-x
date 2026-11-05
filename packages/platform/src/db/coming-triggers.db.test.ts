@@ -12,7 +12,13 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
-import { liveSchemaDrift, liveSchemaProblems, MARK_TRIGGERS, type WrittenTrigger } from './schema-guard.ts';
+import {
+  BUILT_TRIGGERS,
+  liveSchemaDrift,
+  liveSchemaProblems,
+  MARK_TRIGGERS,
+  type WrittenTrigger,
+} from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 
 const server = inject('postgres');
@@ -223,7 +229,7 @@ describe('0077, read as the image before it would read it (4D2e D10)', () => {
   const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
   // The image before knew every trigger before 0077's as written, these two as coming, and the job CHECK as 0075 made it.
   const before = {
-    triggers: MARK_TRIGGERS.filter((one) => !ours(one)),
+    triggers: BUILT_TRIGGERS.filter((one) => !ours(one)),
     tables: BUILT_TABLES,
     checks: BUILT_CHECKS.map((one) =>
       one.name === 'org_work_job_check'
@@ -315,7 +321,7 @@ describe('0075, read as the image before it would read it (4D2e D9)', () => {
   const each = (says: (table: string, name: string) => string) => eachNamed(NAMED, says);
   // The image before knew 0072's and 0073's triggers as written, these seven as coming, and the job CHECK as 0073 made it.
   const before = {
-    triggers: MARK_TRIGGERS.filter((one) => !ours(one)),
+    triggers: BUILT_TRIGGERS.filter((one) => !ours(one)),
     tables: BUILT_TABLES,
     checks: BUILT_CHECKS.map((one) =>
       one.name === 'org_work_job_check'
@@ -380,7 +386,7 @@ describe('0073, read as the image before it would read it (4D2e D8)', () => {
   const EXPIRY = ['marks_request_expiry', 'marks_mandate_expiry'];
   // The image before knew 0072's three triggers as written, these two as coming, and the job CHECK as 0072 made it.
   const before = {
-    triggers: MARK_TRIGGERS.filter(({ name }) => !EXPIRY.includes(name)),
+    triggers: BUILT_TRIGGERS.filter(({ name }) => !EXPIRY.includes(name)),
     tables: BUILT_TABLES,
     checks: BUILT_CHECKS.map((one) =>
       one.name === 'org_work_job_check'
@@ -427,7 +433,7 @@ describe('0072, read as the image before it would read it', () => {
   ];
 
   it('knowing the marks: nothing at all is the alarm at once, and all of it warns first', async () => {
-    const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: MARK_TRIGGERS });
+    const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: BUILT_TRIGGERS });
     expect(atOnce).toEqual([]);
     expect(releaseShaped).toEqual(
       expect.arrayContaining([
@@ -442,8 +448,10 @@ describe('0072, read as the image before it would read it', () => {
 
   it('not knowing them: the false alarm this all exists to prevent, on the triggers alone', async () => {
     const { atOnce, releaseShaped } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: [] });
-    // The migrated database holds 0073's, 0075's and 0077's as well, which that image knew no more of.
-    expect(atOnce).toEqual(MARK_TRIGGERS.map(({ table, name }) => `${table} carries the trigger "${name}"`).toSorted());
+    // The migrated database holds 0073's, 0075's, 0077's and 0080's as well, which that image knew no more of.
+    expect(atOnce).toEqual(
+      BUILT_TRIGGERS.map(({ table, name }) => `${table} carries the trigger "${name}"`).toSorted(),
+    );
     expect(releaseShaped).toContain('directory.mark_org_work is a function our schemas should not hold');
   });
 });

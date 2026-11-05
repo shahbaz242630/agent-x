@@ -2,47 +2,23 @@
 // E10's repair, who could drop the rule anyway). The readers already
 // refuse an operator's event without its signature; this is the database's own
 // rule beside them, so the API's role can't even add one, on either chain. A
-// trigger on a table already built, so it comes in two releases (the guard's
-// header): this image knows it (COMING_TRIGGERS), and the migration below runs
-// in the next. RULE is that migration's text, word for word: applied here as
-// the owner, it must read to this image as exactly the coming trigger, no more.
-import { createTestDatabase, type TestClient, type TestDatabase, type TestSession } from '@agentx/testing';
+// trigger on a table already built, so it came in two releases (the guard's
+// header): 0079's image knew it as coming, and 0080 writes it.
+import { createTestDatabase, type TestClient, type TestDatabase } from '@agentx/testing';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
-import { liveSchemaDrift } from './schema-guard.ts';
+import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
+import BUILT_TABLES from './built-tables.json' with { type: 'json' };
+import { BUILT_TRIGGERS, liveSchemaDrift, MARK_TRIGGERS, OPERATOR_EVENT_TRIGGERS } from './schema-guard.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Kysely<unknown>;
-let owner: TestSession;
 
 const ROLES = { appRole: 'agentx_app', ownerRole: 'agentx_owner' } as const;
-
-/**
- * The coming migration, as it will be written: the function, then its trigger on each chain's events. It refuses
- * every role but the operator's and the owner's: E10's repair puts a chain's original rows back (an operator's event
- * among them) as the owner, and the owner could drop the trigger anyway. The threat it closes is the API's role.
- */
-const RULE = `
-CREATE FUNCTION audit.operator_events_by_operator() RETURNS trigger LANGUAGE plpgsql
-  SET search_path = pg_catalog AS $$
-begin
-  if current_user not in ('agentx_operator', 'agentx_owner') then
-    raise exception 'only the operator''s role records an event in its name' using errcode = 'insufficient_privilege';
-  end if;
-  return new;
-end
-$$;
-
-CREATE TRIGGER operator_events_by_operator BEFORE INSERT ON audit.events
-  FOR EACH ROW WHEN (new.actor_id = 'operator') EXECUTE FUNCTION audit.operator_events_by_operator();
-
-CREATE TRIGGER operator_events_by_operator BEFORE INSERT ON platform_controls.audit_events
-  FOR EACH ROW WHEN (new.actor_id = 'operator') EXECUTE FUNCTION audit.operator_events_by_operator();
-`;
 
 const ORG = '0199a0f0-0000-7000-8000-0000000000b1';
 
@@ -85,7 +61,6 @@ const REFUSED = { code: '42501', message: "only the operator's role records an e
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  owner = database.as('owner');
   app = createDatabase(
     { ...database.connection('app'), tls: 'disable' },
     createLogger({
@@ -94,7 +69,6 @@ beforeAll(async () => {
       destination: { write: () => undefined },
     }),
   );
-  await owner.query(RULE);
 }, 60_000);
 
 afterAll(async () => {
@@ -103,14 +77,30 @@ afterAll(async () => {
 });
 
 describe(`the operator's events added by its role alone (PL-57, Postgres ${server.version})`, () => {
-  it('reads to this image as exactly the coming triggers, and nothing at once', async () => {
-    expect(await liveSchemaDrift(app, ROLES)).toEqual({
+  it('reads to this image as built: nothing at all', async () => {
+    expect(BUILT_TRIGGERS).toEqual(expect.arrayContaining([...OPERATOR_EVENT_TRIGGERS]));
+    expect(await liveSchemaDrift(app, ROLES)).toEqual({ atOnce: [], releaseShaped: [] });
+  });
+
+  // The image before 0080 knew the marks' triggers as written and these two as coming.
+  const imageBefore = { ...ROLES, built: { triggers: MARK_TRIGGERS, tables: BUILT_TABLES, checks: BUILT_CHECKS } };
+
+  it('reads to the image before as release-shaped alone, so 0080 raises no alarm as it ends', async () => {
+    expect(await liveSchemaDrift(app, { ...imageBefore, comingTriggers: OPERATOR_EVENT_TRIGGERS })).toEqual({
       atOnce: [],
       releaseShaped: [
         'audit.events carries "operator_events_by_operator", a coming trigger',
         'platform_controls.audit_events carries "operator_events_by_operator", a coming trigger',
       ],
     });
+  });
+
+  it('is the alarm at once to an image that never knew it: why 0079 had to reach a release first', async () => {
+    const { atOnce } = await liveSchemaDrift(app, { ...imageBefore, comingTriggers: [] });
+    expect(atOnce).toEqual([
+      'audit.events carries the trigger "operator_events_by_operator"',
+      'platform_controls.audit_events carries the trigger "operator_events_by_operator"',
+    ]);
   });
 
   it.each([

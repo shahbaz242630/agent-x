@@ -352,8 +352,8 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
 /**
  * The operator's events added by its role alone (PL-57): on both chains, an event in the operator's name from any
  * role but the operator's and the owner's (E10's repair puts original rows back as the owner, who could drop the
- * trigger anyway: the threat is the API's role) is refused as it is inserted, before a reader ever has to refuse it unsigned. Its migration
- * (operator-events-rule.db.test.ts holds its text) comes in the release after this image's.
+ * trigger anyway: the threat is the API's role) is refused as it is inserted, before a reader ever has to refuse it unsigned. 0080
+ * writes it, after 0079's image knew it as coming.
  */
 const OPERATOR_EVENTS_FUNCTION = 'audit.operator_events_by_operator';
 const OPERATOR_EVENTS_BODY = 'b462c31ce668bcdd0308bd2fa6bc4ce1b3aab20c1e991e200996c05a27fbede7';
@@ -370,11 +370,18 @@ function operatorEventsTrigger(table: string): WrittenTrigger {
   };
 }
 
+/** The operator's rule's triggers (0080), one on each chain's events. */
+export const OPERATOR_EVENT_TRIGGERS: readonly WrittenTrigger[] = OPERATOR_EVENT_TABLES.map(operatorEventsTrigger);
+
+/** Every trigger a migration added to a table already built, as written: the marks' and the operator's rule's. */
+export const BUILT_TRIGGERS: readonly WrittenTrigger[] = [...MARK_TRIGGERS, ...OPERATOR_EVENT_TRIGGERS];
+
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
+ * None now: 0080's left it for BUILT_TRIGGERS.
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = OPERATOR_EVENT_TABLES.map(operatorEventsTrigger);
+const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
@@ -1931,7 +1938,7 @@ export async function liveSchemaDrift<Schema>(
     fixedAtCreation = {},
     comingTriggers = COMING_TRIGGERS,
     built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks, keys: builtKeys = BUILT_KEYS } = {
-      triggers: MARK_TRIGGERS,
+      triggers: BUILT_TRIGGERS,
       tables: BUILT_TABLES,
       checks: BUILT_CHECKS,
     },

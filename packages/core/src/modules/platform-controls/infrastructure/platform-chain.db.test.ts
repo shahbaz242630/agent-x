@@ -116,6 +116,12 @@ const tamper = async (...statements: string[]): Promise<void> => {
   for (const statement of statements) await attacker.query(statement);
 };
 
+/** Runs statements as the owner: past 0080, the one role beside the operator's that may add an operator's event. */
+const tamperAsOwner = async (...statements: string[]): Promise<void> => {
+  // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.
+  for (const statement of statements) await database.as('owner').query(statement);
+};
+
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   const logger = testLogger();
@@ -342,7 +348,8 @@ describe('the organisations it records as created, for the anchor check (B1d-2)'
     // The owner can drop the table's check that details are a JSON object, as here.
     await tamper('alter table platform_controls.audit_events drop constraint audit_events_details_check');
     try {
-      await tamper(
+      // Copies of the operator's event, so added as the owner (0080 refuses any other role).
+      await tamperAsOwner(
         `insert into platform_controls.audit_events
          select seq + 1, gen_random_uuid(), recorded_at, actor_type, actor_id, action, '{"orgId":7}', prev_hash, hash, mac,
                 mac_key_version from platform_controls.audit_events where seq = 1`,
