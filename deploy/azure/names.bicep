@@ -63,7 +63,7 @@ func operatorOnly(key string) bool => length(filter(operatorOnlyKeys, prefix => 
 
 // The keys the chain repair holds (4D2e E10, PL-29): every version of the audit
 // chains' MAC, to check a chain with, and no other; the operator's signatures
-// it checks with their public halves alone.
+// and its rebases (E11) it checks with their public halves alone (publicHalves).
 @export()
 var restoreKeys = ['key-audit-mac-v']
 

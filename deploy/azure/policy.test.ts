@@ -721,6 +721,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         }),
         'api reads public-audit-rebase-v1',
         'api reads public-operator-signing-v1',
+        'chain-restore reads public-audit-rebase-v1',
         'chain-restore reads public-operator-signing-v1',
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
@@ -4771,6 +4772,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(declaredSecrets(restorer).map((secret) => secret.name)).toEqual([
       'db-owner-password',
       ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')),
+      'public-audit-rebase-v1',
       'public-operator-signing-v1',
       'chain-restore-request',
     ]);

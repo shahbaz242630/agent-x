@@ -66,9 +66,12 @@ const SERVICE = 'chain-restore';
 /** How the repair's connections are named in Postgres's own views. */
 const APPLICATION_NAME = 'agentx-chain-restore';
 
-/** The one key the repair holds, to check the chain with; the operator's own it checks with its public half alone. */
+/**
+ * The one key the repair holds, to check the chain with; the operator's own signature and its rebases (E11) it checks
+ * with their public halves alone, so the anchors it checks against are the planner's.
+ */
 const RESTORE_HELD_KEYS = ['audit-mac'] as const;
-const RESTORE_CHECKED_KEYS = ['operator-signing'] as const;
+const RESTORE_CHECKED_KEYS = ['operator-signing', 'audit-rebase'] as const;
 
 /** What the owner's login sets off (playbook I), said in every run's first lines. */
 export const OWNER_LOGIN_NOTE =
@@ -199,7 +202,7 @@ async function restoreRun(config: OperatorConfig, keys: KeyProvider, argv: reado
   log.info('operator.starting', { command: CHAIN_RESTORE, role: config.db.user, keys: keys.describe() });
   log.info('operator.chain_restore_owner_login', { restoreId, note: OWNER_LOGIN_NOTE });
   const store = evidenceStoreOf(config);
-  // It holds no `audit-rebase` key: a chain's rebase line it can't check is refused, never trusted (E11b gives it the public half).
+  // A chain's rebase line is checked with `audit-rebase`'s public half (E11), as the planner checks it with the key.
   const anchors = anchorLogOf(config, keys, logger);
   const refused = settingsProblems(config, store, anchors);
   if (store === undefined || anchors === undefined || config.db.drillHost === null || refused.length > 0) {
