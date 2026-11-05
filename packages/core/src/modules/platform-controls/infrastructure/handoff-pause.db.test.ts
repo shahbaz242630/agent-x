@@ -244,29 +244,33 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
     expect(await row()).toEqual({ paused: true, event_seq: null, event_id: null });
   });
 
-  it('an event planted with the app’s own rights, unsealed, the row pointed at it: tampering (B1 review)', async () => {
+  it('an event planted past the app, unsealed, the row pointed at it: refused to the app (0080), tampering (B1 review)', async () => {
     await change(false);
     await change(true);
-    // As anything running as the app role could add: an event after the head. The row pointed at it past the
-    // app, as the owner can (the app's role may no longer move it, PL-57).
-    await app.transaction().execute(async (tx) => {
-      await tx
-        .insertInto('platform_controls.audit_events')
-        .values({
-          seq: 3n,
-          id: '0199a0f0-0000-7000-8000-00000000b1f0',
-          recorded_at: new Date('2026-10-22T08:00:00Z'),
-          actor_type: 'system',
-          actor_id: 'operator',
-          action: HANDOFF_RESUMED,
-          details: '{"reason":"planted"}',
-          prev_hash: Buffer.alloc(32),
-          hash: Buffer.alloc(32, 1),
-          mac: Buffer.alloc(32, 2),
-          mac_key_version: 1,
-        })
-        .execute();
-    });
+    const planted = {
+      seq: 3n,
+      id: '0199a0f0-0000-7000-8000-00000000b1f0',
+      recorded_at: new Date('2026-10-22T08:00:00Z'),
+      actor_type: 'system',
+      actor_id: 'operator',
+      action: HANDOFF_RESUMED,
+      details: '{"reason":"planted"}',
+      prev_hash: Buffer.alloc(32),
+      hash: Buffer.alloc(32, 1),
+      mac: Buffer.alloc(32, 2),
+      mac_key_version: 1,
+    };
+    // The app's own rights no longer add an event in the operator's name (0080): refused as it is written.
+    await expect(
+      app.transaction().execute((tx) => tx.insertInto('platform_controls.audit_events').values(planted).execute()),
+    ).rejects.toMatchObject({ code: '42501' });
+    // The owner still can (E10's repair), so the reader behind the rule is tested with it: an event after the head,
+    // the row pointed at it past the app (the app's role may no longer move it, PL-57).
+    await tamper(
+      `insert into platform_controls.audit_events (seq, id, recorded_at, actor_type, actor_id, action, details, prev_hash,
+         hash, mac, mac_key_version) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      Object.values(planted),
+    );
     await tamper('update platform_controls.handoff_pause set paused = false, event_seq = 3, event_id = $1', [
       '0199a0f0-0000-7000-8000-00000000b1f0',
     ]);

@@ -74,15 +74,26 @@ const footholdKeys: KeyProvider = {
   sign: (purpose, message) => (purpose === 'operator-signing' ? (undefined as never) : keys.sign(purpose, message)),
 };
 
+/**
+ * Since 0080 the database refuses the API's role that event (operator-events-rule.db.test.ts), so it is planted here
+ * with the rule switched off, as someone past the app could: the plan's own check behind the rule is what's tested.
+ */
 async function forgedByApi(database: TestDatabase = live): Promise<void> {
-  await withTenant(appOn(database, false), orgId, (tx) =>
-    createAuditTrail({ keys: footholdKeys, ids: uuidV7Ids }).record(tx, orgId, {
-      actor: { type: 'system', id: 'operator' },
-      action: 'probe.stepped',
-      subject: { type: 'probe', id: USER, version: 1 },
-      details: {},
-    }),
-  );
+  const rule = (to: 'disable' | 'enable') =>
+    tamper(database, (admin) => admin.query(`alter table audit.events ${to} trigger operator_events_by_operator`));
+  await rule('disable');
+  try {
+    await withTenant(appOn(database, false), orgId, (tx) =>
+      createAuditTrail({ keys: footholdKeys, ids: uuidV7Ids }).record(tx, orgId, {
+        actor: { type: 'system', id: 'operator' },
+        action: 'probe.stepped',
+        subject: { type: 'probe', id: USER, version: 1 },
+        details: {},
+      }),
+    );
+  } finally {
+    await rule('enable');
+  }
 }
 
 /** Changes a database as its superuser with every trigger off: what someone past the app could do. */
