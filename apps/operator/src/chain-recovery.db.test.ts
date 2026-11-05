@@ -563,7 +563,15 @@ describe("PL-57 the plan judges the operator's events as every reader does", () 
     expect(actions(planned.rows)).toEqual([['replace', 1n]]);
     const [original] = (await chainRowsAlone(appOn(theCopy(), true), keys, orgId, null, 1)).rows;
     expect(original?.read?.columns.signature).toMatchObject({ keyVersion: 1 });
-    expect(planned.rows[0]).toEqual({ action: 'replace', seq: 1n, columns: original?.read?.columns });
+    // The live row it replaces kept beside it, every column as stored (E10's evidence): its signature gone.
+    const [damaged] = (await chainRowsAlone(appOn(live, true), keys, orgId, null, 1)).rows;
+    expect(damaged?.stored).toMatchObject({ signature: null, signature_key_version: null });
+    expect(planned.rows[0]).toEqual({
+      action: 'replace',
+      seq: 1n,
+      columns: original?.read?.columns,
+      replaced: damaged?.stored,
+    });
   });
 
   it("keeps an unsigned operator's event recorded before signing started on its chain", async () => {

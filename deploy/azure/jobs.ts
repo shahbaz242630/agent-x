@@ -32,12 +32,28 @@ import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text, UsageErro
 const FIRST_DEPLOY = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'] as const;
 
 /**
- * The jobs, by the work each does (names.bicep; a test holds the two equal):
- * a first deploy's, then the operator's command (B1c), which is never started
- * as it is deployed: it holds no request until a person writes one.
+ * The jobs that run a request a person writes onto them first, never started as
+ * they are deployed (each holds no request until then): the operator's command
+ * (B1c) and the chain repair (4D2e E10), both by deploy/azure/operator.ts.
  */
-export const JOBS = [...FIRST_DEPLOY, 'operator'] as const;
+const REQUEST_JOBS = ['operator', 'chain-restore'] as const;
+
+/**
+ * The jobs, by the work each does (names.bicep; a test holds the two equal):
+ * a first deploy's, then those that run a request.
+ */
+export const JOBS = [...FIRST_DEPLOY, ...REQUEST_JOBS] as const;
 export type Job = (typeof JOBS)[number];
+
+/** Why a job that runs a request isn't run or started as it is deployed. */
+const notAsDeployed = (job: Job, command: 'run' | 'start'): UsageError =>
+  new UsageError(
+    `the ${job === 'operator' ? "operator's job" : 'chain repair'} isn't ${command === 'run' ? 'run' : 'started'} as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it`,
+  );
+
+/** Whether a job runs only a request written onto it first. */
+const runsRequest = (job: Job): job is (typeof REQUEST_JOBS)[number] =>
+  (REQUEST_JOBS as readonly string[]).includes(job);
 
 /**
  * The load test's jobs (D2c; apps.bicep `loadJobs`), there only for a load
@@ -131,11 +147,7 @@ export function parseArguments(argv: readonly string[]): Request {
     throw new UsageError(`say run, start, wait or cleanup, not ${command ?? 'nothing'}`);
   }
   if (!isJob(job)) throw new UsageError(`${job ?? 'nothing'} isn't a job: ${JOBS.join(', ')}`);
-  if (command !== 'wait' && job === 'operator') {
-    throw new UsageError(
-      `the operator's job isn't ${command === 'run' ? 'run' : 'started'} as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it`,
-    );
-  }
+  if (command !== 'wait' && runsRequest(job)) throw notAsDeployed(job, command);
   if (command !== 'wait') {
     if (rest.length > 0) throw new UsageError(`${command} takes one job, not ${rest.join(' ')} as well`);
     return { command, job };
@@ -327,7 +339,7 @@ function clock(value: string): string {
 
 /** What to run after a job that succeeded, in a first deploy; nothing follows the operator's. */
 function after(job: Job): string {
-  if (job === 'operator') return "The operator's request has run: the lines above say what it did.";
+  if (runsRequest(job)) return 'The request has run: the lines above say what it did.';
   const next = FIRST_DEPLOY[FIRST_DEPLOY.indexOf(job) + 1];
   return next === undefined
     ? 'That is the last of the four a first deploy runs.'

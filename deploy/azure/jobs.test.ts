@@ -284,18 +284,19 @@ describe('parseArguments', () => {
     expect(parseArguments(['cleanup'])).toEqual({ command: 'cleanup', job: 'zitadel-setup' });
   });
 
-  it("reads the three ways the runner is used, for every job, and only waits for the operator's", () => {
+  it("reads the three ways the runner is used, for every job, and only waits for the operator's and the chain repair's", () => {
     for (const job of JOBS) {
-      if (job === 'operator') {
-        // Started as deployed, it holds no request and refuses (B1c-2a).
+      if (job === 'operator' || job === 'chain-restore') {
+        // Started as deployed, it holds no request and refuses (B1c-2a; the chain repair's since 4D2e E10).
+        const which = job === 'operator' ? "operator's job" : 'chain repair';
         expect(() => parseArguments(['run', job])).toThrow(
           new UsageError(
-            "the operator's job isn't run as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it",
+            `the ${which} isn't run as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it`,
           ),
         );
         expect(() => parseArguments(['start', job])).toThrow(
           new UsageError(
-            "the operator's job isn't started as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it",
+            `the ${which} isn't started as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it`,
           ),
         );
       } else {
@@ -413,21 +414,24 @@ describe('run', () => {
 
   it('names the next job in the order a first deploy runs them, and says when there is none', async () => {
     const next: string[] = [];
-    for (const job of JOBS.filter((each) => each !== 'operator')) {
+    for (const job of JOBS.filter((each) => each !== 'operator' && each !== 'chain-restore')) {
       const done = await run(['run', job], { started: `${jobName(job)}-abc1234` });
       expect(done.status).toBe(0);
       next.push(done.said.at(-1) ?? '');
     }
-    // The operator's is no part of a first deploy.
-    const operator = await run(['wait', 'operator', `${jobName('operator')}-abc1234`]);
-    expect(operator.status).toBe(0);
-    next.push(operator.said.at(-1) ?? '');
+    // The operator's and the chain repair's are no part of a first deploy.
+    for (const job of ['operator', 'chain-restore'] as const) {
+      const waited = await run(['wait', job, `${jobName(job)}-abc1234`]);
+      expect(waited.status).toBe(0);
+      next.push(waited.said.at(-1) ?? '');
+    }
     expect(next).toEqual([
       'In a first deploy, the next is: node deploy/azure/jobs.ts run migrate',
       'In a first deploy, the next is: node deploy/azure/jobs.ts run zitadel-init',
       'In a first deploy, the next is: node deploy/azure/jobs.ts run zitadel-setup',
       'That is the last of the four a first deploy runs.',
-      "The operator's request has run: the lines above say what it did.",
+      'The request has run: the lines above say what it did.',
+      'The request has run: the lines above say what it did.',
     ]);
   });
 

@@ -261,8 +261,9 @@ const PROBLEM_LINES = 'where tostring(parse_json(Log).level) in~ ("warn", "warni
  */
 const SAYS_FROM_OWN =
   /^extend Says = iff\(coalesce\(ContainerAppName, JobName\) in \(((?:"[a-z0-9-]+", )*"[a-z0-9-]+")\), substring\(tostring\(parse_json\(Log\)\.says\), 0, 300\), ""\)$/;
-/** Our logger's containers: the API and the three jobs built on it. */
-const OWN_CONTAINER = /^"(?:ca-agentx-(?:stg|prd)-api|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator))"$/;
+/** Our logger's containers: the API and the four jobs built on it (the chain repair's since 4D2e E10). */
+const OWN_CONTAINER =
+  /^"(?:ca-agentx-(?:stg|prd)-api|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator|chain-restore))"$/;
 const NO_WORDS =
   'A warning or error with no plain words, from the login service or another part: open the saved query What broke, in plain words.';
 const SAYS_FALLBACK = `extend Says = iff(isempty(Says), "${NO_WORDS}", Says)`;
@@ -438,6 +439,11 @@ const GRANTS: ReadonlySet<string> = new Set([
   'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
+  // 4D2e E10 (PL-29): the chain repair writes as the owner, the one job besides the migration; it checks the chain
+  // with the MAC key and the operator's signatures with their public halves, and holds no other key.
+  'chain-restore reads db-owner-password',
+  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')).map((key) => `chain-restore reads ${key}`),
+  ...[...PUBLIC_HALVES.values()].map((half) => `chain-restore reads ${half}`),
   'zitadel reads db-zitadel-password',
   'zitadel reads zitadel-masterkey',
   'zitadel reads login-client-public-key',
@@ -467,7 +473,14 @@ const secretsRead = (workload: string): ReadonlySet<string> =>
  * a server's roles and databases, the app's migrations, Zitadel's own init and
  * setup, and the operator's command (B1c). This list is what must be there.
  */
-const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'];
+const JOB_WORKLOADS: readonly string[] = [
+  'db-setup',
+  'migrate',
+  'zitadel-init',
+  'zitadel-setup',
+  'operator',
+  'chain-restore',
+];
 
 /**
  * What a job may hold itself rather than read from the vault, by the job: only
@@ -498,6 +511,13 @@ const HELD: Readonly<
     value: '[]',
     command: ['node', 'apps/operator/src/main.ts'],
     args: ['--request', '/mnt/secrets/operator-request'],
+  },
+  // The chain repair's request (4D2e E10; apps.bicep `restoreRequest`), held as the operator's is.
+  'chain-restore': {
+    name: 'chain-restore-request',
+    value: '[]',
+    command: ['node', 'apps/operator/src/chain-restore-main.ts'],
+    args: ['--request', '/mnt/secrets/chain-restore-request'],
   },
   // The load test's run request (D2c; apps.bicep `loadRequest`), written by load.ts before each run.
   ...Object.fromEntries(
@@ -814,6 +834,9 @@ const ANCHOR_READ_ACTIONS = ANCHOR_ACTIONS;
 
 /** The operator's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors-reader');
+
+/** The chain repair's read of the plans as a role assignment names it, without case (modules/evidence.bicep, 4D2e E10). */
+const planReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-plan-reader');
 
 /** The audit exports' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-writer');
@@ -2000,8 +2023,21 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: evidenceRoleName(groupOf(snapshot)),
       dataActions: [EVIDENCE_WRITE],
       containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
-      workload: 'operator',
+      workloads: STORE_WRITERS,
       called: "the audit exports' role",
+      on: 'the export container',
+    },
+    problem,
+  );
+  // The chain repair reads the plan it applies (4D2e E10): reading alone, on the exports, to its identity alone.
+  storeRoleProblems(
+    snapshot,
+    {
+      name: planReaderRoleName(groupOf(snapshot)),
+      dataActions: ANCHOR_READ_ACTIONS,
+      containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
+      workloads: ['chain-restore'],
+      called: "the chain repair's read of the plans",
       on: 'the export container',
     },
     problem,
@@ -2014,8 +2050,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_EVIDENCE_CLIENT_ID',
       accounts,
       container: EVIDENCE_CONTAINER,
-      holders: (workload) => (isOperatorJob(workload) ? writers : undefined),
-      holder: "the operator's job writes to the store",
+      holders: (workload) => ownOf(workload, STORE_WRITERS, writers),
+      holder: "the operator's and the chain repair's jobs write to the store",
       store: 'store',
     },
     problem,
@@ -2026,7 +2062,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workload: 'api',
+      workloads: ['api'],
       called: "the anchors' role",
       on: 'the anchors container',
     },
@@ -2038,7 +2074,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorReaderRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_READ_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workload: 'operator',
+      workloads: STORE_WRITERS,
       called: "the operator's read of the anchors",
       on: 'the anchors container',
     },
@@ -2052,11 +2088,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
       accounts,
       container: ANCHOR_CONTAINER,
-      holders: (workload) => {
-        if (isApiApp(workload)) return keepers;
-        return isOperatorJob(workload) ? readers : undefined;
-      },
-      holder: "the API keeps the chains' anchors and the operator's job reads them",
+      holders: (workload) => (isApiApp(workload) ? keepers : ownOf(workload, STORE_WRITERS, readers)),
+      holder: "the API keeps the chains' anchors and the operator's and the chain repair's jobs read them",
       store: 'store',
     },
     problem,
@@ -2067,9 +2100,29 @@ const evidenceStore: Check = (snapshot, expected, add) => {
 const isApiApp = (workload: PredictedResource): boolean =>
   workload.type === TYPES.app && jobWorkloadOf(workload.name) === 'api';
 
-/** The operator's job. */
-const isOperatorJob = (workload: PredictedResource): boolean =>
-  workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator';
+/**
+ * The jobs that write to the evidence store and read the anchors, each as its
+ * own identity: the operator's (E10c, 4D2e E9) and the chain repair's (4D2e E10).
+ */
+const STORE_WRITERS: readonly string[] = ['operator', 'chain-restore'];
+
+/** A job among `jobs`, as a store's settings judge it. */
+const isJobOf = (workload: PredictedResource, jobs: readonly string[]): boolean =>
+  workload.type === TYPES.job && jobs.includes(jobWorkloadOf(workload.name));
+
+/**
+ * The identities a job among `jobs` may name for a store: its own alone, of
+ * those the store's role is given to, so one can't act as another; undefined
+ * for any other workload, never told of the store.
+ */
+const ownOf = (
+  workload: PredictedResource,
+  jobs: readonly string[],
+  given: readonly PredictedResource[],
+): readonly PredictedResource[] | undefined =>
+  isJobOf(workload, jobs)
+    ? given.filter((identity) => workloadOf(identity.name) === jobWorkloadOf(workload.name))
+    : undefined;
 
 /**
  * The anchors' epoch (AGENTX_ANCHOR_EPOCH, 4D2e E9): the API, which signs for it,
@@ -2085,23 +2138,24 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
         .filter((entry) => at(entry, 'name') === 'AGENTX_ANCHOR_EPOCH')
         .map((entry) => text(at(entry, 'value'))),
     );
-    if (isApiApp(workload) || isOperatorJob(workload)) {
+    if (isApiApp(workload) || isJobOf(workload, STORE_WRITERS)) {
       values.set(workload.name, set);
     } else if (set.length > 0) {
       add({
         rule: 'anchor-epoch',
         resource: workload.name,
-        message: "sets AGENTX_ANCHOR_EPOCH: only the API and the operator's job",
+        message: "sets AGENTX_ANCHOR_EPOCH: only the API, the operator's job and the chain repair's",
       });
     }
   }
   const said = [...values.values()];
   const first = said[0]?.[0];
-  if (said.length !== 2 || said.some((set) => set.length !== 1 || set[0] !== first)) {
+  if (said.length !== 1 + STORE_WRITERS.length || said.some((set) => set.length !== 1 || set[0] !== first)) {
     add({
       rule: 'anchor-epoch',
       resource: 'the deployment',
-      message: "must set AGENTX_ANCHOR_EPOCH once on the API and once on the operator's job, to the same value",
+      message:
+        "must set AGENTX_ANCHOR_EPOCH once on the API, once on the operator's job and once on the chain repair's, to the same value",
     });
   }
 };
@@ -2155,8 +2209,8 @@ interface StoreRole {
   readonly dataActions: readonly string[];
   /** The containers it may be given on. */
   readonly containers: readonly PredictedResource[];
-  /** The one app or job whose identity it is given to. */
-  readonly workload: string;
+  /** The apps or jobs whose identities it is given to, once each. */
+  readonly workloads: readonly string[];
   /** What a problem calls it, and the container it is given on. */
   readonly called: string;
   readonly on: string;
@@ -2195,23 +2249,27 @@ function storeRoleProblems(
   }
   const role = customRoleId(group, wanted.name);
   const assignments = ofType(snapshot, TYPES.roleAssignment).filter((assignment) => roleOf(assignment) === role);
+  const given = new Set<string>();
   for (const assignment of assignments) {
     const identity = principalOf(snapshot, assignment);
+    const workload = identity === undefined ? undefined : workloadOf(identity.name);
     if (
       !wanted.containers.some((container) => container.id === scopeOf(assignment)) ||
-      identity === undefined ||
-      workloadOf(identity.name) !== wanted.workload
+      workload === undefined ||
+      !wanted.workloads.includes(workload)
     ) {
       problem(
         assignment.name,
-        `must give ${wanted.called} on ${wanted.on} alone, to the ${wanted.workload}'s identity (principalType ServicePrincipal)`,
+        `must give ${wanted.called} on ${wanted.on} alone, to the ${wanted.workloads.join("'s or the ")}'s identity (principalType ServicePrincipal)`,
       );
+    } else {
+      given.add(workload);
     }
   }
-  if (assignments.length !== 1) {
+  if (assignments.length !== wanted.workloads.length || given.size !== wanted.workloads.length) {
     problem(
       'the deployment',
-      `must give ${wanted.called} once, to the ${wanted.workload}; it gives it ${String(assignments.length)} times`,
+      `must give ${wanted.called} ${wanted.workloads.length === 1 ? 'once' : 'once each'}, to the ${wanted.workloads.join(' and the ')}; it gives it ${String(assignments.length)} times`,
     );
   }
   return assignments.flatMap((assignment) => principalOf(snapshot, assignment) ?? []);
@@ -2416,7 +2474,7 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
       name: downloadsRoleName(groupOf(snapshot)),
       dataActions: DOWNLOADS_ACTIONS,
       containers: ofType(snapshot, TYPES.container).filter((container) => inDownloadsStore(snapshot, container)),
-      workload: 'api',
+      workloads: ['api'],
       called: "the activity downloads' role",
       on: 'the downloads container',
     },
@@ -3520,7 +3578,8 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const downloads = customRoleId(groupOf(snapshot), downloadsRoleName(groupOf(snapshot)));
   const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
   const readAnchors = customRoleId(groupOf(snapshot), anchorReaderRoleName(groupOf(snapshot)));
-  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors]);
+  const readPlans = customRoleId(groupOf(snapshot), planReaderRoleName(groupOf(snapshot)));
+  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors, readPlans]);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
@@ -3625,6 +3684,7 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
     evidenceRoleName(groupOf(snapshot)),
     anchorRoleName(groupOf(snapshot)),
     anchorReaderRoleName(groupOf(snapshot)),
+    planReaderRoleName(groupOf(snapshot)),
     downloadsRoleName(groupOf(snapshot)),
   ]);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));

@@ -957,6 +957,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing was changed. The chain still holds its point, fails its own check, or the store was unreadable.',
     next: 'Read the reason in the line. A chain failing its own check needs playbook H, not a rebase.',
   },
+  'operator.chain_restore_refused': {
+    happened: "An organisation's audit chain repair was refused or rolled back.",
+    broke: 'Nothing was changed, and the organisation stays on hold.',
+    next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
+  },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
     broke: "Nothing was changed: the organisation or its first admin's invitation already exists from an earlier run.",

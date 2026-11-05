@@ -103,6 +103,7 @@ import {
   auditExportOf,
   CHAIN_REBASE_USAGE,
   CHAIN_RECOVERY_USAGE,
+  DISCARD_FORK,
   FIRST_ADMIN_USAGE,
   type HandoffCommand,
   handoffAskedOf,
@@ -117,7 +118,7 @@ import {
   UUID_V7,
 } from './request.ts';
 import { checkRestoredCopy } from './restore-check.ts';
-import { planChainRecovery, planFile } from './chain-recovery.ts';
+import { planChainRecovery, planDigest, planFile } from './chain-recovery.ts';
 
 /** Every table the commands reach. */
 type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables & HandoffPauseTables & RebaseTables;
@@ -152,7 +153,7 @@ const ANCHOR_READ_NEVER_ALERTS_MS = Number.MAX_SAFE_INTEGER;
 export const USAGE = 'create-organization --name <name>';
 
 /** How the job names the file its request is in. */
-const REQUEST_FLAG = '--request';
+export const REQUEST_FLAG = '--request';
 
 /** The parts of `process` the command uses. Tests pass a stand-in. */
 export interface OperatorProcess {
@@ -215,6 +216,8 @@ type Request =
       readonly orgId: string;
       /** The plan's ID: its file's name in the evidence store. */
       readonly id: string;
+      /** The named flag (E10): a fork's live branch planned away rather than the plan refused. */
+      readonly discardFork: boolean;
     }
   | {
       readonly command: typeof CHAIN_REBASE;
@@ -241,12 +244,12 @@ type HandoffRequest = {
 }[HandoffCommand];
 
 /** Why a request can't be done, each rule broken. */
-interface Problems {
+export interface Problems {
   readonly problems: readonly string[];
 }
 
 /** One problem. */
-const problem = (text: string): Problems => ({ problems: [text] });
+export const problem = (text: string): Problems => ({ problems: [text] });
 
 /**
  * A request file's text: a plain file (never a pipe or a device, which could
@@ -282,7 +285,7 @@ function readRequestFile(file: string): { readonly text: string } | Problems {
  * The words a request file holds, a JSON list of the command's arguments, or
  * the problems. A problem says what is wrong with the file, never what is in it.
  */
-function requestWords(argv: readonly string[]): { readonly words: readonly string[] } | Problems {
+export function requestWords(argv: readonly string[]): { readonly words: readonly string[] } | Problems {
   const [, file, ...rest] = argv;
   if (file === undefined || rest.length > 0) {
     return problem(`${REQUEST_FLAG} takes the one file that holds the request, and nothing else`);
@@ -359,18 +362,25 @@ function restoreCheckAsked(words: readonly string[], fromFile: boolean): Request
     : problem(`${RESTORE_CHECK} runs only from a request file, as the one word in its list`);
 }
 
-/** A chain recovery plan (4D2e E9): only from a file, the organisation and the plan's ID named. */
+/** Whether what follows a request's own words is nothing, or the named flag alone (E10's --discard-fork). */
+export const flagAlone = (more: readonly string[]): { readonly discardFork: boolean } | undefined => {
+  if (more.length === 0) return { discardFork: false };
+  return more.length === 1 && more[0] === DISCARD_FORK ? { discardFork: true } : undefined;
+};
+
+/** A chain recovery plan (4D2e E9): only from a file, the organisation and the plan's ID named, the fork flag maybe. */
 function chainRecoveryAsked(words: readonly string[], fromFile: boolean): Request | Problems {
   const [, orgFlag, orgId, idFlag, id, ...more] = words;
   if (!fromFile) return problem(`${CHAIN_RECOVERY} runs only from a request file: ${CHAIN_RECOVERY_USAGE}`);
-  if (!(orgFlag === '--org' && idFlag === '--id' && id !== undefined && more.length === 0)) {
+  const flag = flagAlone(more);
+  if (!(orgFlag === '--org' && idFlag === '--id' && id !== undefined && flag !== undefined)) {
     return problem(`the request file holds ${CHAIN_RECOVERY_USAGE} as a JSON list, and nothing else`);
   }
   const problems = [
     ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
     ...(UUID_V7.test(id) ? [] : ["the plan's ID must be a UUIDv7, in lower case"]),
   ];
-  return problems.length > 0 ? { problems } : { command: CHAIN_RECOVERY, orgId: String(orgId), id };
+  return problems.length > 0 ? { problems } : { command: CHAIN_RECOVERY, orgId: String(orgId), id, ...flag };
 }
 
 /** The chain a rebase names: the platform's, or an organisation's by its ID. */
@@ -690,7 +700,7 @@ async function handoff(
 }
 
 /** Where an audit export's file goes: the write-once container, or the local folder in development and test. */
-function evidenceStoreOf({ evidence: { directory, container } }: OperatorConfig): EvidenceStore | undefined {
+export function evidenceStoreOf({ evidence: { directory, container } }: OperatorConfig): EvidenceStore | undefined {
   if (container !== null) {
     return azureBlobStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
   }
@@ -787,7 +797,7 @@ function anchorStoreOf({ anchors: { directory, container } }: OperatorConfig): W
  * (4D2e E9), or nothing where the store or the keys aren't set. A rebase's line
  * is checked with the command's own `audit-rebase` key, which signs them (E11).
  */
-function anchorLogOf(config: OperatorConfig, keys: KeyProvider, logger: Logger): AnchorLog | undefined {
+export function anchorLogOf(config: OperatorConfig, keys: KeyProvider, logger: Logger): AnchorLog | undefined {
   const { epoch, publicKeys } = config.anchors;
   const store = anchorStoreOf(config);
   if (publicKeys === null || store === undefined) return undefined;
@@ -818,7 +828,7 @@ async function chainRecovery(
   request: Extract<Request, { command: typeof CHAIN_RECOVERY }>,
   logger: Logger,
 ): Promise<number> {
-  const { orgId, id: planId } = request;
+  const { orgId, id: planId, discardFork } = request;
   const log = logger.child({ orgId });
   const store = evidenceStoreOf(config);
   // The config has checked each public key's form, so the checker takes them as they are.
@@ -840,8 +850,10 @@ async function chainRecovery(
       return 1;
     }
     const anchor = anchors.latest({ kind: 'organisation', orgId });
-    const plan = await planChainRecovery({ copy, live, keys, orgId, anchor });
+    const plan = await planChainRecovery({ copy, live, keys, orgId, anchor, discardFork });
     const file = planFile(plan, { planId, orgId, release: config.release, run: config.run, anchor });
+    // What a repair is asked with (chain-restore): the plan as read, by its digest alone.
+    const digest = planDigest(plan, orgId, anchor);
     if ((await store.put(`${orgId}/chain-recovery-${planId}.ndjson`, file)) === 'there_already') {
       log.error('operator.done_before', { command: CHAIN_RECOVERY, planId });
       return 1;
@@ -849,6 +861,7 @@ async function chainRecovery(
     if (!plan.ok) {
       log.error('operator.chain_recovery_refused', {
         planId,
+        discardFork,
         reason: plan.reason,
         seq: plan.seq,
         problem: plan.problem ?? null,
@@ -858,6 +871,9 @@ async function chainRecovery(
     const count = (action: string): number => plan.rows.filter((row) => row.action === action).length;
     log.info('operator.chain_recovery_planned', {
       planId,
+      digest,
+      discardFork,
+      forkDiscarded: plan.forkDiscarded,
       putBack: count('put_back'),
       replaced: count('replace'),
       removed: count('remove'),
