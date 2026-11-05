@@ -40,16 +40,50 @@ export const RESTORE_CHECK = 'restore-check';
 /** The request for the restore drill's check, as its file holds it. */
 export const restoreCheckRequest = (): string => JSON.stringify([RESTORE_CHECK]);
 
+/**
+ * The named flag (4D2e E10) that lets a plan discard a fork's live branch, the
+ * events the app wrote after the damage, rather than be refused: last in a
+ * plan's request and its repair's, never assumed.
+ */
+export const DISCARD_FORK = '--discard-fork';
+
 /** What a request file holds to plan an organisation's chain recovery from the drill's copy (4D2e E9, PL-29): only ever a file. */
-export const CHAIN_RECOVERY_USAGE = 'chain-recovery-plan --org <organisation ID> --id <new plan ID>';
+export const CHAIN_RECOVERY_USAGE = `chain-recovery-plan --org <organisation ID> --id <new plan ID> [${DISCARD_FORK}]`;
 
 /** Why a chain recovery plan can't be made without the anchors' store and the public keys its lines are checked with. */
 export const NO_ANCHORS_PROBLEM =
   "no store of the chains' anchors is set to check a plan against: AGENTX_AUDIT_ANCHORS_URL deployed, or AGENTX_AUDIT_ANCHORS_DIR in development and test, each with AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS";
 
 /** The request for a chain recovery plan, as its file holds it. */
-export const chainRecoveryRequest = (orgId: string, id: string): string =>
-  JSON.stringify(['chain-recovery-plan', '--org', orgId, '--id', id]);
+export const chainRecoveryRequest = (orgId: string, id: string, discardFork = false): string =>
+  JSON.stringify(['chain-recovery-plan', '--org', orgId, '--id', id, ...(discardFork ? [DISCARD_FORK] : [])]);
+
+/** The chain repair's command word (4D2e E10, PL-29): its own job, as the owner. */
+export const CHAIN_RESTORE = 'chain-restore';
+
+/** What the chain repair's request file holds: the plan the operator read, by its ID and digest, and the repair's own ID. */
+export const CHAIN_RESTORE_USAGE = `${CHAIN_RESTORE} --org <organisation ID> --plan <plan ID> --digest <the plan's digest, 64 hex> --id <new repair ID> [${DISCARD_FORK}]`;
+
+/** A plan's digest (chain-recovery.ts's planDigest): SHA-256 in lower-case hex. */
+export const PLAN_DIGEST_HEX = /^[0-9a-f]{64}$/;
+
+/** The request for a chain repair, as its file holds it. */
+export const chainRestoreRequest = (
+  asked: { readonly orgId: string; readonly planId: string; readonly digest: string; readonly id: string },
+  discardFork = false,
+): string =>
+  JSON.stringify([
+    CHAIN_RESTORE,
+    '--org',
+    asked.orgId,
+    '--plan',
+    asked.planId,
+    '--digest',
+    asked.digest,
+    '--id',
+    asked.id,
+    ...(discardFork ? [DISCARD_FORK] : []),
+  ]);
 
 /** What a request file holds to export an organisation's audit log for a case (Phase 3 E10c, ADR-005 §6): only ever a file. */
 export const AUDIT_EXPORT_USAGE =

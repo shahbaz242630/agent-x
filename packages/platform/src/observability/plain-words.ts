@@ -942,6 +942,11 @@ export const PLAIN_WORDS = {
       'Nothing was changed, and the organisation stays on hold: its copy cannot mend the chain with original records.',
     next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
   },
+  'operator.chain_restore_refused': {
+    happened: "An organisation's audit chain repair was refused or rolled back.",
+    broke: 'Nothing was changed, and the organisation stays on hold.',
+    next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
+  },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
     broke: "Nothing was changed: the organisation or its first admin's invitation already exists from an earlier run.",

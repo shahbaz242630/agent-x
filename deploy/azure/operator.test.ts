@@ -17,6 +17,8 @@ import {
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
+  chainRecoveryRequest,
+  chainRestoreRequest,
   restoreCheckRequest,
   UUID_V7,
 } from '../../apps/operator/src/request.ts';
@@ -24,6 +26,7 @@ import type { Az, AzResult } from './deploy.ts';
 import { jobName, JOBS_API, UsageError } from './jobs.ts';
 import {
   auditExport,
+  chainRestore,
   createOrganization,
   handoffChange,
   type HandoffArguments,
@@ -35,7 +38,12 @@ import {
   parseAuditExport,
   parseFirstAdmin,
   parseHandoff,
+  parseRecoveryPlan,
+  parseRestore,
+  recoveryPlan,
   REQUEST_SECRET,
+  RESTORE_JOB,
+  RESTORE_REQUEST_SECRET,
   restoreCheck,
   USAGE,
 } from './operator.ts';
@@ -73,6 +81,7 @@ const EARLIER_ID = '0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b';
 
 const ARM = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers`;
 const JOB_URL = `${ARM}/Microsoft.App/jobs/job-agentx-stg-operator?api-version=${JOBS_API}`;
+const RESTORE_URL = `${ARM}/Microsoft.App/jobs/job-agentx-stg-chain-restore?api-version=${JOBS_API}`;
 const API_URL = `${ARM}/Microsoft.App/containerApps/ca-agentx-stg-api?api-version=${JOBS_API}`;
 const WORKSPACE_URL = `${ARM}/Microsoft.OperationalInsights/workspaces/log-agentx-stg?api-version=2025-02-01`;
 
@@ -111,6 +120,14 @@ const operatorContainer = (on: string, build: string) => ({
   name: 'operator',
   resources: { cpu: 0.5, memory: '1Gi' },
   volumeMounts: [{ mountPath: '/mnt/secrets', volumeName: 'secrets' }],
+});
+
+/** The chain repair's container (4D2e E10): the operator's, running its own command on its own request. */
+const restoreContainer = (on: string, build: string) => ({
+  ...operatorContainer(on, build),
+  name: 'chain-restore',
+  command: ['node', 'apps/operator/src/chain-restore-main.ts'],
+  args: ['--request', `/mnt/secrets/${RESTORE_REQUEST_SECRET}`],
 });
 
 /** The address a first admin's link starts with: never a real domain in the repository. */
@@ -179,7 +196,20 @@ type Ending =
   | 'resumed-by-another'
   | 'paused-as-born'
   | 'resume-refused'
-  | 'resumed-other';
+  | 'resumed-other'
+  | 'planned'
+  | 'plan-refused'
+  | 'plan-copy-broken'
+  | 'restored'
+  | 'restored-other'
+  | 'restore-plan'
+  | 'restore-stale'
+  | 'restore-signing'
+  | 'restore-moved'
+  | 'restore-unverified'
+  | 'restore-unknown'
+  | 'restore-done-before'
+  | 'restore-settings';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
@@ -348,6 +378,73 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     }),
     TERMINATED,
   ],
+  planned: (id) => [
+    said({
+      event: 'operator.chain_recovery_planned',
+      planId: id,
+      digest: 'ab'.repeat(32),
+      putBack: 2,
+      replaced: 1,
+      removed: 0,
+      headReplaced: true,
+      forkDiscarded: false,
+    }),
+    TERMINATED,
+  ],
+  'plan-refused': (id) => [
+    said({ event: 'operator.chain_recovery_refused', planId: id, reason: 'fork', seq: '4', problem: null }),
+    TERMINATED,
+  ],
+  'plan-copy-broken': (id) => [
+    said({ event: 'operator.chain_recovery_refused', planId: id, reason: 'copy_broken', seq: '2', problem: 'mac' }),
+    TERMINATED,
+  ],
+  restored: (id) => [
+    said({ event: 'operator.chain_restore_owner_login', restoreId: id }),
+    said({
+      event: 'operator.chain_restored',
+      restoreId: id,
+      putBack: 2,
+      replaced: 1,
+      removed: 0,
+      endsAt: '9',
+      holdKept: true,
+    }),
+    TERMINATED,
+  ],
+  'restored-other': () => [said({ event: 'operator.chain_restored', restoreId: OTHER_ID }), TERMINATED],
+  'restore-plan': (id) => [
+    said({ event: 'operator.chain_restore_refused', restoreId: id, reason: 'plan', planRefused: 'fork', seq: '4' }),
+    TERMINATED,
+  ],
+  'restore-stale': (id) => [
+    said({ event: 'operator.chain_restore_refused', restoreId: id, reason: 'stale' }),
+    TERMINATED,
+  ],
+  'restore-signing': (id) => [
+    said({ event: 'operator.chain_restore_refused', restoreId: id, reason: 'signing_start' }),
+    TERMINATED,
+  ],
+  'restore-moved': (id) => [
+    said({ event: 'operator.chain_restore_refused', restoreId: id, reason: 'moved' }),
+    TERMINATED,
+  ],
+  'restore-unverified': (id) => [
+    said({ event: 'operator.chain_restore_refused', restoreId: id, reason: 'unverified', problem: 'mac', seq: '3' }),
+    TERMINATED,
+  ],
+  'restore-unknown': (id) => [
+    said({ event: 'operator.chain_restore_refused', restoreId: id, reason: 'something_new' }),
+    TERMINATED,
+  ],
+  'restore-done-before': (id) => [said({ event: 'operator.done_before', restoreId: id }), TERMINATED],
+  'restore-settings': () => [
+    said({
+      event: 'operator.refused',
+      problems: ['AGENTX_DB_USER must be agentx_owner: only the owner may repair a chain'],
+    }),
+    TERMINATED,
+  ],
   'resumed-other': () => [
     said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
     said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
@@ -371,6 +468,9 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'resumed-by-another',
   'paused-as-born',
   'resumed-other',
+  'planned',
+  'restored',
+  'restored-other',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -406,6 +506,8 @@ interface Script {
   /** The states `execution show` gives, the last repeated. */
   readonly states?: readonly string[];
   readonly ending?: Ending;
+  /** The chain repair's job (4D2e E10) in place of the operator's. */
+  readonly restore?: boolean;
 }
 
 /** A change Azure is settling: the readings left that show the job as it was, then the change. */
@@ -440,9 +542,19 @@ class FakeAzure implements Az {
   #changes = 0;
   #readings = 0;
 
+  /** The job's own address and the secret its request is in: the operator's, or the chain repair's. */
+  readonly #jobUrl: string;
+  readonly #secret: string;
+  /** The name Azure gives a run of the job. */
+  readonly #run: string;
+
   constructor(script: Script) {
     this.#script = script;
-    this.container = operatorContainer(script.jobImage ?? image('a'), script.jobBuild ?? commit('a'));
+    const made = script.restore === true ? restoreContainer : operatorContainer;
+    this.container = made(script.jobImage ?? image('a'), script.jobBuild ?? commit('a'));
+    this.#jobUrl = script.restore === true ? RESTORE_URL : JOB_URL;
+    this.#secret = script.restore === true ? RESTORE_REQUEST_SECRET : REQUEST_SECRET;
+    this.#run = script.restore === true ? 'job-agentx-stg-chain-restore-7x2kq9m' : RUN;
     this.state = script.state ?? 'Succeeded';
   }
 
@@ -466,13 +578,13 @@ class FakeAzure implements Az {
         }
         this.heldAtStart = this.request;
         this.#busy = script.busy ?? 0;
-        return json({ id: '/subscriptions/x', name: RUN });
+        return json({ id: '/subscriptions/x', name: this.#run });
       case 'containerapp job execution show': {
         const states = script.states ?? [SUCCEEDS.has(script.ending ?? 'created') ? 'Succeeded' : 'Failed'];
         const state = states[Math.min(this.#readings, states.length - 1)];
         this.#readings += 1;
         return json({
-          name: RUN,
+          name: this.#run,
           properties: { status: state, startTime: '2026-09-23T08:01:43+00:00', endTime: '2026-09-23T08:02:21+00:00' },
         });
       }
@@ -487,7 +599,7 @@ class FakeAzure implements Az {
     const method = args[args.indexOf('--method') + 1];
     const url = args[args.indexOf('--url') + 1];
     if (method === 'patch') return this.#patch(args, url);
-    if (method === 'get' && url === JOB_URL) return json(this.#job());
+    if (method === 'get' && url === this.#jobUrl) return json(this.#job());
     if (method === 'get' && url === API_URL) return json(this.#api());
     if (method === 'get' && url === WORKSPACE_URL) return json({ properties: { customerId: WORKSPACE_ID } });
     if (method === 'post' && url === `https://api.loganalytics.azure.com/v1/workspaces/${WORKSPACE_ID}/query`) {
@@ -539,14 +651,14 @@ class FakeAzure implements Az {
     if (going) this.#busy -= 1;
     const answer: Record<string, unknown> = {
       id: '/subscriptions/x',
-      name: jobName('operator'),
+      name: jobName(this.#script.restore === true ? 'chain-restore' : 'operator'),
       properties: {
         provisioningState: going ? 'InProgress' : this.state,
         configuration: {
           replicaTimeout: 300,
           replicaRetryLimit: 0,
           triggerType: 'Manual',
-          secrets: [...REFERENCES, { name: REQUEST_SECRET }],
+          secrets: [...REFERENCES, { name: this.#secret }],
         },
         template: {
           containers: [this.container],
@@ -560,7 +672,7 @@ class FakeAzure implements Az {
   }
 
   #patch(args: readonly string[], url: string | undefined): AzResult {
-    expect(url).toBe(JOB_URL);
+    expect(url).toBe(this.#jobUrl);
     const body = args[args.indexOf('--body') + 1] ?? '';
     expect(body.startsWith('@')).toBe(true);
     const file = body.slice(1);
@@ -599,7 +711,7 @@ class FakeAzure implements Az {
       applied: false,
       settles: this.#script.settles?.[index] ?? 'Succeeded',
       apply: () => {
-        this.request = properties.configuration.secrets.find((each) => each.name === REQUEST_SECRET)?.value ?? '';
+        this.request = properties.configuration.secrets.find((each) => each.name === this.#secret)?.value ?? '';
         if (properties.template !== undefined) this.container = properties.template.containers[0];
       },
     };
@@ -610,7 +722,8 @@ class FakeAzure implements Az {
   #log(): unknown {
     const words = JSON.parse(this.heldAtStart ?? '[]') as string[];
     // The ID a request names: an organisation's fifth word, an invitation's seventh, an export's eleventh.
-    const at = { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10 }[String(words[0])] ?? 4;
+    const at =
+      { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10, 'chain-restore': 8 }[String(words[0])] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
     return {
@@ -628,7 +741,8 @@ class FakeAzure implements Az {
     return this.calls.map((call) => {
       if (call[0] !== 'rest') return call.slice(0, call[2] === 'execution' ? 4 : 3).join(' ');
       const url = call[call.indexOf('--url') + 1] ?? '';
-      const what = url === JOB_URL ? 'job' : url === API_URL ? 'api' : url.includes('/query') ? 'log' : 'workspace';
+      const what =
+        url === this.#jobUrl ? 'job' : url === API_URL ? 'api' : url.includes('/query') ? 'log' : 'workspace';
       return `${call[2] ?? ''} ${what}`;
     });
   }
@@ -1304,6 +1418,26 @@ describe('the runner and the deployment agree', () => {
     expect(value('AGENTX_DB_DRILL_HOST')).toBe('psql-agentx-stg-drill.postgres.database.azure.com');
     expect(value('AGENTX_DB_HOST')).toMatch(/^psql-agentx-stg-[a-z0-9]{6}\.postgres\.database\.azure\.com$/);
   });
+
+  it("names the chain repair's job, its container, its command and the request it holds as deployed (4D2e E10)", () => {
+    const created = inCopy((dir) => environmentSnapshot(dir, 'staging').together).predictedResources;
+    const job = created.find((resource) => resource.name === jobName('chain-restore'));
+    expect(`jobs/${String(job?.name)}`).toBe(RESTORE_JOB.path);
+    const container = firstContainer(job?.properties);
+    expect(container?.name).toBe(RESTORE_JOB.container);
+    expect([...(container?.command as string[]), ...(container?.args as string[])]).toEqual([
+      'node',
+      'apps/operator/src/chain-restore-main.ts',
+      '--request',
+      `/mnt/secrets/${RESTORE_REQUEST_SECRET}`,
+    ]);
+    expect(at(job?.properties, 'configuration').secrets).toContainEqual({
+      name: RESTORE_REQUEST_SECRET,
+      value: NO_REQUEST,
+    });
+    const settings = container?.env as { name: string; value?: string }[];
+    expect(settings.find((entry) => entry.name === 'AGENTX_DB_USER')?.value).toBe('agentx_owner');
+  });
 });
 
 /** A value deep in an answer, as an object a test can change. */
@@ -1809,5 +1943,233 @@ describe('a pause or resume of every hand-off to the bank (Phase 4 B1, SEC-OPS-0
       ),
     ).resolves.toBe(2);
     expect(lines).toEqual([`say handoff-pause --reason <case reference> [--id <ID>], and nothing else\n${USAGE}`]);
+  });
+});
+
+/** One run of the plan's or the repair's command, read as main reads it, with a clock that moves only when it sleeps. */
+async function drill(argv: readonly string[], script: Script) {
+  const az = new FakeAzure(script);
+  const lines: string[] = [];
+  let now = START.getTime();
+  const steps = {
+    az,
+    say: (line: string) => lines.push(line),
+    now: () => new Date(now),
+    sleep: (ms: number) => {
+      now += ms;
+      return Promise.resolve();
+    },
+  };
+  const status = await (
+    argv[0] === 'chain-restore' ? chainRestore(parseRestore(argv), steps) : recoveryPlan(parseRecoveryPlan(argv), steps)
+  ).then(
+    (value) => value,
+    (error: unknown) => {
+      lines.push(messageOf(error));
+      return 1;
+    },
+  );
+  return { status, az, said: lines };
+}
+
+const PLAN_ORG = '0199a1b2-c3d4-7e5f-8a6b-0000000000a1';
+const PLAN_ID = '0199a1b2-c3d4-7e5f-8a6b-0000000000a2';
+const DIGEST = 'ab'.repeat(32);
+
+describe("4D2e E9 a chain recovery plan, on the operator's job", () => {
+  it("writes the plan's request, puts [] back, and says the plan and the repair's command", async () => {
+    const done = await drill(['chain-recovery-plan', '--org', PLAN_ORG], { ending: 'planned' });
+    expect(done.status).toBe(0);
+    const words = JSON.parse(String(done.az.heldAtStart)) as string[];
+    expect(done.az.heldAtStart).toBe(chainRecoveryRequest(PLAN_ORG, String(words[4])));
+    expect(words).not.toContain('--discard-fork');
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.at(-2)).toBe(
+      `Planned ${String(words[4])}: 2 rows to put back, 1 to replace, 0 to remove; the head put back. Nothing was changed. The plan and its rows are in the evidence store as ${PLAN_ORG}/chain-recovery-${String(words[4])}.ndjson.`,
+    );
+    expect(done.said.at(-1)).toBe(
+      `Once read, the repair is: node deploy/azure/operator.ts chain-restore --org ${PLAN_ORG} --plan ${String(words[4])} --digest ${DIGEST}`,
+    );
+  });
+
+  it("passes --discard-fork through only when given, and says so in the repair's command", async () => {
+    const done = await drill(['chain-recovery-plan', '--org', PLAN_ORG, '--discard-fork'], { ending: 'planned' });
+    const words = JSON.parse(String(done.az.heldAtStart)) as string[];
+    expect(words.at(-1)).toBe('--discard-fork');
+    expect(done.said.at(-1)).toMatch(/ --discard-fork$/);
+  });
+
+  it('says why a plan was refused, and ends 1', async () => {
+    const fork = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
+      ending: 'plan-refused',
+      states: ['Failed'],
+    });
+    expect(fork.status).toBe(1);
+    expect(fork.said.at(-1)).toBe(
+      'No plan: refused as fork at 4. Nothing was changed; the refusal is kept in the evidence store. Playbook H says what each reason means.',
+    );
+    const broken = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
+      ending: 'plan-copy-broken',
+      states: ['Failed'],
+    });
+    expect(broken.said.at(-1)).toMatch(/^No plan: refused as copy_broken at 2 \(mac\)\./);
+  });
+
+  it('says a refusal, no request found, and lines that never came', async () => {
+    const refused = await drill(['chain-recovery-plan', '--org', PLAN_ORG], { ending: 'refused', states: ['Failed'] });
+    expect(refused.said.at(-1)).toBe('Refused, and nothing changed: the name starts or ends with a space.');
+    const none = await drill(['chain-recovery-plan', '--org', PLAN_ORG], { ending: 'no-request', states: ['Failed'] });
+    expect(none.said.at(-1)).toMatch(/^The run found no request, so nothing changed/);
+    const silent = await drill(['chain-recovery-plan', '--org', PLAN_ORG], { ending: 'silent' });
+    expect(silent.status).toBe(1);
+    expect(silent.said.at(-1)).toBe(
+      "The run's lines don't say what it did: they may not all have arrived. Read the lines above. Run the same command again: a plan only reads.",
+    );
+  });
+
+  it.each([
+    [['chain-recovery-plan'], 'say chain-recovery-plan --org <organisation ID> [--discard-fork], and nothing else'],
+    [
+      ['chain-recovery-plan', '--org', PLAN_ORG, '--force'],
+      'say chain-recovery-plan --org <organisation ID> [--discard-fork], and nothing else',
+    ],
+    [
+      ['chain-recovery-plan', '--org', PLAN_ORG, '--discard-fork', '--discard-fork'],
+      'say chain-recovery-plan --org <organisation ID> [--discard-fork], and nothing else',
+    ],
+    [['chain-recovery-plan', '--org', 'ORG'], "--org takes the organisation's ID: a UUIDv7, in lower case"],
+  ])('refuses %j before anything is sent', async (argv, problem) => {
+    const lines: string[] = [];
+    const az = new FakeAzure({});
+    await expect(
+      main(
+        argv,
+        (line) => lines.push(line),
+        () => az,
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([`${problem}\n${USAGE}`]);
+    expect(az.calls).toEqual([]);
+  });
+});
+
+describe('4D2e E10 a chain repair, on its own job, as the owner', () => {
+  const restore = (...more: string[]) => [
+    'chain-restore',
+    '--org',
+    PLAN_ORG,
+    '--plan',
+    PLAN_ID,
+    '--digest',
+    DIGEST,
+    ...more,
+  ];
+
+  it("writes the repair's request onto the chain repair's job, says the owner-login alert first, and the hold stays", async () => {
+    const done = await drill(restore(), { restore: true, ending: 'restored' });
+    expect(done.status).toBe(0);
+    const words = JSON.parse(String(done.az.heldAtStart)) as string[];
+    const id = String(words[8]);
+    expect(id).toMatch(UUID_V7);
+    expect(done.az.heldAtStart).toBe(chainRestoreRequest({ orgId: PLAN_ORG, planId: PLAN_ID, digest: DIGEST, id }));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.az.sequence).toContain('patch job');
+    const intro = done.said.find((line) => line.startsWith('Repairing '));
+    expect(intro).toBe(
+      `Repairing ${PLAN_ORG}'s chain from plan ${PLAN_ID}, as repair ${id}. This run logs in as the database's owner, so the "login by the owner role outside a deploy" SEV-1 alert fires for it about 20 to 35 minutes later, by design. Note this run in the incident log.`,
+    );
+    expect(done.said.at(-1)).toBe(
+      `Repaired: 2 rows put back, 1 replaced, 0 removed; the chain checks whole to 9. The records are in the evidence store as ${PLAN_ORG}/chain-restore-${id}-start.ndjson and -outcome.ndjson. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
+    );
+  });
+
+  it('passes --discard-fork and an earlier --id through only when given', async () => {
+    const done = await drill(restore('--id', EARLIER_ID, '--discard-fork'), { restore: true, ending: 'restored' });
+    expect(done.az.heldAtStart).toBe(
+      chainRestoreRequest({ orgId: PLAN_ORG, planId: PLAN_ID, digest: DIGEST, id: EARLIER_ID }, true),
+    );
+    const plain = await drill(restore('--id', EARLIER_ID), { restore: true, ending: 'restored' });
+    expect(JSON.parse(String(plain.az.heldAtStart))).not.toContain('--discard-fork');
+  });
+
+  it.each([
+    ['restore-plan', 'the plan made now is refused (fork at 4): make a new plan and read why'],
+    [
+      'restore-stale',
+      'the plan made now is not the one asked for: something changed since it was read. Make a new plan',
+    ],
+    [
+      'restore-signing',
+      "where the operator's signing starts on the live chain changed after the plan read it: treat it as tampering (playbook B)",
+    ],
+    ['restore-moved', 'the live chain changed as the repair began: make a new plan'],
+    ['restore-unverified', 'the chain as written failed its check (mac at 3), so every write was rolled back'],
+    ['restore-unknown', 'something_new'],
+  ] as const)('says a %s refusal in plain words, and ends 1', async (ending, why) => {
+    const done = await drill(restore('--id', EARLIER_ID), { restore: true, ending, states: ['Failed'] });
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe(
+      `Not repaired, and nothing changed: ${why}. The records are in the evidence store as ${PLAN_ORG}/chain-restore-${EARLIER_ID}-start.ndjson and -outcome.ndjson.`,
+    );
+  });
+
+  it("says a repair that ran before did nothing now, and a refusal, and another repair's lines are not this one's", async () => {
+    const before = await drill(restore('--id', EARLIER_ID), {
+      restore: true,
+      ending: 'restore-done-before',
+      states: ['Failed'],
+    });
+    expect(before.status).toBe(1);
+    expect(before.said.at(-1)).toMatch(/^This repair's ID ran before, so nothing was done now/);
+    const settings = await drill(restore(), { restore: true, ending: 'restore-settings', states: ['Failed'] });
+    expect(settings.said.at(-1)).toBe(
+      'Refused, and nothing changed: AGENTX_DB_USER must be agentx_owner: only the owner may repair a chain.',
+    );
+    const other = await drill(restore('--id', EARLIER_ID), { restore: true, ending: 'restored-other' });
+    expect(other.status).toBe(1);
+    expect(other.said.at(-1)).toBe(
+      `The run's lines don't say what it did: they may not all have arrived. Read the lines above. Run the same command again with --id ${EARLIER_ID}: a repair that ran stops at its first record and does nothing twice.`,
+    );
+  });
+
+  it("refuses a job that isn't the chain repair's as deployed", async () => {
+    const done = await drill(restore(), {
+      restore: true,
+      job: (answer) => {
+        const container = firstContainer(answer.properties);
+        if (container !== undefined) container.args = ['--request', '/mnt/secrets/operator-request'];
+      },
+    });
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toMatch(
+      /^jobs\/job-agentx-stg-chain-restore isn't the chain repair's job this tool knows \(it must run node apps\/operator\/src\/chain-restore-main\.ts --request \/mnt\/secrets\/chain-restore-request\): deploy it by hand\.$/,
+    );
+  });
+
+  it.each([
+    [['chain-restore', '--org', PLAN_ORG], 'shape'],
+    [['chain-restore', '--org', PLAN_ORG, '--plan', PLAN_ID, '--digest', DIGEST, '--force'], 'shape'],
+    [['chain-restore', '--org', PLAN_ORG, '--plan', PLAN_ID, '--digest', DIGEST, '--id'], 'shape'],
+    [
+      ['chain-restore', '--org', PLAN_ORG, '--plan', PLAN_ID, '--digest', DIGEST, '--discard-fork', '--id', EARLIER_ID],
+      'shape',
+    ],
+    [['chain-restore', '--org', 'O', '--plan', 'P', '--digest', 'D', '--id', 'I'], 'values'],
+  ])('refuses %j before anything is sent', async (argv, kind) => {
+    const lines: string[] = [];
+    const az = new FakeAzure({ restore: true });
+    await expect(
+      main(
+        argv,
+        (line) => lines.push(line),
+        () => az,
+      ),
+    ).resolves.toBe(2);
+    expect(az.calls).toEqual([]);
+    expect(lines[0]).toBe(
+      kind === 'shape'
+        ? `say chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork], and nothing else\n${USAGE}`
+        : `--org takes the organisation's ID: a UUIDv7, in lower case; --plan takes the plan's ID: a UUIDv7, in lower case; --digest takes the plan's digest: 64 lower-case hex digits; --id takes the ID an earlier run gave: a UUIDv7, in lower case\n${USAGE}`,
+    );
   });
 });

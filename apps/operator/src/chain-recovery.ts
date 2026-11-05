@@ -16,8 +16,10 @@
 //   copy's own start, moved, would let it vouch for an operator's event unsigned
 // - `fork`: the live server holds an event sealed by us, in a place the copy
 //   holds another: the app wrote on after the damage (a wound-back head grown
-//   again). Putting the copy's back would throw those away. E10 decides the
-//   named flag that may allow it; here it is only named
+//   again). Putting the copy's back would throw those away, so only the named
+//   flag `--discard-fork` allows it (E10, `discardFork`): then the copy's
+//   events take those places, every live row past the copy is removed (its
+//   columns kept as evidence), and the copy's head is put back
 // - `new_seal`: the result would need an event or a head no original row holds:
 //   an event past the copy's head missing or damaged, a sealed live head past
 //   where the plan could end, or no head row for the plan's end
@@ -36,6 +38,8 @@
 // event is planned back with its signature (a row's columns carry it). A live row numbered below 1, or
 // past a sealed live head at exactly the plan's end, was never the app's: it is
 // planned removed, which writes nothing new either.
+import { createHash } from 'node:crypto';
+
 import {
   type AuditTables,
   chainRowsAlone,
@@ -70,7 +74,14 @@ type RecoveryRefusal =
 
 /** A row the plan writes: the copy's original put back where it is missing, or in place of a damaged one; or one removed. */
 export type PlannedRow =
-  | { readonly action: 'put_back' | 'replace'; readonly seq: bigint; readonly columns: StoredColumns }
+  | { readonly action: 'put_back'; readonly seq: bigint; readonly columns: StoredColumns }
+  | {
+      readonly action: 'replace';
+      readonly seq: bigint;
+      readonly columns: StoredColumns;
+      /** Every column as the live row holds it: evidence of what the original replaces (E10). */
+      readonly replaced: StoredValues;
+    }
   | {
       readonly action: 'remove';
       readonly seq: bigint;
@@ -89,6 +100,10 @@ export type RecoveryPlan =
       readonly head: ChainHead | undefined;
       /** Live events past the copy, kept as they are. */
       readonly keptPastCopy: bigint;
+      /** Whether a fork was found and its live branch planned away, under `discardFork` alone (E10). */
+      readonly forkDiscarded: boolean;
+      /** The live chain as the plan read it, every row and the head (fingerprintOf): a repair writes only onto this. */
+      readonly liveFingerprint: string;
     }
   | {
       readonly ok: false;
@@ -118,12 +133,14 @@ async function* rowsOf(
   db: Database<AuditTables>,
   orgId: string,
   heads: { first?: ChainHead | string },
+  fingerprint?: Fingerprint,
 ): AsyncGenerator<StoredRow> {
   let after: bigint | null = null;
   for (;;) {
     const page = await readPage(db, keys, orgId, after, pageSize);
     heads.first ??= page.head;
     if (!sameHead(heads.first, page.head)) throw new ChainMoved();
+    for (const row of page.rows) fingerprint?.row(row);
     yield* page.rows;
     const last = page.rows.at(-1);
     if (last === undefined || page.rows.length < pageSize) return;
@@ -158,6 +175,8 @@ export interface RecoverySides {
   /** The store's latest anchor for the organisation's chain, its signature checked; undefined where it has none. */
   readonly anchor: CheckedPoint | undefined;
   readonly mostRows?: number;
+  /** The named flag (E10): a fork's live branch planned away rather than the plan refused. */
+  readonly discardFork?: boolean;
   /** How a page is read, and its size: the module's own read, but for a test that moves a chain between pages. */
   readonly readPage?: typeof chainRowsAlone;
   readonly pageSize?: number;
@@ -178,11 +197,12 @@ export async function planChainRecovery(sides: RecoverySides): Promise<RecoveryP
   if (!copied.ok) return refused('copy_broken', copied.problem.seq, copied.problem.reason);
   const copyHeads: { first?: ChainHead | string } = {};
   const liveHeads: { first?: ChainHead | string } = {};
+  const fingerprint = createFingerprint();
   const planner = createPlanner({ ...sides, orgId }, copied, liveHeads);
   try {
     for await (const { seq, copy, live } of sideBySide(
       rowsOf(sides, sides.copy, orgId, copyHeads),
-      rowsOf(sides, sides.live, orgId, liveHeads),
+      rowsOf(sides, sides.live, orgId, liveHeads, fingerprint),
     )) {
       const refusal = planner.take(seq, copy, live);
       if (refusal !== undefined) return refusal;
@@ -195,7 +215,53 @@ export async function planChainRecovery(sides: RecoverySides): Promise<RecoveryP
   if (copyHead === undefined || typeof copyHead === 'string') return refused('copy_broken', 0n, 'head');
   // The copy's check and its rows' read must have seen one chain.
   if (copyHead.seq !== copied.seq || !copyHead.hash.equals(copied.hash)) return refused('moved', copied.seq);
-  return planner.finish(copyHead);
+  return planner.finish(copyHead, fingerprint.finish(liveHeads.first));
+}
+
+/** A running SHA-256 of a chain's rows as stored, in number order, then its head: the same read, the same bytes. */
+interface Fingerprint {
+  row(row: StoredRow): void;
+  finish(head: ChainHead | string | undefined): string;
+}
+
+function createFingerprint(): Fingerprint {
+  const hash = createHash('sha256');
+  return {
+    row(row) {
+      // Every column, in the read's fixed order, as text: two reads of the same rows give the same line.
+      hash.update(`${JSON.stringify(row.stored)}\n`);
+    },
+    finish(head) {
+      const line =
+        head === undefined || typeof head === 'string'
+          ? (head ?? null)
+          : { seq: head.seq.toString(), hash: hex(head.hash), mac: hex(head.mac), macKeyVersion: head.macKeyVersion };
+      hash.update(JSON.stringify(line));
+      return hash.digest('hex');
+    },
+  };
+}
+
+/**
+ * The live chain's fingerprint as a plan takes it, read with `readPage` (a
+ * repair's own read, in its transaction under the head's lock, 4D2e E10), or
+ * null where its head moved between pages.
+ */
+export async function fingerprintOf(
+  read: Pick<RecoverySides, 'readPage' | 'pageSize' | 'keys'>,
+  db: Database<AuditTables>,
+  orgId: string,
+): Promise<string | null> {
+  const heads: { first?: ChainHead | string } = {};
+  const fingerprint = createFingerprint();
+  try {
+    // Each row is taken into the fingerprint as it is read; nothing else is done with it.
+    for await (const _row of rowsOf(read, db, orgId.toLowerCase(), heads, fingerprint));
+  } catch (error) {
+    if (error instanceof ChainMoved) return null;
+    throw error;
+  }
+  return fingerprint.finish(heads.first);
 }
 
 /** What a copy from before 0079 is refused with, in plain words. */
@@ -204,7 +270,7 @@ const COPY_UNSIGNED =
 
 /** The plan's row by row judgement, then its end. */
 function createPlanner(
-  { keys, orgId, anchor, mostRows = MOST_PLANNED_ROWS }: RecoverySides,
+  { keys, orgId, anchor, mostRows = MOST_PLANNED_ROWS, discardFork = false }: RecoverySides,
   copied: CheckedPoint,
   liveHeads: { first?: ChainHead | string },
 ) {
@@ -232,6 +298,8 @@ function createPlanner(
   const walker = createChainWalker(keys, chain, copied);
   let end: CheckedPoint = copied;
   let broken = false;
+  // A fork's live branch, found and planned away under discardFork alone.
+  let forked = false;
   let atAnchor: CheckedPoint | undefined;
 
   const plan = (row: PlannedRow): Refused | undefined => {
@@ -248,8 +316,10 @@ function createPlanner(
     if (seq === anchor?.seq) atAnchor = entry;
     if (live === undefined) return plan({ action: 'put_back', seq, columns });
     if (isOriginal(live, entry)) return undefined;
-    if (sealedHere(live)) return refused('fork', seq);
-    return plan({ action: 'replace', seq, columns });
+    const fork = sealedHere(live);
+    if (fork && !discardFork) return refused('fork', seq);
+    forked ||= fork;
+    return plan({ action: 'replace', seq, columns, replaced: live.stored });
   };
 
   /** A live row past the copy: the chain grown on from it, or what can't be kept. */
@@ -263,8 +333,12 @@ function createPlanner(
       }
       broken = true;
       // Sealed by us, but not on from the copy's event before it: the app wrote on another branch.
-      if (problem.reason === 'link' && sealedHere(live)) return refused('fork', seq);
+      const fork = problem.reason === 'link' && sealedHere(live);
+      if (fork && !discardFork) return refused('fork', seq);
+      forked ||= fork;
     }
+    // The fork's branch, past the copy: every row of it goes, the copy's head put back in finish.
+    if (forked) return plan({ action: 'remove', seq, stored: live.stored });
     const head = liveHead();
     // Never the app's: not sealed by us, and past a sealed head that stands exactly where the plan ends (every row
     // here is past that end).
@@ -283,10 +357,11 @@ function createPlanner(
       return live === undefined ? undefined : pastCopy(seq, live);
     },
 
-    finish(copyHead: ChainHead): RecoveryPlan {
+    finish(copyHead: ChainHead, liveFingerprint: string): RecoveryPlan {
       const head = liveHead();
-      // The live head is sealed past where the plan can end: events the copy doesn't hold are lost.
-      if (head !== undefined && head.seq > end.seq) return refused('new_seal', end.seq + 1n);
+      // The live head is sealed past where the plan can end: events the copy doesn't hold are lost. A fork's
+      // branch is discarded whole, the plan ending at the copy's head.
+      if (head !== undefined && head.seq > end.seq && !forked) return refused('new_seal', end.seq + 1n);
       let replaceHead: ChainHead | undefined;
       if (end.seq === copied.seq) {
         const live = liveHeads.first;
@@ -312,6 +387,8 @@ function createPlanner(
         rows,
         head: replaceHead,
         keptPastCopy: end.seq - copied.seq,
+        forkDiscarded: forked,
+        liveFingerprint,
       };
     },
   };
@@ -332,24 +409,17 @@ const pointLine = (point: CheckedPoint | undefined) =>
   point === undefined ? null : { seq: point.seq.toString(), hash: hex(point.hash), macKeyVersion: point.macKeyVersion };
 
 /**
- * The plan as the evidence store keeps it, NDJSON: its summary first, then each
- * row it would write, then the head it would put back. A refused plan is its
- * summary alone, naming why.
+ * The plan's lines as its file holds them, but for who made it and when (the
+ * plan's ID, the release, the run): its summary, each row it would write, the
+ * head it would put back. What its digest covers.
  */
-export function planFile(plan: RecoveryPlan, facts: PlanFacts): Buffer {
-  const about = {
-    k: 'plan',
-    planId: facts.planId,
-    orgId: facts.orgId,
-    release: facts.release,
-    run: facts.run,
-    anchor: pointLine(facts.anchor),
-  };
+function planLines(plan: RecoveryPlan, orgId: string, anchor: CheckedPoint | undefined): object[] {
+  const about = { k: 'plan', orgId, anchor: pointLine(anchor) };
   if (!plan.ok) {
     const { reason, seq, problem } = plan;
-    return Buffer.from(`${JSON.stringify({ ...about, ok: false, reason, seq: seq.toString(), problem })}\n`);
+    return [{ ...about, ok: false, reason, seq: seq.toString(), problem }];
   }
-  const lines = [
+  return [
     {
       ...about,
       ok: true,
@@ -358,12 +428,16 @@ export function planFile(plan: RecoveryPlan, facts: PlanFacts): Buffer {
       rows: plan.rows.length,
       headReplaced: plan.head !== undefined,
       keptPastCopy: plan.keptPastCopy.toString(),
+      forkDiscarded: plan.forkDiscarded,
+      liveFingerprint: plan.liveFingerprint,
     },
-    ...plan.rows.map((row) =>
-      row.action === 'remove'
-        ? { k: 'row', action: row.action, seq: row.seq.toString(), stored: row.stored }
-        : { k: 'row', action: row.action, seq: row.seq.toString(), columns: row.columns },
-    ),
+    ...plan.rows.map((row) => {
+      const at = { k: 'row', action: row.action, seq: row.seq.toString() };
+      if (row.action === 'remove') return { ...at, stored: row.stored };
+      return row.action === 'replace'
+        ? { ...at, columns: row.columns, replaced: row.replaced }
+        : { ...at, columns: row.columns };
+    }),
     ...(plan.head === undefined
       ? []
       : [
@@ -376,5 +450,30 @@ export function planFile(plan: RecoveryPlan, facts: PlanFacts): Buffer {
           },
         ]),
   ];
-  return Buffer.from(lines.map((line) => `${JSON.stringify(line)}\n`).join(''));
+}
+
+const ndjson = (lines: readonly object[]): string => lines.map((line) => `${JSON.stringify(line)}\n`).join('');
+
+/**
+ * A plan's digest (4D2e E10): SHA-256, in hex, of its lines but for who made
+ * it and when. A repair is asked with the digest of the plan the operator read,
+ * makes the plan again and applies it only if the digest is the same: the
+ * same rows, the same head, the same live chain read, under the same anchor.
+ */
+export const planDigest = (plan: RecoveryPlan, orgId: string, anchor: CheckedPoint | undefined): string =>
+  createHash('sha256')
+    .update(ndjson(planLines(plan, orgId, anchor)))
+    .digest('hex');
+
+/**
+ * The plan as the evidence store keeps it, NDJSON: its summary first, then each
+ * row it would write, then the head it would put back. A refused plan is its
+ * summary alone, naming why. The summary names its digest, which a repair is
+ * asked with (chain-restore.ts).
+ */
+export function planFile(plan: RecoveryPlan, facts: PlanFacts): Buffer {
+  const [summary, ...rest] = planLines(plan, facts.orgId, facts.anchor);
+  const made = { planId: facts.planId, release: facts.release, run: facts.run };
+  const digest = planDigest(plan, facts.orgId, facts.anchor);
+  return Buffer.from(ndjson([{ ...summary, ...made, digest }, ...rest]));
 }

@@ -7,6 +7,16 @@
 //   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
+//   node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
+//   node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
+//
+// The last two (4D2e E9, E10; PL-29; playbook H) mend an organisation's audit
+// chain from the restore drill's copy: the first plans it, read-only, and says
+// the plan's ID and digest; the second runs on the chain repair's own job, as
+// the database's owner, and applies that plan only if it is still the same. A
+// repair's every run sets off the owner-login SEV-1 alert, by design: it says
+// so before it starts. --discard-fork, given to both, lets a plan throw away
+// what the app wrote on a wound-back chain; it is never assumed.
 //
 // (An UNKNOWN payment is marked failed by the customer's admin, not by our
 // team: partner decision 38.)
@@ -78,6 +88,10 @@ import {
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
   RESTORE_CHECK,
+  chainRecoveryRequest,
+  chainRestoreRequest,
+  DISCARD_FORK,
+  PLAN_DIGEST_HEX,
   restoreCheckRequest,
   UUID_V7,
 } from '../../apps/operator/src/request.ts';
@@ -121,11 +135,45 @@ export const OPERATOR_JOB: WorkloadSpec = { path: `jobs/${jobName('operator')}`,
 /** The secret the job holds its request in (apps.bicep `operatorRequest`); a test holds the two equal. */
 export const REQUEST_SECRET = 'operator-request';
 
+/** The chain repair's job (4D2e E10), as apps.bicep deploys it, and the secret it holds its request in (`restoreRequest`). */
+export const RESTORE_JOB: WorkloadSpec = { path: `jobs/${jobName('chain-restore')}`, container: 'chain-restore' };
+export const RESTORE_REQUEST_SECRET = 'chain-restore-request';
+
 /** What the job holds between runs: no request, which the command refuses (B1c-2a). */
 export const NO_REQUEST = '[]';
 
-/** What the job runs: the command, reading its request from the file the secret is mounted as (policy.ts `HELD`). */
-const RUNS = ['node', 'apps/operator/src/main.ts', '--request', `/mnt/secrets/${REQUEST_SECRET}`];
+/** The jobs a request is written onto: the operator's and the chain repair's. */
+type RequestJob = 'operator' | 'chain-restore';
+
+/** A job a request is written onto, by its name: what it is, the secret its request is in, and what it runs. */
+interface RequestJobSpec {
+  readonly spec: WorkloadSpec;
+  readonly secret: string;
+  /** The command, reading its request from the file the secret is mounted as (policy.ts `HELD`). */
+  readonly runs: readonly string[];
+  /** What a refusal calls it. */
+  readonly known: string;
+}
+
+const REQUEST_JOBS: Readonly<Record<RequestJob, RequestJobSpec>> = {
+  operator: {
+    spec: OPERATOR_JOB,
+    secret: REQUEST_SECRET,
+    runs: ['node', 'apps/operator/src/main.ts', '--request', `/mnt/secrets/${REQUEST_SECRET}`],
+    known: "the operator's job this tool knows",
+  },
+  'chain-restore': {
+    spec: RESTORE_JOB,
+    secret: RESTORE_REQUEST_SECRET,
+    runs: ['node', 'apps/operator/src/chain-restore-main.ts', '--request', `/mnt/secrets/${RESTORE_REQUEST_SECRET}`],
+    known: "the chain repair's job this tool knows",
+  },
+};
+
+/** Where a request is written: the subscription and one of the jobs that runs one. */
+interface HeldTarget extends Target {
+  readonly job: RequestJob;
+}
 
 /** How long a change to the job may take to settle: as long as a release gives one (release.ts). */
 const SETTLE_MS = 10 * 60_000;
@@ -153,6 +201,8 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
+  node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
+  node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -292,8 +342,10 @@ export function parseHandoff(argv: readonly string[]): HandoffArguments {
   return { command, reason: asked.reason, id };
 }
 
-/** The operator's job as Azure has it, checked: what a change sends back of it, and where it stands. */
+/** A request's job as Azure has it, checked: what a change sends back of it, and where it stands. */
 interface OperatorJob {
+  /** The secret its request is in. */
+  readonly secret: string;
   readonly running: Running;
   readonly references: readonly VaultReference[];
   /** How long one run may take, in seconds. */
@@ -310,24 +362,24 @@ interface OperatorJob {
  * nothing shown of it; every other secret a reference to the vault; a time
  * limit; and the time of its last change, which tells a change of ours apart.
  */
-function readOperatorJob(steps: JobSteps, target: Target): OperatorJob {
-  const known = "the operator's job this tool knows";
+function readOperatorJob(steps: JobSteps, target: HeldTarget): OperatorJob {
+  const { spec, secret, runs, known } = REQUEST_JOBS[target.job];
   const refuse = (why: string): never => {
-    throw new Error(`${OPERATOR_JOB.path} isn't ${known} (${why}): deploy it by hand.`);
+    throw new Error(`${spec.path} isn't ${known} (${why}): deploy it by hand.`);
   };
-  const found = get(steps.az, resourceUrl(target.subscription, OPERATOR_JOB), "the operator's job");
+  const found = get(steps.az, resourceUrl(target.subscription, spec), jobName(target.job));
   const properties = record(found.properties);
   const configuration = record(properties.configuration);
-  const running = runningAs(OPERATOR_JOB, known, record(properties.template).containers);
-  if (JSON.stringify([...running.container.command, ...running.container.args]) !== JSON.stringify(RUNS)) {
-    refuse(`it must run ${RUNS.join(' ')}`);
+  const running = runningAs(spec, known, record(properties.template).containers);
+  if (JSON.stringify([...running.container.command, ...running.container.args]) !== JSON.stringify(runs)) {
+    refuse(`it must run ${runs.join(' ')}`);
   }
-  const references = vaultReferences(configuration.secrets, REQUEST_SECRET, refuse);
+  const references = vaultReferences(configuration.secrets, secret, refuse);
   const limit = configuration.replicaTimeout;
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) return refuse('it has no time limit');
   const modified = lastModified(found);
   if (modified === '') return refuse("Azure gave no time of its last change, so one of ours can't be told apart");
-  return { running, references, limit, state: text(properties.provisioningState), modified };
+  return { secret, running, references, limit, state: text(properties.provisioningState), modified };
 }
 
 /**
@@ -339,15 +391,15 @@ const patchBody = (job: OperatorJob, value: string, container?: Container): stri
   asciiJson(
     JSON.stringify({
       properties: {
-        configuration: { secrets: [...job.references, { name: REQUEST_SECRET, value }] },
+        configuration: { secrets: [...job.references, { name: job.secret, value }] },
         ...(container === undefined ? {} : { template: { containers: [container] } }),
       },
     }),
   );
 
-/** Sends a PATCH to the operator's job (held-request.ts `sendPatch`). */
-const patch = (steps: JobSteps, target: Target, body: string, what: string): void => {
-  sendPatch(steps, resourceUrl(target.subscription, OPERATOR_JOB), body, what);
+/** Sends a PATCH to the request's job (held-request.ts `sendPatch`). */
+const patch = (steps: JobSteps, target: HeldTarget, body: string, what: string): void => {
+  sendPatch(steps, resourceUrl(target.subscription, REQUEST_JOBS[target.job].spec), body, what);
 };
 
 /**
@@ -358,7 +410,7 @@ const patch = (steps: JobSteps, target: Target, body: string, what: string): voi
  */
 async function settled(
   steps: JobSteps,
-  target: Target,
+  target: HeldTarget,
   before: string,
   container: Container,
   what: string,
@@ -369,11 +421,11 @@ async function settled(
     const taken = job.modified !== before && same(job.running.container, container);
     if (taken && job.state === 'Succeeded') return job;
     if (taken && (job.state === 'Failed' || job.state === 'Canceled')) {
-      throw new Error(`Azure's change to ${jobName('operator')} for ${what} ended ${job.state}.`);
+      throw new Error(`Azure's change to ${jobName(target.job)} for ${what} ended ${job.state}.`);
     }
     if (steps.now().getTime() >= deadline) {
       throw new Error(
-        `Azure hadn't settled ${what} on ${jobName('operator')} after ${String(SETTLE_MS / 60_000)} minutes (${job.state}${taken ? '' : ', not yet taken'}).`,
+        `Azure hadn't settled ${what} on ${jobName(target.job)} after ${String(SETTLE_MS / 60_000)} minutes (${job.state}${taken ? '' : ', not yet taken'}).`,
       );
     }
     await steps.sleep(POLL_MS);
@@ -381,14 +433,14 @@ async function settled(
 }
 
 /** Waits until no change to the job is still going, so the next is taken rather than refused: the job then. */
-async function idle(steps: JobSteps, target: Target): Promise<OperatorJob> {
+async function idle(steps: JobSteps, target: HeldTarget): Promise<OperatorJob> {
   const deadline = steps.now().getTime() + SETTLE_MS;
   for (;;) {
     const job = readOperatorJob(steps, target);
     if (job.state !== 'InProgress') return job;
     if (steps.now().getTime() >= deadline) {
       throw new Error(
-        `${jobName('operator')} was still taking a change after ${String(SETTLE_MS / 60_000)} minutes, so nothing more was sent.`,
+        `${jobName(target.job)} was still taking a change after ${String(SETTLE_MS / 60_000)} minutes, so nothing more was sent.`,
       );
     }
     await steps.sleep(POLL_MS);
@@ -400,12 +452,12 @@ async function idle(steps: JobSteps, target: Target): Promise<OperatorJob> {
  * no change is still going (Azure may refuse one made during another), and
  * waits until Azure has taken it.
  */
-async function clearRequest(steps: JobSteps, target: Target): Promise<void> {
+async function clearRequest(steps: JobSteps, target: HeldTarget): Promise<void> {
   const job = await idle(steps, target);
   const what = `putting ${NO_REQUEST} back`;
   patch(steps, target, patchBody(job, NO_REQUEST), what);
   await settled(steps, target, job.modified, job.running.container, what);
-  steps.say(`Put ${NO_REQUEST} back on ${jobName('operator')}: its next run holds no request until one is written.`);
+  steps.say(`Put ${NO_REQUEST} back on ${jobName(target.job)}: its next run holds no request until one is written.`);
 }
 
 /** The command's own lines in a run: its JSON ones, since neither Azure's lines nor Node's own are JSON. */
@@ -769,12 +821,203 @@ export function handoffChange(request: HandoffArguments, steps: JobSteps): Promi
   }));
 }
 
+/** A chain recovery plan the partner asked for (4D2e E9): the organisation, and whether a fork may be planned away. */
+export interface RecoveryPlanArguments {
+  readonly orgId: string;
+  readonly discardFork: boolean;
+}
+
+/** Whether the words after a command's own are nothing, or the named flag alone; undefined for anything else. */
+const forkFlag = (rest: readonly string[]): boolean | undefined => {
+  if (rest.length === 0) return false;
+  return rest.length === 1 && rest[0] === DISCARD_FORK ? true : undefined;
+};
+
+const ORG_PROBLEM = "--org takes the organisation's ID: a UUIDv7, in lower case";
+
+/** What was asked for, or a UsageError saying why it can't be done. */
+export function parseRecoveryPlan(argv: readonly string[]): RecoveryPlanArguments {
+  const [command, orgFlag, orgId, ...rest] = argv;
+  const discardFork = forkFlag(rest);
+  if (command !== 'chain-recovery-plan' || orgFlag !== '--org' || orgId === undefined || discardFork === undefined) {
+    throw new UsageError(`say chain-recovery-plan --org <organisation ID> [${DISCARD_FORK}], and nothing else`);
+  }
+  if (!UUID_V7.test(orgId)) throw new UsageError(ORG_PROBLEM);
+  return { orgId, discardFork };
+}
+
+/** A chain repair the partner asked for (4D2e E10): the plan by its ID and digest, and the repair's ID if one ran before. */
+export interface RestoreArguments {
+  readonly orgId: string;
+  readonly planId: string;
+  readonly digest: string;
+  readonly id: string | undefined;
+  readonly discardFork: boolean;
+}
+
+/** What was asked for, or a UsageError saying why it can't be done. */
+export function parseRestore(argv: readonly string[]): RestoreArguments {
+  const [command, orgFlag, orgId, planFlag, planId, digestFlag, digest, ...rest] = argv;
+  const ided = rest[0] === '--id';
+  const id = ided ? rest[1] : undefined;
+  const discardFork = forkFlag(rest.slice(ided ? 2 : 0));
+  const shaped =
+    command === 'chain-restore' &&
+    orgFlag === '--org' &&
+    planFlag === '--plan' &&
+    digestFlag === '--digest' &&
+    digest !== undefined &&
+    (!ided || id !== undefined) &&
+    discardFork !== undefined;
+  if (!shaped) {
+    throw new UsageError(
+      `say chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [${DISCARD_FORK}], and nothing else`,
+    );
+  }
+  const problems = [
+    ...(UUID_V7.test(String(orgId)) ? [] : [ORG_PROBLEM]),
+    ...(UUID_V7.test(String(planId)) ? [] : ["--plan takes the plan's ID: a UUIDv7, in lower case"]),
+    ...(PLAN_DIGEST_HEX.test(digest) ? [] : ["--digest takes the plan's digest: 64 lower-case hex digits"]),
+    ...(id === undefined || UUID_V7.test(id) ? [] : ['--id takes the ID an earlier run gave: a UUIDv7, in lower case']),
+  ];
+  if (problems.length > 0) throw new UsageError(problems.join('; '));
+  return { orgId: String(orgId), planId: String(planId), digest, id, discardFork };
+}
+
+/** What a plan's run did: 0 once a plan is made, saying its digest and the repair's command. */
+function planOutcome(steps: JobSteps, lines: readonly LogLine[], asked: RecoveryPlanArguments, planId: string): number {
+  const said = commandLines(lines);
+  const about = (event: string) => said.find((line) => line.event === event && line.planId === planId);
+  const planned = about('operator.chain_recovery_planned');
+  if (planned !== undefined) {
+    const fork = asked.discardFork ? ` ${DISCARD_FORK}` : '';
+    steps.say(
+      `Planned ${planId}: ${String(planned.putBack)} rows to put back, ${String(planned.replaced)} to replace, ${String(planned.removed)} to remove; the head ${planned.headReplaced === true ? 'put back' : 'left as it is'}${planned.forkDiscarded === true ? "; the app's events on a fork thrown away" : ''}. Nothing was changed. The plan and its rows are in the evidence store as ${asked.orgId}/chain-recovery-${planId}.ndjson.`,
+    );
+    steps.say(
+      `Once read, the repair is: node deploy/azure/operator.ts chain-restore --org ${asked.orgId} --plan ${planId} --digest ${String(planned.digest)}${fork}`,
+    );
+    return 0;
+  }
+  const refusedPlan = about('operator.chain_recovery_refused');
+  if (refusedPlan !== undefined) {
+    const problem = typeof refusedPlan.problem === 'string' ? ` (${refusedPlan.problem})` : '';
+    steps.say(
+      `No plan: refused as ${String(refusedPlan.reason)} at ${String(refusedPlan.seq)}${problem}. Nothing was changed; the refusal is kept in the evidence store. Playbook H says what each reason means.`,
+    );
+    return 1;
+  }
+  return refusedOrUnclear(steps, said, 'Run the same command again: a plan only reads.');
+}
+
+/** A refusal the run said, or an unclear end: what to do next. Always 1. */
+function refusedOrUnclear(steps: JobSteps, said: readonly Readonly<Record<string, unknown>>[], again: string): number {
+  const refused = said.find((line) => line.event === 'operator.refused');
+  if (refusedFor(refused, NO_REQUEST_PROBLEM)) {
+    steps.say(
+      `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. ${again}`,
+    );
+    return 1;
+  }
+  const refusedSaid = problemsSaid(refused);
+  steps.say(
+    refusedSaid === undefined
+      ? `The run's lines don't say what it did: they may not all have arrived. Read the lines above. ${again}`
+      : `Refused, and nothing changed: ${refusedSaid}.`,
+  );
+  return 1;
+}
+
+/** What each refused repair means, in plain words, by its reason. */
+const RESTORE_REFUSALS: Readonly<Record<string, (line: Readonly<Record<string, unknown>>) => string>> = {
+  plan: (line) =>
+    `the plan made now is refused (${String(line.planRefused)} at ${String(line.seq)}): make a new plan and read why`,
+  stale: () => 'the plan made now is not the one asked for: something changed since it was read. Make a new plan',
+  signing_start: () =>
+    "where the operator's signing starts on the live chain changed after the plan read it: treat it as tampering (playbook B)",
+  moved: () => 'the live chain changed as the repair began: make a new plan',
+  unverified: (line) =>
+    `the chain as written failed its check (${String(line.problem)} at ${String(line.seq)}), so every write was rolled back`,
+};
+
+/** What a repair's run did: 0 once the chain is repaired. */
+function restoreOutcome(steps: JobSteps, lines: readonly LogLine[], asked: RestoreArguments, id: string): number {
+  const said = commandLines(lines);
+  const about = (event: string) => said.find((line) => line.event === event && line.restoreId === id);
+  const records = `${asked.orgId}/chain-restore-${id}-start.ndjson and -outcome.ndjson`;
+  const restored = about('operator.chain_restored');
+  if (restored !== undefined) {
+    steps.say(
+      `Repaired: ${String(restored.putBack)} rows put back, ${String(restored.replaced)} replaced, ${String(restored.removed)} removed; the chain checks whole to ${String(restored.endsAt)}. The records are in the evidence store as ${records}. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
+    );
+    return 0;
+  }
+  const refusedRepair = about('operator.chain_restore_refused');
+  if (refusedRepair !== undefined) {
+    const why = RESTORE_REFUSALS[String(refusedRepair.reason)]?.(refusedRepair) ?? String(refusedRepair.reason);
+    steps.say(`Not repaired, and nothing changed: ${why}. The records are in the evidence store as ${records}.`);
+    return 1;
+  }
+  if (about('operator.done_before') !== undefined) {
+    steps.say(
+      `This repair's ID ran before, so nothing was done now: its records in the evidence store (${records}) say how it ended. A new repair needs no --id.`,
+    );
+    return 1;
+  }
+  return refusedOrUnclear(
+    steps,
+    said,
+    `Run the same command again with --id ${id}: a repair that ran stops at its first record and does nothing twice.`,
+  );
+}
+
+/** What a repair's every run sets off, said before it starts (playbook I). */
+const OWNER_LOGIN_SAID =
+  'This run logs in as the database\'s owner, so the "login by the owner role outside a deploy" SEV-1 alert fires for it about 20 to 35 minutes later, by design. Note this run in the incident log.';
+
+/** Plans an organisation's chain recovery on the operator's job (4D2e E9): 0 once a plan is made. Read-only. */
+export function recoveryPlan(asked: RecoveryPlanArguments, steps: JobSteps): Promise<number> {
+  const planId = uuidV7Ids.next();
+  const again = 'Run the same command again: a plan only reads, so nothing is done twice.';
+  return runRequest(steps, () => ({
+    text: chainRecoveryRequest(asked.orgId, planId, asked.discardFork),
+    intro: `Planning ${planId} for ${asked.orgId} from the drill's copy, read-only on both servers.`,
+    tryAgain: again,
+    mayStillHold: `The request may still be on ${jobName('operator')}: it only reads. ${again} It takes the request off at its end, as does deploy.ts apps.`,
+    judge: (_run, lines) => planOutcome(steps, lines, asked, planId),
+  }));
+}
+
+/** Repairs an organisation's chain from its plan on the chain repair's job (4D2e E10): 0 once repaired. */
+export function chainRestore(asked: RestoreArguments, steps: JobSteps): Promise<number> {
+  const id = asked.id ?? uuidV7Ids.next();
+  const again = `Run the same command again with --id ${id}: a repair that ran stops at its first record and does nothing twice.`;
+  return runRequest(
+    steps,
+    () => ({
+      text: chainRestoreRequest(
+        { orgId: asked.orgId, planId: asked.planId, digest: asked.digest, id },
+        asked.discardFork,
+      ),
+      intro: `Repairing ${asked.orgId}'s chain from plan ${asked.planId}, as repair ${id}. ${OWNER_LOGIN_SAID}`,
+      tryAgain: again,
+      mayStillHold: `The request may still be on ${jobName('chain-restore')}. It names ${id}, so it can't repair twice. ${again} It takes the request off at its end, as does deploy.ts apps.`,
+      judge: (_run, lines) => restoreOutcome(steps, lines, asked, id),
+    }),
+    'chain-restore',
+  );
+}
+
 /** Writes a request, runs it, puts [] back, and says what the run did: 0 once what it makes exists. */
-async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest): Promise<number> {
+async function runRequest(
+  steps: JobSteps,
+  prepare: (api: Running) => JobRequest,
+  on: RequestJob = 'operator',
+): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
-  const target: Target = { subscription, job: 'operator' };
+  const target: HeldTarget = { subscription, job: on };
   const job = readOperatorJob(steps, target);
-  const name = jobName('operator');
+  const name = jobName(on);
   if (job.state !== 'Succeeded') {
     throw new Error(`${name} is ${job.state} from an earlier change, so nothing was written: look at it first.`);
   }
@@ -844,6 +1087,14 @@ export function main(
       if (argv[0] === 'handoff-pause' || argv[0] === 'handoff-resume') {
         const request = parseHandoff(argv);
         return (steps) => handoffChange(request, steps);
+      }
+      if (argv[0] === 'chain-recovery-plan') {
+        const asked = parseRecoveryPlan(argv);
+        return (steps) => recoveryPlan(asked, steps);
+      }
+      if (argv[0] === 'chain-restore') {
+        const asked = parseRestore(argv);
+        return (steps) => chainRestore(asked, steps);
       }
       if (argv[0] === 'invite-first-admin') {
         const request = parseFirstAdmin(argv);
