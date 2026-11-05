@@ -217,6 +217,7 @@ type Ending =
   | 'rebased'
   | 'rebased-shorter'
   | 'rebased-unrecorded'
+  | 'rebased-already-recorded'
   | 'rebase-recorded'
   | 'rebase-done-already'
   | 'rebase-done-unrecorded'
@@ -492,6 +493,7 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
   rebased: (id) => [said(rebasedLine(id, {})), TERMINATED],
   'rebased-shorter': (id) => [said(rebasedLine(id, { shorterBy: '2' })), TERMINATED],
   'rebased-unrecorded': (id) => [said(rebasedLine(id, { recorded: 'failed' })), TERMINATED],
+  'rebased-already-recorded': (id) => [said(rebasedLine(id, { recorded: 'already' })), TERMINATED],
   'rebase-recorded': (id) => [said({ event: 'operator.rebase_recorded', rebaseId: id }), TERMINATED],
   'rebase-done-already': (id) => [
     said({ event: 'operator.done_before', command: 'chain-rebase', rebaseId: id, recorded: 'already' }),
@@ -538,6 +540,7 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'restored-old',
   'rebased',
   'rebased-shorter',
+  'rebased-already-recorded',
   'rebase-recorded',
   'rebased-other',
   'planned',
@@ -2333,6 +2336,10 @@ describe("4D2e E11 a chain's rebase, on the operator's job", () => {
   });
 
   it('says a rebase finished now, already done, or its event still unwritten', async () => {
+    // Its event found on the chain already, as another run wrote it: rebased all the same.
+    const recordedBefore = await drill(rebase('--id', EARLIER_ID), { ending: 'rebased-already-recorded' });
+    expect(recordedBefore.status).toBe(0);
+    expect(recordedBefore.said.at(-1)).toMatch(/^Rebased: /);
     const unrecorded = await drill(rebase('--id', EARLIER_ID), { ending: 'rebased-unrecorded', states: ['Failed'] });
     expect(unrecorded.status).toBe(1);
     expect(unrecorded.said.at(-1)).toBe(
@@ -2356,7 +2363,7 @@ describe("4D2e E11 a chain's rebase, on the operator's job", () => {
     const other = await drill(rebase('--id', EARLIER_ID), { ending: 'rebase-done-other', states: ['Failed'] });
     expect(other.status).toBe(1);
     expect(other.said.at(-1)).toBe(
-      `A rebase named ${EARLIER_ID} is already in the anchors' store for another chain, or can't be read as one: nothing was done. A new rebase needs no --id.`,
+      `A rebase named ${EARLIER_ID} is already in the anchors' store for another chain or another head, or can't be read as one: nothing was done, and the head named isn't rebased. A new rebase needs no --id.`,
     );
   });
 

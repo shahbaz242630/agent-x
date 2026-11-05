@@ -951,8 +951,10 @@ const chainSaid = (chain: string): string => (chain === 'platform' ? "the platfo
 /** What each refused rebase means, in plain words, by its reason. */
 const REBASE_REFUSALS: Readonly<Record<string, (line: Readonly<Record<string, unknown>>) => string>> = {
   store: () => "the anchors' store couldn't be read, so nothing was checked: read the lines above",
-  not_needed: (line) =>
-    `the chain already meets its anchor${line.seq === null || line.seq === undefined ? '' : ` (at ${String(line.seq)})`}: there is nothing to move on`,
+  not_needed: (line) => {
+    const at = typeof line.seq === 'string' ? ' (at ' + line.seq + ')' : '';
+    return `the chain already meets its anchor${at}: there is nothing to move on`;
+  },
   broken: (line) =>
     `the chain fails its own check (${String(line.problem)} at ${String(line.seq)}), and a rebase never blesses a chain the app didn't write: repair it first (chain-recovery-plan, then chain-restore)`,
   head_differs: (line) =>
@@ -992,7 +994,7 @@ function rebaseOutcome(steps: JobSteps, lines: readonly LogLine[], asked: Rebase
     steps.say(
       before.recorded === 'failed'
         ? `The rebase ${id} is in the anchors' store, but its event on the chain still couldn't be written. ${again}`
-        : `A rebase named ${id} is already in the anchors' store for another chain, or can't be read as one: nothing was done. A new rebase needs no --id.`,
+        : `A rebase named ${id} is already in the anchors' store for another chain or another head, or can't be read as one: nothing was done, and the head named isn't rebased. A new rebase needs no --id.`,
     );
     return 1;
   }
