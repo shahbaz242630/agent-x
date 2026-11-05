@@ -141,12 +141,23 @@ param loadImageDigest string
 @maxLength(1000)
 param anchorPublicKeys string = ''
 
-@description('The anchors\' epoch (AGENTX_ANCHOR_EPOCH): raised by one only for a sanctioned restore of the whole database. One value for the API, which signs for it, and the operator, which reads it (4D2e E9).')
+@description('The anchors\' epoch (AGENTX_ANCHOR_EPOCH): raised by one only for a sanctioned restore of the whole database. One value for the app that holds the jobs, which signs for it, and the operator, which reads it (4D2e E9).')
 @minValue(1)
 @maxValue(1000000)
 param anchorEpoch int = 1
 
+@description('How many `web` copies production\'s API runs beside its jobs (4D2e D13), counted against its server by policy.ts `connections`. Staging\'s load run always runs three (`loadWebCopies`), the size it is measured at.')
+@minValue(1)
+@maxValue(10)
+param webCopies int = 3
+
 var names = resourceNames(environment, nameSuffix)
+
+// Where the API runs as `web` copies beside one `jobs` app (4D2e D13): production,
+// and staging's load run. Out of one, staging keeps a single API at AGENTX_ROLE
+// all (unset), holding the jobs and scaling to zero, so a quiet staging costs
+// nothing more (StageD-Design: a `jobs` app on staging would pass the $60 alarm).
+var split = loadRun || environment == 'production'
 
 // The restore drill's copy (S78): a point-in-time restore made under this name,
 // in the same subnet and private zone, which the operator's restore check reads
@@ -526,10 +537,22 @@ resource apiIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-3
   name: identityName(environment, 'api')
 }
 
-var activityDownloadsSettings = [
+// The API's jobs' own identity, where they run apart from it (4D2e D13): read only
+// then, so an apps run with no jobs app never asks Azure for it (it may not exist yet).
+resource jobsIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = if (split) {
+  name: identityName(environment, 'jobs')
+}
+
+var activityDownloadsUrl = 'https://${activityDownloadsAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${activityDownloadsContainerName()}'
+
+// A `web` copy hands a download out and the jobs build it, so both are told
+// (4D2e D13), each as its own identity. Kept apart, and chosen by a condition
+// (ARM evaluates only the branch taken), so a deployment with no `jobs` app never
+// reads the jobs' identity: an apps run before the foundation has made it works.
+var apiDownloadsSettings = [
   {
     name: 'AGENTX_ACTIVITY_DOWNLOADS_URL'
-    value: 'https://${activityDownloadsAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${activityDownloadsContainerName()}'
+    value: activityDownloadsUrl
   }
   {
     name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
@@ -537,24 +560,51 @@ var activityDownloadsSettings = [
   }
 ]
 
-// The anchors' epoch, the same setting for the API and the operator, so a plan reads the
-// files the API writes (4D2e E9; the policy's `anchor-epoch` holds them equal).
+var jobsDownloadsSettings = [
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_URL'
+    value: activityDownloadsUrl
+  }
+  {
+    name: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID'
+    value: jobsIdentity!.properties.clientId
+  }
+]
+
+// The anchors' epoch, the same setting for the app that holds the jobs and the
+// operator, so a plan reads the files those jobs write (4D2e E9; the policy's
+// `anchor-epoch` holds them equal).
 var anchorEpochSetting = {
   name: 'AGENTX_ANCHOR_EPOCH'
   value: string(anchorEpoch)
 }
 
-// Where the API keeps the audit chains' anchors (4D2e E, PL-58): the write-once
-// store's second container, as its own identity. Added as `activityDownloadsSettings` is.
-var anchorStoreSettings = [
+var anchorsUrl = 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
+
+// Where the app that holds the jobs keeps the audit chains' anchors (4D2e E,
+// PL-58; D13): the write-once store's second container, as its own identity.
+// Kept apart by identity as the downloads' settings are.
+var apiAnchorSettings = [
   anchorEpochSetting
   {
     name: 'AGENTX_AUDIT_ANCHORS_URL'
-    value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
+    value: anchorsUrl
   }
   {
     name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
     value: apiIdentity.properties.clientId
+  }
+]
+
+var jobsAnchorSettings = [
+  anchorEpochSetting
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_URL'
+    value: anchorsUrl
+  }
+  {
+    name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
+    value: jobsIdentity!.properties.clientId
   }
 ]
 
@@ -566,7 +616,7 @@ var operatorAnchorSettings = concat(
     anchorEpochSetting
     {
       name: 'AGENTX_AUDIT_ANCHORS_URL'
-      value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
+      value: anchorsUrl
     }
     {
       name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
@@ -952,18 +1002,20 @@ var loadApiSettings = [
     name: 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'
     value: '200000'
   }
-  // The fair gate (4D2e C, PL-63), wide until the load run's sweep sets the numbers: tooling/load/plan.ts's LOAD_GATE.
+  // The fair gate (4D2e C, PL-63), wide until the load run's sweep sets the numbers: tooling/load/plan.ts's LOAD_GATE
+  // (20 at once, 6 an organisation, 100 waiting), shared by the three copies as the rate limits are, each its third
+  // rounded up (4D2e D13). Each copy keeps its own gate (decision-gate.ts), and one gate can't pass its pool's eight.
   {
     name: 'AGENTX_DECISION_GATE_ACTIVE'
-    value: '20'
+    value: '7'
   }
   {
     name: 'AGENTX_DECISION_GATE_PER_ORGANISATION'
-    value: '6'
+    value: '2'
   }
   {
     name: 'AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION'
-    value: '100'
+    value: '34'
   }
   {
     name: 'AGENTX_DECISION_GATE_WAIT_MS'
@@ -971,15 +1023,193 @@ var loadApiSettings = [
   }
 ]
 
-// The three apps that serve traffic (ADR-002 Amendment G2d). Each is shaped
+// The load run's split (4D2e D13; StageD-Design "Memory at N copies"): three `web`
+// copies of eight connections and one `jobs` of six, 72 of the larger server's 85.
+var loadWebCopies = 3
+var copies = loadRun ? loadWebCopies : webCopies
+
+// What both apps that run the API read (4D2e D13): its login, and each of the
+// app's keys (ADR-011 §2), which it finds by name in the folder AGENTX_KEYS_DIR
+// names rather than one setting each; and the login service's tokens, which the
+// `web` side signs out with and the jobs carry out resets with.
+var apiFiles = concat(
+  [
+    {
+      reads: 'db-app-password'
+      setting: 'AGENTX_DB_PASSWORD_FILE'
+    }
+    {
+      reads: 'api-oidc-client-secret'
+      setting: 'AGENTX_OIDC_CLIENT_SECRET_FILE'
+    }
+    // B6-3c: Zitadel's token for removing a person's second factors once
+    // a reset has cooled off, its own service user's (Org User Manager).
+    {
+      reads: 'zitadel-reset-token'
+      setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
+    }
+  ],
+  // B5-3: the email service's key, copied in by the secrets deployment,
+  // and Zitadel's read-only token for the admins' addresses. The four
+  // email settings are all or none, so neither in the load run.
+  loadRun
+    ? []
+    : [
+        {
+          reads: 'acs-access-key'
+          setting: 'AGENTX_EMAIL_ACCESS_KEY_FILE'
+        }
+        {
+          reads: 'zitadel-directory-token'
+          setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
+        }
+      ],
+  // Every key but the operator's own, and their public halves instead (PL-57, E11).
+  map(filter(appKeys, key => !operatorOnly(key)), key => {
+    reads: key
+    setting: ''
+  }),
+  map(publicHalves, half => {
+    reads: half
+    setting: ''
+  })
+)
+
+var keysDirectorySetting = {
+  name: 'AGENTX_KEYS_DIR'
+  value: secretsPath
+}
+
+var appRoleSetting = {
+  name: 'AGENTX_DB_USER'
+  value: 'agentx_app'
+}
+
+// The one address a browser may send a change from (SEC-WEB-01). The
+// app door (below) is what serves that host; the jobs put it in a notice's link.
+var publicOriginSetting = {
+  name: 'AGENTX_PUBLIC_ORIGIN'
+  value: 'https://${appHost}'
+}
+
+// The proxy in front, so each client keeps its own rate limit and its own
+// address in a security event rather than every client sharing the
+// ingress's (ADR-011 §4). Microsoft: Envoy appends the client to
+// X-Forwarded-For and "only the rightmost IP is provided by Azure
+// Container Apps", so what is trusted is the subnet the ingress sits in.
+// And the loopback address: the replica's own Envoy connects from
+// 127.0.0.1 (S129, every activity log row on staging read 127.0.0.1, a
+// GitHub runner's requests among them), and only something inside the
+// replica can connect from there. The API's config asks for it wherever it is
+// deployed, so the jobs, which nothing reaches, are told it too.
+var trustedProxiesSetting = {
+  name: 'AGENTX_TRUSTED_PROXIES'
+  value: '127.0.0.1,${appsPrefix(networkAddressSpace)}'
+}
+
+// The login service (ADR-003 §5): its public address, which its tokens
+// name, and the API's client ID there; then the payment partner (ADR-014 §4,
+// Phase 1 D2-3a).
+var signInAndPartnerSettings = [
+  {
+    name: 'AGENTX_OIDC_ISSUER'
+    value: 'https://${authHost}'
+  }
+  {
+    name: 'AGENTX_OIDC_CLIENT_ID'
+    value: apiOidcClientId
+  }
+  {
+    name: 'AGENTX_PARTNER_MODE'
+    value: partnerMode
+  }
+]
+
+// The API as `web` copies beside the `jobs` app (4D2e D13): each counts its share
+// of every rate limit for the copies there are (rate-limit.ts, D12).
+var webRoleSettings = [
+  {
+    name: 'AGENTX_ROLE'
+    value: 'web'
+  }
+  {
+    name: 'AGENTX_WEB_COPIES'
+    value: string(copies)
+  }
+]
+
+// The API's jobs apart from it (4D2e D13): their own pool, six in the load run
+// (at least six: the hand-off's two transactions take at most a third of it),
+// and the log's cap the load run's API has, since the jobs log for the same run.
+var jobsRoleSettings = concat(
+  [
+    {
+      name: 'AGENTX_ROLE'
+      value: 'jobs'
+    }
+    {
+      name: 'AGENTX_DB_JOBS_POOL_MAX'
+      value: loadRun ? '6' : '10'
+    }
+  ],
+  loadRun
+    ? [
+        {
+          name: 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'
+          value: '200000'
+        }
+      ]
+    : []
+)
+
+// The API's jobs, apart from it where it is split (4D2e D13): the same image and
+// command at AGENTX_ROLE jobs, as its own identity. No ingress: it serves nothing,
+// so nothing, a door or a neighbour, can reach it. One copy, always running:
+// the lease alone doesn't make a second safe for the copier, and nothing would
+// wake one scaled to zero. It reaches what the jobs reach: Zitadel inside the
+// environment and the email endpoint, the downloads it builds and the anchors.
+var jobsApp = {
+  workload: 'jobs'
+  image: appImage
+  // As the API's heap (policy.ts): three quarters of its memory.
+  command: ['node', '--max-old-space-size=${loadRun ? '1536' : '768'}', 'apps/api/src/main.ts']
+  args: []
+  zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN']
+  sendsEmail: !loadRun
+  signsIn: true
+  keepsDownloads: true
+  keepsAnchors: true
+  minReplicas: 1
+  maxReplicas: 1
+  // As the API's: its runs end, then the lease is let go, within the stop deadline.
+  stopSeconds: 30
+  // Its jobs share no traffic's pace: half the API's load-run size is room enough.
+  cpu: loadRun ? '1' : '0.5'
+  memory: loadRun ? '2Gi' : '1Gi'
+  files: apiFiles
+  settings: concat(
+    ourSettings,
+    [
+      keysDirectorySetting
+      appRoleSetting
+      publicOriginSetting
+      trustedProxiesSetting
+    ],
+    signInAndPartnerSettings,
+    jobsRoleSettings
+  )
+}
+
+// The three apps that serve traffic (ADR-002 Amendment G2d), and the API's jobs
+// apart from it where it is split (`jobsApp`). Each is shaped
 // like a job above — the work it does, its image and command, what it reads as
 // a mounted file, its settings — with what only something long-running has:
 // the port it answers on and how many replicas may run.
 //
-// Every one of them has internal ingress. The environment has a public IP, but
+// Every one that serves traffic has internal ingress. The environment has a public IP, but
 // nothing here is a door: the doors are the route configs at the end of this
 // file (G2e), so an app is only ever public because a door names it.
-var apps = [
+var apps = concat([
   {
     // The API (Product-Documentation/API.md), as the app role and no other.
     workload: 'api'
@@ -1001,126 +1231,54 @@ var apps = [
     // and each notice would end as a warning. Zitadel stays its one origin.
     sendsEmail: !loadRun
     signsIn: true
-    // Keeps the activity log's background downloads (`activityDownloadsSettings`).
+    // Keeps the activity log's background downloads (`apiDownloadsSettings`).
     keepsDownloads: true
-    // Keeps the audit chains' anchors (`anchorStoreSettings`).
-    keepsAnchors: true
+    // Keeps the audit chains' anchors (`apiAnchorSettings`) where it holds the
+    // jobs: out of a split. In one, the `jobs` app keeps them (4D2e D13).
+    keepsAnchors: !split
     // AGENTX_ROLE all (unset) holds the jobs and counts its rate limits as the
-    // only copy (4D2e D12): one. A split's `web` copies scale (D13).
-    maxReplicas: 1
+    // only copy (4D2e D12): at most one, none while staging sleeps. A split's
+    // `web` copies run exactly as many as they count their limits for (D13).
+    minReplicas: split ? copies : appMinReplicas
+    maxReplicas: split ? copies : 1
     // Longer than the API's own 25-second stop deadline (API.md), so the log's
     // held-back counts are still written.
     stopSeconds: 30
     // The smallest pair the Consumption profile offers above its minimum, as
-    // the jobs take; the load run measures it at two CPUs (D2c), one copy as ever.
+    // the jobs take; the load run measures each copy at two CPUs (D2c).
     cpu: loadRun ? '2' : '0.5'
     memory: loadRun ? '4Gi' : '1Gi'
-    // Its login, and each of the app's keys (ADR-011 §2), which it finds by
-    // name in the folder AGENTX_KEYS_DIR names rather than one setting each.
-    files: concat(
+    files: apiFiles
+    settings: concat(
+      ourSettings,
       [
+        keysDirectorySetting
         {
-          reads: 'db-app-password'
-          setting: 'AGENTX_DB_PASSWORD_FILE'
+          name: 'AGENTX_HTTP_HOST'
+          value: '0.0.0.0'
         }
         {
-          reads: 'api-oidc-client-secret'
-          setting: 'AGENTX_OIDC_CLIENT_SECRET_FILE'
+          name: 'AGENTX_HTTP_PORT'
+          value: '8080'
         }
-        // B6-3c: Zitadel's token for removing a person's second factors once
-        // a reset has cooled off, its own service user's (Org User Manager).
+        appRoleSetting
+        publicOriginSetting
+        trustedProxiesSetting
+        // Ten of the server's 35 user connections, leaving Zitadel's ten, one for
+        // each job, and room for the worker (ADR-002 Amendment G1). Eight a copy on
+        // the load run's larger server, three copies beside the jobs' six (4D2e
+        // D13): each organisation's agents may hold 30% of a copy's pool
+        // (organisation-shares.ts). Production needs its own server's numbers
+        // (Pre-Launch Checklist, PL-63), which the policy's `connections` counts.
         {
-          reads: 'zitadel-reset-token'
-          setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
+          name: 'AGENTX_DB_POOL_MAX'
+          value: loadRun ? '8' : '10'
         }
       ],
-      // B5-3: the email service's key, copied in by the secrets deployment,
-      // and Zitadel's read-only token for the admins' addresses. The four
-      // email settings are all or none, so neither in the load run.
-      loadRun
-        ? []
-        : [
-            {
-              reads: 'acs-access-key'
-              setting: 'AGENTX_EMAIL_ACCESS_KEY_FILE'
-            }
-            {
-              reads: 'zitadel-directory-token'
-              setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
-            }
-          ],
-      // Every key but the operator's own, and its public half instead (PL-57).
-      map(filter(appKeys, key => !operatorOnly(key)), key => {
-        reads: key
-        setting: ''
-      }),
-      map(publicHalves, half => {
-        reads: half
-        setting: ''
-      })
+      signInAndPartnerSettings,
+      loadRun ? loadApiSettings : [],
+      split ? webRoleSettings : []
     )
-    settings: concat(ourSettings, [
-      {
-        name: 'AGENTX_KEYS_DIR'
-        value: secretsPath
-      }
-      {
-        name: 'AGENTX_HTTP_HOST'
-        value: '0.0.0.0'
-      }
-      {
-        name: 'AGENTX_HTTP_PORT'
-        value: '8080'
-      }
-      {
-        name: 'AGENTX_DB_USER'
-        value: 'agentx_app'
-      }
-      // The one address a browser may send a change from (SEC-WEB-01). The
-      // app door (below) is what serves that host.
-      {
-        name: 'AGENTX_PUBLIC_ORIGIN'
-        value: 'https://${appHost}'
-      }
-      // The proxy in front, so each client keeps its own rate limit and its own
-      // address in a security event rather than every client sharing the
-      // ingress's (ADR-011 §4). Microsoft: Envoy appends the client to
-      // X-Forwarded-For and "only the rightmost IP is provided by Azure
-      // Container Apps", so what is trusted is the subnet the ingress sits in.
-      // And the loopback address: the replica's own Envoy connects from
-      // 127.0.0.1 (S129, every activity log row on staging read 127.0.0.1, a
-      // GitHub runner's requests among them), and only something inside the
-      // replica can connect from there.
-      {
-        name: 'AGENTX_TRUSTED_PROXIES'
-        value: '127.0.0.1,${appsPrefix(networkAddressSpace)}'
-      }
-      // Ten of the server's 35 user connections, leaving Zitadel's ten, one for
-      // each job, and room for the worker (ADR-002 Amendment G1). Twenty on the
-      // load run's larger server: each organisation's agents may hold 30%
-      // (organisation-shares.ts), so two in trouble leave the others room (4D2d,
-      // PL-63: on ten, others' p95 332 ms; on twenty, 100 ms). Production needs
-      // the same, on its own server's connections (Pre-Launch Checklist, PL-63).
-      {
-        name: 'AGENTX_DB_POOL_MAX'
-        value: loadRun ? '20' : '10'
-      }
-      // The login service (ADR-003 §5): its public address, which its tokens
-      // name, and the API's client ID there.
-      {
-        name: 'AGENTX_OIDC_ISSUER'
-        value: 'https://${authHost}'
-      }
-      {
-        name: 'AGENTX_OIDC_CLIENT_ID'
-        value: apiOidcClientId
-      }
-      // The payment partner (ADR-014 §4, Phase 1 D2-3a).
-      {
-        name: 'AGENTX_PARTNER_MODE'
-        value: partnerMode
-      }
-    ], loadRun ? loadApiSettings : [])
   }
   {
     // Zitadel itself, already set up by the two jobs above: this only starts it.
@@ -1141,6 +1299,7 @@ var apps = [
     keepsAnchors: false
     // Its projections and its cache are one replica's; a second would also take
     // ten more of the server's connections.
+    minReplicas: appMinReplicas
     maxReplicas: 1
     stopSeconds: 30
     // The smallest pair the Consumption profile offers above its minimum, as
@@ -1181,6 +1340,7 @@ var apps = [
     transport: 'auto'
     // Nothing here holds state, but one replica is enough for a pilot and
     // keeps the deployment's shape the same everywhere.
+    minReplicas: appMinReplicas
     maxReplicas: 1
     stopSeconds: 30
     cpu: '0.5'
@@ -1227,7 +1387,7 @@ var apps = [
       }
     ]
   }
-]
+], split ? [jobsApp] : [])
 
 // Every secret a job is given, once each: the ones it reads as files and the
 // ones its settings name.
@@ -1354,21 +1514,24 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
       workloadProfileName: 'Consumption'
       configuration: {
         // Internal: reachable inside the environment only. The public doors are
-        // the route configs (below), so no app is a door by accident.
-        ingress: {
-          external: false
-          targetPort: app.targetPort
-          transport: app.transport
-          // Plain http is refused even inside the environment, which peer-to-peer
-          // encryption already covers (G2b).
-          allowInsecure: false
-          traffic: [
-            {
-              latestRevision: true
-              weight: 100
+        // the route configs (below), so no app is a door by accident. An app
+        // that serves nothing (the API's jobs, 4D2e D13) has no ingress at all.
+        ingress: app.?targetPort == null
+          ? null
+          : {
+              external: false
+              targetPort: app.targetPort
+              transport: app.transport
+              // Plain http is refused even inside the environment, which peer-to-peer
+              // encryption already covers (G2b).
+              allowInsecure: false
+              traffic: [
+                {
+                  latestRevision: true
+                  weight: 100
+                }
+              ]
             }
-          ]
-        }
         // Read from the vault by the app's own identity, never a value held here.
         secrets: map(secretsOf(app), secret => {
           name: secret
@@ -1378,7 +1541,7 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
       }
       template: {
         scale: {
-          minReplicas: appMinReplicas
+          minReplicas: app.minReplicas
           maxReplicas: app.maxReplicas
         }
         terminationGracePeriodSeconds: app.stopSeconds
@@ -1405,8 +1568,8 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
                 value: zitadelInternalUrl
               }),
               app.sendsEmail ? emailSettings : app.signsIn ? zitadelOrigins : [],
-              app.keepsDownloads ? activityDownloadsSettings : [],
-              app.keepsAnchors ? anchorStoreSettings : []
+              !app.keepsDownloads ? [] : app.workload == 'jobs' ? jobsDownloadsSettings : apiDownloadsSettings,
+              !app.keepsAnchors ? [] : app.workload == 'jobs' ? jobsAnchorSettings : apiAnchorSettings
             )
             volumeMounts: empty(app.files)
               ? []

@@ -46,6 +46,7 @@ import { promises as systemDns } from 'node:dns';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { setTimeout as sleepFor } from 'node:timers/promises';
 
 import { BICEP_VERSION, installedBicep } from '../../tooling/bicep/bicep.ts';
 import { installedCosign } from '../../tooling/cosign/cosign.ts';
@@ -804,6 +805,8 @@ export interface Steps {
   /** Whether GitHub's published ranges still match the file the rules are built from. */
   readonly rangesCurrent: () => boolean;
   readonly now: () => Date;
+  /** Waits between reads of something Azure finishes later (the jobs app's removal); the clock's own where unset. */
+  readonly sleep?: (ms: number) => Promise<void>;
   readonly makers?: Makers;
   readonly images?: Images;
   readonly dns?: DnsLookup;
@@ -1198,6 +1201,33 @@ function confirmLoadServer(steps: Steps, subscription: string): void {
       `The database allows ${String(live.limit)} connections${live.waiting ? ', and a change of it waits on a restart' : ''}, but the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}: the API would be refused connections. ${next}`,
     );
   }
+}
+
+/** The jobs app's identity, which the foundation makes (names.bicep, 4D2e D13). */
+const JOBS_IDENTITY = 'id-agentx-stg-jobs';
+
+/**
+ * The load run's jobs app runs as its own identity, which the foundation makes and the secrets deployment lets read
+ * its secrets (4D2e D13). Without it Azure would refuse the deployment half-way, naming a missing resource; so it is
+ * read first, and its absence said plainly.
+ */
+function confirmJobsIdentity(steps: Steps, subscription: string): void {
+  const done = steps.az.run([
+    'identity',
+    'show',
+    '--subscription',
+    subscription,
+    '--resource-group',
+    RESOURCE_GROUP,
+    '--name',
+    JOBS_IDENTITY,
+  ]);
+  if (done.status === 0) return;
+  const identity = `The jobs app's identity (${JOBS_IDENTITY})`;
+  const why = done.stderr.includes('NotFound') ? "isn't there yet" : `couldn't be read (${done.stderr.trim()})`;
+  throw new Error(
+    `${identity} ${why}: the load run's jobs app runs as it. Run node deploy/azure/deploy.ts foundation first, then secrets (which lets it read its secrets), then apps --load-run again. Nothing was deployed.`,
+  );
 }
 
 /** Where Azure Resource Manager answers: a list's next page must be there too. */
@@ -1825,13 +1855,16 @@ async function verifiedLoadImage(steps: Steps, images: Images, release: string):
   }
   steps.terminal.say('Verified.');
   steps.terminal.say(
-    "The load run: the API at 2 CPUs and 4 GiB (roughly $0.20 to $0.25 an hour while a copy runs, at list price), its limits raised, email off, and the load test's three jobs. Run apps again without --load-run the same day to put it back.",
+    "The load run: the API as three copies at 2 CPUs and 4 GiB each beside the jobs app at 1 CPU and 2 GiB, all always running (roughly $0.70 to $0.90 an hour at list price: $0.20 to $0.25 a copy, half that for the jobs), its limits raised, email off, and the load test's three jobs. Run apps again without --load-run the same day to put it back.",
   );
   return digest;
 }
 
-/** The apps and jobs as Azure left them after an apps deploy, and the load test's jobs when a plain one left them. */
-function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean): void {
+/** The app the API's jobs run in apart from it (apps.bicep `jobsApp`, 4D2e D13): staging has it in a load run alone. */
+const JOBS_APP = 'ca-agentx-stg-jobs';
+
+/** Says what Azure left of every app and job after an apps deploy, and the load test's jobs when a plain one left them; the apps' names. */
+function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean): readonly string[] {
   const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
     const found = azJson(steps.az, [
       ...kind.split(' '),
@@ -1857,7 +1890,48 @@ function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean)
       "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
     );
   }
+  return appsLeft.map((each) => text(each.name));
 }
+
+/**
+ * After a plain apps, the jobs app a load run left (4D2e D13): a deployment only adds and changes, and staging's API
+ * now holds the jobs again (AGENTX_ROLE all), so a jobs app left running would be a second holder of them, always
+ * billed. Removed only once the deployment that put the API back has succeeded: the two overlap no longer than a
+ * deploy's revisions do, and the lease keeps one leading.
+ */
+async function removeLeftJobsApp(
+  steps: Steps,
+  subscription: string,
+  appsLeft: readonly string[],
+  loadRun: boolean,
+): Promise<void> {
+  if (loadRun || !appsLeft.includes(JOBS_APP)) return;
+  const url = `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${JOBS_APP}?api-version=${ENVIRONMENT_API}`;
+  const stillThere = `two hold them until it goes. Remove it in the Azure portal (Container Apps, ${JOBS_APP}, Delete), or run apps again.`;
+  const done = steps.az.run(['rest', '--method', 'delete', '--url', url]);
+  if (done.status !== 0) {
+    throw new Error(
+      `Deployed, but Azure refused to remove ${JOBS_APP}, which a load run left beside the API, now holding the jobs again: ${stillThere}`,
+    );
+  }
+  // Azure takes a removal (202) before it is done: read until the app is gone, within the wait.
+  steps.terminal.say(`Removing ${JOBS_APP}, which the load run left (it takes a minute or two)...`);
+  for (let read = 0; read < REMOVAL_READS; read += 1) {
+    const found = steps.az.run(['rest', '--method', 'get', '--url', url]);
+    if (found.status !== 0 && found.stderr.includes('NotFound')) {
+      steps.terminal.say(`Removed ${JOBS_APP}: the API holds the jobs again (4D2e D13).`);
+      return;
+    }
+    await (steps.sleep ?? sleepFor)(REMOVAL_READ_MS);
+  }
+  throw new Error(
+    `Deployed, and Azure took the removal of ${JOBS_APP}, but it was still there ${String((REMOVAL_READS * REMOVAL_READ_MS) / 60_000)} minutes later, beside the API now holding the jobs again: ${stillThere}`,
+  );
+}
+
+/** How often, and how many times, the jobs app's removal is read back: ten minutes in all. */
+const REMOVAL_READ_MS = 10_000;
+const REMOVAL_READS = 60;
 
 async function deployApps(
   steps: Steps,
@@ -1867,7 +1941,10 @@ async function deployApps(
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
-  if (loadRun) confirmLoadServer(steps, subscription);
+  if (loadRun) {
+    confirmLoadServer(steps, subscription);
+    confirmJobsIdentity(steps, subscription);
+  }
   // Before anything else is asked: the API reads its client secret from the vault.
   // A disabled one counts as missing: the API couldn't read it either (the confirmation review).
   const missing = issuedMissing(
@@ -1920,7 +1997,8 @@ async function deployApps(
   };
   checkPolicy(steps, values);
   if ((await sendWithWhatIf(steps, subscription, 'apps', values)) === undefined) return 1;
-  sayWhatIsDeployed(steps, subscription, loadRun);
+  const appsLeft = sayWhatIsDeployed(steps, subscription, loadRun);
+  await removeLeftJobsApp(steps, subscription, appsLeft, loadRun);
   steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");
   // Most deploys need no job (S21): only a first one needs all four.
   steps.terminal.say(

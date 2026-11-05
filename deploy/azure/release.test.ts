@@ -21,6 +21,7 @@ import {
   type Decision,
   type Folder,
   HAND_DEPLOYED,
+  LOAD_RUN_UP,
   handDeployedList,
   main,
   ORDER,
@@ -1935,6 +1936,27 @@ describe('release', () => {
       expect((await outcome(azure)).message).toBe(`${message}${left}`);
       expect(methods(azure)).toEqual(['patch', 'post', 'patch']);
     }
+  });
+
+  it('refuses while a load run is up (the API at AGENTX_ROLE web), before anything is written, migrate included (4D2e D13)', async () => {
+    const azure = new Staging();
+    azure.app = { ...azure.app, env: [...azure.app.env, { name: 'AGENTX_ROLE', value: 'web' }] };
+    const ended_ = await outcome(azure);
+    expect(ended_.status).toBe(1);
+    expect(ended_.said).toContain(LOAD_RUN_UP);
+    expect(methods(azure)).toEqual([]);
+    expect(azure.writes).toEqual([]);
+    // `check` says the same, and changes nothing.
+    const checking = new Staging();
+    checking.app = azure.app;
+    const steps = checking.steps(ordinary());
+    expect(await check(RELEASE_NEW, steps)).toBe(1);
+    expect(steps.said).toContain(LOAD_RUN_UP);
+    expect(methods(checking)).toEqual([]);
+    // The API at `all`, said outright, is staging's own shape: released as ever.
+    const all = new Staging();
+    all.app = { ...all.app, env: [...all.app.env, { name: 'AGENTX_ROLE', value: 'all' }] };
+    expect((await outcome(all)).status).toBe(0);
   });
 });
 
