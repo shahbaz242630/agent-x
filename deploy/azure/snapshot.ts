@@ -177,7 +177,13 @@ type ShellValues = Readonly<Record<string, string>>;
  * Bicep can without Azure: at subscription scope, or into `resourceGroup` for
  * a part of an environment's foundation.
  */
-function snapshot(dir: string, paramsFile: string, resourceGroup: string | undefined, values: ShellValues): Snapshot {
+function snapshot(
+  dir: string,
+  paramsFile: string,
+  resourceGroup: string | undefined,
+  values: ShellValues,
+  subscription = SUBSCRIPTION,
+): Snapshot {
   const run = runBicep(
     [
       'snapshot',
@@ -185,7 +191,7 @@ function snapshot(dir: string, paramsFile: string, resourceGroup: string | undef
       '--mode',
       'overwrite',
       '--subscription-id',
-      SUBSCRIPTION,
+      subscription,
       '--tenant-id',
       TENANT,
       '--location',
@@ -199,6 +205,20 @@ function snapshot(dir: string, paramsFile: string, resourceGroup: string | undef
   const written = path.join(dir, paramsFile.replace(/\.bicepparam$/, '.snapshot.json'));
   return JSON.parse(readFileSync(written, 'utf8')) as Snapshot;
 }
+
+/**
+ * One deployment alone, resolved in a real subscription: names.bicep makes a
+ * suffix from the subscription for the names that must be unique, so only
+ * then are its resources' names and IDs the ones Azure holds (deploy.ts reads
+ * its log alerts so, S172).
+ */
+export const deploymentSnapshot = (
+  dir: string,
+  paramsFile: string,
+  resourceGroup: string | undefined,
+  values: ShellValues,
+  subscription: string,
+): Snapshot => snapshot(dir, paramsFile, resourceGroup, values, subscription);
 
 export interface EnvironmentSnapshot {
   /** main.bicep's deployment alone. */
