@@ -179,6 +179,8 @@ export function outcomeLine(outcome: RestoreOutcome): Readonly<Record<string, un
       headReplaced: plan.head !== undefined,
       forkDiscarded: plan.forkDiscarded,
       endsAt: plan.endsAt.seq.toString(),
+      // The repaired head's hash: with endsAt, the place a rebase names (4D2e E11).
+      endsAtHash: plan.endsAt.hash.toString('hex'),
     };
   }
   switch (outcome.reason) {

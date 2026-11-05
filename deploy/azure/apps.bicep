@@ -559,8 +559,10 @@ var anchorStoreSettings = [
 ]
 
 // Where the operator reads the chains' anchors for a chain recovery plan (4D2e
-// E9): the same container, as the operator's own identity, which may only read
-// it (modules/evidence.bicep), and the public keys the lines are checked with.
+// E9) and adds a chain's rebase (E11), and the chain repair reads them (E10):
+// the same container, each as its own identity, the operator's able to add a new
+// file and the chain repair's only to read (modules/evidence.bicep), and the
+// public keys the lines are checked with.
 var operatorAnchorSettings = concat(
   [
     anchorEpochSetting

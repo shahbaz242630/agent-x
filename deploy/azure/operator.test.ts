@@ -17,6 +17,7 @@ import {
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
+  chainRebaseRequest,
   chainRecoveryRequest,
   chainRestoreRequest,
   restoreCheckRequest,
@@ -26,6 +27,7 @@ import type { Az, AzResult } from './deploy.ts';
 import { jobName, JOBS_API, UsageError } from './jobs.ts';
 import {
   auditExport,
+  chainRebase,
   chainRestore,
   createOrganization,
   handoffChange,
@@ -38,6 +40,7 @@ import {
   parseAuditExport,
   parseFirstAdmin,
   parseHandoff,
+  parseRebase,
   parseRecoveryPlan,
   parseRestore,
   recoveryPlan,
@@ -209,13 +212,49 @@ type Ending =
   | 'restore-unverified'
   | 'restore-unknown'
   | 'restore-done-before'
-  | 'restore-settings';
+  | 'restore-settings'
+  | 'restored-old'
+  | 'rebased'
+  | 'rebased-shorter'
+  | 'rebased-unrecorded'
+  | 'rebase-recorded'
+  | 'rebase-done-already'
+  | 'rebase-done-unrecorded'
+  | 'rebase-done-other'
+  | 'rebase-store'
+  | 'rebase-not-needed'
+  | 'rebase-not-needed-unanchored'
+  | 'rebase-broken'
+  | 'rebase-head-differs'
+  | 'rebase-unknown'
+  | 'rebased-other';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
 
 /** Another request's ID, as if that request had run in this one's place. */
 const OTHER_ID = '0199a1b2-c3d4-7e5f-8a6b-000000000001';
+
+/** A repaired chain's head, as a rebase names it (4D2e E11). */
+const HEAD_HASH_HEX = 'cd'.repeat(32);
+
+/** The line a rebase's run ends with when it is written, for its ID, with `more` in place. */
+const rebasedLine = (id: string, more: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> => ({
+  event: 'operator.chain_rebased',
+  rebaseId: id,
+  chain: 'organisation',
+  seq: '9',
+  headHash: HEAD_HASH_HEX,
+  anchorSeq: '7',
+  shorterBy: '0',
+  reason: 'repaired',
+  recorded: 'recorded',
+  ...more,
+});
+
+/** A refused rebase's line, for its ID. */
+const rebaseRefused = (id: string, more: Readonly<Record<string, unknown>>): Row =>
+  said({ event: 'operator.chain_rebase_refused', rebaseId: id, problem: null, seq: null, ...more });
 
 const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
   created: (id) => [
@@ -408,6 +447,7 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
       replaced: 1,
       removed: 0,
       endsAt: '9',
+      endsAtHash: 'cd'.repeat(32),
       holdKept: true,
     }),
     TERMINATED,
@@ -445,6 +485,33 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     }),
     TERMINATED,
   ],
+  'restored-old': (id) => [
+    said({ event: 'operator.chain_restored', restoreId: id, putBack: 1, replaced: 0, removed: 0, endsAt: '9' }),
+    TERMINATED,
+  ],
+  rebased: (id) => [said(rebasedLine(id, {})), TERMINATED],
+  'rebased-shorter': (id) => [said(rebasedLine(id, { shorterBy: '2' })), TERMINATED],
+  'rebased-unrecorded': (id) => [said(rebasedLine(id, { recorded: 'failed' })), TERMINATED],
+  'rebase-recorded': (id) => [said({ event: 'operator.rebase_recorded', rebaseId: id }), TERMINATED],
+  'rebase-done-already': (id) => [
+    said({ event: 'operator.done_before', command: 'chain-rebase', rebaseId: id, recorded: 'already' }),
+    TERMINATED,
+  ],
+  'rebase-done-unrecorded': (id) => [
+    said({ event: 'operator.done_before', command: 'chain-rebase', rebaseId: id, recorded: 'failed' }),
+    TERMINATED,
+  ],
+  'rebase-done-other': (id) => [
+    said({ event: 'operator.done_before', command: 'chain-rebase', rebaseId: id, recorded: null }),
+    TERMINATED,
+  ],
+  'rebase-store': (id) => [rebaseRefused(id, { reason: 'store' }), TERMINATED],
+  'rebase-not-needed': (id) => [rebaseRefused(id, { reason: 'not_needed', seq: '12' }), TERMINATED],
+  'rebase-not-needed-unanchored': (id) => [rebaseRefused(id, { reason: 'not_needed', seq: null }), TERMINATED],
+  'rebase-broken': (id) => [rebaseRefused(id, { reason: 'broken', problem: 'mac', seq: '4' }), TERMINATED],
+  'rebase-head-differs': (id) => [rebaseRefused(id, { reason: 'head_differs', seq: '11' }), TERMINATED],
+  'rebase-unknown': (id) => [rebaseRefused(id, { reason: 'something_new' }), TERMINATED],
+  'rebased-other': () => [said(rebasedLine(OTHER_ID, {})), TERMINATED],
   'resumed-other': () => [
     said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
     said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
@@ -468,6 +535,11 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'resumed-by-another',
   'paused-as-born',
   'resumed-other',
+  'restored-old',
+  'rebased',
+  'rebased-shorter',
+  'rebase-recorded',
+  'rebased-other',
   'planned',
   'restored',
   'restored-other',
@@ -723,7 +795,9 @@ class FakeAzure implements Az {
     const words = JSON.parse(this.heldAtStart ?? '[]') as string[];
     // The ID a request names: an organisation's fifth word, an invitation's seventh, an export's eleventh.
     const at =
-      { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10, 'chain-restore': 8 }[String(words[0])] ?? 4;
+      { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10, 'chain-restore': 8, 'chain-rebase': 12 }[
+        String(words[0])
+      ] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
     return {
@@ -1960,9 +2034,12 @@ async function drill(argv: readonly string[], script: Script) {
       return Promise.resolve();
     },
   };
-  const status = await (
-    argv[0] === 'chain-restore' ? chainRestore(parseRestore(argv), steps) : recoveryPlan(parseRecoveryPlan(argv), steps)
-  ).then(
+  const run = (): Promise<number> => {
+    if (argv[0] === 'chain-restore') return chainRestore(parseRestore(argv), steps);
+    if (argv[0] === 'chain-rebase') return chainRebase(parseRebase(argv), steps);
+    return recoveryPlan(parseRecoveryPlan(argv), steps);
+  };
+  const status = await run().then(
     (value) => value,
     (error: unknown) => {
       lines.push(messageOf(error));
@@ -2078,9 +2155,17 @@ describe('4D2e E10 a chain repair, on its own job, as the owner', () => {
     expect(intro).toBe(
       `Repairing ${PLAN_ORG}'s chain from plan ${PLAN_ID}, as repair ${id}. This run logs in as the database's owner, so the "login by the owner role outside a deploy" SEV-1 alert fires for it about 20 to 35 minutes later, by design. Note this run in the incident log.`,
     );
-    expect(done.said.at(-1)).toBe(
+    expect(done.said.at(-2)).toBe(
       `Repaired: 2 rows put back, 1 replaced, 0 removed; the chain checks whole to 9. The records are in the evidence store as ${PLAN_ORG}/chain-restore-${id}-start.ndjson and -outcome.ndjson. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
     );
+    // The rebase's command, with the repaired head (4D2e E11).
+    expect(done.said.at(-1)).toBe(
+      `If the anchor check then alarms "anchor" for this chain, the rebase, once its head is checked: node deploy/azure/operator.ts chain-rebase --chain ${PLAN_ORG} --seq 9 --hash ${'cd'.repeat(32)} --reason repaired --evidence <incident reference>`,
+    );
+    // A repair from before the head's hash was logged says no rebase.
+    const old = await drill(restore(), { restore: true, ending: 'restored-old' });
+    expect(old.status).toBe(0);
+    expect(old.said.at(-1)).toMatch(/^Repaired: 1 rows put back/);
   });
 
   it('passes --discard-fork and an earlier --id through only when given', async () => {
@@ -2171,5 +2256,189 @@ describe('4D2e E10 a chain repair, on its own job, as the owner', () => {
         ? `say chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork], and nothing else\n${USAGE}`
         : `--org takes the organisation's ID: a UUIDv7, in lower case; --plan takes the plan's ID: a UUIDv7, in lower case; --digest takes the plan's digest: 64 lower-case hex digits; --id takes the ID an earlier run gave: a UUIDv7, in lower case\n${USAGE}`,
     );
+  });
+});
+
+describe("4D2e E11 a chain's rebase, on the operator's job", () => {
+  const rebase = (...more: string[]) => [
+    'chain-rebase',
+    '--chain',
+    PLAN_ORG,
+    '--seq',
+    '9',
+    '--hash',
+    HEAD_HASH_HEX,
+    '--reason',
+    'repaired',
+    '--evidence',
+    'INC-2026-11',
+    ...more,
+  ];
+  const AGAIN = (id: string) =>
+    `Run the same command again with --id ${id}: a rebase is written once, and a run that stopped between its file and its event on the chain finishes the event.`;
+
+  it("writes the rebase's request onto the operator's job, puts [] back, and says the anchor moved", async () => {
+    const done = await drill(rebase(), { ending: 'rebased' });
+    expect(done.status).toBe(0);
+    const words = JSON.parse(String(done.az.heldAtStart)) as string[];
+    const id = String(words[12]);
+    expect(id).toMatch(UUID_V7);
+    expect(done.az.heldAtStart).toBe(
+      chainRebaseRequest({
+        chain: PLAN_ORG,
+        seq: '9',
+        hash: HEAD_HASH_HEX,
+        reason: 'repaired',
+        evidence: 'INC-2026-11',
+        id,
+      }),
+    );
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.find((line) => line.startsWith('Rebasing '))).toBe(
+      `Rebasing ${PLAN_ORG}'s chain on to its head at 9, as rebase ${id}, signed with the operator's rebase key. The API trusts that head from then on: name only a head checked after a sanctioned change.`,
+    );
+    expect(done.said.at(-1)).toBe(
+      `Rebased: ${PLAN_ORG}'s chain's anchor moves on from 7 to 9 (head ${HEAD_HASH_HEX}). The rebase ${id} is in the anchors' store and its event on the chain. The API takes it in on its next read of the store: the anchor alarm for this chain stops, and it logs the warning audit.rebased, by design.`,
+    );
+    // The incident's reference goes in the request alone: never said.
+    expect(done.said.join('\n')).not.toContain('INC-2026-11');
+  });
+
+  it('passes the platform chain and an earlier --id through, and says a shorter chain', async () => {
+    const platform = await drill(
+      ['chain-rebase', '--chain', 'platform', ...rebase('--id', EARLIER_ID).slice(3)].map((word) =>
+        word === 'repaired' ? 'recovered' : word,
+      ),
+      { ending: 'rebased-shorter' },
+    );
+    expect(JSON.parse(String(platform.az.heldAtStart))).toEqual([
+      'chain-rebase',
+      '--chain',
+      'platform',
+      '--seq',
+      '9',
+      '--hash',
+      HEAD_HASH_HEX,
+      '--reason',
+      'recovered',
+      '--evidence',
+      'INC-2026-11',
+      '--id',
+      EARLIER_ID,
+    ]);
+    expect(platform.status).toBe(0);
+    expect(platform.said.at(-1)).toMatch(
+      /^Rebased: the platform's chain's anchor moves on from 7 to 9 \(head (?:cd){32}\); the chain is 2 events shorter than its old anchor, and those are given up\. /,
+    );
+  });
+
+  it('says a rebase finished now, already done, or its event still unwritten', async () => {
+    const unrecorded = await drill(rebase('--id', EARLIER_ID), { ending: 'rebased-unrecorded', states: ['Failed'] });
+    expect(unrecorded.status).toBe(1);
+    expect(unrecorded.said.at(-1)).toBe(
+      `The rebase ${EARLIER_ID} is in the anchors' store, but its event on the chain wasn't written. ${AGAIN(EARLIER_ID)}`,
+    );
+    const finished = await drill(rebase('--id', EARLIER_ID), { ending: 'rebase-recorded' });
+    expect(finished.status).toBe(0);
+    expect(finished.said.at(-1)).toBe(
+      `The rebase ${EARLIER_ID} was written by an earlier run; its event on the chain is written now. It is done.`,
+    );
+    const already = await drill(rebase('--id', EARLIER_ID), { ending: 'rebase-done-already', states: ['Failed'] });
+    expect(already.status).toBe(0);
+    expect(already.said.at(-1)).toBe(
+      `Already done: the rebase ${EARLIER_ID} and its event on the chain were written by an earlier run.`,
+    );
+    const still = await drill(rebase('--id', EARLIER_ID), { ending: 'rebase-done-unrecorded', states: ['Failed'] });
+    expect(still.status).toBe(1);
+    expect(still.said.at(-1)).toBe(
+      `The rebase ${EARLIER_ID} is in the anchors' store, but its event on the chain still couldn't be written. ${AGAIN(EARLIER_ID)}`,
+    );
+    const other = await drill(rebase('--id', EARLIER_ID), { ending: 'rebase-done-other', states: ['Failed'] });
+    expect(other.status).toBe(1);
+    expect(other.said.at(-1)).toBe(
+      `A rebase named ${EARLIER_ID} is already in the anchors' store for another chain, or can't be read as one: nothing was done. A new rebase needs no --id.`,
+    );
+  });
+
+  it.each([
+    ['rebase-store', "the anchors' store couldn't be read, so nothing was checked: read the lines above"],
+    ['rebase-not-needed', 'the chain already meets its anchor (at 12): there is nothing to move on'],
+    ['rebase-not-needed-unanchored', 'the chain already meets its anchor: there is nothing to move on'],
+    [
+      'rebase-broken',
+      "the chain fails its own check (mac at 4), and a rebase never blesses a chain the app didn't write: repair it first (chain-recovery-plan, then chain-restore)",
+    ],
+    [
+      'rebase-head-differs',
+      "the chain's head is at 11, not the place named: check the head again and ask for that one",
+    ],
+    ['rebase-unknown', 'something_new'],
+  ] as const)('says a %s refusal in plain words, and ends 1', async (ending, why) => {
+    const done = await drill(rebase('--id', EARLIER_ID), { ending, states: ['Failed'] });
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe(`Not rebased, and nothing changed: ${why}.`);
+  });
+
+  it("says a refusal and an unclear end, and another rebase's lines are not this one's", async () => {
+    const refused = await drill(rebase('--id', EARLIER_ID), { ending: 'refused', states: ['Failed'] });
+    expect(refused.said.at(-1)).toBe('Refused, and nothing changed: the name starts or ends with a space.');
+    const other = await drill(rebase('--id', EARLIER_ID), { ending: 'rebased-other' });
+    expect(other.status).toBe(1);
+    expect(other.said.at(-1)).toBe(
+      `The run's lines don't say what it did: they may not all have arrived. Read the lines above. ${AGAIN(EARLIER_ID)}`,
+    );
+  });
+
+  const SHAPE =
+    'say chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>], and nothing else';
+  it.each([
+    [['chain-rebase', '--chain', PLAN_ORG], SHAPE],
+    [rebase('--force'), SHAPE],
+    [rebase('--id'), SHAPE],
+    [rebase('--id', EARLIER_ID, '--id', EARLIER_ID), SHAPE],
+    [rebase().map((word) => (word === '--seq' ? '--head' : word)), SHAPE],
+    [
+      [
+        'chain-rebase',
+        '--chain',
+        'PLATFORM',
+        '--seq',
+        '0',
+        '--hash',
+        'CD',
+        '--reason',
+        'fixed',
+        '--evidence',
+        'x y',
+        '--id',
+        'I',
+      ],
+      "--chain takes platform, or the organisation's ID: a UUIDv7, in lower case; --seq takes the checked head's number: a whole number from 1; --hash takes the checked head's hash: 64 lower-case hex digits; --reason takes repaired or recovered; --evidence takes the incident's reference: 3 to 64 letters, digits and . _ / -, starting with a letter or digit; --id takes the ID an earlier run gave: a UUIDv7, in lower case",
+    ],
+  ])('refuses %j before anything is sent', async (argv, problem) => {
+    const lines: string[] = [];
+    const az = new FakeAzure({});
+    await expect(
+      main(
+        argv,
+        (line) => lines.push(line),
+        () => az,
+      ),
+    ).resolves.toBe(2);
+    expect(az.calls).toEqual([]);
+    expect(lines).toEqual([`${problem}\n${USAGE}`]);
+  });
+
+  it('runs from the command line as the others do', async () => {
+    const lines: string[] = [];
+    const az = new FakeAzure({ ending: 'rebased' });
+    await expect(
+      main(
+        rebase(),
+        (line) => lines.push(line),
+        () => az,
+      ),
+    ).resolves.toBe(0);
+    expect(lines.at(-1)).toMatch(/^Rebased: /);
   });
 });
