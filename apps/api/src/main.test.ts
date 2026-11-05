@@ -475,7 +475,6 @@ const EVERY_TIMER: [string, number][] = [
   ['schema_check', 300_000],
   ['mandate_expiry', 300_000],
   ['hold_history', 30_000],
-  ['zone_sealing', 900_000],
   ['holdings_check', 900_000],
   ['request_expiry', 300_000],
   ['request_voids', 300_000],
@@ -1081,13 +1080,6 @@ describe('4D2e D: the first try at the lease', () => {
   it('`web` has no lease to try', async () => {
     await start({ ...ENV, AGENTX_ROLE: 'web' });
     expect(fake.steps).not.toContain('lease taken');
-  });
-
-  it('4D2e Stage F the first zone pass, before listening and off the timer, is a run: its lines say so', async () => {
-    const { capture } = await start();
-    const passLines = capture.lines().filter((line) => String(line.event).startsWith('agent_zones.'));
-    expect(passLines.map((line) => line.event)).not.toEqual([]);
-    for (const line of passLines) expect(line.runId).toEqual(expect.any(String));
   });
 
   it('a stop while it goes unanswered is a clean stop: exit 0, nothing started, nothing listening', async () => {

@@ -628,27 +628,30 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
     });
   });
 
-  describe('0075 against the app writing the tables it adds triggers to (4D2e D9)', () => {
-    /** Every file before 0075 run; 0075 then copied in, for the next run to take. */
-    async function upTo0075() {
-      for (const name of (await readdir(REPO_MIGRATIONS)).filter((file) => file < '0075')) {
-        await copyFile(path.join(REPO_MIGRATIONS, name), path.join(folder, name));
-      }
-      await run();
-      await copyFile(path.join(REPO_MIGRATIONS, '0075_void_marks.sql'), path.join(folder, '0075_void_marks.sql'));
+  /** Every file before `file` run; `file` then copied in, for the next run to take. */
+  async function upTo(file: string) {
+    for (const name of (await readdir(REPO_MIGRATIONS)).filter((one) => one < file)) {
+      await copyFile(path.join(REPO_MIGRATIONS, name), path.join(folder, name));
     }
+    await run();
+    await copyFile(path.join(REPO_MIGRATIONS, file), path.join(folder, file));
+  }
 
-    const migrating = (pauseMs: number) =>
-      runMigrations({
-        connection: database.connection('owner'),
-        directory: folder,
-        logger: createLogger({
-          service: 'migrate',
-          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
-          destination: capture,
-        }),
-        lockWait: { timeoutMs: 8000, pauseMs },
-      });
+  /** The migrations run as the owner, each lock waited for up to 8 s in all, `pauseMs` between tries. */
+  const migrating = (pauseMs: number) =>
+    runMigrations({
+      connection: database.connection('owner'),
+      directory: folder,
+      logger: createLogger({
+        service: 'migrate',
+        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+        destination: capture,
+      }),
+      lockWait: { timeoutMs: 8000, pauseMs },
+    });
+
+  describe('0075 against the app writing the tables it adds triggers to (4D2e D9)', () => {
+    const upTo0075 = () => upTo('0075_void_marks.sql');
 
     it('waits for a writer marking its work as it commits, and both go through: org_work is taken last', async () => {
       await upTo0075();
@@ -699,6 +702,63 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
         await writer.end();
       }
       expect(await running).toEqual(['0075_void_marks.sql']);
+    });
+  });
+
+  describe('0077 against the app writing the tables it adds triggers to (4D2e D10)', () => {
+    const FILE = '0077_reset_download_hold_marks.sql';
+
+    const upTo0077 = () => upTo(FILE);
+
+    it('waits for a writer marking its work as it commits, and both go through: org_work is taken last', async () => {
+      await upTo0077();
+      await database.as('admin').query('insert into directory.orgs (org_id) values ($1)', [ORG_A]);
+      // As a reset's confirming part-way: it has the resets' table, and marks its work at its commit (0072).
+      const writer = await database.connect('admin');
+      await writer.query("set deadlock_timeout = '10s'");
+      await writer.query('begin');
+      await writer.query('update identity.factor_resets set status = status where false');
+      const running = migrating(10);
+      try {
+        await waitUntilQueued(database.as('admin'), 1);
+        await within(
+          5000,
+          writer.query(
+            `insert into directory.org_work (org_id, job, due_at) values ($1, 'request_voids', pg_catalog.now())`,
+            [ORG_A],
+          ),
+          'the commit marking its work',
+        );
+        await writer.query('commit');
+      } finally {
+        await writer.end();
+      }
+      expect(await running).toEqual([FILE]);
+      expect(capture.lines().filter((line) => line.event === 'db.migration.deadlocked')).toEqual([]);
+    });
+
+    it('gives way to a writer taking its two tables the other way round: the app is never the one aborted', async () => {
+      await upTo0077();
+      // A download's month written, then a reset, at Postgres's own 1 s deadlock_timeout: against ADR-006's order, as
+      // no app transaction should, so only the file's own 500 ms wait keeps the writer from being the deadlock's victim.
+      const writer = await database.connect('admin');
+      await writer.query("set deadlock_timeout = '1s'");
+      await writer.query('begin');
+      await writer.query('update activity_exports.files set state = state where false');
+      // The retry comes after the writer is done.
+      const running = migrating(2000);
+      try {
+        // The file holds the resets and waits for the months. The writer comes past the file's own deadlock check
+        // (1 s into its wait, finding no cycle yet), so only the writer's check could find the one it makes: without
+        // the file's 500 ms, the writer is the one aborted.
+        await waitUntilQueued(database.as('admin'), 1);
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        await within(5000, writer.query('update identity.factor_resets set status = status where false'), 'the writer');
+        await writer.query('commit');
+      } finally {
+        await writer.end();
+      }
+      expect(await running).toEqual([FILE]);
     });
   });
 });

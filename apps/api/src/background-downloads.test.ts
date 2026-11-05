@@ -31,11 +31,11 @@ describe('L5c the background downloads, as the config sets them up', () => {
     expect(backgroundDownloadsFrom(undefined, services)).toEqual({
       exports: undefined,
       files: undefined,
-      builder: undefined,
+      builderFor: undefined,
     });
     const on = backgroundDownloadsFrom(folderBlockStore('/tmp/downloads'), services);
     expect(typeof on.exports?.ask).toBe('function');
     expect(typeof on.files?.part).toBe('function');
-    expect(typeof on.builder?.run).toBe('function');
+    expect(typeof on.builderFor?.(() => Promise.resolve([])).run).toBe('function');
   });
 });

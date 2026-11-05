@@ -45,6 +45,7 @@ function removalsWith(env: Record<string, string>) {
     },
   );
   const removals = resetRemovalsFrom({
+    list: () => Promise.reject(new Error('no directory in this test')),
     config: loadConfig(env),
     database: failing as never,
     keys,

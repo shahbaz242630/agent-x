@@ -4,6 +4,7 @@
 // are, calling the real function, as the app role: real rows in the real tables are
 // org-work.db.test.ts's in apps/api. Every race is forced with a held transaction.
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { sql } from 'kysely';
 import {
   createTestDatabase,
   FixedClock,
@@ -14,8 +15,15 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { dueOrgWork, markOrgWork, settleOrgWork, settleOrgWorkPage } from './org-work.ts';
-import type { DirectoryTables } from './tables.ts';
+import {
+  dueOrgWork,
+  markOrgWork,
+  organisationsWithMarks,
+  organisationsWithMarksRead,
+  settleOrgWork,
+  settleOrgWorkPage,
+} from './org-work.ts';
+import { type DirectoryTables, ORG_WORK_JOBS } from './tables.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -532,6 +540,72 @@ describe('which organisations a job takes from its marks', () => {
     await markedAgo(a, 10);
     await admin().query(`insert into directory.org_work (org_id, job, due_at) values ($1, 'hand_off', now())`, [b]);
     expect((await dueOrgWork(app, job, { most: 10, by: new Date(0) })).map(({ orgId }) => orgId)).toEqual([a]);
+  });
+});
+
+describe('which organisations have marks of any job (4D2e D11)', () => {
+  it('each once, whatever its jobs, soonest due first, at most as many as asked', async () => {
+    const [a = '', b = '', c = ''] = [1, 2, 3].map((at) => `0199a0f1-0000-7000-8000-${String(at).padStart(12, '0')}`);
+    await admin().query('insert into directory.orgs (org_id) select unnest($1::uuid[])', [[a, b, c]]);
+    // Ahead of every other test's marks, so the first come back as this test's.
+    const markedAt = (orgId: string, job: string, seconds: number) =>
+      admin().query(
+        `insert into directory.org_work (org_id, job, due_at) values ($1, $2, '2000-01-01'::timestamptz + make_interval(secs => $3))`,
+        [orgId, job, seconds],
+      );
+    await markedAt(a, 'hand_off', 20);
+    await markedAt(b, 'payment_check', 30);
+    await markedAt(b, 'request_expiry', 10);
+    await markedAt(c, 'hand_off', 40);
+
+    expect((await organisationsWithMarks(app, 1_000)).slice(0, 3)).toEqual([b, a, c]);
+    expect(await organisationsWithMarks(app, 2)).toEqual([b, a]);
+  });
+
+  it('knows every job the table may hold: its list is the CHECK on `job`', async () => {
+    const [{ check } = { check: '' }] = await admin().query<{ check: string }>(
+      `select pg_catalog.pg_get_constraintdef(oid) as "check" from pg_catalog.pg_constraint
+        where conname = 'org_work_job_check' and conrelid = 'directory.org_work'::regclass`,
+    );
+    expect([...check.matchAll(/'([a-z_]+)'::text/g)].map(([, job]) => job).toSorted()).toEqual(
+      [...ORG_WORK_JOBS].toSorted(),
+    );
+  });
+
+  it('reads 100,000 marks through the due index alone, each job a scan of its soonest, no table read whole', async () => {
+    const owner = database.as('owner');
+    const first = 9_100;
+    await owner.query(
+      `insert into directory.orgs (org_id)
+         select ('0199a0f2-0000-7000-8000-' || lpad(n::text, 12, '0'))::uuid from generate_series(1, $1) n`,
+      [first],
+    );
+    try {
+      await owner.query(
+        `insert into directory.org_work (org_id, job, due_at)
+           select ('0199a0f2-0000-7000-8000-' || lpad(n::text, 12, '0'))::uuid, job,
+                  -- Every organisation soonest by its hand-off, before every other job's mark, and before every
+                  -- other test's: so the first 1,000 are the hand-off's own first 1,000, each job's limit binding.
+                  '1990-01-01'::timestamptz + make_interval(secs => n * 7 + (case job when 'hand_off' then 0 else 100000 end))
+             from generate_series(1, $1) n, unnest($2::text[]) job`,
+        [first, ORG_WORK_JOBS],
+      );
+      await owner.query('analyze directory.org_work');
+      const { rows } = await sql<{ 'QUERY PLAN': { Plan: unknown }[] }>`
+        explain (analyze, format json) ${organisationsWithMarksRead(1_000)}
+      `.execute(app);
+      const nodes = JSON.stringify(rows[0]?.['QUERY PLAN'][0]?.Plan);
+      expect(nodes).toContain('"Index Name":"org_work_due"');
+      expect(nodes).not.toContain('Seq Scan');
+      // The same as grouping the whole table, in the same order.
+      const whole = await owner.query<{ org_id: string }>(
+        'select org_id from directory.org_work group by org_id order by min(due_at), org_id limit 1000',
+      );
+      expect(await organisationsWithMarks(app, 1_000)).toEqual(whole.map(({ org_id }) => org_id));
+    } finally {
+      await owner.query(`delete from directory.org_work where org_id::text like '0199a0f2-%'`);
+      await owner.query(`delete from directory.orgs where org_id::text like '0199a0f2-%'`);
+    }
   });
 });
 

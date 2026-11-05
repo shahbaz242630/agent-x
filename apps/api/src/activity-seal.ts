@@ -4,7 +4,7 @@
 // event on its audit chain (activity-seal.ts in the activity module says
 // what a day and its digest are).
 //
-// For each organisation the directory lists: the day after its newest seal,
+// For each organisation a run lists: the day after its newest seal,
 // or the day its first row was written when it has none; then each day after
 // that is closed, in order, at most MOST_DAYS_A_RUN a run (a server woken
 // after days asleep catches up over a few runs), no day skipped, quiet days
@@ -17,6 +17,15 @@
 // stop sealing unseen, F1 G3). A day holding a row written past the app
 // (its ID's time far from its own: `misdated`) is never sealed: the alarm
 // raised and the organisation held.
+//
+// A run lists every organisation once a UTC day, at its first run once
+// yesterday can be sealed (00:15 UTC), and at a process's first run (4D2e
+// D11; org-passes.ts): a day is sealed at most a run past its grace, as
+// before, with no visit to the rest of the day's runs. One not finished (it
+// failed, a day moved, more than MOST_DAYS_A_RUN behind, or the run was
+// stopped) is visited again each run, from memory, until it is; a restart
+// lists every one anyway. One tampered with is finished: its alarm and hold
+// are set, and nothing past them is sealed.
 //
 // A run never throws: each failure is logged, naming the organisation, and
 // the run goes on to the next.
@@ -37,7 +46,7 @@ import { type Database, type DatabaseTransaction, holdTransactionLock } from '@a
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-/** How often closed days are looked for, once the last run has ended. */
+/** How often a run seals the closed days of those it lists, once the last run has ended. */
 export const ACTIVITY_SEAL_EVERY_MS = 15 * 60_000;
 
 /** The most days one run seals an organisation, so one asleep for long doesn't hold up the rest. */
@@ -55,12 +64,13 @@ type SealTables = AuditTables & ActivityTables;
 type SealTx = DatabaseTransaction<SealTables>;
 
 export interface ActivitySeal {
-  /** Seals the closed days, up to MOST_DAYS_A_RUN an organisation, until the signal is aborted. Never throws. */
+  /** Seals the listed organisations' closed days, up to MOST_DAYS_A_RUN each, until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
 export function createActivitySeal({
   list,
+  done = () => undefined,
   database,
   keys,
   ids,
@@ -68,8 +78,10 @@ export function createActivitySeal({
   logger,
   batch = SEAL_BATCH,
 }: {
-  /** The organisations to seal: the directory's list, which job-list.ts passes. */
+  /** The organisations to seal this run: job-list.ts's, a pass a day. */
   readonly list: () => Promise<readonly string[]>;
+  /** One with every closed day sealed, or its seals tampered with: owed no visit until listed again. */
+  readonly done?: (orgId: string) => void;
   readonly database: Database<SealTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
@@ -132,17 +144,19 @@ export function createActivitySeal({
     });
   };
 
-  /** Seals the organisation's closed days, oldest first, up to MOST_DAYS_A_RUN. */
-  const sealFor = async (orgId: string, signal: AbortSignal | undefined) => {
+  /** Seals the organisation's closed days, oldest first, up to MOST_DAYS_A_RUN: whether it is finished. */
+  const sealFor = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const correlationId = ids.next();
     let day = await firstToSeal(orgId, correlationId);
     // The alarm raised and the hold set already.
-    if (day === 'tampered') return;
+    if (day === 'tampered') return true;
     for (let sealed = 0; day !== undefined && sealed < MOST_DAYS_A_RUN; sealed += 1) {
-      if (signal?.aborted === true || !sealable(day, clock.now())) return;
-      if (!(await seal(orgId, day, correlationId))) return;
+      if (signal?.aborted === true) return false;
+      if (!sealable(day, clock.now())) return true;
+      if (!(await seal(orgId, day, correlationId))) return false;
       day = nextDay(day);
     }
+    return day === undefined;
   };
 
   return {
@@ -151,7 +165,7 @@ export function createActivitySeal({
         for (const orgId of await list()) {
           if (signal?.aborted === true) return;
           try {
-            await sealFor(orgId, signal);
+            if (await sealFor(orgId, signal)) done(orgId);
           } catch (error) {
             logger.child({ orgId }).error('access_log_seal.failed', { reason: 'error', err: error });
           }

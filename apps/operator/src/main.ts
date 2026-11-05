@@ -44,6 +44,8 @@
 //    catch: the failure names the organisation's ID, to look for first)
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
+import { markHoldsWith } from '@agentx/core/modules/audit';
+import { markOrgWorkNow } from '@agentx/core/modules/directory';
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -446,6 +448,8 @@ async function connect(
     await database.destroy();
     return undefined;
   }
+  // A hold an operator's read sets marks the hold history's work, in the hold's own transaction, as the API's (4D2e D10).
+  markHoldsWith((tx, orgId) => markOrgWorkNow(tx, orgId, 'hold_history'));
   return database;
 }
 

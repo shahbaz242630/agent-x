@@ -1,8 +1,10 @@
 // The activity log's background downloads, as the config sets them up (Phase
 // 3 L5c): the store, a container in the UAE written and read as the API's own
 // managed identity, or the local folder in development and test; then the
-// routes' use cases (asking, reading, downloading) and the builder's job. With neither set, both
-// are off: the routes answer NOT_FOUND and no builder runs.
+// routes' use cases (asking, reading, downloading) and the builder's job, made
+// for the organisations it is given (job-list.ts: those its marks say have a month
+// to build, 4D2e D10). With neither set, both are off: the routes answer NOT_FOUND
+// and no builder runs.
 import type { Config } from '@agentx/platform/config';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import { azureBlobOrigins, azureBlockStore, type BlockStore, folderBlockStore } from '@agentx/platform/storage';
@@ -20,21 +22,21 @@ export function downloadStoreOf({ activityDownloads: { directory, container } }:
 }
 
 type ExportsServices = Parameters<typeof createBackgroundExports>[0];
-type BuilderServices = Omit<Parameters<typeof createActivityExportBuilder>[0], 'store'>;
+type BuilderServices = Omit<Parameters<typeof createActivityExportBuilder>[0], 'store' | 'list'>;
 
-/** The routes' use cases and the builder, with the store; all undefined without one. */
+/** The routes' use cases and the builder, for the organisations it is given, with the store; all undefined without one. */
 export function backgroundDownloadsFrom(
   store: BlockStore | undefined,
   services: ExportsServices & BuilderServices,
 ): {
   readonly exports: BackgroundExports | undefined;
   readonly files: DownloadFiles | undefined;
-  readonly builder: ActivityExportBuilder | undefined;
+  readonly builderFor: ((list: () => Promise<readonly string[]>) => ActivityExportBuilder) | undefined;
 } {
-  if (store === undefined) return { exports: undefined, files: undefined, builder: undefined };
+  if (store === undefined) return { exports: undefined, files: undefined, builderFor: undefined };
   return {
     exports: createBackgroundExports(services),
     files: createDownloadFiles({ ...services, store }),
-    builder: createActivityExportBuilder({ ...services, store }),
+    builderFor: (list) => createActivityExportBuilder({ ...services, store, list }),
   };
 }

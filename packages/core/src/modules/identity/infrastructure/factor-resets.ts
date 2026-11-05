@@ -281,6 +281,20 @@ export async function resetRecordsCount(
 }
 
 /**
+ * When the factor removals' job next has work in the organisation (4D2e D10): the soonest end of a cooling-off still
+ * running or passed, as the rows hold it, believed in nothing; none without one. A choice of when to look alone: the
+ * job reads every reset verified before it carries any out. Not run: a statement for the caller's trip, over the
+ * organisation's resets (at most MOST_RESET_RECORDS a check reads).
+ */
+export const factorRemovalsDue = (tx: Transaction<IdentityTables>, orgId: string) =>
+  tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, for choosing when to look
+    .selectFrom(FACTOR_RESETS.table)
+    .select((eb) => eb.fn.min<Date | null>('cooling_off_until').as('due'))
+    .where('org_id', '=', orgId)
+    .where('status', '=', 'COOLING_OFF');
+
+/**
  * The person's open resets (DRAFT, AWAITING_CONTACT or COOLING_OFF), each
  * read for a decision (`share`) and verified, in the caller's transaction,
  * which must be withSignedStates' for the organisation; or tampered with,

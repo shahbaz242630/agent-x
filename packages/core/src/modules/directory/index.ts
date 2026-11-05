@@ -16,7 +16,9 @@ export {
 export {
   type DueOrgWork,
   dueOrgWork,
+  organisationsWithMarks,
   markOrgWork,
+  markOrgWorkNow,
   type OrgWorkJob,
   type OrgWorkMark,
   orgWorkOf,

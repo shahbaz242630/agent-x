@@ -1,10 +1,16 @@
 // The idempotency keys' retention sweep (B1e-3, ADR-014 §3): a key is kept 30
-// days from its claim, then deleted. The API sweeps when it starts and then an
-// hour after each sweep ends, on a timer of its own: a long sweep (a backlog)
+// days from its claim, then deleted. The API runs it when it starts and then an
+// hour after each run ends, on a timer of its own: a long sweep (a backlog)
 // must never hold up the anchor check, whose missed runs are the alarm.
-// Staging's API scales to zero when idle, so each start sweeps too.
 //
-// Each run reads the directory's list and sweeps each organisation in its own
+// Each organisation is swept once a UTC day, and at a process's first run (4D2e
+// D11; job-list.ts's list, org-passes.ts), so a key goes at most about a day
+// and a run past its 30. One not finished (it failed, the run was stopped, or it
+// had more than its share of batches) is swept again each run, from memory,
+// until it is; a restart sweeps every one anyway. The day's other runs read
+// nothing but their one line.
+//
+// Each run sweeps each organisation it lists in its own
 // withTenant (sweepExpiredKeys), a batch at a time until a batch comes back
 // short. The database holds the line itself (0009's `retention` policy), so a
 // sweep can only ever delete keys past their 30 days; what this adds is doing
@@ -18,8 +24,10 @@ import type { Logger } from '@agentx/platform/observability';
 import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
 export interface RetentionSweepOptions {
-  /** Every organisation the directory lists, by ID. */
+  /** The organisations to sweep this run, by ID. */
   readonly list: () => Promise<readonly string[]>;
+  /** One swept to its last batch this run: owed no sweep until listed again. */
+  readonly done?: (orgId: string) => void;
   /** Deletes up to `most` of the organisation's keys past their retention, and says how many. */
   readonly sweep: (orgId: string, most: number) => Promise<number>;
   readonly logger: Logger;
@@ -38,6 +46,7 @@ export interface RetentionSweep {
 
 export function createRetentionSweep({
   list,
+  done = () => undefined,
   sweep,
   logger,
   deadlineMs,
@@ -68,7 +77,10 @@ export function createRetentionSweep({
       for (let round = 0; round < mostBatches; round += 1) {
         const swept = await step(() => sweep(orgId, batch), signal);
         deleted += swept;
-        if (swept < batch) break;
+        if (swept < batch) {
+          done(orgId);
+          break;
+        }
       }
     } catch (error) {
       if (!(error instanceof Stopped)) {

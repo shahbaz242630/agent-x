@@ -9,7 +9,7 @@
 import { jobsBeating } from '@agentx/core/modules/platform-controls';
 import type { FastifyInstance } from 'fastify';
 
-import { asARun, type Leadership } from './background.ts';
+import type { Leadership } from './background.ts';
 import {
   boot,
   type ApiProcess,
@@ -63,10 +63,6 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const leadership = leadershipOf(booted);
   const parts = sharedParts(booted, leadership);
   const oneCopy = leadership && oneCopyJobs(booted, parts, leadership);
-  const firstZonePass = async (): Promise<void> => {
-    // Off the timer, the one job run before listening: a run all the same, and its lines say so.
-    await asARun(() => oneCopy?.zoneSealing.run());
-  };
 
   // What a stop finds, which comes at any moment from here on.
   const started: {
@@ -97,18 +93,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // holds the listening up to that deadline.
   await leadership?.start(() => oneCopy?.handoff?.beating() === true && oneCopy.paymentChecks?.beating() === true);
   if (stopping()) return undefined;
-  if (role === 'jobs') {
-    await firstZonePass();
-  } else {
-    started.server = await startWeb(
-      booted,
-      parts,
-      healthChecksOf(booted, parts, leadership, oneCopy),
-      firstZonePass,
-      async () => {
-        await leadership?.stop();
-      },
-    );
+  if (role !== 'jobs') {
+    started.server = await startWeb(booted, parts, healthChecksOf(booted, parts, leadership, oneCopy), async () => {
+      await leadership?.stop();
+    });
     if (started.server === undefined) return undefined;
   }
   if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);

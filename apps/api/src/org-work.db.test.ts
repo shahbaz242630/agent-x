@@ -561,6 +561,35 @@ describe('the hourly look', () => {
     expect(lines('org_work.rediscovered')).toEqual([expect.objectContaining({ organisations: 2, failed: 1 })]);
   });
 
+  it("a reset cooling off with its mark lost is written for its cooling-off's end, and said (4D2e D10)", async () => {
+    const { w } = await readyToLook();
+    const until = new Date(clock.now().getTime() + 3_600_000);
+    // Past the app and its triggers, as a write that missed its mark: the rows are read for when to look, not believed.
+    const writer = await database.connect('admin');
+    try {
+      await writer.query('begin');
+      await writer.query('set local session_replication_role = replica');
+      await writer.query(
+        `insert into identity.factor_resets (org_id, id, status, person, requested_by, step_up_challenge_id, expires_at,
+           confirmed_by, cooling_off_until, created_at)
+         values ($1, $2, 'COOLING_OFF', $3, $4, $5, $6, $7, $6, $8)`,
+        [w.org, ids.next(), ids.next(), ids.next(), ids.next(), until, ids.next(), clock.now()],
+      );
+      await writer.query('commit');
+    } finally {
+      await writer.end();
+    }
+
+    await rediscoveryOf(w.org).run();
+
+    expect(lines('org_work.unmarked')).toEqual([expect.objectContaining({ job: 'factor_removals', late: false })]);
+    const [mark] = await admin().query<{ due_at: Date }>(
+      `select due_at from directory.org_work where org_id = $1 and job = 'factor_removals'`,
+      [w.org],
+    );
+    expect(mark?.due_at).toEqual(until);
+  });
+
   it('a list it cannot read is said, and that run ends', async () => {
     const job = createOrgWorkRediscovery({
       list: () => Promise.reject(new Error('no list')),

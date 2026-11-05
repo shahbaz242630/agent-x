@@ -112,15 +112,11 @@ function signInFrom(
   });
 }
 
-/**
- * Builds the server and listens. Returns nothing, the failure logged and everything closed, when it can't listen.
- * `beforeListen` runs between the two: what must be true before a request is answered.
- */
+/** Builds the server and listens. Returns nothing, the failure logged and everything closed, when it can't listen. */
 export async function startWeb(
   { host, config, keys, logger, database }: Booted,
   { flows, sessions, challenges, outbox, directory, downloads, recorder, rail, providerEvents }: SharedParts,
   healthChecks: readonly HealthCheck[],
-  beforeListen: () => Promise<void>,
   /** What must end while the pool is open when it can't listen. */
   whenRefused: () => Promise<void>,
 ): Promise<FastifyInstance | undefined> {
@@ -420,7 +416,6 @@ export async function startWeb(
         clock: systemClock,
       }),
   });
-  await beforeListen();
   try {
     await server.listen({ host: config.http.host, port: config.http.port });
   } catch (error) {
