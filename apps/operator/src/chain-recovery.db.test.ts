@@ -79,9 +79,9 @@ const footholdKeys: KeyProvider = {
  * with the rule switched off, as someone past the app could: the plan's own check behind the rule is what's tested.
  */
 async function forgedByApi(database: TestDatabase = live): Promise<void> {
-  const rule = (to: 'disable' | 'enable') =>
-    tamper(database, (admin) => admin.query(`alter table audit.events ${to} trigger operator_events_by_operator`));
-  await rule('disable');
+  await tamper(database, (admin) =>
+    admin.query('alter table audit.events disable trigger operator_events_by_operator'),
+  );
   try {
     await withTenant(appOn(database, false), orgId, (tx) =>
       createAuditTrail({ keys: footholdKeys, ids: uuidV7Ids }).record(tx, orgId, {
@@ -92,7 +92,9 @@ async function forgedByApi(database: TestDatabase = live): Promise<void> {
       }),
     );
   } finally {
-    await rule('enable');
+    await tamper(database, (admin) =>
+      admin.query('alter table audit.events enable trigger operator_events_by_operator'),
+    );
   }
 }
 

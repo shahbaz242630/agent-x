@@ -195,9 +195,26 @@ describe(`the operator's events on an organisation's chain, believed only signed
     expect(await statusByApi()).toBe('ACTIVE');
   });
 
-  it("refuses a freeze in the operator's name the API's role recorded unsigned, with the alarm", async () => {
+  it("refuses a freeze in the operator's name from the API's role as it is written (0080): nothing recorded", async () => {
     await created();
-    await frozenBy(app, footholdKeys);
+    const before = await eventCount();
+    await expect(frozenBy(app, footholdKeys)).rejects.toMatchObject({ code: '42501' });
+
+    expect(await eventCount()).toBe(before);
+    expect(await statusByApi()).toBe('ACTIVE');
+    expect(await checkedByApi()).toMatchObject({ ok: true });
+    expect(alarms()).toEqual([]);
+  });
+
+  it("refuses a freeze in the operator's name the API's role recorded unsigned past 0080's rule, with the alarm", async () => {
+    await created();
+    // The rule switched off, as someone past the app could: the readers' own check behind it is what's tested.
+    await tamper('alter table audit.events disable trigger operator_events_by_operator', []);
+    try {
+      await frozenBy(app, footholdKeys);
+    } finally {
+      await tamper('alter table audit.events enable trigger operator_events_by_operator', []);
+    }
 
     expect(await readByApi()).toEqual({ outcome: 'tampered', sign: 'log' });
     expect(await readByApi('change')).toMatchObject({ outcome: 'tampered' });
