@@ -350,11 +350,31 @@ export const MARK_TRIGGERS: readonly WrittenTrigger[] = [
 ];
 
 /**
+ * The operator's events added by its role alone (PL-57): on both chains, an event in the operator's name from any
+ * role but the operator's and the owner's (E10's repair puts original rows back as the owner, who could drop the
+ * trigger anyway: the threat is the API's role) is refused as it is inserted, before a reader ever has to refuse it unsigned. Its migration
+ * (operator-events-rule.db.test.ts holds its text) comes in the release after this image's.
+ */
+const OPERATOR_EVENTS_FUNCTION = 'audit.operator_events_by_operator';
+const OPERATOR_EVENTS_BODY = 'b462c31ce668bcdd0308bd2fa6bc4ce1b3aab20c1e991e200996c05a27fbede7';
+const OPERATOR_EVENT_TABLES = ['audit.events', 'platform_controls.audit_events'] as const;
+
+/** The rule's trigger on one chain's events, as Postgres prints it: before each insert naming the operator. */
+function operatorEventsTrigger(table: string): WrittenTrigger {
+  return {
+    table,
+    name: 'operator_events_by_operator',
+    definition: `CREATE TRIGGER operator_events_by_operator BEFORE INSERT ON ${table} FOR EACH ROW WHEN ((new.actor_id = 'operator'::text)) EXECUTE FUNCTION ${OPERATOR_EVENTS_FUNCTION}()`,
+    function: OPERATOR_EVENTS_FUNCTION,
+    body: OPERATOR_EVENTS_BODY,
+  };
+}
+
+/**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * None now.
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
+const COMING_TRIGGERS: readonly WrittenTrigger[] = OPERATOR_EVENT_TABLES.map(operatorEventsTrigger);
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
@@ -460,12 +480,18 @@ const COLUMN_RIGHTS = new Set(['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']);
 /** The backup job's role, fixed by `db/bootstrap/roles.sql` (proven in tooling/checks/database-roles.test.ts). */
 export const BACKUP_ROLE = 'agentx_backup';
 
+/** The API's role, fixed by `db/bootstrap/roles.sql` likewise: the one the operator's command checks the walls for. */
+export const APP_ROLE = 'agentx_app';
+
+/** The operator's command's own role (PL-57), fixed by `db/bootstrap/operator-role.sql` likewise. */
+export const OPERATOR_ROLE = 'agentx_operator';
+
 /**
  * What the backup role may hold (ADR-005 §3), CI-06's BACKUP_MAY on the running
  * database. It bypasses row security, so one grant more than reading would let
  * it change every organisation's rows.
  */
-const BACKUP_MAY: Readonly<Record<BackupRight['kind'], readonly string[]>> = {
+const BACKUP_MAY: Readonly<Record<RoleRight['kind'], readonly string[]>> = {
   relation: ['SELECT'],
   column: ['SELECT'],
   schema: ['USAGE'],
@@ -700,8 +726,8 @@ export interface KeyConstraint {
   readonly definition: string;
 }
 
-/** One right granted to the backup role, on the object the problem names. */
-interface BackupRight {
+/** One right granted to the backup role or the operator's, on the object the problem names. */
+interface RoleRight {
   readonly kind: 'relation' | 'column' | 'schema' | 'database' | 'function';
   readonly object: string;
   readonly privilege: string;
@@ -920,7 +946,7 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
  * Found by the A3e-1b review.
  *
  * The `::text` here, and on the bound values in updatableColumns,
- * roleSettings and backupRights, and the `'{0}'::pg_catalog.oid[]` in policies, are the only
+ * roleSettings and roleRights, and the `'{0}'::pg_catalog.oid[]` in policies, are the only
  * ones left in this file, and they are not casts in the sense that matters:
  * they give a type to a bound parameter or a literal that arrives untyped,
  * which is an input coercion and never looks in `pg_cast`.
@@ -1085,19 +1111,19 @@ export async function keyConstraints<Schema>(db: Kysely<Schema>): Promise<KeyCon
 }
 
 /**
- * Every right the backup role was granted on what the database owner can grant:
+ * Every right a role (the backup's, the operator's) was granted on what the database owner can grant:
  * our tables, sequences, columns, schemas and functions, and this database. Read
  * from the access lists, as publicGrants reads PUBLIC's, so a privilege a later
  * Postgres adds (as 17 added MAINTAIN) is seen with no list here to update.
  */
-async function backupRights<Schema>(db: Kysely<Schema>): Promise<BackupRight[]> {
-  const { rows } = await sql<BackupRight>`
-    with backup as (select r.oid from pg_catalog.pg_roles r where r.rolname = ${BACKUP_ROLE}::text)
+async function roleRights<Schema>(db: Kysely<Schema>, role: string): Promise<RoleRight[]> {
+  const { rows } = await sql<RoleRight>`
+    with held_by as (select r.oid from pg_catalog.pg_roles r where r.rolname = ${role}::text)
     select 'relation' as kind, ${QUALIFIED} as object, acl.privilege_type as privilege, acl.is_grantable as grantable
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     cross join pg_catalog.aclexplode(c.relacl) as acl
-    where ${OURS} and (${ROW_KINDS} or c.relkind = 'S') and acl.grantee in (select b.oid from backup b)
+    where ${OURS} and (${ROW_KINDS} or c.relkind = 'S') and acl.grantee in (select b.oid from held_by b)
     union all
     select 'column', pg_catalog.format('column %I.%I.%I', n.nspname, c.relname, a.attname), acl.privilege_type,
            acl.is_grantable
@@ -1105,23 +1131,23 @@ async function backupRights<Schema>(db: Kysely<Schema>): Promise<BackupRight[]> 
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
     cross join pg_catalog.aclexplode(a.attacl) as acl
-    where ${OURS} and ${ROW_KINDS} and acl.grantee in (select b.oid from backup b)
+    where ${OURS} and ${ROW_KINDS} and acl.grantee in (select b.oid from held_by b)
     union all
     select 'schema', pg_catalog.format('schema %I', n.nspname), acl.privilege_type, acl.is_grantable
     from pg_catalog.pg_namespace n
     cross join pg_catalog.aclexplode(n.nspacl) as acl
-    where ${OURS} and acl.grantee in (select b.oid from backup b)
+    where ${OURS} and acl.grantee in (select b.oid from held_by b)
     union all
     select 'function', pg_catalog.format('function %I.%I', n.nspname, p.proname), acl.privilege_type, acl.is_grantable
     from pg_catalog.pg_proc p
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     cross join pg_catalog.aclexplode(p.proacl) as acl
-    where ${OURS} and acl.grantee in (select b.oid from backup b)
+    where ${OURS} and acl.grantee in (select b.oid from held_by b)
     union all
     select 'database', 'this database', acl.privilege_type, acl.is_grantable
     from pg_catalog.pg_database d
     cross join pg_catalog.aclexplode(d.datacl) as acl
-    where d.datname = pg_catalog.current_database() and acl.grantee in (select b.oid from backup b)
+    where d.datname = pg_catalog.current_database() and acl.grantee in (select b.oid from held_by b)
   `.execute(db);
   return [...rows];
 }
@@ -1338,10 +1364,42 @@ function builtKeyProblems(
 }
 
 /** Each right the backup role holds beyond reading, and each it could hand on. */
-function backupProblems({ kind, object, privilege, grantable }: BackupRight): SchemaProblem[] {
+function backupProblems({ kind, object, privilege, grantable }: RoleRight): SchemaProblem[] {
   return [
     ...(BACKUP_MAY[kind].includes(privilege) ? [] : [`${BACKUP_ROLE} may ${privilege} on ${object}`]),
     ...(grantable ? [`${BACKUP_ROLE} may grant ${privilege} on ${object}`] : []),
+  ];
+}
+
+/**
+ * The operator's role holding exactly its list (PL-57): a right more is one no
+ * command needs, or one handed on; a right gone, a command that fails, or the
+ * list and the database no longer the same release's. Each problem with the
+ * table it is on, if any, so one on a table a release made or took away can be
+ * held as that release's (a table renamed keeps its rights under its new name).
+ */
+function operatorProblems(
+  held: readonly RoleRight[],
+  listed: readonly string[],
+): readonly { readonly problem: SchemaProblem; readonly table: string | undefined }[] {
+  const rights = new Set(held.map(({ object, privilege }) => `${privilege} on ${object}`));
+  const tableOf = (object: string): string | undefined => {
+    if (object.startsWith('column ')) return object.slice('column '.length).split('.').slice(0, 2).join('.');
+    return object.includes(' ') ? undefined : object;
+  };
+  return [
+    ...held.flatMap(({ object, privilege, grantable }) =>
+      [
+        ...(listed.includes(`${privilege} on ${object}`) ? [] : [`${OPERATOR_ROLE} may ${privilege} on ${object}`]),
+        ...(grantable ? [`${OPERATOR_ROLE} may grant ${privilege} on ${object}`] : []),
+      ].map((problem) => ({ problem, table: tableOf(object) })),
+    ),
+    ...listed
+      .filter((right) => !rights.has(right))
+      .map((right) => ({
+        problem: `${OPERATOR_ROLE} no longer holds ${right}`,
+        table: tableOf(right.slice(right.indexOf(' on ') + ' on '.length)),
+      })),
   ];
 }
 
@@ -1690,19 +1748,26 @@ function narrowTables(
   return { narrow, problems };
 }
 
+/** The append-only schemas, and the tables in them held wider (exceptions) or narrower (read only, PL-57). */
+interface AppendOnlyKinds {
+  readonly schemas: ReadonlySet<string>;
+  readonly exceptions: ReadonlySet<string>;
+  readonly readsOnly: ReadonlySet<string>;
+}
+
 /** The rights a table not held narrower may hold: its global-table entry's, or its schema's kind's. */
 function allowedRights(
   relation: RelationRow,
   entry: SchemaPolicy['globalTables'][string] | undefined,
-  appendOnly: ReadonlySet<string>,
-  exceptions: ReadonlySet<string>,
+  kinds: AppendOnlyKinds,
 ): Set<string> {
   if (entry?.appMay !== undefined) {
     // A table changed in part only may hold UPDATE on its listed columns, checked below.
     return new Set<string>(entry.appMayUpdate === undefined ? entry.appMay : [...entry.appMay, 'UPDATE']);
   }
-  if (!appendOnly.has(relation.schema)) return new Set<string>(APP_ROW_RIGHTS);
-  return new Set<string>(exceptions.has(relation.name) ? EXCEPTION_RIGHTS : APPEND_ONLY_RIGHTS);
+  if (!kinds.schemas.has(relation.schema)) return new Set<string>(APP_ROW_RIGHTS);
+  if (kinds.readsOnly.has(relation.name)) return new Set<string>(['SELECT']);
+  return new Set<string>(kinds.exceptions.has(relation.name) ? EXCEPTION_RIGHTS : APPEND_ONLY_RIGHTS);
 }
 
 /** Each right the app role holds on a table not held narrower that its allow-list leaves out. */
@@ -1717,8 +1782,11 @@ function heldRightsProblems(
   for (const grant of allGrants) {
     held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
   }
-  const appendOnly = new Set(policy.appendOnlySchemas);
-  const exceptions = new Set(Object.keys(policy.appendOnlyExceptions));
+  const kinds: AppendOnlyKinds = {
+    schemas: new Set(policy.appendOnlySchemas),
+    exceptions: new Set(Object.keys(policy.appendOnlyExceptions)),
+    readsOnly: new Set(Object.keys(policy.appReadsOnly)),
+  };
   const problems: SchemaProblem[] = [];
   for (const relation of allRelations) {
     // Held to their own list, below.
@@ -1726,7 +1794,7 @@ function heldRightsProblems(
     // A global table that names its rights is held to them, on the table and
     // on each column alike (B1d-1): the directory's list is added to and read.
     const entry = Object.hasOwn(policy.globalTables, relation.name) ? policy.globalTables[relation.name] : undefined;
-    const allowed = allowedRights(relation, entry, appendOnly, exceptions);
+    const allowed = allowedRights(relation, entry, kinds);
     for (const right of held.get(relation.name) ?? []) {
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
     }
@@ -1885,11 +1953,12 @@ export async function liveSchemaDrift<Schema>(
       await columns(one),
       await updatableColumns(one, appRole),
       await plantedCasts(one),
-      await roleSettings(one, [appRole, ownerRole]),
+      await roleSettings(one, [appRole, ownerRole, OPERATOR_ROLE]),
       await foreignKeys(one),
       await connectionLimits(one, [appRole, ownerRole]),
       await checkConstraints(one),
-      await backupRights(one),
+      await roleRights(one, BACKUP_ROLE),
+      await roleRights(one, OPERATOR_ROLE),
       await keyConstraints(one),
     ] as const;
   };
@@ -1911,6 +1980,7 @@ export async function liveSchemaDrift<Schema>(
     limited,
     allChecks,
     backupHeld,
+    operatorHeld,
     allKeys,
   ] = await db.connection().execute((one) => reading(one));
 
@@ -1938,6 +2008,10 @@ export async function liveSchemaDrift<Schema>(
   );
   const isNew = new Set(newTables.map(({ name }) => name));
   const gone = builtTables.filter((name) => !known.has(name));
+  // A right of the operator's on a table a release made, or one it took away, is that release's, as the table is.
+  const byRelease = (table: string | undefined): boolean =>
+    table !== undefined && (isNew.has(table) || gone.includes(table));
+  const operatorRightsDrift = operatorProblems(operatorHeld, policy.operatorRights);
   // A coming trigger only when exact and firing as written; any other falls to the rules below, the alarm at once.
   const comingDefinitions = new Set(comingTriggers.map(({ definition }) => definition));
   const isComing = ({ definition, enabled }: TriggerRow): boolean =>
@@ -2008,6 +2082,7 @@ export async function liveSchemaDrift<Schema>(
     ...policy.requiredForeignKeys.flatMap((required) => requiredKeyProblems(required, keys)),
     ...allChecks.filter(({ validated }) => !validated).map((one) => `${checkNamed(one)} is not validated`),
     ...backupHeld.flatMap(backupProblems),
+    ...operatorRightsDrift.filter(({ table }) => !byRelease(table)).map(({ problem }) => problem),
   ];
 
   if (casts) problems.push('the database carries a cast Postgres did not ship');
@@ -2023,6 +2098,7 @@ export async function liveSchemaDrift<Schema>(
       ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),
       ...gone.map((name) => `${name} is a table the migrations built, and is not there`),
+      ...operatorRightsDrift.filter(({ table }) => byRelease(table)).map(({ problem }) => problem),
     ]),
   };
 }

@@ -9,7 +9,14 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 import { KEY_FILE } from '../../deploy/compose/mail-sink.ts';
-import { API_SIGN_IN, APP_KEYS, LOGIN_CLIENT_KEYS, MAIL_SINK, VARIABLES } from '../../deploy/compose/prepare.ts';
+import {
+  API_SIGN_IN,
+  APP_KEYS,
+  LOGIN_CLIENT_KEYS,
+  MAIL_SINK,
+  OPERATOR_KEYS,
+  VARIABLES,
+} from '../../deploy/compose/prepare.ts';
 
 const COMPOSE_FILE = 'deploy/compose/compose.yaml';
 
@@ -247,15 +254,17 @@ describe("ADR-011 §2: the app's keys, as Azure mounts them", () => {
     expect(mountersOf(API_SIGN_IN)).toEqual(['api']);
   });
 
-  it("B4-6d gives the operator's command the two keys it holds, file by file, and its requests, none of it writable", () => {
+  it("B4-6d gives the operator's command the keys it holds, file by file, its own from a folder the API never mounts (PL-57), and its requests, none of it writable", () => {
     expect(file.services.operator?.volumes).toEqual([
       `./secrets/${APP_KEYS}/key-audit-mac-v1:${SECRETS_PATH}/key-audit-mac-v1:ro`,
       `./secrets/${APP_KEYS}/key-field-encryption-v1:${SECRETS_PATH}/key-field-encryption-v1:ro`,
+      `./secrets/${OPERATOR_KEYS}/key-operator-signing-v1:${SECRETS_PATH}/key-operator-signing-v1:ro`,
+      `./secrets/${OPERATOR_KEYS}/key-audit-rebase-v1:${SECRETS_PATH}/key-audit-rebase-v1:ro`,
       './secrets/operator-requests:/mnt/requests:ro',
     ]);
     expect(file.services.operator?.environment).toMatchObject({
       AGENTX_ENV: 'development',
-      AGENTX_DB_USER: 'agentx_app',
+      AGENTX_DB_USER: 'agentx_operator',
       AGENTX_DB_TLS: 'disable',
       AGENTX_KEYS_DIR: SECRETS_PATH,
     });

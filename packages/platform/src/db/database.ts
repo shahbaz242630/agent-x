@@ -186,3 +186,16 @@ export async function transactionsReadOnly<Schema>(database: Database<Schema>): 
   const shown = await sql<{ transaction_read_only: string }>`show transaction_read_only`.execute(database);
   return shown.rows[0]?.transaction_read_only === 'on';
 }
+
+/**
+ * The database's own clock, to the millisecond: one clock every process can be held to, as the times sealed into the
+ * chains are (4D2e E11, a rebase's time).
+ */
+export async function databaseNow<Schema>(database: Database<Schema>): Promise<Date> {
+  const read = await sql<{
+    at: Date;
+  }>`select pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as at`.execute(database);
+  const at = read.rows[0]?.at;
+  if (!(at instanceof Date)) throw new TypeError('The database answered its clock with something other than a time');
+  return at;
+}

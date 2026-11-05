@@ -40,6 +40,8 @@ import { spendWorld } from './spend-world.helper.test.ts';
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<HandoffWorldTables>;
+/** The operator's own role (PL-57), the one that moves the hand-off pause. */
+let operator: Database<HandoffWorldTables>;
 
 const ids = new SequentialIds(0xd7a0_0000_0000);
 const chain = createPlatformChain({ keys, ids: new SequentialIds(0xd7b0_0000_0000) });
@@ -78,7 +80,7 @@ const serverNow = async () =>
   (await admin().query<{ now: Date }>('select pg_catalog.now() as now'))[0]?.now.getTime() ?? 0;
 
 const pauseMoved = (paused: boolean) =>
-  app
+  operator
     .transaction()
     .execute((tx) =>
       changeHandoffPause(
@@ -213,12 +215,17 @@ const gapsOf = (minutes: readonly number[]) => minutes.slice(1).map((minute, at)
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<HandoffWorldTables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  operator = createDatabase<HandoffWorldTables>(
+    { ...database.connection('operator'), maxConnections: 2 },
+    testLogger(),
+  );
   // Born paused (ADR-014 §4): resumed for these tests, as the operator would.
   await pauseMoved(false);
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
 });
 

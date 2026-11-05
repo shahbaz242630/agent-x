@@ -23,7 +23,7 @@
 //   holds the same list
 // - every value comes from the shell that deploys, never from this repository
 //   (Rule Book §7), and none is ever an output
-import { appKeys, operatorHolds, resourceNames, uniqueSuffix } from 'names.bicep'
+import { appKeys, operatorHolds, operatorOnly, publicHalves, resourceNames, restoreHolds, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -54,6 +54,10 @@ param dbAppPassword string
 @description('agentx_backup\'s login.')
 @secure()
 param dbBackupPassword string
+
+@description('agentx_operator\'s login, for the operator\'s command (PL-57).')
+@secure()
+param dbOperatorPassword string
 
 @description('The zitadel role\'s login, for Zitadel and its jobs.')
 @secure()
@@ -111,17 +115,23 @@ var secrets = [
   {
     name: 'db-owner-password'
     value: dbOwnerPassword
-    readers: ['db-setup', 'migrate']
+    // The chain repair writes as the owner (4D2e E10), the one job besides the migration.
+    readers: ['db-setup', 'migrate', 'chain-restore']
   }
   {
     name: 'db-app-password'
     value: dbAppPassword
-    readers: ['db-setup', 'api', 'jobs', 'operator']
+    readers: ['db-setup', 'api', 'jobs']
   }
   {
     name: 'db-backup-password'
     value: dbBackupPassword
     readers: ['db-setup']
+  }
+  {
+    name: 'db-operator-password'
+    value: dbOperatorPassword
+    readers: ['db-setup', 'operator']
   }
   {
     name: 'db-zitadel-password'
@@ -181,12 +191,21 @@ var access = concat(
     readers: secret.readers
   }),
   [masterKey, copiedKey],
-  // The API and its jobs read every key; the operator's command the audit chains' MAC and
-  // the field encryption alone, each version of them, as the API does
-  // (ADR-011 §3, B4-6b).
+  // The API and its jobs read every key but the operator's own, whose public
+  // half they read instead (PL-57); the operator's command the audit chains'
+  // MAC, the field encryption and its own keys alone, each version of them
+  // (ADR-011 §3, B4-6b); the chain repair the MAC alone and the public halves
+  // (4D2e E10).
   map(appKeys, key => {
     name: key
-    readers: operatorHolds(key) ? ['api', 'jobs', 'operator'] : ['api', 'jobs']
+    readers: concat(
+      operatorOnly(key) ? ['operator'] : operatorHolds(key) ? ['api', 'jobs', 'operator'] : ['api', 'jobs'],
+      restoreHolds(key) ? ['chain-restore'] : []
+    )
+  }),
+  map(publicHalves, half => {
+    name: half
+    readers: ['api', 'jobs', 'chain-restore']
   })
 )
 
@@ -240,6 +259,19 @@ resource keys 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
   }
 ]
 
+// Each operator-only key's public half, created once with its key, from the
+// same run's value (PL-57).
+@onlyIfNotExists()
+resource halves 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
+  for half in publicHalves: {
+    parent: vault
+    name: half
+    properties: {
+      value: keyValues[half]
+    }
+  }
+]
+
 // Who reads what, in a template of its own: Azure refuses one that both writes
 // a secret and looks it up, and each grant needs its secret looked up as its
 // scope (modules/secret-access.bicep).
@@ -255,5 +287,6 @@ module readAccess 'modules/secret-access.bicep' = {
     created
     copied
     keys
+    halves
   ]
 }

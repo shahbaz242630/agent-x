@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
-import { APP_KEYS } from './app-keys.ts';
+import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 
@@ -261,8 +261,12 @@ const PROBLEM_LINES = 'where tostring(parse_json(Log).level) in~ ("warn", "warni
  */
 const SAYS_FROM_OWN =
   /^extend Says = iff\(coalesce\(ContainerAppName, JobName\) in \(((?:"[a-z0-9-]+", )*"[a-z0-9-]+")\), substring\(tostring\(parse_json\(Log\)\.says\), 0, 300\), ""\)$/;
-/** Our logger's containers: the API, its jobs where they run apart from it (4D2e D13), and the three jobs built on it. */
-const OWN_CONTAINER = /^"(?:ca-agentx-(?:stg|prd)-(?:api|jobs)|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator))"$/;
+/**
+ * Our logger's containers: the API, its jobs where they run apart from it (4D2e D13), and the four jobs built on it
+ * (the chain repair's since 4D2e E10).
+ */
+const OWN_CONTAINER =
+  /^"(?:ca-agentx-(?:stg|prd)-(?:api|jobs)|job-agentx-(?:stg|prd)-(?:db-setup|migrate|operator|chain-restore))"$/;
 const NO_WORDS =
   'A warning or error with no plain words, from the login service or another part: open the saved query What broke, in plain words.';
 const SAYS_FALLBACK = `extend Says = iff(isempty(Says), "${NO_WORDS}", Says)`;
@@ -411,24 +415,26 @@ const TELEMETRY_SETTINGS = [
  * because GitGuardian read an app's name beside a secret's name as a password,
  * whichever held which (PRs #27 and #28). The set-up job reads every database
  * login, since each of its runs sets them all. The API reads each of the app's
- * keys (ADR-011 §2), from the one list of them (app-keys.json); the operator's
- * command, the app's login and every version of the audit chains' MAC and of
- * the field encryption alone (ADR-011 §3, B1c, B4-6b). The API's jobs, where
- * they run apart from it (`jobs`, 4D2e D13), read what the API reads: the same
- * process at another role, its sign-in's three settings and email's four taken
- * together, whose jobs send the notices and carry out the factor resets.
+ * keys (ADR-011 §2), from the one list of them (app-keys.json), but the
+ * operator's own, whose public half it reads instead (PL-57); the operator's
+ * command, its own login and every version of the audit chains' MAC, of the
+ * field encryption and of its own signing key alone (ADR-011 §3, B1c, B4-6b).
+ * The API's jobs, where they run apart from it (`jobs`, 4D2e D13), read what
+ * the API reads: the same process at another role, its sign-in's three
+ * settings and email's four taken together, whose jobs send the notices and
+ * carry out the factor resets.
  */
 const GRANTS: ReadonlySet<string> = new Set([
-  ...APP_KEYS.map((key) => `api reads ${key}`),
-  ...APP_KEYS.map((key) => `jobs reads ${key}`),
+  ...APP_KEYS.filter((key) => !operatorOnly(key)).flatMap((key) => [`api reads ${key}`, `jobs reads ${key}`]),
+  ...[...PUBLIC_HALVES.values()].flatMap((half) => [`api reads ${half}`, `jobs reads ${half}`]),
   'jobs reads db-app-password',
   'jobs reads api-oidc-client-secret',
   'jobs reads acs-access-key',
   'jobs reads zitadel-directory-token',
   'jobs reads zitadel-reset-token',
-  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')).map(
-    (key) => `operator reads ${key}`,
-  ),
+  ...APP_KEYS.filter(
+    (key) => key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v') || operatorOnly(key),
+  ).map((key) => `operator reads ${key}`),
   'api reads db-app-password',
   // B2-6: the API's own secret as the login service's client, which Zitadel gave.
   'api reads api-oidc-client-secret',
@@ -437,13 +443,19 @@ const GRANTS: ReadonlySet<string> = new Set([
   'api reads zitadel-directory-token',
   // B6-3c: the login service's token for removing second factors once a reset has cooled off.
   'api reads zitadel-reset-token',
-  'operator reads db-app-password',
+  'operator reads db-operator-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',
   'db-setup reads db-app-password',
   'db-setup reads db-backup-password',
+  'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
+  // 4D2e E10 (PL-29): the chain repair writes as the owner, the one job besides the migration; it checks the chain
+  // with the MAC key and the operator's signatures with their public halves, and holds no other key.
+  'chain-restore reads db-owner-password',
+  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')).map((key) => `chain-restore reads ${key}`),
+  ...[...PUBLIC_HALVES.values()].map((half) => `chain-restore reads ${half}`),
   'zitadel reads db-zitadel-password',
   'zitadel reads zitadel-masterkey',
   'zitadel reads login-client-public-key',
@@ -473,7 +485,14 @@ const secretsRead = (workload: string): ReadonlySet<string> =>
  * a server's roles and databases, the app's migrations, Zitadel's own init and
  * setup, and the operator's command (B1c). This list is what must be there.
  */
-const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'];
+const JOB_WORKLOADS: readonly string[] = [
+  'db-setup',
+  'migrate',
+  'zitadel-init',
+  'zitadel-setup',
+  'operator',
+  'chain-restore',
+];
 
 /**
  * What a job may hold itself rather than read from the vault, by the job: only
@@ -505,6 +524,13 @@ const HELD: Readonly<
     command: ['node', 'apps/operator/src/main.ts'],
     args: ['--request', '/mnt/secrets/operator-request'],
   },
+  // The chain repair's request (4D2e E10; apps.bicep `restoreRequest`), held as the operator's is.
+  'chain-restore': {
+    name: 'chain-restore-request',
+    value: '[]',
+    command: ['node', 'apps/operator/src/chain-restore-main.ts'],
+    args: ['--request', '/mnt/secrets/chain-restore-request'],
+  },
   // The load test's run request (D2c; apps.bicep `loadRequest`), written by load.ts before each run.
   ...Object.fromEntries(
     LOAD_PARTS.map((part) => [
@@ -532,7 +558,7 @@ const LOAD_RUN = {
   jobs: LOAD_PARTS.map((part) => `load-${part}`),
   runsAs: 'api',
   image: 'ghcr.io/shahbaz242630/agent-x-load@',
-  reads: new Set(['db-app-password', ...APP_KEYS]),
+  reads: new Set(['db-app-password', ...APP_KEYS.filter((key) => !operatorOnly(key)), ...PUBLIC_HALVES.values()]),
   apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
   // Three `web` copies of eight connections, and the jobs' six, on the larger server `foundation --load-size` gives,
@@ -784,7 +810,7 @@ const LONGEST_RUN_SECONDS = 3600;
  * encrypted with another master key, and what one of the app's keys sealed or
  * signed needs that key as it was (a rotation adds a version instead).
  */
-const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS]);
+const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS, ...PUBLIC_HALVES.values()]);
 
 /**
  * The secrets a run copies from an Azure service of this deployment on every
@@ -822,11 +848,17 @@ const ANCHOR_ACTIONS = [
 /** The anchors' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors');
 
-/** The operator's role on the anchors (4D2e E9): Get Blob and List Blobs alone, for a chain recovery plan. */
+/**
+ * A read-only role on a store's container: Get Blob and List Blobs alone. The chain repair's read of the anchors and
+ * of the plans (4D2e E10). The operator holds the anchors' own role instead, to add a rebase (E11).
+ */
 const ANCHOR_READ_ACTIONS = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'] as const;
 
-/** The operator's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
+/** The chain repair's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors-reader');
+
+/** The chain repair's read of the plans as a role assignment names it, without case (modules/evidence.bicep, 4D2e E10). */
+const planReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-plan-reader');
 
 /** The audit exports' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const evidenceRoleName = (groupId: string): string => bicepGuid(groupId, 'evidence-writer');
@@ -1218,7 +1250,7 @@ const KEY_MEMBER_REFERENCE = /^\[json\(parameters\('[^']+'\)\)\['([^']+)'\]\]$/;
 /** Whether a vault secret's value is its own key member: only for one of the app's keys. */
 const isOwnKeyMember = (secret: PredictedResource, value: unknown): boolean =>
   typeof value === 'string' &&
-  APP_KEYS.includes(secretNameOf(secret)) &&
+  (APP_KEYS.includes(secretNameOf(secret)) || [...PUBLIC_HALVES.values()].includes(secretNameOf(secret))) &&
   KEY_MEMBER_REFERENCE.exec(value)?.[1] === secretNameOf(secret);
 
 /**
@@ -1968,10 +2000,11 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
  * a new file and reads, to the identities of the apps that may hold the jobs
- * (`ANCHOR_KEEPERS`, 4D2e D13). The anchors container has a second role,
- * reading alone, to the operator's identity, for a chain recovery plan (4D2e E9).
- * The app that holds the jobs and the operator's job alone are told where the
- * anchors are, each as its own identity, which its role is given to (`storeSettingsProblems`). None can
+ * (`ANCHOR_KEEPERS`, 4D2e D13) and to the operator's (a chain recovery plan,
+ * 4D2e E9, and a rebase, E11). The anchors container has a second role, reading
+ * alone, to the chain repair's identity (4D2e E10). The app that holds the jobs,
+ * the operator's job and the chain repair's job alone are told where the anchors
+ * are, each as its own identity, which its role is given to (`storeSettingsProblems`). None can
  * overwrite or delete. The account's immutability covers both. Its logs are
  * `resource-logs`'s.
  */
@@ -2014,8 +2047,21 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: evidenceRoleName(groupOf(snapshot)),
       dataActions: [EVIDENCE_WRITE],
       containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
-      workloads: ['operator'],
+      workloads: STORE_WRITERS,
       called: "the audit exports' role",
+      on: 'the export container',
+    },
+    problem,
+  );
+  // The chain repair reads the plan it applies (4D2e E10): reading alone, on the exports, to its identity alone.
+  storeRoleProblems(
+    snapshot,
+    {
+      name: planReaderRoleName(groupOf(snapshot)),
+      dataActions: ANCHOR_READ_ACTIONS,
+      containers: containersNamed(snapshot, EVIDENCE_CONTAINER),
+      workloads: ['chain-restore'],
+      called: "the chain repair's read of the plans",
       on: 'the export container',
     },
     problem,
@@ -2028,8 +2074,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_EVIDENCE_CLIENT_ID',
       accounts,
       container: EVIDENCE_CONTAINER,
-      holders: (workload) => (isOperatorJob(workload) ? writers : undefined),
-      holder: "the operator's job writes to the store",
+      holders: (workload) => (isJobOf(workload, STORE_WRITERS) ? ownOf(workload, writers) : undefined),
+      holder: "the operator's and the chain repair's jobs write to the store",
       store: 'store',
     },
     problem,
@@ -2040,7 +2086,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workloads: ANCHOR_KEEPERS[expected.environment],
+      // The operator adds a chain's rebase (4D2e E11) as the app holding the jobs adds an anchor.
+      workloads: [...ANCHOR_KEEPERS[expected.environment], 'operator'],
       called: "the anchors' role",
       on: 'the anchors container',
     },
@@ -2052,8 +2099,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorReaderRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_READ_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workloads: ['operator'],
-      called: "the operator's read of the anchors",
+      workloads: ['chain-restore'],
+      called: "the chain repair's read of the anchors",
       on: 'the anchors container',
     },
     problem,
@@ -2067,10 +2114,11 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       accounts,
       container: ANCHOR_CONTAINER,
       holders: (workload) => {
-        if (holdsJobs(workload)) return ownOf(workload, keepers);
-        return isOperatorJob(workload) ? readers : undefined;
+        if (holdsJobs(workload) || isJobOf(workload, ['operator'])) return ownOf(workload, keepers);
+        return isJobOf(workload, ['chain-restore']) ? ownOf(workload, readers) : undefined;
       },
-      holder: "the app that holds the jobs keeps the chains' anchors and the operator's job reads them",
+      holder:
+        "the app that holds the jobs and the operator's job keep the chains' anchors and the chain repair's job reads them",
       store: 'store',
     },
     problem,
@@ -2103,13 +2151,20 @@ const ANCHOR_KEEPERS: Readonly<Record<Expectations['environment'], readonly stri
   staging: ['api', 'jobs'],
 };
 
-/** The operator's job. */
-const isOperatorJob = (workload: PredictedResource): boolean =>
-  workload.type === TYPES.job && jobWorkloadOf(workload.name) === 'operator';
+/**
+ * The jobs that write to the evidence store and read the anchors, each as its
+ * own identity: the operator's (E10c, 4D2e E9) and the chain repair's (4D2e E10).
+ */
+const STORE_WRITERS: readonly string[] = ['operator', 'chain-restore'];
+
+/** A job among `jobs`, as a store's settings judge it. */
+const isJobOf = (workload: PredictedResource, jobs: readonly string[]): boolean =>
+  workload.type === TYPES.job && jobs.includes(jobWorkloadOf(workload.name));
 
 /**
- * The anchors' epoch (AGENTX_ANCHOR_EPOCH, 4D2e E9): the API, which signs for it,
- * and the operator's job, which reads the anchors for a chain recovery plan, each
+ * The anchors' epoch (AGENTX_ANCHOR_EPOCH, 4D2e E9): the app that holds the jobs
+ * (4D2e D13), which signs for it, and the operator's and the chain repair's jobs,
+ * which read the anchors for a chain recovery plan or a repair, each
  * set it once, to the same value, and nothing else sets it. Apart, the operator
  * would read another epoch's files, or none, and plan against the wrong anchors.
  */
@@ -2121,24 +2176,25 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
         .filter((entry) => at(entry, 'name') === 'AGENTX_ANCHOR_EPOCH')
         .map((entry) => text(at(entry, 'value'))),
     );
-    if (holdsJobs(workload) || isOperatorJob(workload)) {
+    if (holdsJobs(workload) || isJobOf(workload, STORE_WRITERS)) {
       values.set(workload.name, set);
     } else if (set.length > 0) {
       add({
         rule: 'anchor-epoch',
         resource: workload.name,
-        message: "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs and the operator's job",
+        message:
+          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the operator's job and the chain repair's",
       });
     }
   }
   const said = [...values.values()];
   const first = said[0]?.[0];
-  if (said.length !== 2 || said.some((set) => set.length !== 1 || set[0] !== first)) {
+  if (said.length !== 1 + STORE_WRITERS.length || said.some((set) => set.length !== 1 || set[0] !== first)) {
     add({
       rule: 'anchor-epoch',
       resource: 'the deployment',
       message:
-        "must set AGENTX_ANCHOR_EPOCH once on the app that holds the jobs and once on the operator's job, to the same value",
+        "must set AGENTX_ANCHOR_EPOCH once on the app that holds the jobs, once on the operator's job and once on the chain repair's, to the same value",
     });
   }
 };
@@ -3563,7 +3619,8 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const downloads = customRoleId(groupOf(snapshot), downloadsRoleName(groupOf(snapshot)));
   const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
   const readAnchors = customRoleId(groupOf(snapshot), anchorReaderRoleName(groupOf(snapshot)));
-  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors]);
+  const readPlans = customRoleId(groupOf(snapshot), planReaderRoleName(groupOf(snapshot)));
+  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors, readPlans]);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
@@ -3668,6 +3725,7 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
     evidenceRoleName(groupOf(snapshot)),
     anchorRoleName(groupOf(snapshot)),
     anchorReaderRoleName(groupOf(snapshot)),
+    planReaderRoleName(groupOf(snapshot)),
     downloadsRoleName(groupOf(snapshot)),
   ]);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));

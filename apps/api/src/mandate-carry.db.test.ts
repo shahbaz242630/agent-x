@@ -74,6 +74,8 @@ const server = inject('postgres');
 let database: TestDatabase;
 type Tables = SpendWorldTables & PlatformControlsTables & InstructionsTables & TransactionsTables;
 let app: Database<Tables>;
+/** The operator's own role (PL-57), the one that moves the hand-off pause. */
+let operator: Database<Tables>;
 
 const ids = new SequentialIds(0xe4c0_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000e4';
@@ -215,10 +217,12 @@ const versionOf = (w: World, id: string) =>
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  operator = createDatabase<Tables>({ ...database.connection('operator'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
 });
 
@@ -551,7 +555,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     for (const { id } of pending.slice(20)) expect(await statusOf(w, id)).toBe('APPROVED');
     // And the hand-off waits for the carry (Phase 4 B4): never paid on the version replaced before it is weighed again.
     const chain = createPlatformChain({ keys, ids });
-    await app
+    await operator
       .transaction()
       .execute((tx) =>
         changeHandoffPause(

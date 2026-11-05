@@ -92,6 +92,7 @@ services:
       AGENTX_DB_OWNER_PASSWORD: ${AGENTX_LOCAL_DB_OWNER_PASSWORD:?}
       AGENTX_DB_APP_PASSWORD: ${AGENTX_LOCAL_DB_APP_PASSWORD:?}
       AGENTX_DB_BACKUP_PASSWORD: ${AGENTX_LOCAL_DB_BACKUP_PASSWORD:?}
+      AGENTX_DB_OPERATOR_PASSWORD: ${AGENTX_LOCAL_DB_OPERATOR_PASSWORD:?}
       AGENTX_DB_ZITADEL_PASSWORD: ${AGENTX_LOCAL_ZITADEL_DB_PASSWORD:?}
     depends_on:
       db:
@@ -166,7 +167,7 @@ services:
 
   # The operator's command (apps/operator; B1c, B4-6b), as Azure runs it as a
   # job: started by a person, one run at a time, never by `up` (its profile),
-  # as the app's role, with the two keys it holds and no other, and its
+  # as its own role (PL-57), with the keys it holds and no other, and its
   # request from a file:
   #   docker compose -f deploy/compose/compose.yaml run --rm --no-deps operator --request /mnt/requests/<file>
   # The end-to-end suite writes the file into secrets/operator-requests (B4-6d).
@@ -178,13 +179,15 @@ services:
       AGENTX_ENV: development
       AGENTX_DB_HOST: db
       AGENTX_DB_NAME: agentx
-      AGENTX_DB_USER: agentx_app
-      AGENTX_DB_PASSWORD: ${AGENTX_LOCAL_DB_APP_PASSWORD:?}
+      AGENTX_DB_USER: agentx_operator
+      AGENTX_DB_PASSWORD: ${AGENTX_LOCAL_DB_OPERATOR_PASSWORD:?}
       AGENTX_DB_TLS: disable
       AGENTX_KEYS_DIR: /mnt/secrets
     volumes:
       - ./secrets/app-keys/key-audit-mac-v1:/mnt/secrets/key-audit-mac-v1:ro
       - ./secrets/app-keys/key-field-encryption-v1:/mnt/secrets/key-field-encryption-v1:ro
+      - ./secrets/operator-keys/key-operator-signing-v1:/mnt/secrets/key-operator-signing-v1:ro
+      - ./secrets/operator-keys/key-audit-rebase-v1:/mnt/secrets/key-audit-rebase-v1:ro
       - ./secrets/operator-requests:/mnt/requests:ro
     restart: 'no'
 

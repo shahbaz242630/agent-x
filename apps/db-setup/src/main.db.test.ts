@@ -36,6 +36,7 @@ function envFor(overrides: Record<string, string> = {}): Record<string, string> 
     AGENTX_DB_OWNER_PASSWORD: server.roles.owner.password,
     AGENTX_DB_APP_PASSWORD: server.roles.app.password,
     AGENTX_DB_BACKUP_PASSWORD: server.roles.backup.password,
+    AGENTX_DB_OPERATOR_PASSWORD: server.roles.operator.password,
     AGENTX_DB_ZITADEL_PASSWORD: zitadelRole.password,
     ...overrides,
   };

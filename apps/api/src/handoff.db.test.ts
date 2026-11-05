@@ -98,6 +98,8 @@ type Tables = HandoffWorldTables;
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<Tables>;
+/** The operator's own role (PL-57), the one that moves the hand-off pause. */
+let operator: Database<Tables>;
 
 const ids = new SequentialIds(0xb4a0_0000_0000);
 const chain = createPlatformChain({ keys, ids: new SequentialIds(0xb4b0_0000_0000) });
@@ -170,7 +172,7 @@ const pauseIn = (tx: Parameters<typeof changeHandoffPause>[0], paused: boolean) 
   );
 
 /** The platform's hand-off pause moved, in a transaction of its own. */
-const pauseMoved = (paused: boolean) => app.transaction().execute((tx) => pauseIn(tx, paused));
+const pauseMoved = (paused: boolean) => operator.transaction().execute((tx) => pauseIn(tx, paused));
 
 /** The world's rail, every submission counted. */
 function counted(w: World): { rail: FakeRail; submitted: () => number } {
@@ -190,12 +192,14 @@ function counted(w: World): { rail: FakeRail; submitted: () => number } {
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  operator = createDatabase<Tables>({ ...database.connection('operator'), maxConnections: 2 }, testLogger());
   // Born paused (ADR-014 §4): resumed for these tests, as the operator would once B4 is live.
   await pauseMoved(false);
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
 });
 
@@ -445,7 +449,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
     const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
     // The operator's pause holds the row (level 1) until it commits.
-    const pausing = app.transaction().execute(async (tx) => {
+    const pausing = operator.transaction().execute(async (tx) => {
       await pauseIn(tx, true);
       holding(undefined);
       await gate;

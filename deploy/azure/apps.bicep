@@ -53,9 +53,12 @@ import {
   jobWorkloads
   networkAddressSpace
   operatorHolds
+  operatorOnly
+  publicHalves
   releaseRoleName
   resourceNames
   resourceTags
+  restoreHolds
   shortName
   uniqueSuffix
 } from 'names.bicep'
@@ -630,6 +633,51 @@ var operatorAnchorSettings = concat(
       ]
 )
 
+// The chain repair's request (4D2e E10), held as the operator's is and for the
+// same reasons: written before a run, a JSON list of the command's words,
+// deployed as no request, which the command refuses.
+var restoreRequest = {
+  name: 'chain-restore-request'
+  value: '[]'
+}
+
+// Where the chain repair writes its records and reads the anchors (4D2e E10):
+// the operator's two stores, as its own identity, which holds the two roles the
+// operator does there (modules/evidence.bicep). Its client ID comes from Azure.
+resource restorerIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: identityName(environment, 'chain-restore')
+}
+
+var restoreStoreSettings = concat(
+  [
+    {
+      name: 'AGENTX_EVIDENCE_CONTAINER_URL'
+      value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${evidenceContainerName()}'
+    }
+    {
+      name: 'AGENTX_EVIDENCE_CLIENT_ID'
+      value: restorerIdentity.properties.clientId
+    }
+    anchorEpochSetting
+    {
+      name: 'AGENTX_AUDIT_ANCHORS_URL'
+      value: 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
+    }
+    {
+      name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
+      value: restorerIdentity.properties.clientId
+    }
+  ],
+  empty(anchorPublicKeys)
+    ? []
+    : [
+        {
+          name: 'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS'
+          value: anchorPublicKeys
+        }
+      ]
+)
+
 // Every job: the work it does (its identity and its name come from that), the
 // image and command, how long one run may take, what it reads as a mounted file
 // with the setting that names each file, what it holds itself rather than reads
@@ -665,6 +713,10 @@ var jobs = concat([
       {
         reads: 'db-backup-password'
         setting: 'AGENTX_DB_BACKUP_PASSWORD_FILE'
+      }
+      {
+        reads: 'db-operator-password'
+        setting: 'AGENTX_DB_OPERATOR_PASSWORD_FILE'
       }
       {
         reads: 'db-zitadel-password'
@@ -738,9 +790,9 @@ var jobs = concat([
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
   }
   {
-    // The operator's command (B1c; ADR-011 §3), as the app's role and no other,
-    // holding the audit chains' MAC alone: what it does, it does through the
-    // same tenant walls as the API. It reads what it is asked from the request
+    // The operator's command (B1c; ADR-011 §3), as its own role (PL-57) and no
+    // other, holding the keys it needs and its own signing key: what it does, it
+    // does through the same tenant walls as the API. It reads what it is asked from the request
     // it holds (above), never from a run's own arguments.
     workload: 'operator'
     image: appImage
@@ -758,7 +810,7 @@ var jobs = concat([
     files: concat(
       [
         {
-          reads: 'db-app-password'
+          reads: 'db-operator-password'
           setting: 'AGENTX_DB_PASSWORD_FILE'
         }
       ],
@@ -776,7 +828,7 @@ var jobs = concat([
       }
       {
         name: 'AGENTX_DB_USER'
-        value: 'agentx_app'
+        value: 'agentx_operator'
       }
       {
         // The restore drill's copy, which only the restore check reads, read-only (S78).
@@ -784,6 +836,59 @@ var jobs = concat([
         value: drillDatabaseHost
       }
     ])
+  }
+  {
+    // The chain repair (4D2e E10, PL-29; apps/operator/src/chain-restore-main.ts):
+    // a recovery plan applied as the owner, the only job besides the migration
+    // holding its login, so its every run sets off the owner-login SEV-1 alert,
+    // by design. It holds the audit chains' MAC to check with and the operator's
+    // public halves, never the operator's own key; it writes only original rows.
+    workload: 'chain-restore'
+    image: appImage
+    command: ['node', 'apps/operator/src/chain-restore-main.ts']
+    args: ['--request', '${secretsPath}/${restoreRequest.name}']
+    // The plan read twice from both servers, then the whole chain checked in
+    // its transaction: as long as a migration may take.
+    timeoutSeconds: 1800
+    // Writes its records and reads the anchors as its own identity (restoreStoreSettings).
+    evidence: false
+    restorerStores: true
+    files: concat(
+      [
+        {
+          reads: 'db-owner-password'
+          setting: 'AGENTX_DB_PASSWORD_FILE'
+        }
+      ],
+      // Found by name in the folder AGENTX_KEYS_DIR names, as the operator finds its keys.
+      map(filter(appKeys, key => restoreHolds(key)), key => {
+        reads: key
+        setting: ''
+      }),
+      map(publicHalves, half => {
+        reads: half
+        setting: ''
+      })
+    )
+    held: [restoreRequest]
+    settings: concat(
+      ourSettings,
+      [
+        {
+          name: 'AGENTX_KEYS_DIR'
+          value: secretsPath
+        }
+        {
+          name: 'AGENTX_DB_USER'
+          value: 'agentx_owner'
+        }
+        {
+          // The drill's copy, read-only, which the repair takes original rows from.
+          name: 'AGENTX_DB_DRILL_HOST'
+          value: drillDatabaseHost
+        }
+      ]
+    )
   }
 ], loadRun ? loadJobs : [])
 
@@ -844,8 +949,13 @@ var loadJobs = map(
           setting: 'AGENTX_DB_PASSWORD_FILE'
         }
       ],
-      map(appKeys, key => {
+      // Every key but the operator's own, and its public half instead (PL-57).
+      map(filter(appKeys, key => !operatorOnly(key)), key => {
         reads: key
+        setting: ''
+      }),
+      map(publicHalves, half => {
+        reads: half
         setting: ''
       })
     )
@@ -954,8 +1064,13 @@ var apiFiles = concat(
           setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
         }
       ],
-  map(appKeys, key => {
+  // Every key but the operator's own, and their public halves instead (PL-57, E11).
+  map(filter(appKeys, key => !operatorOnly(key)), key => {
     reads: key
+    setting: ''
+  }),
+  map(publicHalves, half => {
+    reads: half
     setting: ''
   })
 )
@@ -1344,6 +1459,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
               }),
               job.evidence ? evidenceSettings : [],
               (job.?readsAnchors ?? false) ? operatorAnchorSettings : [],
+              (job.?restorerStores ?? false) ? restoreStoreSettings : [],
               (job.?callsApi ?? false) ? [loadApiSetting] : []
             )
             volumeMounts: empty(concat(job.files, job.held))

@@ -25,8 +25,13 @@
 //   app that holds the jobs (`anchorKeepers`, 4D2e D13) may add a new file to
 //   `audit-anchors` and read and list what is there (`blobs/read`, as a restart
 //   must), and can't overwrite or delete. The operator's may read and
-//   list `audit-anchors` alone (`blobs/read`), which a chain's recovery plan is
-//   checked against (4D2e E9): it can add nothing there. No one else is given anything
+//   list `audit-anchors` (`blobs/read`), which a chain's recovery plan is
+//   checked against (4D2e E9), and add a new file there (`blobs/add/action`):
+//   a chain's rebase (4D2e E11), which the API believes only signed with the
+//   operator's own `audit-rebase` key; anything else it adds is a file the API
+//   reads as spoiled, the alarm: it holds the keepers' own role there. Neither can
+//   overwrite or delete. The chain repair's (4D2e E10) may read and list
+//   `audit-anchors` alone: it adds nothing there. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -59,6 +64,12 @@ param anchorRoleName string
 
 @description('As `writerRoleName`, for the role the operator reads the anchors with (4D2e E9).')
 param anchorReaderRoleName string
+
+@description('The chain repair\'s identity (4D2e E10): it adds its records as the writer does and reads the anchors as the operator does. Created by the foundation under this name.')
+param restorerIdentityName string
+
+@description('As `writerRoleName`, for the role the chain repair reads a plan\'s file with (4D2e E10).')
+param planReaderRoleName string
 
 @description('How many days each file is kept unchangeable.')
 @minValue(1)
@@ -243,14 +254,13 @@ resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   }
 ]
 
-// Get Blob and List Blobs (both `blobs/read`), and nothing else: the operator's
-// chain recovery plan (4D2e E9) is checked against the anchors and adds none.
-// Given to the operator's identity, the exports' writer above.
+// Get Blob and List Blobs (both `blobs/read`), and nothing else: the chain
+// repair (4D2e E10) checks a repair against the anchors and adds none.
 resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   name: guid(resourceGroup().id, 'audit-anchors-reader')
   properties: {
     roleName: anchorReaderRoleName
-    description: 'The operator\'s chain recovery plan: read and list the anchors container. Nothing else.'
+    description: 'The chain repair: read and list the anchors container. Nothing else.'
     type: 'CustomRole'
     assignableScopes: [
       resourceGroup().id
@@ -268,14 +278,84 @@ resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' =
   }
 }
 
+// The operator's identity, the exports' writer above, holds the keepers' own role
+// on the anchors: Get Blob and List Blobs for a chain recovery plan (4D2e E9),
+// and Put Blob of a file not there yet for a chain's rebase (4D2e E11). Never
+// overwrite or delete.
 resource readsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: anchorContainer
-  name: guid(anchorContainer.id, writer.id, anchorReaderRole.id)
+  name: guid(anchorContainer.id, writer.id, anchorRole.id)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorRole.name)
     principalId: writer.properties.principalId
     principalType: 'ServicePrincipal'
-    description: 'operator reads audit anchors (deploy/azure/modules/evidence.bicep)'
+    description: 'operator reads and adds audit anchors (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// The chain repair (4D2e E10, PL-29): its own identity, as its job alone holds
+// the owner's login. It adds the records of each repair beside the plans, and
+// reads the anchors a repair is checked against; the same two roles, no more.
+resource restorer 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: restorerIdentityName
+}
+
+resource restorerWrites 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: container
+  name: guid(container.id, restorer.id, writerRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', writerRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore adds chain repair records (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+resource restorerReadsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: anchorContainer
+  name: guid(anchorContainer.id, restorer.id, anchorReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore reads audit anchors (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// Get Blob and List Blobs on the exports container (both `blobs/read`), and
+// nothing else: the chain repair reads the plan it is asked to apply, so the
+// repair is tied to the plan kept as evidence (4D2e E10). Its job already
+// reads the whole database as its owner, so these files tell it nothing more.
+resource planReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, 'evidence-plan-reader')
+  properties: {
+    roleName: planReaderRoleName
+    description: 'The chain repair: read and list the export container, for the plan it applies. Nothing else.'
+    type: 'CustomRole'
+    assignableScopes: [
+      resourceGroup().id
+    ]
+    permissions: [
+      {
+        actions: []
+        notActions: []
+        dataActions: [
+          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
+        ]
+        notDataActions: []
+      }
+    ]
+  }
+}
+
+resource restorerReadsPlans 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: container
+  name: guid(container.id, restorer.id, planReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', planReaderRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore reads recovery plans (deploy/azure/modules/evidence.bicep)'
   }
 }
 

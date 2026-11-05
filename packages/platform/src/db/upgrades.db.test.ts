@@ -74,6 +74,58 @@ describe('migrations that fill rows already there', () => {
     ).toEqual([{ relforcerowsecurity: true }]);
   });
 
+  it("0079 starts the operator's signing at the platform chain's next place, or its first on a chain not started (PL-57)", async () => {
+    await migratedTo('0078_reset_download_hold_first_marks.sql');
+    const owner = database.as('owner');
+    await owner.query(
+      "insert into platform_controls.audit_head (seq, hash, mac, mac_key_version) values (41, pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), pg_catalog.decode('00', 'hex'), 1)",
+    );
+
+    await migratedTo('0079_operator_role.sql');
+
+    expect(await owner.query('select signed_from::text from platform_controls.operator_signing')).toEqual([
+      { signed_from: '42' },
+    ]);
+    const fresh = await createTestDatabase(server, { schema: 'migrated' });
+    try {
+      expect(await fresh.as('owner').query('select signed_from::text from platform_controls.operator_signing')).toEqual(
+        [{ signed_from: '1' }],
+      );
+    } finally {
+      await fresh.drop();
+    }
+  });
+
+  it("0079 starts the operator's signing on every organisation's chain at its own next place, under the wall (PL-57)", async () => {
+    await migratedTo('0078_reset_download_hold_first_marks.sql');
+    const owner = database.as('owner');
+    const other = '0199a000-0000-7000-8000-0000000000a2';
+    for (const [org, seq] of [
+      [ORG, 7],
+      [other, 300],
+    ] as const) {
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [org]);
+      await owner.query(
+        "insert into audit.heads (org_id, seq, hash, mac, mac_key_version) values ($1, $2, pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), pg_catalog.decode('00', 'hex'), 1)",
+        [org, seq],
+      );
+    }
+    await owner.query("select pg_catalog.set_config('app.org_id', '', false)");
+
+    await migratedTo('0079_operator_role.sql');
+
+    const startOf = async (org: string): Promise<unknown> => {
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [org]);
+      return owner.query('select org_id::text, signed_from::text from audit.operator_signing_starts');
+    };
+    expect(await startOf(ORG)).toEqual([{ org_id: ORG, signed_from: '8' }]);
+    expect(await startOf(other)).toEqual([{ org_id: other, signed_from: '301' }]);
+    // The heads' wall is back on the owner too.
+    expect(
+      await owner.query("select relforcerowsecurity from pg_catalog.pg_class where oid = 'audit.heads'::regclass"),
+    ).toEqual([{ relforcerowsecurity: true }]);
+  });
+
   describe('0067 re-keys every request and claim by the full case fold (PL-39)', () => {
     const OTHER_ORG = '0199a000-0000-7000-8000-0000000000a2';
     const SUPPLIER = '0199a000-0000-7000-8000-0000000000c1';

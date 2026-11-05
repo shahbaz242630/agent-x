@@ -21,6 +21,8 @@ export interface TestPostgresServer {
     readonly owner: TestLogin;
     readonly app: TestLogin;
     readonly backup: TestLogin;
+    /** The operator's command's own role (PL-57). */
+    readonly operator: TestLogin;
   };
   /** A database with every migration applied, copied for each test file. */
   readonly templateDatabase: string;

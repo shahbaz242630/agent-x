@@ -29,21 +29,25 @@ import { gatheredEnd, printedEnd, readGrowthEnd } from './table-growth.ts';
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<LoadTables>;
+/** The operator's own role (PL-57), the one that moves the hand-off pause. */
+let operator: Database<LoadTables>;
 const chain = createPlatformChain({ keys, ids: new SequentialIds(0xd2c0_0000_0000) });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<LoadTables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  operator = createDatabase<LoadTables>({ ...database.connection('operator'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
 });
 
 /** The platform's hand-off pause moved, as the operator's command moves it (B1). A migrated database is born paused. */
 const pauseMoved = (paused: boolean) =>
-  app
+  operator
     .transaction()
     .execute((tx) =>
       changeHandoffPause(

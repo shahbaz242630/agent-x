@@ -18,8 +18,9 @@ var appWorkloads = [
 
 // Every job, each with an identity of its own: the jobs that set up a server's
 // roles and databases, migrate the app's database, and build Zitadel's (init,
-// then setup), and the operator's command (B1c). Each is started by hand, never
-// on a schedule (apps.bicep).
+// then setup), the operator's command (B1c), and the chain repair (4D2e E10),
+// the one job besides the migration that logs in as the owner. Each is started
+// by hand, never on a schedule (apps.bicep).
 @export()
 var jobWorkloads = [
   'db-setup'
@@ -27,6 +28,7 @@ var jobWorkloads = [
   'zitadel-init'
   'zitadel-setup'
   'operator'
+  'chain-restore'
 ]
 
 // Everything that runs, so each can be given only its own secrets (G2c).
@@ -42,15 +44,40 @@ var workloads = concat(appWorkloads, jobWorkloads)
 var appKeys = loadJsonContent('app-keys.json')
 
 // The keys the operator's command holds, by how their names start: every
-// version of the audit chains' MAC (ADR-011 §3, B1c) and of the field
-// encryption a first admin's invited address is kept with (B4-6b), and no
-// other.
+// version of the audit chains' MAC (ADR-011 §3, B1c), of the field encryption a
+// first admin's invited address is kept with (B4-6b), and of its own signing
+// key (PL-57) and the rebase key (4D2e E11), and no other.
 @export()
-var operatorKeys = ['key-audit-mac-v', 'key-field-encryption-v']
+var operatorKeys = ['key-audit-mac-v', 'key-field-encryption-v', 'key-operator-signing-v', 'key-audit-rebase-v']
 
 // Whether the operator's command holds this key.
 @export()
 func operatorHolds(key string) bool => length(filter(operatorKeys, prefix => startsWith(key, prefix))) > 0
+
+// The keys the operator's command alone holds (PL-57, E11): never mounted into the
+// API, which reads each one's public half instead (publicHalves).
+@export()
+var operatorOnlyKeys = ['key-operator-signing-v', 'key-audit-rebase-v']
+
+// Whether only the operator's command holds this key.
+@export()
+func operatorOnly(key string) bool => length(filter(operatorOnlyKeys, prefix => startsWith(key, prefix))) > 0
+
+// The keys the chain repair holds (4D2e E10, PL-29): every version of the audit
+// chains' MAC, to check a chain with, and no other; the operator's signatures
+// and its rebases (E11) it checks with their public halves alone (publicHalves).
+@export()
+var restoreKeys = ['key-audit-mac-v']
+
+// Whether the chain repair holds this key.
+@export()
+func restoreHolds(key string) bool => length(filter(restoreKeys, prefix => startsWith(key, prefix))) > 0
+
+// Each operator-only key's public half, a secret of its own the API reads
+// (`public-<purpose>-v<version>`), made by the deploy tool from the same value
+// as its key and created once with it (deploy/azure/app-keys.ts).
+@export()
+var publicHalves = map(filter(appKeys, key => operatorOnly(key)), key => 'public-${substring(key, 4)}')
 
 @export()
 @description('The environment\'s three letters, for the names Azure keeps short.')

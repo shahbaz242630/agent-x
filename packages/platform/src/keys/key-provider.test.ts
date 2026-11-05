@@ -64,14 +64,14 @@ describe('SEC-DATA-07 keyed hashes (HMAC-SHA-256)', () => {
 
   it('stays on a newer version it is asked for, never an older one', () => {
     // Current is 1 here, with version 2 held: a process rolled back after a rotation.
-    const keys = provider({ 'request-hash': rotated(2, 9, 1) });
+    const keys = provider({ 'request-hash': rotated(2, 29, 1) });
     const withKey = (fill: number): Buffer => createHmac('sha256', key(fill)).update(encodeMessage(REQUEST)).digest();
 
-    expect(keys.mac('request-hash', REQUEST, 2)).toEqual({ keyVersion: 2, mac: withKey(9) });
+    expect(keys.mac('request-hash', REQUEST, 2)).toEqual({ keyVersion: 2, mac: withKey(29) });
     expect(keys.mac('request-hash', REQUEST, 1)).toEqual({ keyVersion: 1, mac: withKey(2) });
-    expect(provider({ 'request-hash': rotated(2, 9) }).mac('request-hash', REQUEST, 1)).toEqual({
+    expect(provider({ 'request-hash': rotated(2, 29) }).mac('request-hash', REQUEST, 1)).toEqual({
       keyVersion: 2,
-      mac: withKey(9),
+      mac: withKey(29),
     });
   });
 
@@ -403,7 +403,7 @@ describe('the keys stay inside the provider (ADR-011 §2)', () => {
       .filter((entry) => entry.versions.some((version) => version.publicKey !== undefined))
       .map((entry) => entry.purpose);
 
-    expect(withPublicKey).toEqual(['audit-anchor']);
+    expect(withPublicKey).toEqual(['audit-anchor', 'operator-signing', 'audit-rebase']);
   });
 
   it("holds its own copy, so clearing the caller's bytes afterwards changes nothing", () => {
@@ -530,6 +530,21 @@ describe('which sets of keys can be used', () => {
           '- key-audit-mac-v1 holds the same key as key-request-hash-v1: every key must be its own\n' +
           '- payee-index is never rotated in place (ADR-014 §3): only its version 1 may exist, and it stays current',
       ),
+    );
+  });
+});
+
+describe("the public halves a process checks another's signatures with (PL-57)", () => {
+  it('refuses a public half of the wrong length or with no version from 1, naming each', () => {
+    expect(() =>
+      createKeyProvider({}, [], {
+        'operator-signing': new Map([
+          [0, Buffer.alloc(32, 1)],
+          [2, Buffer.alloc(31, 1)],
+        ]),
+      }),
+    ).toThrow(
+      /public-operator-signing-v0 must be a version from 1 holding 32 bytes\n- public-operator-signing-v2 must be a version from 1 holding 32 bytes/,
     );
   });
 });

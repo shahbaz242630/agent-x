@@ -485,6 +485,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'dbOwnerPassword',
       'dbAppPassword',
       'dbBackupPassword',
+      'dbOperatorPassword',
       'dbZitadelPassword',
       'zitadelMasterKey',
       'zitadelAdminPassword',
@@ -590,9 +591,18 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
       'Microsoft.Insights/diagnosticSettings system-logs-to-login-workspace',
       // The API's jobs apart from it (4D2e D13) have their own, unused on staging out of a load run.
-      ...['api', 'zitadel', 'login', 'jobs', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'].map(
-        (workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`,
-      ),
+      ...[
+        'api',
+        'zitadel',
+        'login',
+        'jobs',
+        'db-setup',
+        'migrate',
+        'zitadel-init',
+        'zitadel-setup',
+        'operator',
+        'chain-restore',
+      ].map((workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`),
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-what-broke',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
@@ -633,6 +643,20 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       // The anchors' role to the API's and the jobs' identities on staging (4D2e D13).
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      // 4D2e E10: the chain repair's identity adds its records and reads the anchors, with the same two roles,
+      // and reads the plans with a role of its own.
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
@@ -698,6 +722,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `db-owner-password ${givenOnly('dbOwnerPassword')}`,
       `db-app-password ${givenOnly('dbAppPassword')}`,
       `db-backup-password ${givenOnly('dbBackupPassword')}`,
+      `db-operator-password ${givenOnly('dbOperatorPassword')}`,
       `db-zitadel-password ${givenOnly('dbZitadelPassword')}`,
       `zitadel-admin-password ${givenOnly('zitadelAdminPassword')}`,
       `login-client-private-key ${givenOnly('loginClientPrivateKey')}`,
@@ -709,16 +734,22 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
+      // PL-57, E11: the operator's keys' public halves, each created once with its key, in the keys' order.
+      'public-audit-rebase-v1 once',
+      'public-operator-signing-v1 once',
       ...[
         'db-setup reads db-admin-password',
         'db-setup reads db-owner-password',
         'migrate reads db-owner-password',
+        // 4D2e E10: the chain repair writes as the owner, the one job besides the migration.
+        'chain-restore reads db-owner-password',
         'db-setup reads db-app-password',
         'api reads db-app-password',
         // The API's jobs apart from it read what the API reads (4D2e D13).
         'jobs reads db-app-password',
-        'operator reads db-app-password',
         'db-setup reads db-backup-password',
+        'db-setup reads db-operator-password',
+        'operator reads db-operator-password',
         'db-setup reads db-zitadel-password',
         'zitadel-init reads db-zitadel-password',
         'zitadel-setup reads db-zitadel-password',
@@ -736,12 +767,27 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel reads zitadel-masterkey',
         'api reads acs-access-key',
         'jobs reads acs-access-key',
-        // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each version.
-        ...APP_KEYS.flatMap((key) =>
-          key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')
+        // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each
+        // version; its own signing key and the rebase key it alone reads, and the API their public halves (PL-57, E11).
+        // The chain repair (4D2e E10) the MAC alone, to check with, and the public half: never the operator's key.
+        // The API's jobs apart from it read what the API reads (4D2e D13).
+        ...APP_KEYS.flatMap((key) => {
+          if (key.startsWith('key-operator-signing-v') || key.startsWith('key-audit-rebase-v')) {
+            return [`operator reads ${key}`];
+          }
+          if (key.startsWith('key-audit-mac-v')) {
+            return [`api reads ${key}`, `jobs reads ${key}`, `operator reads ${key}`, `chain-restore reads ${key}`];
+          }
+          return key.startsWith('key-field-encryption-v')
             ? [`api reads ${key}`, `jobs reads ${key}`, `operator reads ${key}`]
-            : [`api reads ${key}`, `jobs reads ${key}`],
-        ),
+            : [`api reads ${key}`, `jobs reads ${key}`];
+        }),
+        'api reads public-audit-rebase-v1',
+        'jobs reads public-audit-rebase-v1',
+        'chain-restore reads public-audit-rebase-v1',
+        'api reads public-operator-signing-v1',
+        'jobs reads public-operator-signing-v1',
+        'chain-restore reads public-operator-signing-v1',
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
   });
@@ -749,7 +795,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(13);
+    expect(variables).toHaveLength(14);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
     // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
     // reach Bicep from Node, as G3's tool sends them.
@@ -758,7 +804,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(13 + APP_KEYS.length);
+      // Fourteen written when given, each key, and the operator's keys' public halves (PL-57, E11).
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(14 + APP_KEYS.length + 2);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
@@ -1608,7 +1655,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       {
         rule: 'evidence-store',
         resource: 'ca-agentx-stg-api',
-        message: "sets AGENTX_EVIDENCE_DIR: only the operator's job writes to the store",
+        message: "sets AGENTX_EVIDENCE_DIR: only the operator's and the chain repair's jobs write to the store",
       },
     ]);
   });
@@ -1730,6 +1777,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
         (app: Mutable) => {
           containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== 'AGENTX_AUDIT_ANCHORS_CLIENT_ID');
         },
+        // The operator holds the same role (E11): the API told of the operator's identity is still refused.
+        (app: Mutable) => {
+          const clientId = anchorSettings(app).find((entry) => entry.name === 'AGENTX_AUDIT_ANCHORS_CLIENT_ID') ?? {};
+          clientId.value = String(clientId.value).replace(apiId, apiId.replace(/-api$/, '-operator'));
+        },
       ]) {
         expect(brokenRules(changed(APP('api'), change))).toEqual(['evidence-store']);
       }
@@ -1741,7 +1793,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           rule: 'evidence-store',
           resource: 'job-agentx-stg-migrate',
           message:
-            "sets AGENTX_AUDIT_ANCHORS_URL: only the app that holds the jobs keeps the chains' anchors and the operator's job reads them",
+            "sets AGENTX_AUDIT_ANCHORS_URL: only the app that holds the jobs and the operator's job keep the chains' anchors and the chain repair's job reads them",
         },
       ]);
     });
@@ -1809,12 +1861,23 @@ describe('SEC-OPS-09 each rule can fail', () => {
           rule: 'evidence-store',
           resource: 'ca-agentx-stg-api',
           message:
-            "sets AGENTX_AUDIT_ANCHORS_URL, AGENTX_AUDIT_ANCHORS_CLIENT_ID: only the app that holds the jobs keeps the chains' anchors and the operator's job reads them",
+            "sets AGENTX_AUDIT_ANCHORS_URL, AGENTX_AUDIT_ANCHORS_CLIENT_ID: only the app that holds the jobs and the operator's job keep the chains' anchors and the chain repair's job reads them",
         },
       ]);
     });
 
-    describe("the operator's read of it, for a chain recovery plan (4D2e E9)", () => {
+    /** An identity's resource ID, by the work it does. */
+    const identityId = (workload: string): string =>
+      String(
+        staging.predictedResources.find(
+          (resource) =>
+            resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
+            resource.name.endsWith(`-${workload}`),
+        )?.id,
+      );
+
+    describe("the operator's hold on it, for a chain recovery plan (4D2e E9) and its rebases (E11)", () => {
+      // The chain repair's read-only role (4D2e E10); the operator holds the API's own role instead.
       const READER = (resource: PredictedResource) =>
         ROLE_DEFINITIONS(resource) &&
         resource.name ===
@@ -1824,17 +1887,22 @@ describe('SEC-OPS-09 each rule can fail', () => {
           );
       const READS = (resource: PredictedResource) =>
         ASSIGNMENTS(resource) &&
-        String(at(resource.properties, 'description')).startsWith('operator reads audit anchors');
-      const identityId = (workload: string): string =>
-        String(
-          staging.predictedResources.find(
-            (resource) =>
-              resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
-              resource.name.endsWith(`-${workload}`),
-          )?.id,
-        );
+        String(at(resource.properties, 'description')).startsWith('operator reads and adds audit anchors');
+      const roleIdOf = (find: (resource: PredictedResource) => boolean): unknown =>
+        at(staging.predictedResources.find(find)?.properties, 'roleDefinitionId');
 
-      it('its role reads and lists, and can add, overwrite or delete nothing', () => {
+      it("holds the API's role, to read, list and add a rebase; the read-only role, given to it, is refused", () => {
+        expect(roleIdOf(READS)).toEqual(roleIdOf(KEEPS));
+        const readOnly = changed(READS, (grant: Mutable) => {
+          inside(grant, 'properties').roleDefinitionId = String(roleIdOf(READS)).replace(
+            String(staging.predictedResources.find(ROLE)?.name),
+            String(staging.predictedResources.find(READER)?.name),
+          );
+        });
+        expect(brokenRules(readOnly)).toEqual(['evidence-store']);
+      });
+
+      it("the chain repair's role reads and lists, and can add, overwrite or delete nothing", () => {
         expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
           { actions: [], notActions: [], dataActions: [`${ACTIONS_OF}/read`], notDataActions: [] },
         ]);
@@ -1869,7 +1937,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         expect(brokenRules(withExtra(twice))).toEqual(['evidence-store']);
       });
 
-      it("the operator's job is told of it as its own identity, and of no public key until one is set", () => {
+      it("the operator's job is told of it as its own identity, and of the public key staging's API logged (S173)", () => {
         const STORE_NAME = String(staging.predictedResources.find(EVIDENCE_STORE)?.name);
         const operator = staging.predictedResources.find(JOB('operator')) as unknown as Mutable;
         expect(settingsOf(operator).filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHOR'))).toEqual([
@@ -1881,6 +1949,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
             name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
             value: `[reference('${identityId('operator')}', '2024-11-30').clientId]`,
           },
+          { name: 'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS', value: '1:YGJbtqiqwcHQT32ByJhe-28JTKwrMacr8rHCj_S91No' },
         ]);
         // Told the API's identity, it would ask for a token it holds no role as.
         const asApi = changed(JOB('operator'), (job) => {
@@ -1888,6 +1957,72 @@ describe('SEC-OPS-09 each rule can fail', () => {
           clientId.value = `[reference('${identityId('api')}', '2024-11-30').clientId]`;
         });
         expect(brokenRules(asApi)).toEqual(['evidence-store']);
+      });
+    });
+
+    describe("the chain repair's reads and records (4D2e E10), as its own identity alone", () => {
+      const restorerGrant = (what: string) => (resource: PredictedResource) =>
+        ASSIGNMENTS(resource) && String(at(resource.properties, 'description')).startsWith(`chain-restore ${what}`);
+
+      it('is told of both stores as its own identity: named the operator’s, it is refused', () => {
+        const restorer = staging.predictedResources.find(JOB('chain-restore')) as unknown as Mutable;
+        const clientIds = settingsOf(restorer).filter((entry) => String(entry.name).endsWith('_CLIENT_ID'));
+        expect(clientIds).toEqual([
+          {
+            name: 'AGENTX_EVIDENCE_CLIENT_ID',
+            value: `[reference('${identityId('chain-restore')}', '2024-11-30').clientId]`,
+          },
+          {
+            name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+            value: `[reference('${identityId('chain-restore')}', '2024-11-30').clientId]`,
+          },
+        ]);
+        for (const setting of ['AGENTX_EVIDENCE_CLIENT_ID', 'AGENTX_AUDIT_ANCHORS_CLIENT_ID']) {
+          const asOperator = changed(JOB('chain-restore'), (job) => {
+            const clientId = settingsOf(job).find((entry) => entry.name === setting) ?? {};
+            clientId.value = `[reference('${identityId('operator')}', '2024-11-30').clientId]`;
+          });
+          expect({ setting, rules: brokenRules(asOperator) }).toEqual({ setting, rules: ['evidence-store'] });
+        }
+      });
+
+      it('its read of the plans reads alone, on the exports alone', () => {
+        const READER = (resource: PredictedResource) =>
+          ROLE_DEFINITIONS(resource) &&
+          resource.name ===
+            bicepGuid(
+              String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id),
+              'evidence-plan-reader',
+            );
+        expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
+          { actions: [], notActions: [], dataActions: [`${ACTIONS_OF}/read`], notDataActions: [] },
+        ]);
+        for (const change of [
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
+        ]) {
+          expect(brokenRules(changed(READER, change))).toEqual(['evidence-store']);
+        }
+        const onAnchors = changed(restorerGrant('reads recovery plans'), (grant: Mutable) => {
+          grant.id = String(grant.id).replace('/containers/audit-exports', '/containers/audit-anchors');
+        });
+        expect(brokenRules(onAnchors)).toEqual(['evidence-store']);
+      });
+
+      it('each of its three roles given once, to its identity: gone, or given to the API instead, is refused', () => {
+        for (const what of ['adds chain repair records', 'reads audit anchors', 'reads recovery plans']) {
+          expect({ what, rules: brokenRules(without(restorerGrant(what))) }).toEqual({
+            what,
+            rules: ['evidence-store'],
+          });
+          const toApi = changed(restorerGrant(what), (grant: Mutable) => {
+            inside(grant, 'properties').principalId = String(at(grant, 'properties', 'principalId')).replace(
+              'id-agentx-stg-chain-restore',
+              'id-agentx-stg-api',
+            );
+          });
+          expect({ what, rules: brokenRules(toApi) }).toEqual({ what, rules: ['evidence-store'] });
+        }
       });
     });
   });
@@ -1917,7 +2052,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       {
         rule: 'anchor-epoch',
         resource: 'job-agentx-stg-migrate',
-        message: "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs and the operator's job",
+        message:
+          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the operator's job and the chain repair's",
       },
     ]);
   });
@@ -4350,13 +4486,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // A job the deployment needs, left out. CI's role would then be given on
     // a migration job this deployment doesn't make, and the owner-login alert
     // would pair logins with its starts.
-    for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator']) {
+    for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator', 'chain-restore']) {
       expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({
         workload,
-        // The operator gone, the anchors' epoch is the API's alone (anchor-epoch).
-        rules: { migrate: ['owner-login-alert', 'release-access', 'jobs'], operator: ['anchor-epoch', 'jobs'] }[
-          workload
-        ] ?? ['jobs'],
+        // The operator or the chain repair gone, the anchors' epoch is set by fewer than all three (anchor-epoch).
+        rules: {
+          migrate: ['owner-login-alert', 'release-access', 'jobs'],
+          operator: ['anchor-epoch', 'jobs'],
+          'chain-restore': ['anchor-epoch', 'jobs'],
+        }[workload] ?? ['jobs'],
       });
     }
   });
@@ -4848,6 +4986,57 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(CERTIFICATE, (certificate) => delete certificate.tags))).toEqual(['tags']);
   });
 
+  it("workload-secrets: the owner's login held by the chain repair (4D2e E10) but never the operator's job, and the repair never given the operator's key", () => {
+    const vault = staging.predictedResources.find(VAULT);
+    const messages = (snapshotted: Snapshot): string[] => policyProblems(snapshotted, STAGING).map(describeProblem);
+    const mounted = (job: Mutable, secret: string, from: string): void => {
+      declaredSecrets(job).push({
+        ...structuredClone(secretNamed(job, from)),
+        name: secret,
+        keyVaultUrl: `[uri(reference('${String(vault?.id)}', '2025-05-01').vaultUri, 'secrets/${secret}')]`,
+      });
+      (at(first(at(job, 'properties', 'template', 'volumes')), 'secrets') as Mutable[]).push({
+        secretRef: secret,
+        path: secret,
+      });
+    };
+    const restorer = staging.predictedResources.find(JOB('chain-restore')) as unknown as Mutable;
+    expect(declaredSecrets(restorer).map((secret) => secret.name)).toEqual([
+      'db-owner-password',
+      ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')),
+      'public-audit-rebase-v1',
+      'public-operator-signing-v1',
+      'chain-restore-request',
+    ]);
+    expect(
+      messages(
+        changed(JOB('operator'), (job) => {
+          mounted(job, 'db-owner-password', 'db-operator-password');
+        }),
+      ),
+    ).toEqual([
+      "job-agentx-stg-operator [workload-secrets] is given db-owner-password, which GRANTS doesn't let operator read",
+    ]);
+    expect(
+      messages(
+        changed(JOB('chain-restore'), (job) => {
+          mounted(job, 'key-operator-signing-v1', 'db-owner-password');
+        }),
+      ),
+    ).toEqual([
+      "job-agentx-stg-chain-restore [workload-secrets] is given key-operator-signing-v1, which GRANTS doesn't let chain-restore read",
+    ]);
+    expect(
+      messages(
+        changed(JOB('chain-restore'), (job) => {
+          mounted(job, 'db-app-password', 'db-owner-password');
+        }),
+      ),
+    ).toEqual([
+      "job-agentx-stg-chain-restore [workload-secrets] is given db-app-password, which GRANTS doesn't let chain-restore read",
+    ]);
+  });
+
   it('workload-secrets: a job given another job’s secret or identity, a pinned version, or a login in the environment', () => {
     const vault = staging.predictedResources.find(VAULT);
     const identity = (workload: string): string => String(staging.predictedResources.find(JOB(workload))?.identity);
@@ -5065,7 +5254,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual([
-      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[3].value must come from a @secure() parameter, never a value in the code',
+      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[5].value must come from a @secure() parameter, never a value in the code',
       holdOnce,
     ]);
     // Held twice, held as a vault secret too, or not held at all (with its file gone, so nothing else objects).
@@ -5342,6 +5531,7 @@ describe('what each job is told', () => {
       AGENTX_DB_OWNER_PASSWORD_FILE: '/mnt/secrets/db-owner-password',
       AGENTX_DB_APP_PASSWORD_FILE: '/mnt/secrets/db-app-password',
       AGENTX_DB_BACKUP_PASSWORD_FILE: '/mnt/secrets/db-backup-password',
+      AGENTX_DB_OPERATOR_PASSWORD_FILE: '/mnt/secrets/db-operator-password',
       AGENTX_DB_ZITADEL_PASSWORD_FILE: '/mnt/secrets/db-zitadel-password',
     });
     // The migration job holds the owner's login and nothing else.

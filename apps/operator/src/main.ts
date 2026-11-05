@@ -1,6 +1,7 @@
 // The operator's command (B1c; ADR-011 §3): operator actions, run as a job
-// started by a person, as the app's own role, never the owner, so the same
-// tenant walls hold it as hold the API. Its commands:
+// started by a person, as its own role (agentx_operator, PL-57), never the
+// owner's or the API's, so the same tenant walls hold it as hold the API and
+// the database, not only this code, keeps the API from its writes. Its commands:
 //
 //   node apps/operator/src/main.ts create-organization --name <name>
 //   node apps/operator/src/main.ts --request <file>
@@ -19,7 +20,9 @@
 // customer's admin, not here: partner decision 38.) Or plan an organisation's
 // chain recovery from the drill's copy (4D2e E9, chain-recovery.ts): only from
 // a file, read-only on both sides, checked against the anchors' store, the
-// plan and its rows to the evidence store alone.
+// plan and its rows to the evidence store alone. Or move a chain's anchor on
+// after a sanctioned change to it (4D2e E11, chain-rebase.ts): only from a
+// file, read-only on the database, one signed line to the anchors' store.
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -36,8 +39,9 @@
 // 3. reads what it was asked and checks the name, before it connects: a
 //    refusal names each rule broken, never the name, which is never logged,
 //    nor anything else a request file holds
-// 4. connects as the app's role, and refuses one that could get round the tenant walls (ADR-005 §3)
-// 5. checks the live schema, and refuses to write through walls that have been rewritten (A3e-1b)
+// 4. connects as its own role, and refuses any other, or one that could get round the tenant walls (ADR-005 §3)
+// 5. checks the live schema, the API's role's rights and its own, and refuses to write through walls that have
+//    been rewritten (A3e-1b)
 // 6. creates the organisation, on its own audit chain and the platform's,
 //    and exits 0; 1 when anything is refused or fails, with nothing changed,
 //    unless the connection was lost as the creation committed (see run's
@@ -50,12 +54,21 @@ import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { type AnchorLog, createAnchorLog } from '@agentx/platform/audit-chain';
+import {
+  type AnchorLog,
+  type Chain,
+  createAnchorLog,
+  EVIDENCE_REFERENCE,
+  REBASE_REASONS,
+  type RebaseReason,
+} from '@agentx/platform/audit-chain';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
 import {
+  APP_ROLE,
   assertRuntimeRole,
   createDatabase,
   type Database,
+  OPERATOR_ROLE,
   transactionsReadOnly,
   UnsafeDatabaseRole,
 } from '@agentx/platform/db';
@@ -77,6 +90,7 @@ import {
 } from '@agentx/platform/storage';
 
 import { type ActivityExportTables, exportActivityLog } from './activity-export.ts';
+import { rebaseChain, type RebaseOutcome, type RebaseTables } from './chain-rebase.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
@@ -87,7 +101,9 @@ import {
   ACTIVITY_EXPORT_USAGE,
   AUDIT_EXPORT_USAGE,
   auditExportOf,
+  CHAIN_REBASE_USAGE,
   CHAIN_RECOVERY_USAGE,
+  DISCARD_FORK,
   FIRST_ADMIN_USAGE,
   type HandoffCommand,
   handoffAskedOf,
@@ -102,21 +118,30 @@ import {
   UUID_V7,
 } from './request.ts';
 import { checkRestoredCopy } from './restore-check.ts';
-import { planChainRecovery, planFile } from './chain-recovery.ts';
+import { planChainRecovery, planDigest, planFile } from './chain-recovery.ts';
 
 /** Every table the commands reach. */
-type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables & HandoffPauseTables;
+type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables & HandoffPauseTables & RebaseTables;
 
 const SERVICE = 'operator';
 
 /** How the command's connection is named in Postgres's own views. */
 const APPLICATION_NAME = 'agentx-operator';
 
-/** The keys the command holds: the audit chains' MAC, and the field encryption an invited address is kept with (B4-6b). Any other mounted with them is refused. */
-const HELD_KEYS = ['audit-mac', 'field-encryption'] as const;
+/**
+ * The keys the command holds: the audit chains' MAC, the field encryption an
+ * invited address is kept with (B4-6b), its own signing key and the rebase key,
+ * which no other process holds (PL-57, E11). Any other mounted with them is
+ * refused. The MAC because it seals its events like any writer; that the
+ * operator wrote them is proven by its signature, which the API can't make.
+ */
+export const HELD_KEYS = ['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase'] as const;
 
 /** The chain recovery plan's command word (4D2e E9). */
 const CHAIN_RECOVERY = 'chain-recovery-plan';
+
+/** A chain's rebase's command word (4D2e E11). */
+const CHAIN_REBASE = 'chain-rebase';
 
 /**
  * How long the anchors' store may fail to be read before that is its alert: never,
@@ -128,7 +153,7 @@ const ANCHOR_READ_NEVER_ALERTS_MS = Number.MAX_SAFE_INTEGER;
 export const USAGE = 'create-organization --name <name>';
 
 /** How the job names the file its request is in. */
-const REQUEST_FLAG = '--request';
+export const REQUEST_FLAG = '--request';
 
 /** The parts of `process` the command uses. Tests pass a stand-in. */
 export interface OperatorProcess {
@@ -191,6 +216,20 @@ type Request =
       readonly orgId: string;
       /** The plan's ID: its file's name in the evidence store. */
       readonly id: string;
+      /** The named flag (E10): a fork's live branch planned away rather than the plan refused. */
+      readonly discardFork: boolean;
+    }
+  | {
+      readonly command: typeof CHAIN_REBASE;
+      readonly chain: Chain;
+      /** The place the repair ended at: the chain's head must be exactly this. */
+      readonly seq: bigint;
+      readonly hash: Buffer;
+      readonly reason: RebaseReason;
+      /** The incident's reference, kept in the store's line; never logged, nor repeated in a problem. */
+      readonly evidence: string;
+      /** The rebase's ID: its file's name in the anchors' store. */
+      readonly id: string;
     };
 
 /** A pause or resume of every hand-off, one shape for each command, so a check of the command narrows to its own. */
@@ -205,12 +244,12 @@ type HandoffRequest = {
 }[HandoffCommand];
 
 /** Why a request can't be done, each rule broken. */
-interface Problems {
+export interface Problems {
   readonly problems: readonly string[];
 }
 
 /** One problem. */
-const problem = (text: string): Problems => ({ problems: [text] });
+export const problem = (text: string): Problems => ({ problems: [text] });
 
 /**
  * A request file's text: a plain file (never a pipe or a device, which could
@@ -246,7 +285,7 @@ function readRequestFile(file: string): { readonly text: string } | Problems {
  * The words a request file holds, a JSON list of the command's arguments, or
  * the problems. A problem says what is wrong with the file, never what is in it.
  */
-function requestWords(argv: readonly string[]): { readonly words: readonly string[] } | Problems {
+export function requestWords(argv: readonly string[]): { readonly words: readonly string[] } | Problems {
   const [, file, ...rest] = argv;
   if (file === undefined || rest.length > 0) {
     return problem(`${REQUEST_FLAG} takes the one file that holds the request, and nothing else`);
@@ -282,6 +321,7 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
   [RESTORE_CHECK, restoreCheckAsked],
   [CHAIN_RECOVERY, chainRecoveryAsked],
+  [CHAIN_REBASE, chainRebaseAsked],
 ]);
 
 /**
@@ -322,18 +362,72 @@ function restoreCheckAsked(words: readonly string[], fromFile: boolean): Request
     : problem(`${RESTORE_CHECK} runs only from a request file, as the one word in its list`);
 }
 
-/** A chain recovery plan (4D2e E9): only from a file, the organisation and the plan's ID named. */
+/** Whether what follows a request's own words is nothing, or the named flag alone (E10's --discard-fork). */
+export const flagAlone = (more: readonly string[]): { readonly discardFork: boolean } | undefined => {
+  if (more.length === 0) return { discardFork: false };
+  return more.length === 1 && more[0] === DISCARD_FORK ? { discardFork: true } : undefined;
+};
+
+/** A chain recovery plan (4D2e E9): only from a file, the organisation and the plan's ID named, the fork flag maybe. */
 function chainRecoveryAsked(words: readonly string[], fromFile: boolean): Request | Problems {
   const [, orgFlag, orgId, idFlag, id, ...more] = words;
   if (!fromFile) return problem(`${CHAIN_RECOVERY} runs only from a request file: ${CHAIN_RECOVERY_USAGE}`);
-  if (!(orgFlag === '--org' && idFlag === '--id' && id !== undefined && more.length === 0)) {
+  const flag = flagAlone(more);
+  if (!(orgFlag === '--org' && idFlag === '--id' && id !== undefined && flag !== undefined)) {
     return problem(`the request file holds ${CHAIN_RECOVERY_USAGE} as a JSON list, and nothing else`);
   }
   const problems = [
     ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
     ...(UUID_V7.test(id) ? [] : ["the plan's ID must be a UUIDv7, in lower case"]),
   ];
-  return problems.length > 0 ? { problems } : { command: CHAIN_RECOVERY, orgId: String(orgId), id };
+  return problems.length > 0 ? { problems } : { command: CHAIN_RECOVERY, orgId: String(orgId), id, ...flag };
+}
+
+/** The chain a rebase names: the platform's, or an organisation's by its ID. */
+function chainNamed(named: string | undefined): Chain | undefined {
+  if (named === 'platform') return { kind: 'platform' };
+  return named !== undefined && UUID_V7.test(named) ? { kind: 'organisation', orgId: named } : undefined;
+}
+
+/** A rebase request's flags, in their order, each followed by its value. */
+const REBASE_FLAGS = ['--chain', '--seq', '--hash', '--reason', '--evidence', '--id'] as const;
+
+/** A chain's head as a request names it: its number, and its hash in lower-case hex. */
+const HEAD_SEQ = /^[1-9]\d{0,18}$/;
+const HEAD_HASH = /^[0-9a-f]{64}$/;
+
+/**
+ * A chain's rebase (4D2e E11): only from a file, naming the chain, the place the repair ended at (its head's number and
+ * hash), why, the incident's reference and the rebase's ID.
+ */
+function chainRebaseAsked(words: readonly string[], fromFile: boolean): Request | Problems {
+  if (!fromFile) return problem(`${CHAIN_REBASE} runs only from a request file: ${CHAIN_REBASE_USAGE}`);
+  const shaped =
+    words.length === 1 + 2 * REBASE_FLAGS.length && REBASE_FLAGS.every((flag, index) => words[1 + 2 * index] === flag);
+  if (!shaped) return problem(`the request file holds ${CHAIN_REBASE_USAGE} as a JSON list, and nothing else`);
+  const [named, seq, hash, reason, evidence, id] = REBASE_FLAGS.map((_flag, index) => String(words[2 + 2 * index]));
+  const chain = chainNamed(named);
+  const why = REBASE_REASONS.find((each) => each === reason);
+  const problems = [
+    ...(chain === undefined ? ["the chain must be platform or an organisation's ID, a UUIDv7 in lower case"] : []),
+    ...(HEAD_SEQ.test(String(seq)) ? [] : ["the head's number must be a whole number from 1"]),
+    ...(HEAD_HASH.test(String(hash)) ? [] : ["the head's hash must be 64 lower-case hex digits"]),
+    ...(why === undefined ? [`the reason must be one of ${REBASE_REASONS.join(', ')}`] : []),
+    ...(EVIDENCE_REFERENCE.test(String(evidence))
+      ? []
+      : ['the incident reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit']),
+    ...(UUID_V7.test(String(id)) ? [] : ["the rebase's ID must be a UUIDv7, in lower case"]),
+  ];
+  if (chain === undefined || why === undefined || problems.length > 0) return { problems };
+  return {
+    command: CHAIN_REBASE,
+    chain,
+    seq: BigInt(String(seq)),
+    hash: Buffer.from(String(hash), 'hex'),
+    reason: why,
+    evidence: String(evidence),
+    id: String(id),
+  };
 }
 
 /**
@@ -432,6 +526,13 @@ async function connect(
   logger: Logger,
   to?: { readonly host: string; readonly readOnly: boolean },
 ): Promise<Database<CommandTables> | undefined> {
+  // Another role's rights are not the operator's: the API's would bring back the writes it no longer holds.
+  if (config.db.user !== OPERATOR_ROLE) {
+    logger.error('operator.start_refused', {
+      problems: [`AGENTX_DB_USER must be ${OPERATOR_ROLE}, the command's own role (PL-57)`],
+    });
+    return undefined;
+  }
   const database = createDatabase<CommandTables>(
     { ...config.db, ...to, maxConnections: 1, applicationName: APPLICATION_NAME },
     logger,
@@ -469,15 +570,9 @@ async function run(
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
   if (request.command === CHAIN_RECOVERY) return chainRecovery(config, keys, request, logger);
+  if (request.command === CHAIN_REBASE) return chainRebase(config, keys, request, logger);
   if (request.command === 'audit-export' || request.command === 'activity-export') {
-    const store = evidenceStoreOf(config);
-    if (store === undefined) {
-      logger.error('operator.refused', { problems: [NO_STORE_PROBLEM] });
-      return 1;
-    }
-    const exporting = await connect(config, logger);
-    if (exporting === undefined) return 1;
-    return auditExport(config, keys, request, store, exporting, logger);
+    return caseExport(config, keys, request, logger);
   }
   const database = await connect(config, logger);
   if (database === undefined) return 1;
@@ -490,7 +585,7 @@ async function run(
   const log = logger.child({ orgId });
   try {
     // Before anything is written: the new organisation's rows would go through the same walls.
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     const created = await createOrganizationAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -518,6 +613,23 @@ async function run(
   }
 }
 
+/** An export for a case (E10c, L7), once its store is set and the database reached: the exit code. */
+async function caseExport(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Extract<Request, { command: 'audit-export' | 'activity-export' }>,
+  logger: Logger,
+): Promise<number> {
+  const store = evidenceStoreOf(config);
+  if (store === undefined) {
+    logger.error('operator.refused', { problems: [NO_STORE_PROBLEM] });
+    return 1;
+  }
+  const exporting = await connect(config, logger);
+  if (exporting === undefined) return 1;
+  return auditExport(config, keys, request, store, exporting, logger);
+}
+
 /** Invites the organisation's first admin (B4-6b): the exit code. The address is never logged. */
 async function inviteFirst(
   config: OperatorConfig,
@@ -529,7 +641,7 @@ async function inviteFirst(
   const log = logger.child({ orgId: request.orgId });
   const invitationId = request.id;
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     const invited = await inviteFirstAdminAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -570,7 +682,7 @@ async function handoff(
   logger: Logger,
 ): Promise<number> {
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     return await changeHandoffPauseAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
@@ -588,7 +700,7 @@ async function handoff(
 }
 
 /** Where an audit export's file goes: the write-once container, or the local folder in development and test. */
-function evidenceStoreOf({ evidence: { directory, container } }: OperatorConfig): EvidenceStore | undefined {
+export function evidenceStoreOf({ evidence: { directory, container } }: OperatorConfig): EvidenceStore | undefined {
   if (container !== null) {
     return azureBlobStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
   }
@@ -605,7 +717,7 @@ async function auditExport(
   logger: Logger,
 ): Promise<number> {
   try {
-    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
     const asked = { ...request, exportId: request.id, release: config.release, run: config.run };
     const services = { keys, ids: uuidV7Ids, logger };
     return request.command === 'audit-export'
@@ -672,24 +784,32 @@ function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger)
   });
 }
 
+/** The anchors' store, or nothing where none is set. */
+function anchorStoreOf({ anchors: { directory, container } }: OperatorConfig): WriteOnceStore | undefined {
+  if (container !== null) {
+    return azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
+  }
+  return directory === null ? undefined : folderWriteOnceStore(directory);
+}
+
 /**
  * The chains' anchors as the API keeps them, read with their public keys alone
- * (4D2e E9), or nothing where the store or the keys aren't set.
+ * (4D2e E9), or nothing where the store or the keys aren't set. A rebase's line
+ * is checked with the command's own `audit-rebase` key, which signs them (E11).
  */
-function anchorLogOf({ anchors }: OperatorConfig, logger: Logger): AnchorLog | undefined {
-  const { directory, container, epoch, publicKeys } = anchors;
-  if (publicKeys === null) return undefined;
-  let store: WriteOnceStore;
-  if (container !== null) {
-    store = azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
-  } else if (directory === null) {
-    return undefined;
-  } else {
-    store = folderWriteOnceStore(directory);
-  }
+export function anchorLogOf(config: OperatorConfig, keys: KeyProvider, logger: Logger): AnchorLog | undefined {
+  const { epoch, publicKeys } = config.anchors;
+  const store = anchorStoreOf(config);
+  if (publicKeys === null || store === undefined) return undefined;
+  const anchorKeys = publicKeyChecker('audit-anchor', publicKeys);
+  const checks: KeyProvider = {
+    ...anchorKeys,
+    verifySignature: (purpose, version, message, signature) =>
+      (purpose === 'audit-rebase' ? keys : anchorKeys).verifySignature(purpose, version, message, signature),
+  };
   return createAnchorLog({
     store,
-    keys: publicKeyChecker('audit-anchor', publicKeys),
+    keys: Object.freeze(checks),
     logger,
     now: () => systemClock.now(),
     epoch,
@@ -708,11 +828,11 @@ async function chainRecovery(
   request: Extract<Request, { command: typeof CHAIN_RECOVERY }>,
   logger: Logger,
 ): Promise<number> {
-  const { orgId, id: planId } = request;
+  const { orgId, id: planId, discardFork } = request;
   const log = logger.child({ orgId });
   const store = evidenceStoreOf(config);
   // The config has checked each public key's form, so the checker takes them as they are.
-  const anchors = anchorLogOf(config, logger);
+  const anchors = anchorLogOf(config, keys, logger);
   if (store === undefined || anchors === undefined) {
     const problems = [
       ...(store === undefined ? [NO_STORE_PROBLEM] : []),
@@ -730,8 +850,10 @@ async function chainRecovery(
       return 1;
     }
     const anchor = anchors.latest({ kind: 'organisation', orgId });
-    const plan = await planChainRecovery({ copy, live, keys, orgId, anchor });
+    const plan = await planChainRecovery({ copy, live, keys, orgId, anchor, discardFork });
     const file = planFile(plan, { planId, orgId, release: config.release, run: config.run, anchor });
+    // What a repair is asked with (chain-restore): the plan as read, by its digest alone.
+    const digest = planDigest(plan, orgId, anchor);
     if ((await store.put(`${orgId}/chain-recovery-${planId}.ndjson`, file)) === 'there_already') {
       log.error('operator.done_before', { command: CHAIN_RECOVERY, planId });
       return 1;
@@ -739,6 +861,7 @@ async function chainRecovery(
     if (!plan.ok) {
       log.error('operator.chain_recovery_refused', {
         planId,
+        discardFork,
         reason: plan.reason,
         seq: plan.seq,
         problem: plan.problem ?? null,
@@ -748,6 +871,9 @@ async function chainRecovery(
     const count = (action: string): number => plan.rows.filter((row) => row.action === action).length;
     log.info('operator.chain_recovery_planned', {
       planId,
+      digest,
+      discardFork,
+      forkDiscarded: plan.forkDiscarded,
       putBack: count('put_back'),
       replaced: count('replace'),
       removed: count('remove'),
@@ -759,6 +885,88 @@ async function chainRecovery(
     });
     return 0;
   });
+}
+
+/** What a rebase came to, said on its own line: the exit code, 0 once the rebase is in the store and on its chain. */
+function rebaseSaid(log: Logger, outcome: RebaseOutcome, rebaseId: string, chain: Chain): number {
+  if (!outcome.ok) {
+    const { reason, problem: why, seq } = outcome;
+    if (reason === 'done_before' && outcome.recorded === 'recorded') {
+      // The run before stopped between the two: this one finished it, so the request is done.
+      log.info('operator.rebase_recorded', {
+        rebaseId,
+        note: "The rebase was already written; its record on the chain's audit log is now written too.",
+      });
+      return 0;
+    }
+    if (reason === 'done_before') {
+      log.error('operator.done_before', { command: CHAIN_REBASE, rebaseId, recorded: outcome.recorded ?? null });
+    } else {
+      log.error('operator.chain_rebase_refused', { rebaseId, reason, problem: why ?? null, seq: seq ?? null });
+    }
+    return 1;
+  }
+  const { rebase, shorterBy, recorded } = outcome;
+  log.info('operator.chain_rebased', {
+    rebaseId,
+    chain: chain.kind,
+    seq: rebase.seq,
+    headHash: rebase.hash.toString('hex'),
+    anchorSeq: rebase.from,
+    shorterBy,
+    reason: rebase.reason,
+    at: rebase.at.toISOString(),
+    keyVersion: rebase.keyVersion,
+    recorded,
+  });
+  return recorded === 'failed' ? 1 : 0;
+}
+
+/**
+ * Moves a chain's anchor on after a sanctioned change to it (4D2e E11): the exit code, 0 once the rebase is in the
+ * anchors' store and its event on the chain. Read-only on the live server but for that event, written on a connection
+ * of its own. The incident's reference is never logged.
+ */
+async function chainRebase(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Extract<Request, { command: typeof CHAIN_REBASE }>,
+  logger: Logger,
+): Promise<number> {
+  const { chain, id: rebaseId } = request;
+  const log = chain.kind === 'organisation' ? logger.child({ orgId: chain.orgId }) : logger;
+  const store = anchorStoreOf(config);
+  const anchors = anchorLogOf(config, keys, logger);
+  if (store === undefined || anchors === undefined) {
+    log.error('operator.refused', { problems: [NO_ANCHORS_PROBLEM] });
+    return 1;
+  }
+  const live = await connect(config, logger, { host: config.db.host, readOnly: true });
+  if (live === undefined) return 1;
+  const writer = await connect(config, logger);
+  try {
+    if (writer === undefined) return 1;
+    if (!(await transactionsReadOnly(live))) {
+      log.error('operator.refused', { problems: ['the connection is not read-only, so nothing was read'] });
+      return 1;
+    }
+    const outcome = await rebaseChain({
+      live,
+      writer,
+      services: { keys, ids: uuidV7Ids, logger: log },
+      store,
+      anchors,
+      chain,
+      asked: { ...request, release: config.release, run: config.run },
+    });
+    return rebaseSaid(log, outcome, rebaseId, chain);
+  } catch (error) {
+    log.error('operator.failed', { command: CHAIN_REBASE, err: error });
+    return 1;
+  } finally {
+    await live.destroy();
+    await writer?.destroy();
+  }
 }
 
 /** Runs the command, sets the process's exit code and returns it: 0 once it is done. */

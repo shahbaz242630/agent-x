@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ConfigError } from '../config/common.ts';
+import { createKeyProvider, KeyError } from './key-provider.ts';
 import { loadKeys } from './load.ts';
-import { type KeyPurpose, PURPOSES } from './purposes.ts';
+import { API_PURPOSES, type KeyPurpose, OPERATOR_ONLY, PURPOSES } from './purposes.ts';
 
 /** A key file's contents: 32 bytes of one value, as base64url, so each key in a test is told apart by its fill. */
 const encoded = (fill: number): string => Buffer.alloc(32, fill).toString('base64url');
@@ -212,6 +213,76 @@ describe('a process that holds only some keys', () => {
   it('still needs the current version of each purpose it holds', () => {
     expect(problemsOf(keysDirectory({}), { 'audit-mac': 2 }, ['audit-mac'])).toEqual([
       'audit-mac has no key for its current version 2 (key-audit-mac-v2)',
+    ]);
+  });
+});
+
+describe("the API, which checks the operator's signatures with its public half alone (PL-57)", () => {
+  /** The operator's key's public half, as the deploy writes it beside the API's keys. */
+  const operatorSeed = Buffer.alloc(32, 0x5a);
+  const operatorKey = createKeyProvider(
+    { 'operator-signing': { current: 1, versions: new Map([[1, operatorSeed]]) } },
+    ['operator-signing'],
+  );
+  const half = operatorKey.describe()[0]?.versions[0]?.publicKey ?? '';
+  const apiFiles = (): Record<string, string> =>
+    Object.fromEntries(
+      API_PURPOSES.map((purpose) => [`key-${purpose}-v1`, `${encoded(PURPOSES.indexOf(purpose) + 1)}\n`]),
+    );
+  const signed = operatorKey.sign('operator-signing', ['probe']);
+
+  it('reads the public half and checks a signature with it, holding no operator key it could sign with', () => {
+    const keys = loadKeys(
+      { directory: keysDirectory({ ...apiFiles(), 'public-operator-signing-v1': `${half}\n` }), current: {} },
+      API_PURPOSES,
+      OPERATOR_ONLY,
+    );
+
+    expect(keys.verifySignature('operator-signing', 1, ['probe'], signed.signature)).toBe(true);
+    expect(keys.verifySignature('operator-signing', 1, ['other'], signed.signature)).toBe(false);
+    expect(() => keys.sign('operator-signing', ['probe'])).toThrow(KeyError);
+    expect(() => keys.verifySignature('operator-signing', 2, ['probe'], signed.signature)).toThrow(KeyError);
+    expect(keys.describe().at(-1)).toEqual({
+      purpose: 'operator-signing',
+      current: 1,
+      versions: [{ version: 1, check: expect.stringMatching(/^[0-9a-f]{32}$/) as unknown, publicKey: half }],
+      checksOnly: true,
+    });
+  });
+
+  it('starts with no public half, which then believes no signature at all', () => {
+    const keys = loadKeys({ directory: keysDirectory(apiFiles()), current: {} }, API_PURPOSES, OPERATOR_ONLY);
+    expect(() => keys.verifySignature('operator-signing', 1, ['probe'], signed.signature)).toThrow(KeyError);
+  });
+
+  it('refuses a public half it does not check with, one that holds no key, and one for a key it holds', () => {
+    const directory = keysDirectory({
+      ...everyPurpose(),
+      'public-audit-anchor-v1': `${half}\n`,
+      'public-operator-signing-v1': 'not a key\n',
+    });
+    expect(problemsOf(directory)).toEqual([
+      'public-audit-anchor-v1 is not a public half this process checks with: only public-<purpose>-v<version> for none',
+      'public-operator-signing-v1 is not a public half this process checks with: only public-<purpose>-v<version> for none',
+    ]);
+    let problems: readonly string[] = [];
+    try {
+      loadKeys({ directory, current: {} }, PURPOSES, OPERATOR_ONLY);
+    } catch (error) {
+      if (error instanceof ConfigError) problems = error.problems;
+    }
+    expect(problems).toEqual([
+      'public-audit-anchor-v1 is not a public half this process checks with: only public-<purpose>-v<version> for operator-signing, audit-rebase',
+      'public-operator-signing-v1 must hold one key: 32 random bytes written as base64url, 43 characters',
+    ]);
+    const held = keysDirectory({ ...everyPurpose(), 'public-operator-signing-v1': `${half}\n` });
+    try {
+      loadKeys({ directory: held, current: {} }, PURPOSES, OPERATOR_ONLY);
+    } catch (error) {
+      if (error instanceof ConfigError) problems = error.problems;
+    }
+    expect(problems).toEqual([
+      'operator-signing is a key this process holds, so it checks with its own: no public half may be given',
     ]);
   });
 });

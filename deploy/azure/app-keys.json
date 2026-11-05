@@ -1,4 +1,6 @@
 [
+  "key-audit-rebase-v1",
+  "key-operator-signing-v1",
   "key-agent-key-pepper-v1",
   "key-request-hash-v1",
   "key-audit-mac-v1",

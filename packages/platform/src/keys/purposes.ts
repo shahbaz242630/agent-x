@@ -30,6 +30,18 @@ export const KEY_PURPOSES = {
    * checked for good: rotated by a new version, the old ones never retired.
    */
   'decision-hash': { kind: 'mac', rotates: true },
+  /**
+   * PL-57: signs the operator's command's events on the platform chain, held by
+   * the operator's job alone. The API holds only its public half, to check
+   * them: a foothold in the API can't sign an operator's act.
+   */
+  'operator-signing': { kind: 'signing', rotates: true },
+  /**
+   * 4D2e E11: signs a rebase, which moves a chain's anchor on after a sanctioned
+   * change to the chain (rebase.ts), held by the operator's job alone. The API
+   * checks it with the public half: a foothold in the API can't move an anchor.
+   */
+  'audit-rebase': { kind: 'signing', rotates: true },
 } as const satisfies Readonly<Record<string, { readonly kind: KeyKind; readonly rotates: boolean }>>;
 
 export type KeyPurpose = keyof typeof KEY_PURPOSES;
@@ -44,6 +56,14 @@ export type SigningPurpose = PurposeOf<'signing'>;
 
 /** Every purpose, in a fixed order. */
 export const PURPOSES = Object.keys(KEY_PURPOSES) as readonly KeyPurpose[];
+
+/** The keys the operator's command holds and the API never does (PL-57, E11): the API checks with their public halves. */
+export const OPERATOR_ONLY: readonly SigningPurpose[] = ['operator-signing', 'audit-rebase'];
+
+/** Every purpose the API holds: all but the operator's own. */
+export const API_PURPOSES: readonly KeyPurpose[] = PURPOSES.filter(
+  (purpose) => !(OPERATOR_ONLY as readonly KeyPurpose[]).includes(purpose),
+);
 
 export const isKeyPurpose = (name: string): name is KeyPurpose => Object.hasOwn(KEY_PURPOSES, name);
 

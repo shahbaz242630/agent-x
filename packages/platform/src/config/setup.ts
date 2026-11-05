@@ -21,13 +21,14 @@ import { tlsProblems } from './tls.ts';
 /** The release name a local run uses when none is set. */
 const LOCAL_RELEASE = 'local';
 
-/** The roles whose logins the job sets: db/bootstrap's three, and the login service's. */
-export type SetupRole = 'owner' | 'app' | 'backup' | 'zitadel';
+/** The roles whose logins the job sets: db/bootstrap's three, the operator's command's (PL-57), and the login service's. */
+export type SetupRole = 'owner' | 'app' | 'backup' | 'operator' | 'zitadel';
 
 const LOGIN_SETTINGS: Readonly<Record<SetupRole, SecretName>> = {
   owner: 'AGENTX_DB_OWNER_PASSWORD',
   app: 'AGENTX_DB_APP_PASSWORD',
   backup: 'AGENTX_DB_BACKUP_PASSWORD',
+  operator: 'AGENTX_DB_OPERATOR_PASSWORD',
   zitadel: 'AGENTX_DB_ZITADEL_PASSWORD',
 };
 
@@ -74,7 +75,7 @@ function loginProblems(name: SecretName, login: Checked<string>): string[] {
 }
 
 /** The roles the job creates, which can't be the admin that creates them. */
-const SET_UP_ROLES: readonly string[] = ['agentx_owner', 'agentx_app', 'agentx_backup', 'zitadel'];
+const SET_UP_ROLES: readonly string[] = ['agentx_owner', 'agentx_app', 'agentx_backup', 'agentx_operator', 'zitadel'];
 
 function adminProblems(admin: Checked<string>): string[] {
   return admin.ok && SET_UP_ROLES.includes(admin.value)
@@ -114,6 +115,7 @@ export function loadSetupConfig(env: Env = process.env): SetupConfig {
     owner: secretSetting(env, LOGIN_SETTINGS.owner),
     app: secretSetting(env, LOGIN_SETTINGS.app),
     backup: secretSetting(env, LOGIN_SETTINGS.backup),
+    operator: secretSetting(env, LOGIN_SETTINGS.operator),
     zitadel: secretSetting(env, LOGIN_SETTINGS.zitadel),
   };
   const checks = {
@@ -171,6 +173,7 @@ export function loadSetupConfig(env: Env = process.env): SetupConfig {
       owner: checks.owner.value,
       app: checks.app.value,
       backup: checks.backup.value,
+      operator: checks.operator.value,
       zitadel: checks.zitadel.value,
     }),
   });

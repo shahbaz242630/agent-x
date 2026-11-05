@@ -30,10 +30,17 @@ import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 
 const server = inject('postgres');
-const mounted = writeTestKeys(['audit-mac', 'field-encryption']);
-const keys = loadKeys({ directory: mounted.directory, current: {} }, ['audit-mac', 'field-encryption']);
+const mounted = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
+const keys = loadKeys({ directory: mounted.directory, current: {} }, [
+  'audit-mac',
+  'field-encryption',
+  'operator-signing',
+  'audit-rebase',
+]);
 let database: TestDatabase;
 let app: Database<AuditExportTables>;
+/** The operator's command's own role (PL-57), as the job connects: every command below runs as it. */
+let operator: Database<AuditExportTables>;
 const folder = mkdtempSync(path.join(tmpdir(), 'agentx-audit-export-'));
 
 /** Plain words a test can look for in every log line. */
@@ -43,10 +50,12 @@ const EVER = { from: new Date('2000-01-01T00:00:00Z'), to: new Date('2100-01-01T
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<AuditExportTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
+  operator = createDatabase<AuditExportTables>({ ...database.connection('operator'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
   mounted.remove();
   rmSync(folder, { recursive: true, force: true });
@@ -56,7 +65,7 @@ afterAll(async () => {
 async function organization(extra = 0): Promise<string> {
   const orgId = uuidV7Ids.next();
   await createOrganizationAsOperator(
-    app,
+    operator,
     { keys, ids: uuidV7Ids, logger: testLogger() },
     { orgId, name: `Export Test ${orgId.slice(-6)}`, release: 'r-test', run: null },
   );
@@ -88,7 +97,7 @@ const requestFor = (orgId: string, overrides: Partial<AuditExportRequest> = {}):
 async function exported(request: AuditExportRequest, store: EvidenceStore = folderStore(folder), mostEvents?: number) {
   const capture = new LogCapture();
   const code = await exportAuditLog(
-    app,
+    operator,
     { keys, ids: uuidV7Ids, logger: testLogger(capture) },
     store,
     request,
@@ -283,8 +292,9 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
     async (_what, actor, action) => {
       const orgId = await organization();
       const request = requestFor(orgId);
-      // A record of the export's ID with every fact the export's would hold, but not the export's own.
-      await withTenant(app, orgId, (tx) =>
+      // A record of the export's ID with every fact the export's would hold, but not the export's own: by the
+      // operator's role, the only one that may record in the operator's name (PL-57).
+      await withTenant(operator, orgId, (tx) =>
         createAuditTrail({ keys, ids: { next: () => request.exportId } }).record(tx, orgId, {
           actor,
           action,

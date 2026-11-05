@@ -4,10 +4,11 @@
 // store; these prove this store keeps the contract: one head, locked, read
 // with the count in one statement, and events read back exactly.
 import { AsyncResource } from 'node:async_hooks';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 
 import { CHAIN_START, ChainBroken, type ChainReport } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, limitStatements } from '@agentx/platform/db';
-import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { API_PURPOSES, createKeyProvider, KeyError, PURPOSES } from '@agentx/platform/keys';
 import {
   createTestDatabase,
   failures,
@@ -28,6 +29,8 @@ import type { PlatformControlsTables } from './tables.ts';
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<PlatformControlsTables>;
+/** The operator's own role (PL-57): its events, and only its, may be signed; the API's role may add the rest. */
+let operator: Database<PlatformControlsTables>;
 /** The FX-TAMPER attacker: the server's superuser, past every wall, holding none of the app's keys. */
 let attacker: TestSession;
 
@@ -38,6 +41,55 @@ const keys = createKeyProvider(
 );
 const chain = createPlatformChain({ keys, ids: new SequentialIds(0x200) });
 
+/** The API's keys (PL-57): every key but the operator's, whose public half alone it checks with. */
+const apiKeys = createKeyProvider(
+  Object.fromEntries(
+    API_PURPOSES.map((purpose) => [
+      purpose,
+      { current: 1, versions: new Map([[1, Buffer.alloc(32, PURPOSES.indexOf(purpose) + 1)]]) },
+    ]),
+  ),
+  API_PURPOSES,
+  {
+    'operator-signing': new Map([[1, publicHalf(Buffer.alloc(32, PURPOSES.indexOf('operator-signing') + 1))]]),
+  },
+);
+
+/** An Ed25519 seed's public half, as the API is given it. */
+function publicHalf(seed: Buffer): Buffer {
+  const prefix = Buffer.from('302e020100300506032b657004220420', 'hex');
+  const key = createPrivateKey({ key: Buffer.concat([prefix, seed]), format: 'der', type: 'pkcs8' });
+  return Buffer.from(String(createPublicKey(key).export({ format: 'jwk' }).x), 'base64url');
+}
+
+/** A forger's keys: the chains' MAC as the API holds it, and an operator's signing key of its own making. */
+const forgerKeys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [
+      purpose,
+      { current: 1, versions: new Map([[1, Buffer.alloc(32, purpose === 'operator-signing' ? 0xf0 : index + 1)]]) },
+    ]),
+  ),
+);
+
+const OPERATOR_ACT: PlatformEvent = {
+  actor: { type: 'system', id: 'operator' },
+  action: 'platform.handoff_resumed',
+  details: { reason: 'INC-2026/0057', release: 'r-1', run: null },
+};
+
+/** IDs for the operator's records, one generator for them all, so no two runs give the same. */
+const operatorIds = new SequentialIds(0x300);
+
+/** Records as the operator's role, with the keys given (the operator's own by default). */
+const recordAsOperator = (events: readonly PlatformEvent[], withKeys = keys) =>
+  operator.transaction().execute(async (tx) => {
+    const own = createPlatformChain({ keys: withKeys, ids: operatorIds });
+    const recorded = [];
+    for (const one of events) recorded.push(await own.record(tx, one));
+    return recorded;
+  });
+
 const started = (n: number): PlatformEvent => ({
   actor: { type: 'system', id: 'api' },
   action: 'platform.started',
@@ -45,7 +97,7 @@ const started = (n: number): PlatformEvent => ({
 });
 
 const record = (...events: PlatformEvent[]) =>
-  app.transaction().execute(async (tx) => {
+  operator.transaction().execute(async (tx) => {
     const recorded = [];
     for (const one of events) recorded.push(await chain.record(tx, one));
     return recorded;
@@ -68,17 +120,23 @@ beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   const logger = testLogger();
   app = createDatabase<PlatformControlsTables>({ ...database.connection('app'), maxConnections: 12 }, logger);
+  operator = createDatabase<PlatformControlsTables>({ ...database.connection('operator'), maxConnections: 4 }, logger);
   attacker = database.as('admin');
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
 });
 
 // One chain for the whole platform, so every test starts from none.
 beforeEach(async () => {
-  await tamper('truncate platform_controls.audit_events, platform_controls.audit_head');
+  await tamper(
+    'truncate platform_controls.audit_events, platform_controls.audit_head, platform_controls.operator_signatures',
+    // Signing starts at the chain's first place, as 0079 found it on the template.
+    'update platform_controls.operator_signing set signed_from = 1',
+  );
 });
 
 describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
@@ -771,5 +829,121 @@ describe('checking the platform chain from its anchor (4D2e E2)', () => {
     await record({ actor: { type: 'system', id: 'api' }, action: 'organization.created', details: { note: 'none' } });
 
     expect(await chain.createdOrganizationsSince(app, 1n, 2n)).toEqual({ orgIds: [], seq: 2n });
+  });
+});
+
+describe("the operator's events, believed only signed with its own key (PL-57)", () => {
+  /** The chain checked as the API checks it: the operator's public half alone. */
+  const verifiedByApi = (): Promise<ChainReport> =>
+    app
+      .transaction()
+      .execute((tx) => createPlatformChain({ keys: apiKeys, ids: new SequentialIds(0x400) }).verify(tx, undefined));
+
+  it("signs the operator's event as it records it, and the API checks it with the public half alone", async () => {
+    const [, act] = await recordAsOperator([started(1), OPERATOR_ACT]);
+    const signatures = await attacker.query<{ seq: string; id: string; key_version: number }>(
+      'select seq::text, id::text, key_version from platform_controls.operator_signatures',
+    );
+
+    expect(signatures).toEqual([{ seq: '2', id: act?.id, key_version: 1 }]);
+    expect(await verifiedByApi()).toMatchObject({ ok: true, seq: 2n });
+  });
+
+  it("refuses to record an operator's event for a process without the operator's key: the API can't sign one", async () => {
+    await expect(
+      app
+        .transaction()
+        .execute((tx) =>
+          createPlatformChain({ keys: apiKeys, ids: new SequentialIds(0x500) }).record(tx, OPERATOR_ACT),
+        ),
+    ).rejects.toThrow(KeyError);
+    expect(await attacker.query('select 1 from platform_controls.audit_events')).toEqual([]);
+  });
+
+  it("refuses the API's role a signature of its own: only the operator's role adds them", async () => {
+    await expect(
+      app.transaction().execute((tx) =>
+        tx
+          .insertInto('platform_controls.operator_signatures')
+          .values({ seq: 1n, id: '0199a0f0-0000-7000-8000-00000000a571', signature: Buffer.alloc(64), key_version: 1 })
+          .execute(),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it("names an operator's event signed with another key, where the API forged it, as unsealed", async () => {
+    await recordAsOperator([OPERATOR_ACT]);
+    // The chains' MAC as the API holds it, and an Ed25519 key of the forger's own.
+    await recordAsOperator([OPERATOR_ACT], forgerKeys);
+
+    expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 2n } });
+  });
+
+  it("believes an unsigned operator's event before where 0079 started signing, and names one from there on", async () => {
+    await recordAsOperator([OPERATOR_ACT, OPERATOR_ACT, OPERATOR_ACT]);
+    // As if 0079 ran with the chain at 2: the first recorded before PL-57, the last unsigned at its very start.
+    await tamper(
+      'update platform_controls.operator_signing set signed_from = 3',
+      'delete from platform_controls.operator_signatures where seq in (1, 3)',
+    );
+
+    expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 3n } });
+  });
+
+  it("names an unsigned operator's event past the cut-over before any signed run: the window is closed", async () => {
+    // As a foothold in the API could add one before the operator's first signed run: no signature exists at all.
+    await recordAsOperator([started(1), OPERATOR_ACT]);
+    await tamper('delete from platform_controls.operator_signatures');
+
+    expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 2n } });
+  });
+
+  it("names an unsigned operator's event before the first signature, where 0079 started signing", async () => {
+    // Signing starts at 1: a signature further on doesn't move the start past the unsigned first.
+    await recordAsOperator([OPERATOR_ACT, OPERATOR_ACT]);
+    await tamper('delete from platform_controls.operator_signatures where seq = 1');
+
+    expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 1n } });
+  });
+
+  it("believes no unsigned operator's event when where signing starts can't be read", async () => {
+    await recordAsOperator([OPERATOR_ACT]);
+    await tamper('update platform_controls.operator_signing set signed_from = 5');
+    expect(await verifiedByApi()).toMatchObject({ ok: true, seq: 1n });
+    await tamper('delete from platform_controls.operator_signatures', 'delete from platform_controls.operator_signing');
+    try {
+      expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 1n } });
+    } finally {
+      await tamper('insert into platform_controls.operator_signing (signed_from) values (1)');
+    }
+  });
+
+  it("refuses the API's role and the operator's a move of where signing starts: 0079 wrote it, as the owner", async () => {
+    for (const role of [app, operator]) {
+      await expect(
+        role
+          .transaction()
+          .execute((tx) => tx.updateTable('platform_controls.operator_signing').set({ signed_from: 99n }).execute()),
+      ).rejects.toMatchObject({ code: '42501' });
+    }
+  });
+
+  it('names a signature that claims a key version the API has no public half for', async () => {
+    await recordAsOperator([OPERATOR_ACT]);
+    await tamper('update platform_controls.operator_signatures set key_version = 2');
+
+    expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 1n } });
+  });
+
+  it("names a signature moved onto another operator's event", async () => {
+    await recordAsOperator([OPERATOR_ACT, OPERATOR_ACT]);
+    // The first as if before PL-57, so the moved signature alone is at fault.
+    await tamper(
+      'update platform_controls.operator_signing set signed_from = 2',
+      'delete from platform_controls.operator_signatures where seq = 2',
+      'update platform_controls.operator_signatures set seq = 2 where seq = 1',
+    );
+
+    expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 2n } });
   });
 });

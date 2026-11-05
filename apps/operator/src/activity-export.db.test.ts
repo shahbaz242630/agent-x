@@ -23,10 +23,17 @@ import { createOrganizationAsOperator } from './create-organization.ts';
 import { folderStore } from './evidence-store.ts';
 
 const server = inject('postgres');
-const mounted = writeTestKeys(['audit-mac', 'field-encryption']);
-const keys = loadKeys({ directory: mounted.directory, current: {} }, ['audit-mac', 'field-encryption']);
+const mounted = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
+const keys = loadKeys({ directory: mounted.directory, current: {} }, [
+  'audit-mac',
+  'field-encryption',
+  'operator-signing',
+  'audit-rebase',
+]);
 let database: TestDatabase;
 let app: Database<ActivityExportTables & ActivityTables>;
+/** The operator's command's own role (PL-57), as the job connects: every command below runs as it. */
+let operator: Database<ActivityExportTables>;
 const folder = mkdtempSync(path.join(tmpdir(), 'agentx-activity-export-'));
 
 /** Plain words a test can look for in every log line. */
@@ -40,10 +47,15 @@ beforeAll(async () => {
     { ...database.connection('app'), maxConnections: 2 },
     testLogger(),
   );
+  operator = createDatabase<ActivityExportTables>(
+    { ...database.connection('operator'), maxConnections: 2 },
+    testLogger(),
+  );
 });
 
 afterAll(async () => {
   await app.destroy();
+  await operator.destroy();
   await database.drop();
   mounted.remove();
   rmSync(folder, { recursive: true, force: true });
@@ -53,7 +65,7 @@ afterAll(async () => {
 async function organization(): Promise<string> {
   const orgId = uuidV7Ids.next();
   await createOrganizationAsOperator(
-    app,
+    operator,
     { keys, ids: uuidV7Ids, logger: testLogger() },
     { orgId, name: `Activity Export ${orgId.slice(-6)}`, release: 'r-test', run: null },
   );
@@ -125,7 +137,7 @@ const requestFor = (orgId: string, overrides: Partial<CaseExportRequest> = {}): 
 async function exported(request: CaseExportRequest, mostRequests?: number, batch?: number) {
   const capture = new LogCapture();
   const code = await exportActivityLog(
-    app,
+    operator,
     { keys, ids: uuidV7Ids, logger: testLogger(capture) },
     folderStore(folder),
     request,
@@ -241,7 +253,7 @@ describe('L7 the operator exports an activity log for a case (ADR-005 §6)', () 
     await requested(orgId, '2026-10-18T09:00:00.000Z');
     const request = requestFor(orgId);
     const failing = await exportActivityLog(
-      app,
+      operator,
       { keys, ids: uuidV7Ids, logger: testLogger() },
       { put: () => Promise.reject(new Error('the store is down')) },
       request,

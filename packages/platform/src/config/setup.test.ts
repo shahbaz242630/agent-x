@@ -19,6 +19,7 @@ const LOGINS = {
   AGENTX_DB_OWNER_PASSWORD: loginOf('owner'),
   AGENTX_DB_APP_PASSWORD: loginOf('app'),
   AGENTX_DB_BACKUP_PASSWORD: loginOf('backup'),
+  AGENTX_DB_OPERATOR_PASSWORD: loginOf('operator'),
   AGENTX_DB_ZITADEL_PASSWORD: loginOf('zitadel'),
 };
 const LOCAL: Env = {
@@ -63,6 +64,7 @@ describe('the set-up job config loads', () => {
         owner: LOGINS.AGENTX_DB_OWNER_PASSWORD,
         app: LOGINS.AGENTX_DB_APP_PASSWORD,
         backup: LOGINS.AGENTX_DB_BACKUP_PASSWORD,
+        operator: LOGINS.AGENTX_DB_OPERATOR_PASSWORD,
         zitadel: LOGINS.AGENTX_DB_ZITADEL_PASSWORD,
       },
     });
@@ -118,6 +120,7 @@ describe('SEC-AV-03 the set-up job refuses a bad config, naming each problem', (
       'AGENTX_DB_OWNER_PASSWORD is required, or AGENTX_DB_OWNER_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
       'AGENTX_DB_APP_PASSWORD is required, or AGENTX_DB_APP_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
       'AGENTX_DB_BACKUP_PASSWORD is required, or AGENTX_DB_BACKUP_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
+      'AGENTX_DB_OPERATOR_PASSWORD is required, or AGENTX_DB_OPERATOR_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
       'AGENTX_DB_ZITADEL_PASSWORD is required, or AGENTX_DB_ZITADEL_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
     ]);
   });
@@ -226,6 +229,8 @@ describe("SEC-AV-03 the other jobs refuse the set-up job's settings", () => {
       'AGENTX_DB_APP_PASSWORD_FILE',
       'AGENTX_DB_BACKUP_PASSWORD',
       'AGENTX_DB_BACKUP_PASSWORD_FILE',
+      'AGENTX_DB_OPERATOR_PASSWORD',
+      'AGENTX_DB_OPERATOR_PASSWORD_FILE',
       'AGENTX_DB_ZITADEL_PASSWORD',
       'AGENTX_DB_ZITADEL_PASSWORD_FILE',
     ]);

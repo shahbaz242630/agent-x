@@ -13,9 +13,13 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BICEP_VERSION } from '../../tooling/bicep/bicep.ts';
 import { newPassword } from '../compose/prepare.ts';
 import { LOAD_SIGNER } from '../image/verify.ts';
-import { APP_KEYS } from './app-keys.ts';
+import { APP_KEYS, PUBLIC_HALVES } from './app-keys.ts';
+
+/** The app's keys and the operator's key's public half (PL-57), each created once. */
+const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
 import {
   ACTION_GROUP,
+  ALERTING,
   APP_KEYS_VARIABLE,
   APP_VARIABLES,
   APPS_ENVIRONMENT,
@@ -44,6 +48,8 @@ import {
   issuedProblems,
   passwordProblems,
   peopleAskedFor,
+  type PlannedAlert,
+  plannedAlerts,
   policyCheck,
   realDns,
   realImages,
@@ -58,7 +64,7 @@ import {
 } from './deploy.ts';
 import type { Checkout } from './git.ts';
 import { policyProblems } from './policy.ts';
-import { environmentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
+import { type EnvironmentSnapshot, environmentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
 
 const AZURE_DIR = import.meta.dirname;
 const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000a';
@@ -252,9 +258,10 @@ describe('the secrets a run writes', () => {
       const keys = JSON.parse(
         secretValues(plan, pasted(aPaste(), aPaste()), quickMakers())[APP_KEYS_VARIABLE] ?? '{}',
       ) as Record<string, string>;
-      expect(Object.keys(keys)).toEqual([...APP_KEYS]);
+      // With each operator-only key's public half beside it (PL-57), 32 bytes as well.
+      expect(Object.keys(keys).toSorted()).toEqual([...CREATED_ONCE].toSorted());
       for (const key of Object.values(keys)) expect(Buffer.from(key, 'base64url')).toHaveLength(32);
-      expect(new Set(Object.values(keys)).size).toBe(APP_KEYS.length);
+      expect(new Set(Object.values(keys)).size).toBe(CREATED_ONCE.length);
     }
   });
 
@@ -303,6 +310,7 @@ describe('the secrets a run writes', () => {
       '  db-owner-password: kept as the vault has it',
       '  db-app-password: written, made fresh by this run',
       '  db-backup-password: kept as the vault has it',
+      '  db-operator-password: kept as the vault has it',
       '  db-zitadel-password: kept as the vault has it',
       '  zitadel-admin-password: kept as the vault has it',
       '  login-client-private-key: kept as the vault has it',
@@ -313,7 +321,7 @@ describe('the secrets a run writes', () => {
       '  zitadel-reset-token: kept as the vault has it',
       // B5-3: copied from the email service on every run, whatever the run writes.
       '  acs-access-key: copied from its Azure service, as every run does',
-      ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
+      ...CREATED_ONCE.map((key) => `  ${key}: written only if the vault has none yet`),
     ]);
     expect(describePlan(all)).toContain('  zitadel-admin-password: written, from what you paste');
     // Zitadel gives the API's secret once the API is registered with it: a first run can't have it, so only its name writes it (B2-6).
@@ -537,6 +545,10 @@ const listed = (held: Held) => {
 };
 
 interface AzAnswers {
+  /** The log alerts the resource group holds (none by default), no group yet (a first deploy), or a list that fails. */
+  readonly alerts?: readonly unknown[] | 'no group' | 'unreadable';
+  /** Whether Azure refuses to delete an alert: every one, or every one after the first. */
+  readonly deleteRefused?: boolean | 'after one';
   /** Whether the alerts on the jobs stopping are on, or a read that fails. */
   readonly deadMen?: boolean | 'unreadable';
   /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
@@ -663,6 +675,9 @@ const PENDING: Receiver = { ...CONFIRMED, verificationStatus: 'VerificationPendi
 
 const ACTION_GROUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.Insights/actionGroups/ag-agentx-stg?api-version=2026-03-01-preview`;
 
+/** The resource group's log alerts, as the tool lists them (at the API the Bicep writes them with). */
+const ALERTS_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.Insights/scheduledQueryRules?api-version=2026-03-01`;
+
 /** An az call that succeeded, answering with the value as JSON. */
 const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
 
@@ -730,6 +745,13 @@ class RecordingAz implements Az {
           };
         }
         return json({ state: ended, outputs: { databaseHost: { type: 'String', value: 'db.example.invalid' } } });
+      }
+      case 'resource delete': {
+        const { deleteRefused } = this.options;
+        const earlier = this.calls.filter((call) => call.args.slice(0, 2).join(' ') === 'resource delete').length;
+        return deleteRefused === true || (deleteRefused === 'after one' && earlier > 1)
+          ? { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) The client may not delete alerts.\n' }
+          : { status: 0, stdout: '', stderr: '' };
       }
       case 'resource show': {
         const { deadMen } = this.options;
@@ -819,7 +841,23 @@ class RecordingAz implements Az {
       const enabled = 'groupEnabled' in this.options ? this.options.groupEnabled : true;
       return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
     }
+    if (url.includes('/scheduledQueryRules?')) return this.#alerts(url);
     return this.#vaultPage(url);
+  }
+
+  /** The resource group's log alerts, as the options say Azure lists them. */
+  #alerts(url: string): AzResult {
+    if (url !== ALERTS_URL) throw new Error(`unexpected alert read ${url}`);
+    const { alerts } = this.options;
+    if (alerts === 'no group') {
+      return {
+        status: 1,
+        stdout: '',
+        stderr: `ERROR: Not Found({"error":{"code":"ResourceGroupNotFound","message":"Resource group 'rg-agentx-staging' could not be found."}})\n`,
+      };
+    }
+    if (alerts === 'unreadable') return { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway\n' };
+    return json({ value: alerts ?? [], nextLink: null });
   }
 
   /** A page of the vault's secrets, as the options say the vault pages them. */
@@ -862,6 +900,8 @@ interface Scenario {
   readonly dns?: DnsLookup;
   /** The folder the run is in: at COMMIT with nothing changed unless given, and no way to read it for null. */
   readonly checkout?: Checkout | null;
+  /** The log alerts the deployment would create: none unless given. */
+  readonly planned?: readonly PlannedAlert[];
 }
 
 /** One run of the tool, with everything it touched. */
@@ -869,12 +909,17 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
   const terminal = new ScriptedTerminal(scenario.answers ?? [], scenario.hidden ?? []);
   const az = scenario.az ?? new RecordingAz();
   const checked: Readonly<Record<string, string>>[] = [];
+  const planned: { part: string; subscription: string; values: Readonly<Record<string, string>> }[] = [];
   const steps: Steps = {
     terminal,
     az,
     policy: (values) => {
       checked.push(values);
       return [...(scenario.problems ?? [])];
+    },
+    alerts: (part, subscription, values) => {
+      planned.push({ part, subscription, values });
+      return scenario.planned ?? [];
     },
     rangesCurrent: () => scenario.rangesCurrent ?? true,
     now: () => new Date('2026-09-16T16:42:15Z'),
@@ -888,7 +933,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     (status) => ({ status, error: undefined }),
     (error: unknown) => ({ status: undefined, error }),
   );
-  return { ...outcome, terminal, az, checked };
+  return { ...outcome, terminal, az, checked, planned };
 }
 
 describe('deploy foundation', () => {
@@ -1266,7 +1311,7 @@ describe('alerts', () => {
 describe("what a secrets run did to the app's keys", () => {
   const vault = (versions: Readonly<Record<string, string>>) =>
     Object.entries(versions).map(([name, version]) => ({ name, version }));
-  const every = (version: string) => Object.fromEntries(APP_KEYS.map((key) => [key, version]));
+  const every = (version: string) => Object.fromEntries(CREATED_ONCE.map((key) => [key, version]));
 
   it('accepts every key there, each the version it was, or new', () => {
     expect(keyProblems(vault(every('v1')), vault(every('v1')))).toEqual([]);
@@ -1291,7 +1336,7 @@ describe('deploy secrets', () => {
   /** What a first --all writes: every secret but the ones Zitadel issues, which only their names write (B2-6, B5-3). */
   const nine = Object.keys(VAULT_SECRETS).filter((name) => VAULT_SECRETS[name]?.source !== 'issued');
   /** Every secret a deployment leaves: the nine, the email key it copies (B5-3) and the app's keys. */
-  const everything = [...nine, ...COPIED_SECRETS, ...APP_KEYS];
+  const everything = [...nine, ...COPIED_SECRETS, ...CREATED_ONCE];
 
   it('on a first run, asks for both pastes, writes every secret, and lists the vault afterwards', async () => {
     const admin = aPaste();
@@ -1310,8 +1355,8 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      // Sixteen secrets, three a page: the last one part full.
-      ...Array<string>(6).fill('rest --method get'),
+      // Twenty-two secrets, three a page: the last one part full.
+      ...Array<string>(8).fill('rest --method get'),
       ...RECORDING,
     ]);
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
@@ -1353,7 +1398,7 @@ describe('deploy secrets', () => {
       [...everything].sort().map((name) => `  ${name}`),
     );
     expect(done.terminal.said.slice(-2)).toEqual([
-      `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
       `Recorded on job-agentx-stg-migrate: secrets sent ${COMMIT}. CI's release takes it for what secrets reads.`,
     ]);
   });
@@ -1382,7 +1427,7 @@ describe('deploy secrets', () => {
       az: new RecordingAz({ before: nine, pages: { emptyFirst: true } }),
     });
     expect(declined.error).toBeInstanceOf(Cancelled);
-    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 9 secrets\./));
+    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 10 secrets\./));
     expect(declined.az.deployment).toBeUndefined();
   });
 
@@ -1465,7 +1510,7 @@ describe('deploy secrets', () => {
     expect(written).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
     done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
     expect(done.terminal.said.at(-2)).toBe(
-      `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
     );
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
   });
@@ -2128,7 +2173,7 @@ describe('what a hand deploy records (T1b)', () => {
       told: { answers: ['y', AUTH_HOST, APP_HOST], dns: readyDns() },
     },
   ];
-  const keys = [...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS];
+  const keys = [...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...CREATED_ONCE];
   /** Staging answering as the options say, with the vault's keys sound. */
   const staging = (options: AzAnswers = {}): RecordingAz => new RecordingAz({ before: keys, after: keys, ...options });
 
@@ -2424,8 +2469,201 @@ describe('main', () => {
   });
 });
 
+describe('foundation and log alerts that move to another workspace, which Azure refuses mid-deployment (S172)', () => {
+  const WORKSPACES = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.OperationalInsights/workspaces`;
+  const MAIN_LOGS = `${WORKSPACES}/log-agentx-stg`;
+  const LOGIN_LOGS = `${WORKSPACES}/log-agentx-stg-logins`;
+  const ERRORS = 'alert-agentx-stg-app-errors';
+  const PRIVILEGED = 'alert-psql-agentx-stg-abcdef-privileged-login';
+  const OWNER = 'alert-psql-agentx-stg-abcdef-owner-login';
+  const PLANNED: readonly PlannedAlert[] = [
+    { name: ERRORS, scopes: [MAIN_LOGS], apiVersion: '2026-03-01' },
+    { name: PRIVILEGED, scopes: [LOGIN_LOGS], apiVersion: '2026-03-01' },
+    { name: OWNER, scopes: [LOGIN_LOGS], apiVersion: '2026-03-01' },
+  ];
+  /** An alert as Azure lists it: its type in lower case, as the real list gives it. */
+  const idOf = (name: string): string =>
+    `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/microsoft.insights/scheduledqueryrules/${name}`;
+  const held = (name: string, ...scopes: readonly string[]) => ({ id: idOf(name), name, properties: { scopes } });
+
+  const foundation = (az: RecordingAz, ...answers: readonly string[]) => {
+    const admin = aPaste();
+    return run(['foundation'], {
+      answers: ['y', 'ops@example.invalid', ...answers],
+      hidden: [admin, admin],
+      az,
+      planned: PLANNED,
+    });
+  };
+  const QUESTION = 'Delete them now so this run recreates them? [y/N] ';
+  const deletes = (az: RecordingAz) => az.calls.filter((call) => call.args.slice(0, 2).join(' ') === 'resource delete');
+
+  it.each([
+    ['none is there yet', []],
+    ['the group is not there yet, as on a first deploy', 'no group'],
+  ] as const)('deploys without a question when %s', async (_, alerts) => {
+    const done = await foundation(new RecordingAz({ alerts }));
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.planned).toEqual([
+      { part: 'foundation', subscription: SUBSCRIPTION, values: done.az.deployment?.values },
+    ]);
+    expect(done.az.calls.find((call) => call.args[0] === 'rest')?.args).toEqual([
+      'rest',
+      '--method',
+      'get',
+      '--url',
+      ALERTS_URL,
+      '--output',
+      'json',
+    ]);
+    expect(done.terminal.questions).not.toContain(QUESTION);
+    expect(done.terminal.said).toContain(
+      'Checking whether this run moves a log alert to another workspace (about 30 seconds)...',
+    );
+    expect(deletes(done.az)).toEqual([]);
+  });
+
+  it('deploys without a question when every alert there reads the workspace it is to read, whatever the case', async () => {
+    const az = new RecordingAz({
+      alerts: [
+        held(ERRORS, MAIN_LOGS),
+        held(PRIVILEGED.toUpperCase(), LOGIN_LOGS.toLowerCase()),
+        held(OWNER, LOGIN_LOGS),
+        // Alerts this deployment doesn't make are none of its business.
+        held('alert-made-by-hand', LOGIN_LOGS),
+        { id: idOf('alert-odd'), name: 'alert-odd' },
+      ],
+    });
+    const done = await foundation(az);
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.terminal.questions).not.toContain(QUESTION);
+    expect(deletes(done.az)).toEqual([]);
+    expect(done.az.deployment).toBeDefined();
+  });
+
+  it('says which alerts move and why, and on a y deletes them by their IDs before the deployment, which creates them again', async () => {
+    const az = new RecordingAz({
+      alerts: [held(ERRORS, MAIN_LOGS), held(PRIVILEGED, MAIN_LOGS), held(OWNER, MAIN_LOGS)],
+    });
+    const done = await foundation(az, 'y');
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.terminal.questions.at(-1)).toBe(QUESTION);
+    const said = done.terminal.said.join('\n');
+    expect(said).toContain('This run moves 2 log alerts to another workspace.');
+    expect(said).toContain('Scope can not be updated');
+    expect(done.terminal.said).toContain(`  ${PRIVILEGED}: from log-agentx-stg to log-agentx-stg-logins`);
+    expect(done.terminal.said).toContain(`  ${OWNER}: from log-agentx-stg to log-agentx-stg-logins`);
+    expect(said).not.toContain(`  ${ERRORS}:`);
+    expect(deletes(done.az).map((call) => call.args)).toEqual([
+      ['resource', 'delete', '--ids', idOf(PRIVILEGED)],
+      ['resource', 'delete', '--ids', idOf(OWNER)],
+    ]);
+    expect(done.terminal.said).toContain(`Deleted ${OWNER}.`);
+    expect(said).toContain(
+      'If you then answer no at the what-if, or the deployment fails, they stay deleted until foundation runs again:',
+    );
+    // Deployed, so they are back: no word of them missing.
+    expect(said).not.toContain('are not back');
+    // Read, then deleted, then deployed: never the other way round.
+    const sequence = done.az.sequence;
+    expect(sequence.indexOf('rest --method get')).toBeLessThan(sequence.indexOf('resource delete --ids'));
+    expect(sequence.lastIndexOf('resource delete --ids')).toBeLessThan(sequence.indexOf('deployment sub create'));
+  });
+
+  it.each(['n', '', 'yes please'])(
+    'stops on %j with nothing deleted or deployed, and prints the commands to delete them by hand',
+    async (answer) => {
+      const done = await foundation(new RecordingAz({ alerts: [held(OWNER, MAIN_LOGS)] }), answer);
+      expect(done.status).toBeUndefined();
+      expect(done.terminal.said).toContainEqual(
+        expect.stringContaining('This run moves a log alert to another workspace.'),
+      );
+      expect((done.error as Error).message).toBe(
+        `Nothing was deployed, and nothing deleted. To delete them yourself, run:\n  az resource delete --ids ${idOf(OWNER)}\nthen run node deploy/azure/deploy.ts foundation again, which creates them.`,
+      );
+      expect(deletes(done.az)).toEqual([]);
+      expect(done.az.deployment).toBeUndefined();
+    },
+  );
+
+  it('stops with nothing deployed when the alerts there cannot be read, never taking that for none moving', async () => {
+    const done = await foundation(new RecordingAz({ alerts: 'unreadable' }));
+    expect(done.status).toBeUndefined();
+    expect((done.error as Error).message).toMatch(
+      /^Couldn't read the log alerts Azure holds now, .* Nothing was deployed\. .*\n.*Bad Gateway/s,
+    );
+    expect(done.terminal.questions).not.toContain(QUESTION);
+    expect(done.az.deployment).toBeUndefined();
+  });
+
+  it('stops with nothing deployed when Azure refuses a delete, saying a run again picks up the rest', async () => {
+    const done = await foundation(new RecordingAz({ alerts: [held(OWNER, MAIN_LOGS)], deleteRefused: true }), 'y');
+    expect(done.status).toBeUndefined();
+    expect((done.error as Error).message).toMatch(
+      new RegExp(`^Azure didn't delete ${OWNER}, so nothing was deployed\\..*AuthorizationFailed`, 's'),
+    );
+    expect(done.terminal.said).not.toContain(`Deleted ${OWNER}.`);
+    expect(done.az.deployment).toBeUndefined();
+  });
+
+  it('stops with nothing read or deployed when Bicep cannot say which workspace an alert reads', async () => {
+    const admin = aPaste();
+    const done = await run(['foundation'], {
+      answers: ['y', 'ops@example.invalid'],
+      hidden: [admin, admin],
+      az: new RecordingAz({ alerts: [held(OWNER, MAIN_LOGS)] }),
+      planned: [...PLANNED, { name: 'alert-later', scopes: ["[reference('x').id]"], apiVersion: '2026-03-01' }],
+    });
+    expect(done.status).toBeUndefined();
+    expect((done.error as Error).message).toMatch(/^Bicep can't say which workspace alert-later reads/);
+    expect(done.az.calls.some((call) => call.args[0] === 'rest')).toBe(false);
+    expect(done.az.deployment).toBeUndefined();
+  });
+
+  it('deletes one alert moved on a y, and deploys', async () => {
+    const done = await foundation(new RecordingAz({ alerts: [held(OWNER, MAIN_LOGS)] }), 'Y');
+    expect(done.status).toBe(0);
+    expect(deletes(done.az).map((call) => call.args)).toEqual([['resource', 'delete', '--ids', idOf(OWNER)]]);
+    expect(done.terminal.said).toContainEqual(
+      expect.stringContaining('This run moves a log alert to another workspace.'),
+    );
+  });
+
+  const NOT_BACK = `These alerts were deleted and are not back: ${PRIVILEGED}, ${OWNER}. Run node deploy/azure/deploy.ts foundation again to create them.`;
+
+  it.each([
+    ['the operator answers no at the what-if', { ended: 'Declined' }],
+    ['the deployment fails', { ended: 'Failed' }],
+    ['the CLI ends with a failure', { status: 1 }],
+  ] as const)('ends saying which deleted alerts are not back when %s', async (_, ending) => {
+    const az = new RecordingAz({ alerts: [held(PRIVILEGED, MAIN_LOGS), held(OWNER, MAIN_LOGS)], ...ending });
+    const done = await foundation(az, 'y');
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(1);
+    expect(deletes(done.az)).toHaveLength(2);
+    expect(done.terminal.said.at(-1)).toBe(NOT_BACK);
+  });
+
+  it('names the alerts already deleted when Azure refuses a later delete', async () => {
+    const az = new RecordingAz({
+      alerts: [held(PRIVILEGED, MAIN_LOGS), held(OWNER, MAIN_LOGS)],
+      deleteRefused: 'after one',
+    });
+    const done = await foundation(az, 'y');
+    expect(done.status).toBeUndefined();
+    expect((done.error as Error).message).toContain(
+      `Azure didn't delete ${OWNER}, so nothing was deployed. These alerts were deleted and are not back: ${PRIVILEGED}. Run node deploy/azure/deploy.ts foundation again to create them.`,
+    );
+    expect(done.az.deployment).toBeUndefined();
+  });
+});
+
 describe('the tool and the deployment agree', () => {
   let snapshot: Snapshot;
+  let environment: EnvironmentSnapshot;
   let privateHalf: string;
 
   beforeAll(() => {
@@ -2433,14 +2671,53 @@ describe('the tool and the deployment agree', () => {
     // text over several lines, which must reach Bicep through the environment.
     const values = secretValues(all, pasted(aPaste(), aPaste()));
     privateHalf = values.AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY ?? '';
-    snapshot = inCopy((dir) => environmentSnapshot(dir, 'staging', values)).together;
+    environment = inCopy((dir) => environmentSnapshot(dir, 'staging', values));
+    snapshot = environment.together;
+  });
+
+  it('asks about moved log alerts for each deployment that creates any, and only those (S172)', () => {
+    const alerting = (part: Snapshot): boolean =>
+      part.predictedResources.some((resource) => resource.type === 'Microsoft.Insights/scheduledQueryRules');
+    const deployments = new Map([
+      ['foundation', environment.foundation],
+      ...[...environment.parts].map(([file, part]) => [file.split('.')[1] ?? file, part] as const),
+    ]);
+    expect([...deployments.keys()].toSorted()).toEqual(['apps', 'certificates', 'foundation', 'secrets']);
+    expect([...deployments].filter(([, part]) => alerting(part)).map(([name]) => name)).toEqual([...ALERTING]);
+  });
+
+  it("plans the foundation's log alerts by the names and workspaces Azure holds in the real subscription (S172)", () => {
+    const real = '6e99c9cb-0000-4000-8000-000000000000';
+    const alerts = plannedAlerts('foundation', real, secretValues(all, pasted(aPaste(), aPaste())));
+    const workspaces = `/subscriptions/${real}/resourceGroups/rg-agentx-staging/providers/Microsoft.OperationalInsights/workspaces`;
+    const SERVER_ALERT = /^alert-psql-agentx-stg-([a-z0-9]+)-(?:privileged|owner)-login$/;
+    const login = alerts.filter((alert) => SERVER_ALERT.test(alert.name));
+    expect(login).toHaveLength(2);
+    for (const alert of login) expect(alert.scopes).toEqual([`${workspaces}/log-agentx-stg-logins`]);
+    expect(alerts.find((alert) => alert.name === 'alert-agentx-stg-app-errors')?.scopes).toEqual([
+      `${workspaces}/log-agentx-stg`,
+    ]);
+    // The server's suffix is the subscription's (names.bicep): the stand-in's names aren't the ones Azure holds.
+    const suffixes = (names: readonly string[]) => new Set(names.map((name) => SERVER_ALERT.exec(name)?.[1]));
+    const inSubscription = suffixes(login.map((alert) => alert.name));
+    const standIn = suffixes(
+      snapshot.predictedResources
+        .filter((resource) => SERVER_ALERT.test(resource.name))
+        .map((resource) => resource.name),
+    );
+    expect(inSubscription.size).toBe(1);
+    expect(standIn.size).toBe(1);
+    expect(inSubscription).not.toEqual(standIn);
+    expect(new Set(alerts.map((alert) => alert.apiVersion))).toEqual(new Set(['2026-03-01']));
+    // A part goes into the group, and creates none.
+    expect(plannedAlerts('certificates', real, {})).toEqual([]);
   });
 
   it('names every secret the deployment creates, by the variable its parameters file reads', () => {
     const created = snapshot.predictedResources
       .filter((resource) => resource.type === 'Microsoft.KeyVault/vaults/secrets')
       .map((resource) => resource.name.split('/').at(-1));
-    expect(created.toSorted()).toEqual([...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS].toSorted());
+    expect(created.toSorted()).toEqual([...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...CREATED_ONCE].toSorted());
     const paramsText = readFileSync(path.join(AZURE_DIR, 'staging.secrets.bicepparam'), 'utf8');
     const read = [...paramsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
     expect(read.toSorted()).toEqual(
@@ -2504,7 +2781,7 @@ describe('the tool and the deployment agree', () => {
     // The keys stay one JSON value with a key each, every one of them a stand-in.
     const given = JSON.parse(values[APP_KEYS_VARIABLE] ?? '{}') as Record<string, string>;
     const standIns = JSON.parse(shaped[APP_KEYS_VARIABLE] ?? '{}') as Record<string, string>;
-    expect(Object.keys(standIns)).toEqual([...APP_KEYS]);
+    expect(Object.keys(standIns).toSorted()).toEqual([...CREATED_ONCE].toSorted());
     for (const key of APP_KEYS) expect(standIns[key]).not.toBe(given[key]);
     expect(shaped.AGENTX_AZURE_ALERT_EMAIL).toBe('ops@example.invalid');
     const rotation = shapedForPolicy(secretValues(rotating('db-app-password'), {}, quickMakers()), randomBytes);

@@ -418,6 +418,8 @@ const SETTINGS = {
   AGENTX_DB_APP_PASSWORD_FILE: { schema: text },
   AGENTX_DB_BACKUP_PASSWORD: { schema: text },
   AGENTX_DB_BACKUP_PASSWORD_FILE: { schema: text },
+  AGENTX_DB_OPERATOR_PASSWORD: { schema: text },
+  AGENTX_DB_OPERATOR_PASSWORD_FILE: { schema: text },
   AGENTX_DB_ZITADEL_PASSWORD: { schema: text },
   AGENTX_DB_ZITADEL_PASSWORD_FILE: { schema: text },
 } as const;
@@ -528,6 +530,8 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_DB_APP_PASSWORD_FILE',
       'AGENTX_DB_BACKUP_PASSWORD',
       'AGENTX_DB_BACKUP_PASSWORD_FILE',
+      'AGENTX_DB_OPERATOR_PASSWORD',
+      'AGENTX_DB_OPERATOR_PASSWORD_FILE',
       'AGENTX_DB_ZITADEL_PASSWORD',
       'AGENTX_DB_ZITADEL_PASSWORD_FILE',
     ],

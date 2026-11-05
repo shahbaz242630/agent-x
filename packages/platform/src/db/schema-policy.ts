@@ -34,8 +34,8 @@ interface GlobalTable {
    * Every right the app role may hold on it, on the whole table or any of its
    * columns: nothing it needn't do, since no tenant wall stands behind a
    * global table (B1d-1). Named for every global table outside the
-   * append-only schemas, and for none inside them, which their own rule holds
-   * (CI-06 checks both).
+   * append-only schemas; inside them, which their own rule holds, only to
+   * narrow it, as for a table the app only reads (PL-57; CI-06 checks both).
    */
   readonly appMay?: readonly RowRight[];
   /**
@@ -124,6 +124,13 @@ export interface SchemaPolicy {
    */
   readonly appendOnlyExceptions: Readonly<Record<string, string>>;
   /**
+   * Tenant tables in those schemas that the app may only read, by name, each
+   * with its reason (PL-57): rows only another role adds, such as the
+   * operator's signatures. Narrower than their schema's rule, so an INSERT
+   * given to the app is drift to CI-06 and the live guard alike.
+   */
+  readonly appReadsOnly: Readonly<Record<string, string>>;
+  /**
    * Tenant tables outside those schemas that the app may add rows to and read,
    * and change only in the columns listed, never DELETE (but past a retention
    * its entry names, `sweptAfter`), by schema-qualified
@@ -142,6 +149,14 @@ export interface SchemaPolicy {
    * table, name, key columns and condition must all be as listed (E2-1a).
    */
   readonly partialUniqueIndexes: readonly PartialUniqueIndex[];
+  /**
+   * Every right the operator's command's own role holds (PL-57, 0079), exactly:
+   * `<privilege> on <object>`, the object as the live guard names it (`schema
+   * audit`, `audit.events`, `column audit.heads.seq`, `this database`). One
+   * more is a right no command needs; one fewer, a command that fails. CI-06
+   * holds the migrations to it, and the live guard the running database.
+   */
+  readonly operatorRights: readonly string[];
 }
 
 export const SCHEMA_POLICY: SchemaPolicy = {
@@ -430,6 +445,21 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       reason:
         "The platform hand-off pause's one row (0057, SEC-OPS-03): one switch for every organisation's hand-offs to the bank, and the platform event that set it",
       columns: ['only_row', 'paused', 'event_seq', 'event_id'],
+      // The lock's column alone (0079, PL-57): moving the pause is the operator's role's.
+      appMayUpdate: ['only_row'],
+    },
+    'platform_controls.operator_signatures': {
+      reason:
+        "The operator's signature on each of its events on the platform chain (0079, PL-57), by its own key, which the API holds only the public half of. Of no organisation, as the chain is; the app reads it, and only the operator's role adds to it",
+      columns: ['seq', 'id', 'signature', 'key_version'],
+      // Read only: narrower than its append-only schema's rule, so an INSERT given to the app is drift.
+      appMay: ['SELECT'],
+    },
+    'platform_controls.operator_signing': {
+      reason:
+        "Where the operator's signatures start on the platform chain (0079, PL-57): one row, written by the migration as it ran, read by the app and the operator, written by neither",
+      columns: ['only_row', 'signed_from'],
+      appMay: ['SELECT'],
     },
     'platform_controls.job_lease': {
       reason:
@@ -445,9 +475,15 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'platform_controls.audit_head':
       "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
     'platform_controls.handoff_pause':
-      'The platform hand-off pause (0057, SEC-OPS-03): the app locks its one row first (ADR-006 §6 level 1) and moves it with the platform event that pauses or resumes, never adding or deleting a row',
+      "The platform hand-off pause (0057, SEC-OPS-03): the app locks its one row first (ADR-006 §6 level 1), and since 0079 (PL-57) may update its only_row alone, which is what a lock needs; only the operator's role moves it",
     'platform_controls.job_lease':
       "The jobs' lease (0068): the app moves its one row as a process takes, renews and gives it up, never adding or deleting a row",
+  },
+  appReadsOnly: {
+    'audit.operator_signatures':
+      "The operator's signature on each of its events on an organisation's chain (0079, PL-57), by its own key, which the API holds only the public half of: only the operator's role adds to it",
+    'audit.operator_signing_starts':
+      "Where the operator's signatures start on each organisation's chain (0079, PL-57): written by the migration as it ran, read by the app and the operator, written by neither",
   },
   fillInTables: {
     'activity_exports.exports': {
@@ -561,5 +597,72 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['org_id', 'transaction_id'],
       predicate: "(status = 'OPEN'::text)",
     },
+  ],
+  // 0079 (PL-57): what the operator's commands do, and no more; each is in the migration with its reason.
+  operatorRights: [
+    'CONNECT on this database',
+    'DELETE on directory.holds_waiting',
+    'INSERT on audit.events',
+    'INSERT on audit.heads',
+    'INSERT on audit.operator_signatures',
+    'INSERT on directory.holds_waiting',
+    'INSERT on directory.invites',
+    'INSERT on directory.org_work',
+    'INSERT on directory.orgs',
+    'INSERT on identity.invitations',
+    'INSERT on notifications.outbox',
+    'INSERT on organizations.organizations',
+    'INSERT on platform_controls.audit_events',
+    'INSERT on platform_controls.audit_head',
+    'INSERT on platform_controls.operator_signatures',
+    'SELECT on access.requests',
+    'SELECT on audit.events',
+    'SELECT on audit.heads',
+    'SELECT on audit.operator_signatures',
+    'SELECT on audit.operator_signing_starts',
+    'SELECT on directory.holds_waiting',
+    'SELECT on directory.members',
+    'SELECT on directory.org_work',
+    'SELECT on directory.orgs',
+    'SELECT on identity.invitations',
+    'SELECT on identity.user_contacts',
+    'SELECT on identity.users',
+    'SELECT on organizations.organizations',
+    'SELECT on platform_controls.audit_events',
+    'SELECT on platform_controls.audit_head',
+    'SELECT on platform_controls.handoff_pause',
+    'SELECT on platform_controls.operator_signatures',
+    'SELECT on platform_controls.operator_signing',
+    'UPDATE on column audit.heads.hash',
+    'UPDATE on column audit.heads.mac',
+    'UPDATE on column audit.heads.mac_key_version',
+    'UPDATE on column audit.heads.seq',
+    'UPDATE on column directory.org_work.due_at',
+    'UPDATE on column directory.org_work.marks',
+    'UPDATE on column identity.invitations.accepted_by',
+    'UPDATE on column identity.invitations.expires_at',
+    'UPDATE on column identity.invitations.invited_by',
+    'UPDATE on column identity.invitations.role',
+    'UPDATE on column identity.invitations.state_event_id',
+    'UPDATE on column identity.invitations.state_version',
+    'UPDATE on column identity.invitations.status',
+    'UPDATE on column identity.invitations.step_up_challenge_id',
+    'UPDATE on column organizations.organizations.state_event_id',
+    'UPDATE on column organizations.organizations.state_version',
+    'UPDATE on column organizations.organizations.status',
+    'UPDATE on column platform_controls.audit_head.hash',
+    'UPDATE on column platform_controls.audit_head.mac',
+    'UPDATE on column platform_controls.audit_head.mac_key_version',
+    'UPDATE on column platform_controls.audit_head.seq',
+    'UPDATE on column platform_controls.handoff_pause.event_id',
+    'UPDATE on column platform_controls.handoff_pause.event_seq',
+    'UPDATE on column platform_controls.handoff_pause.paused',
+    'USAGE on schema access',
+    'USAGE on schema audit',
+    'USAGE on schema directory',
+    'USAGE on schema identity',
+    'USAGE on schema notifications',
+    'USAGE on schema organizations',
+    'USAGE on schema platform_controls',
   ],
 };

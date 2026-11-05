@@ -97,6 +97,9 @@ const BEFORE_ATTACH: readonly string[] = [
   `CREATE POLICY tenant_isolation ON access.requests USING (${WALL}) WITH CHECK (${WALL})`,
   'GRANT SELECT, INSERT ON access.requests TO agentx_app',
   'GRANT SELECT ON access.requests TO agentx_backup',
+  // The operator's exports read the log through its parent alone (PL-57): its right moves there, as its list holds it.
+  'GRANT SELECT ON access.requests TO agentx_operator',
+  'REVOKE SELECT ON access.requests_first FROM agentx_operator',
 ];
 
 const ATTACH = [
@@ -346,13 +349,15 @@ describe(`access.requests attached as its first partition, a rehearsal (ADR-005 
     await asApp.end();
 
     // The parent's own grants are the old table's, exactly.
-    const [grants] = await database.as('admin').query<{ app: string[]; backup: string[] }>(
+    const [grants] = await database.as('admin').query<{ app: string[]; backup: string[]; operator: string[] }>(
       `select array(select privilege_type::text from information_schema.role_table_grants
                      where table_schema = 'access' and table_name = 'requests' and grantee = 'agentx_app' order by 1) as app,
               array(select privilege_type::text from information_schema.role_table_grants
-                     where table_schema = 'access' and table_name = 'requests' and grantee = 'agentx_backup' order by 1) as backup`,
+                     where table_schema = 'access' and table_name = 'requests' and grantee = 'agentx_backup' order by 1) as backup,
+              array(select privilege_type::text from information_schema.role_table_grants
+                     where table_schema = 'access' and table_name = 'requests' and grantee = 'agentx_operator' order by 1) as operator`,
     );
-    expect(grants).toEqual({ app: ['INSERT', 'SELECT'], backup: ['SELECT'] });
+    expect(grants).toEqual({ app: ['INSERT', 'SELECT'], backup: ['SELECT'], operator: ['SELECT'] });
 
     // The backup role reads everything, each partition too, as a logical backup must.
     const backup = database.as('backup');
