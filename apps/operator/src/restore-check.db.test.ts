@@ -14,11 +14,12 @@ import { createOrganizationAsOperator, type OperatorTables } from './create-orga
 import { checkRestoredCopy } from './restore-check.ts';
 
 const server = inject('postgres');
-const keyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 const keys = loadKeys({ directory: keyFiles.directory, current: {} }, [
   'audit-mac',
   'field-encryption',
   'operator-signing',
+  'audit-rebase',
 ]);
 
 const quiet = () => testLogger();

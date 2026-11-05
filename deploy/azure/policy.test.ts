@@ -678,7 +678,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
-      // PL-57: the operator's key's public half, created once with it.
+      // PL-57, E11: the operator's keys' public halves, each created once with its key, in the keys' order.
+      'public-audit-rebase-v1 once',
       'public-operator-signing-v1 once',
       ...[
         'db-setup reads db-admin-password',
@@ -705,10 +706,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel reads zitadel-masterkey',
         'api reads acs-access-key',
         // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each
-        // version; its own signing key it alone reads, and the API its public half (PL-57).
+        // version; its own signing key and the rebase key it alone reads, and the API their public halves (PL-57, E11).
         // The chain repair (4D2e E10) the MAC alone, to check with, and the public half: never the operator's key.
         ...APP_KEYS.flatMap((key) => {
-          if (key.startsWith('key-operator-signing-v')) return [`operator reads ${key}`];
+          if (key.startsWith('key-operator-signing-v') || key.startsWith('key-audit-rebase-v')) {
+            return [`operator reads ${key}`];
+          }
           if (key.startsWith('key-audit-mac-v')) {
             return [`api reads ${key}`, `operator reads ${key}`, `chain-restore reads ${key}`];
           }
@@ -716,6 +719,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
             ? [`api reads ${key}`, `operator reads ${key}`]
             : [`api reads ${key}`];
         }),
+        'api reads public-audit-rebase-v1',
+        'chain-restore reads public-audit-rebase-v1',
         'api reads public-operator-signing-v1',
         'chain-restore reads public-operator-signing-v1',
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
@@ -734,8 +739,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      // Fourteen written when given, each key, and the operator's key's public half (PL-57).
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(14 + APP_KEYS.length + 1);
+      // Fourteen written when given, each key, and the operator's keys' public halves (PL-57, E11).
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(14 + APP_KEYS.length + 2);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
@@ -1707,6 +1712,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
         (app: Mutable) => {
           containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== 'AGENTX_AUDIT_ANCHORS_CLIENT_ID');
         },
+        // The operator holds the same role (E11): the API told of the operator's identity is still refused.
+        (app: Mutable) => {
+          const clientId = anchorSettings(app).find((entry) => entry.name === 'AGENTX_AUDIT_ANCHORS_CLIENT_ID') ?? {};
+          clientId.value = String(clientId.value).replace(apiId, apiId.replace(/-api$/, '-operator'));
+        },
       ]) {
         expect(brokenRules(changed(APP('api'), change))).toEqual(['evidence-store']);
       }
@@ -1718,7 +1728,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           rule: 'evidence-store',
           resource: 'job-agentx-stg-migrate',
           message:
-            "sets AGENTX_AUDIT_ANCHORS_URL: only the API keeps the chains' anchors and the operator's and the chain repair's jobs read them",
+            "sets AGENTX_AUDIT_ANCHORS_URL: only the API and the operator's job keep the chains' anchors and the chain repair's job reads them",
         },
       ]);
     });
@@ -1733,7 +1743,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
         )?.id,
       );
 
-    describe("the operator's read of it, for a chain recovery plan (4D2e E9)", () => {
+    describe("the operator's hold on it, for a chain recovery plan (4D2e E9) and its rebases (E11)", () => {
+      // The chain repair's read-only role (4D2e E10); the operator holds the API's own role instead.
       const READER = (resource: PredictedResource) =>
         ROLE_DEFINITIONS(resource) &&
         resource.name ===
@@ -1743,9 +1754,22 @@ describe('SEC-OPS-09 each rule can fail', () => {
           );
       const READS = (resource: PredictedResource) =>
         ASSIGNMENTS(resource) &&
-        String(at(resource.properties, 'description')).startsWith('operator reads audit anchors');
+        String(at(resource.properties, 'description')).startsWith('operator reads and adds audit anchors');
+      const roleIdOf = (find: (resource: PredictedResource) => boolean): unknown =>
+        at(staging.predictedResources.find(find)?.properties, 'roleDefinitionId');
 
-      it('its role reads and lists, and can add, overwrite or delete nothing', () => {
+      it("holds the API's role, to read, list and add a rebase; the read-only role, given to it, is refused", () => {
+        expect(roleIdOf(READS)).toEqual(roleIdOf(KEEPS));
+        const readOnly = changed(READS, (grant: Mutable) => {
+          inside(grant, 'properties').roleDefinitionId = String(roleIdOf(READS)).replace(
+            String(staging.predictedResources.find(ROLE)?.name),
+            String(staging.predictedResources.find(READER)?.name),
+          );
+        });
+        expect(brokenRules(readOnly)).toEqual(['evidence-store']);
+      });
+
+      it("the chain repair's role reads and lists, and can add, overwrite or delete nothing", () => {
         expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
           { actions: [], notActions: [], dataActions: [`${ACTIONS_OF}/read`], notDataActions: [] },
         ]);
@@ -4762,6 +4786,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(declaredSecrets(restorer).map((secret) => secret.name)).toEqual([
       'db-owner-password',
       ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')),
+      'public-audit-rebase-v1',
       'public-operator-signing-v1',
       'chain-restore-request',
     ]);
@@ -5011,7 +5036,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual([
-      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[4].value must come from a @secure() parameter, never a value in the code',
+      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[5].value must come from a @secure() parameter, never a value in the code',
       holdOnce,
     ]);
     // Held twice, held as a vault secret too, or not held at all (with its file gone, so nothing else objects).

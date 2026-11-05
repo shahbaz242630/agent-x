@@ -19,11 +19,15 @@ import {
   activityExportRequest,
   AUDIT_EXPORT_USAGE,
   auditExportRequest,
+  CHAIN_REBASE_USAGE,
+  chainRebaseRequest,
+  type ChainRebaseWords,
   createOrganizationRequest,
   FIRST_ADMIN_USAGE,
   firstAdminRequest,
   handoffRequest,
   handoffUsage,
+  NO_ANCHORS_PROBLEM,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
   RESTORE_CHECK,
@@ -77,7 +81,7 @@ afterEach(() => {
 });
 
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 /** Every key, mounted where the command holds only one. */
 const everyKey = writeTestKeys(PURPOSES);
 
@@ -197,7 +201,7 @@ describe("B1c what the operator's command refuses before it connects", () => {
         .toSorted()
         .map(
           (purpose) =>
-            `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac, field-encryption, operator-signing may be mounted for it`,
+            `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac, field-encryption, operator-signing, audit-rebase may be mounted for it`,
         ),
     );
   });
@@ -280,6 +284,8 @@ describe("B1c what the operator's command refuses before it connects", () => {
           current: 1,
           versions: [expect.objectContaining({ publicKey: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown })],
         }),
+        // The rebase key, its public half the API checks a rebase with (E11).
+        expect.objectContaining({ purpose: 'audit-rebase', current: 1 }),
       ],
     });
     expect(text).not.toContain(NAME);
@@ -794,6 +800,122 @@ describe("S78 the restore drill's check, only ever from a file", () => {
       expect(line('operator.refused')?.problems).toEqual([
         "AGENTX_DB_DRILL_HOST must name the drill's copy, a server other than AGENTX_DB_HOST",
       ]);
+    }
+  });
+});
+
+describe("4D2e E11 a chain's rebase, only ever from a file", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-rebase-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const EVIDENCE = 'INC-2026/0042';
+  const ORG = '0199a0f0-0000-7000-8000-000000000001';
+  const HASH = 'ab'.repeat(32);
+  const WITH_ANCHORS = {
+    ...ENV,
+    AGENTX_AUDIT_ANCHORS_DIR: path.join(folder, 'anchors'),
+    AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${'A'.repeat(43)}`,
+  };
+  const asked = (change: Partial<ChainRebaseWords> = {}): string =>
+    chainRebaseRequest({
+      chain: ORG,
+      seq: '12',
+      hash: HASH,
+      reason: 'repaired',
+      evidence: EVIDENCE,
+      id: NEW_ID,
+      ...change,
+    });
+  const words = (): string[] => JSON.parse(asked()) as string[];
+
+  it.each([ORG, 'platform'])(
+    'reads a well-formed rebase of %s, then connects, never repeating the reference',
+    async (chain) => {
+      const { events, line, text } = await run(['--request', requestFile(asked({ chain }))], WITH_ANCHORS);
+
+      expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+      expect(line('operator.starting')).toMatchObject({ command: 'chain-rebase' });
+      expect(text).not.toContain(EVIDENCE);
+    },
+  );
+
+  it("refuses with no anchors' store or no public keys to read it with, before it connects", async () => {
+    const file = requestFile(asked({ reason: 'recovered' }));
+    const { AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: _keys, ...keyless } = WITH_ANCHORS;
+    for (const env of [ENV, keyless]) {
+      const { code, events, line } = await run(['--request', file], env);
+      expect(code).toBe(1);
+      expect(events).toEqual(['operator.starting', 'operator.refused']);
+      expect(line('operator.refused')).toMatchObject({ orgId: ORG, problems: [NO_ANCHORS_PROBLEM] });
+    }
+  });
+
+  it('refuses it typed', async () => {
+    const { events, line, text } = await run(words(), WITH_ANCHORS);
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `chain-rebase runs only from a request file: ${CHAIN_REBASE_USAGE}`,
+    ]);
+    expect(text).not.toContain(EVIDENCE);
+  });
+
+  it.each([
+    ['its head left out', (all: string[]) => [...all.slice(0, 3), ...all.slice(7)]],
+    ['its hash left out', (all: string[]) => [...all.slice(0, 5), ...all.slice(7)]],
+    ['its ID flag with no ID', (all: string[]) => all.slice(0, -1)],
+    ['a word more', (all: string[]) => [...all, 'x']],
+    ['a flag misnamed', (all: string[]) => all.map((word) => (word === '--chain' ? '--org' : word))],
+    ['the seq flag misnamed', (all: string[]) => all.map((word) => (word === '--seq' ? '--head' : word))],
+    ['the evidence flag misnamed', (all: string[]) => all.map((word) => (word === '--evidence' ? '--case' : word))],
+    [
+      'two flags swapped',
+      (all: string[]) => all.map((word) => ({ '--seq': '--hash', '--hash': '--seq' })[word] ?? word),
+    ],
+  ])('refuses %s, naming the shape', async (_what, change) => {
+    const { events, line, text } = await run(['--request', requestFile(JSON.stringify(change(words())))], WITH_ANCHORS);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `the request file holds ${CHAIN_REBASE_USAGE} as a JSON list, and nothing else`,
+    ]);
+    expect(text).not.toContain(EVIDENCE);
+  });
+
+  it('names each word that isn’t one it takes, never repeating the reference', async () => {
+    const evidence = 'a note about the incident';
+    for (const chain of ['organisation', ORG.toUpperCase()]) {
+      for (const [seq, hash] of [
+        ['0', HASH.toUpperCase()],
+        ['01', 'ab'],
+        ['twelve', `${HASH}00`],
+      ] as const) {
+        const { line, text } = await run(
+          [
+            '--request',
+            requestFile(asked({ chain, seq, hash, reason: 'because', evidence, id: NEW_ID.toUpperCase() })),
+          ],
+          WITH_ANCHORS,
+        );
+        expect(line('operator.refused')?.problems).toEqual([
+          "the chain must be platform or an organisation's ID, a UUIDv7 in lower case",
+          "the head's number must be a whole number from 1",
+          "the head's hash must be 64 lower-case hex digits",
+          'the reason must be one of repaired, recovered',
+          'the incident reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+          "the rebase's ID must be a UUIDv7, in lower case",
+        ]);
+        expect(text).not.toContain(evidence);
+      }
+    }
+    for (const [change, said] of [
+      [{ id: NEW_ID.toUpperCase() }, "the rebase's ID must be a UUIDv7, in lower case"],
+      [{ seq: '0' }, "the head's number must be a whole number from 1"],
+      [{ hash: HASH.slice(1) }, "the head's hash must be 64 lower-case hex digits"],
+    ] as const) {
+      const { line } = await run(['--request', requestFile(asked(change))], WITH_ANCHORS);
+      expect(line('operator.refused')?.problems).toEqual([said]);
     }
   });
 });

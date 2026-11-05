@@ -24,8 +24,13 @@
 //   (`blobs/add/action`): it can't read, overwrite or list. The API's may add a
 //   new file to `audit-anchors` and read and list what is there (`blobs/read`, as
 //   a restart must), and can't overwrite or delete. The operator's may read and
-//   list `audit-anchors` alone (`blobs/read`), which a chain's recovery plan is
-//   checked against (4D2e E9): it can add nothing there. No one else is given anything
+//   list `audit-anchors` (`blobs/read`), which a chain's recovery plan is
+//   checked against (4D2e E9), and add a new file there (`blobs/add/action`):
+//   a chain's rebase (4D2e E11), which the API believes only signed with the
+//   operator's own `audit-rebase` key; anything else it adds is a file the API
+//   reads as spoiled, the alarm: it holds the API's own role there. Neither can
+//   overwrite or delete. The chain repair's (4D2e E10) may read and list
+//   `audit-anchors` alone: it adds nothing there. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -244,14 +249,13 @@ resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// Get Blob and List Blobs (both `blobs/read`), and nothing else: the operator's
-// chain recovery plan (4D2e E9) is checked against the anchors and adds none.
-// Given to the operator's identity, the exports' writer above.
+// Get Blob and List Blobs (both `blobs/read`), and nothing else: the chain
+// repair (4D2e E10) checks a repair against the anchors and adds none.
 resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   name: guid(resourceGroup().id, 'audit-anchors-reader')
   properties: {
     roleName: anchorReaderRoleName
-    description: 'The operator\'s chain recovery plan: read and list the anchors container. Nothing else.'
+    description: 'The chain repair: read and list the anchors container. Nothing else.'
     type: 'CustomRole'
     assignableScopes: [
       resourceGroup().id
@@ -269,14 +273,18 @@ resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' =
   }
 }
 
+// The operator's identity, the exports' writer above, holds the API's own role
+// on the anchors: Get Blob and List Blobs for a chain recovery plan (4D2e E9),
+// and Put Blob of a file not there yet for a chain's rebase (4D2e E11). Never
+// overwrite or delete.
 resource readsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: anchorContainer
-  name: guid(anchorContainer.id, writer.id, anchorReaderRole.id)
+  name: guid(anchorContainer.id, writer.id, anchorRole.id)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorRole.name)
     principalId: writer.properties.principalId
     principalType: 'ServicePrincipal'
-    description: 'operator reads audit anchors (deploy/azure/modules/evidence.bicep)'
+    description: 'operator reads and adds audit anchors (deploy/azure/modules/evidence.bicep)'
   }
 }
 

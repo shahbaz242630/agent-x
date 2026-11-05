@@ -289,6 +289,11 @@ export const PLAIN_WORDS = {
     broke: 'An old audit record edited there is found later than promised; backups can still undo it. Nobody is held.',
     next: 'See whether the database is slow or the tamper check runs out of time, and add capacity.',
   },
+  'audit.rebased': {
+    happened: "The operator moved an audit chain's trusted point on with a signed rebase.",
+    broke: 'The tamper check now trusts that chain from the new point; what it trusted before is set aside.',
+    next: 'Find the incident that asked for it. If none did, the rebase key was used by someone else: treat it as a break-in.',
+  },
   'audit.backlog': {
     happened: 'A record had too much unchecked recent history to be verified while showing a list.',
     broke: 'That record was left off the list; the rest of the list was shown.',
@@ -942,6 +947,16 @@ export const PLAIN_WORDS = {
       'Nothing was changed, and the organisation stays on hold: its copy cannot mend the chain with original records.',
     next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
   },
+  'operator.chain_rebase_shorter': {
+    happened: 'A rebase is accepting an audit chain shorter than the point it was last trusted at.',
+    broke: 'The events past the new end are given up for good. The line says how many.',
+    next: 'Check the incident expected that loss. If not, find where those events went before trusting the chain.',
+  },
+  'operator.chain_rebase_refused': {
+    happened: "The operator's job refused to move an audit chain's trusted point on.",
+    broke: 'Nothing was changed. The chain still holds its point, fails its own check, or the store was unreadable.',
+    next: 'Read the reason in the line. A chain failing its own check needs playbook H, not a rebase.',
+  },
   'operator.chain_restore_refused': {
     happened: "An organisation's audit chain repair was refused or rolled back.",
     broke: 'Nothing was changed, and the organisation stays on hold.',
@@ -967,6 +982,11 @@ export const PLAIN_WORDS = {
     broke:
       'That organisation has no audit log entry for it yet and its admins got no email; the pause or resume holds.',
     next: 'Run the job again with the same request file: it tells only the organisations not told yet.',
+  },
+  'operator.rebase_not_recorded': {
+    happened: "A rebase was written, but its entry on the chain's own audit log was not.",
+    broke: "The rebase stands; the chain's owner can't read of it yet.",
+    next: 'Run the same request again: it finds the rebase and writes only the entry.',
   },
   'operator.refused': {
     happened: 'An operator job refused the request it was given.',

@@ -44,18 +44,18 @@ var appKeys = loadJsonContent('app-keys.json')
 // The keys the operator's command holds, by how their names start: every
 // version of the audit chains' MAC (ADR-011 §3, B1c), of the field encryption a
 // first admin's invited address is kept with (B4-6b), and of its own signing
-// key (PL-57), and no other.
+// key (PL-57) and the rebase key (4D2e E11), and no other.
 @export()
-var operatorKeys = ['key-audit-mac-v', 'key-field-encryption-v', 'key-operator-signing-v']
+var operatorKeys = ['key-audit-mac-v', 'key-field-encryption-v', 'key-operator-signing-v', 'key-audit-rebase-v']
 
 // Whether the operator's command holds this key.
 @export()
 func operatorHolds(key string) bool => length(filter(operatorKeys, prefix => startsWith(key, prefix))) > 0
 
-// The keys the operator's command alone holds (PL-57): never mounted into the
+// The keys the operator's command alone holds (PL-57, E11): never mounted into the
 // API, which reads each one's public half instead (publicHalves).
 @export()
-var operatorOnlyKeys = ['key-operator-signing-v']
+var operatorOnlyKeys = ['key-operator-signing-v', 'key-audit-rebase-v']
 
 // Whether only the operator's command holds this key.
 @export()
@@ -63,7 +63,7 @@ func operatorOnly(key string) bool => length(filter(operatorOnlyKeys, prefix => 
 
 // The keys the chain repair holds (4D2e E10, PL-29): every version of the audit
 // chains' MAC, to check a chain with, and no other; the operator's signatures
-// it checks with their public halves alone.
+// and its rebases (E11) it checks with their public halves alone (publicHalves).
 @export()
 var restoreKeys = ['key-audit-mac-v']
 

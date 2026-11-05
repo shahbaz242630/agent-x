@@ -257,7 +257,11 @@ describe("the app's keys (ADR-011 §2): one file per key, as the API reads them"
     const made = keysDir('app-keys');
     expect(prepareAppKeys(made, counting())).toBe('created');
     expect(readdirSync(made).sort()).toEqual(
-      [...API_PURPOSES.map((purpose) => `key-${purpose}-v1`), 'public-operator-signing-v1'].sort(),
+      [
+        ...API_PURPOSES.map((purpose) => `key-${purpose}-v1`),
+        'public-operator-signing-v1',
+        'public-audit-rebase-v1',
+      ].sort(),
     );
     API_PURPOSES.forEach((purpose, index) => {
       const text = readFileSync(path.join(made, `key-${purpose}-v1`), 'utf8');
@@ -265,15 +269,19 @@ describe("the app's keys (ADR-011 §2): one file per key, as the API reads them"
     });
   });
 
-  it("puts the operator's own key where the API never mounts it, and its public half beside the API's keys (PL-57)", () => {
+  it("puts the operator's own keys where the API never mounts them, and their public halves beside the API's keys (PL-57, E11)", () => {
     const made = keysDir('app-keys-operator');
     const operator = keysDir('operator-keys');
     prepareAppKeys(made, counting(), operator);
-    const key = readFileSync(path.join(operator, 'key-operator-signing-v1'), 'utf8');
 
-    expect(readdirSync(operator)).toEqual(['key-operator-signing-v1']);
-    expect(readFileSync(path.join(made, 'public-operator-signing-v1'), 'utf8')).toBe(`${publicHalfOf(key)}\n`);
-    expect(publicHalfOf(key)).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(readdirSync(operator).sort()).toEqual(
+      ['audit-rebase', 'operator-signing'].map((purpose) => `key-${purpose}-v1`),
+    );
+    for (const purpose of ['operator-signing', 'audit-rebase']) {
+      const key = readFileSync(path.join(operator, `key-${purpose}-v1`), 'utf8');
+      expect(readFileSync(path.join(made, `public-${purpose}-v1`), 'utf8')).toBe(`${publicHalfOf(key)}\n`);
+      expect(publicHalfOf(key)).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    }
   });
 
   it("keeps every key it finds, since the stack's data is sealed with them, and writes only the missing ones", () => {

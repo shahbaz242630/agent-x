@@ -21,7 +21,7 @@ describe.skipIf(process.platform === 'win32')("B1c-2a the operator's request fil
   let keys: TestKeys;
   let folder: string;
   beforeAll(() => {
-    keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+    keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
     folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-pipe-'));
   });
   afterAll(() => {

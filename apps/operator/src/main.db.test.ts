@@ -4,7 +4,7 @@
 // walls, and a failure anywhere leaves nothing behind. What it refuses before
 // it connects is main.test.ts.
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -12,27 +12,39 @@ import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createPlatformChain, HEAD_WAIT_SECONDS } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
-import { type CheckedPoint, createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import {
+  type Chain,
+  type CheckedPoint,
+  createAnchorLog,
+  readRebaseFile,
+  rebaseFile,
+  signAnchor,
+  signRebase,
+} from '@agentx/platform/audit-chain';
+import { createDatabase, type Database, databaseNow, lockName, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { type Output } from '@agentx/platform/observability';
-import { folderWriteOnceStore } from '@agentx/platform/storage';
+import { folderWriteOnceStore, OverwriteRefused } from '@agentx/platform/storage';
 import {
   createTestDatabase,
+  holdNamedLock,
   LogCapture,
   tamperAsOwner,
   type TestDatabase,
   testLogger,
   type TestRole,
   within,
+  waitUntilQueued,
   writeTestKeys,
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import type { OperatorTables } from './create-organization.ts';
+import { REBASE_LOCK } from './chain-rebase.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
 import {
   auditExportRequest,
+  chainRebaseRequest,
   chainRecoveryRequest,
   firstAdminRequest,
   handoffRequest,
@@ -43,7 +55,61 @@ import {
 const faults = vi.hoisted(() => ({
   create: undefined as Error | undefined,
   readOnly: [] as boolean[],
+  /** Fails the next work through the signed states once (a rebase's event, E11). */
+  signedStates: undefined as Error | undefined,
+  /** Fails the next platform event recorded on its own once (a rebase's event, E11). */
+  platformRecord: undefined as Error | undefined,
+  /** Fails the next file written to a folder store once (a rebase's file, E11). */
+  storePut: undefined as Error | undefined,
 }));
+
+vi.mock('@agentx/core/modules/platform-controls', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/core/modules/platform-controls')>();
+  return {
+    ...actual,
+    createPlatformChain: (...args: Parameters<typeof actual.createPlatformChain>) => {
+      const chain = actual.createPlatformChain(...args);
+      return {
+        ...chain,
+        recordAlone: (...more: Parameters<typeof chain.recordAlone>) => {
+          const fault = faults.platformRecord;
+          faults.platformRecord = undefined;
+          return fault === undefined ? chain.recordAlone(...more) : Promise.reject(fault);
+        },
+      };
+    },
+  };
+});
+
+vi.mock('@agentx/platform/storage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/platform/storage')>();
+  return {
+    ...actual,
+    folderWriteOnceStore: (...args: Parameters<typeof actual.folderWriteOnceStore>) => {
+      const store = actual.folderWriteOnceStore(...args);
+      return {
+        ...store,
+        put: (...more: Parameters<typeof store.put>) => {
+          const fault = faults.storePut;
+          faults.storePut = undefined;
+          return fault === undefined ? store.put(...more) : Promise.reject(fault);
+        },
+      };
+    },
+  };
+});
+
+vi.mock('@agentx/core/modules/audit', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/core/modules/audit')>();
+  return {
+    ...actual,
+    withSignedStates: (...args: Parameters<typeof actual.withSignedStates>) => {
+      const fault = faults.signedStates;
+      faults.signedStates = undefined;
+      return fault === undefined ? actual.withSignedStates(...args) : Promise.reject(fault);
+    },
+  };
+});
 
 vi.mock('./create-organization.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./create-organization.ts')>();
@@ -71,16 +137,20 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 afterEach(() => {
   faults.create = undefined;
   faults.readOnly = [];
+  faults.signedStates = undefined;
+  faults.platformRecord = undefined;
+  faults.storePut = undefined;
 });
 
 const server = inject('postgres');
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 /** The same key the command holds, to check what it wrote. */
 const auditKeys = loadKeys({ directory: keys.directory, current: {} }, [
   'audit-mac',
   'field-encryption',
   'operator-signing',
+  'audit-rebase',
 ]);
 let database: TestDatabase;
 let app: Database<OperatorTables>;
@@ -191,6 +261,7 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
         expect.objectContaining({ purpose: 'audit-mac', current: 1 }),
         expect.objectContaining({ purpose: 'field-encryption', current: 1 }),
         expect.objectContaining({ purpose: 'operator-signing', current: 1 }),
+        expect.objectContaining({ purpose: 'audit-rebase', current: 1 }),
       ],
     });
     const created = line('operator.organization_created');
@@ -958,3 +1029,451 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
     expect(summary?.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 });
+
+describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-rebase-'));
+  const anchorKeyFiles = writeTestKeys(['audit-anchor']);
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+    anchorKeyFiles.remove();
+  });
+  const anchors = path.join(folder, 'anchors');
+  const rebases = path.join(anchors, 'e1', 'rebases');
+  const apiAnchorKey = loadKeys({ directory: anchorKeyFiles.directory, current: {} }, ['audit-anchor']);
+  const env = (store = anchors) =>
+    envFor('operator', {
+      AGENTX_AUDIT_ANCHORS_DIR: store,
+      AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${String(apiAnchorKey.describe()[0]?.versions[0]?.publicKey)}`,
+    });
+  const EVIDENCE = 'INC-2026/0042';
+
+  /** The chains' anchors as the API holds them: its own anchor key, and the rebase key's public half alone. */
+  const apiLog = () =>
+    createAnchorLog({
+      store: folderWriteOnceStore(anchors),
+      keys: {
+        ...apiAnchorKey,
+        verifySignature: (purpose, version, message, signature) =>
+          (purpose === 'audit-rebase' ? auditKeys : apiAnchorKey).verifySignature(purpose, version, message, signature),
+      },
+      logger: quiet(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+    });
+
+  /** The chain's head, checked whole. */
+  async function headOf(chain: Chain): Promise<CheckedPoint> {
+    const report =
+      chain.kind === 'platform'
+        ? await createPlatformChain({ keys: auditKeys, ids: uuidV7Ids }).verifyAlone(app, undefined)
+        : await createAuditTrail({ keys: auditKeys, ids: uuidV7Ids }).verifyAlone(app, chain.orgId, undefined);
+    if (!report.ok) throw new Error('The chain should check out');
+    return report;
+  }
+
+  /** The chain anchored `ahead` events past its head, as a chain wound back, or cut short by a repair, reads: its head. */
+  async function anchoredAhead(chain: Chain, ahead: bigint): Promise<CheckedPoint> {
+    const head = await headOf(chain);
+    const log = apiLog();
+    await log.read();
+    log.keep(signAnchor(apiAnchorKey, chain, { ...head, seq: head.seq + ahead }, new Date(), 1));
+    await log.flush();
+    return head;
+  }
+
+  async function madeOrganisation(): Promise<string> {
+    const orgId = uuidV7Ids.next();
+    const asked = path.join(folder, `create-${orgId}`);
+    writeFileSync(asked, JSON.stringify(['create-organization', '--name', NAME, '--id', orgId]));
+    expect((await run(['--request', asked])).code).toBe(0);
+    return orgId;
+  }
+
+  function rebase(chain: string, head: CheckedPoint, { id = uuidV7Ids.next(), store = anchors } = {}) {
+    const asked = path.join(folder, `rebase-${id}`);
+    writeFileSync(
+      asked,
+      chainRebaseRequest({
+        chain,
+        seq: head.seq.toString(),
+        hash: head.hash.toString('hex'),
+        reason: 'repaired',
+        evidence: EVIDENCE,
+        id,
+      }),
+    );
+    return { id, asked, running: run(['--request', asked], env(store)) };
+  }
+
+  /** The newest event of an organisation's chain, as stored. */
+  async function newestEvent(orgId: string): Promise<Record<string, unknown> | undefined> {
+    const rows = await database
+      .as('admin')
+      .query(
+        'select seq, actor_id, action, subject_type, subject_id, details from audit.events where org_id = $1 order by seq desc limit 1',
+        [orgId],
+      );
+    return rows[0];
+  }
+
+  it("SEC-DB-11 moves an organisation's chain on to the head named, says it is shorter, records it on the chain, and the API takes it in", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 3n);
+    const before = await databaseNow(app);
+    const { id, asked, running } = rebase(orgId, head);
+
+    const { code, events, line, text } = await running;
+
+    expect(code).toBe(0);
+    expect(events).toEqual([
+      'operator.starting',
+      'audit.anchors_read',
+      'operator.chain_rebase_shorter',
+      'operator.chain_rebased',
+    ]);
+    expect(line('operator.chain_rebase_shorter')).toMatchObject({
+      orgId,
+      rebaseId: id,
+      seq: String(head.seq),
+      anchorSeq: String(head.seq + 3n),
+      shorterBy: '3',
+    });
+    expect(line('operator.chain_rebased')).toMatchObject({
+      orgId,
+      rebaseId: id,
+      chain: 'organisation',
+      seq: String(head.seq),
+      headHash: head.hash.toString('hex'),
+      anchorSeq: String(head.seq + 3n),
+      shorterBy: '3',
+      reason: 'repaired',
+      recorded: 'recorded',
+    });
+    expect(text).not.toContain(EVIDENCE);
+    const read = await readRebaseFile(auditKeys, {
+      bytes: readFileSync(path.join(rebases, id)),
+      name: `e1/rebases/${id}`,
+      epoch: 1,
+    });
+    expect(read).toMatchObject({
+      rebase: { chain: `organisation:${orgId}`, seq: head.seq, from: head.seq + 3n, evidence: EVIDENCE },
+    });
+    // Dated by the database's clock.
+    const at = 'rebase' in read ? read.rebase.at.getTime() : 0;
+    expect(at).toBeGreaterThanOrEqual(before.getTime());
+    expect(at).toBeLessThanOrEqual((await databaseNow(app)).getTime());
+    // The organisation can read of it on its own chain: the operator's signed event, just past the rebase's place.
+    expect(await newestEvent(orgId)).toMatchObject({
+      seq: String(head.seq + 1n),
+      actor_id: 'operator',
+      action: 'audit_chain.rebased',
+      subject_type: 'audit_chain',
+      subject_id: id,
+    });
+    expect(JSON.parse(String((await newestEvent(orgId))?.details))).toMatchObject({
+      rebaseId: id,
+      seq: String(head.seq),
+      fromSeq: String(head.seq + 3n),
+      evidence: EVIDENCE,
+      reason: 'repaired',
+    });
+    expect((await headOf({ kind: 'organisation', orgId })).seq).toBe(head.seq + 1n);
+
+    const api = apiLog();
+    await api.read();
+    expect(api.latest({ kind: 'organisation', orgId })).toMatchObject({ seq: head.seq, hash: head.hash });
+
+    // The same request again: done, its event there already.
+    const again = await run(['--request', asked], env());
+    expect(again.code).toBe(1);
+    expect(again.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: 'already' });
+    // Another: the chain holds its point and has grown whole from it.
+    const another = await rebase(orgId, head).running;
+    expect(another.line('operator.chain_rebase_refused')).toMatchObject({
+      reason: 'not_needed',
+      seq: String(head.seq),
+    });
+  });
+
+  it('SEC-DB-11 refuses a head other than the one named, writing nothing: a chain cut short since is never blessed', async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 3n);
+    for (const named of [
+      { ...head, seq: head.seq + 1n },
+      { ...head, seq: head.seq - 1n },
+      { ...head, hash: Buffer.alloc(32, 7) },
+    ]) {
+      const { id, running } = rebase(orgId, named);
+      const { code, line } = await running;
+      expect(code).toBe(1);
+      expect(line('operator.chain_rebase_refused')).toMatchObject({
+        rebaseId: id,
+        reason: 'head_differs',
+        seq: String(head.seq),
+      });
+      expect(readdirOrNone(rebases)).not.toContain(id);
+    }
+    expect((await headOf({ kind: 'organisation', orgId })).seq).toBe(head.seq);
+  });
+
+  it('moves the platform chain on, as after it was begun again, and records it there', async () => {
+    const head = await anchoredAhead({ kind: 'platform' }, 5n);
+    const { id, asked, running } = rebase('platform', head);
+    const { code, line } = await running;
+    expect(code).toBe(0);
+    expect(line('operator.chain_rebased')).toMatchObject({
+      chain: 'platform',
+      anchorSeq: String(head.seq + 5n),
+      shorterBy: '5',
+      recorded: 'recorded',
+    });
+    expect(line('operator.chain_rebased')).not.toHaveProperty('orgId');
+    const rows = await database
+      .as('admin')
+      .query('select seq, actor_id, action from platform_controls.audit_events where id = $1', [id]);
+    expect(rows).toEqual([{ seq: String(head.seq + 1n), actor_id: 'operator', action: 'audit_chain.rebased' }]);
+
+    // Its rebase found again: the platform chain holds its event under the rebase's ID already, and refuses a second.
+    const again = await run(['--request', asked], env());
+    expect(again.code).toBe(1);
+    expect(again.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: 'already' });
+  });
+
+  it('a run whose event was not written says so; the same request run again writes only the event', async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 2n);
+    faults.signedStates = new Error('the database went away');
+    const { id, asked, running } = rebase(orgId, head);
+
+    const first = await running;
+    expect(first.code).toBe(1);
+    expect(first.line('operator.rebase_not_recorded')).toMatchObject({ orgId, rebaseId: id });
+    expect(first.line('operator.chain_rebased')).toMatchObject({ recorded: 'failed' });
+    expect(readdirOrNone(rebases)).toContain(id);
+    expect((await headOf({ kind: 'organisation', orgId })).seq).toBe(head.seq);
+
+    const again = await run(['--request', asked], env());
+    expect(again.code).toBe(0);
+    // Every rebase in the store is said as it is read (audit.rebased), this one's among them.
+    expect(again.events.filter((event) => event !== 'audit.rebased')).toEqual([
+      'operator.starting',
+      'audit.anchors_read',
+      'operator.rebase_recorded',
+    ]);
+    expect(again.line('operator.rebase_recorded')).toMatchObject({
+      rebaseId: id,
+      note: "The rebase was already written; its record on the chain's audit log is now written too.",
+    });
+    expect(await newestEvent(orgId)).toMatchObject({ action: 'audit_chain.rebased', subject_id: id });
+  });
+
+  it("two runs finishing one rebase's record at once write it once: each waits for the rebase's lock before it looks", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 2n);
+    faults.signedStates = new Error('the database went away');
+    const { id, asked, running } = rebase(orgId, head);
+    expect((await running).line('operator.rebase_not_recorded')).toMatchObject({ rebaseId: id });
+
+    // A third party part-way through, holding the rebase's lock: both runs queue behind it, then go one after the other.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holdNamedLock(holder, lockName(REBASE_LOCK, id));
+      const both = within(
+        30_000,
+        Promise.all([run(['--request', asked], env()), run(['--request', asked], env())]),
+        'the two runs',
+      );
+      await waitUntilQueued(database.as('admin'), 2);
+      await holder.query('commit');
+      const outcomes = (await both).map((done) => [done.code, done.events.at(-1)]);
+      expect(outcomes.toSorted()).toEqual([
+        [0, 'operator.rebase_recorded'],
+        [1, 'operator.done_before'],
+      ]);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    const written = await database
+      .as('admin')
+      .query("select count(*)::int as n from audit.events where org_id = $1 and action = 'audit_chain.rebased'", [
+        orgId,
+      ]);
+    expect(written).toEqual([{ n: 1 }]);
+  });
+
+  it("dates the rebase by the database's clock, whatever the job's own says", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 1n);
+    const before = await databaseNow(app);
+    // The job's clock a year ahead: only Date is faked, so the database and its timers go on as they are.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.now() + 365 * 86_400_000));
+    let done: Awaited<ReturnType<typeof run>>;
+    try {
+      done = await rebase(orgId, head).running;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(done.code).toBe(0);
+    const at = Date.parse(String(done.line('operator.chain_rebased')?.at));
+    expect(at).toBeGreaterThanOrEqual(before.getTime());
+    expect(at).toBeLessThanOrEqual((await databaseNow(app)).getTime());
+  });
+
+  /** An organisation whose chain holds two events, its first anchored with another hash: wound back and grown again. */
+  async function grownAgainOnAWoundBackHead(): Promise<{ orgId: string; head: CheckedPoint }> {
+    const orgId = await madeOrganisation();
+    await withTenant(app, orgId, (tx) =>
+      createAuditTrail({ keys: auditKeys, ids: uuidV7Ids }).record(tx, orgId, {
+        actor: { type: 'system', id: 'api' },
+        action: 'probe.noted',
+        subject: { type: 'probe', id: orgId, version: 1 },
+        details: { n: 1 },
+      }),
+    );
+    const head = await headOf({ kind: 'organisation', orgId });
+    const log = apiLog();
+    await log.read();
+    const first = { seq: 1n, hash: Buffer.alloc(32, 9), macKeyVersion: head.macKeyVersion };
+    log.keep(signAnchor(apiAnchorKey, { kind: 'organisation', orgId }, first, new Date(), 1));
+    await log.flush();
+    return { orgId, head };
+  }
+
+  it('moves a chain grown again past a wound-back anchor on to its head, giving up nothing', async () => {
+    const { orgId, head } = await grownAgainOnAWoundBackHead();
+    const { code, events, line } = await rebase(orgId, head).running;
+    expect(code).toBe(0);
+    expect(events).not.toContain('operator.chain_rebase_shorter');
+    expect(line('operator.chain_rebased')).toMatchObject({ seq: String(head.seq), anchorSeq: '1', shorterBy: '0' });
+  });
+
+  it('SEC-DB-11 refuses a chain that fails its own check past where it fails its anchor', async () => {
+    const { orgId, head } = await grownAgainOnAWoundBackHead();
+    await database
+      .as('admin')
+      .query(`update audit.events set details = '{"forged":1}' where org_id = $1 and seq = 2`, [orgId]);
+    const { code, line } = await rebase(orgId, head).running;
+    expect(code).toBe(1);
+    expect(line('operator.chain_rebase_refused')).toMatchObject({ reason: 'broken', seq: '2' });
+  });
+
+  it('finishes a rebase found in the store for a chain that had no anchor before, its record naming none', async () => {
+    const orgId = await madeOrganisation();
+    const head = await headOf({ kind: 'organisation', orgId });
+    const id = uuidV7Ids.next();
+    const fresh = signRebase(auditKeys, 1, {
+      id,
+      chain: `organisation:${orgId}`,
+      seq: head.seq,
+      hash: head.hash,
+      macKeyVersion: head.macKeyVersion,
+      at: await databaseNow(app),
+      reason: 'recovered',
+      evidence: EVIDENCE,
+      from: null,
+    });
+    await folderWriteOnceStore(anchors).put(`e1/rebases/${id}`, rebaseFile(fresh));
+    const { code, line } = await rebase(orgId, head, { id }).running;
+    expect(code).toBe(0);
+    expect(line('operator.rebase_recorded')).toMatchObject({ rebaseId: id });
+    expect(JSON.parse(String((await newestEvent(orgId))?.details))).toMatchObject({ rebaseId: id, fromSeq: null });
+  });
+
+  it("says the record failed when the organisation's audit log about the rebase can't be verified", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 1n);
+    const { id, asked, running } = rebase(orgId, head);
+    expect((await running).code).toBe(0);
+    await database
+      .as('admin')
+      .query(`update audit.events set details = '{"forged":1}' where org_id = $1 and subject_id = $2`, [orgId, id]);
+    const again = await run(['--request', asked], env());
+    expect(again.code).toBe(1);
+    expect(again.line('operator.rebase_not_recorded')).toMatchObject({ rebaseId: id });
+    expect(again.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: 'failed' });
+  });
+
+  it("says the platform chain's record failed, for any refusal but its own event there already", async () => {
+    const head = await anchoredAhead({ kind: 'platform' }, 2n);
+    faults.platformRecord = new Error('the database went away');
+    const { id, running } = rebase('platform', head);
+    const { code, line } = await running;
+    expect(code).toBe(1);
+    expect(line('operator.rebase_not_recorded')).toMatchObject({ rebaseId: id });
+    expect(line('operator.chain_rebased')).toMatchObject({ recorded: 'failed' });
+  });
+
+  it("refuses a rebase whose file another run wrote first, and fails on any other failure of the store's write", async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 1n);
+    faults.storePut = new OverwriteRefused();
+    const raced = await rebase(orgId, head).running;
+    expect(raced.code).toBe(1);
+    expect(raced.line('operator.done_before')).toMatchObject({ command: 'chain-rebase', recorded: null });
+
+    faults.storePut = new Error('the store went away');
+    const failed = await rebase(orgId, head).running;
+    expect(failed.code).toBe(1);
+    expect(failed.line('operator.failed')).toMatchObject({ command: 'chain-rebase' });
+    expect((await headOf({ kind: 'organisation', orgId })).seq).toBe(head.seq);
+  });
+
+  it('refuses a chain that holds its anchor, or has none: nothing to move', async () => {
+    const orgId = await madeOrganisation();
+    const { id, running } = rebase(orgId, await headOf({ kind: 'organisation', orgId }));
+    const { code, line } = await running;
+    expect(code).toBe(1);
+    expect(line('operator.chain_rebase_refused')).toMatchObject({ orgId, reason: 'not_needed', seq: null });
+    expect(readdirOrNone(rebases)).not.toContain(id);
+  });
+
+  it('SEC-DB-11 refuses a chain that fails its own check: a rebase never blesses what the app did not write', async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 3n);
+    await database
+      .as('admin')
+      .query(`update audit.events set details = '{"forged":1}' where org_id = $1 and seq = 1`, [orgId]);
+
+    const { id, running } = rebase(orgId, head);
+    const { code, line } = await running;
+
+    expect(code).toBe(1);
+    expect(line('operator.chain_rebase_refused')).toMatchObject({ rebaseId: id, reason: 'broken', seq: '1' });
+    expect(readdirOrNone(rebases)).not.toContain(id);
+  });
+
+  it('refuses a rebase whose ID is taken in the store by something else, and one the store cannot be read for', async () => {
+    const orgId = await madeOrganisation();
+    const head = await anchoredAhead({ kind: 'organisation', orgId }, 3n);
+    const id = uuidV7Ids.next();
+    await folderWriteOnceStore(anchors).put(`e1/rebases/${id}`, Buffer.from('taken'));
+    const taken = await rebase(orgId, head, { id }).running;
+    expect(taken.code).toBe(1);
+    expect(taken.line('operator.done_before')).toMatchObject({ command: 'chain-rebase', rebaseId: id, recorded: null });
+    expect((await headOf({ kind: 'organisation', orgId })).seq).toBe(head.seq);
+
+    const notAFolder = path.join(folder, 'not-a-folder');
+    writeFileSync(notAFolder, '');
+    const unread = await rebase(orgId, head, { store: notAFolder }).running;
+    expect(unread.code).toBe(1);
+    expect(unread.line('operator.chain_rebase_refused')).toMatchObject({ reason: 'store' });
+  });
+
+  it('reads nothing when the live server does not prove itself read-only', async () => {
+    faults.readOnly.push(false);
+    const { code, line } = await rebase('platform', await headOf({ kind: 'platform' })).running;
+    expect(code).toBe(1);
+    expect(line('operator.refused')).toMatchObject({
+      problems: ['the connection is not read-only, so nothing was read'],
+    });
+  });
+});
+
+/** A folder's names, or none where it isn't there yet. */
+function readdirOrNone(folder: string): string[] {
+  return existsSync(folder) ? readdirSync(folder) : [];
+}

@@ -41,8 +41,8 @@ describe("4D2e E9: checking the anchors' signatures with their public keys alone
     expect(checker.verifySignature('audit-anchor', 1, message, signature)).toBe(false);
     expect(checker.verifySignature('audit-anchor', 3, message, signature)).toBe(false);
     expect(checker.verifySignature('audit-anchor', 2, [...message, 'more'], signature)).toBe(false);
-    // A purpose of its own to come (E11's rebase key): the anchor's public key never stands for it.
-    expect(checker.verifySignature('audit-rebase' as 'audit-anchor', 2, message, signature)).toBe(false);
+    // A purpose of its own (E11's rebase key): the anchor's public key never stands for it.
+    expect(checker.verifySignature('audit-rebase', 2, message, signature)).toBe(false);
   });
 
   it('holds no key: every other use is refused', () => {

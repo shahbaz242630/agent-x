@@ -259,6 +259,7 @@ describe("ADR-011 §2: the app's keys, as Azure mounts them", () => {
       `./secrets/${APP_KEYS}/key-audit-mac-v1:${SECRETS_PATH}/key-audit-mac-v1:ro`,
       `./secrets/${APP_KEYS}/key-field-encryption-v1:${SECRETS_PATH}/key-field-encryption-v1:ro`,
       `./secrets/${OPERATOR_KEYS}/key-operator-signing-v1:${SECRETS_PATH}/key-operator-signing-v1:ro`,
+      `./secrets/${OPERATOR_KEYS}/key-audit-rebase-v1:${SECRETS_PATH}/key-audit-rebase-v1:ro`,
       './secrets/operator-requests:/mnt/requests:ro',
     ]);
     expect(file.services.operator?.environment).toMatchObject({

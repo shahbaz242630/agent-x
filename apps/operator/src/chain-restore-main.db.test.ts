@@ -83,11 +83,12 @@ afterEach(() => {
 
 const server = inject('postgres');
 /** The operator's keys, which made the organisation; the repair is given the MAC key and the public half alone. */
-const operatorKeyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const operatorKeyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 const operatorKeys = loadKeys({ directory: operatorKeyFiles.directory, current: {} }, [
   'audit-mac',
   'field-encryption',
   'operator-signing',
+  'audit-rebase',
 ]);
 /** writeTestKeys gives each purpose its place's value: audit-mac first, so the same key as the operator's. */
 const restoreKeyFiles = writeTestKeys(['audit-mac']);
@@ -95,6 +96,11 @@ const operatorHalf = String(
   operatorKeys.describe().find((key) => key.purpose === 'operator-signing')?.versions[0]?.publicKey,
 );
 writeFileSync(path.join(restoreKeyFiles.directory, 'public-operator-signing-v1'), `${operatorHalf}\n`);
+// The rebase key's public half, mounted beside it as on Azure (publicHalves): the job must start with it (E11).
+const rebaseHalf = String(
+  operatorKeys.describe().find((key) => key.purpose === 'audit-rebase')?.versions[0]?.publicKey,
+);
+writeFileSync(path.join(restoreKeyFiles.directory, 'public-audit-rebase-v1'), `${rebaseHalf}\n`);
 
 const folder = mkdtempSync(path.join(tmpdir(), 'agentx-chain-restore-'));
 const evidence = path.join(folder, 'evidence');

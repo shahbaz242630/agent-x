@@ -826,10 +826,13 @@ const ANCHOR_ACTIONS = [
 /** The anchors' custom role as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors');
 
-/** The operator's role on the anchors (4D2e E9): Get Blob and List Blobs alone, for a chain recovery plan. */
+/**
+ * A read-only role on a store's container: Get Blob and List Blobs alone. The chain repair's read of the anchors and
+ * of the plans (4D2e E10). The operator holds the anchors' own role instead, to add a rebase (E11).
+ */
 const ANCHOR_READ_ACTIONS = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'] as const;
 
-/** The operator's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
+/** The chain repair's read of the anchors as a role assignment names it, without case (modules/evidence.bicep names it so). */
 const anchorReaderRoleName = (groupId: string): string => bicepGuid(groupId, 'audit-anchors-reader');
 
 /** The chain repair's read of the plans as a role assignment names it, without case (modules/evidence.bicep, 4D2e E10). */
@@ -1974,10 +1977,11 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * custom role, assignable in the resource group alone, given once on that
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
- * a new file and reads, to the API's. The anchors container has a second role,
- * reading alone, to the operator's identity, for a chain recovery plan (4D2e E9).
- * The API and the operator's job alone are told where the anchors are, each as
- * the identity its role is given to (`storeSettingsProblems`). None can
+ * a new file and reads, to the API's and the operator's (a chain recovery plan,
+ * 4D2e E9, and a rebase, E11). The anchors container has a second role, reading
+ * alone, to the chain repair's identity (4D2e E10). The API, the operator's job
+ * and the chain repair's job alone are told where the anchors are, each as its
+ * own identity its role is given to (`storeSettingsProblems`). None can
  * overwrite or delete. The account's immutability covers both. Its logs are
  * `resource-logs`'s.
  */
@@ -2059,7 +2063,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workloads: ['api'],
+      // The operator adds a chain's rebase (4D2e E11) as the API adds an anchor.
+      workloads: ['api', 'operator'],
       called: "the anchors' role",
       on: 'the anchors container',
     },
@@ -2071,8 +2076,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       name: anchorReaderRoleName(groupOf(snapshot)),
       dataActions: ANCHOR_READ_ACTIONS,
       containers: containersNamed(snapshot, ANCHOR_CONTAINER),
-      workloads: STORE_WRITERS,
-      called: "the operator's read of the anchors",
+      workloads: ['chain-restore'],
+      called: "the chain repair's read of the anchors",
       on: 'the anchors container',
     },
     problem,
@@ -2085,8 +2090,11 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
       accounts,
       container: ANCHOR_CONTAINER,
-      holders: (workload) => (isApiApp(workload) ? keepers : ownOf(workload, STORE_WRITERS, readers)),
-      holder: "the API keeps the chains' anchors and the operator's and the chain repair's jobs read them",
+      holders: (workload) =>
+        isApiApp(workload)
+          ? keepers.filter((identity) => workloadOf(identity.name) === 'api')
+          : (ownOf(workload, ['operator'], keepers) ?? ownOf(workload, ['chain-restore'], readers)),
+      holder: "the API and the operator's job keep the chains' anchors and the chain repair's job reads them",
       store: 'store',
     },
     problem,

@@ -23,11 +23,12 @@ import { createOrganizationAsOperator } from './create-organization.ts';
 import { changeHandoffPauseAsOperator, type HandoffPauseRequest, type HandoffPauseTables } from './handoff-pause.ts';
 
 const server = inject('postgres');
-const mounted = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const mounted = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 const keys = loadKeys({ directory: mounted.directory, current: {} }, [
   'audit-mac',
   'field-encryption',
   'operator-signing',
+  'audit-rebase',
 ]);
 let database: TestDatabase;
 let app: Database<HandoffPauseTables>;

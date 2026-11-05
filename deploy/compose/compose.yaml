@@ -187,6 +187,7 @@ services:
       - ./secrets/app-keys/key-audit-mac-v1:/mnt/secrets/key-audit-mac-v1:ro
       - ./secrets/app-keys/key-field-encryption-v1:/mnt/secrets/key-field-encryption-v1:ro
       - ./secrets/operator-keys/key-operator-signing-v1:/mnt/secrets/key-operator-signing-v1:ro
+      - ./secrets/operator-keys/key-audit-rebase-v1:/mnt/secrets/key-audit-rebase-v1:ro
       - ./secrets/operator-requests:/mnt/requests:ro
     restart: 'no'
 
