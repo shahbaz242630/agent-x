@@ -720,8 +720,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
             : [`api reads ${key}`];
         }),
         'api reads public-audit-rebase-v1',
-        'api reads public-operator-signing-v1',
         'chain-restore reads public-audit-rebase-v1',
+        'api reads public-operator-signing-v1',
         'chain-restore reads public-operator-signing-v1',
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
@@ -1723,7 +1723,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           rule: 'evidence-store',
           resource: 'job-agentx-stg-migrate',
           message:
-            "sets AGENTX_AUDIT_ANCHORS_URL: only the API keeps the chains' anchors and the operator's and the chain repair's jobs read them",
+            "sets AGENTX_AUDIT_ANCHORS_URL: only the API and the operator's job keep the chains' anchors and the chain repair's job reads them",
         },
       ]);
     });
@@ -1738,7 +1738,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
         )?.id,
       );
 
-    describe("the operator's read of it, for a chain recovery plan (4D2e E9), and its rebases (E11)", () => {
+    describe("the operator's hold on it, for a chain recovery plan (4D2e E9) and its rebases (E11)", () => {
+      // The chain repair's read-only role (4D2e E10); the operator holds the API's own role instead.
       const READER = (resource: PredictedResource) =>
         ROLE_DEFINITIONS(resource) &&
         resource.name ===
@@ -1748,19 +1749,27 @@ describe('SEC-OPS-09 each rule can fail', () => {
           );
       const READS = (resource: PredictedResource) =>
         ASSIGNMENTS(resource) &&
-        String(at(resource.properties, 'description')).startsWith('operator reads audit anchors');
+        String(at(resource.properties, 'description')).startsWith('operator reads and adds audit anchors');
+      const roleIdOf = (find: (resource: PredictedResource) => boolean): unknown =>
+        at(staging.predictedResources.find(find)?.properties, 'roleDefinitionId');
 
-      it('its role reads and lists, and adds a new file (a rebase), and can overwrite or delete nothing', () => {
+      it("holds the API's role, to read, list and add a rebase; the read-only role, given to it, is refused", () => {
+        expect(roleIdOf(READS)).toEqual(roleIdOf(KEEPS));
+        const readOnly = changed(READS, (grant: Mutable) => {
+          inside(grant, 'properties').roleDefinitionId = String(roleIdOf(READS)).replace(
+            String(staging.predictedResources.find(ROLE)?.name),
+            String(staging.predictedResources.find(READER)?.name),
+          );
+        });
+        expect(brokenRules(readOnly)).toEqual(['evidence-store']);
+      });
+
+      it("the chain repair's role reads and lists, and can add, overwrite or delete nothing", () => {
         expect(at(staging.predictedResources.find(READER)?.properties, 'permissions')).toEqual([
-          {
-            actions: [],
-            notActions: [],
-            dataActions: [`${ACTIONS_OF}/add/action`, `${ACTIONS_OF}/read`],
-            notDataActions: [],
-          },
+          { actions: [], notActions: [], dataActions: [`${ACTIONS_OF}/read`], notDataActions: [] },
         ]);
         for (const change of [
-          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).splice(0, 1),
+          (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/add/action`),
           (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
           (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
           (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
