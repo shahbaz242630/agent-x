@@ -41,7 +41,9 @@ describe('SEC-TEN-07 the string-built SQL rule is turned off in product code onl
     expect(counted).toEqual({
       // Each file's text; a no-transaction file's statements (4D2e D8); an index name the catalogue gave, quoted by format('%I.%I').
       'packages/platform/src/db/migrate.ts': 3,
-      'packages/platform/src/db/server-setup.ts': 4,
+      // The bootstrap files, two role grants, a login, and the operator's CONNECT on a server made before it (PL-57),
+      // each name checked as a plain Postgres name.
+      'packages/platform/src/db/server-setup.ts': 5,
       'packages/platform/src/db/tenant.ts': 2,
     });
   });

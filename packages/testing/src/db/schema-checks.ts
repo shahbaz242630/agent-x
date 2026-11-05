@@ -84,6 +84,8 @@ export interface SchemaPolicy {
    * its reason: a row the app locks and moves on, such as a chain head.
    */
   readonly appendOnlyExceptions: Readonly<Record<string, string>>;
+  /** Tenant tables in those schemas that the app may only read, each with its reason (PL-57). */
+  readonly appReadsOnly: Readonly<Record<string, string>>;
   /**
    * Tenant tables outside those schemas that the app may add rows to and read,
    * and change only in the columns listed, never DELETE, by schema-qualified
@@ -104,6 +106,8 @@ export interface SchemaPolicy {
    * to their table, name, key columns and printed condition (E2-1a).
    */
   readonly partialUniqueIndexes: readonly PartialUniqueIndex[];
+  /** Every right the operator's role holds, exactly, as the live guard names each (`<privilege> on <object>`, PL-57). */
+  readonly operatorRights: readonly string[];
 }
 
 /** A unique index allowed to be partial, exactly as listed (E2-1a). */
@@ -509,10 +513,11 @@ interface Facts {
   memberships: Membership[];
 }
 
-/** The app and backup roles db/bootstrap/roles.sql creates. */
+/** The app and backup roles db/bootstrap/roles.sql creates, and the operator's, operator-role.sql. */
 interface RoleNames {
   readonly app: string;
   readonly backup: string;
+  readonly operator: string;
 }
 
 /**
@@ -520,7 +525,11 @@ interface RoleNames {
  * migration role and reads the system catalogues; it changes nothing.
  */
 export async function schemaProblems(database: TestDatabase, policy: SchemaPolicy): Promise<string[]> {
-  const roles: RoleNames = { app: database.server.roles.app.user, backup: database.server.roles.backup.user };
+  const roles: RoleNames = {
+    app: database.server.roles.app.user,
+    backup: database.server.roles.backup.user,
+    operator: database.server.roles.operator.user,
+  };
   // The catalogue connection: the migration role, pg_catalog alone on the
   // search path, so every name from our schemas is printed with its schema,
   // public included. (A look-alike function in a policy prints with its schema
@@ -656,10 +665,12 @@ const CHECKED_LISTS: readonly string[] = [
   'globalTables',
   'appendOnlySchemas',
   'appendOnlyExceptions',
+  'appReadsOnly',
   'fillInTables',
   'requiredForeignKeys',
   'partialUniqueIndexes',
   'tablesThatStay',
+  'operatorRights',
 ] satisfies readonly (keyof SchemaPolicy)[];
 
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
@@ -674,6 +685,7 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
     ...unchecked.map((list) => `the schema policy's ${list} is a list CI-06 doesn't check`),
     ...globalListProblems(policy, facts),
     ...appendOnlyListProblems(policy, facts),
+    ...readsOnlyListProblems(policy, facts),
     ...fillInListProblems(policy, facts, roles),
     ...requiredForeignKeyProblems(policy, facts),
     ...policy.tablesThatStay
@@ -708,6 +720,7 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
     ),
     ...facts.grants.flatMap((grant) => grantProblems(grant, policy, roles)),
     ...unheldRightProblems(policy, facts, roles),
+    ...operatorRightProblems(policy, facts, roles),
     ...facts.roles
       .filter((role) => role.bypass_rls && role.name !== roles.backup)
       .map((role) => `role ${role.name} has BYPASSRLS; only ${roles.backup} may (ADR-005 §3)`),
@@ -740,14 +753,19 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
       problems.push(`${name}: the global-table list names column ${column}, which the table doesn't have`);
     }
     const appendOnly = policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`));
-    if (appendOnly && table.appMay !== undefined) {
-      problems.push(`${name}: the global-table list names the app's rights, but its schema is append-only`);
+    // Inside an append-only schema a list may only narrow what the schema allows (PL-57: a table the app only reads).
+    if (appendOnly && table.appMay?.some((right) => !APPEND_ONLY_APP_MAY.includes(right)) === true) {
+      problems.push(
+        `${name}: the global-table list lets the app do more than add and read, but its schema is append-only`,
+      );
     } else if (!appendOnly && table.appMay === undefined) {
       problems.push(`${name}: the global-table list doesn't name the app's rights on it (B1d-1)`);
     } else if (table.appMay !== undefined && new Set(table.appMay).size !== table.appMay.length) {
       problems.push(`${name}: the global-table list names one of the app's rights twice`);
     }
-    problems.push(...appMayUpdateProblems(name, table, appendOnly));
+    // An append-only table the app may change at all (an exception) may name the only columns it changes.
+    const exception = Object.hasOwn(policy.appendOnlyExceptions, name);
+    problems.push(...appMayUpdateProblems(name, table, appendOnly && !exception));
     return problems;
   });
 }
@@ -879,6 +897,23 @@ function appendOnlyListProblems(policy: SchemaPolicy, facts: Facts): string[] {
       problems.push(`${name}: is on the append-only exception list, but no such table exists`);
     } else if (!policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) {
       problems.push(`${name}: is on the append-only exception list, but its schema isn't append-only`);
+    }
+    return problems;
+  });
+}
+
+/** Every read-only table has a reason, and names a tenant table that exists in an append-only schema, on no other list. */
+function readsOnlyListProblems(policy: SchemaPolicy, facts: Facts): string[] {
+  return Object.entries(policy.appReadsOnly).flatMap(([name, reason]) => {
+    const problems: string[] = [];
+    if (reason.trim() === '') problems.push(`${name}: the read-only list gives no reason for it`);
+    if (!facts.relations.some((relation) => relation.name === name)) {
+      problems.push(`${name}: is on the read-only list, but no such table exists`);
+    } else if (!policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) {
+      problems.push(`${name}: is on the read-only list, but its schema isn't append-only`);
+    }
+    if (Object.hasOwn(policy.globalTables, name) || Object.hasOwn(policy.appendOnlyExceptions, name)) {
+      problems.push(`${name}: is on the read-only list and another list of the app's rights`);
     }
     return problems;
   });
@@ -1082,6 +1117,10 @@ function appendOnlyGrantProblems(grant: Grant, policy: SchemaPolicy, roles: Role
   // Only inside an append-only schema, as the live guard reads it; an exception
   // listed anywhere else already fails the list's own check (appendOnlyListProblems).
   const exception = inAppendOnly && Object.hasOwn(policy.appendOnlyExceptions, grant.relation);
+  const readsOnly = inAppendOnly && Object.hasOwn(policy.appReadsOnly, grant.relation);
+  if (readsOnly && grant.grantee === roles.app && grant.privilege !== 'SELECT') {
+    return [`${grant.object}: ${roles.app} has ${grant.privilege} on a table it may only read (PL-57)`];
+  }
   if (inAppendOnly && !exception && grant.grantee === roles.app && !APPEND_ONLY_APP_MAY.includes(grant.privilege)) {
     return [
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)`,
@@ -1164,4 +1203,30 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
     ];
   }
   return [];
+}
+
+/**
+ * A grant as the live guard names it (`<privilege> on <object>`): a table's or
+ * sequence's by its name alone, this database's as `this database`.
+ */
+function guardNamed(grant: Grant): string {
+  const object = grant.object.replace(/^(?:table|sequence) /, '').replace(/^database .*$/, 'this database');
+  return `${grant.privilege} on ${object}`;
+}
+
+/** The operator's role holding exactly the schema policy's list (PL-57): nothing more, nothing less. */
+function operatorRightProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames): string[] {
+  const held = facts.grants.filter((grant) => grant.grantee === roles.operator && grant.kind !== 'default');
+  const named = new Set(held.map(guardNamed));
+  return [
+    ...held
+      .filter((grant) => !policy.operatorRights.includes(guardNamed(grant)))
+      .map(
+        (grant) =>
+          `${grant.object}: ${roles.operator} has ${grant.privilege}, which the schema policy's operatorRights don't list (PL-57)`,
+      ),
+    ...policy.operatorRights
+      .filter((right) => !named.has(right))
+      .map((right) => `${roles.operator} lacks ${right}, which the schema policy's operatorRights list (PL-57)`),
+  ];
 }

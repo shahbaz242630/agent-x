@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
+import { API_PURPOSES, PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 import {
   API_SIGN_IN,
   APP_KEYS,
@@ -23,6 +23,7 @@ import {
   PASSWORDS,
   prepare,
   prepareAppKeys,
+  publicHalfOf,
   prepareEnv,
   prepareKeys,
   prepareSuiteDir,
@@ -255,11 +256,24 @@ describe("the app's keys (ADR-011 §2): one file per key, as the API reads them"
   it('writes a version 1 key for every purpose: 32 random bytes as base64url, on one line', () => {
     const made = keysDir('app-keys');
     expect(prepareAppKeys(made, counting())).toBe('created');
-    expect(readdirSync(made).sort()).toEqual(PURPOSES.map((purpose) => `key-${purpose}-v1`).sort());
-    PURPOSES.forEach((purpose, index) => {
+    expect(readdirSync(made).sort()).toEqual(
+      [...API_PURPOSES.map((purpose) => `key-${purpose}-v1`), 'public-operator-signing-v1'].sort(),
+    );
+    API_PURPOSES.forEach((purpose, index) => {
       const text = readFileSync(path.join(made, `key-${purpose}-v1`), 'utf8');
       expect(text).toBe(`${Buffer.alloc(32, index + 1).toString('base64url')}\n`);
     });
+  });
+
+  it("puts the operator's own key where the API never mounts it, and its public half beside the API's keys (PL-57)", () => {
+    const made = keysDir('app-keys-operator');
+    const operator = keysDir('operator-keys');
+    prepareAppKeys(made, counting(), operator);
+    const key = readFileSync(path.join(operator, 'key-operator-signing-v1'), 'utf8');
+
+    expect(readdirSync(operator)).toEqual(['key-operator-signing-v1']);
+    expect(readFileSync(path.join(made, 'public-operator-signing-v1'), 'utf8')).toBe(`${publicHalfOf(key)}\n`);
+    expect(publicHalfOf(key)).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it("keeps every key it finds, since the stack's data is sealed with them, and writes only the missing ones", () => {
@@ -287,7 +301,7 @@ describe("the app's keys (ADR-011 §2): one file per key, as the API reads them"
     const made = keysDir('app-keys-mode');
     prepareAppKeys(made, counting());
     if (process.platform === 'win32') return;
-    for (const purpose of PURPOSES) {
+    for (const purpose of API_PURPOSES) {
       expect(statSync(path.join(made, `key-${purpose}-v1`)).mode & 0o777).toBe(0o644);
     }
   });

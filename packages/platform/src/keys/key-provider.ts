@@ -88,8 +88,11 @@ export interface KeyVersionDescription {
 
 export interface KeyDescription {
   readonly purpose: KeyPurpose;
+  /** The version new work uses; for a key checked with only (`checksOnly`), its newest. */
   readonly current: number;
   readonly versions: readonly KeyVersionDescription[];
+  /** Held as public halves alone, to check another process's signatures with (PL-57): this process can't sign. */
+  readonly checksOnly?: true;
 }
 
 export interface KeyProvider {
@@ -125,6 +128,28 @@ export interface PurposeKeys {
 
 /** The keys of each purpose a process holds; a purpose it doesn't hold has none. */
 export type KeyMaterial = Readonly<Partial<Record<KeyPurpose, PurposeKeys>>>;
+
+/**
+ * Public halves of another process's signing keys, by version, each the raw
+ * 32 bytes of an Ed25519 public key: what a process checks signatures with
+ * when it may not hold the key itself (the API, the operator's key; PL-57).
+ */
+export type PublicKeys = Readonly<Partial<Record<SigningPurpose, ReadonlyMap<number, Uint8Array>>>>;
+
+/** Ed25519's SubjectPublicKeyInfo wrapping of a 32-byte public key (RFC 8410). */
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+/** Why a set of public halves can't be used, or nothing: 32 bytes each, a version from 1, and none for a purpose held. */
+export function publicKeyProblems(publicKeys: PublicKeys, held: readonly KeyPurpose[]): string[] {
+  return Object.entries(publicKeys).flatMap(([purpose, versions]) => [
+    ...(held.includes(purpose as KeyPurpose)
+      ? [`${purpose} is a key this process holds, so it checks with its own: no public half may be given`]
+      : []),
+    ...[...versions.entries()]
+      .filter(([version, key]) => !(Number.isInteger(version) && version >= 1) || key.length !== KEY_BYTES)
+      .map(([version]) => `public-${purpose}-v${String(version)} must be a version from 1 holding ${KEY_BYTES} bytes`),
+  ]);
+}
 
 /**
  * Why a set of keys can't be used, or nothing: at least one purpose is held,
@@ -222,6 +247,37 @@ function hold(purpose: KeyPurpose, { current, versions }: PurposeKeys): Held {
   };
 }
 
+/** Each purpose checked with public halves alone: the key of each version, and how the start line shows them. */
+function checkingWith(publicKeys: PublicKeys): Map<SigningPurpose, Checking> {
+  const checking = new Map<SigningPurpose, Checking>();
+  for (const [purpose, versions] of Object.entries(publicKeys) as [SigningPurpose, ReadonlyMap<number, Uint8Array>][]) {
+    const sorted = [...versions].sort(([a], [b]) => a - b);
+    const keys = new Map(
+      sorted.map(([version, bytes]) => [
+        version,
+        createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, bytes]), format: 'der', type: 'spki' }),
+      ]),
+    );
+    const described = sorted.map(([version, bytes]) =>
+      Object.freeze({ version, check: checkValue(bytes), publicKey: Buffer.from(bytes).toString('base64url') }),
+    );
+    const description: KeyDescription = Object.freeze({
+      purpose,
+      current: Math.max(0, ...versions.keys()),
+      versions: Object.freeze(described),
+      checksOnly: true,
+    });
+    checking.set(purpose, { keys, description });
+  }
+  return checking;
+}
+
+/** A purpose checked with public halves alone. */
+interface Checking {
+  readonly keys: ReadonlyMap<number, KeyObject>;
+  readonly description: KeyDescription;
+}
+
 /**
  * The in-process provider, holding its own copy of each key of the purposes
  * `held` (every purpose when not given: the API's). A process that needs only
@@ -234,8 +290,12 @@ function hold(purpose: KeyPurpose, { current, versions }: PurposeKeys): Held {
  * wiping one copy of several (ADR-011 §2: an HSM adapter is the answer for a
  * bank that needs more).
  */
-export function createKeyProvider(material: KeyMaterial, held: readonly KeyPurpose[] = PURPOSES): KeyProvider {
-  const problems = keyMaterialProblems(material, held);
+export function createKeyProvider(
+  material: KeyMaterial,
+  held: readonly KeyPurpose[] = PURPOSES,
+  publicKeys: PublicKeys = {},
+): KeyProvider {
+  const problems = [...keyMaterialProblems(material, held), ...publicKeyProblems(publicKeys, held)];
   if (problems.length > 0) throw new KeyError(`The keys can't be used:\n- ${problems.join('\n- ')}`);
   const holding = new Map<KeyPurpose, Held>();
   for (const purpose of PURPOSES) {
@@ -243,6 +303,7 @@ export function createKeyProvider(material: KeyMaterial, held: readonly KeyPurpo
     // Given only for a purpose held, which then has its keys (keyMaterialProblems).
     if (given !== undefined) holding.set(purpose, hold(purpose, given));
   }
+  const checking = checkingWith(publicKeys);
 
   // A caller the compiler can't see (plain JavaScript, or a cast) could still
   // name a purpose not held, or another kind's: refuse it rather than use a key
@@ -313,12 +374,19 @@ export function createKeyProvider(material: KeyMaterial, held: readonly KeyPurpo
     },
 
     verifySignature(purpose: SigningPurpose, keyVersion: number, message: Message, signature: Uint8Array): boolean {
-      const key = keyFor(purpose, 'signing', keyVersion);
+      // A key held checks with its own public half; one not held, with the public half given for it, if any
+      // (never both: publicKeyProblems refuses a public half for a key held).
+      const publicOnly = checking.get(purpose);
+      const key = publicOnly === undefined ? keyFor(purpose, 'signing', keyVersion) : publicOnly.keys.get(keyVersion);
+      if (key === undefined) throw new KeyError(`${purpose} has no public half for version ${keyVersion}`);
       return verifyBytes(null, encodeMessage(message), key, signature);
     },
 
     describe(): readonly KeyDescription[] {
-      return Object.freeze([...holding.values()].map((entry) => entry.description));
+      return Object.freeze([
+        ...[...holding.values()].map((entry) => entry.description),
+        ...[...checking.values()].map((entry) => entry.description),
+      ]);
     },
   });
 }

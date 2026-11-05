@@ -28,7 +28,7 @@ import {
   type PlatformControlsTables,
 } from '../../packages/core/src/modules/platform-controls/index.ts';
 import { createDatabase, type Database, withTenant } from '../../packages/platform/src/db/index.ts';
-import { type KeyProvider, loadKeys } from '../../packages/platform/src/keys/index.ts';
+import { API_PURPOSES, type KeyProvider, loadKeys, OPERATOR_ONLY } from '../../packages/platform/src/keys/index.ts';
 import { createStartupLogger } from '../../packages/platform/src/observability/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
@@ -389,7 +389,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
   try {
     const steps: JobSteps = {
       database,
-      keyring: loadKeys({ directory: needed(env, 'AGENTX_KEYS_DIR'), current: {} }),
+      keyring: loadKeys({ directory: needed(env, 'AGENTX_KEYS_DIR'), current: {} }, API_PURPOSES, OPERATOR_ONLY),
       // The clean-up sends no traffic, so it needs no API.
       k6:
         job === 'cleanup'

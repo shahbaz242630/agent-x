@@ -33,6 +33,7 @@ const SET_LOGINS = `
 ALTER ROLE agentx_owner PASSWORD :'owner_login';
 ALTER ROLE agentx_app PASSWORD :'app_login';
 ALTER ROLE agentx_backup PASSWORD :'backup_login';
+ALTER ROLE agentx_operator PASSWORD :'operator_login';
 `;
 
 export default async function setup(project: TestProject): Promise<() => Promise<void>> {
@@ -47,12 +48,15 @@ export default async function setup(project: TestProject): Promise<() => Promise
       owner: { user: 'agentx_owner', password: newLogin() },
       app: { user: 'agentx_app', password: newLogin() },
       backup: { user: 'agentx_backup', password: newLogin() },
+      operator: { user: 'agentx_operator', password: newLogin() },
     };
     await psql(container.id, await readFile(repoFile('db/bootstrap/roles.sql'), 'utf8'));
+    await psql(container.id, await readFile(repoFile('db/bootstrap/operator-role.sql'), 'utf8'));
     await psql(container.id, SET_LOGINS, {
       owner_login: roles.owner.password,
       app_login: roles.app.password,
       backup_login: roles.backup.password,
+      operator_login: roles.operator.password,
     });
     await psql(container.id, await readFile(repoFile('db/bootstrap/database.sql'), 'utf8'), { db: TEMPLATE });
 

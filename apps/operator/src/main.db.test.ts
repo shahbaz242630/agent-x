@@ -75,9 +75,13 @@ afterEach(() => {
 
 const server = inject('postgres');
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac', 'field-encryption']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
 /** The same key the command holds, to check what it wrote. */
-const auditKeys = loadKeys({ directory: keys.directory, current: {} }, ['audit-mac', 'field-encryption']);
+const auditKeys = loadKeys({ directory: keys.directory, current: {} }, [
+  'audit-mac',
+  'field-encryption',
+  'operator-signing',
+]);
 let database: TestDatabase;
 let app: Database<OperatorTables>;
 
@@ -120,7 +124,7 @@ function envFor(role: TestRole, overrides: Record<string, string> = {}): Record<
   };
 }
 
-async function run(argv: readonly string[], env: Record<string, string> = envFor('app')) {
+async function run(argv: readonly string[], env: Record<string, string> = envFor('operator')) {
   const host = new FakeProcess();
   const capture = new LogCapture();
   const code = await runOperator(host, { argv, env, destination: capture });
@@ -172,7 +176,7 @@ async function counts(): Promise<{ orgs: number; platform: number }> {
 }
 
 describe(`B1c the operator creates an organisation (Postgres ${server.version})`, () => {
-  it("creates it ACTIVE as the app's role, its own chain first, then the platform's, and never logs its name", async () => {
+  it("creates it ACTIVE as its own role (PL-57), its own chain first, then the platform's, and never logs its name", async () => {
     const before = await counts();
 
     const { code, host, text, events, line } = await run(['create-organization', '--name', NAME]);
@@ -182,10 +186,11 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
     expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.organization_created']);
     expect(line('operator.starting')).toMatchObject({
       command: 'create-organization',
-      role: 'agentx_app',
+      role: 'agentx_operator',
       keys: [
         expect.objectContaining({ purpose: 'audit-mac', current: 1 }),
         expect.objectContaining({ purpose: 'field-encryption', current: 1 }),
+        expect.objectContaining({ purpose: 'operator-signing', current: 1 }),
       ],
     });
     const created = line('operator.organization_created');
@@ -302,7 +307,7 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
       writeFileSync(file, JSON.stringify(['create-organization', '--name', NAME, '--id', id]));
       const jobRun = 'job-agentx-stg-operator-7x2kq9m';
 
-      const { code } = await run(['--request', file], envFor('app', { CONTAINER_APP_JOB_EXECUTION_NAME: jobRun }));
+      const { code } = await run(['--request', file], envFor('operator', { CONTAINER_APP_JOB_EXECUTION_NAME: jobRun }));
 
       expect(code).toBe(0);
       const event = await app
@@ -618,7 +623,7 @@ describe(`E10c the operator exports an organisation's audit log for a case, as t
     const exportId = uuidV7Ids.next();
     const asked = path.join(folder, `export-${exportId}`);
     writeFileSync(asked, auditExportRequest(orgId, around(-1), around(1), CASE, exportId));
-    return { exportId, running: run(['--request', asked], envFor('app', { AGENTX_EVIDENCE_DIR: store })) };
+    return { exportId, running: run(['--request', asked], envFor('operator', { AGENTX_EVIDENCE_DIR: store })) };
   }
 
   it('writes the file to the evidence store from a request file, checking the schema first, never logging the case', async () => {
@@ -702,7 +707,7 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
   writeFileSync(file, restoreCheckRequest());
   // The copy is this same database under another name for the same server
   // (the test server listens on 127.0.0.1, which localhost names too): a copy the live server is.
-  const drill = () => run(['--request', file], envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' }));
+  const drill = () => run(['--request', file], envFor('operator', { AGENTX_DB_DRILL_HOST: 'localhost' }));
 
   it('reads the copy and the live server, read-only, says the copy holds, and writes nothing', async () => {
     const head = async () => database.as('owner').query('select seq from platform_controls.audit_head');
@@ -731,7 +736,7 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
 
   it('fails a copy with a single problem, naming it', async () => {
     // The directory's list unreadable: one problem, on both sides at once.
-    await database.as('owner').query('revoke select on directory.orgs from agentx_app');
+    await database.as('owner').query('revoke select on directory.orgs from agentx_operator');
     try {
       const { code, events, line } = await drill();
 
@@ -742,7 +747,7 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
         problemCount: 1,
       });
     } finally {
-      await database.as('owner').query('grant select on directory.orgs to agentx_app');
+      await database.as('owner').query('grant select on directory.orgs to agentx_operator');
     }
   });
 
@@ -774,7 +779,7 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
   const signing = loadKeys({ directory: signingFiles.directory, current: {} }, ['audit-anchor']);
   const publicKey = String(signing.describe()[0]?.versions[0]?.publicKey);
   const recoveryEnv = (overrides: Record<string, string> = {}) =>
-    envFor('app', {
+    envFor('operator', {
       // The copy is this same database by another name, as for the restore check: a copy the live server is.
       AGENTX_DB_DRILL_HOST: 'localhost',
       AGENTX_EVIDENCE_DIR: evidence,
@@ -870,7 +875,7 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
   });
 
   it("refuses without the evidence store, the anchors' store or their public keys, before it connects", async () => {
-    const bare = await plan(uuidV7Ids.next(), envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' })).running;
+    const bare = await plan(uuidV7Ids.next(), envFor('operator', { AGENTX_DB_DRILL_HOST: 'localhost' })).running;
     expect(bare.code).toBe(1);
     expect(bare.line('operator.refused')).toMatchObject({
       problems: [
@@ -880,14 +885,14 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
     });
     const keyless = await plan(
       uuidV7Ids.next(),
-      envFor('app', { AGENTX_EVIDENCE_DIR: evidence, AGENTX_AUDIT_ANCHORS_DIR: anchorsFolder }),
+      envFor('operator', { AGENTX_EVIDENCE_DIR: evidence, AGENTX_AUDIT_ANCHORS_DIR: anchorsFolder }),
     ).running;
     expect(keyless.line('operator.refused')).toMatchObject({
       problems: [expect.stringMatching(/^no store of the chains' anchors/)],
     });
     const storeless = await plan(
       uuidV7Ids.next(),
-      envFor('app', { AGENTX_EVIDENCE_DIR: evidence, AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${publicKey}` }),
+      envFor('operator', { AGENTX_EVIDENCE_DIR: evidence, AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS: `1:${publicKey}` }),
     ).running;
     expect(storeless.line('operator.refused')).toMatchObject({
       problems: [expect.stringMatching(/^no store of the chains' anchors/)],

@@ -8,6 +8,14 @@
 // hold, one that can't be read or doesn't hold a key, a purpose without its
 // current version, a copy of another key, or a second version of a key that
 // is never rotated in place. Problems name the file, never what it holds.
+//
+// Beside them, the public half of another process's signing key, for a process
+// that checks its signatures without holding it (the API, the operator's key;
+// PL-57): `public-<purpose>-v<version>`, the 32-byte Ed25519 public key as
+// base64url. One for a purpose the process doesn't check with is refused as a
+// key file is; none at all is no refusal, since a signature it can't check is
+// never believed (platform-chain.ts), so the deployment that brings the first
+// one can come after the image.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -18,8 +26,10 @@ import {
   type KeyMaterial,
   keyMaterialProblems,
   type KeyProvider,
+  publicKeyProblems,
+  type PublicKeys,
 } from './key-provider.ts';
-import { isKeyPurpose, type KeyPurpose, PURPOSES } from './purposes.ts';
+import { isKeyPurpose, type KeyPurpose, PURPOSES, type SigningPurpose } from './purposes.ts';
 
 export interface KeySettings {
   /** Where the key files are. */
@@ -30,6 +40,10 @@ export interface KeySettings {
 
 /** A key file's name, in any case, so a file that looks like one but is misspelt is refused rather than ignored. */
 const LOOKS_LIKE_A_KEY = /^key-/i;
+
+/** A public half's file name, likewise. */
+const LOOKS_LIKE_A_PUBLIC_HALF = /^public-/i;
+const PUBLIC_FILE = /^public-([a-z-]+)-v([1-9][0-9]{0,5})$/;
 
 /** A version is a whole number from 1, written without leading zeros. */
 const KEY_FILE = /^key-([a-z-]+)-v([1-9][0-9]{0,5})$/;
@@ -65,14 +79,43 @@ function readKey(path: string, name: string): Buffer | string {
     : `${name} must hold one key: ${KEY_BYTES} random bytes written as base64url, 43 characters`;
 }
 
+/** The public halves found for the purposes `checks`, by version, and the problems with any file of one. */
+function readPublicHalves(
+  directory: string,
+  names: readonly string[],
+  checks: readonly SigningPurpose[],
+): { readonly halves: PublicKeys; readonly problems: readonly string[] } {
+  const problems: string[] = [];
+  const halves = new Map<SigningPurpose, Map<number, Buffer>>();
+  for (const name of names.filter((entry) => LOOKS_LIKE_A_PUBLIC_HALF.test(entry)).sort()) {
+    const [, purpose = '', version = ''] = PUBLIC_FILE.exec(name) ?? [];
+    const checked = checks.find((each) => each === purpose);
+    if (checked === undefined) {
+      problems.push(
+        `${name} is not a public half this process checks with: only public-<purpose>-v<version> for ${checks.join(', ') || 'none'}`,
+      );
+      continue;
+    }
+    const key = readKey(join(directory, name), name);
+    if (typeof key === 'string') problems.push(key);
+    else halves.set(checked, (halves.get(checked) ?? new Map<number, Buffer>()).set(Number(version), key));
+  }
+  return { halves: Object.fromEntries(halves), problems };
+}
+
 /**
  * Reads every key file, or throws a ConfigError listing every problem. A
  * process holds the keys of the purposes `held` (every purpose when not
- * given: the API's) and no others: a file or a current version for another
- * purpose is refused, not ignored, since a key mounted where it has no use is
- * one more place it can leak from.
+ * given) and no others: a file or a current version for another purpose is
+ * refused, not ignored, since a key mounted where it has no use is one more
+ * place it can leak from. It checks signatures of the purposes `checks` with
+ * their public halves alone (PL-57), each only one it doesn't hold.
  */
-export function loadKeys(settings: KeySettings, held: readonly KeyPurpose[] = PURPOSES): KeyProvider {
+export function loadKeys(
+  settings: KeySettings,
+  held: readonly KeyPurpose[] = PURPOSES,
+  checks: readonly SigningPurpose[] = [],
+): KeyProvider {
   let names: string[];
   try {
     names = readdirSync(settings.directory);
@@ -113,6 +156,8 @@ export function loadKeys(settings: KeySettings, held: readonly KeyPurpose[] = PU
     ]),
   );
   problems.push(...keyMaterialProblems(material, held));
+  const { halves, problems: halfProblems } = readPublicHalves(settings.directory, names, checks);
+  problems.push(...halfProblems, ...publicKeyProblems(halves, held));
   if (problems.length > 0) throw new ConfigError(problems);
-  return createKeyProvider(material, held);
+  return createKeyProvider(material, held, halves);
 }

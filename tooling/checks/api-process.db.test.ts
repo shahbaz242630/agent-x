@@ -13,7 +13,7 @@ import { gunzipSync } from 'node:zlib';
 
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
-import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
+import { API_PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 import { createTestDatabase, type TestDatabase } from '../../packages/testing/src/db/test-database.ts';
 import { writeTestKeys } from '../../packages/testing/src/keys.ts';
 import { findLeaks } from '../../packages/testing/src/log-scan.ts';
@@ -21,7 +21,7 @@ import { findLeaks } from '../../packages/testing/src/log-scan.ts';
 const MAIN = path.resolve('apps/api/src/main.ts');
 const PUBLIC_ORIGIN = 'http://localhost:8080';
 const server = inject('postgres');
-const keys = writeTestKeys(PURPOSES);
+const keys = writeTestKeys(API_PURPOSES);
 
 /** The parent's environment without any AGENTX_ or PG setting, plus a test run's, against the test database. */
 function childEnv(database: TestDatabase): NodeJS.ProcessEnv {

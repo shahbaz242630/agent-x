@@ -43,12 +43,13 @@ import { scramVerifier } from './scram.ts';
 import { splitStatements } from './sql-statements.ts';
 
 /** The roles the job gives logins to, by what they're for. */
-export type SetupLogins = Readonly<Record<'owner' | 'app' | 'backup' | 'zitadel', string>>;
+export type SetupLogins = Readonly<Record<'owner' | 'app' | 'backup' | 'operator' | 'zitadel', string>>;
 
 const ROLE: Readonly<Record<keyof SetupLogins, string>> = {
   owner: 'agentx_owner',
   app: 'agentx_app',
   backup: 'agentx_backup',
+  operator: 'agentx_operator',
   zitadel: 'zitadel',
 };
 
@@ -138,6 +139,7 @@ export async function loadBootstrap(directory: string, database: string): Promis
   const bootstrap: Bootstrap = {
     roles: [
       { file: 'roles.sql', roles: [ROLE.owner, ROLE.app, ROLE.backup], statements: await statementsOf('roles.sql') },
+      { file: 'operator-role.sql', roles: [ROLE.operator], statements: await statementsOf('operator-role.sql') },
       { file: 'zitadel-role.sql', roles: [ROLE.zitadel], statements: await statementsOf('zitadel-role.sql') },
     ],
     databases: [
@@ -178,6 +180,7 @@ const EXPECTED_ROLES: Readonly<Record<string, { inherit: boolean; bypassRls: boo
   [ROLE.owner]: { inherit: true, bypassRls: false },
   [ROLE.app]: { inherit: false, bypassRls: false },
   [ROLE.backup]: { inherit: false, bypassRls: true },
+  [ROLE.operator]: { inherit: false, bypassRls: false },
   [ROLE.zitadel]: { inherit: false, bypassRls: false },
 };
 
@@ -223,7 +226,7 @@ export function databaseProblems(
   grants: readonly GrantRow[],
 ): string[] {
   const expected: readonly { name: string; owner: string; connect: readonly string[] }[] = [
-    { name: database, owner: ROLE.owner, connect: [ROLE.app, ROLE.backup] },
+    { name: database, owner: ROLE.owner, connect: [ROLE.app, ROLE.backup, ROLE.operator] },
     { name: ZITADEL_DATABASE, owner: ROLE.zitadel, connect: [] },
   ];
   return expected.flatMap(({ name, owner, connect }) => {
@@ -542,6 +545,9 @@ export async function setUpServer(options: ServerSetupOptions): Promise<ServerSe
           logger.info('db_setup.database_created', { file: step.file, database: step.database });
         }
         if (!isApp) return;
+        // database.sql lets the operator in on a new server; a server made before its role (PL-57) is let in here.
+        // eslint-disable-next-line agentx/no-string-built-sql -- GRANT takes no bound parameters; the database's name is checked as a plain Postgres name.
+        await admin.query(`grant connect on database ${quoted(database)} to ${quoted(ROLE.operator)}`);
         const inside = await connect({ ...options.admin, database }, logger);
         try {
           schemaProblems.push(...(await securePublicSchema(inside, logger, database)));

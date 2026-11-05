@@ -25,7 +25,13 @@ const APP_DATABASE = 'agentx';
 
 /** A fresh login, random, for this run only. */
 const newLogin = (): string => randomBytes(18).toString('hex');
-const newLogins = (): SetupLogins => ({ owner: newLogin(), app: newLogin(), backup: newLogin(), zitadel: newLogin() });
+const newLogins = (): SetupLogins => ({
+  owner: newLogin(),
+  app: newLogin(),
+  backup: newLogin(),
+  operator: newLogin(),
+  zitadel: newLogin(),
+});
 
 const superuserLogin = newLogin();
 const adminLogin = newLogin();
@@ -141,14 +147,15 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     ).toEqual([]);
   });
 
-  it('sets up a new server as an admin that is no superuser: four roles, two databases', async () => {
+  it('sets up a new server as an admin that is no superuser: five roles, two databases', async () => {
     logins = newLogins();
     const { outcome, capture } = await setUp(cloudAdmin(), logins);
     expect(outcome).toEqual({
-      rolesCreated: ['agentx_owner', 'agentx_app', 'agentx_backup', 'zitadel'],
+      rolesCreated: ['agentx_owner', 'agentx_app', 'agentx_backup', 'agentx_operator', 'zitadel'],
       databasesCreated: [APP_DATABASE, 'zitadel'],
     });
     expect(capture.lines().map((line) => line.event)).toEqual([
+      'db_setup.roles_created',
       'db_setup.roles_created',
       'db_setup.roles_created',
       'db_setup.logins_set',
@@ -174,6 +181,7 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     expect(rows).toEqual([
       { rolname: 'agentx_app', ...role, rolinherit: false, rolbypassrls: false },
       { rolname: 'agentx_backup', ...role, rolinherit: false, rolbypassrls: true },
+      { rolname: 'agentx_operator', ...role, rolinherit: false, rolbypassrls: false },
       { rolname: 'agentx_owner', ...role, rolinherit: true, rolbypassrls: false },
       { rolname: 'zitadel', ...role, rolinherit: false, rolbypassrls: false },
     ]);
@@ -190,7 +198,10 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     );
     const creator = { grantor: 'postgres', admin_option: true, inherit_option: false, set_option: false };
     expect(rows).toEqual(
-      ['agentx_app', 'agentx_backup', 'agentx_owner', 'zitadel'].map((name) => ({ role: name, ...creator })),
+      ['agentx_app', 'agentx_backup', 'agentx_operator', 'agentx_owner', 'zitadel'].map((name) => ({
+        role: name,
+        ...creator,
+      })),
     );
   });
 
@@ -205,10 +216,14 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     ]);
     await expect(queryAs('agentx_app', logins.app, APP_DATABASE, 'select 1 as one')).resolves.toEqual([{ one: 1 }]);
     await expect(queryAs('agentx_backup', logins.backup, APP_DATABASE, 'select 1 as one')).resolves.toHaveLength(1);
+    await expect(queryAs('agentx_operator', logins.operator, APP_DATABASE, 'select 1 as one')).resolves.toHaveLength(1);
     await expect(queryAs('agentx_owner', logins.owner, APP_DATABASE, 'select 1 as one')).resolves.toHaveLength(1);
     await expect(queryAs('zitadel', logins.zitadel, 'zitadel', 'select 1 as one')).resolves.toHaveLength(1);
     await expect(queryAs('agentx_app', logins.app, 'zitadel', 'select 1')).rejects.toMatchObject({ code: '42501' });
     await expect(queryAs('zitadel', logins.zitadel, APP_DATABASE, 'select 1')).rejects.toMatchObject({ code: '42501' });
+    await expect(queryAs('agentx_operator', logins.operator, 'zitadel', 'select 1')).rejects.toMatchObject({
+      code: '42501',
+    });
   });
 
   it('works out the verifier Postgres itself makes from the same login and salt', async () => {
@@ -280,6 +295,15 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     logins = rotated;
   });
 
+  it("gives a server made before the operator's role (PL-57) the role, its login and its way into the app's database, on a run again", async () => {
+    // Its rights on the migrated tables go first, as a real repair would take them.
+    await asSuperuser('drop owned by agentx_operator', APP_DATABASE);
+    await asSuperuser('drop role agentx_operator');
+    const { outcome } = await setUp(cloudAdmin(), logins);
+    expect(outcome).toEqual({ rolesCreated: ['agentx_operator'], databasesCreated: [] });
+    await expect(queryAs('agentx_operator', logins.operator, APP_DATABASE, 'select 1 as one')).resolves.toHaveLength(1);
+  });
+
   it('puts back what PUBLIC was given on the public schema since', async () => {
     await asSuperuser('grant create on schema public to public', APP_DATABASE);
     await setUp(cloudAdmin(), logins);
@@ -339,7 +363,7 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
       "the app's database opened to everyone",
       'grant connect on database agentx to public',
       'revoke connect on database agentx from public',
-      'the database agentx lets in PUBLIC CONNECT, agentx_app CONNECT, agentx_backup CONNECT besides its owner, not agentx_app CONNECT, agentx_backup CONNECT',
+      'the database agentx lets in PUBLIC CONNECT, agentx_app CONNECT, agentx_backup CONNECT, agentx_operator CONNECT besides its owner, not agentx_app CONNECT, agentx_backup CONNECT, agentx_operator CONNECT',
     ],
   ])('refuses a server with %s, naming it', async (_, change, undo, problem) => {
     await asSuperuser(change);
@@ -480,7 +504,7 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     // The compose stack's superuser, which makes its own roles, is covered in apps/db-setup/src/main.db.test.ts.
     await expect(setUp({ user: 'postgres', login: superuserLogin }, logins)).rejects.toEqual(
       new ServerSetupRefused(
-        ['agentx_app', 'agentx_backup', 'agentx_owner', 'zitadel'].map(
+        ['agentx_app', 'agentx_backup', 'agentx_operator', 'agentx_owner', 'zitadel'].map(
           (role) => `cloud_admin is a member of ${role}, which db/bootstrap never grants`,
         ),
       ),

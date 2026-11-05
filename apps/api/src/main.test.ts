@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
-import { PURPOSES } from '@agentx/platform/keys';
+import { API_PURPOSES } from '@agentx/platform/keys';
 import { type Output, withLogContext } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, writeTestKeys } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
@@ -334,7 +334,7 @@ const MISPLACED = 'value that must never be printed';
 const DB_LOGIN = 'stand-in login for these tests';
 
 /** Stand-in keys, one per purpose, as the platform mounts real ones. */
-const KEYS = writeTestKeys(PURPOSES);
+const KEYS = writeTestKeys(API_PURPOSES);
 afterAll(() => {
   KEYS.remove();
 });
@@ -515,7 +515,7 @@ describe('SEC-AV-03 the API refuses to start on a bad config', () => {
     expect(capture.lines()).toEqual([
       expect.objectContaining({
         event: 'api.start_refused',
-        problems: PURPOSES.map((purpose) => `${purpose} has no key for its current version 1 (key-${purpose}-v1)`),
+        problems: API_PURPOSES.map((purpose) => `${purpose} has no key for its current version 1 (key-${purpose}-v1)`),
       }),
     ]);
     expect(fake.created).toEqual([]);
@@ -523,7 +523,7 @@ describe('SEC-AV-03 the API refuses to start on a bad config', () => {
 
   it('refuses a key file that holds no key, without showing what it holds', async () => {
     const good = Object.fromEntries(
-      PURPOSES.map((purpose, index) => [`key-${purpose}-v1`, Buffer.alloc(32, index + 100).toString('base64url')]),
+      API_PURPOSES.map((purpose, index) => [`key-${purpose}-v1`, Buffer.alloc(32, index + 100).toString('base64url')]),
     );
     const { server, capture } = await start({
       ...ENV,
@@ -844,7 +844,7 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
     );
     // Each key's versions and check value, so a key swapped under the same version shows.
     expect(starting?.keys).toEqual(
-      PURPOSES.map((purpose): unknown =>
+      API_PURPOSES.map((purpose): unknown =>
         expect.objectContaining({
           purpose,
           current: 1,
@@ -863,7 +863,7 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
 
   it('never writes a key to the log', async () => {
     const { capture } = await start();
-    const keys = PURPOSES.map((_purpose, index) => Buffer.alloc(32, index + 1));
+    const keys = API_PURPOSES.map((_purpose, index) => Buffer.alloc(32, index + 1));
     const written = keys.flatMap((key) => [key.toString('base64url'), key.toString('base64'), key.toString('hex')]);
     expect(findLeaks(capture.text, written)).toEqual([]);
   });

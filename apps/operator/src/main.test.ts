@@ -13,7 +13,7 @@ import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type OperatorProcess, runOperator, USAGE } from './main.ts';
+import { HELD_KEYS, type OperatorProcess, runOperator, USAGE } from './main.ts';
 import {
   ACTIVITY_EXPORT_USAGE,
   activityExportRequest,
@@ -77,7 +77,7 @@ afterEach(() => {
 });
 
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac', 'field-encryption']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
 /** Every key, mounted where the command holds only one. */
 const everyKey = writeTestKeys(PURPOSES);
 
@@ -95,6 +95,7 @@ const ENV: Record<string, string> = {
   AGENTX_RELEASE: 'r-operator',
   AGENTX_DB_HOST: '127.0.0.1',
   AGENTX_DB_PORT: '1',
+  AGENTX_DB_USER: 'agentx_operator',
   AGENTX_DB_PASSWORD: APP_LOGIN,
   AGENTX_DB_TLS: 'disable',
   AGENTX_KEYS_DIR: keys.directory,
@@ -192,13 +193,26 @@ describe("B1c what the operator's command refuses before it connects", () => {
     expect(events).toEqual(['operator.start_refused']);
     expect(line('operator.start_refused')).toMatchObject({ service: 'operator', env: 'unconfigured' });
     expect(line('operator.start_refused')?.problems).toEqual(
-      PURPOSES.filter((purpose) => purpose !== 'audit-mac' && purpose !== 'field-encryption')
+      PURPOSES.filter((purpose) => !(HELD_KEYS as readonly string[]).includes(purpose))
         .toSorted()
         .map(
           (purpose) =>
-            `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac, field-encryption may be mounted for it`,
+            `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac, field-encryption, operator-signing may be mounted for it`,
         ),
     );
+  });
+
+  it("refuses any role but its own, before it connects (PL-57): the API's would bring back the writes it lost", async () => {
+    const { code, events, line } = await run(['create-organization', '--name', NAME], {
+      ...ENV,
+      AGENTX_DB_USER: 'agentx_app',
+    });
+
+    expect(code).toBe(1);
+    expect(events).toEqual(['operator.starting', 'operator.start_refused']);
+    expect(line('operator.start_refused')?.problems).toEqual([
+      "AGENTX_DB_USER must be agentx_operator, the command's own role (PL-57)",
+    ]);
   });
 
   it("refuses a run name Azure wouldn't give, naming the rule, never the name, before anything else", async () => {
@@ -256,10 +270,16 @@ describe("B1c what the operator's command refuses before it connects", () => {
     expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
     expect(line('operator.starting')).toMatchObject({
       command: 'create-organization',
-      role: 'agentx_app',
+      role: 'agentx_operator',
       keys: [
         expect.objectContaining({ purpose: 'audit-mac', current: 1 }),
         expect.objectContaining({ purpose: 'field-encryption', current: 1 }),
+        // Its own signing key's public half, which the API is given to check its events with (PL-57).
+        expect.objectContaining({
+          purpose: 'operator-signing',
+          current: 1,
+          versions: [expect.objectContaining({ publicKey: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown })],
+        }),
       ],
     });
     expect(text).not.toContain(NAME);
