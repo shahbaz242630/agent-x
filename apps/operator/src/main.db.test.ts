@@ -1188,6 +1188,15 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
     const again = await run(['--request', asked], env());
     expect(again.code).toBe(1);
     expect(again.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: 'already' });
+    // Its ID reused for another head is no rebase of that head: never said done (E11b review).
+    for (const named of [
+      { ...head, seq: head.seq + 1n },
+      { ...head, hash: Buffer.alloc(32, 7) },
+    ]) {
+      const reused = await rebase(orgId, named, { id }).running;
+      expect(reused.code).toBe(1);
+      expect(reused.line('operator.done_before')).toMatchObject({ rebaseId: id, recorded: null });
+    }
     // Another: the chain holds its point and has grown whole from it.
     const another = await rebase(orgId, head).running;
     expect(another.line('operator.chain_rebase_refused')).toMatchObject({

@@ -190,16 +190,23 @@ async function recorded(
   }
 }
 
-/** This rebase in the store from a run before, for this chain: none if there is none, or it is no rebase of this one. */
+/**
+ * This rebase in the store from a run before, for this chain and the head asked: none if there is none, or `other`
+ * where it is no rebase of this one. An ID reused for another head is `other`, so a run never says done for a head
+ * that was never rebased (E11b review).
+ */
 async function storedBefore(
   store: WriteOnceStore,
   keys: KeyProvider,
-  { epoch, chain, id }: { readonly epoch: number; readonly chain: Chain; readonly id: string },
+  { epoch, chain, asked }: { readonly epoch: number; readonly chain: Chain; readonly asked: RebaseAsked },
 ): Promise<Rebase | 'other' | undefined> {
-  const name = rebaseFileName(epoch, id);
+  const name = rebaseFileName(epoch, asked.id);
   if (!(await store.list(name, 1)).names.includes(name)) return undefined;
   const read = await readRebaseFile(keys, { bytes: await store.get(name), name, epoch });
-  return 'rebase' in read && read.rebase.chain === nameOf(chain) ? read.rebase : 'other';
+  if (!('rebase' in read)) return 'other';
+  const { rebase } = read;
+  const same = rebase.chain === nameOf(chain) && rebase.seq === asked.seq && rebase.hash.equals(asked.hash);
+  return same ? rebase : 'other';
 }
 
 /**
@@ -229,7 +236,7 @@ export async function rebaseChain({
     recorded(() => recordRebase(writer, services, chain, rebase, asked), logger, rebase.id);
   await anchors.read();
   if (anchors.state() !== 'read') return { ok: false, reason: 'store' };
-  const before = await storedBefore(store, keys, { epoch: anchors.epoch, chain, id: asked.id });
+  const before = await storedBefore(store, keys, { epoch: anchors.epoch, chain, asked });
   if (before === 'other') return { ok: false, reason: 'done_before' };
   if (before !== undefined) return { ok: false, reason: 'done_before', recorded: await record(before) };
 

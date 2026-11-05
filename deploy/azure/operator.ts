@@ -9,14 +9,23 @@
 //   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
 //   node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
+//   node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
 //
-// The last two (4D2e E9, E10; PL-29; playbook H) mend an organisation's audit
+// chain-recovery-plan and chain-restore (4D2e E9, E10; PL-29; playbook H) mend an organisation's audit
 // chain from the restore drill's copy: the first plans it, read-only, and says
 // the plan's ID and digest; the second runs on the chain repair's own job, as
 // the database's owner, and applies that plan only if it is still the same. A
 // repair's every run sets off the owner-login SEV-1 alert, by design: it says
 // so before it starts. --discard-fork, given to both, lets a plan throw away
-// what the app wrote on a wound-back chain; it is never assumed.
+// what the app wrote on a wound-back chain; it is never assumed. A repair says
+// the rebase's command with its head's number and hash.
+//
+// chain-rebase (4D2e E11) moves a chain's anchor on to its checked head after a
+// sanctioned change (a repair, or the platform chain begun again), signed with
+// the operator's rebase key on the operator's job: the API then trusts that head,
+// and the anchor alarm for the chain stops. Its --id is the rebase's: the same
+// command with it writes nothing twice, and finishes a run that stopped between
+// the rebase's file and its event on the chain.
 //
 // (An UNKNOWN payment is marked failed by the customer's admin, not by our
 // team: partner decision 38.)
@@ -88,14 +97,18 @@ import {
   NO_STORE_PROBLEM,
   REQUEST_LIMIT_BYTES,
   RESTORE_CHECK,
+  chainRebaseRequest,
   chainRecoveryRequest,
   chainRestoreRequest,
   DISCARD_FORK,
+  HEAD_HASH,
+  HEAD_SEQ,
   PLAN_DIGEST_HEX,
   restoreCheckRequest,
   UUID_V7,
 } from '../../apps/operator/src/request.ts';
 import { MOST_EXPORT_DAYS } from '../../packages/core/src/modules/evidence/domain/exports.ts';
+import { EVIDENCE_REFERENCE, REBASE_REASONS } from '../../packages/platform/src/audit-chain/rebase.ts';
 import { invitationEmail } from '../../packages/core/src/modules/identity/domain/invitation.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/ids.ts';
 import { realAz, signedIn, text } from './deploy.ts';
@@ -203,6 +216,7 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
   node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
+  node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -884,6 +898,128 @@ export function parseRestore(argv: readonly string[]): RestoreArguments {
   return { orgId: String(orgId), planId: String(planId), digest, id, discardFork };
 }
 
+/** A chain's rebase the partner asked for (4D2e E11): the chain, its checked head, why, the incident, and an earlier ID. */
+export interface RebaseArguments {
+  /** `platform`, or an organisation's ID. */
+  readonly chain: string;
+  readonly seq: string;
+  readonly hash: string;
+  readonly reason: string;
+  readonly evidence: string;
+  readonly id: string | undefined;
+}
+
+const REBASE_SHAPE = `say chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <${REBASE_REASONS.join(' | ')}> --evidence <incident reference> [--id <ID>], and nothing else`;
+
+/** What was asked for, or a UsageError saying why it can't be done. The incident's reference is repeated in none. */
+export function parseRebase(argv: readonly string[]): RebaseArguments {
+  const [command, chainFlag, chain, seqFlag, seq, hashFlag, hash, reasonFlag, reason, evidenceFlag, evidence, ...rest] =
+    argv;
+  const ided = rest.length === 2 && rest[0] === '--id';
+  const shaped =
+    command === 'chain-rebase' &&
+    chainFlag === '--chain' &&
+    seqFlag === '--seq' &&
+    hashFlag === '--hash' &&
+    reasonFlag === '--reason' &&
+    evidenceFlag === '--evidence' &&
+    evidence !== undefined &&
+    (rest.length === 0 || ided);
+  if (!shaped) throw new UsageError(REBASE_SHAPE);
+  const id = ided ? rest[1] : undefined;
+  const problems = [
+    ...(chain === 'platform' || UUID_V7.test(String(chain))
+      ? []
+      : ["--chain takes platform, or the organisation's ID: a UUIDv7, in lower case"]),
+    ...(HEAD_SEQ.test(String(seq)) ? [] : ["--seq takes the checked head's number: a whole number from 1"]),
+    ...(HEAD_HASH.test(String(hash)) ? [] : ["--hash takes the checked head's hash: 64 lower-case hex digits"]),
+    ...(REBASE_REASONS.some((each) => each === reason) ? [] : [`--reason takes ${REBASE_REASONS.join(' or ')}`]),
+    ...(EVIDENCE_REFERENCE.test(evidence)
+      ? []
+      : [
+          "--evidence takes the incident's reference: 3 to 64 letters, digits and . _ / -, starting with a letter or digit",
+        ]),
+    ...(id === undefined || UUID_V7.test(id) ? [] : ['--id takes the ID an earlier run gave: a UUIDv7, in lower case']),
+  ];
+  if (problems.length > 0) throw new UsageError(problems.join('; '));
+  return { chain: String(chain), seq: String(seq), hash: String(hash), reason: String(reason), evidence, id };
+}
+
+/** A chain, as said to the partner. */
+const chainSaid = (chain: string): string => (chain === 'platform' ? "the platform's chain" : `${chain}'s chain`);
+
+/** What each refused rebase means, in plain words, by its reason. */
+const REBASE_REFUSALS: Readonly<Record<string, (line: Readonly<Record<string, unknown>>) => string>> = {
+  store: () => "the anchors' store couldn't be read, so nothing was checked: read the lines above",
+  not_needed: (line) => {
+    const at = typeof line.seq === 'string' ? ' (at ' + line.seq + ')' : '';
+    return `the chain already meets its anchor${at}: there is nothing to move on`;
+  },
+  broken: (line) =>
+    `the chain fails its own check (${String(line.problem)} at ${String(line.seq)}), and a rebase never blesses a chain the app didn't write: repair it first (chain-recovery-plan, then chain-restore)`,
+  head_differs: (line) =>
+    `the chain's head is at ${String(line.seq)}, not the place named: check the head again and ask for that one`,
+};
+
+/** What a rebase's run did: 0 once the rebase is in the anchors' store and its event on the chain. */
+function rebaseOutcome(steps: JobSteps, lines: readonly LogLine[], asked: RebaseArguments, id: string): number {
+  const said = commandLines(lines);
+  const about = (event: string) => said.find((line) => line.event === event && line.rebaseId === id);
+  const again = `Run the same command again with --id ${id}: a rebase is written once, and a run that stopped between its file and its event on the chain finishes the event.`;
+  const rebased = about('operator.chain_rebased');
+  if (rebased !== undefined) {
+    if (rebased.recorded === 'failed') {
+      steps.say(`The rebase ${id} is in the anchors' store, but its event on the chain wasn't written. ${again}`);
+      return 1;
+    }
+    const shorter =
+      Number(rebased.shorterBy) > 0
+        ? `; the chain is ${String(rebased.shorterBy)} events shorter than its old anchor, and those are given up`
+        : '';
+    steps.say(
+      `Rebased: ${chainSaid(asked.chain)}'s anchor moves on from ${String(rebased.anchorSeq)} to ${String(rebased.seq)} (head ${String(rebased.headHash)})${shorter}. The rebase ${id} is in the anchors' store and its event on the chain. The API takes it in on its next read of the store: the anchor alarm for this chain stops, and it logs the warning audit.rebased, by design.`,
+    );
+    return 0;
+  }
+  if (about('operator.rebase_recorded') !== undefined) {
+    steps.say(`The rebase ${id} was written by an earlier run; its event on the chain is written now. It is done.`);
+    return 0;
+  }
+  const before = about('operator.done_before');
+  if (before !== undefined) {
+    if (before.recorded === 'already') {
+      steps.say(`Already done: the rebase ${id} and its event on the chain were written by an earlier run.`);
+      return 0;
+    }
+    steps.say(
+      before.recorded === 'failed'
+        ? `The rebase ${id} is in the anchors' store, but its event on the chain still couldn't be written. ${again}`
+        : `A rebase named ${id} is already in the anchors' store for another chain or another head, or can't be read as one: nothing was done, and the head named isn't rebased. A new rebase needs no --id.`,
+    );
+    return 1;
+  }
+  const refusedRebase = about('operator.chain_rebase_refused');
+  if (refusedRebase !== undefined) {
+    const why = REBASE_REFUSALS[String(refusedRebase.reason)]?.(refusedRebase) ?? String(refusedRebase.reason);
+    steps.say(`Not rebased, and nothing changed: ${why}.`);
+    return 1;
+  }
+  return refusedOrUnclear(steps, said, again);
+}
+
+/** Moves a chain's anchor on to its checked head on the operator's job (4D2e E11): 0 once rebased. */
+export function chainRebase(asked: RebaseArguments, steps: JobSteps): Promise<number> {
+  const id = asked.id ?? uuidV7Ids.next();
+  const again = `Run the same command again with --id ${id}: a rebase is written once.`;
+  return runRequest(steps, () => ({
+    text: chainRebaseRequest({ ...asked, id }),
+    intro: `Rebasing ${chainSaid(asked.chain)} on to its head at ${asked.seq}, as rebase ${id}, signed with the operator's rebase key. The API trusts that head from then on: name only a head checked after a sanctioned change.`,
+    tryAgain: again,
+    mayStillHold: `The request may still be on ${jobName('operator')}. It names ${id}, so it can't rebase twice. ${again} It takes the request off at its end, as does deploy.ts apps.`,
+    judge: (_run, lines) => rebaseOutcome(steps, lines, asked, id),
+  }));
+}
+
 /** What a plan's run did: 0 once a plan is made, saying its digest and the repair's command. */
 function planOutcome(steps: JobSteps, lines: readonly LogLine[], asked: RecoveryPlanArguments, planId: string): number {
   const said = commandLines(lines);
@@ -950,6 +1086,12 @@ function restoreOutcome(steps: JobSteps, lines: readonly LogLine[], asked: Resto
     steps.say(
       `Repaired: ${String(restored.putBack)} rows put back, ${String(restored.replaced)} replaced, ${String(restored.removed)} removed; the chain checks whole to ${String(restored.endsAt)}. The records are in the evidence store as ${records}. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
     );
+    // The head a rebase names (4D2e E11), said only by a repair that logs its hash.
+    if (typeof restored.endsAtHash === 'string') {
+      steps.say(
+        `If the anchor check then alarms "anchor" for this chain, the rebase, once its head is checked: node deploy/azure/operator.ts chain-rebase --chain ${asked.orgId} --seq ${String(restored.endsAt)} --hash ${restored.endsAtHash} --reason repaired --evidence <incident reference>`,
+      );
+    }
     return 0;
   }
   const refusedRepair = about('operator.chain_restore_refused');
@@ -1095,6 +1237,10 @@ export function main(
       if (argv[0] === 'chain-restore') {
         const asked = parseRestore(argv);
         return (steps) => chainRestore(asked, steps);
+      }
+      if (argv[0] === 'chain-rebase') {
+        const asked = parseRebase(argv);
+        return (steps) => chainRebase(asked, steps);
       }
       if (argv[0] === 'invite-first-admin') {
         const request = parseFirstAdmin(argv);

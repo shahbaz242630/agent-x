@@ -89,6 +89,10 @@ export const chainRestoreRequest = (
 export const CHAIN_REBASE_USAGE =
   'chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> --id <new rebase ID>';
 
+/** A chain's head as a rebase names it (4D2e E11): its number, from 1, and its hash in lower-case hex. */
+export const HEAD_SEQ = /^[1-9]\d{0,18}$/;
+export const HEAD_HASH = /^[0-9a-f]{64}$/;
+
 /** What a chain's rebase names: the chain, the place the repair ended at, why, the incident and the rebase's ID. */
 export interface ChainRebaseWords {
   readonly chain: string;

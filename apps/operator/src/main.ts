@@ -108,6 +108,8 @@ import {
   type HandoffCommand,
   handoffAskedOf,
   handoffUsage,
+  HEAD_HASH,
+  HEAD_SEQ,
   NO_ANCHORS_PROBLEM,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
@@ -391,10 +393,6 @@ function chainNamed(named: string | undefined): Chain | undefined {
 
 /** A rebase request's flags, in their order, each followed by its value. */
 const REBASE_FLAGS = ['--chain', '--seq', '--hash', '--reason', '--evidence', '--id'] as const;
-
-/** A chain's head as a request names it: its number, and its hash in lower-case hex. */
-const HEAD_SEQ = /^[1-9]\d{0,18}$/;
-const HEAD_HASH = /^[0-9a-f]{64}$/;
 
 /**
  * A chain's rebase (4D2e E11): only from a file, naming the chain, the place the repair ended at (its head's number and

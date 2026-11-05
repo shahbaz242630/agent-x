@@ -191,7 +191,15 @@ describe('PL-29 a chain repaired from its plan, original rows alone', () => {
     expect(await verifiedLive()).toMatchObject({ ok: false });
     const outcome = await restore(await digestNow());
     expect(outcome).toMatchObject({ ok: true });
-    expect(outcome.ok && outcomeLine(outcome)).toMatchObject({ putBack: 1, replaced: 0, removed: 0 });
+    // The repaired head, by its number and hash: the place a rebase names (4D2e E11).
+    expect(outcome.ok && outcomeLine(outcome)).toMatchObject({
+      putBack: 1,
+      replaced: 0,
+      removed: 0,
+      endsAt: outcome.ok ? outcome.plan.endsAt.seq.toString() : '',
+      endsAtHash: outcome.ok ? outcome.plan.endsAt.hash.toString('hex') : '',
+    });
+    expect(outcome.ok && outcome.plan.endsAt.hash.toString('hex')).toMatch(/^[0-9a-f]{64}$/);
     expect(await verifiedLive()).toMatchObject({ ok: true });
     expect(await snapshot(live)).toBe(await snapshot(theCopy()));
   });
