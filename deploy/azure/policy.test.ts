@@ -1740,7 +1740,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         expect(brokenRules(withExtra(twice))).toEqual(['evidence-store']);
       });
 
-      it("the operator's job is told of it as its own identity, and of no public key until one is set", () => {
+      it("the operator's job is told of it as its own identity, and of the public key staging's API logged (S173)", () => {
         const STORE_NAME = String(staging.predictedResources.find(EVIDENCE_STORE)?.name);
         const operator = staging.predictedResources.find(JOB('operator')) as unknown as Mutable;
         expect(settingsOf(operator).filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_ANCHOR'))).toEqual([
@@ -1752,6 +1752,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
             name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
             value: `[reference('${identityId('operator')}', '2024-11-30').clientId]`,
           },
+          { name: 'AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS', value: '1:YGJbtqiqwcHQT32ByJhe-28JTKwrMacr8rHCj_S91No' },
         ]);
         // Told the API's identity, it would ask for a token it holds no role as.
         const asApi = changed(JOB('operator'), (job) => {
