@@ -13,6 +13,7 @@
 // summary (plain.k6.js's stageGSummary) is one JSON line on stdout
 // (load.stageg_summary), as the jobs keep no files; stageg.ts's judgeStep
 // says whether the step passed.
+import { SharedArray } from 'k6/data';
 import exec from 'k6/execution';
 
 import { judgedKind, readStep, stageGOptions, stageGSummary } from './plain.k6.js';
@@ -32,10 +33,12 @@ const STEP = readStep(__ENV.STEP);
 const TRAFFIC = judgedKind(STEP);
 const NEIGHBOURS = STEP.neighbours !== null;
 
-const { agents } = JSON.parse(open(__ENV.SEED ?? '/out/seed.json'));
-const steadyAgents = ofKind(agents, NEIGHBOURS ? 'neighbour-calm' : 'ample');
-const busyAgents = ofKind(agents, 'neighbour-busy');
-const stuckAgents = ofKind(agents, 'neighbour-stuck');
+const SEED = __ENV.SEED ?? '/out/seed.json';
+/** One kind's agents, read from the seed once and shared by every VU: thousands of VUs never each parse it. */
+const sharedAgents = (kind) => new SharedArray(kind, () => ofKind(JSON.parse(open(SEED)).agents, kind));
+const steadyAgents = sharedAgents(NEIGHBOURS ? 'neighbour-calm' : 'ample');
+const busyAgents = NEIGHBOURS ? sharedAgents('neighbour-busy') : [];
+const stuckAgents = NEIGHBOURS ? sharedAgents('neighbour-stuck') : [];
 const missing = [
   ['the steady traffic', steadyAgents],
   ...(NEIGHBOURS
