@@ -6,7 +6,8 @@
 // Each seed's numbers are printed (seconds per organisation by kind). Run with
 // the load stack up (run.ts's compose files):
 //   AGENTX_LOAD_DB_PASSWORD=... node node_modules/vitest/vitest.mjs run --config vitest.load.config.ts stageg-grow
-// AGENTX_STAGE_G_WORKERS and AGENTX_STAGE_G_HUGE_CHAIN set the workers and the long chain's length.
+// AGENTX_STAGE_G_CONNECTIONS sets the seed's connections (the load job's 6, five workers, unless given: 9 gives
+// the laptop's fastest measured, eight workers) and AGENTX_STAGE_G_HUGE_CHAIN the long chain's length.
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -18,23 +19,17 @@ import { API_PURPOSES, loadKeys, OPERATOR_ONLY } from '../../packages/platform/s
 import { testLogger } from '../../packages/testing/src/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
-import {
-  APP_KEYS_DIR,
-  loadConnection,
-  loadOrgName,
-  OUT_DIR,
-  SEED_FILE,
-  STAGE_G_HUGE_CHAIN_EVENTS,
-  STAGE_G_SEED_WORKERS,
-} from './plan.ts';
+import { APP_KEYS_DIR, loadConnection, loadOrgName, OUT_DIR, SEED_FILE, STAGE_G_HUGE_CHAIN_EVENTS } from './plan.ts';
 import { asAdmin, COMPOSE } from './run.ts';
 import { rekeyed } from './seed.ts';
-import { stageGCohort, stageGSeed, type StageGSeeded } from './stageg-seed.ts';
+import { JOB_CONNECTIONS } from './job.ts';
+import { stageGCohort, stageGSeed, type StageGSeeded, stageGSeedWorkers } from './stageg-seed.ts';
 
-const workers = Number(process.env.AGENTX_STAGE_G_WORKERS ?? STAGE_G_SEED_WORKERS);
+const connections = Number(process.env.AGENTX_STAGE_G_CONNECTIONS ?? JOB_CONNECTIONS);
+const workers = stageGSeedWorkers(connections);
 const hugeChainEvents = Number(process.env.AGENTX_STAGE_G_HUGE_CHAIN ?? STAGE_G_HUGE_CHAIN_EVENTS);
 const runId = process.env.AGENTX_LOAD_RUN_ID ?? `stage-g ${new Date().toISOString()}`;
-const database = createDatabase<MandateWorldTables>({ ...loadConnection(), maxConnections: workers + 2 }, testLogger());
+const database = createDatabase<MandateWorldTables>({ ...loadConnection(), maxConnections: connections }, testLogger());
 const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} }, API_PURPOSES, OPERATOR_ONLY);
 const seeded = (orgs: number) => stageGSeed({ database, keyring, runId, orgs, workers, hugeChainEvents });
 

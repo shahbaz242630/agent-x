@@ -171,13 +171,6 @@ export const STAGE_G_HEAVY_EVERY = 200;
 export const STAGE_G_HUGE_CHAIN_EVENTS = 20_000;
 
 /**
- * Stage G's seed workers, each one connection at a time, plus two for the
- * seed's other reads: beside the load run's API (20) and the jobs app, well
- * within the server's connections.
- */
-export const STAGE_G_SEED_WORKERS = 8;
-
-/**
  * A run's k6 phases: 1 and 2 the steady traffic (2 with the spike); 3 and 4 the
  * crowds, reported apart; 5 the neighbours, one organisation's trouble beside others.
  */
