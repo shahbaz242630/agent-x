@@ -1,0 +1,285 @@
+import { describe, expect, it } from 'vitest';
+
+import type { BackgroundHealth } from './stageg-background.ts';
+import { recoverySeconds, renderStageG, type StageGStepResult, type StageGSummary } from './stageg-report.ts';
+import { type Profile, stageGProfile, stepRun, type WindowNumbers } from './stageg.ts';
+
+const CALM: BackgroundHealth = {
+  minutes: 20,
+  anchorChecks: 4,
+  failed: 0,
+  unchecked: { first: 0, last: 0 },
+  left: { first: 3, last: 1 },
+  stalled: [],
+  pulses: 20,
+  longestPulseGapMinutes: 1.2,
+};
+
+const summaryOf = (label: string, orgs: number, p95: number, more: Partial<StageGSummary> = {}): StageGSummary => ({
+  test: 'orgs',
+  step: label,
+  orgs,
+  requests: 153_000,
+  created: 152_100,
+  serverErrors: 0,
+  rateLimited: 0,
+  checksFailed: 0,
+  dropped: 0,
+  asksMs: { p50: p95 / 2, p95, p99: p95 * 1.5, max: p95 * 3 },
+  kinds: { steady: { requests: 153_000, serverErrors: 0, rateLimited: 0, p95Ms: p95 } },
+  aborted: false,
+  windows: null,
+  startedAt: '2026-11-06T10:00:00.000Z',
+  endedAt: '2026-11-06T10:20:00.000Z',
+  ...more,
+});
+
+/** A step of `profile` with clean results, its numbers changed by `more`. */
+const stepOf = (
+  profile: Profile,
+  index: number,
+  p95: number,
+  more: Partial<Omit<StageGStepResult, 'run' | 'summary'>> & { readonly summary?: Partial<StageGSummary> } = {},
+): StageGStepResult => {
+  const step = profile.steps[index];
+  if (step === undefined) throw new Error(`No step ${String(index)}.`);
+  const { summary, ...rest } = more;
+  return {
+    run: stepRun(profile, step),
+    summary: summaryOf(step.label, step.orgs, p95, summary),
+    decisionP95Ms: 60,
+    background: CALM,
+    restarts: { before: 0, after: 0 },
+    databaseFailures: [],
+    ...rest,
+  };
+};
+
+const orgs = stageGProfile('orgs');
+
+const HEAD = [
+  '| Step | Organisations | Requests | New | p50 ms | p95 ms | p99 ms | 5xx | 429 by kind | Not sent | Decision p95 ms | p95 vs baseline | Result |',
+  '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+];
+const BACKGROUND_HEAD = [
+  '### Background work in each step’s window',
+  '',
+  '| Step | Minutes | Anchor checks | Failed | Unchecked (first → last) | Waiting (first → last) | Stalled jobs | Pulses | Longest pulse gap min | API restarts (before → after) |',
+  '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+];
+const ASSUMPTIONS =
+  'Stated assumptions, not sourced: one organisation in 50 is light-active (2%), one agent each, sending the steady traffic; one in 200 is heavy (0.5%), 10 agents sharing three suppliers; the rest are idle with a short history; the first organisation holds a long chain of 20,000 partner refreshes.';
+
+describe("the report's Stage G section", () => {
+  it('sets a passing climb’s steps side by side against the first', () => {
+    const text = renderStageG({
+      profile: orgs,
+      steps: [stepOf(orgs, 0, 40), stepOf(orgs, 1, 42), stepOf(orgs, 2, 44.8), stepOf(orgs, 3, 45.6)],
+    });
+    expect(text).toBe(
+      [
+        '## Stage G: orgs (4 of 4 steps)',
+        '',
+        '**Passed: every step.**',
+        '',
+        ASSUMPTIONS,
+        '',
+        ...HEAD,
+        '| orgs-100 | 100 | 153000 | 152100 | 20.0 | 40.0 | 60.0 | 0 | steady 0 | 0 | 60.0 | baseline | Passed |',
+        '| orgs-1000 | 1000 | 153000 | 152100 | 21.0 | 42.0 | 63.0 | 0 | steady 0 | 0 | 60.0 | +5.0% | Passed |',
+        '| orgs-3000 | 3000 | 153000 | 152100 | 22.4 | 44.8 | 67.2 | 0 | steady 0 | 0 | 60.0 | +12.0% | Passed |',
+        '| orgs-10000 | 10000 | 153000 | 152100 | 22.8 | 45.6 | 68.4 | 0 | steady 0 | 0 | 60.0 | +14.0% | Passed |',
+        '',
+        "Baseline: the first step, orgs-100, p95 40.0 ms. A step's p95 more than 15% above it fails (AWS's investigation threshold).",
+        '',
+        ...BACKGROUND_HEAD,
+        '| orgs-100 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-1000 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-3000 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-10000 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  it('names each reason a failing climb stopped where it did, and how to resume it', () => {
+    const text = renderStageG({
+      profile: orgs,
+      steps: [
+        stepOf(orgs, 0, 40),
+        stepOf(orgs, 1, 47, {
+          summary: {
+            serverErrors: 3,
+            dropped: 12,
+            kinds: { steady: { requests: 153_000, serverErrors: 3, rateLimited: 2, p95Ms: 47 } },
+          },
+          decisionP95Ms: 160,
+          background: { ...CALM, failed: 1, stalled: ['anchor-check'], unchecked: null },
+          restarts: { before: 1, after: 2 },
+          databaseFailures: [
+            'The database holds 152099 requests of step orgs-1000, but k6 was answered 201 for 152100 new ones.',
+          ],
+        }),
+      ],
+    });
+    expect(text).toBe(
+      [
+        '## Stage G: orgs (2 of 4 steps)',
+        '',
+        '**Failed at step orgs-1000.** The climb stops there: fix it, then resume with `--from orgs-1000`.',
+        '',
+        ASSUMPTIONS,
+        '',
+        ...HEAD,
+        '| orgs-100 | 100 | 153000 | 152100 | 20.0 | 40.0 | 60.0 | 0 | steady 0 | 0 | 60.0 | baseline | Passed |',
+        '| orgs-1000 | 1000 | 153000 | 152100 | 23.5 | 47.0 | 70.5 | 3 | steady 2 | 12 | 160.0 | +17.5% | **Failed** |',
+        '',
+        "Baseline: the first step, orgs-100, p95 40.0 ms. A step's p95 more than 15% above it fails (AWS's investigation threshold).",
+        '',
+        ...BACKGROUND_HEAD,
+        '| orgs-100 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-1000 | 20.0 | 4 | 1 | no run | 3 → 1 | anchor-check | 20 | 1.2 | 1 → 2 |',
+        '',
+        '### What failed',
+        '',
+        "- orgs-1000: The decisions' p95 was 160.0 ms, over the 150.0 ms limit.",
+        '- orgs-1000: 12 requests were never sent (k6 had no free VU): the step carried less load than it says.',
+        "- orgs-1000: The p95 was 47.0 ms, more than 15% above the baseline step's 40.0 ms.",
+        '- orgs-1000: The database holds 152099 requests of step orgs-1000, but k6 was answered 201 for 152100 new ones.',
+        '- orgs-1000: The anchor check failed 1 chain check(s) in the step: read its audit.anchor_check_done lines.',
+        '- orgs-1000: A background job stalled in the step: anchor-check.',
+        "- orgs-1000: The API's replicas restarted 1 time(s) during the step: a crash, or a replica killed for memory.",
+        '',
+      ].join('\n'),
+    );
+  });
+});
+
+const windowsOf = (p95s: Readonly<Record<number, number>>): WindowNumbers[] =>
+  Object.entries(p95s).map(([window, p95Ms]) => ({ window: Number(window), p95Ms, failedShare: 0 }));
+
+const spike = stageGProfile('spike');
+/** The spike's base hold is 300 to 600 s, the surge ends at 800 s: windows 10 to 19 the base, 26 on after it. */
+const spikeWindows = (after: Readonly<Record<number, number>>) =>
+  windowsOf({ 9: 400, 10: 40, 15: 50, 19: 45, 22: 900, ...after });
+const ABORT = { p95Ms: 500, errorShare: 0.01, windowSeconds: 30 };
+
+describe('the recovery after a surge, from its windows', () => {
+  const run = stepOf(spike, 0, 40).run;
+
+  it('is the time from the surge’s end to the window after its last slow one, within 15% of the base hold’s slowest', () => {
+    expect(recoverySeconds(run, 30, spikeWindows({ 26: 300, 27: 70, 28: 57, 29: 45 }))).toBe(40);
+    expect(recoverySeconds(run, 30, spikeWindows({ 26: 50, 27: 40 }))).toBe(0);
+  });
+
+  it('is null when latency never came back, or no window was in the base hold', () => {
+    expect(recoverySeconds(run, 30, spikeWindows({ 26: 50, 27: 90 }))).toBeNull();
+    expect(recoverySeconds(run, 30, windowsOf({ 26: 50 }))).toBeNull();
+  });
+
+  it('reports a surge with windows against its rule, and one without as not measured, never as never recovered', () => {
+    const measured = { ...stepOf(spike, 0, 40), run: { ...run, abort: ABORT } };
+    const withWindows = (after: Readonly<Record<number, number>>) =>
+      renderStageG({
+        profile: spike,
+        steps: [{ ...measured, summary: { ...measured.summary, windows: spikeWindows(after) } }],
+      });
+    expect(withWindows({ 26: 300, 27: 45 })).toContain(
+      "### Recovery after the surge\n\nLatency was back to the base load's 10 s after the surge ended (the rule: within 60 s).",
+    );
+    expect(withWindows({ 26: 300, 27: 90 })).toContain("Recovery: latency never came back to the base load's.");
+    expect(withWindows({ 26: 300, 27: 300, 28: 300, 29: 45 })).toContain(
+      '- spike: Latency took 70 s to come back after the surge, over the 60 s window.',
+    );
+    const unmeasured = renderStageG({ profile: spike, steps: [stepOf(spike, 0, 40)] });
+    expect(unmeasured).toContain('Recovery: not measured, k6 gave no window numbers for this step.');
+    expect(unmeasured).toContain(
+      '- spike: The recovery after the surge was not measured: k6 gave no window numbers for this step.',
+    );
+    expect(unmeasured).not.toContain('never came back after the surge');
+  });
+});
+
+describe("the report's tests apart from the climb", () => {
+  it('names the rate a breaking-point climb broke at, or the ceiling it reached', () => {
+    const breaking = stageGProfile('breaking');
+    const broke = (windows: readonly WindowNumbers[] | null) =>
+      renderStageG({ profile: breaking, steps: [stepOf(breaking, 0, 40, { summary: { windows, aborted: true } })] });
+    expect(broke(windowsOf({ 29: 300, 30: 600 }))).toContain(
+      '### The breaking point\n\nThe climb broke at 425 requests a second: the first 30 s window whose p95 reached 500 ms or whose failed share reached 1%. The overload test is sized from this rate.',
+    );
+    expect(broke(windowsOf({ 29: 300 }))).toContain(
+      'The climb reached its ceiling of 1700 requests a second without breaking: the breaking point is past it.',
+    );
+    expect(broke(null)).toContain('The climb reached its ceiling of 1700 requests a second');
+  });
+
+  it('sets the soak’s segments in a row, with what was and wasn’t measured', () => {
+    const soak = stageGProfile('soak');
+    const text = renderStageG({
+      profile: soak,
+      steps: [
+        stepOf(soak, 0, 40, { resources: { memoryMb: 410, connections: 18 } }),
+        stepOf(soak, 1, 41, { resources: { memoryMb: 415, connections: null } }),
+        stepOf(soak, 2, 0, { summary: { asksMs: null } }),
+        stepOf(soak, 3, 44, { resources: { memoryMb: 430, connections: null } }),
+      ],
+    });
+    expect(text).toContain(
+      [
+        '### The soak, segment by segment',
+        '',
+        '| Segment | p95 ms | API memory MB | Database connections |',
+        '| --- | --- | --- | --- |',
+        '| soak-1 | 40.0 | 410 | 18 |',
+        '| soak-2 | 41.0 | 415 | not measured |',
+        '| soak-3 | none | not measured | not measured |',
+        '| soak-4 | 44.0 | 430 | not measured |',
+        '',
+        'p95 from 40.0 ms in the first segment to 44.0 ms in the last (+10.0%).',
+        "The API's memory (MB): 410 at the first segment's end, 430 at the last's.",
+        "The database's connections: not measured.",
+      ].join('\n'),
+    );
+    expect(text).toContain('| soak-3 | 10000 | 153000 | 152100 | none | none | none |');
+    expect(renderStageG({ profile: soak, steps: [stepOf(soak, 0, 0, { summary: { asksMs: null } })] })).toContain(
+      'p95 from 0.0 ms in the first segment to 0.0 ms in the last (not compared).',
+    );
+  });
+
+  it('compares the neighbours with the target’s p95, judged by the calm organisations only', () => {
+    const neighbours = stageGProfile('neighbours');
+    const kinds = {
+      calm: { requests: 9000, serverErrors: 0, rateLimited: 4, p95Ms: 50 },
+      busy: { requests: 15_000, serverErrors: 0, rateLimited: 900, p95Ms: 20 },
+      stuck: { requests: 3000, serverErrors: 2, rateLimited: 0, p95Ms: 4000 },
+    };
+    const text = renderStageG({
+      profile: neighbours,
+      baselineP95Ms: 45,
+      steps: [stepOf(neighbours, 0, 50, { summary: { kinds } })],
+    });
+    expect(text).toContain('| 0 | calm 4, busy 900, stuck 0 | 0 | 60.0 | +11.1% | **Failed** |');
+    expect(text).toContain('Baseline: the target step, p95 45.0 ms.');
+    expect(text).toContain(
+      '- neighbours: The calm organisations were refused for rate 4 times: only the offender may be.',
+    );
+  });
+
+  it('says a climb not yet finished, and a step with no p95 has no baseline', () => {
+    expect(renderStageG({ profile: orgs, steps: [stepOf(orgs, 0, 40)] })).toContain(
+      '**Not finished: 1 of 4 steps ran, each passing.**',
+    );
+    const none = renderStageG({
+      profile: orgs,
+      steps: [stepOf(orgs, 0, 0, { summary: { asksMs: null, kinds: {} }, restarts: null })],
+    });
+    expect(none).toContain('No step had a p95 to set as the baseline.');
+    expect(none).toContain('| 0 | no traffic | 0 | 60.0 | not compared | **Failed** |');
+    expect(none).toContain('| 0 → 0 | 3 → 1 | none | 20 | 1.2 | not read |');
+    expect(none).toContain('- orgs-100: The step sent no request, so nothing could be judged.');
+    expect(
+      renderStageG({ profile: stageGProfile('target'), steps: [stepOf(stageGProfile('target'), 0, 40)] }),
+    ).toContain('Baseline: the first step, target, p95 40.0 ms.\n');
+  });
+});
