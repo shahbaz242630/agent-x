@@ -91,7 +91,8 @@ const NO_KIND: KindNumbers = { requests: 0, serverErrors: 0, rateLimited: 0, fai
 /** The tests that mean their judged traffic to be refused for rate: a surge, and a climb past its knee. */
 const REFUSALS_EXPECTED: ReadonlySet<string> = new Set(['spike', 'overload', 'breaking']);
 
-const ms = (value: number): string => value.toFixed(1);
+// A number not read yet (the runner stores NaN, never 0) shows as "not read", never as a time.
+const ms = (value: number): string => (Number.isNaN(value) ? 'not read' : value.toFixed(1));
 const percent = (share: number): string => `${share >= 0 ? '+' : ''}${(share * 100).toFixed(1)}%`;
 
 const isSurge = (run: StepRun): boolean => run.test === 'spike' || run.test === 'overload';

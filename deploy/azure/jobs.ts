@@ -64,14 +64,17 @@ export const LOAD_JOBS = ['load-first', 'load-second', 'load-cleanup'] as const;
 export type LoadJob = (typeof LOAD_JOBS)[number];
 
 /**
- * Stage G's jobs (4D2e; apps.bicep `stageGJobs`), there only on its throwaway
- * copy's run: started by its runner, removed by load.ts finish with PL-38's.
+ * Stage G's jobs (4D2e; apps.bicep `stageGJobs`), there only for a run on its
+ * throwaway copy: run by deploy/azure/stage-g.ts alone, as load.ts runs PL-38's.
  */
 export const STAGE_G_JOBS = ['load-mark', 'load-step', 'load-check'] as const;
 export type StageGJob = (typeof STAGE_G_JOBS)[number];
 
+/** Every job this file can wait for and read. */
+export type AnyJob = Job | LoadJob | StageGJob;
+
 /** A job's name in Azure (names.bicep `jobName`). */
-export const jobName = (job: Job | LoadJob | StageGJob): string => `job-agentx-stg-${job}`;
+export const jobName = (job: AnyJob): string => `job-agentx-stg-${job}`;
 
 /** How a run can end (Container Apps' execution states); any other state hasn't ended. */
 export const ENDED: ReadonlySet<string> = new Set(['Succeeded', 'Failed', 'Stopped', 'Degraded']);
@@ -135,7 +138,7 @@ const RUN_SUFFIX = /^[a-z0-9]+$/;
  * Whether a name is one of the job's runs. A fixed pattern and a prefix, never
  * a pattern built from what was typed (CodeQL js/regex-injection).
  */
-export const isRunOf = (job: Job | LoadJob | StageGJob, execution: string): boolean => {
+export const isRunOf = (job: AnyJob, execution: string): boolean => {
   const prefix = `${jobName(job)}-`;
   return execution.startsWith(prefix) && RUN_SUFFIX.test(execution.slice(prefix.length));
 };
@@ -179,7 +182,7 @@ export const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 /** A job in the subscription the operator is signed in to. */
 export interface Target {
   readonly subscription: string;
-  readonly job: Job | LoadJob | StageGJob;
+  readonly job: AnyJob;
 }
 
 /**
@@ -436,9 +439,13 @@ export function workspaceId(steps: JobSteps, subscription: string): string {
   return id;
 }
 
-/** One query of the workspace over `timespan` (ISO start/end), Log Analytics' answer as it gave it. */
-export const askWorkspace = (steps: JobSteps, workspace: string, query: string, timespan: string): unknown =>
-  azJson(steps.az, [
+/**
+ * One query of the workspace over `timespan` (ISO start/end), Log Analytics'
+ * answer as it gave it. An answer carrying an error (a partial result, a limit
+ * passed, a timeout) is thrown, never read as all the lines there are.
+ */
+export function askWorkspace(steps: JobSteps, workspace: string, query: string, timespan: string): unknown {
+  const answer = azJson(steps.az, [
     'rest',
     '--method',
     'post',
@@ -448,7 +455,15 @@ export const askWorkspace = (steps: JobSteps, workspace: string, query: string, 
     LOG_AUDIENCE,
     '--body',
     JSON.stringify({ query, timespan }),
-  ]);
+  ]) as { error?: { code?: unknown; message?: unknown } | null } | null;
+  const error = answer?.error;
+  if (error !== undefined && error !== null) {
+    throw new Error(
+      `Log Analytics answered only in part (${text(error.code) || 'no code'}: ${text(error.message) || 'no message'}), so its lines can't be taken as all of them.`,
+    );
+  }
+  return answer;
+}
 
 /**
  * Everything logged about one run, oldest first: the platform's lines (which
@@ -456,7 +471,7 @@ export const askWorkspace = (steps: JobSteps, workspace: string, query: string, 
  * and the container's (whose group is named after the run). Both names are
  * held to `isRunOf` before they get here, so neither can end a string early.
  */
-const logQuery = (job: Job | LoadJob | StageGJob, execution: string): string =>
+const logQuery = (job: AnyJob, execution: string): string =>
   [
     'union',
     `(ContainerAppSystemLogs | where JobName == '${jobName(job)}' and (ReplicaName startswith_cs '${execution}-' or Log contains_cs "'${execution}'") | project TimeGenerated, Source = 'platform', Reason, Text = Log),`,

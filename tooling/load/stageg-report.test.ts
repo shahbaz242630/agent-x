@@ -228,6 +228,16 @@ describe('a bad run never passes for what the error share left out (review S175)
     steady: { requests: 10_000, serverErrors: 0, rateLimited, failedAnswers, p95Ms: 40 },
   });
 
+  it('shows a decision time not read yet as "not read", never NaN or a time', () => {
+    const text = renderStageG({
+      site: 'azure',
+      profile: orgs,
+      steps: [stepOf(orgs, 0, 40, { decisionP95Ms: Number.NaN })],
+    });
+    expect(text).toContain('| not read |');
+    expect(text).not.toContain('NaN');
+  });
+
   it('counts every answer but a 2xx in the error share: 4xx ones that are neither 5xx nor 429 too', () => {
     // 150 answers 409/422, none a 5xx or a 429: 1.5%, which the share of 5xx and 429 alone called 0%.
     expect(failing('orgs', steady(150, 0))).toContain(
