@@ -125,7 +125,8 @@ export function stageGOptions(step) {
   const seconds = stepSeconds(step);
   const kinds = kindsOf(step);
   return {
-    summaryTrendStats: ['med', 'p(95)', 'p(99)', 'max'],
+    // `count` for a window's answers, so its shares weigh as much as it carried.
+    summaryTrendStats: ['med', 'p(95)', 'p(99)', 'max', 'count'],
     // Every metric carries its step, so a step's numbers are never another's.
     tags: { test: step.test, step: step.label },
     scenarios: {
@@ -177,7 +178,11 @@ export const windowCount = (step) => Math.ceil(stepSeconds(step) / step.windowSe
  * metric is in the summary with no threshold, where a tagged one is there only
  * if a threshold names it, so only a climb's windows carry thresholds.
  */
-export const windowMetrics = (window) => ({ ms: `window_ms_${window}`, failed: `window_failed_${window}` });
+export const windowMetrics = (window) => ({
+  ms: `window_ms_${window}`,
+  failed: `window_failed_${window}`,
+  refused: `window_refused_${window}`,
+});
 
 const windows = (step) => Array.from({ length: windowCount(step) }, (_, window) => window);
 
@@ -199,10 +204,19 @@ const abortThresholds = (step) => {
 /** Each window's p95 and failed share, for the windows that saw an answer: a climb's breaking rate, a surge's recovery. */
 const windowNumbers = (step, metrics) =>
   windows(step).flatMap((window) => {
-    const { ms, failed } = windowMetrics(window);
-    const p95Ms = metrics[ms]?.values['p(95)'];
-    const failedShare = metrics[failed]?.values.rate ?? 0;
-    return p95Ms === undefined ? [] : [{ window, p95Ms, failedShare }];
+    const { ms, failed, refused } = windowMetrics(window);
+    const times = metrics[ms]?.values;
+    if (times === undefined) return [];
+    return [
+      {
+        window,
+        p95Ms: times['p(95)'],
+        failedShare: metrics[failed]?.values.rate ?? 0,
+        // 429s apart from the rest: a surge means to cause them, and only during the surge.
+        refusedShare: metrics[refused]?.values.rate ?? 0,
+        requests: times.count ?? 0,
+      },
+    ];
   });
 
 /** A count k6 summed up, 0 when nothing was counted. */

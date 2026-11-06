@@ -83,8 +83,8 @@ const WINDOWS =
   STEP.windowSeconds === null
     ? null
     : Array.from({ length: windowCount(STEP) }, (_, window) => {
-        const { ms, failed } = windowMetrics(window);
-        return { ms: new Trend(ms, true), failed: new Rate(failed) };
+        const { ms, failed, refused } = windowMetrics(window);
+        return { ms: new Trend(ms, true), failed: new Rate(failed), refused: new Rate(refused) };
       });
 
 /** The steady (or calm) traffic: round the agents, so every active organisation sends, each round its suppliers. */
@@ -97,6 +97,7 @@ export function steady(data) {
   window.ms.add(answer.timings.duration);
   // As k6's http_req_failed: anything but a 2xx or 3xx answer, a timeout's status 0 included.
   window.failed.add(answer.status < 200 || answer.status >= 400);
+  window.refused.add(answer.status === 429);
 }
 
 export function duplicate(data) {

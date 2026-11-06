@@ -9,17 +9,16 @@ import { allowedBusyLines, type BackgroundHealth, backgroundFailures } from './s
 import {
   breakingRate,
   judgeStep,
-  type K6Stages,
   MAX_ERROR_SHARE,
   type Profile,
   rateAt,
-  REQUEST_P95_MS,
   type StepMeasured,
   type StepRun,
   stagesSeconds,
   type WindowNumbers,
 } from './stageg.ts';
 import type { StageGCheckResult } from './stageg-checks.ts';
+import { baseHoldFailures, recoverySeconds, refusedByPhase, refusedFailures, refusedLine } from './stageg-surge.ts';
 import {
   type LoadSite,
   CROWD_AGENTS,
@@ -68,6 +67,8 @@ export interface StageGStepResult {
   readonly restarts: { readonly before: number; readonly after: number } | null;
   /** Each of stageg-checks.ts's checks after the step, with what it found: none run fails the step. */
   readonly databaseChecks: readonly StageGCheckResult[];
+  /** For a surge: the decisions' p95 over its base hold (stageg-surge.ts's baseHoldWindow); null when none was made. */
+  readonly baseDecisionP95Ms?: number | null;
   /** For the soak: the API's memory and the database's connections at the segment's end, where they were read. */
   readonly resources?: { readonly memoryMb: number | null; readonly connections: number | null };
 }
@@ -85,9 +86,6 @@ export interface StageGReportInput {
 /** The kind a step is judged by, as plain.k6.js's judgedKind names it. */
 const JUDGED: Readonly<Record<Profile['mix'], string>> = { steady: 'steady', neighbours: 'calm' };
 
-/** Back to the base load's latency: a window's p95 within this much of the base hold's median. */
-const RECOVERED_MARGIN = 0.15;
-
 const NO_KIND: KindNumbers = { requests: 0, serverErrors: 0, rateLimited: 0, failedAnswers: 0, p95Ms: 0 };
 
 /** The tests that mean their judged traffic to be refused for rate: a surge, and a climb past its knee. */
@@ -95,76 +93,6 @@ const REFUSALS_EXPECTED: ReadonlySet<string> = new Set(['spike', 'overload', 'br
 
 const ms = (value: number): string => value.toFixed(1);
 const percent = (share: number): string => `${share >= 0 ? '+' : ''}${(share * 100).toFixed(1)}%`;
-
-const secondsOf = (duration: string): number => Number.parseInt(duration, 10);
-
-/** Where a surge's windows lie: its base hold's, and the first and last after the surge ends. */
-function surgeWindows(stages: K6Stages, windowSeconds: number) {
-  // A surge's stages end rise, peak, fall, recovery (stageg.ts's k6Stages): before them, the ramp and the base hold.
-  const opening = stages.stages.slice(0, -4).map(({ duration }) => secondsOf(duration));
-  const baseTo = opening.reduce((sum, seconds) => sum + seconds, 0);
-  const baseFrom = opening.length > 1 ? (opening[0] ?? 0) : 0;
-  const surgeEnd = stagesSeconds(stages) - secondsOf(stages.stages.at(-1)?.duration ?? '0s');
-  const span = (first: number, last: number) =>
-    Array.from({ length: Math.max(0, last - first + 1) }, (_, i) => first + i);
-  return {
-    base: span(Math.ceil(baseFrom / windowSeconds), Math.floor(baseTo / windowSeconds) - 1),
-    after: span(Math.floor(surgeEnd / windowSeconds), Math.ceil(stagesSeconds(stages) / windowSeconds) - 1),
-    surgeEnd,
-  };
-}
-
-/** The middle value, the lower of the two middles for an even count. */
-const median = (values: readonly number[]): number =>
-  values.toSorted((a, b) => a - b)[Math.floor((values.length - 1) / 2)] ?? 0;
-
-/**
- * Seconds from a surge's end to the start of the first window after which
- * every window is back: its p95 within RECOVERED_MARGIN of the base hold's
- * median (capped at the request target, so a base already slow can't lower the
- * bar) and its failed share below `maxFailedShare`. Every window after the
- * surge must be there: a missing one is not back. Counted from the last bad
- * window, so a relapse restarts it. Null if the last window is not back, or no
- * window of the base hold has numbers.
- */
-export function recoverySeconds(
-  stages: K6Stages,
-  windowSeconds: number,
-  windows: readonly WindowNumbers[],
-  maxFailedShare: number,
-): number | null {
-  const { base, after, surgeEnd } = surgeWindows(stages, windowSeconds);
-  const byWindow = new Map(windows.map((each) => [each.window, each]));
-  const baseP95s = base.flatMap((window) => byWindow.get(window)?.p95Ms ?? []);
-  if (baseP95s.length === 0) return null;
-  const limit = Math.min(median(baseP95s), REQUEST_P95_MS) * (1 + RECOVERED_MARGIN);
-  const isBack = (window: number) => {
-    const numbers = byWindow.get(window);
-    return numbers !== undefined && numbers.p95Ms <= limit && numbers.failedShare < maxFailedShare;
-  };
-  const lastBad = after.findLastIndex((window) => !isBack(window));
-  const back = after[lastBad + 1];
-  return back === undefined ? null : Math.max(0, back * windowSeconds - surgeEnd);
-}
-
-/** The base hold before a surge judged by the target's rules: what the surge must come back to must itself be right. */
-function baseHoldFailures(stages: K6Stages, windowSeconds: number, windows: readonly WindowNumbers[]): string[] {
-  const byWindow = new Map(windows.map((each) => [each.window, each]));
-  return surgeWindows(stages, windowSeconds).base.flatMap((window) => {
-    const numbers = byWindow.get(window);
-    if (numbers === undefined) {
-      return [
-        `Window ${String(window)} of the base load before the surge has no numbers: there is nothing sure to come back to.`,
-      ];
-    }
-    const { p95Ms, failedShare } = numbers;
-    return p95Ms < REQUEST_P95_MS && failedShare < MAX_ERROR_SHARE
-      ? []
-      : [
-          `The base load before the surge already missed the target in window ${String(window)}: p95 ${ms(p95Ms)} ms (under ${String(REQUEST_P95_MS)}), ${(failedShare * 100).toFixed(2)}% failed (under ${String(MAX_ERROR_SHARE * 100)}%).`,
-        ];
-  });
-}
 
 const isSurge = (run: StepRun): boolean => run.test === 'spike' || run.test === 'overload';
 
@@ -177,6 +105,34 @@ const measuredRecovery = ({ run, summary }: StageGStepResult, rules: Profile['ru
   run.windowSeconds === null || summary.windows === null
     ? undefined
     : recoverySeconds(run, run.windowSeconds, summary.windows, rules.maxErrorShare ?? MAX_ERROR_SHARE);
+
+/** A surge's own failures from its windows: its base hold, and refusals for rate outside the surge. */
+function surgeFailures({ run, summary, baseDecisionP95Ms }: StageGStepResult, rules: Profile['rules']): string[] {
+  if (!isSurge(run) || run.windowSeconds === null || summary.windows === null) return [];
+  const phases = refusedByPhase(run, run.windowSeconds, summary.windows, rules.maxErrorShare ?? MAX_ERROR_SHARE);
+  return [...baseHoldFailures(run, run.windowSeconds, summary.windows, baseDecisionP95Ms), ...refusedFailures(phases)];
+}
+
+/**
+ * A step's judgement: passed, failed with every reason in plain words, or not
+ * judged yet while its logs are still arriving (with what is missing), which is
+ * neither: the runner waits on it and asks again.
+ */
+export type StepJudgement =
+  | { readonly state: 'passed' }
+  | { readonly state: 'failed'; readonly failures: readonly string[] }
+  | { readonly state: 'not-judged-yet'; readonly missing: readonly string[] };
+
+/** Judges one step of `input`, against `baselineP95Ms` where its rules compare. */
+export function judgeStageGStep(
+  input: StageGReportInput,
+  result: StageGStepResult,
+  baselineP95Ms: number | undefined,
+): StepJudgement {
+  if (result.background.missing.length > 0) return { state: 'not-judged-yet', missing: result.background.missing };
+  const failures = stepFailures(input, result, baselineP95Ms);
+  return failures.length === 0 ? { state: 'passed' } : { state: 'failed', failures };
+}
 
 /** Every reason a step failed, in plain words: its rules, its checks, its background work and its replicas. */
 function stepFailures(input: StageGReportInput, result: StageGStepResult, baselineP95Ms: number | undefined): string[] {
@@ -205,9 +161,7 @@ function stepFailures(input: StageGReportInput, result: StageGStepResult, baseli
         ]
       : []),
     ...(unmeasured ? ['The recovery after the surge was not measured: k6 gave no window numbers for this step.'] : []),
-    ...(isSurge(run) && run.windowSeconds !== null && summary.windows !== null
-      ? baseHoldFailures(run, run.windowSeconds, summary.windows)
-      : []),
+    ...surgeFailures(result, input.profile.rules),
     ...databaseFailures(result.databaseChecks),
     ...backgroundFailures(result.background, REFUSALS_EXPECTED.has(run.test)),
     ...restartFailures(restarts, input.site),
@@ -234,6 +188,12 @@ function restartFailures(restarts: StageGStepResult['restarts'], site: LoadSite)
     : [];
 }
 
+const RESULT_CELL: Readonly<Record<StepJudgement['state'], string>> = {
+  passed: 'Passed',
+  failed: '**Failed**',
+  'not-judged-yet': 'not judged yet — logs still arriving',
+};
+
 const timesCell = (summary: StageGSummary): string => {
   const { asksMs } = summary;
   return asksMs === null ? 'none | none | none' : `${ms(asksMs.p50)} | ${ms(asksMs.p95)} | ${ms(asksMs.p99)}`;
@@ -244,7 +204,12 @@ const refusedCell = ({ kinds }: StageGSummary): string =>
     .map(([kind, { rateLimited }]) => `${kind} ${String(rateLimited)}`)
     .join(', ') || 'no traffic';
 
-function stepRow(result: StageGStepResult, baselineP95Ms: number | undefined, index: number, failed: boolean): string {
+function stepRow(
+  result: StageGStepResult,
+  baselineP95Ms: number | undefined,
+  index: number,
+  judged: StepJudgement,
+): string {
   const { summary } = result;
   const p95 = summary.asksMs?.p95;
   let versus = 'not compared';
@@ -253,7 +218,7 @@ function stepRow(result: StageGStepResult, baselineP95Ms: number | undefined, in
     versus = percent(p95 / baselineP95Ms - 1);
   return (
     `| ${result.run.label} | ${String(summary.orgs)} | ${String(summary.requests)} | ${String(summary.created)} | ${timesCell(summary)} | ` +
-    `${String(summary.serverErrors)} | ${refusedCell(summary)} | ${String(summary.dropped)} | ${ms(result.decisionP95Ms)} | ${versus} | ${failed ? '**Failed**' : 'Passed'} |`
+    `${String(summary.serverErrors)} | ${refusedCell(summary)} | ${String(summary.dropped)} | ${ms(result.decisionP95Ms)} | ${versus} | ${RESULT_CELL[judged.state]} |`
   );
 }
 
@@ -301,7 +266,21 @@ function recoverySection(input: StageGReportInput): string[] {
     let said = `Latency was back to the base load's ${String(seconds)} s after the surge ended (the rule: within ${String(window)} s).`;
     if (seconds === undefined) said = 'Recovery: not measured, k6 gave no window numbers for this step.';
     else if (seconds === null) said = "Recovery: latency never came back to the base load's.";
-    return ['', '### Recovery after the surge', '', said];
+    const { run, summary } = result;
+    const refused =
+      run.windowSeconds === null || summary.windows === null
+        ? []
+        : [
+            refusedLine(
+              refusedByPhase(
+                run,
+                run.windowSeconds,
+                summary.windows,
+                input.profile.rules.maxErrorShare ?? MAX_ERROR_SHARE,
+              ),
+            ),
+          ];
+    return ['', '### Recovery after the surge', '', said, ...refused];
   });
 }
 
@@ -346,19 +325,26 @@ const ASSUMPTIONS = [
   `the first organisation holds a long chain of ${STAGE_G_HUGE_CHAIN_EVENTS.toLocaleString('en-GB')} partner refreshes.`,
 ].join(' ');
 
+/** The test's verdict: its first step not passed decides it, a step not judged yet never read as passed or failed. */
+function verdictOf(steps: readonly StageGStepResult[], judged: readonly StepJudgement[], planned: number): string {
+  const at = judged.findIndex(({ state }) => state !== 'passed');
+  const label = steps[at]?.run.label;
+  if (label === undefined) {
+    return steps.length === planned
+      ? '**Passed: every step.**'
+      : `**Not finished: ${String(steps.length)} of ${String(planned)} steps ran, each passing.**`;
+  }
+  return judged[at]?.state === 'not-judged-yet'
+    ? `**Not judged yet — logs still arriving for step ${label}.** Read them again before going on.`
+    : `**Failed at step ${label}.** The climb stops there: fix it, then resume with \`--from ${label}\`.`;
+}
+
 /** The Stage G section of a test's report, as markdown. */
 export function renderStageG(input: StageGReportInput): string {
   const { profile, steps } = input;
   const baselineP95Ms = input.baselineP95Ms ?? steps[0]?.summary.asksMs?.p95;
-  const failures = steps.map((step) => stepFailures(input, step, baselineP95Ms));
-  const failedAt = failures.findIndex((each) => each.length > 0);
-  const stopped = steps[failedAt]?.run.label;
-  const verdict =
-    stopped === undefined
-      ? steps.length === profile.steps.length
-        ? '**Passed: every step.**'
-        : `**Not finished: ${String(steps.length)} of ${String(profile.steps.length)} steps ran, each passing.**`
-      : `**Failed at step ${stopped}.** The climb stops there: fix it, then resume with \`--from ${stopped}\`.`;
+  const judged = steps.map((step) => judgeStageGStep(input, step, baselineP95Ms));
+  const verdict = verdictOf(steps, judged, profile.steps.length);
   const baselineStep =
     input.baselineP95Ms === undefined ? 'the first step, ' + String(steps[0]?.run.label) : 'the target step';
   const baseline =
@@ -377,7 +363,7 @@ export function renderStageG(input: StageGReportInput): string {
     '',
     '| Step | Organisations | Requests | New | p50 ms | p95 ms | p99 ms | 5xx | 429 by kind | Not sent | Decision p95 ms | p95 vs baseline | Result |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
-    ...steps.map((step, index) => stepRow(step, baselineP95Ms, index, (failures[index] ?? []).length > 0)),
+    ...steps.map((step, index) => stepRow(step, baselineP95Ms, index, judged[index] ?? { state: 'passed' })),
     '',
     baseline,
     '',
@@ -391,9 +377,17 @@ export function renderStageG(input: StageGReportInput): string {
     ...recoverySection(input),
     ...soakSection(input),
   ];
-  const named = steps.flatMap(({ run }, index) =>
-    (failures[index] ?? []).map((failure) => `- ${run.label}: ${failure}`),
-  );
+  const said = (state: StepJudgement['state']) =>
+    steps.flatMap(({ run }, index) => {
+      const judgement = judged[index];
+      if (judgement?.state !== state) return [];
+      return (judgement.state === 'failed' ? judgement.failures : 'missing' in judgement ? judgement.missing : []).map(
+        (each) => `- ${run.label}: ${each}`,
+      );
+    });
+  const waiting = said('not-judged-yet');
+  if (waiting.length > 0) lines.push('', '### Not judged yet: still waiting for', '', ...waiting);
+  const named = said('failed');
   if (named.length > 0) lines.push('', '### What failed', '', ...named);
   return `${lines.join('\n')}\n`;
 }

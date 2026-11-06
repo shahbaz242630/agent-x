@@ -3,15 +3,25 @@
 // check's `audit.anchor_check_done` (chains failed, left unchecked, still
 // waiting their turn), the jobs' `jobs.pulse`, and every warning or error the
 // API logged in the step's window. Read from the log as load.ts reads it: one
-// JSON line per event, the logger's `time` on each. Under load the checks must
+// JSON line per event, the logger's `time` on each, with the replica that
+// wrote it (the workspace's RevisionName and ContainerGroupName). Under load the checks must
 // run, never fail and never fall behind, the jobs must say they are alive
 // every minute, and nothing may go wrong: no error line at all, and no warning
 // but the busy lines a step meant to overload causes by design.
+
+import { percentilesOf } from './logs.ts';
 
 /** When a step ran, as its k6 summary dates it. */
 export interface StepWindow {
   readonly from: string;
   readonly to: string;
+}
+
+/** One line of the log as the workspace holds it: the logger's JSON, and which replica wrote it. */
+export interface LogLine {
+  /** `<RevisionName>/<ContainerGroupName>`: one API replica, or one of the jobs app's. */
+  readonly replica: string;
+  readonly log: string;
 }
 
 /** A count over the step's anchor check runs: the most any run said, and what the last said. */
@@ -22,8 +32,12 @@ interface Peak {
 
 export interface BackgroundHealth {
   readonly minutes: number;
-  /** Whether a line LATE_LINES_MINUTES past the window's end has arrived: before then the window's may be on their way. */
-  readonly complete: boolean;
+  /**
+   * What hasn't arrived yet that says the window's lines are all in: a
+   * jobs.pulse after its end, and a line after its end from each API replica.
+   * Empty when the window can be judged.
+   */
+  readonly missing: readonly string[];
   /** Anchor check runs that finished in the window. */
   readonly anchorChecks: number;
   /** Chain checks that failed, over every run. */
@@ -44,13 +58,6 @@ export interface BackgroundHealth {
   /** The longest time without a pulse, the window's two ends counted as edges. */
   readonly longestPulseGapMinutes: number;
 }
-
-/**
- * Container logs reach the workspace minutes late, and the runner reads them
- * once they have settled: a line this long past the window's end is the sign
- * that the window's own lines are all there.
- */
-const LATE_LINES_MINUTES = 2;
 
 /** Pulses come every minute (job-watch.ts's PULSE_EVERY_MS): three missed is the jobs stopped or none leading. */
 const PULSE_GAP_MINUTES = 3;
@@ -105,26 +112,49 @@ const countBy = (lines: readonly Line[]): Record<string, number> => {
   return counts;
 };
 
+/** The log's lines that are the logger's JSON with a time, oldest first. */
+const timedLines = (log: readonly LogLine[]) =>
+  log
+    .flatMap(({ replica, log: raw }) => {
+      const line = parsed(raw);
+      const at = typeof line?.time === 'string' ? Date.parse(line.time) : Number.NaN;
+      return line === undefined || Number.isNaN(at) ? [] : [{ line, at, replica }];
+    })
+    .sort((a, b) => a.at - b.at);
+
 /**
- * The health of the background work over `window`, from the log's text: lines
- * outside it, or not the logger's JSON, are skipped. `offenders` are the
- * organisations the step means to be in trouble, whose busy lines are theirs.
+ * What must still arrive before a window ending at `to` can be judged: logs
+ * reach the workspace minutes late, and each replica's on its own.
+ */
+function missingAfter(timed: ReturnType<typeof timedLines>, to: number, apiReplicas: readonly string[]): string[] {
+  const after = timed.filter(({ at }) => at > to);
+  const said = new Set(after.map(({ replica }) => replica));
+  return [
+    ...(after.some(({ line }) => line.event === 'jobs.pulse') ? [] : ['a jobs.pulse line after the step ended']),
+    ...(apiReplicas.length === 0 ? ['the names of the API replicas that ran the step, to wait for each'] : []),
+    ...apiReplicas
+      .filter((replica) => !said.has(replica))
+      .map((replica) => `a line from API replica ${replica} after the step ended`),
+  ];
+}
+
+/**
+ * The health of the background work over `window`, from the log's lines:
+ * lines outside it, or not the logger's JSON, are skipped. `apiReplicas` are
+ * the API's replicas while the step ran, each of whose lines must have come in;
+ * `offenders` the organisations the step means to be in trouble.
  */
 export function backgroundHealth(
-  text: string,
+  log: readonly LogLine[],
   window: StepWindow,
-  offenders: ReadonlySet<string> = new Set(),
+  {
+    apiReplicas,
+    offenders = new Set(),
+  }: { readonly apiReplicas: readonly string[]; readonly offenders?: ReadonlySet<string> | undefined },
 ): BackgroundHealth {
   const from = Date.parse(window.from);
   const to = Date.parse(window.to);
-  const timed = text
-    .split(/\r?\n/)
-    .map(parsed)
-    .flatMap((line) => {
-      const at = typeof line?.time === 'string' ? Date.parse(line.time) : Number.NaN;
-      return line === undefined || Number.isNaN(at) ? [] : [{ line, at }];
-    })
-    .sort((a, b) => a.at - b.at);
+  const timed = timedLines(log);
   const lines = timed.filter(({ at }) => at >= from && at <= to);
   const of = (event: string) => lines.filter(({ line }) => line.event === event);
   const anchors = of('audit.anchor_check_done').map(({ line }) => line);
@@ -137,7 +167,7 @@ export function backgroundHealth(
   const isOffender = ({ orgId }: Line) => typeof orgId === 'string' && offenders.has(orgId);
   return {
     minutes: (to - from) / MINUTE_MS,
-    complete: timed.some(({ at }) => at >= to + LATE_LINES_MINUTES * MINUTE_MS),
+    missing: missingAfter(timed, to, apiReplicas),
     anchorChecks: anchors.length,
     failed: anchors.reduce((sum, { failed }) => sum + numberOf(failed), 0),
     unchecked: peakOf(anchors.map(({ unchecked }) => numberOf(unchecked))),
@@ -154,6 +184,14 @@ export function backgroundHealth(
 }
 
 /**
+ * The pool every organisation shares: run out, one organisation's trouble has
+ * reached the others (PL-63), so never an offender's own busy line.
+ */
+const SHARED_POOL_RAN_OUT = 'db.pool_wait_ran_out';
+
+const offenderMayLog = (event: string): boolean => BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT;
+
+/**
  * The warnings a step may log, by event, with their counts: the offenders'
  * busy lines always, and everyone's when the step means to overload the platform.
  */
@@ -162,7 +200,9 @@ export function allowedBusyLines(health: BackgroundHealth, overloading: boolean)
   const sources = overloading ? [health.offenderWarnings, health.warnings] : [health.offenderWarnings];
   for (const counts of sources) {
     for (const [event, count] of Object.entries(counts)) {
-      if (BUSY_LINES.has(event)) allowed[event] = (allowed[event] ?? 0) + count;
+      // Only an overloaded platform may run its shared pool out: beside the neighbours that is their trouble spreading.
+      const mayLog = overloading ? BUSY_LINES.has(event) : offenderMayLog(event);
+      if (mayLog) allowed[event] = (allowed[event] ?? 0) + count;
     }
   }
   return allowed;
@@ -170,12 +210,18 @@ export function allowedBusyLines(health: BackgroundHealth, overloading: boolean)
 
 /** A warning not allowed in the step: any but a busy line, or a busy line where nothing is meant to be busy. */
 function warningsNotAllowed(health: BackgroundHealth, overloading: boolean): [string, number][] {
-  const busyAllowed = (event: string) => BUSY_LINES.has(event);
   return [
-    ...Object.entries(health.warnings).filter(([event]) => !(overloading && busyAllowed(event))),
-    ...Object.entries(health.offenderWarnings).filter(([event]) => !busyAllowed(event)),
+    ...Object.entries(health.warnings).filter(([event]) => !(overloading && BUSY_LINES.has(event))),
+    ...Object.entries(health.offenderWarnings).filter(
+      ([event]) => !(offenderMayLog(event) || (overloading && BUSY_LINES.has(event))),
+    ),
   ];
 }
+
+const warningSaid = ([event, count]: [string, number]): string =>
+  event === SHARED_POOL_RAN_OUT
+    ? `The API logged ${event} ${String(count)} warning(s) in the step: the shared pool ran out, so one organisation's trouble reached the others.`
+    : `The API logged ${event} ${String(count)} warning(s) in the step: only the busy lines of a step meant to overload are allowed.`;
 
 const behind = (peak: Peak | null, what: string): string[] => {
   if (peak === null) return [];
@@ -193,15 +239,10 @@ const behind = (peak: Peak | null, what: string): string[] => {
 
 /**
  * What the background work's health says went wrong in the step, in plain
- * words: none when it kept up. Logs not yet complete are never judged: that
- * is said alone, and is not a pass.
+ * words: none when it kept up. Only for a window whose lines are all in
+ * (`missing` empty): the report never judges one before.
  */
 export function backgroundFailures(health: BackgroundHealth, overloading: boolean): string[] {
-  if (!health.complete) {
-    return [
-      `The step's logs are not complete yet: no line ${String(LATE_LINES_MINUTES)} minutes past its end has arrived, so its background work is not judged. Read them again later.`,
-    ];
-  }
   const gap = health.longestPulseGapMinutes;
   return [
     ...(health.anchorChecks === 0
@@ -217,14 +258,26 @@ export function backgroundFailures(health: BackgroundHealth, overloading: boolea
     ...Object.entries(health.errors).map(
       ([event, count]) => `The API logged ${event} ${String(count)} time(s) at error level in the step.`,
     ),
-    ...warningsNotAllowed(health, overloading).map(
-      ([event, count]) =>
-        `The API logged ${event} ${String(count)} warning(s) in the step: only the busy lines of a step meant to overload are allowed.`,
-    ),
+    ...warningsNotAllowed(health, overloading).map(warningSaid),
     ...(gap > PULSE_GAP_MINUTES
       ? [
           `No jobs.pulse for ${gap.toFixed(1)} minutes in the step: the background jobs stopped, or none held the lease.`,
         ]
       : []),
   ];
+}
+
+/**
+ * The decisions' p95 over `window`, from the API's own spend_request.decided
+ * lines, as logs.ts times them (nearest rank); null when none was made in it.
+ */
+export function decisionP95In(log: readonly LogLine[], window: StepWindow): number | null {
+  const from = Date.parse(window.from);
+  const to = Date.parse(window.to);
+  const times = timedLines(log).flatMap(({ line, at }) =>
+    line.event === 'spend_request.decided' && typeof line.durationMs === 'number' && at >= from && at <= to
+      ? [line.durationMs]
+      : [],
+  );
+  return times.length === 0 ? null : percentilesOf(times).p95;
 }

@@ -235,7 +235,13 @@ describe("naming a climb's breaking rate from its windows", () => {
     const times = Array.from({ length: 80 }, (_, window) =>
       answers(window < KNEE ? 0 : Math.min(100, 60 + (window - KNEE) * 10)),
     );
-    const windows: WindowNumbers[] = times.map((each, window) => ({ window, p95Ms: p95(each), failedShare: 0 }));
+    const windows: WindowNumbers[] = times.map((each, window) => ({
+      window,
+      p95Ms: p95(each),
+      failedShare: 0,
+      refusedShare: 0,
+      requests: 1000,
+    }));
     // At 40 windows of 30 s, 1,200 s in: 170/s plus a third of the climb to 1,700/s.
     expect(breakingRate(climb, abort, windows)).toBe(680);
     expect(rateAt(climb, KNEE * 30)).toBe(680);
@@ -244,7 +250,13 @@ describe("naming a climb's breaking rate from its windows", () => {
   });
 
   it('breaks on the failed share alone, at the limit, and names no rate for a climb that never broke', () => {
-    const calm = (window: number): WindowNumbers => ({ window, p95Ms: 120, failedShare: 0.002 });
+    const calm = (window: number): WindowNumbers => ({
+      window,
+      p95Ms: 120,
+      failedShare: 0.002,
+      refusedShare: 0,
+      requests: 1000,
+    });
     expect(breakingRate(climb, abort, [calm(0), calm(30), { ...calm(31), failedShare: 0.01 }, calm(32)])).toBe(
       rateAt(climb, 31 * 30),
     );

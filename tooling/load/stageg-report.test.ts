@@ -1,14 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
 import type { BackgroundHealth } from './stageg-background.ts';
-import { recoverySeconds, renderStageG, type StageGStepResult, type StageGSummary } from './stageg-report.ts';
+import {
+  judgeStageGStep,
+  renderStageG,
+  type StageGReportInput,
+  type StageGStepResult,
+  type StageGSummary,
+} from './stageg-report.ts';
+import { baseHoldWindow, recoverySeconds } from './stageg-surge.ts';
 import { type Profile, stageGProfile, stepRun, type WindowNumbers } from './stageg.ts';
 
 const CALM: BackgroundHealth = {
   minutes: 20,
   anchorChecks: 4,
   failed: 0,
-  complete: true,
+  missing: [],
   unchecked: { most: 0, last: 0 },
   left: { most: 3, last: 0 },
   stalled: [],
@@ -58,6 +65,7 @@ const stepOf = (
     run: stepRun(profile, step),
     summary: summaryOf(step.label, step.orgs, p95, summary),
     decisionP95Ms: 60,
+    baseDecisionP95Ms: 60,
     background: CALM,
     restarts: { before: 0, after: 0 },
     databaseChecks: CLEAN_CHECKS,
@@ -173,18 +181,30 @@ describe("the report's Stage G section", () => {
 });
 
 const windowsOf = (p95s: Readonly<Record<number, number>>): WindowNumbers[] =>
-  Object.entries(p95s).map(([window, p95Ms]) => ({ window: Number(window), p95Ms, failedShare: 0 }));
+  Object.entries(p95s).map(([window, p95Ms]) => ({
+    window: Number(window),
+    p95Ms,
+    failedShare: 0,
+    refusedShare: 0,
+    requests: 1000,
+  }));
 
 const spike = stageGProfile('spike');
 const overload = stageGProfile('overload', 400);
 
-/** A window's p95 and failed share, by window number. */
-type Windows = Readonly<Record<number, readonly [number, number]>>;
+/** A window's p95, failed share and refused share (429s, counted in the failed too), by window number: 1,000 answers each. */
+type Windows = Readonly<Record<number, readonly [number, number, number?]>>;
 const windowsWith = (each: Windows): WindowNumbers[] =>
-  Object.entries(each).map(([window, [p95Ms, failedShare]]) => ({ window: Number(window), p95Ms, failedShare }));
+  Object.entries(each).map(([window, [p95Ms, failedShare, refusedShare = 0]]) => ({
+    window: Number(window),
+    p95Ms,
+    failedShare,
+    refusedShare,
+    requests: 1000,
+  }));
 
 /** Windows `from` to `to`, each with the p95 and failed share given. */
-const span = (from: number, to: number, numbers: readonly [number, number]): Windows =>
+const span = (from: number, to: number, numbers: readonly [number, number, number?]): Windows =>
   Object.fromEntries(Array.from({ length: to - from + 1 }, (_, i) => [from + i, numbers]));
 
 /**
@@ -229,6 +249,12 @@ describe('a bad run never passes for what the error share left out (review S175)
     );
   });
 });
+
+/** The spike's report with these windows, every other number clean. */
+const spikeReport = (windows: WindowNumbers[]): string => {
+  const step = stepOf(spike, 0, 40);
+  return renderStageG({ site: 'azure', profile: spike, steps: [{ ...step, summary: { ...step.summary, windows } }] });
+};
 
 describe('the recovery after a surge, from its windows', () => {
   const run = stepOf(spike, 0, 40).run;
@@ -308,14 +334,7 @@ describe('the recovery after a surge, from its windows', () => {
   });
 
   it('fails a surge whose base hold missed the target, or has a window with no numbers', () => {
-    const report = (windows: WindowNumbers[]) => {
-      const step = stepOf(spike, 0, 40);
-      return renderStageG({
-        site: 'azure',
-        profile: spike,
-        steps: [{ ...step, summary: { ...step.summary, windows } }],
-      });
-    };
+    const report = spikeReport;
     const slowBase = report(spikeWindows({ 11: [600, 0], 12: [40, 0.02] }));
     expect(slowBase).toContain(
       '- spike: The base load before the surge already missed the target in window 11: p95 600.0 ms (under 500), 0.00% failed (under 1%).',
@@ -326,6 +345,62 @@ describe('the recovery after a surge, from its windows', () => {
     expect(report(without(spikeWindows({}), 13))).toContain(
       '- spike: Window 13 of the base load before the surge has no numbers: there is nothing sure to come back to.',
     );
+  });
+
+  it("fails a surge whose base hold's decisions missed the 150 ms rule, or weren't measured", () => {
+    const withDecisions = (baseDecisionP95Ms: number | null) => {
+      const step = stepOf(spike, 0, 40, { baseDecisionP95Ms });
+      return renderStageG({
+        site: 'azure',
+        profile: spike,
+        steps: [{ ...step, summary: { ...step.summary, windows: spikeWindows({}) } }],
+      });
+    };
+    expect(withDecisions(150)).toContain('**Passed: every step.**');
+    expect(withDecisions(151)).toContain(
+      "- spike: The base load's decisions before the surge had a p95 of 151.0 ms, over the 150.0 ms limit.",
+    );
+    expect(withDecisions(null)).toContain(
+      "- spike: The base load's decisions before the surge were not measured: no decision line in its time.",
+    );
+    // The base hold's time, for the decisions read from the API's lines: 300 to 600 s into the step.
+    expect(baseHoldWindow(stepOf(spike, 0, 40).run, '2026-11-06T10:00:00.000Z')).toEqual({
+      from: '2026-11-06T10:05:00.000Z',
+      to: '2026-11-06T10:10:00.000Z',
+    });
+  });
+
+  it('prints the refusals for rate by phase, and fails one outside the surge: in the base hold or after it recovered', () => {
+    const report = spikeReport;
+    // The surge's windows 20-25 (600-780 s): 20, 22 and 24 shown; 26 still slow and refusing, back from 27.
+    const surged = spikeWindows({
+      20: [300, 0.3, 0.3],
+      22: [900, 0.2, 0.1],
+      24: [400, 0.1, 0.05],
+      26: [300, 0.05, 0.04],
+    });
+    const clean = report(surged);
+    expect(clean).toContain(
+      'Refused for rate (429), by phase: base 0.00%, surge 15.00%, recovery 4.00%, after recovering 0.00%.',
+    );
+    expect(clean).toContain('**Passed: every step.**');
+    const inBase = report([
+      ...surged.filter(({ window }) => window !== 12),
+      { window: 12, p95Ms: 40, failedShare: 0.002, refusedShare: 0.002, requests: 1000 },
+    ]);
+    expect(inBase).toContain(
+      '- spike: Turned away outside the surge: 0.02% of the answers in the base load before it were refused for rate (429).',
+    );
+    const afterBack = report(
+      surged.map((each) => (each.window === 50 ? { ...each, failedShare: 0.03, refusedShare: 0.03 } : each)),
+    );
+    expect(afterBack).toContain('after recovering 0.10%.');
+    expect(afterBack).toContain(
+      '- spike: Turned away outside the surge: 0.10% of the answers after it recovered were refused for rate (429).',
+    );
+    const never = report(spikeWindows({ 56: [90, 0] }));
+    expect(never).toContain('recovery 0.00%, after recovering never recovered.');
+    expect(report(spikeWindows({}).filter(({ window }) => window < 20 || window > 25))).toContain('surge no answers');
   });
 
   it('says a surge k6 gave no windows for was not measured, never that it never recovered', () => {
@@ -455,5 +530,35 @@ describe("the report's tests apart from the climb", () => {
         steps: [stepOf(stageGProfile('target'), 0, 40)],
       }),
     ).toContain('Baseline: the first step, target, p95 40.0 ms.\n');
+  });
+
+  it('says a step whose logs are still arriving is not judged yet, never passed or failed, with what it waits for', () => {
+    const waiting = { ...CALM, missing: ['a jobs.pulse line after the step ended'] };
+    const input: StageGReportInput = {
+      site: 'azure',
+      profile: orgs,
+      steps: [stepOf(orgs, 0, 40), stepOf(orgs, 1, 400, { background: waiting, databaseChecks: [] })],
+    };
+    const [first, second] = input.steps;
+    expect(first && judgeStageGStep(input, first, 40)).toEqual({ state: 'passed' });
+    expect(second && judgeStageGStep(input, second, 40)).toEqual({
+      state: 'not-judged-yet',
+      missing: ['a jobs.pulse line after the step ended'],
+    });
+    const text = renderStageG(input);
+    expect(text).toContain(
+      '**Not judged yet — logs still arriving for step orgs-1000.** Read them again before going on.',
+    );
+    expect(text).toContain('| 60.0 | +900.0% | not judged yet — logs still arriving |');
+    expect(text).toContain(
+      '### Not judged yet: still waiting for\n\n- orgs-1000: a jobs.pulse line after the step ended',
+    );
+    expect(text).not.toContain('**Failed');
+    expect(text).not.toContain('### What failed');
+    const failing = { ...input, steps: [stepOf(orgs, 0, 40, { databaseChecks: [] })] };
+    expect(failing.steps[0] && judgeStageGStep(failing, failing.steps[0], 40)).toEqual({
+      state: 'failed',
+      failures: ['The database checks never ran after the step, so nothing says its rows are right.'],
+    });
   });
 });

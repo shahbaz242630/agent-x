@@ -139,7 +139,7 @@ describe("a Stage G step's k6 options", () => {
     const options = plain.stageGOptions(target);
     expect(plain.stepSeconds(target)).toBe(2100);
     expect(options.tags).toEqual({ test: 'target', step: 'target' });
-    expect(options.summaryTrendStats).toEqual(['med', 'p(95)', 'p(99)', 'max']);
+    expect(options.summaryTrendStats).toEqual(['med', 'p(95)', 'p(99)', 'max', 'count']);
     expect(options.scenarios).toEqual({
       steady: {
         executor: 'ramping-arrival-rate',
@@ -204,16 +204,27 @@ describe("a Stage G step's k6 options", () => {
       );
       expect(plain.windowCount(surge)).toBe(test === 'spike' ? 57 : 104);
     }
-    expect(plain.windowMetrics(7)).toEqual({ ms: 'window_ms_7', failed: 'window_failed_7' });
+    expect(plain.windowMetrics(7)).toEqual({
+      ms: 'window_ms_7',
+      failed: 'window_failed_7',
+      refused: 'window_refused_7',
+    });
     const summary = plain.stageGSummary(
       runOf('spike'),
       {
-        metrics: { window_ms_26: { values: { 'p(95)': 300 } }, window_failed_26: { values: { rate: 0.02 } } },
+        metrics: {
+          window_ms_26: { values: { 'p(95)': 300, count: 5100 } },
+          window_failed_26: { values: { rate: 0.02 } },
+          window_refused_26: { values: { rate: 0.015 } },
+        },
         state: { testRunDurationMs: 1_700_000 },
       },
       Date.parse('2026-11-06T10:35:00.000Z'),
     );
-    expect(summary).toMatchObject({ aborted: false, windows: [{ window: 26, p95Ms: 300, failedShare: 0.02 }] });
+    expect(summary).toMatchObject({
+      aborted: false,
+      windows: [{ window: 26, p95Ms: 300, failedShare: 0.02, refusedShare: 0.015, requests: 5100 }],
+    });
     expect(
       plain.stageGSummary(
         target,
@@ -335,9 +346,9 @@ describe("the summaries' numbers", () => {
       ended,
     );
     expect(summary.windows).toEqual([
-      { window: 0, p95Ms: 40, failedShare: 0 },
-      { window: 1, p95Ms: 75, failedShare: 0 },
-      { window: 3, p95Ms: 620, failedShare: 0.002 },
+      { window: 0, p95Ms: 40, failedShare: 0, refusedShare: 0, requests: 0 },
+      { window: 1, p95Ms: 75, failedShare: 0, refusedShare: 0, requests: 0 },
+      { window: 3, p95Ms: 620, failedShare: 0.002, refusedShare: 0, requests: 0 },
     ]);
   });
 });

@@ -366,7 +366,12 @@ export function rateAt({ startRate, stages }: K6Stages, atSeconds: number): numb
 export interface WindowNumbers {
   readonly window: number;
   readonly p95Ms: number;
+  /** Every answer but a 2xx or 3xx, refusals for rate included. */
   readonly failedShare: number;
+  /** Refused for rate (429), as a share of the window's answers. */
+  readonly refusedShare: number;
+  /** The window's answers. */
+  readonly requests: number;
 }
 
 /**
