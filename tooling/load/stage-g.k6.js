@@ -16,7 +16,7 @@
 import { SharedArray } from 'k6/data';
 import exec from 'k6/execution';
 
-import { judgedKind, readStep, stageGOptions, stageGSummary } from './plain.k6.js';
+import { judgedKind, readStep, stageGOptions, stageGSummary, windowOf } from './plain.k6.js';
 import {
   anyOf,
   ask,
@@ -59,15 +59,20 @@ export const options = stageGOptions(STEP);
  * asks for new orders, never ones its first run already made (they would be denied as the same order).
  */
 export function setup() {
-  return { run: Date.now().toString(36) };
+  const t0 = Date.now();
+  return { run: t0.toString(36), t0 };
 }
 
 const orderOf = ({ run }, letter, n) => `G-${STEP.label}-${run}-${letter}-${n}`;
 
+/** A climb's requests carry their window (plain.k6.js's windowOf), so each window is judged on its own. */
+const windowTags = ({ t0 }) =>
+  STEP.abort === null ? {} : { window: String(windowOf(t0, Date.now(), STEP.abort.windowSeconds)) };
+
 /** The steady (or calm) traffic: round the agents, so every active organisation sends, each round its suppliers. */
 export function steady(data) {
   const n = exec.scenario.iterationInTest;
-  sendSteady(steadyAgents[n % steadyAgents.length], orderOf(data, 'S', n), n, n, TRAFFIC);
+  sendSteady(steadyAgents[n % steadyAgents.length], orderOf(data, 'S', n), n, n, TRAFFIC, windowTags(data));
 }
 
 export function duplicate(data) {

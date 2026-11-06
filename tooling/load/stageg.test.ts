@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { POLICY_P95_MS } from './plan.ts';
 import {
+  breakingRate,
   judgeStep,
   k6Stages,
   type PassRules,
@@ -17,6 +18,7 @@ import {
   type StepMeasured,
   type StepRun,
   stepRun,
+  type WindowNumbers,
 } from './stageg.ts';
 
 /** A step's stages as `rate@seconds`, easy to read against the research table. */
@@ -83,9 +85,9 @@ describe("Stage G's profiles, as the research table sets them", () => {
     expect(runs('neighbours')).toMatchObject([{ mix: 'neighbours', neighbours: { busyRate: 25, stuckRate: 5 } }]);
   });
 
-  it('climbs smoothly from 170/s to ten times over 30 minutes, stopped at p95 500 ms or 1% failed', () => {
+  it('climbs smoothly from 170/s to ten times over 30 minutes, stopped at p95 500 ms or 1% failed in any 30 s window', () => {
     expect(steps('breaking').map(shape)).toEqual([['start 0', '170@300s', '170@300s', '1700@1800s']]);
-    expect(runs('breaking').map(({ abort }) => abort)).toEqual([{ p95Ms: 500, errorShare: 0.01 }]);
+    expect(runs('breaking').map(({ abort }) => abort)).toEqual([{ p95Ms: 500, errorShare: 0.01, windowSeconds: 30 }]);
   });
 
   it('overloads to one and a half times the measured breaking rate for 10 minutes, then 30 back at 170/s', () => {
@@ -196,6 +198,41 @@ describe('what k6 is handed for one step', () => {
     // Halfway up the ramp, at the hold, halfway up the climb, and long after it ended.
     const seconds = [0, 150, 450, 600 + 900, 99_999];
     expect(runs('breaking').map((climb) => seconds.map((at) => rateAt(climb, at)))).toEqual([[0, 85, 170, 935, 1700]]);
+  });
+});
+
+describe("naming a climb's breaking rate from its windows", () => {
+  const climb = runs('breaking')[0];
+  if (climb === undefined || climb.abort === null) throw new Error('The breaking test has an abort rule.');
+  const { abort } = climb;
+  /** The 95th percentile by nearest rank, as near k6's as this needs. */
+  const p95 = (times: readonly number[]): number =>
+    [...times].sort((a, b) => a - b)[Math.ceil(times.length * 0.95) - 1] ?? 0;
+  /** A thousand answers a window: `slow` of them at 900 ms past the knee, the rest at 100 ms. */
+  const answers = (slow: number): number[] => Array.from({ length: 1000 }, (_, i) => (i < slow ? 900 : 100));
+  const KNEE = 40;
+
+  it('catches a gradual knee, 6% slow growing to 10%, in its first window, where the whole run hides it', () => {
+    const times = Array.from({ length: 80 }, (_, window) =>
+      answers(window < KNEE ? 0 : Math.min(100, 60 + (window - KNEE) * 10)),
+    );
+    const windows: WindowNumbers[] = times.map((each, window) => ({ window, p95Ms: p95(each), failedShare: 0 }));
+    // At 40 windows of 30 s, 1,200 s in: 170/s plus a third of the climb to 1,700/s.
+    expect(breakingRate(climb, abort, windows)).toBe(680);
+    expect(rateAt(climb, KNEE * 30)).toBe(680);
+    // The whole run up to that window, as k6's own cumulative p95 would read it, still looks fine.
+    expect(p95(times.slice(0, KNEE + 1).flat())).toBeLessThan(abort.p95Ms);
+  });
+
+  it('breaks on the failed share alone, at the limit, and names no rate for a climb that never broke', () => {
+    const calm = (window: number): WindowNumbers => ({ window, p95Ms: 120, failedShare: 0.002 });
+    expect(breakingRate(climb, abort, [calm(0), calm(30), { ...calm(31), failedShare: 0.01 }, calm(32)])).toBe(
+      rateAt(climb, 31 * 30),
+    );
+    expect(breakingRate(climb, abort, [{ ...calm(25), p95Ms: 500 }, calm(0), { ...calm(12), p95Ms: 499.9 }])).toBe(
+      rateAt(climb, 25 * 30),
+    );
+    expect(breakingRate(climb, abort, [calm(0), calm(1)])).toBeNull();
   });
 });
 

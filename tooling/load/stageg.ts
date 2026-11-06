@@ -22,10 +22,12 @@ export const STAGE_G_TESTS = [
 
 export type StageGTest = (typeof STAGE_G_TESTS)[number];
 
-/** When a breaking-point climb stops itself: the traffic's own p95 or its share of failed answers past these. */
+/** When a breaking-point climb stops itself: the traffic's own p95 or its share of failed answers past these, in any one window. */
 interface AbortRule {
   readonly p95Ms: number;
   readonly errorShare: number;
+  /** Judged window by window: the whole run's p95 would hide a knee under every faster request before it. */
+  readonly windowSeconds: number;
 }
 
 type StepShape =
@@ -124,8 +126,11 @@ const SPIKE = { factor: 3, riseSeconds: 10, peakSeconds: 180, recoverySeconds: 9
 /** Breaking point: ten times the target is past any knee seen so far; a 30-minute climb is smooth and fits one job. */
 const BREAKING = { factor: 10, climbSeconds: 1800 } as const;
 
-/** The climb stops at the Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500) or 1% failed answers. */
-const BREAKING_ABORT: AbortRule = { p95Ms: 500, errorShare: 0.01 };
+/**
+ * The climb stops at the Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500) or 1% failed answers,
+ * in any 30 s window: about 1% of the climb's 30 minutes, short enough to name the rate, long enough for a p95.
+ */
+const BREAKING_ABORT: AbortRule = { p95Ms: 500, errorShare: 0.01, windowSeconds: 30 };
 
 /** Overload: half again the measured breaking rate (top of the table's 1.2-1.5×) for 10 minutes, then 30 back at the target. */
 const OVERLOAD = { factor: 1.5, riseSeconds: 60, peakSeconds: 600, recoverySeconds: 1800 } as const;
@@ -350,6 +355,26 @@ export function rateAt({ startRate, stages }: K6Stages, atSeconds: number): numb
     elapsed += length;
   }
   return from;
+}
+
+/** One window of a climb, as stage-g.k6.js's summary gives it (`windows`). */
+export interface WindowNumbers {
+  readonly window: number;
+  readonly p95Ms: number;
+  readonly failedShare: number;
+}
+
+/**
+ * The climb's breaking rate: the rate asked at the start of the first window
+ * whose p95 or failed share broke the abort rule (k6's thresholds read them
+ * the same way: `p(95)<limit` and `rate<share` hold strictly below), or null
+ * if none did and the climb reached its ceiling.
+ */
+export function breakingRate(stages: K6Stages, abort: AbortRule, windows: readonly WindowNumbers[]): number | null {
+  const broke = windows
+    .filter(({ p95Ms, failedShare }) => p95Ms >= abort.p95Ms || failedShare >= abort.errorShare)
+    .map(({ window }) => window);
+  return broke.length === 0 ? null : rateAt(stages, Math.min(...broke) * abort.windowSeconds);
 }
 
 /** What the runner hands stage-g.k6.js for one step, as JSON in `STEP`: all k6 needs, nothing it works out itself. */

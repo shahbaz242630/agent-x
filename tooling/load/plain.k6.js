@@ -57,8 +57,9 @@ const STEP_PARTS = [
     'abort rule',
     (step) =>
       step.abort === null ||
-      (hasFields(step.abort, ['p95Ms', 'errorShare']) &&
+      (hasFields(step.abort, ['p95Ms', 'errorShare', 'windowSeconds']) &&
         isPositive(step.abort.p95Ms) &&
+        isWhole(step.abort.windowSeconds) &&
         isPositive(step.abort.errorShare) &&
         step.abort.errorShare < 1),
   ],
@@ -136,7 +137,7 @@ export function stageGOptions(step) {
       ...namedOnly(kinds, 'http_reqs', 'count>=0'),
       ...namedOnly(kinds, 'server_errors', 'count>=0'),
       ...namedOnly(kinds, 'rate_limited', 'count>=0'),
-      ...(step.abort === null ? {} : abortThresholds(judged, step.abort)),
+      ...(step.abort === null ? {} : abortThresholds(step, judged)),
     },
   };
 }
@@ -144,15 +145,42 @@ export function stageGOptions(step) {
 /** A minute of numbers before a climb may stop itself, so its first few slow answers can't. */
 const ABORT_AFTER = '60s';
 
-/** The breaking-point climb stops itself once the judged traffic's p95 or failed share passes its rule. */
-const abortThresholds = (judged, { p95Ms, errorShare }) => ({
-  [`http_req_duration{kind:${judged}}`]: [
-    { threshold: `p(95)<${p95Ms}`, abortOnFail: true, delayAbortEval: ABORT_AFTER },
-  ],
-  [`http_req_failed{kind:${judged}}`]: [
-    { threshold: `rate<${errorShare}`, abortOnFail: true, delayAbortEval: ABORT_AFTER },
-  ],
-});
+/**
+ * Which window of a climb a request falls in, counted from `t0` (setup's):
+ * judged window by window, a knee shows in its own window, where the whole
+ * run's p95 would hide it under every faster request before it.
+ */
+export const windowOf = (t0, now, windowSeconds) => Math.max(0, Math.floor((now - t0) / (windowSeconds * 1000)));
+
+/** How many windows a windowed step's stages span, the last one maybe short. */
+export const windowCount = (step) => Math.ceil(stepSeconds(step) / step.abort.windowSeconds);
+
+/** A metric of the judged traffic in one window, named the same in the thresholds and the summary. */
+const inWindow = (metric, judged, window) => `${metric}{kind:${judged},window:${window}}`;
+
+const windows = (step) => Array.from({ length: windowCount(step) }, (_, window) => window);
+
+/** The breaking-point climb stops itself in the first window whose p95 or failed share passes its rule. */
+const abortThresholds = (step, judged) => {
+  const { p95Ms, errorShare } = step.abort;
+  const stop = (threshold) => [{ threshold, abortOnFail: true, delayAbortEval: ABORT_AFTER }];
+  return Object.fromEntries(
+    windows(step).flatMap((window) => [
+      [inWindow('http_req_duration', judged, window), stop(`p(95)<${p95Ms}`)],
+      [inWindow('http_req_failed', judged, window), stop(`rate<${errorShare}`)],
+    ]),
+  );
+};
+
+/** Each window's p95 and failed share, for the windows that saw an answer: stageg.ts's breakingRate reads them. */
+const windowNumbers = (step, metrics) => {
+  const judged = judgedKind(step);
+  return windows(step).flatMap((window) => {
+    const p95Ms = metrics[inWindow('http_req_duration', judged, window)]?.values['p(95)'];
+    const failedShare = metrics[inWindow('http_req_failed', judged, window)]?.values.rate ?? 0;
+    return p95Ms === undefined ? [] : [{ window, p95Ms, failedShare }];
+  });
+};
 
 /** A count k6 summed up, 0 when nothing was counted. */
 export const countOf = (metrics, name) => metrics[name]?.values.count ?? 0;
@@ -203,8 +231,9 @@ export function stageGSummary(step, { metrics, state }, endedAt = Date.now()) {
     dropped: countOf(metrics, 'dropped_iterations'),
     asksMs: judged === undefined ? null : trendMs(judged),
     kinds: Object.fromEntries(kindsOf(step).map((kind) => [kind, kindNumbers(metrics, kind)])),
-    // A climb its abort rule stopped ran short of its stages: the runner names its breaking rate from durationMs.
+    // A climb its abort rule stopped ran short of its stages; its breaking rate comes from the windows.
     aborted: state.testRunDurationMs < stepSeconds(step) * 1000,
+    windows: step.abort === null ? null : windowNumbers(step, metrics),
     thresholds: thresholdResults(metrics),
     durationMs: state.testRunDurationMs,
     ...runWindow(state, endedAt),
